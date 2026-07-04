@@ -56,6 +56,15 @@ public API surface (CSI gRPC verbs, StorageClass parameters,
   pile into a single "unknown" bucket in the snapshot tree. Tree
   entries are labeled with the PV name; the backend also re-derives
   ids as a fallback for older agents.
+- **Disk lvol counts were always 0** (release-check-found). The SPDK
+  lvol counter matched a `lvol_store_name` field that
+  `bdev_get_bdevs` does not emit; live stores therefore always
+  reported zero lvols — which also meant the new delete endpoint's
+  refusal guard could not fire. The counter now matches
+  `lvol_store_uuid` and the `<lvs>/<name>` alias, and
+  `delete_blobstore` re-counts against fresh SPDK state immediately
+  before the destructive RPC instead of trusting a discovery
+  snapshot.
 - Frontend strictness: zero `any` types; `noUncheckedIndexedAccess`.
 
 ### Removed

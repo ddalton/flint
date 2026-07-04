@@ -238,6 +238,33 @@ impl MinimalDiskService {
             message: format!("Disk {} reports an initialized blobstore but no LVS name", pci_address),
         })?;
 
+        // Authoritative occupancy check against fresh SPDK state immediately
+        // before the destructive RPC — the discovery snapshot above can be
+        // stale, and its lvol_count once silently read 0 on live stores
+        // (lvol_store_name vs lvol_store_uuid). Never trust a cached zero
+        // for a delete.
+        let fresh_bdevs = self.get_spdk_bdevs().await?;
+        let fresh_lvstores = self.get_spdk_lvstores().await?;
+        let lvs_uuid = fresh_lvstores["result"]
+            .as_array()
+            .and_then(|stores| {
+                stores
+                    .iter()
+                    .find(|s| s["name"].as_str() == Some(lvs_name.as_str()))
+            })
+            .and_then(|s| s["uuid"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let live_lvols = Self::count_lvols_in_lvs(&lvs_name, &lvs_uuid, &fresh_bdevs);
+        if live_lvols > 0 {
+            return Err(MinimalStateError::SpdkRpcError {
+                message: format!(
+                    "Refusing to delete LVS {}: {} logical volume(s) still exist on it",
+                    lvs_name, live_lvols
+                ),
+            });
+        }
+
         let delete_lvs_params = json!({
             "method": "bdev_lvol_delete_lvstore",
             "params": { "lvs_name": lvs_name }
@@ -2063,12 +2090,13 @@ impl MinimalDiskService {
 
                     if base_bdev == bdev_name {
                         let lvs_name = lvs["name"].as_str().unwrap_or("").to_string();
+                        let lvs_uuid = lvs["uuid"].as_str().unwrap_or("").to_string();
                         let free_clusters = lvs["free_clusters"].as_u64().unwrap_or(0);
                         let cluster_size = lvs["cluster_size"].as_u64().unwrap_or(0);
                         let free_space = free_clusters * cluster_size;
 
                         // Count lvols belonging to this LVS
-                        let lvol_count = self.count_lvols_in_lvs(&lvs_name, all_bdevs);
+                        let lvol_count = Self::count_lvols_in_lvs(&lvs_name, &lvs_uuid, all_bdevs);
 
                         println!("✅ [LVS_RECOVERY] Found existing LVS '{}' on bdev '{}' (free: {}MB, lvols: {})",
                                  lvs_name, bdev_name, free_space / 1024 / 1024, lvol_count);
@@ -2086,27 +2114,35 @@ impl MinimalDiskService {
         (None, 0, 0)
     }
 
-    /// Count logical volumes in an LVS
-    fn count_lvols_in_lvs(&self, lvs_name: &str, all_bdevs: &Value) -> u32 {
+    /// Count logical volumes in an LVS.
+    ///
+    /// SPDK identifies an lvol's store by `driver_specific.lvol.lvol_store_uuid`
+    /// and by the `"<lvs_name>/<lvol_name>"` alias — there is no
+    /// `lvol_store_name` field in bdev_get_bdevs output (matching one meant
+    /// this counter reported 0 on every live disk, which let delete_blobstore's
+    /// refusal guard pass on a store that still carried replica legs).
+    fn count_lvols_in_lvs(lvs_name: &str, lvs_uuid: &str, all_bdevs: &Value) -> u32 {
+        let alias_prefix = format!("{}/", lvs_name);
         let mut count = 0;
 
         if let Some(bdev_list) = all_bdevs["result"].as_array() {
             for bdev in bdev_list {
-                // Check if this is a logical volume
-                if let Some(product_name) = bdev["product_name"].as_str() {
-                    if product_name == "Logical Volume" {
-                        // Check if it belongs to our LVS
-                        if let Some(driver_specific) = bdev.get("driver_specific") {
-                            if let Some(lvol) = driver_specific.get("lvol") {
-                                if let Some(bdev_lvs_name) = lvol.get("lvol_store_name")
-                                    .and_then(|v| v.as_str()) {
-                                    if bdev_lvs_name == lvs_name {
-                                        count += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if bdev["product_name"].as_str() != Some("Logical Volume") {
+                    continue;
+                }
+                let lvol = &bdev["driver_specific"]["lvol"];
+                let uuid_match = !lvs_uuid.is_empty()
+                    && lvol["lvol_store_uuid"].as_str() == Some(lvs_uuid);
+                // Legacy field, kept for older SPDK JSON shapes.
+                let name_match = lvol["lvol_store_name"].as_str() == Some(lvs_name);
+                let alias_match = bdev["aliases"].as_array().is_some_and(|aliases| {
+                    aliases
+                        .iter()
+                        .filter_map(|a| a.as_str())
+                        .any(|a| a.starts_with(&alias_prefix))
+                });
+                if uuid_match || name_match || alias_match {
+                    count += 1;
                 }
             }
         }
@@ -2129,6 +2165,75 @@ struct PhysicalDevice {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// Live SPDK v26.05 shape: lvols carry `lvol_store_uuid` and a
+    /// `"<lvs>/<name>"` alias — NOT `lvol_store_name`. The counter used to
+    /// match only the nonexistent field, report 0 on every live store, and
+    /// let delete_blobstore delete an LVS out from under live replica legs
+    /// (found live on runj 2026-07-04 during the v1.5.0 release checks).
+    #[test]
+    fn count_lvols_matches_live_spdk_shape() {
+        let bdevs = serde_json::json!({"result": [
+            {
+                "name": "8b143a6e-0000-0000-0000-000000000001",
+                "product_name": "Logical Volume",
+                "aliases": ["lvs_runj-aws-1_0000-00-1f-0/vol_pvc-abc_replica_0"],
+                "driver_specific": {"lvol": {
+                    "lvol_store_uuid": "7d14e16e-58aa-4542-bd80-8c5cfc13e26b",
+                    "base_bdev": "uring_nvme1n1",
+                    "thin_provision": true,
+                    "snapshot": false,
+                    "clone": true
+                }}
+            },
+            {
+                "name": "8b143a6e-0000-0000-0000-000000000002",
+                "product_name": "Logical Volume",
+                "aliases": ["other_lvs/vol_pvc-zzz"],
+                "driver_specific": {"lvol": {
+                    "lvol_store_uuid": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                    "base_bdev": "uring_nvme0n1"
+                }}
+            },
+            {
+                "name": "uring_nvme1n1",
+                "product_name": "URING bdev",
+                "aliases": []
+            }
+        ]});
+
+        assert_eq!(
+            MinimalDiskService::count_lvols_in_lvs(
+                "lvs_runj-aws-1_0000-00-1f-0",
+                "7d14e16e-58aa-4542-bd80-8c5cfc13e26b",
+                &bdevs
+            ),
+            1
+        );
+        // uuid unknown -> the alias still identifies the store's lvols
+        assert_eq!(
+            MinimalDiskService::count_lvols_in_lvs("lvs_runj-aws-1_0000-00-1f-0", "", &bdevs),
+            1
+        );
+        // empty store counts zero
+        assert_eq!(
+            MinimalDiskService::count_lvols_in_lvs("lvs_empty", "no-such-uuid", &bdevs),
+            0
+        );
+    }
+
+    /// Legacy shape (lvol_store_name) still counts.
+    #[test]
+    fn count_lvols_accepts_legacy_field() {
+        let bdevs = serde_json::json!({"result": [
+            {
+                "name": "legacy-lvol",
+                "product_name": "Logical Volume",
+                "driver_specific": {"lvol": {"lvol_store_name": "lvs_old"}}
+            }
+        ]});
+        assert_eq!(MinimalDiskService::count_lvols_in_lvs("lvs_old", "", &bdevs), 1);
+    }
 
     /// Simulates the udev race condition observed on the ubuntu node
     /// Based on dmesg showing vfio-pci probe failures causing EBUSY
