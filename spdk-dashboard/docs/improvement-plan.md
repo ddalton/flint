@@ -423,14 +423,20 @@ builder recipe, scripts/bulk-init-drill.mjs, 8/8): group-scoped
 select on the pristine scratch NVMe → ConfirmModal manifest → confirm
 → agent initialize_blobstore → per-disk ok → blobstore_initialized
 verified via the agent — the last untested hop of the 2d flow is
-closed. New finding from the hand-back: the node agent returns 404
-for /disks/delete — the UI's "Delete SPDK Disk" button calls an
-endpoint the agent does not implement (it fails honestly, but either
-implement agent-side delete or drop the button; tracked for the next
-backend pass). Two data-labeling quirks noted for later: tree entries
-for epoch snapshots show volume-unknown (source_volume_id not
-resolved to a PV), and the drill disk hand-back needed an spdk-tgt
-bounce because delete is unimplemented.
+closed. New finding from the hand-back: the node agent returned 404
+for /disks/delete — the UI's "Delete SPDK Disk" button called an
+endpoint the agent did not implement. BOTH follow-ups FIXED 2026-07-04
+(956f2f8): the agent now implements /api/disks/delete (strict inverse
+of initialize; refuses with 409 while lvols exist; typed + added to
+the OpenAPI spec, which had also been missing the proxy), and epoch
+snapshots resolve to their real volume in the snapshot tree (the
+shared name parser learned the epoch-<pv>-<seq> convention; the tree
+builder re-derives ids for older agents). Delivery: the tree fix
+activates at the next dashboard-backend roll, the delete endpoint at
+the next node-DS roll — both ride the next release image together
+with the phase-4 admission probe (6f798c3). Until then the Delete
+button keeps failing honestly, and future drill hand-backs can use
+the endpoint instead of the spdk-tgt bounce.
 
 ## Design system & UX quality (cross-cutting principle)
 

@@ -67,7 +67,11 @@ DASHBOARD_ADMIN_PW=$(kubectl -n flint-system get secret spdk-dashboard-auth     
 
 The drill exercises selection → BulkConfirmModal manifest → confirm →
 runInitBatch per-disk status → LVS Ready, against a real agent. It leaves an
-SPDK LVS on the scratch disk; hand the disk back before the docker setup:
+SPDK LVS on the scratch disk; hand the disk back before the docker setup.
+Preferred (agents ≥ the release carrying 956f2f8): the agent's delete
+endpoint — `POST /api/nodes/<node>/disks/delete {"pci_address": "..."}`
+through the dashboard (admin token) — it refuses if lvols exist and returns
+the disk to the uninitialized pool. Fallback for older agents (delete 404s):
 
 ```sh
 node_run <new-node-name> <<'EOF'
