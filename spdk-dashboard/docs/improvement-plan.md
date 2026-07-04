@@ -452,6 +452,30 @@ Deliverables (a small, real design system — not a rewrite):
 
 ## Phase 4 — Visual system rollout + polish
 
+Status (2026-07-04): core items DONE in four commits (14d8cd5
+code-split — entry chunk 1013→296 KB, recharts/reactflow as on-demand
+vendor chunks; d0d9fbc primitive kit + semantic Tailwind status
+palette; ad89e2c view migration — the three destructive flows share
+ConfirmModal, every hand-rolled width-% div is the accessible
+ProgressBar, decorative rebuild-gear spin removed, boot/tab/detail
+loading is skeletons, EventsTab on AsyncView; b552660 login unified
+with the app shell + the dead usingMockData plumbing removed).
+Topology scoping (Decision 3): already satisfied as-built — the RAID
+topology renders one selected volume, not a cluster-wide graph; no
+change needed. Remaining deliberately open: the full Button/IconButton
+sweep across legacy views (primitives exist; adopt as views are
+touched) and the two honesty debts below.
+
+LIVE-VALIDATED on runj 2026-07-04 (frontend-only image `phase4.0`,
+digest 22630817…, spot-builder build + surgical roll): 13/13 checks —
+full tab tour under the code-split build (every chunk loads, zero
+page errors), the unified login serving the shell chrome, the lazy
+volume-detail modal opening live against r3-e2e (Healthy, 3/3 in
+sync, epoch #645) with its `?volume=` deep link reopening after
+reload+login, and all Phase 3 URL-state behaviors intact. Screenshot
+review: login/overview/detail read as one visual language; recharts
+verifiably arrives via its on-demand vendor chunk.
+
 By here the primitives exist and each touched component already uses
 them; Phase 4 finishes the sweep and does the deliberate visual pass.
 
