@@ -94,17 +94,18 @@ export const SnapshotsTopologyView: React.FC<SnapshotsTopologyViewProps> = ({
         .filter(s => s.source_volume_id === selectedVolume)
         .sort((a, b) => new Date(a.creation_time).getTime() - new Date(b.creation_time).getTime());
 
-      if (volumeSnapshots.length > 0) {
-        minTime = new Date(volumeSnapshots[0].creation_time).getTime();
-        maxTime = new Date(volumeSnapshots[volumeSnapshots.length - 1].creation_time).getTime();
+      const first = volumeSnapshots[0];
+      const last = volumeSnapshots[volumeSnapshots.length - 1];
+      if (first && last) {
+        minTime = new Date(first.creation_time).getTime();
+        maxTime = new Date(last.creation_time).getTime();
       }
 
       volumeSnapshots.forEach(snapshot => {
         snapshot.replica_bdev_details.forEach((replica: ReplicaBdevDetails) => {
-          if (!data[replica.name]) {
-            data[replica.name] = { replica, snapshots: [] };
-          }
-          data[replica.name].snapshots.push(snapshot);
+          const entry = data[replica.name] ?? { replica, snapshots: [] };
+          data[replica.name] = entry;
+          entry.snapshots.push(snapshot);
         });
       });
     }

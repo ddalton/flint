@@ -87,26 +87,26 @@ export const VolumeStatusChart: React.FC<VolumeStatusChartProps> = ({ volumes })
       )}
       
       {/* Status summary for volume states only */}
-      {(statusCounts.Failed > 0 || statusCounts.Degraded > 0) && (
+      {((statusCounts.Failed ?? 0) > 0 || (statusCounts.Degraded ?? 0) > 0) && (
         <div className="mt-4 p-3 bg-gray-50 rounded-lg">
           <h4 className="text-sm font-medium text-gray-700 mb-2">Volume Status Summary</h4>
           <div className="space-y-1 text-xs">
-            {statusCounts.Failed > 0 && (
+            {(statusCounts.Failed ?? 0) > 0 && (
               <div className="flex items-center gap-2 text-red-700">
                 <XCircle className="w-3 h-3" />
-                <span>{statusCounts.Failed} volume{statusCounts.Failed !== 1 ? 's' : ''} failed - immediate attention required</span>
+                <span>{(statusCounts.Failed ?? 0)} volume{(statusCounts.Failed ?? 0) !== 1 ? 's' : ''} failed - immediate attention required</span>
               </div>
             )}
-            {statusCounts.Degraded > 0 && (
+            {(statusCounts.Degraded ?? 0) > 0 && (
               <div className="flex items-center gap-2 text-yellow-700">
                 <AlertTriangle className="w-3 h-3" />
-                <span>{statusCounts.Degraded} volume{statusCounts.Degraded !== 1 ? 's' : ''} degraded - reduced redundancy but functional</span>
+                <span>{(statusCounts.Degraded ?? 0)} volume{(statusCounts.Degraded ?? 0) !== 1 ? 's' : ''} degraded - reduced redundancy but functional</span>
               </div>
             )}
-            {statusCounts.Healthy > 0 && (
+            {(statusCounts.Healthy ?? 0) > 0 && (
               <div className="flex items-center gap-2 text-green-700">
                 <CheckCircle className="w-3 h-3" />
-                <span>{statusCounts.Healthy} volume{statusCounts.Healthy !== 1 ? 's' : ''} healthy - all replicas operational</span>
+                <span>{(statusCounts.Healthy ?? 0)} volume{(statusCounts.Healthy ?? 0) !== 1 ? 's' : ''} healthy - all replicas operational</span>
               </div>
             )}
           </div>

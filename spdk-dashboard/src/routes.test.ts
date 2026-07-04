@@ -14,7 +14,7 @@ describe('parseTab', () => {
 describe('searchForTab', () => {
   it('keeps filter context across tabs but drops foreign detail params', () => {
     const current = new URLSearchParams(
-      'filter=degraded&disk=d1&replicas=v1&volume=pvc-1&node=runj-aws-2&snapshot=snap-1'
+      'filter=degraded&disk=d1&replicas=v1&volume=pvc-1&snapshot=snap-1'
     );
 
     const toDisks = new URLSearchParams(searchForTab(current, 'disks'));
@@ -22,15 +22,14 @@ describe('searchForTab', () => {
     expect(toDisks.get('disk')).toBe('d1');
     expect(toDisks.get('replicas')).toBe('v1');
     expect(toDisks.get('volume')).toBeNull();
-    expect(toDisks.get('node')).toBeNull();
     expect(toDisks.get('snapshot')).toBeNull();
   });
 
   it('keeps a detail param when navigating to its home tab', () => {
-    const current = new URLSearchParams('volume=pvc-1&node=runj-aws-2');
+    const current = new URLSearchParams('volume=pvc-1&snapshot=snap-1');
     const toVolumes = new URLSearchParams(searchForTab(current, 'volumes'));
     expect(toVolumes.get('volume')).toBe('pvc-1');
-    expect(toVolumes.get('node')).toBeNull();
+    expect(toVolumes.get('snapshot')).toBeNull();
   });
 
   it('returns an empty string when nothing survives', () => {

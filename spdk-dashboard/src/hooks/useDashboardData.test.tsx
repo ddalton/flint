@@ -7,7 +7,7 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { http, HttpResponse } from 'msw';
 import { server } from '../test/server';
-import { makeDashboardData, makeReplica, makeSyncInfo, makeVolume } from '../test/fixtures';
+import { makeDashboardData, makeDisk, makeReplica, makeSyncInfo, makeVolume } from '../test/fixtures';
 import * as api from '../api/client';
 import {
   computeStats,
@@ -38,7 +38,7 @@ describe('useDashboardData', () => {
 
     expect(result.current.connectionError).toBeNull();
     expect(result.current.data.volumes).toHaveLength(1);
-    expect(result.current.data.volumes[0].name).toBe('hr-e2e');
+    expect(result.current.data.volumes[0]?.name).toBe('hr-e2e');
     expect(result.current.stats.totalVolumes).toBe(1);
     expect(result.current.stats.healthyVolumes).toBe(1);
     expect(result.current.stats.totalDisks).toBe(2);
@@ -87,22 +87,24 @@ describe('transformBackendData', () => {
     // A backend mid-rollout can omit newer fields; the transform must not
     // let a missing array crash a table render.
     const wire = makeDashboardData();
-    delete (wire.volumes[0] as Partial<(typeof wire.volumes)[0]>).consumer_raids;
-    delete (wire.volumes[0] as Partial<(typeof wire.volumes)[0]>).nvmeof_targets;
-    delete (wire.disks[0] as Partial<(typeof wire.disks)[0]>).provisioned_volumes;
+    const wireVolume = wire.volumes[0] as Partial<(typeof wire.volumes)[number]>;
+    const wireDisk = wire.disks[0] as Partial<(typeof wire.disks)[number]>;
+    delete wireVolume.consumer_raids;
+    delete wireVolume.nvmeof_targets;
+    delete wireDisk.provisioned_volumes;
 
     const data = transformBackendData(wire);
 
-    expect(data.volumes[0].consumer_raids).toEqual([]);
-    expect(data.volumes[0].nvmeof_targets).toEqual([]);
-    expect(data.disks[0].provisioned_volumes).toEqual([]);
+    expect(data.volumes[0]?.consumer_raids).toEqual([]);
+    expect(data.volumes[0]?.nvmeof_targets).toEqual([]);
+    expect(data.disks[0]?.provisioned_volumes).toEqual([]);
   });
 
   it('derives disk capacity fields when the backend omits the GB projections', () => {
     const wire = makeDashboardData();
     wire.disks = [
       {
-        ...wire.disks[0],
+        ...makeDisk(),
         capacity: 4 * 1024 ** 3,
         capacity_gb: 0,
         free_space: 1,
@@ -113,9 +115,9 @@ describe('transformBackendData', () => {
 
     const disk = transformBackendData(wire).disks[0];
 
-    expect(disk.capacity_gb).toBe(4);
-    expect(disk.allocated_space).toBe(3);
-    expect(disk.free_space_display).toBe('1GB');
+    expect(disk?.capacity_gb).toBe(4);
+    expect(disk?.allocated_space).toBe(3);
+    expect(disk?.free_space_display).toBe('1GB');
   });
 });
 

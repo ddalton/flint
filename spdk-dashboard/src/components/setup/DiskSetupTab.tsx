@@ -469,6 +469,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
     if (selectedDisks.size !== 1) return false;
     
     const selectedDiskKey = Array.from(selectedDisks)[0];
+    if (selectedDiskKey === undefined) return false;
     const colonIndex = selectedDiskKey.indexOf(':');
     const nodeName = selectedDiskKey.substring(0, colonIndex);
     const pciAddr = selectedDiskKey.substring(colonIndex + 1);
@@ -542,6 +543,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
     if (selectedDisks.size !== 1) return null;
     
     const selectedDiskKey = Array.from(selectedDisks)[0];
+    if (selectedDiskKey === undefined) return null;
     const colonIndex = selectedDiskKey.indexOf(':');
     const nodeName = selectedDiskKey.substring(0, colonIndex);
     const pciAddr = selectedDiskKey.substring(colonIndex + 1);

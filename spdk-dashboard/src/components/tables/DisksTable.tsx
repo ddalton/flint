@@ -4,7 +4,7 @@ import {
   X, HardDrive, Search, Filter, ChevronDown, SortAsc, SortDesc,
   Server, Database, CheckCircle, Activity, AlertTriangle, Trash2
 } from 'lucide-react';
-import type { Disk, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
+import type { Disk, OrphanedVolumeInfo, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 import { filterVolumesByType } from '../../hooks/useDashboardData';
 
 interface DisksTableProps {
@@ -52,7 +52,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   // Delete orphaned volume state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [volumeToDelete, setVolumeToDelete] = useState<{
-    volume: any;
+    volume: OrphanedVolumeInfo;
     diskNode: string;
   } | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
@@ -151,7 +151,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
 
     // Apply sorting
     result.sort((a, b) => {
-      let aValue: any, bValue: any;
+      let aValue: string | number, bValue: string | number;
       
       switch (sortField) {
         case 'id':
@@ -191,13 +191,14 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           bValue = b.id;
       }
 
-      if (typeof aValue === 'string') {
-        return sortOrder === 'asc' 
+      if (typeof aValue === 'string' && typeof bValue === 'string') {
+        return sortOrder === 'asc'
           ? aValue.localeCompare(bValue)
           : bValue.localeCompare(aValue);
-      } else {
-        return sortOrder === 'asc' ? aValue - bValue : bValue - aValue;
       }
+      return sortOrder === 'asc'
+        ? Number(aValue) - Number(bValue)
+        : Number(bValue) - Number(aValue);
     });
 
     return result;
@@ -257,7 +258,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   };
 
   // Delete orphaned volume handlers
-  const handleDeleteOrphanedVolume = (volume: any, diskNode: string) => {
+  const handleDeleteOrphanedVolume = (volume: OrphanedVolumeInfo, diskNode: string) => {
     setVolumeToDelete({ volume, diskNode });
     setDeleteConfirmText('');
     setDeleteSuccess(false);

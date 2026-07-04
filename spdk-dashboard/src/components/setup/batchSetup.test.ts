@@ -148,7 +148,7 @@ describe('runInitBatch', () => {
     });
 
     expect(items.map((i) => i.status)).toEqual(['ok', 'failed', 'ok']);
-    expect(items[1].error).toBe('agent connection reset');
+    expect(items[1]?.error).toBe('agent connection reset');
   });
 
   it('fires onNodeDrained exactly once per node, after its queue empties', async () => {
@@ -198,11 +198,11 @@ describe('selection and eligibility', () => {
 
     const byNode = groupDisks(disks, 'node');
     expect(byNode.map((g) => g.label)).toEqual(['node-a', 'node-b']);
-    expect(byNode[0].disks).toHaveLength(2);
+    expect(byNode[0]?.disks).toHaveLength(2);
 
     const byClass = groupDisks(disks, 'class');
     expect(byClass.map((g) => g.label)).toEqual(['ModelX — 2 GB', 'ModelY — 4 GB']);
-    expect(byClass[0].disks).toHaveLength(2);
+    expect(byClass[0]?.disks).toHaveLength(2);
 
     expect(groupDisks([], 'none')).toEqual([]);
     expect(groupDisks(disks, 'none')).toHaveLength(1);

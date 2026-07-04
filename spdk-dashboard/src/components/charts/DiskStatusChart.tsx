@@ -19,11 +19,9 @@ const getDiskStatus = (disk: Disk): DiskStatus => {
 
 export const DiskStatusChart: React.FC<DiskStatusChartProps> = ({ disks }) => {
   const nodeData = disks.reduce((acc, disk) => {
-    if (!acc[disk.node]) {
-      acc[disk.node] = { Healthy: 0, Uninitialized: 0, Unhealthy: 0 };
-    }
-    const status = getDiskStatus(disk);
-    acc[disk.node][status]++;
+    const bucket = acc[disk.node] ?? { Healthy: 0, Uninitialized: 0, Unhealthy: 0 };
+    acc[disk.node] = bucket;
+    bucket[getDiskStatus(disk)]++;
     return acc;
   }, {} as Record<string, Record<DiskStatus, number>>);
 

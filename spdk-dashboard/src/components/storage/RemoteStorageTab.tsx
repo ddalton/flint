@@ -106,7 +106,12 @@ const RemoteStorageTab: React.FC = () => {
   
   // State for the NVMe-oF discovery process
   const [isDiscovering, setIsDiscovering] = useState(false);
-  const [discoveredNamespaces, setDiscoveredNamespaces] = useState<any[]>([]);
+  interface DiscoveredNamespace {
+    nsid: number;
+    size: string;
+    attached: boolean;
+  }
+  const [discoveredNamespaces, setDiscoveredNamespaces] = useState<DiscoveredNamespace[]>([]);
   const [selectedNamespaceId, setSelectedNamespaceId] = useState<string | null>(null);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
 
@@ -120,7 +125,7 @@ const RemoteStorageTab: React.FC = () => {
     resetForm(true); // soft reset
   }, [activeTab]);
 
-  const handleFormChange = (field: string, value: any) => {
+  const handleFormChange = (field: string, value: string | number | boolean) => {
     const newFormData = { ...formData, [field]: value };
     setFormData(newFormData);
 

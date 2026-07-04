@@ -74,23 +74,26 @@ export async function runInitBatch(
   const worker = async () => {
     while (nextNode < nodeOrder.length) {
       const node = nodeOrder[nextNode++];
-      for (const index of queues.get(node)!) {
+      if (node === undefined) break;
+      for (const index of queues.get(node) ?? []) {
+        const item = items[index];
+        if (!item) continue;
         if (isCancelled()) {
-          items[index] = { ...items[index], status: 'skipped' };
+          items[index] = { ...item, status: 'skipped' };
           emit();
           continue;
         }
-        items[index] = { ...items[index], status: 'running' };
+        items[index] = { ...item, status: 'running' };
         emit();
         let result: SetupOneResult;
         try {
-          result = await setupOne(items[index].disk);
+          result = await setupOne(item.disk);
         } catch (error) {
           result = { ok: false, error: error instanceof Error ? error.message : String(error) };
         }
         items[index] = result.ok
-          ? { ...items[index], status: 'ok', error: undefined }
-          : { ...items[index], status: 'failed', error: result.error };
+          ? { ...item, status: 'ok', error: undefined }
+          : { ...item, status: 'failed', error: result.error };
         emit();
       }
       onNodeDrained?.(node);

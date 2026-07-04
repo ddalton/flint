@@ -63,8 +63,11 @@ describe('SyncStateIndicator', () => {
 });
 
 describe('VolumeSyncSummary', () => {
-  const toVolume = (v: ReturnType<typeof makeVolume>) =>
-    transformBackendData(makeDashboardData({ volumes: [v] })).volumes[0];
+  const toVolume = (v: ReturnType<typeof makeVolume>) => {
+    const volume = transformBackendData(makeDashboardData({ volumes: [v] })).volumes[0];
+    if (!volume) throw new Error('fixture produced no volume');
+    return volume;
+  };
 
   it('renders a neutral dash for volumes without sync data', () => {
     const volume = toVolume(

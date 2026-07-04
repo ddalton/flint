@@ -1,12 +1,9 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { useSearchParams } from 'react-router';
+import React, { useState, useMemo } from 'react';
 import { Filter, X, Search, Server, ChevronDown, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
 import { NodeDetailView } from './NodeDetailView';
 import type { DashboardData, VolumeFilter } from '../../hooks/useDashboardData';
 import { filterVolumesByType } from '../../hooks/useDashboardData';
 import { volumeFilterDisplay } from '../ui/status';
-import { NodeMetricsAPI } from '../detail/NodeMetricsAPI';
-import { useOperations } from '../../contexts/OperationsContext';
 
 interface FilteredNodesViewProps {
   data: DashboardData;
@@ -35,24 +32,6 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
-  // The node metrics modal lives in the URL (?node=) — refresh-safe and
-  // deep-linkable, matching the volume detail modal.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const activeMetricsModal = searchParams.get('node');
-  const setActiveMetricsModal = (node: string | null) => {
-    setSearchParams(prev => {
-      const next = new URLSearchParams(prev);
-      if (node) next.set('node', node);
-      else next.delete('node');
-      return next;
-    });
-  };
-  const { setDialogVisible } = useOperations();
-
-  useEffect(() => {
-    setDialogVisible(activeMetricsModal !== null);
-  }, [activeMetricsModal, setDialogVisible]);
-
   // Filter volumes via the shared predicate (same semantics as the stat
   // cards and the volumes table).
   const getFilteredVolumes = () =>
@@ -63,7 +42,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
   // This allows users to create memory disks on any node, even if it has no volumes
   const getFilteredAndSearchedNodes = () => {
     // Always include all nodes - volume filters don't apply to nodes view
-    let relevantNodes = new Set(data.nodes);
+    const relevantNodes = new Set(data.nodes);
 
     // Apply search filter to nodes
     let searchedNodes = Array.from(relevantNodes);
@@ -131,7 +110,7 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
 
     // Sort enhanced nodes
     enhancedNodes.sort((a, b) => {
-      let aValue: any, bValue: any;
+      let aValue: string | number, bValue: string | number;
       
       switch (sortBy) {
         case 'name':
@@ -155,13 +134,14 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
           bValue = b.name;
       }
 
-      if (typeof aValue === 'string') {
-        return sortOrder === 'asc' 
+      if (typeof aValue === 'string' && typeof bValue === 'string') {
+        return sortOrder === 'asc'
           ? aValue.localeCompare(bValue)
           : bValue.localeCompare(aValue);
-      } else {
-        return sortOrder === 'asc' ? aValue - bValue : bValue - aValue;
       }
+      return sortOrder === 'asc'
+        ? Number(aValue) - Number(bValue)
+        : Number(bValue) - Number(aValue);
     });
 
     return enhancedNodes;
@@ -587,7 +567,6 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
               volumeFilter={activeFilter}
               filteredVolumes={hasVolumeFilter ? nodeData.nodeFilteredVolumes : undefined}
               onDiskVolumeFilter={onDiskVolumeFilter}
-              onShowMetrics={() => setActiveMetricsModal(nodeData.name)}
               nodeInfo={data.node_info?.[nodeData.name]}
             />
           ))}
@@ -683,14 +662,6 @@ export const FilteredNodesView: React.FC<FilteredNodesViewProps> = ({
             </div>
           </div>
         </div>
-      )}
-
-      {/* Render the modal here */}
-      {activeMetricsModal && (
-        <NodeMetricsAPI 
-          nodeName={activeMetricsModal}
-          onClose={() => setActiveMetricsModal(null)}
-        />
       )}
     </div>
   );

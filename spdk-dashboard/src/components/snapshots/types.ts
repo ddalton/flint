@@ -57,7 +57,8 @@ export interface SnapshotChainInfo {
 export interface SnapshotChainItem {
   bdev_name: string;
   snapshot_id?: string;
-  details: any;
+  // Untyped SPDK bdev passthrough; consumers must narrow before use.
+  details: Record<string, unknown>;
   children: SnapshotChainItem[];
   storage_info?: {
     consumed_bytes: number;

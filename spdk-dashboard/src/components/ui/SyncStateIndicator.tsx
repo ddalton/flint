@@ -74,13 +74,14 @@ export function VolumeSyncSummary({ volume }: { volume: Volume }) {
   const withSync = volume.replica_statuses.filter(
     (r): r is ReplicaStatus & { sync: ReplicaSyncInfo } => r.sync != null
   );
-  if (withSync.length === 0) {
+  const first = withSync[0];
+  if (!first) {
     return <span className="text-xs text-gray-400">—</span>;
   }
 
   const degraded = withSync.filter(isReplicaRecovering);
   if (degraded.length === 0) {
-    return <SyncStateIndicator sync={withSync[0].sync} compact />;
+    return <SyncStateIndicator sync={first.sync} compact />;
   }
 
   return (

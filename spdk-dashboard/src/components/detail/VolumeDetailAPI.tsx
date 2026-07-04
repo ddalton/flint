@@ -31,8 +31,7 @@ const formatTime = (ts: string | null | undefined) => {
 // stays in the title attribute.
 const shortEpoch = (epoch: string | null | undefined) => {
   if (!epoch) return '—';
-  const parts = epoch.split('-');
-  const tail = parts[parts.length - 1];
+  const tail = epoch.split('-').at(-1) ?? '';
   return /^\d+$/.test(tail) ? `#${tail}` : epoch;
 };
 

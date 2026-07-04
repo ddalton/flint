@@ -3,13 +3,12 @@
 //
 //   /volumes?filter=degraded&disk=<diskId>&volume=<volumeId>
 //   /disks?replicas=<volumeId>
-//   /nodes?node=<nodeName>
 //   /snapshots?snapshot=<snapshotId>
 //
 // Cross-tab FILTER params (filter / disk / replicas) persist across tab
 // switches — an operator filtering to degraded volumes keeps that context
-// everywhere. DETAIL params (volume / node / snapshot) belong to one tab's
-// modal and are dropped when navigating away from it.
+// everywhere. DETAIL params (volume / snapshot) belong to one tab's modal
+// and are dropped when navigating away from it.
 
 export const TAB_IDS = [
   'overview',
@@ -37,7 +36,6 @@ export function parseTab(segment: string | undefined): TabId | null {
 
 const DETAIL_PARAM_HOME: Record<string, TabId> = {
   volume: 'volumes',
-  node: 'nodes',
   snapshot: 'snapshots',
 };
 

@@ -17,7 +17,6 @@ interface NodeDetailViewProps {
   volumeFilter?: VolumeFilter;
   filteredVolumes?: Volume[];
   onDiskVolumeFilter?: (diskId: string) => void;
-  onShowMetrics: () => void;
   nodeInfo?: NodeInfo;  // Add node memory info
 }
 
@@ -32,7 +31,6 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
   volumeFilter,
   filteredVolumes,
   onDiskVolumeFilter,
-  onShowMetrics,
   nodeInfo,
 }) => {
   const [expandedDisks, setExpandedDisks] = useState(new Set<string>());
@@ -138,16 +136,6 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
               {filteredVolumeCount} Filtered
             </span>
           )}
-          
-          {/* Node Metrics Button */}
-          <button
-            onClick={onShowMetrics}
-            className="px-3 py-1 text-sm bg-indigo-600 text-white rounded-full hover:bg-indigo-700 transition-colors flex items-center gap-1"
-            title="View detailed node metrics and SPDK status"
-          >
-            <Activity className="w-3 h-3" />
-            SPDK Metrics
-          </button>
           
           {/* Quick Access Button */}
           {volumeFilter && volumeFilter !== 'all' && filteredVolumes && filteredVolumes.length > 0 && (

@@ -294,7 +294,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             {/* Efficiency Filter */}
             <select
               value={filterThreshold}
-              onChange={(e) => setFilterThreshold(e.target.value as any)}
+              onChange={(e) => setFilterThreshold(e.target.value as 'all' | 'high' | 'medium' | 'low')}
               className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="all">All Efficiency Levels</option>
@@ -306,7 +306,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             {/* Sort */}
             <select
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as any)}
+              onChange={(e) => setSortBy(e.target.value as 'overhead' | 'efficiency' | 'count')}
               className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="overhead">Sort by Overhead</option>
@@ -397,9 +397,9 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             {/* View Snapshots Button */}
             <button
               onClick={() => {
-                const volumeSnapshots = snapshots.filter(s => s.source_volume_id === card.volumeId);
-                if (volumeSnapshots.length > 0) {
-                  onSnapshotSelect(volumeSnapshots[0]);
+                const firstSnapshot = snapshots.find(s => s.source_volume_id === card.volumeId);
+                if (firstSnapshot) {
+                  onSnapshotSelect(firstSnapshot);
                 }
               }}
               className="mt-4 w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium"

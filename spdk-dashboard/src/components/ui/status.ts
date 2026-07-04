@@ -265,6 +265,8 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
   },
 };
 
+const ALL_VOLUMES_DISPLAY = VOLUME_FILTER_DISPLAY.all as VolumeFilterDisplay;
+
 export function volumeFilterDisplay(filter: string | null | undefined): VolumeFilterDisplay {
-  return VOLUME_FILTER_DISPLAY[filter ?? 'all'] ?? VOLUME_FILTER_DISPLAY.all;
+  return VOLUME_FILTER_DISPLAY[filter ?? 'all'] ?? ALL_VOLUMES_DISPLAY;
 }

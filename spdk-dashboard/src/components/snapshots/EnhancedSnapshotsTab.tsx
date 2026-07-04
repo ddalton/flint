@@ -105,14 +105,26 @@ export const EnhancedSnapshotsTab: React.FC = () => {
     }
   };
 
+  // What /api/snapshots actually sends (frontend assumption, not a typed
+  // backend contract): SnapshotDetails minus the fields this enhancer
+  // derives, with the id under either name.
+  type BackendSnapshot = Omit<
+    SnapshotDetails,
+    'snapshot_id' | 'parent_snapshot_id' | 'child_snapshot_ids' | 'replica_bdev_details'
+  > & {
+    snapshot_id?: string;
+    snapshot_uuid?: string;
+    replica_bdev_details?: SnapshotDetails['replica_bdev_details'];
+  };
+
   // Transform backend data to include relationships
-  const enhanceSnapshotsWithRelationships = (backendSnapshots: any[]): SnapshotDetails[] => {
+  const enhanceSnapshotsWithRelationships = (backendSnapshots: BackendSnapshot[]): SnapshotDetails[] => {
     const relationships = new Map<string, { parent?: string; children: string[] }>();
     
     // Build relationship map from clone_source_snapshot_id
     backendSnapshots.forEach(snap => {
       // Backend returns snapshot_uuid, frontend expects snapshot_id
-      const snapshotId = snap.snapshot_id || snap.snapshot_uuid;
+      const snapshotId = snap.snapshot_id || snap.snapshot_uuid || '';
       if (!relationships.has(snapshotId)) {
         relationships.set(snapshotId, { children: [] });
       }
@@ -132,8 +144,8 @@ export const EnhancedSnapshotsTab: React.FC = () => {
     // Enhance snapshots with relationship data and map backend fields to frontend interface
     return backendSnapshots.map(snap => {
       // Backend returns snapshot_uuid, frontend expects snapshot_id
-      const snapshotId = snap.snapshot_id || snap.snapshot_uuid;
-      
+      const snapshotId = snap.snapshot_id || snap.snapshot_uuid || '';
+
       return {
         ...snap,
         snapshot_id: snapshotId, // Ensure snapshot_id exists
@@ -153,15 +165,25 @@ export const EnhancedSnapshotsTab: React.FC = () => {
     });
   };
 
+  // Tree nodes as sent by /api/snapshots/tree — analytics may be absent
+  // (this enhancer synthesizes them; see the honesty note in the
+  // improvement plan about the estimated values).
+  type BackendTreeNode = Omit<SnapshotTreeNode, 'storage_analytics'> & {
+    storage_analytics?: SnapshotTreeNode['storage_analytics'];
+  };
+
   // Transform tree data to include storage analytics
-  const enhanceTreeWithStorageAnalytics = (backendTree: any): Record<string, SnapshotTreeNode> => {
+  const enhanceTreeWithStorageAnalytics = (
+    backendTree: Record<string, BackendTreeNode>
+  ): Record<string, SnapshotTreeNode> => {
     const enhanced: Record<string, SnapshotTreeNode> = {};
-    
-    Object.entries(backendTree).forEach(([volumeId, volumeData]: [string, any]) => {
+
+    Object.entries(backendTree).forEach(([volumeId, volumeData]) => {
       // Calculate storage analytics from chain data
       const chainSnapshots = volumeData.snapshot_chain?.snapshots || [];
-      const totalSnapshotConsumption = chainSnapshots.reduce((sum: number, snap: any) => 
-        sum + (snap.storage_info?.consumed_bytes || 0), 0
+      const totalSnapshotConsumption = chainSnapshots.reduce(
+        (sum, snap) => sum + (snap.storage_info?.consumed_bytes || 0),
+        0
       );
       
       const volumeSize = volumeData.volume_size || 0;
