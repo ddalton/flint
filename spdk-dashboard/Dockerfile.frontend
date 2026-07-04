@@ -1,5 +1,5 @@
 # Multi-stage build for React dashboard frontend
-FROM node:18-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -27,7 +27,8 @@ RUN rm -rf /usr/share/nginx/html/*
 # Copy built React app
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Copy nginx configuration (will be overridden by ConfigMap in K8s)
+# nginx.conf here is THE config (single source of truth; the chart no
+# longer mounts a ConfigMap copy over it)
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 3000
