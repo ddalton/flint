@@ -14,6 +14,108 @@ covered by the stability guarantee.
 
 _Nothing yet._
 
+## [1.5.0] - 2026-07-03
+
+Dashboard release: the operations dashboard gains structure (URL
+routing, a real test safety net, this repo's first CI), a coherent
+visual system, and sheds its last fabricated data. No changes to the
+public API surface (CSI gRPC verbs, StorageClass parameters,
+`volume_context` keys).
+
+### Added
+
+- **Deep-linkable dashboard state.** Tabs, cross-tab filters, and
+  volume/snapshot detail selections live in the URL (react-router);
+  refresh and back/forward are safe, and any view can be shared as a
+  link.
+- **Frontend safety net + CI.** 73 Vitest/RTL tests with MSW fixtures
+  typed against the generated OpenAPI schema (contract drift is a
+  compile error), and two GitHub Actions gates: the dashboard suite
+  and OpenAPI-spec freshness in both directions (the Rust structs are
+  the schema's sole author).
+- **Primitive UI kit with one status vocabulary.** Chip, ProgressBar,
+  Card, Skeleton, AsyncView, and ConfirmModal primitives; a single
+  status-color vocabulary aliased to semantic Tailwind tokens; errors
+  never blank present data (stale banner instead); destructive flows
+  gate on a typed phrase. Entry bundle code-split 1013 KB → 296 KB.
+- **Node agent `POST /api/disks/delete`** — the strict inverse of
+  disk initialize: a no-op on an uninitialized disk, a 409 refusal
+  while any logical volume still exists on the store. The dashboard's
+  delete proxy is now documented in the OpenAPI spec.
+- **Committed end-to-end bulk-init drill**
+  (`spdk-dashboard/scripts/bulk-init-drill.mjs`) — Step 0 of the
+  remote-builder runbook: every fresh builder's pristine scratch NVMe
+  exercises the full select → manifest → confirm → LVS-Ready flow
+  against a real agent before being repurposed.
+
+### Fixed
+
+- **Epoch snapshots resolve to their volume.** `epoch-<pv>-<seq>`
+  names now parse to their PV (right-anchored; the trailing segment
+  must be the numeric sequence), so Tier-2 epoch snapshots no longer
+  pile into a single "unknown" bucket in the snapshot tree. Tree
+  entries are labeled with the PV name; the backend also re-derives
+  ids as a fallback for older agents.
+- Frontend strictness: zero `any` types; `noUncheckedIndexedAccess`.
+
+### Removed
+
+- **Fabricated dashboard data.** The Remote Storage tab (pure
+  client-side mocks; no backend routes ever existed) and the snapshot
+  list's invented per-snapshot storage consumption are gone. The
+  snapshot tree's real backend analytics (SPDK bdev consumption)
+  remain.
+
+### Changed
+
+- The frontend image's `nginx.conf` is the single source of truth;
+  the chart no longer overlays it with a ConfigMap.
+
+## [1.4.0] - 2026-07-03
+
+Tier-2 hot rejoin ships: non-disruptive standby admission for
+attached RWO volumes. Validated at 2–4 replicas through staggered
+multi-failure drills: zero acked-write loss across 145,000+ fsync'd
+writes, 5 controller deaths, 12+ leg kills, and one full raid
+collapse.
+
+### Added
+
+- **Hot rejoin (Tier-2).** Leased quiesce windows (100–200 ms esnap
+  path; O(delta) inline fenced-final-delta path, chosen adaptively by
+  a delta estimator), epoch catch-up with coverage-aware source
+  selection, esnap localization with local-chain resume, crash-decode
+  reconciler (adopt/scrub/resume/demote), defensive unquiesce, and
+  per-volume rejoin claims. `spdk-tgt` 1.4.0 = SPDK v26.05 + raid
+  skip_rebuild / leased-quiesce patch v3. Operator runbook:
+  `docs/tier2-operator-runbook.md`. Drill-only fault knob
+  `FLINT_HOT_REJOIN_FAULT` (never set in production).
+- **NFSv4 state persistence across server replacement** (`state.db`
+  on the export volume) — closes 1.3.0's "dirty open state lost at
+  bounce" limitation. Locks remain memory-only.
+- Node agents reap dead reconnect-looping NVMe-oF controllers.
+- Operations dashboard phases 0–2d: backend-enforced bearer auth,
+  TanStack Query data layer + backend aggregate cache, live replica
+  sync state, live volume detail, engine event timeline with
+  hot-rejoin windows, bulk disk initialization, and OpenAPI-generated
+  frontend types.
+
+### Fixed
+
+- **Latent 1.3.0 shared-volume unstage bug (found by this release's
+  gate).** NodeUnstage classified NFS consumers by `findmnt` on the
+  staging path, but RWX/ROX consumers mount at publish time — so
+  every shared-volume consumer unstage ran the block teardown, whose
+  per-replica sweep could delete the NFS server's live backing
+  exports. Classification now reads the PV's access modes (`findmnt`
+  only as a fallback).
+- Staggered-failure fixes from the 3-failure drill campaign: chase and
+  catch-up sources resolve via the record's live uuid and fail over by
+  lineage coverage; E_f cuts on each survivor's live head; the
+  localization backfill and phase-4 admission sources are
+  coverage-probed; the orphan sweep learned the hot-rejoin name
+  shapes; esnap-resume prefers the local chain.
+
 ## [1.3.0] - 2026-06-12
 
 Self-healing release: every common single-failure (replica node loss,
@@ -75,6 +177,22 @@ forced failure injection.
 - Migration from ≤1.2.0: existing volumes cross onto the pinned
   namespace identity at their next detach/restage; existing NFS server
   pods mint stable file-handle ids at their next recreation.
+
+## [1.2.0] - 2026-06-11
+
+- **Incremental replica rebuild** (phases 1–5b) and superblock-less
+  raids.
+- **Bounded unstage umount** — a wedged NFS mount can no longer hang
+  `NodeUnstageVolume` indefinitely.
+
+## [1.1.1] - 2026-06-10
+
+- **NVMe-oF fencing admits the consumer node.**
+  `ControllerPublishVolume` whitelisted the controller pod's host NQN
+  instead of the consuming node's, so every cross-node single-replica
+  attach was fenced out with EIO. (1.1.0 introduced the phase-0
+  fencing and was superseded by this tag without a standalone
+  release.)
 
 ## [1.0.0] - 2026-05-04
 
@@ -217,5 +335,10 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/ddalton/flint/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/ddalton/flint/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/ddalton/flint/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/ddalton/flint/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/ddalton/flint/compare/v1.0.0...v1.1.1
 [1.0.0]: https://github.com/ddalton/flint/releases/tag/v1.0.0

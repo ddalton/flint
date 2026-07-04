@@ -15,11 +15,11 @@ images:
   repository: dilipdalton  # Docker Hub registry
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
-    tag: "1.4.0"            # Tier-2 hot rejoin: non-disruptive standby admission, epoch catch-up hardening
+    tag: "1.5.0"            # dashboard release: URL state, UI kit, agent disk delete, epoch snapshot labeling
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (SPDK v26.05)
-    tag: "1.4.0"            # SPDK v26.05 + raid skip_rebuild/leased-quiesce patch v3
+    tag: "1.5.0"            # SPDK v26.05 + raid skip_rebuild/leased-quiesce patch v3 (unchanged; promoted from 1.4.0)
   # NFS Server for ReadWriteMany (RWX) volumes
   # By default, uses the same image as flintCsiDriver (which includes flint-nfs-server binary)
   # Uncomment to override with a separate NFS server image
@@ -177,7 +177,7 @@ dashboard:
     port: 8080
   frontend:
     name: spdk-dashboard-frontend
-    tag: "1.4.0"      # live ops dashboard: replica sync state, engine events, rejoin windows
+    tag: "1.5.0"      # deep-linkable URL state, primitive UI kit, code-split bundle, fabricated data removed
     port: 3000
   resources:
     backend:
