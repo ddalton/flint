@@ -3731,13 +3731,39 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             abnormal,
             message);
 
-        // Try to get filesystem stats if the volume is mounted
+        // Try to get filesystem stats if the volume is mounted.
+        //
+        // BOUNDED (Phase-3 drill A finding, 2026-07-04 — audit L2 made
+        // real): `Path::exists()` and `statvfs` are blocking syscalls that
+        // pin a runtime worker in D-state when the path is a dead hard NFS
+        // mount (RWX client whose server died). Kubelet polls stats per
+        // volume ~every minute, so each call ate one worker until the gRPC
+        // liveness probe starved and kubelet SIGKILLed the plugin — a
+        // permanent crash loop that also took down the co-located node
+        // agent (remote attaches to this node then failed EIO). Both calls
+        // now run on a blocking thread under a 5 s timeout; a timeout
+        // reports the volume ABNORMAL instead of hanging. The timed-out
+        // thread parks in D-state until the mount revives — a bounded leak
+        // (one per poll while dead), infinitely cheaper than plugin death.
         let mut usage = Vec::new();
+        let mut abnormal = abnormal;
+        let mut message = message;
 
-        if !req.volume_path.is_empty() && std::path::Path::new(&req.volume_path).exists() {
-            // Use statvfs to get filesystem stats
-            match nix::sys::statvfs::statvfs(req.volume_path.as_str()) {
-                Ok(stats) => {
+        if !req.volume_path.is_empty() {
+            let stats_path = req.volume_path.clone();
+            let fs_stats = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::task::spawn_blocking(move || {
+                    if !std::path::Path::new(&stats_path).exists() {
+                        return Ok(None);
+                    }
+                    nix::sys::statvfs::statvfs(stats_path.as_str()).map(Some)
+                }),
+            )
+            .await;
+
+            match fs_stats {
+                Ok(Ok(Ok(Some(stats)))) => {
                     let block_size = stats.block_size() as i64;
                     let total_blocks = stats.blocks() as i64;
                     let free_blocks = stats.blocks_free() as i64;
@@ -3769,9 +3795,26 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     println!("📊 [NODE] Volume stats: {} bytes total, {} bytes used, {} bytes available",
                         total_bytes, used_bytes, available_bytes);
                 }
-                Err(e) => {
+                Ok(Ok(Ok(None))) => {
+                    // Path absent — not mounted here; health condition alone.
+                }
+                Ok(Ok(Err(e))) => {
                     println!("⚠️ [NODE] Could not get filesystem stats: {}", e);
                     // Continue - we can still report health condition without usage stats
+                }
+                Ok(Err(join_err)) => {
+                    println!("⚠️ [NODE] Filesystem stats task failed: {}", join_err);
+                }
+                Err(_elapsed) => {
+                    println!(
+                        "⚠️ [NODE] Filesystem stats TIMED OUT after 5s for {} — mount unresponsive (dead NFS server?)",
+                        req.volume_path
+                    );
+                    abnormal = true;
+                    message = format!(
+                        "filesystem stats timed out — mount unresponsive (dead NFS backend?); {}",
+                        message
+                    );
                 }
             }
         }
