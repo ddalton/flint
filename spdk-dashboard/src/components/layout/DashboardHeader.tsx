@@ -7,7 +7,6 @@ interface DashboardHeaderProps {
   onAutoRefreshChange: (enabled: boolean) => void;
   onRefresh: () => void;
   onLogout: () => void;
-  usingMockData?: boolean;
   connectionError?: string | null;
 }
 
@@ -16,7 +15,6 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
   onAutoRefreshChange,
   onRefresh,
   onLogout,
-  usingMockData = false,
   connectionError = null
 }) => {
   const { shouldPauseRefresh } = useOperations();
@@ -38,12 +36,6 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
                 <span className="text-sm font-medium text-red-800">
                   Backend unreachable — showing last known data
                 </span>
-              </div>
-            )}
-            {usingMockData && (
-              <div className="flex items-center gap-2 px-3 py-1 bg-yellow-100 border border-yellow-300 rounded-full">
-                <AlertTriangle className="w-4 h-4 text-yellow-600" />
-                <span className="text-sm font-medium text-yellow-800">Mock Data (dev)</span>
               </div>
             )}
           </div>

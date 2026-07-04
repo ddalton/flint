@@ -52,7 +52,6 @@ interface DashboardProps {
   onAutoRefreshChange: (enabled: boolean) => void;
   onRefresh: () => void;
   onLogout: () => void;
-  usingMockData?: boolean;
   connectionError?: string | null;
   showNodesWithDisksOnly?: boolean;
   onShowNodesWithDisksOnlyChange?: (enabled: boolean) => void;
@@ -66,7 +65,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onAutoRefreshChange,
   onRefresh,
   onLogout,
-  usingMockData = false,
   connectionError = null,
   showNodesWithDisksOnly = false,
   onShowNodesWithDisksOnlyChange
@@ -267,7 +265,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
         onAutoRefreshChange={onAutoRefreshChange}
         onRefresh={onRefresh}
         onLogout={onLogout}
-        usingMockData={usingMockData}
         connectionError={connectionError}
       />
 

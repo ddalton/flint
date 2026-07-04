@@ -288,9 +288,6 @@ export const useDashboardData = (autoRefresh: boolean = true, filters?: Dashboar
     loading: query.isLoading,
     stats,
     refreshData: query.refetch,
-    // Mock data is gone; kept in the return shape as a constant so existing
-    // consumers compile unchanged (removed from the UI in a follow-up).
-    usingMockData: false,
     connectionError: query.isError ? (query.error as Error).message : null,
   };
 };
