@@ -293,6 +293,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // NFS server-pod liveness reconciler — controller role. Closes the
+    // contract's recorded open item: a bare server-pod death used to wait
+    // for the next client publish or a cutover trigger; stable clients
+    // meant an indefinite hang on the hard mount. Recreates an Absent
+    // server (pvc-backed volumes only) through the exact publish-side
+    // ensure machinery. Default-enabled; FLINT_NFS_RECONCILER=disabled
+    // to opt out.
+    if mode == "controller" || mode == "all" {
+        if spdk_csi_driver::rwx_nfs::nfs_reconciler_enabled() {
+            let reconciler_client = kube_client.clone();
+            let reconciler_node = node_id.clone();
+            tokio::spawn(async move {
+                spdk_csi_driver::rwx_nfs::run_nfs_server_reconciler(
+                    reconciler_client,
+                    reconciler_node,
+                )
+                .await;
+            });
+        } else {
+            println!("ℹ️ [NFS-RECONCILER] NFS server-pod liveness reconciler disabled (FLINT_NFS_RECONCILER=disabled)");
+        }
+    }
+
     // Start health server for Kubernetes liveness probes
     tokio::spawn(async move {
         start_health_server().await;

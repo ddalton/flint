@@ -24,8 +24,12 @@ production mints converted; CI lint
 `identity::tests::no_naming_mints_outside_identity` enforces it (one
 allowlisted L4 exception); transitional divergence assertions removed
 (earned); contract published at docs/identity-contract.md. ALL PHASES
-DONE. Open follow-ups: NFS-server-pod liveness reconciler; latent
-findings L1/L3-L6 (L2 fixed via a78c79c).
+DONE. Follow-ups closed 2026-07-04 (pre-release hardening pass): the
+NFS-server-pod liveness reconciler landed (rwx_nfs.rs, default-enabled,
+contract corollary updated); L1/L3 fixed (loud expand refusal for shared
+volumes, contract matrix rows added); L4 verified unreachable (legacy
+operator chart-disabled, audit note); L5 was already unified in Phase 1;
+L6 is the contract cell, not a bug. L2 was fixed via a78c79c.
 **Motivation:** the RWX identity-aliasing bug class has produced P1s on
 three separate occasions, each found live: the RWX cutover validation
 batch (637be1c, six fixes), the v1.4.0 release gate (d7490de, NodeUnstage

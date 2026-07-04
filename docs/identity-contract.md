@@ -53,8 +53,15 @@ and skip backing PVs where consumer semantics would double-run.
   (integrity over availability); nodes stay healthy (bounded stats) and
   teardown drains via the assume-mounted lazy unmount. A writer caught
   mid-write is unkillable until the server returns — kernel semantics.
-- Server pod recreation belongs to the cutover machinery or the next
-  client ControllerPublish. There is deliberately no independent pod
-  reconciler (open item; see the audit doc).
+- Server pod recreation has three owners: the cutover machinery, the next
+  client ControllerPublish, and — since 2026-07-04 — the NFS server-pod
+  liveness reconciler (controller role, 30 s tick, default-enabled,
+  `FLINT_NFS_RECONCILER=disabled` to opt out), which recreates an Absent
+  server for any pvc-backed shared volume that still has client
+  attachments, through the same publish-side ensure machinery
+  (`NfsServerPodRecreated` event). emptydir-backed shares are deliberately
+  NOT reconciled — their data dies with the pod, and auto-recreation would
+  silently swap a hung mount for an empty export; they keep next-publish
+  semantics.
 - Fencing an RWO consumer on a node that hosts an NFS server removes
   exactly the RWO volume's target; the server's export is untouched.

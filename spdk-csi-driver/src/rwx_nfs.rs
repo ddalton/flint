@@ -530,6 +530,16 @@ pub async fn create_nfs_server_pod(
             eprintln!("   Provides stable DNS endpoint for NFS clients");
             Ok(())
         }
+        // The per-volume Service outlives the server pod by design (the
+        // stable client endpoint) — every server RECREATION therefore hits
+        // AlreadyExists here. Treat it as success: the existing Service's
+        // selector picks up the new pod. First seen live when the
+        // liveness reconciler recreated a killed server (2026-07-04);
+        // the publish-path recreation had the same latent failure.
+        Err(kube::Error::Api(ref ae)) if ae.code == 409 => {
+            eprintln!("ℹ️  [NFS] Service already exists: {}.{}.svc.cluster.local (kept — stable endpoint)", service_name, config.namespace);
+            Ok(())
+        }
         Err(e) => {
             eprintln!("❌ [NFS] Failed to create Service: {}", e);
             Err(Status::internal(format!("Failed to create NFS service: {}", e)))
@@ -814,10 +824,265 @@ pub async fn delete_nfs_server_pod(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// NFS server-pod liveness reconciler
+//
+// Closes the availability gap the identity contract recorded as an open
+// item: a bare server-pod death was only healed by the NEXT client
+// ControllerPublish or a cutover trigger. An RWX volume with stable,
+// long-lived clients and no new publishes therefore hung indefinitely —
+// contained (bounded stats, assume-mounted teardown, no corpse-binding)
+// but never recovered. The reconciler recreates an Absent server for any
+// pvc-backed NFS volume that still has client attachments, through the
+// exact ensure machinery ControllerPublish uses.
+//
+// Deliberately NOT reconciled: emptydir-backed volumes. Their share dies
+// with the pod (ephemeral by contract); auto-recreating would silently
+// swap a hung mount for an EMPTY export. They keep the legacy
+// next-publish semantics.
+// ---------------------------------------------------------------------------
+
+/// What the reconciler should do for one volume this tick. Pure — the
+/// truth table is pinned in tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NfsReconcileAction {
+    Skip(&'static str),
+    Recreate,
+}
+
+pub fn nfs_reconcile_decision(
+    backend_is_emptydir: bool,
+    pv_terminating: bool,
+    attachment_count: usize,
+    liveness: NfsPodLiveness,
+) -> NfsReconcileAction {
+    if backend_is_emptydir {
+        return NfsReconcileAction::Skip("emptydir backend — ephemeral by contract, recreation belongs to the next publish");
+    }
+    if pv_terminating {
+        return NfsReconcileAction::Skip("PV deleting — DeleteVolume owns teardown");
+    }
+    if attachment_count == 0 {
+        return NfsReconcileAction::Skip("no client attachments — the next publish creates the server");
+    }
+    match liveness {
+        NfsPodLiveness::Present => NfsReconcileAction::Skip("server pod present"),
+        NfsPodLiveness::Terminating => {
+            NfsReconcileAction::Skip("server pod terminating — recreate once it has exited")
+        }
+        NfsPodLiveness::Absent => NfsReconcileAction::Recreate,
+    }
+}
+
+/// One reconcile pass over all flint NFS-backed user PVs. Returns the
+/// number of servers recreated (for logging/tests of the loop).
+pub async fn nfs_reconciler_pass(kube_client: &Client, source_node: &str) -> usize {
+    use k8s_openapi::api::storage::v1::VolumeAttachment;
+    use kube::api::ListParams;
+
+    let pv_api: Api<PersistentVolume> = Api::all(kube_client.clone());
+    let va_api: Api<VolumeAttachment> = Api::all(kube_client.clone());
+
+    let (pvs, vas) = match (
+        pv_api.list(&ListParams::default()).await,
+        va_api.list(&ListParams::default()).await,
+    ) {
+        (Ok(p), Ok(v)) => (p, v),
+        (p, v) => {
+            eprintln!(
+                "⚠️  [NFS-RECONCILER] Listing failed (pv ok: {}, va ok: {}) — skipping this pass",
+                p.is_ok(),
+                v.is_ok()
+            );
+            return 0;
+        }
+    };
+
+    // Client attachments per PV name. Attachment INTENT counts (attached
+    // or still attaching): either way a client is depending on the share.
+    let mut attachments: HashMap<String, usize> = HashMap::new();
+    for va in &vas.items {
+        if let Some(pv_name) = va.spec.source.persistent_volume_name.as_ref() {
+            *attachments.entry(pv_name.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut recreated = 0;
+    for pv in &pvs.items {
+        let Some(name) = pv.metadata.name.as_ref() else { continue };
+        let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
+        if csi.driver != "flint.csi.storage.io" {
+            continue;
+        }
+        let attrs = csi.volume_attributes.as_ref();
+        let nfs_enabled = attrs
+            .and_then(|a| a.get("nfs.flint.io/enabled"))
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        if !nfs_enabled {
+            // Backing PVs are automatically excluded here too: their
+            // attributes are minted with every nfs.flint.io/* key filtered
+            // out (create_nfs_server_pod), so only USER shared PVs match.
+            continue;
+        }
+        let backend_is_emptydir = attrs
+            .and_then(|a| a.get("nfs.flint.io/backend"))
+            .map(|v| v == "emptydir")
+            .unwrap_or(false);
+        let pv_terminating = pv.metadata.deletion_timestamp.is_some();
+        let n_attached = attachments.get(name).copied().unwrap_or(0);
+
+        let liveness = match nfs_pod_liveness(kube_client.clone(), name).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("⚠️  [NFS-RECONCILER] {}: liveness check failed ({}); skipping", name, e);
+                continue;
+            }
+        };
+
+        match nfs_reconcile_decision(backend_is_emptydir, pv_terminating, n_attached, liveness) {
+            NfsReconcileAction::Skip(_) => {}
+            NfsReconcileAction::Recreate => {
+                println!(
+                    "🩺 [NFS-RECONCILER] Server pod for {} is ABSENT with {} client attachment(s) — recreating",
+                    name, n_attached
+                );
+                let ctx: HashMap<String, String> = attrs
+                    .map(|a| a.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
+                let replica_nodes = match parse_replica_nodes(&ctx) {
+                    Ok(nodes) => nodes,
+                    Err(e) => {
+                        eprintln!(
+                            "⚠️  [NFS-RECONCILER] {}: cannot reconstruct replica nodes ({}); skipping",
+                            name, e
+                        );
+                        continue;
+                    }
+                };
+                // Same capacity derivation as the publish path (context
+                // "size", Gi suffix or raw bytes; publish's 1 GiB default).
+                let capacity_bytes = ctx
+                    .get("size")
+                    .and_then(|s| {
+                        if s.ends_with("Gi") {
+                            s.trim_end_matches("Gi").parse::<i64>().ok().map(|v| v * 1024 * 1024 * 1024)
+                        } else {
+                            s.parse::<i64>().ok()
+                        }
+                    })
+                    .unwrap_or(1073741824);
+                // ROX ⇔ the PV can only ever be shared read-only (RWM wins
+                // when both are present — same dominance as role_from_modes).
+                let modes = pv
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.access_modes.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
+                let is_rox = !modes.iter().any(|m| m == "ReadWriteMany")
+                    && modes.iter().any(|m| m == "ReadOnlyMany");
+
+                match create_nfs_server_pod(
+                    kube_client.clone(),
+                    name,
+                    &replica_nodes,
+                    &ctx,
+                    capacity_bytes,
+                    is_rox,
+                    NfsBackend::Pvc,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        recreated += 1;
+                        crate::replica_sync::emit_pv_event(
+                            kube_client,
+                            source_node,
+                            name,
+                            "Normal",
+                            "NfsServerPodRecreated",
+                            &format!(
+                                "NFS server pod was absent while {} client attachment(s) depended on it — \
+                                 recreated by the liveness reconciler (the pod died outside any \
+                                 publish/cutover event). Client mounts resume via the stable Service \
+                                 endpoint once the server is Ready.",
+                                n_attached
+                            ),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        // AlreadyExists = lost a benign race against a
+                        // concurrent ControllerPublish ensure — fine.
+                        eprintln!("⚠️  [NFS-RECONCILER] {}: recreate failed ({}); retrying next tick", name, e);
+                    }
+                }
+            }
+        }
+    }
+    recreated
+}
+
+/// Controller-role loop. Enabled by default — it only acts on the
+/// unambiguous state [pvc-backed NFS user PV, not deleting, ≥1 client
+/// attachment, server pod Absent] and only through the same ensure path
+/// ControllerPublish runs. Opt out with FLINT_NFS_RECONCILER=disabled.
+pub fn nfs_reconciler_enabled() -> bool {
+    env::var("FLINT_NFS_RECONCILER")
+        .map(|v| v != "disabled")
+        .unwrap_or(true)
+}
+
+pub async fn run_nfs_server_reconciler(kube_client: Client, source_node: String) {
+    // NFS entirely off ⇒ nothing to reconcile, don't even loop.
+    if !is_nfs_enabled() {
+        println!("ℹ️ [NFS-RECONCILER] NFS_ENABLED=false — reconciler idle");
+        return;
+    }
+    println!("🩺 [NFS-RECONCILER] NFS server-pod liveness reconciler running (30s tick; FLINT_NFS_RECONCILER=disabled to opt out)");
+    loop {
+        let n = nfs_reconciler_pass(&kube_client, &source_node).await;
+        if n > 0 {
+            println!("🩺 [NFS-RECONCILER] Recreated {} NFS server pod(s) this pass", n);
+        }
+        sleep(Duration::from_secs(30)).await;
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reconciler acts on exactly one state: pvc-backed, PV alive,
+    /// clients attached, server pod Absent. Everything else is a Skip —
+    /// emptydir NEVER recreates (an auto-recreated emptydir share would
+    /// silently replace a hung mount with an empty export).
+    #[test]
+    fn nfs_reconcile_truth_table() {
+        use NfsPodLiveness::*;
+        use NfsReconcileAction::*;
+        // The one Recreate cell.
+        assert_eq!(nfs_reconcile_decision(false, false, 2, Absent), Recreate);
+        assert_eq!(nfs_reconcile_decision(false, false, 1, Absent), Recreate);
+        // Liveness gates.
+        assert!(matches!(nfs_reconcile_decision(false, false, 2, Present), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(false, false, 2, Terminating), Skip(_)));
+        // No clients — next publish owns creation.
+        assert!(matches!(nfs_reconcile_decision(false, false, 0, Absent), Skip(_)));
+        // PV deleting — DeleteVolume owns teardown.
+        assert!(matches!(nfs_reconcile_decision(false, true, 2, Absent), Skip(_)));
+        // emptydir: never, regardless of everything else.
+        assert!(matches!(nfs_reconcile_decision(true, false, 5, Absent), Skip(_)));
+    }
+
+    #[test]
+    fn nfs_reconciler_gate_default_and_optout() {
+        // Default (unset) = enabled; only the literal "disabled" opts out.
+        // NOTE: env-var manipulation is process-global — this test only
+        // asserts the pure default since the suite runs multi-threaded.
+        assert!(nfs_reconciler_enabled());
+    }
 
     #[test]
     fn nfs_instance_id_stable_and_per_volume() {
