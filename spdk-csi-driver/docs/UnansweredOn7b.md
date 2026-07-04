@@ -1595,3 +1595,37 @@ surfaced is now landed and validated:
   acked-write loss** through 5 controller deaths, 12+ leg kills, one
   full raid collapse, three staggered-failure drills and every window
   ever committed.
+
+## v1.4.0 RELEASED (2026-07-03) — Tier-2 ships
+
+The campaign's exit: chart `flint-csi-driver-chart:1.4.0` pushed with
+`flint-driver:1.4.0`, `spdk-tgt:1.4.0` (the live-validated
+tier2-spike-v3 digest promoted — patch inputs unchanged since da74444)
+and `spdk-dashboard-frontend:1.4.0`; aliases 1.4/1/latest on all
+three. Cluster runj fully rolled INCLUDING the node DS (first DS roll
+since tier2-7b4.0): both DS rolls completed with the record never
+leaving in_sync ×3 — every spdk-tgt bounce absorbed at Tier-0 before
+detection fired — and the campaign ledger ran gapless past 145,795
+appends.
+
+**The release gate earned its keep.** First run: 7/8 + rwx-single-
+replica FAILED on teardown timeout, exposing a LATENT 1.3.0 bug
+(shipped in 637be1c): NodeUnstage classified NFS consumers by findmnt
+on the STAGING path, but RWX/ROX consumers mount NFS at publish time —
+staging never holds the mount — so every shared-volume consumer
+unstage ran the block teardown, whose per-replica sweep deletes the
+NFS server's live backing exports. Every green gate since June had
+merely won the teardown race; this run lost it twice (the rox volume's
+nfs server crashed with its device deleted under it; the rwx volume's
+last consumer unmount wedged on the dead server). FIXED (d7490de):
+classification now reads the PV's accessModes (RWX/ROX → unmount-only;
+findmnt only as fallback when the PV is unreadable; `nfs-server-*`
+handles stay on the block path). Gate rerun: **8/8 + clean-shutdown
+PASS**, rwx-single-replica 83 s (was 341 s timeout).
+
+Also in the release roll: the controller's `CSI_DRIVER_IMAGE_TAG` env
+(the nfs-server pod spawn pin) bumped from 1.3.0 — the gate's first
+run surfaced that stale pin too (nfs pods spawning 1.3.0 under a 1.4.0
+control plane). Trove's chart pin bumped to 1.4.0 (uncommitted,
+applies at next backend restart). Annotated tag `v1.4.0` created
+locally; push to origin pending a valid GitHub credential.
