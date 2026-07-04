@@ -111,6 +111,9 @@ export interface MemberStateStyle {
   chip: string;
   icon: LucideIcon;
   iconClass: string;
+  // Stroke token for graph edges/rings (topology view). The -600 steps, not
+  // the -500 chart fills: thin strokes need ≥3:1 on the white surface.
+  hex: string;
 }
 
 const MEMBER_STATE_STYLES: Record<string, MemberStateStyle> = {
@@ -118,21 +121,25 @@ const MEMBER_STATE_STYLES: Record<string, MemberStateStyle> = {
     chip: 'bg-green-100 text-green-800 border-green-200',
     icon: CheckCircle,
     iconClass: 'text-green-600',
+    hex: '#059669',
   },
   healthy: {
     chip: 'bg-green-100 text-green-800 border-green-200',
     icon: CheckCircle,
     iconClass: 'text-green-600',
+    hex: '#059669',
   },
   degraded: {
     chip: 'bg-yellow-100 text-yellow-800 border-yellow-200',
     icon: AlertTriangle,
     iconClass: 'text-yellow-600',
+    hex: '#d97706',
   },
   failed: {
     chip: 'bg-red-100 text-red-800 border-red-200',
     icon: X,
     iconClass: 'text-red-600',
+    hex: '#dc2626',
   },
   rebuilding: {
     chip: 'bg-orange-100 text-orange-800 border-orange-200',
@@ -140,26 +147,31 @@ const MEMBER_STATE_STYLES: Record<string, MemberStateStyle> = {
     // Motion with meaning: the gear itself is static — real progress renders
     // through the data-bound sync indicator / ProgressBar.
     iconClass: 'text-rebuilding-600',
+    hex: '#ea580c',
   },
   spare: {
     chip: 'bg-blue-100 text-blue-800 border-blue-200',
     icon: Shield,
     iconClass: 'text-blue-600',
+    hex: '#2563eb',
   },
   removing: {
     chip: 'bg-purple-100 text-purple-800 border-purple-200',
     icon: Clock,
     iconClass: 'text-purple-600',
+    hex: '#9333ea',
   },
   stale: {
     chip: SYNC_STATE_STYLES.stale.chip,
     icon: AlertTriangle,
     iconClass: 'text-amber-600',
+    hex: '#d97706',
   },
   standby: {
     chip: SYNC_STATE_STYLES.standby.chip,
     icon: Clock,
     iconClass: 'text-blue-600',
+    hex: '#2563eb',
   },
 };
 
@@ -167,6 +179,7 @@ export const UNKNOWN_MEMBER_STATE: MemberStateStyle = {
   chip: 'bg-gray-100 text-gray-800 border-gray-200',
   icon: HardDrive,
   iconClass: 'text-gray-600',
+  hex: '#6b7280',
 };
 
 export function memberStateStyle(state: string): MemberStateStyle {
