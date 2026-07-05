@@ -24,6 +24,16 @@ use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use bytes::Bytes;
 use tracing::{warn, debug};
 
+/// utf8str_cs validity beyond raw UTF-8: RFC 8881 §14.4 excludes Unicode
+/// noncharacters (pynfs COMP3 sends U+FFFE as a compound tag and expects
+/// NFS4ERR_INVAL; RNM8/9 do the same with component names).
+pub fn utf8str_cs_ok(s: &str) -> bool {
+    !s.chars().any(|c| {
+        let cp = c as u32;
+        (0xFDD0..=0xFDEF).contains(&cp) || (cp & 0xFFFE) == 0xFFFE
+    })
+}
+
 /// COMPOUND request
 #[derive(Debug)]
 pub struct CompoundRequest {
@@ -341,6 +351,11 @@ pub enum Operation {
 
     // Placeholder for unsupported operations
     Unsupported(u32),            // operation code
+    /// A component4 name in the op's args is not valid utf8str_cs (bad
+    /// UTF-8 bytes or Unicode noncharacters). The bytes were consumed, so
+    /// later ops still parse; the dispatcher replies NFS4ERR_INVAL
+    /// (RFC 8881 §14.4 — pynfs RNM8/RNM9).
+    InvalidName(u32),            // operation code
     /// The opcode is recognised as a valid NFSv4 op but its arguments could
     /// not be parsed. Distinguished from `Unsupported` so the dispatcher can
     /// return `NFS4ERR_BADXDR` instead of `NFS4ERR_NOTSUPP` /
@@ -794,7 +809,9 @@ impl CompoundRequest {
         // tag (RFC 5661 §15 says servers MUST detect this) doesn't crash
         // request decode.
         let tag_bytes = decoder.decode_opaque()?;
-        let tag_valid = std::str::from_utf8(&tag_bytes).is_ok();
+        let tag_valid = std::str::from_utf8(&tag_bytes)
+            .map(utf8str_cs_ok)
+            .unwrap_or(false);
         let tag = String::from_utf8_lossy(&tag_bytes).into_owned();
         tracing::trace!("DEBUG CompoundRequest::decode: After tag decode (tag='{}', valid={}): {} bytes remaining",
                  tag, tag_valid, decoder.remaining());
@@ -846,7 +863,17 @@ impl CompoundRequest {
                     Operation::BadXdr(opcode)
                 }
             };
+            // An op we can't decode leaves the cursor mid-argument, so the
+            // remaining ops would parse as garbage (a v4.2 COPY's args used
+            // to become the "next op" and the whole reply came out
+            // mis-shaped). Its error result legitimately ends the compound
+            // (RFC 8881 §15.2.4: results run up to and including the first
+            // failing op) — stop decoding here.
+            let stop = matches!(op, Operation::Unsupported(_) | Operation::BadXdr(_));
             operations.push(op);
+            if stop {
+                break;
+            }
         }
 
         Ok(Self {
@@ -863,6 +890,18 @@ impl CompoundRequest {
 
     /// Decode a single operation
     fn decode_operation(decoder: &mut XdrDecoder, opcode: u32) -> Result<Operation, String> {
+        // Decode a component4: opaque bytes that must be valid utf8str_cs.
+        // The bytes are consumed either way so subsequent ops stay
+        // parseable; an invalid name surfaces as Ok(Err(())) and the arm
+        // returns Operation::InvalidName (→ NFS4ERR_INVAL).
+        fn decode_component(decoder: &mut XdrDecoder) -> Result<Result<String, ()>, String> {
+            let bytes = decoder.decode_opaque()?;
+            match std::str::from_utf8(&bytes) {
+                Ok(s) if utf8str_cs_ok(s) => Ok(Ok(s.to_owned())),
+                _ => Ok(Err(())),
+            }
+        }
+
         // Reserved/illegal opcode classes (0/1/2 reserved per RFC 5661 §15.2,
         // anything > the highest valid v4.2 op is unknown) carry no body, so
         // they're handled before any further decoding. The dispatcher will
@@ -896,8 +935,10 @@ impl CompoundRequest {
 
             // Lookup and directory operations
             opcode::LOOKUP => {
-                let component = decoder.decode_string()?;
-                Ok(Operation::Lookup(component))
+                match decode_component(decoder)? {
+                    Ok(component) => Ok(Operation::Lookup(component)),
+                    Err(()) => Ok(Operation::InvalidName(opcode)),
+                }
             }
             opcode::LOOKUPP => Ok(Operation::LookupP),
             opcode::READDIR => {
@@ -1197,7 +1238,10 @@ impl CompoundRequest {
                     _ => None,
                 };
 
-                let objname = decoder.decode_string()?;
+                let objname = match decode_component(decoder)? {
+                    Ok(n) => n,
+                    Err(()) => return Ok(Operation::InvalidName(opcode)),
+                };
                 tracing::trace!("DEBUG CREATE: objname='{}'", objname);
 
                 // createattrs (fattr4 = bitmap4 + attrlist4 opaque) — values
@@ -1211,17 +1255,26 @@ impl CompoundRequest {
                 Ok(Operation::Create { objtype, objname, linkdata })
             }
             opcode::REMOVE => {
-                let component = decoder.decode_string()?;
-                Ok(Operation::Remove(component))
+                match decode_component(decoder)? {
+                    Ok(component) => Ok(Operation::Remove(component)),
+                    Err(()) => Ok(Operation::InvalidName(opcode)),
+                }
             }
             opcode::RENAME => {
-                let oldname = decoder.decode_string()?;
-                let newname = decoder.decode_string()?;
-                Ok(Operation::Rename { oldname, newname })
+                // Consume BOTH names before validity checks so an invalid
+                // oldname doesn't strand the cursor before newname.
+                let oldname = decode_component(decoder)?;
+                let newname = decode_component(decoder)?;
+                match (oldname, newname) {
+                    (Ok(oldname), Ok(newname)) => Ok(Operation::Rename { oldname, newname }),
+                    _ => Ok(Operation::InvalidName(opcode)),
+                }
             }
             opcode::LINK => {
-                let newname = decoder.decode_string()?;
-                Ok(Operation::Link(newname))
+                match decode_component(decoder)? {
+                    Ok(newname) => Ok(Operation::Link(newname)),
+                    Err(()) => Ok(Operation::InvalidName(opcode)),
+                }
             }
             opcode::READLINK => Ok(Operation::ReadLink),
 
@@ -1237,7 +1290,34 @@ impl CompoundRequest {
                 };
 
                 let flags = decoder.decode_u32()?;
+                // eia_state_protect is a union (RFC 8881 §18.35.1); the arm
+                // bodies must be consumed or everything after them decodes
+                // garbage (an SP4_SSV request used to surface as BADXDR).
                 let state_protect = decoder.decode_u32()?;
+                match state_protect {
+                    0 => { /* SP4_NONE — void */ }
+                    1 | 2 => {
+                        // state_protect_ops4: two bitmap4s.
+                        let _must_enforce = decoder.decode_bitmap()?;
+                        let _must_allow = decoder.decode_bitmap()?;
+                        if state_protect == 2 {
+                            // ssv_sp_parms4 tail: hash algs, encr algs
+                            // (arrays of sec_oid4), window, num_gss_handles.
+                            for _ in 0..2 {
+                                let alg_count = decoder.decode_u32()? as usize;
+                                if alg_count > 16 {
+                                    return Err(format!("ssp alg array too long: {}", alg_count));
+                                }
+                                for _ in 0..alg_count {
+                                    let _oid = decoder.decode_opaque()?;
+                                }
+                            }
+                            let _window = decoder.decode_u32()?;
+                            let _num_gss_handles = decoder.decode_u32()?;
+                        }
+                    }
+                    other => return Err(format!("bad spa_how: {}", other)),
+                }
 
                 // eia_client_impl_id is a length-prefixed array of at most
                 // one element (RFC 8881 §18.35.1: `nfs_impl_id4 eia_client_impl_id<1>`).
@@ -2215,7 +2295,15 @@ impl CompoundResponse {
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(res) = result {
+                        // COPY4resok = write_response4 + consecutive +
+                        // synchronous (RFC 7862 §15.2.3). The reply used to
+                        // skip write_response4's callback-id array,
+                        // committed and verifier fields — clients hit EOF
+                        // decoding it (pynfs COPY5).
+                        encoder.encode_u32(0); // wr_callback_id<1>: empty (copy is synchronous)
                         encoder.encode_u64(res.count);
+                        encoder.encode_u32(2); // wr_committed = FILE_SYNC4
+                        encoder.encode_fixed_opaque(&[0u8; 8]); // wr_writeverf (sync copy: unused)
                         encoder.encode_bool(res.consecutive);
                         encoder.encode_bool(res.synchronous);
                     }

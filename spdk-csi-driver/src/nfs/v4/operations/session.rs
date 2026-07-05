@@ -206,6 +206,16 @@ impl SessionOperationHandler {
             return exchange_id_err(Nfs4Status::Inval);
         }
 
+        // SP4_SSV (spa_how=2) state protection needs SSV GSS machinery we
+        // don't implement. RFC 8881 §2.10.8.3: a server that supports none
+        // of the client's SSV algorithms returns ENCR_ALG_UNSUPP — the
+        // honest answer here (previously the args didn't even decode and
+        // clients saw BADXDR).
+        if op.state_protect == 2 {
+            warn!("EXCHANGE_ID: SP4_SSV requested — unsupported → ENCR_ALG_UNSUPP");
+            return exchange_id_err(Nfs4Status::EncrAlgUnsupp);
+        }
+
         // RFC 8881 §18.35.5 client-record state machine. Principal is the
         // RPC-level identity of the caller; an empty Vec for AUTH_NONE.
         use crate::nfs::v4::state::client::ExchangeIdOutcome;

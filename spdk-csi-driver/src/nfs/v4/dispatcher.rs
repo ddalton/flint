@@ -56,6 +56,19 @@ pub struct CompoundDispatcher {
         crate::nfs::v4::protocol::SessionId,
         Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
     >>,
+
+    /// Which TCP connections are bound to which session (RFC 8881 §2.10.3.1).
+    /// The per-connection `BackChannelWriter` Arc doubles as the connection's
+    /// identity (one writer per connection, held alive by the connection
+    /// handler); Weak refs keep dead connections from pinning memory or
+    /// recycling pointer identity while still registered. Bound at
+    /// CREATE_SESSION / SEQUENCE (implicit under SP4_NONE) /
+    /// BIND_CONN_TO_SESSION; checked by DESTROY_SESSION, which must reject
+    /// unbound connections with NFS4ERR_CONN_NOT_BOUND_TO_SESSION (§18.37.3).
+    session_bound_conns: dashmap::DashMap<
+        crate::nfs::v4::protocol::SessionId,
+        Vec<std::sync::Weak<crate::nfs::v4::back_channel::BackChannelWriter>>,
+    >,
 }
 
 impl CompoundDispatcher {
@@ -93,7 +106,37 @@ impl CompoundDispatcher {
             lock_mgr,
             pnfs_handler,
             back_channels: Arc::new(dashmap::DashMap::new()),
+            session_bound_conns: dashmap::DashMap::new(),
         }
+    }
+
+    /// Record that the compound's connection is bound to `sid`. No-op for
+    /// call sites without a connection writer (unit tests, GSS init).
+    fn bind_conn_to_session(
+        &self,
+        sid: crate::nfs::v4::protocol::SessionId,
+        ctx: &CompoundContext,
+    ) {
+        let Some(bcw) = ctx.back_channel.as_ref() else { return };
+        let mut entry = self.session_bound_conns.entry(sid).or_default();
+        entry.retain(|w| w.strong_count() > 0);
+        if !entry.iter().any(|w| w.as_ptr() == Arc::as_ptr(bcw)) {
+            entry.push(Arc::downgrade(bcw));
+        }
+    }
+
+    /// Whether the compound's connection is bound to `sid`. Compounds with
+    /// no connection writer (unit tests, GSS init) are treated as bound.
+    fn conn_bound_to_session(
+        &self,
+        sid: &crate::nfs::v4::protocol::SessionId,
+        ctx: &CompoundContext,
+    ) -> bool {
+        let Some(bcw) = ctx.back_channel.as_ref() else { return true };
+        self.session_bound_conns
+            .get(sid)
+            .map(|v| v.iter().any(|w| w.as_ptr() == Arc::as_ptr(bcw)))
+            .unwrap_or(false)
     }
 
     /// Read-only handle to the back-channel registry. Callers (the
@@ -612,6 +655,9 @@ impl CompoundDispatcher {
                             );
                         }
                     }
+                    // CREATE_SESSION binds its connection to the new
+                    // session (RFC 8881 §18.36.3).
+                    self.bind_conn_to_session(res.sessionid, context);
                     OperationResult::CreateSession(res.status, Some(CreateSessionResult {
                         sessionid: res.sessionid,
                         sequenceid: res.sequence,
@@ -636,6 +682,9 @@ impl CompoundDispatcher {
                 if res.status == Nfs4Status::Ok {
                     // Store session_id in context for subsequent operations
                     context.session_id = Some(res.sessionid);
+                    // A successful SEQUENCE implicitly binds the connection
+                    // to the session (RFC 8881 §2.10.3.1, SP4_NONE).
+                    self.bind_conn_to_session(res.sessionid, context);
 
                     OperationResult::Sequence(res.status, Some(SequenceResult {
                         sessionid: res.sessionid,
@@ -655,8 +704,25 @@ impl CompoundDispatcher {
             }
 
             Operation::DestroySession(sessionid) => {
+                // RFC 8881 §18.37.3: DESTROY_SESSION must arrive on a
+                // connection bound to the session (pynfs DSESS9001). Only
+                // gate sessions that exist — unknown ids stay BADSESSION.
+                if self.state_mgr.sessions.get_session(&sessionid).is_some()
+                    && !self.conn_bound_to_session(&sessionid, context)
+                {
+                    warn!(
+                        "DESTROY_SESSION: connection not bound to session {:?} → CONN_NOT_BOUND_TO_SESSION",
+                        sessionid,
+                    );
+                    return OperationResult::DestroySession(
+                        Nfs4Status::ConnNotBoundToSession,
+                    );
+                }
                 let op = DestroySessionOp { sessionid };
                 let res = self.session_handler.handle_destroy_session(op);
+                if res.status == Nfs4Status::Ok {
+                    self.session_bound_conns.remove(&sessionid);
+                }
                 OperationResult::DestroySession(res.status)
             }
 
@@ -664,6 +730,7 @@ impl CompoundDispatcher {
                 info!("BIND_CONN_TO_SESSION: sessionid={:?}, dir={}", sessionid, dir);
                 if self.state_mgr.sessions.get_session(&sessionid).is_some() {
                     info!("BIND_CONN_TO_SESSION: Session found, binding connection");
+                    self.bind_conn_to_session(sessionid, context);
                     // RFC 5661 §2.10.3.1 conn_dir values:
                     //   1 = FORE (forward only — default if BCTS isn't called)
                     //   2 = BACK (the new bit we care about: server may
@@ -1600,6 +1667,12 @@ impl CompoundDispatcher {
             Operation::BadXdr(opcode) => {
                 warn!("BADXDR for opcode={}", opcode);
                 OperationResult::Unsupported { opcode, status: Nfs4Status::BadXdr }
+            }
+
+            // A component name failed utf8str_cs validation (RFC 8881 §14.4).
+            Operation::InvalidName(opcode) => {
+                warn!("invalid utf8str_cs name for opcode={} → INVAL", opcode);
+                OperationResult::Unsupported { opcode, status: Nfs4Status::Inval }
             }
 
             // Catch-all for any unhandled operations (e.g. an Operation variant

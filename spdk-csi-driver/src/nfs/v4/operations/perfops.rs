@@ -425,6 +425,15 @@ impl PerfOperationHandler {
                 .create(true)
                 .open(&dst_path)?;
 
+            // RFC 7862 §15.2.3: ca_count == 0 means "copy from
+            // ca_src_offset through end of source file", not a
+            // zero-byte copy (pynfs COPY5).
+            let count = if count == 0 {
+                src_file.metadata()?.len().saturating_sub(src_offset)
+            } else {
+                count
+            };
+
             // Copy data in chunks using positioned I/O
             // This allows concurrent operations on the same files
             const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
