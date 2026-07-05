@@ -204,6 +204,18 @@ pub struct CommitRes {
 struct CachedFile {
     file: Arc<File>,
     path: PathBuf,
+    /// Whether the fd was opened with write access. READ populates
+    /// the cache too and falls back to a read-only open when the
+    /// file mode denies write; WRITE only reuses writable entries.
+    writable: bool,
+}
+
+/// Whether an fd may be cached under this stateid. Special stateids
+/// (`other` all-zeros / all-ones, RFC 8881 §8.2.3) are not unique to
+/// one open — caching under them would alias different files to the
+/// same key and serve one file's fd for another's I/O.
+fn cacheable_stateid(other: &[u8; 12]) -> bool {
+    *other != [0u8; 12] && *other != [0xffu8; 12]
 }
 
 /// Whether the server may grant delegations (FLINT_NFS_DELEGATIONS=1).
@@ -838,16 +850,51 @@ impl IoOperationHandler {
         // Get filename for logging before moving path
         let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
 
+        // Reuse the cached fd for this stateid when it maps to the
+        // same file; otherwise open and cache. The path check guards
+        // against a stateid presented with a different filehandle.
+        let cacheable = cacheable_stateid(&op.stateid.other);
+        let cached = if cacheable {
+            self.fd_cache
+                .get(&op.stateid.other)
+                .filter(|e| e.path == path)
+                .map(|e| Arc::clone(&e.file))
+        } else {
+            None
+        };
+
         // Perform positioned read using blocking I/O
         // Uses positioned I/O (pread) for concurrent access without seek
         let offset = op.offset;
         let count = op.count as usize;
-        
-        let read_result = tokio::task::spawn_blocking(move || {
-            // Open file for reading
-            let file = match std::fs::File::open(&path) {
-                Ok(f) => f,
-                Err(e) => return Err(e),
+        let fd_cache = Arc::clone(&self.fd_cache);
+        let stateid_other = op.stateid.other;
+
+        let read_result = tokio::task::spawn_blocking(move || -> std::io::Result<(Bytes, bool)> {
+            let file = match cached {
+                Some(f) => f,
+                None => {
+                    // Prefer read+write so a later WRITE on this
+                    // stateid reuses the entry; fall back to
+                    // read-only when the file mode denies write.
+                    let (file, writable) = match std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                    {
+                        Ok(f) => (f, true),
+                        Err(_) => (std::fs::File::open(&path)?, false),
+                    };
+                    let file = Arc::new(file);
+                    if cacheable {
+                        fd_cache.insert(stateid_other, CachedFile {
+                            file: Arc::clone(&file),
+                            path: path.clone(),
+                            writable,
+                        });
+                    }
+                    file
+                }
             };
 
             // Get file size to determine EOF
@@ -877,7 +924,7 @@ impl IoOperationHandler {
 
         match read_result {
             Ok(Ok((data, eof))) => {
-                info!("READ: Read {} bytes at offset {} from {:?}, eof={}", 
+                debug!("READ: Read {} bytes at offset {} from {:?}, eof={}",
                       data.len(), op.offset, filename.as_deref().unwrap_or("unknown"), eof);
                 ReadRes {
                     status: Nfs4Status::Ok,
@@ -964,16 +1011,27 @@ impl IoOperationHandler {
         // Get filename for logging before moving path
         let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
 
-        // Try to get cached file descriptor first
-        let cached_entry = self.fd_cache.get(&op.stateid.other);
-        
-        let file_arc = if let Some(entry) = cached_entry {
+        // Try to get cached file descriptor first. Only writable
+        // entries for the same file qualify — READ may have cached a
+        // read-only fd, and a stateid presented with a different
+        // filehandle must not reuse another file's fd.
+        let cacheable = cacheable_stateid(&op.stateid.other);
+        let cached_entry = if cacheable {
+            self.fd_cache
+                .get(&op.stateid.other)
+                .filter(|e| e.writable && e.path == path)
+                .map(|e| Arc::clone(&e.file))
+        } else {
+            None
+        };
+
+        let file_arc = if let Some(file) = cached_entry {
             // Found in cache - reuse existing FD!
-            info!("✅ FD CACHE HIT: Reusing cached file descriptor for {:?}", op.stateid);
-            Arc::clone(&entry.file)
+            debug!("✅ FD CACHE HIT: Reusing cached file descriptor for {:?}", op.stateid);
+            file
         } else {
             // Not in cache - open and cache it
-            info!("🔧 FD CACHE MISS: Opening file and caching for {:?} (path: {:?})", op.stateid, path);
+            debug!("🔧 FD CACHE MISS: Opening file and caching for {:?} (path: {:?})", op.stateid, path);
             
             let path_clone = path.clone();
             let file_result = tokio::task::spawn_blocking(move || {
@@ -1008,13 +1066,15 @@ impl IoOperationHandler {
             
             let file_arc = Arc::new(file);
 
-            // Cache the file descriptor
-            self.fd_cache.insert(op.stateid.other, CachedFile {
-                file: Arc::clone(&file_arc),
-                path: path.clone(),
-            });
-            
-            info!("WRITE: Cached new FD for {:?} (path: {:?})", op.stateid, path);
+            // Cache the file descriptor (never under special stateids)
+            if cacheable {
+                self.fd_cache.insert(op.stateid.other, CachedFile {
+                    file: Arc::clone(&file_arc),
+                    path: path.clone(),
+                    writable: true,
+                });
+                debug!("WRITE: Cached new FD for {:?} (path: {:?})", op.stateid, path);
+            }
             file_arc
         };
 
@@ -1051,7 +1111,7 @@ impl IoOperationHandler {
         match write_result {
             Ok(Ok(bytes_written)) => {
                 let count = bytes_written as u32;
-                info!("WRITE: Wrote {} bytes at offset {} to {:?}, stable={}", 
+                debug!("WRITE: Wrote {} bytes at offset {} to {:?}, stable={}",
                       count, offset, filename.as_deref().unwrap_or("unknown"), stable);
                 WriteRes {
                     status: Nfs4Status::Ok,
@@ -1155,7 +1215,7 @@ impl IoOperationHandler {
 
         match commit_result {
             Ok(Ok(())) => {
-                info!("COMMIT: Synced data to disk for {:?}", filename.as_deref().unwrap_or("unknown"));
+                debug!("COMMIT: Synced data to disk for {:?}", filename.as_deref().unwrap_or("unknown"));
                 CommitRes {
                     status: Nfs4Status::Ok,
                     writeverf: write_verifier,

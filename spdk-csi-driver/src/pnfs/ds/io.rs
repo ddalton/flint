@@ -27,23 +27,50 @@
 use crate::pnfs::Result;
 use crate::nfs::v4::filehandle::FileHandleManager;
 use crate::nfs::v4::protocol::Nfs4FileHandle;
+use dashmap::DashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write, Seek, SeekFrom};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// Upper bound on cached DS file descriptors. Large datasets (e.g. the
+/// 16k-file dataloader benchmark) would otherwise exhaust the process
+/// fd limit. Eviction is arbitrary-entry — an evicted-but-hot file just
+/// pays one reopen, which is the pre-cache behavior for every op.
+const FD_CACHE_CAP: usize = 512;
+
+/// Cached open fd for one DS-side file, keyed by raw filehandle bytes.
+///
+/// `Arc<File>` with no mutex: every operation is positioned I/O
+/// (`read_at`/`write_all_at`) or fsync, all of which take `&File` and
+/// are safe to issue concurrently on one fd. Safe to key by
+/// filehandle because the DS namespace is append-only from the DS's
+/// point of view — it serves no REMOVE/RENAME, so a filehandle's
+/// path→inode mapping never changes under a live fd.
+struct CachedFd {
+    file: Arc<File>,
+    /// Whether the fd was opened with write access. A READ-populated
+    /// read-only fd is upgraded (reopened rw) on the first WRITE.
+    writable: bool,
+}
+
 /// I/O operation handler for data server
-/// 
+///
 /// Performs filesystem-based I/O on locally mounted SPDK volumes.
 /// This is the correct approach for pNFS FILE layout per RFC 8881.
 pub struct IoOperationHandler {
     /// Base path where SPDK volume is mounted
     /// Example: /mnt/pnfs-data
     base_path: PathBuf,
-    
+
     /// File handle manager (reused from standalone NFS server)
     fh_manager: Arc<FileHandleManager>,
+
+    /// fd cache: filehandle bytes → open fd. Hits skip both the
+    /// filehandle→path resolution and the open(2) that previously ran
+    /// on every READ/WRITE/COMMIT.
+    fd_cache: DashMap<Vec<u8>, CachedFd>,
 }
 
 impl IoOperationHandler {
@@ -69,10 +96,34 @@ impl IoOperationHandler {
         
         // Create file handle manager - reuse from existing NFS server
         let fh_manager = Arc::new(FileHandleManager::new(base_path.clone()));
-        
+
         info!("I/O handler initialized with data path: {:?}", base_path);
-        
-        Ok(Self { base_path, fh_manager })
+
+        Ok(Self { base_path, fh_manager, fd_cache: DashMap::new() })
+    }
+
+    /// Look up a cached fd for this filehandle.
+    fn cached_fd(&self, filehandle: &[u8]) -> Option<(Arc<File>, bool)> {
+        self.fd_cache
+            .get(filehandle)
+            .map(|e| (Arc::clone(&e.file), e.writable))
+    }
+
+    /// Insert (or replace) a cached fd, evicting an arbitrary entry if
+    /// the cache is full. In-flight ops hold their own `Arc<File>`
+    /// clone, so eviction never closes an fd out from under an op.
+    fn insert_fd(&self, filehandle: &[u8], file: Arc<File>, writable: bool) {
+        if self.fd_cache.len() >= FD_CACHE_CAP && !self.fd_cache.contains_key(filehandle) {
+            // Bind the victim key in its own statement: an `if let`
+            // scrutinee would keep the iter shard guard alive across
+            // the remove() and deadlock the shard.
+            let victim = self.fd_cache.iter().next().map(|e| e.key().clone());
+            if let Some(victim) = victim {
+                self.fd_cache.remove(&victim);
+            }
+        }
+        self.fd_cache
+            .insert(filehandle.to_vec(), CachedFd { file, writable });
     }
 
     /// Handle READ operation (RFC 8881 Section 18.22)
@@ -92,27 +143,40 @@ impl IoOperationHandler {
             count
         );
 
-        // Map filehandle to file path
-        let file_path = self.filehandle_to_path(filehandle)?;
-        
-        // Standard file I/O - just like standalone NFS server!
-        let mut file = File::open(&file_path)
-            .map_err(|e| {
-                warn!("Failed to open file {:?}: {}", file_path, e);
-                crate::pnfs::Error::Io(e)
-            })?;
-        
-        // Seek to requested offset
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| crate::pnfs::Error::Io(e))?;
-        
-        // Read data
+        let file = match self.cached_fd(filehandle) {
+            Some((file, _)) => file,
+            None => {
+                let file_path = self.filehandle_to_path(filehandle)?;
+                // Prefer a read+write fd so a later WRITE to the same
+                // file reuses this entry; fall back to read-only.
+                let (file, writable) = match OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&file_path)
+                {
+                    Ok(f) => (f, true),
+                    Err(_) => {
+                        let f = File::open(&file_path).map_err(|e| {
+                            warn!("Failed to open file {:?}: {}", file_path, e);
+                            crate::pnfs::Error::Io(e)
+                        })?;
+                        (f, false)
+                    }
+                };
+                let file = Arc::new(file);
+                self.insert_fd(filehandle, Arc::clone(&file), writable);
+                file
+            }
+        };
+
+        // Positioned read: pread(2) is concurrency-safe on a shared fd
+        // (no seek pointer), so the cached fd needs no mutex.
         let mut buffer = vec![0u8; count as usize];
-        let bytes_read = file.read(&mut buffer)
+        let bytes_read = file.read_at(&mut buffer, offset)
             .map_err(|e| crate::pnfs::Error::Io(e))?;
-        
+
         buffer.truncate(bytes_read);
-        
+
         // Check if we reached EOF
         let file_size = file.metadata()
             .map(|m| m.len())
@@ -146,24 +210,30 @@ impl IoOperationHandler {
             stable
         );
 
-        let file_path = self.filehandle_to_path(filehandle)?;
-        
-        // Open file for writing (create if doesn't exist)
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(&file_path)
-            .map_err(|e| {
-                warn!("Failed to open file for writing {:?}: {}", file_path, e);
-                crate::pnfs::Error::Io(e)
-            })?;
-        
-        // Seek to requested offset
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| crate::pnfs::Error::Io(e))?;
-        
-        // Write data
-        file.write_all(data)
+        let file = match self.cached_fd(filehandle) {
+            // Only a writable cached fd will do; a READ-populated
+            // read-only entry is upgraded by falling through.
+            Some((file, true)) => file,
+            _ => {
+                let file_path = self.filehandle_to_path(filehandle)?;
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(&file_path)
+                    .map_err(|e| {
+                        warn!("Failed to open file for writing {:?}: {}", file_path, e);
+                        crate::pnfs::Error::Io(e)
+                    })?;
+                let file = Arc::new(file);
+                self.insert_fd(filehandle, Arc::clone(&file), true);
+                file
+            }
+        };
+
+        // Positioned write: pwrite(2) at an explicit offset, safe to
+        // issue concurrently on the shared cached fd.
+        file.write_all_at(data, offset)
             .map_err(|e| crate::pnfs::Error::Io(e))?;
         
         // Sync based on stability level
@@ -215,15 +285,20 @@ impl IoOperationHandler {
             count
         );
 
-        let file_path = self.filehandle_to_path(filehandle)?;
-        
-        // Open file and sync
-        let file = File::open(&file_path)
-            .map_err(|e| {
-                warn!("Failed to open file for commit {:?}: {}", file_path, e);
-                crate::pnfs::Error::Io(e)
-            })?;
-        
+        // Reuse the WRITE-side cached fd; fsync doesn't need write
+        // access, so any cached entry works. Cold path opens fresh
+        // without caching (a commit-only file sees no further I/O).
+        let file = match self.cached_fd(filehandle) {
+            Some((file, _)) => file,
+            None => {
+                let file_path = self.filehandle_to_path(filehandle)?;
+                Arc::new(File::open(&file_path).map_err(|e| {
+                    warn!("Failed to open file for commit {:?}: {}", file_path, e);
+                    crate::pnfs::Error::Io(e)
+                })?)
+            }
+        };
+
         // Sync all data to stable storage
         file.sync_all()
             .map_err(|e| crate::pnfs::Error::Io(e))?;
@@ -261,7 +336,7 @@ impl IoOperationHandler {
                 &self.base_path
             ).map_err(|e| crate::pnfs::Error::Config(format!("pNFS filehandle error: {}", e)))?;
             
-            info!("📂 pNFS filehandle resolved to: {:?}", ds_path);
+            debug!("📂 pNFS filehandle resolved to: {:?}", ds_path);
             return Ok(ds_path);
         }
         
@@ -361,12 +436,86 @@ pub struct CommitResult {
 pub enum WriteStable {
     /// Unstable - data may be in cache
     Unstable = 0,
-    
+
     /// Data sync - data written, metadata not necessarily
     DataSync = 1,
-    
+
     /// File sync - data and metadata written
     FileSync = 2,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn handler() -> (IoOperationHandler, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let h = IoOperationHandler::new(dir.path()).unwrap();
+        (h, dir)
+    }
+
+    fn fh_for(h: &IoOperationHandler, name: &str, dir: &TempDir) -> Vec<u8> {
+        let path = dir.path().join(name);
+        if !path.exists() {
+            // path_to_filehandle canonicalizes, so the file must exist
+            std::fs::File::create(&path).unwrap();
+        }
+        h.file_handle_manager()
+            .path_to_filehandle(&path)
+            .unwrap()
+            .data
+    }
+
+    #[tokio::test]
+    async fn write_read_commit_share_cached_fd() {
+        let (h, dir) = handler();
+        let fh = fh_for(&h, "f1", &dir);
+
+        let w = h.write(&fh, 3, b"hello", WriteStable::Unstable).await.unwrap();
+        assert_eq!(w.count, 5);
+        assert_eq!(h.fd_cache.len(), 1);
+
+        let r = h.read(&fh, 3, 5).await.unwrap();
+        assert_eq!(&r.data, b"hello");
+        assert!(r.eof);
+        assert_eq!(h.fd_cache.len(), 1, "READ must hit the WRITE-cached fd");
+
+        h.commit(&fh, 0, 0).await.unwrap();
+        assert_eq!(h.fd_cache.len(), 1, "COMMIT must hit the cached fd");
+    }
+
+    #[tokio::test]
+    async fn read_populated_entry_upgrades_on_write() {
+        let (h, dir) = handler();
+        std::fs::write(dir.path().join("ro"), b"data").unwrap();
+        let fh = fh_for(&h, "ro", &dir);
+
+        let r = h.read(&fh, 0, 4).await.unwrap();
+        assert_eq!(&r.data, b"data");
+        assert_eq!(h.fd_cache.len(), 1);
+
+        // WRITE must succeed whether READ cached the fd rw or ro.
+        let w = h.write(&fh, 4, b"more", WriteStable::FileSync).await.unwrap();
+        assert_eq!(w.count, 4);
+        let r = h.read(&fh, 0, 8).await.unwrap();
+        assert_eq!(&r.data, b"datamore");
+    }
+
+    #[tokio::test]
+    async fn fd_cache_stays_bounded() {
+        let (h, dir) = handler();
+        for i in 0..(FD_CACHE_CAP + 8) {
+            let fh = fh_for(&h, &format!("f{}", i), &dir);
+            h.write(&fh, 0, b"x", WriteStable::Unstable).await.unwrap();
+        }
+        assert!(
+            h.fd_cache.len() <= FD_CACHE_CAP,
+            "cache len {} exceeds cap {}",
+            h.fd_cache.len(),
+            FD_CACHE_CAP
+        );
+    }
 }
 
 

@@ -36,21 +36,55 @@ Everything below exists to make it true and then prove it.
   small-file workload serialized onto one DS by construction. Validated
   e2e: 16 small files spread across both DSes, checksums intact.
 
-## Phase 1 — DS data-path quick wins (~1–2 days)
+## Phase 1 — DS data-path quick wins — LANDED 2026-07-04
 
-Each item is a measured change: run `tests/lima/pnfs/bench-sweep.sh`
+Each item was a measured change: `tests/lima/pnfs/bench-sweep.sh`
 before/after; keep if ≥5% aggregate improvement or clearly neutral+correct.
 
-1. **DS fd cache.** `pnfs/ds/io.rs` opens the backing file on *every*
-   READ and WRITE. Mirror the standalone server's stateid-keyed fd cache
-   (`ioops.rs fd_cache`) or an LRU keyed by filehandle.
-2. **COMMIT fd reuse** (ADR 0003 item 2): COMMIT re-opens the file to
-   fsync instead of using the cached write fd. One-line once (1) exists.
-3. **Drop the per-file write mutex** (ADR 0003 item 3): `write_at` is
-   thread-safe positioned I/O; the mutex serializes concurrent writers
-   to the same file. Audit metadata reads before removal.
-4. **Fix bench-sweep read phase** (known harness bug: unique `--name=`
-   per variant means reads never find write-phase files).
+1. **DS fd cache** — DONE. `pnfs/ds/io.rs` opened the backing file on
+   *every* READ, WRITE, **and** COMMIT, and used seek+read (unsafe to
+   share an fd). Now: a filehandle-keyed `DashMap` fd cache (cap 512,
+   arbitrary eviction) + positioned I/O (`read_at`/`write_all_at`).
+   Hits also skip the per-op filehandle→path resolution. COMMIT reuses
+   the cached fd (ADR 0003 item 2, DS side).
+2. **COMMIT fd reuse / write-mutex removal (standalone)** — found
+   ALREADY DONE in `ioops.rs` (landed since ADR 0003 was written).
+   What remained: the standalone READ path still opened per-op — now
+   it reuses/populates the same stateid-keyed cache (write-only
+   entries get a `writable` flag; READ falls back to read-only opens).
+   Bonus correctness: special stateids (all-zero/all-one `other`) are
+   no longer cacheable (they aliased different files to one key), and
+   cache hits now require a path match with the presented filehandle.
+3. **Per-op `info!` logging demoted to `debug!`** on READ/WRITE/COMMIT
+   hot paths (both servers) — default level is info, so every RPC was
+   formatting + writing log lines.
+4. **bench-sweep read phase fixed** — fio `--name` is now shared per
+   numjobs so read variants find the write-phase files. Reads measure
+   real NFS reads for the first time; ADR 0002/0003 read rows are void.
+
+**Result.** The 1M-block sequential sweep could not resolve the change
+(±15% run-to-run swings in both directions, including untouched paths —
+one open(2) amortized over a 1 MiB transfer is below this rig's noise
+floor). A 4k direct-I/O A/B/A/B microbench (old/new binaries
+interleaved, per-RPC cost dominant, old↔old variance ~2.5%) is
+decisive:
+
+| 4k direct, 4 jobs × QD16, 2 DSes | old | new | delta |
+|---|---:|---:|---:|
+| randread IOPS | 36,426 / 37,322 | 44,016 / 43,347 | **+18%** |
+| randwrite IOPS | 346 / 334 | 862 / 720 | **+2.1–2.5×** |
+
+The randwrite jump is the old path's per-WRITE open/close forcing
+writeback on close of a dirty file; the cached fd avoids it. Integrity
+drill: 32 × 1 MiB concurrent-writer files through the pNFS mount,
+32/32 md5s intact after client cache drop, files spread 13/19 across
+the DSes (rotation + cache coexist).
+
+**Not done here (deliberate)**: DS I/O still runs blocking file ops on
+the tokio workers and dispatch is serial per connection — that's the
+Phase 2 pipelining refactor. DS write verifier is still a fixed
+`[0u8; 8]` (client can't detect DS reboot / lost unstable writes) —
+folded into Phase 4 durability gates.
 
 ## Phase 2 — RPC pipelining (~1 week)
 
@@ -103,6 +137,10 @@ Not perf work, but perf claims are moot without them:
    loss, no replication. Either back DSes with flint block volumes
    (replicated lvols) or ship pNFS explicitly as ephemeral scratch tier.
    This decision shapes whether Phase 3 numbers are marketable.
+   Related: the DS write verifier is a fixed `[0u8; 8]`
+   (`pnfs/ds/io.rs generate_verifier`), so clients cannot detect a DS
+   restart and will not retransmit lost UNSTABLE writes — must become
+   a boot-time value before any durability claim.
 2. **MDS export size check**: bench flags ~1 GiB *apparent* size on the
    MDS export ("should be ~0") — confirm with `du` it's sparse
    LAYOUTCOMMIT EOF metadata, not clients falling back to MDS-proxy I/O.
