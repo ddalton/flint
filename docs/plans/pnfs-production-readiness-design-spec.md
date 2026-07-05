@@ -1,15 +1,39 @@
 ---
 title: "Flint pNFS: RPC Pipelining for Per-Connection Throughput"
-status: draft
+status: implemented
 type: design-impl-spec
 jira: AWC-1808
 tags: [pnfs, flint, performance, nfs]
 created: 2026-05-13
-updated: 2026-05-13
+updated: 2026-07-05
 governs:
   - spdk-csi-driver/src/nfs/server_v4.rs
+  - spdk-csi-driver/src/nfs/pipeline.rs
+  - spdk-csi-driver/src/pnfs/mds/server.rs
+  - spdk-csi-driver/src/pnfs/ds/server.rs
   - spdk-csi-driver/src/nfs/v4/dispatcher.rs
 ---
+
+> **Implementation note (2026-07-05).** Landed as Phase 2 of
+> `docs/plans/pnfs-performance-plan.md`, with two deliberate deltas
+> from the design below:
+> 1. **Semaphore instead of mpsc + writer task.** The spec's own "key
+>    insight" holds: `BackChannelWriter`'s mutex already serializes
+>    frames (I1/I4), so replies are written directly from the spawned
+>    dispatch task and the dedicated writer task/oneshot plumbing is
+>    unnecessary. Backpressure comes from a per-connection semaphore
+>    the read loop awaits (`FLINT_NFS_MAX_INFLIGHT`, default 64 = B1;
+>    0 = sequential fallback, I5). Bounded read-ahead beyond the
+>    dispatch bound (B2's extra queue) was dropped — it only added
+>    buffered memory, not throughput.
+> 2. **The DS is IN scope** (anti-scope item 4 reversed): the DS had
+>    the same serial loop, and its inline blocking file I/O moved to
+>    `spawn_blocking` so concurrent dispatches can't stall the
+>    runtime. Measured on the 4k data path (see performance plan).
+>
+> Config is the `FLINT_NFS_MAX_INFLIGHT` env var rather than a yaml
+> `server.pipeline` section — the standalone server is flag/env
+> configured, and one knob serves all three roles.
 
 ## TL;DR
 

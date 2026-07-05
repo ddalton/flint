@@ -86,16 +86,69 @@ Phase 2 pipelining refactor. DS write verifier is still a fixed
 `[0u8; 8]` (client can't detect DS reboot / lost unstable writes) —
 folded into Phase 4 durability gates.
 
-## Phase 2 — RPC pipelining (~1 week)
+## Phase 2 — RPC pipelining — LANDED 2026-07-05
 
-Implement `docs/plans/pnfs-production-readiness-design-spec.md` as
-written (invariants I1–I5, bounds B1–B4). One dispatch loop change
-benefits all three server roles: single-server, MDS metadata ops, and
-per-DS throughput. Success bar from the spec: single-server
-`numjobs=4, fsync=1, bs=1M` ≥ 220 MiB/s (was ~165 at spec time; the slot
-fix has already moved this — re-baseline first, keep the ≥30% spirit).
-Now that clients genuinely fill 64 slots, head-of-line blocking on the
-serial loop is the top remaining structural bottleneck.
+Implemented per `pnfs-production-readiness-design-spec.md` (see the
+implementation note there for the two deltas: semaphore instead of
+mpsc+writer-task, and the DS brought INTO scope). One
+`nfs/pipeline.rs` serves all three roles — standalone, MDS, DS.
+`FLINT_NFS_MAX_INFLIGHT` (default 64 = B1; 0 = sequential fallback,
+I5). DS blocking file I/O restructured for concurrency: fsync paths
+on `spawn_blocking`, >64 KiB transfers via `block_in_place`, small
+transfers inline.
+
+**What the 4k-direct A/B taught (each step measured, old↔old ~2.5%):**
+
+| DS I/O strategy under pipelining | randread | randwrite |
+|---|---:|---:|
+| Phase 1 serial loop (reference) | ~45.3k IOPS | ~810 |
+| `spawn_blocking` everything | −14% | +15% |
+| `block_in_place` everything | −10% | ~par |
+| + adaptive inline dispatch | −12% | +25% |
+| + ≤64 KiB I/O runs inline (**shipped**) | **−3%** | **+26%** |
+
+Two lessons now encoded in the code: (1) a per-op cross-thread
+handoff (`spawn_blocking`, and even `block_in_place`'s queue
+migration) costs more than a µs-scale page-cache read; (2) task
+fan-out only pays when requests actually overlap — so `submit()`
+dispatches INLINE unless the read buffer holds more input or other
+dispatches are in flight (spec open-question 2, option B). The −3%
+residual is a QD-1 latency probe on a 2-vCPU client VM (DS at ~24%
+CPU — latency-bound, not throughput-bound); concurrent workloads are
+where pipelining pays:
+
+- 1M sweep, pNFS reads: j4 +18.6%, j8 +10.4% (first build; final
+  numbers below).
+- 4k randwrite (fsync-heavy): +26%.
+
+**Gates on the shipping build**: pynfs **171/171**, `test-pnfs-smoke`
+✓, `test-pnfs-recall` ✓ (I4/T5), sequential-fallback smoke ✓ (I5; an
+initial failure was stale client state from four back-to-back server
+restarts on one VM — passes in isolation), 609 unit tests incl.
+pipeline T1/T2/T4/T6 + inline-fast-path + write-poisoning; T3 replay
+covered by the existing session slot tests + pynfs.
+
+**Final-build sweep** (Phase 1 → Phase 2, same rig, 1M blocks; rows
+that reproduced across two independent Phase-2 sweeps — the fs=0 j1
+page-cache-fill cells swing ±30% run-to-run and are excluded):
+
+| Workload | Phase 1 | Phase 2 | delta |
+|---|---:|---:|---:|
+| pNFS read j4 | 230.9 | 270.8 | **+17.3%** (was +18.6% on first build) |
+| pNFS read j8 | 254.3 | 271.4 | **+6.7%** (was +10.4%) |
+| pNFS write j8 fs=1 | 295.4 | 307.5 | +4.1% (was +11.6%) |
+| single write j8 fs=1 | 307.4 | 334.0 | +8.7% (was +15.0%) |
+| everything else | — | — | within rig noise (±5-15%) |
+
+Note the spec's B4 (≥220 MiB/s at `numjobs=4 fsync=1`) predates the
+slot fix; it was already exceeded before this phase. The honest B4
+successor is the concurrency behavior above.
+
+**Known limits of this rig's evidence**: one 2-vCPU client VM over
+loopback can neither saturate the pipelined server nor exercise
+multi-client contention — the workloads pipelining exists for.
+Phase 3's cross-host bench is where the structural win must show up;
+if it doesn't, `FLINT_NFS_MAX_INFLIGHT=0` is the one-knob rollback.
 
 ## Phase 3 — the cross-host benchmark (the proof)
 

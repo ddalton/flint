@@ -187,7 +187,17 @@ impl DataServer {
 
         let (reader, writer) = stream.into_split();
         let mut reader = tokio::io::BufReader::with_capacity(128 * 1024, reader);
-        let mut writer = BufWriter::with_capacity(128 * 1024, writer);
+        // Mutex-serialized shared writer: pipelined replies are
+        // written from concurrent tasks and must not interleave
+        // frames on the wire (pipeline invariant I1).
+        let writer = Arc::new(tokio::sync::Mutex::new(
+            BufWriter::with_capacity(128 * 1024, writer),
+        ));
+
+        // Per-connection RPC pipelining (RFC 8881 §2.10.6): DS READ/
+        // WRITE/COMMIT dispatch concurrently up to
+        // FLINT_NFS_MAX_INFLIGHT (default 64, 0 = sequential).
+        let pipeline = crate::nfs::pipeline::ConnectionPipeline::from_env();
 
         let mut buf = BytesMut::with_capacity(128 * 1024);
         let mut rpc_count = 0;
@@ -225,22 +235,28 @@ impl DataServer {
 
             let request = buf.split().freeze();
 
-            // Process RPC (minimal NFS)
-            let reply = Self::dispatch_minimal_nfs(
+            // Dispatch through the pipeline; the reply is framed and
+            // flushed under the shared writer mutex.
+            let io_c = Arc::clone(&io_handler);
+            let sess_c = Arc::clone(&session_mgr);
+            let client_c = Arc::clone(&client_mgr);
+            let writer_c = Arc::clone(&writer);
+            // Backlog hint: bytes already buffered mean the client is
+            // pipelining, so concurrent dispatch pays for its overhead.
+            let more_queued = !reader.buffer().is_empty();
+            pipeline.submit(
                 request,
-                Arc::clone(&io_handler),
-                Arc::clone(&session_mgr),
-                Arc::clone(&client_mgr),
-            ).await;
+                more_queued,
+                move |req| Self::dispatch_minimal_nfs(req, io_c, sess_c, client_c),
+                move |reply| async move {
+                    let reply_marker = 0x80000000 | reply.len() as u32;
+                    let mut w = writer_c.lock().await;
+                    w.write_all(&reply_marker.to_be_bytes()).await?;
+                    w.write_all(&reply).await?;
+                    w.flush().await
+                },
+            ).await?;
             rpc_count += 1;
-
-            // Write reply
-            let reply_len = reply.len() as u32;
-            let reply_marker = 0x80000000 | reply_len;
-            
-            writer.write_all(&reply_marker.to_be_bytes()).await?;
-            writer.write_all(&reply).await?;
-            writer.flush().await?;
         }
     }
 
@@ -608,7 +624,7 @@ impl DataServer {
                             _ => WriteStable::FileSync,
                         };
 
-                        match io_handler.write(fh, offset, &data, stable_level).await {
+                        match io_handler.write(fh, offset, data, stable_level).await {
                             Ok(write_result) => {
                                 let mut encoder = XdrEncoder::new();
                                 encoder.encode_u32(write_result.count);
@@ -921,7 +937,9 @@ impl DataServer {
             _ => WriteStable::FileSync,
         };
         
-        let result = self.io_handler.write(filehandle, offset, data, stable_level).await?;
+        let result = self.io_handler
+            .write(filehandle, offset, Bytes::copy_from_slice(data), stable_level)
+            .await?;
         Ok(result.count)
     }
 

@@ -418,6 +418,12 @@ impl MetadataServer {
         }
         let _inflight_guard = InflightGuard { bcw: Arc::clone(&bcw) };
 
+        // Per-connection RPC pipelining (RFC 8881 §2.10.6): metadata
+        // ops (GETATTR/LOOKUP/LAYOUTGET) no longer queue behind a slow
+        // op on the same connection. Replies stay frame-safe via the
+        // BCW mutex. FLINT_NFS_MAX_INFLIGHT=0 restores sequential.
+        let pipeline = crate::nfs::pipeline::ConnectionPipeline::from_env();
+
         // Reusable buffer
         let mut buf = BytesMut::with_capacity(128 * 1024);
 
@@ -498,25 +504,27 @@ impl MetadataServer {
                 }
             }
 
-            // Process the RPC call with pNFS support
+            // Dispatch through the pipeline; the reply goes out via
+            // the same writer the back-channel uses — `send_record`
+            // prepends the record marker and flushes; the inner mutex
+            // serializes against concurrent replies and
+            // CB_LAYOUTRECALL frames.
             debug!(">>> Processing pNFS/NFSv4 request from {}", peer);
-            let reply = Self::dispatch_rpc_with_pnfs(
+            let dispatcher_c = Arc::clone(&base_dispatcher);
+            let gss_c = Arc::clone(&gss_manager);
+            let bcw_dispatch = Arc::clone(&bcw);
+            let bcw_write = Arc::clone(&bcw);
+            // Backlog hint: bytes already buffered mean the client is
+            // pipelining, so concurrent dispatch pays for its overhead.
+            let more_queued = !reader.buffer().is_empty();
+            pipeline.submit(
                 request,
-                Arc::clone(&base_dispatcher),
-                Arc::clone(&gss_manager),
-                Arc::clone(&bcw),
-            ).await;
-            debug!("<<< Reply ready for {}, length={} bytes", peer, reply.len());
+                more_queued,
+                move |req| Self::dispatch_rpc_with_pnfs(req, dispatcher_c, gss_c, bcw_dispatch),
+                move |reply| async move { bcw_write.send_record(reply).await },
+            ).await?;
 
             rpc_count += 1;
-
-            // Forward replies go through the same writer the back-
-            // channel uses — `send_record` prepends the 4-byte
-            // record marker and flushes; the inner mutex serializes
-            // against any concurrent CB_LAYOUTRECALL.
-            debug!("📤 Sending reply to {}: {} bytes", peer, reply.len());
-            bcw.send_record(reply).await?;
-            debug!("✅ Reply sent and flushed to {}", peer);
         }
     }
 
@@ -536,14 +544,14 @@ impl MetadataServer {
             }
         };
 
-        info!(
+        debug!(
             ">>> RPC CALL: xid={}, program={}, procedure={}, cred={:?}",
             call.xid, call.program, call.procedure, call.cred.flavor
         );
 
         // Handle RPCSEC_GSS authentication
         if call.cred.flavor == AuthFlavor::RpcsecGss {
-            info!("🔐 RPCSEC_GSS authentication detected on MDS");
+            debug!("🔐 RPCSEC_GSS authentication detected on MDS");
             return Self::handle_rpcsec_gss_call(call, args, gss_manager, base_dispatcher, back_channel).await;
         }
 
@@ -562,12 +570,12 @@ impl MetadataServer {
         // Handle procedure
         match call.procedure {
             procedure::NULL => {
-                info!(">>> NULL procedure");
+                debug!(">>> NULL procedure");
                 ReplyBuilder::success(call.xid).finish()
             }
 
             procedure::COMPOUND => {
-                info!(">>> COMPOUND procedure");
+                debug!(">>> COMPOUND procedure");
                 // Handle COMPOUND with pNFS support
                 Self::handle_compound_with_pnfs(
                     call,

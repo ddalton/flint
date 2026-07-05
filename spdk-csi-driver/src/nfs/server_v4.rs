@@ -17,7 +17,7 @@ use bytes::{Bytes, BytesMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
 /// NFS server configuration
@@ -329,6 +329,11 @@ async fn handle_tcp_connection(
         bcw: Arc::clone(&bcw),
     };
 
+    // Per-connection RPC pipelining (RFC 8881 §2.10.6): dispatches run
+    // concurrently up to FLINT_NFS_MAX_INFLIGHT (default 64, 0 =
+    // sequential); replies are serialized on the wire by the BCW mutex.
+    let pipeline = crate::nfs::pipeline::ConnectionPipeline::from_env();
+
     loop {
         debug!("📥 [NFS_SERVER] Connection #{}: Waiting for RPC message #{} from {}", conn_id, rpc_count + 1, peer);
         
@@ -420,33 +425,44 @@ async fn handle_tcp_connection(
             }
         }
 
-        // Process the RPC call with timing
-        let rpc_start = Instant::now();
+        // Dispatch through the pipeline: concurrent up to the permit
+        // bound, sequential when FLINT_NFS_MAX_INFLIGHT=0. The reply
+        // goes out via the same writer the back-channel uses —
+        // `send_record` prepends the 4-byte record marker and
+        // flushes; its inner Mutex serializes against concurrent
+        // replies and CB_LAYOUTRECALL frames so wire framing stays
+        // valid.
         debug!(">>> [NFS_SERVER] Connection #{}: Processing NFSv4 RPC #{} from {}, length={} bytes",
                conn_id, rpc_count + 1, peer, length);
-        let reply = dispatch_nfsv4(
+        let dispatcher_c = dispatcher.clone();
+        let gss_c = gss_manager.clone();
+        let bcw_dispatch = Arc::clone(&bcw);
+        let bcw_write = Arc::clone(&bcw);
+        let rpc_num = rpc_count + 1;
+        // Backlog hint: bytes already buffered mean the client is
+        // pipelining, so concurrent dispatch pays for its overhead.
+        let more_queued = !reader.buffer().is_empty();
+        pipeline.submit(
             request,
-            dispatcher.clone(),
-            gss_manager.clone(),
-            conn_id,
-            rpc_count + 1,
-            Arc::clone(&bcw),
-        ).await;
-        let rpc_duration = rpc_start.elapsed();
-        info!("📨 [NFS_SERVER] Connection #{}: RPC #{} processed in {:?} (reply: {} bytes)",
-              conn_id, rpc_count + 1, rpc_duration, reply.len());
+            more_queued,
+            move |req| async move {
+                let rpc_start = Instant::now();
+                let reply = dispatch_nfsv4(
+                    req,
+                    dispatcher_c,
+                    gss_c,
+                    conn_id,
+                    rpc_num,
+                    bcw_dispatch,
+                ).await;
+                debug!("📨 [NFS_SERVER] Connection #{}: RPC #{} processed in {:?} (reply: {} bytes)",
+                       conn_id, rpc_num, rpc_start.elapsed(), reply.len());
+                reply
+            },
+            move |reply| async move { bcw_write.send_record(reply).await },
+        ).await?;
 
         rpc_count += 1;
-
-        // Forward reply via the same writer the back-channel uses.
-        // `send_record` prepends the 4-byte RPC record marker
-        // (`0x80000000 | length`) and flushes; the inner Mutex
-        // serializes against any concurrent CB_LAYOUTRECALL frame so
-        // wire framing stays valid.
-        debug!("📤 Sending reply to {}: {} bytes", peer, reply.len());
-        debug!("   Reply first 32 bytes: {:02x?}", &reply[..std::cmp::min(32, reply.len())]);
-        bcw.send_record(reply).await?;
-        debug!("✅ Reply sent and flushed to {}", peer);
     }
 }
 

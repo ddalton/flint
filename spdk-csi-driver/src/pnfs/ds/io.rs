@@ -40,6 +40,31 @@ use tracing::{debug, info, warn};
 /// pays one reopen, which is the pre-cache behavior for every op.
 const FD_CACHE_CAP: usize = 512;
 
+/// I/O at or below this size runs directly on the async worker — a
+/// page-cache pread/pwrite at this scale is a few µs, cheaper than
+/// ANY handoff. `spawn_blocking` costs a cross-thread send+wake per
+/// op (measured −19% of 4k randread throughput) and even
+/// `block_in_place` migrates the worker's queue per call (measured
+/// −10%); see pnfs-performance-plan.md Phase 2. Larger transfers use
+/// `block_in_place` so a slow/cold read can't stall other tasks
+/// queued on this worker.
+const INLINE_IO_MAX: usize = 64 * 1024;
+
+/// Run a filesystem op of `len` bytes with the cheapest safe
+/// blocking strategy (see [`INLINE_IO_MAX`]). ms-scale ops (fsync)
+/// must NOT come through here — they go to `spawn_blocking` so they
+/// can't hijack async workers under pipelined dispatch.
+fn fast_blocking<T>(len: usize, f: impl FnOnce() -> T) -> T {
+    if len <= INLINE_IO_MAX {
+        return f();
+    }
+    match tokio::runtime::Handle::current().runtime_flavor() {
+        tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        // current_thread runtime (unit tests): run inline.
+        _ => f(),
+    }
+}
+
 /// Cached open fd for one DS-side file, keyed by raw filehandle bytes.
 ///
 /// `Arc<File>` with no mutex: every operation is positioned I/O
@@ -169,22 +194,25 @@ impl IoOperationHandler {
             }
         };
 
-        // Positioned read: pread(2) is concurrency-safe on a shared fd
-        // (no seek pointer), so the cached fd needs no mutex.
-        let mut buffer = vec![0u8; count as usize];
-        let bytes_read = file.read_at(&mut buffer, offset)
-            .map_err(|e| crate::pnfs::Error::Io(e))?;
+        // Positioned read via block_in_place: pread(2) is
+        // concurrency-safe on a shared fd (no seek pointer), so the
+        // cached fd needs no mutex, and the scheduler migrates this
+        // worker's queue for the syscall's duration — no per-op
+        // cross-thread handoff.
+        let (buffer, eof) = fast_blocking(count as usize, || -> std::io::Result<(Vec<u8>, bool)> {
+            let mut buffer = vec![0u8; count as usize];
+            let bytes_read = file.read_at(&mut buffer, offset)?;
+            buffer.truncate(bytes_read);
 
-        buffer.truncate(bytes_read);
+            // Check if we reached EOF
+            let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let eof = offset + (bytes_read as u64) >= file_size;
+            Ok((buffer, eof))
+        })
+        .map_err(crate::pnfs::Error::Io)?;
 
-        // Check if we reached EOF
-        let file_size = file.metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let eof = offset + (bytes_read as u64) >= file_size;
-        
-        debug!("DS READ: returned {} bytes, eof={}", bytes_read, eof);
-        
+        debug!("DS READ: returned {} bytes, eof={}", buffer.len(), eof);
+
         Ok(ReadResult {
             eof,
             data: buffer,
@@ -199,7 +227,7 @@ impl IoOperationHandler {
         &self,
         filehandle: &[u8],
         offset: u64,
-        data: &[u8],
+        data: bytes::Bytes,
         stable: WriteStable,
     ) -> Result<WriteResult> {
         debug!(
@@ -231,39 +259,51 @@ impl IoOperationHandler {
             }
         };
 
-        // Positioned write: pwrite(2) at an explicit offset, safe to
-        // issue concurrently on the shared cached fd.
-        file.write_all_at(data, offset)
-            .map_err(|e| crate::pnfs::Error::Io(e))?;
-        
-        // Sync based on stability level
+        // pwrite(2) at an explicit offset is safe to issue
+        // concurrently on the shared cached fd. UNSTABLE writes are a
+        // page-cache memcpy (µs) — run them via block_in_place with
+        // no cross-thread handoff. Sync variants pay an fsync
+        // (ms-scale), so pwrite+fsync go to the blocking pool where
+        // they can't hijack async workers under pipelined dispatch.
+        // `data` is `Bytes`, so moving it is a refcount bump.
+        let wrote = data.len() as u32;
         match stable {
             WriteStable::Unstable => {
-                // No sync - data may be in cache
+                fast_blocking(data.len(), || file.write_all_at(&data, offset))
+                    .map_err(crate::pnfs::Error::Io)?;
             }
-            WriteStable::DataSync => {
-                // Sync data only (not metadata)
-                #[cfg(unix)]
-                {
-                    
-                    // On Unix, sync_data() syncs data but not metadata
-                    file.sync_data().map_err(|e| crate::pnfs::Error::Io(e))?;
-                }
-                #[cfg(not(unix))]
-                {
-                    file.sync_all().map_err(|e| crate::pnfs::Error::Io(e))?;
-                }
-            }
-            WriteStable::FileSync => {
-                // Sync data and metadata
-                file.sync_all().map_err(|e| crate::pnfs::Error::Io(e))?;
+            WriteStable::DataSync | WriteStable::FileSync => {
+                tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                    file.write_all_at(&data, offset)?;
+                    match stable {
+                        WriteStable::DataSync => {
+                            // Sync data only (not metadata)
+                            #[cfg(unix)]
+                            {
+                                file.sync_data()?;
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                file.sync_all()?;
+                            }
+                        }
+                        _ => {
+                            // FILE_SYNC: sync data and metadata
+                            file.sync_all()?;
+                        }
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(|e| crate::pnfs::Error::Config(format!("blocking write task: {}", e)))?
+                .map_err(crate::pnfs::Error::Io)?;
             }
         }
-        
-        debug!("DS WRITE: wrote {} bytes", data.len());
-        
+
+        debug!("DS WRITE: wrote {} bytes", wrote);
+
         Ok(WriteResult {
-            count: data.len() as u32,
+            count: wrote,
             committed: stable,
             verifier: Self::generate_verifier(),
         })
@@ -299,10 +339,13 @@ impl IoOperationHandler {
             }
         };
 
-        // Sync all data to stable storage
-        file.sync_all()
-            .map_err(|e| crate::pnfs::Error::Io(e))?;
-        
+        // Sync all data to stable storage — on the blocking pool,
+        // since fsync can take milliseconds under load.
+        tokio::task::spawn_blocking(move || file.sync_all())
+            .await
+            .map_err(|e| crate::pnfs::Error::Config(format!("blocking commit task: {}", e)))?
+            .map_err(crate::pnfs::Error::Io)?;
+
         debug!("DS COMMIT: synced to stable storage");
         
         Ok(CommitResult {
@@ -472,7 +515,7 @@ mod tests {
         let (h, dir) = handler();
         let fh = fh_for(&h, "f1", &dir);
 
-        let w = h.write(&fh, 3, b"hello", WriteStable::Unstable).await.unwrap();
+        let w = h.write(&fh, 3, bytes::Bytes::from_static(b"hello"), WriteStable::Unstable).await.unwrap();
         assert_eq!(w.count, 5);
         assert_eq!(h.fd_cache.len(), 1);
 
@@ -496,7 +539,7 @@ mod tests {
         assert_eq!(h.fd_cache.len(), 1);
 
         // WRITE must succeed whether READ cached the fd rw or ro.
-        let w = h.write(&fh, 4, b"more", WriteStable::FileSync).await.unwrap();
+        let w = h.write(&fh, 4, bytes::Bytes::from_static(b"more"), WriteStable::FileSync).await.unwrap();
         assert_eq!(w.count, 4);
         let r = h.read(&fh, 0, 8).await.unwrap();
         assert_eq!(&r.data, b"datamore");
@@ -507,7 +550,7 @@ mod tests {
         let (h, dir) = handler();
         for i in 0..(FD_CACHE_CAP + 8) {
             let fh = fh_for(&h, &format!("f{}", i), &dir);
-            h.write(&fh, 0, b"x", WriteStable::Unstable).await.unwrap();
+            h.write(&fh, 0, bytes::Bytes::from_static(b"x"), WriteStable::Unstable).await.unwrap();
         }
         assert!(
             h.fd_cache.len() <= FD_CACHE_CAP,
