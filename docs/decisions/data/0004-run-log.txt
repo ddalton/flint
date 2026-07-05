@@ -1,0 +1,109 @@
+#### CONFIG N=1 tag=n1 extra=''
+== n1 N=1 seqwrite M=3: aggregate 264.9 MiB/s
+   ds1 tx delta: 19 MiB
+== n1 N=1 seqread M=1: aggregate 340.6 MiB/s
+   ds1 tx delta: 15671 MiB
+MDS-CPU: 0%
+== n1 N=1 seqread M=3: aggregate 328.5 MiB/s
+   ds1 tx delta: 15730 MiB
+== n1 N=1 rand4k M=3: aggregate 112.4 MiB/s
+   ds1 tx delta: 3517 MiB
+== n1 N=1 sfwrite M=3: aggregate 4769.7 MiB/s
+   ds1 tx delta: 11 MiB
+== n1 N=1 sfread M=3: aggregate 889.0 MiB/s
+   ds1 tx delta: 26877 MiB
+   ds1 ds-bytes: 54760923136
+#### CONFIG N=2 tag=n2 extra=''
+== n2 N=2 seqwrite M=3: aggregate 526.6 MiB/s
+   ds1 tx delta: 12 MiB
+   ds2 tx delta: 12 MiB
+== n2 N=2 seqread M=1: aggregate 903.4 MiB/s
+   ds1 tx delta: 20997 MiB
+   ds2 tx delta: 21008 MiB
+MDS-CPU: 0%
+== n2 N=2 seqread M=3: aggregate 695.7 MiB/s
+   ds1 tx delta: 16216 MiB
+   ds2 tx delta: 16255 MiB
+== n2 N=2 rand4k M=3: aggregate 239.6 MiB/s
+   ds1 tx delta: 3751 MiB
+   ds2 tx delta: 3756 MiB
+== n2 N=2 sfwrite M=3: aggregate 4730.0 MiB/s
+   ds1 tx delta: 6 MiB
+   ds2 tx delta: 6 MiB
+== n2 N=2 sfread M=3: aggregate 1319.1 MiB/s
+   ds1 tx delta: 7376 MiB
+   ds2 tx delta: 7861 MiB
+   ds2 ds-bytes: 53159727988
+   ds1 ds-bytes: 53014648236
+#### CONFIG N=4 tag=n4 extra=''
+== n4 N=4 seqwrite M=3: aggregate 1060.6 MiB/s
+   ds1 tx delta: 12 MiB
+   ds2 tx delta: 13 MiB
+   ds3 tx delta: 13 MiB
+   ds4 tx delta: 13 MiB
+== n4 N=4 seqread M=1: aggregate 1039.2 MiB/s
+   ds1 tx delta: 12194 MiB
+   ds2 tx delta: 12257 MiB
+   ds3 tx delta: 12281 MiB
+   ds4 tx delta: 12253 MiB
+MDS-CPU: 0%
+== n4 N=4 seqread M=3: aggregate 1978.3 MiB/s
+   ds1 tx delta: 23105 MiB
+   ds2 tx delta: 23123 MiB
+   ds3 tx delta: 23180 MiB
+   ds4 tx delta: 23145 MiB
+== n4 N=4 rand4k M=3: aggregate 525.9 MiB/s
+   ds1 tx delta: 4015 MiB
+   ds2 tx delta: 4118 MiB
+   ds3 tx delta: 4125 MiB
+   ds4 tx delta: 4209 MiB
+== n4 N=4 sfwrite M=3: aggregate 4725.9 MiB/s
+   ds1 tx delta: 3 MiB
+   ds2 tx delta: 3 MiB
+   ds3 tx delta: 3 MiB
+   ds4 tx delta: 3 MiB
+== n4 N=4 sfread M=3: aggregate 1335.0 MiB/s
+   ds1 tx delta: 10018 MiB
+   ds2 tx delta: 9806 MiB
+   ds3 tx delta: 10355 MiB
+   ds4 tx delta: 10186 MiB
+   ds1 ds-bytes: 52152751344
+   ds4 ds-bytes: 52196335964
+   ds2 ds-bytes: 52199873488
+   ds3 ds-bytes: 52247179792
+#### CONFIG N=4 tag=n4-seq extra='FLINT_NFS_MAX_INFLIGHT=0'
+== n4-seq N=4 seqwrite M=3: aggregate 1060.0 MiB/s
+   ds1 tx delta: 10 MiB
+   ds2 tx delta: 8 MiB
+   ds3 tx delta: 9 MiB
+   ds4 tx delta: 9 MiB
+== n4-seq N=4 seqread M=1: aggregate 1045.7 MiB/s
+   ds1 tx delta: 12263 MiB
+   ds2 tx delta: 12283 MiB
+   ds3 tx delta: 12346 MiB
+   ds4 tx delta: 12300 MiB
+MDS-CPU: 0%
+== n4-seq N=4 seqread M=3: aggregate 1837.9 MiB/s
+   ds1 tx delta: 21281 MiB
+   ds2 tx delta: 21298 MiB
+   ds3 tx delta: 21329 MiB
+   ds4 tx delta: 21347 MiB
+== n4-seq N=4 rand4k M=3: aggregate 600.1 MiB/s
+   ds1 tx delta: 4695 MiB
+   ds2 tx delta: 4702 MiB
+   ds3 tx delta: 4700 MiB
+   ds4 tx delta: 4706 MiB
+== n4-seq N=4 sfwrite M=3: aggregate 4699.4 MiB/s
+   ds1 tx delta: 4 MiB
+   ds2 tx delta: 3 MiB
+   ds3 tx delta: 3 MiB
+   ds4 tx delta: 3 MiB
+== n4-seq N=4 sfread M=3: aggregate 1024.7 MiB/s
+   ds1 tx delta: 7917 MiB
+   ds2 tx delta: 7698 MiB
+   ds3 tx delta: 7677 MiB
+   ds4 tx delta: 7691 MiB
+   ds2 ds-bytes: 52158485172
+   ds1 ds-bytes: 52216376716
+   ds4 ds-bytes: 52224590576
+   ds3 ds-bytes: 52190979856

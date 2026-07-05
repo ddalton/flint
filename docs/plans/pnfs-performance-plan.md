@@ -150,7 +150,25 @@ multi-client contention — the workloads pipelining exists for.
 Phase 3's cross-host bench is where the structural win must show up;
 if it doesn't, `FLINT_NFS_MAX_INFLIGHT=0` is the one-knob rollback.
 
-## Phase 3 — the cross-host benchmark (the proof)
+## Phase 3 — the cross-host benchmark — DONE 2026-07-05, ALL GATES PASS
+
+**Results are in ADR 0004** (`docs/decisions/0004-pnfs-cross-host-scaling.md`).
+Headlines: aggregate seq read 328.5 → 695.7 → **1978.3 MiB/s** at
+N=1/2/4 (6.02×, gate was ≥3.2×); writes exactly 4.00×; 4k randread
+4.68× (134.6k IOPS at N=4); small-file spread 48.4/51.6% at N=2; MDS
+0% CPU at every N; single client reads ~1 GiB/s from 4 DSes.
+Cross-host pipelining A/B: **+30% on the small-file dataloader
+shape**, +7.6% on aggregate seq read, −12% on deep-QD 4k random
+(follow-up below). Bench found a P1: **DS basename collision** (the
+MDS-issued-FH fallback rebases to `<data-dir>/<basename>`; same-named
+files in different dirs share one backing file) — fix by keying
+DS-local storage on MDS file-id; added to Phase 4.
+
+**Follow-up (perf)**: per-op-cost-adaptive dispatch — inline µs-scale
+ops even when the connection has backlog (deep-QD 4k is where spawn
+overhead still loses); consider a per-connection dispatch-time EMA.
+
+The original plan for reference:
 
 Runs on a disposable extension of the standing runk cluster (trove
 project 28): keep the on-demand CP, add spot workers as DS nodes
@@ -190,6 +208,13 @@ Not perf work, but perf claims are moot without them:
    loss, no replication. Either back DSes with flint block volumes
    (replicated lvols) or ship pNFS explicitly as ephemeral scratch tier.
    This decision shapes whether Phase 3 numbers are marketable.
+0. **DS basename collision (P1, found by the Phase 3 bench).** The
+   MDS-issued-FH fallback in `pnfs/ds/io.rs filehandle_to_path`
+   rebases every file to `<data-dir>/<basename>`; files with equal
+   basenames in different directories silently share one backing
+   file (data corruption for any multi-directory namespace). Fix by
+   keying DS-local storage on the MDS file-id (the pNFS v2
+   filehandle already carries it). Must land before any external use.
    Related: the DS write verifier is a fixed `[0u8; 8]`
    (`pnfs/ds/io.rs generate_verifier`), so clients cannot detect a DS
    restart and will not retransmit lost UNSTABLE writes — must become
