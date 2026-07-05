@@ -90,6 +90,13 @@ drop_client_cache() {
 
 # Run one fio invocation, parse JSON, return KB/s aggregate on stdout.
 # $1: tag (server-rw-numjobs-fsync), $2: rw, $3: numjobs, $4: fsync
+#
+# The fio --name is shared per numjobs (NOT per variant): fio derives
+# filenames from the job name, and RW_SWEEP runs writes before reads,
+# so read variants must reuse the files their matching write variant
+# created. A per-variant name made every read lay out fresh files and
+# measure page-cache readback of its own layout pass (the "reads
+# return 0.0/garbage" bug noted in ADR 0003).
 fio_run() {
   local tag="$1" rw="$2" jobs="$3" fsync="$4"
   local out="$LOG_DIR/flint-pnfs-sweep-$tag.json"
@@ -97,7 +104,7 @@ fio_run() {
   drop_client_cache
 
   limactl shell "$LIMA_VM" -- bash -c "fio \
-    --name=bench-$tag \
+    --name=bench-j${jobs} \
     --directory=$VM_MOUNT \
     --rw=$rw \
     --bs=1M \
@@ -207,7 +214,7 @@ limactl shell "$LIMA_VM" -- sudo umount "$VM_MOUNT" >/dev/null 2>&1
 
 echo
 echo "════════════════════════════════════════════════════════════════"
-echo "  Summary: pNFS / single-server ratio (write only — reads tie)"
+echo "  Summary: pNFS / single-server ratio"
 echo "════════════════════════════════════════════════════════════════"
 printf '  %-5s %-5s %-12s %-12s %-8s\n' jobs fsync 'single MiB/s' 'pnfs MiB/s' 'ratio'
 
