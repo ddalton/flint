@@ -12,8 +12,48 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-04
+
+### Added
+
+- **Two-altitude topology view.** The dashboard topology page is a real
+  data-path graph now (React Flow): the volume altitude draws
+  consumer → access device → RAID bdev → members → backing disks, with
+  edge encodings for health (color), access path (solid local / dashed
+  NVMe-oF), and recovery (animation); a rebuild renders as an animated
+  source→target edge with live progress. The cluster altitude lays one
+  card per node (disk-state ring, replica/capacity counts) with
+  replica-placement links between nodes, drill-through into the volume
+  view. Node/edge details, sync state, NQNs, and the RAID/NVMe-oF
+  explainers live in an on-demand drawer instead of inline walls of
+  text.
+- **`identity.rs` owns every derived name** (Phases 0–4 + CI lint):
+  lvols, snapshots, epochs, NQNs, lvstores — one constructor set, one
+  published contract (`docs/identity-contract.md`), and now the inverse
+  parser (`lvol_owner`) that maps any lvol name back to its owning
+  volume.
+- **NFS server-pod liveness reconciler.** A bare NFS server-pod death
+  (node loss, OOM-kill, manual delete) now self-heals: the controller
+  reconciles the pod back, republishes the Service endpoint, and
+  clients resume in ~30–42 s.
+- **Incremental replica-rebuild kuttl suite** joins `make test`
+  (isolated run, exercises the epoch/catch-up orchestrators
+  end-to-end).
+- Dashboard sessions survive a page refresh (token in sessionStorage,
+  per-tab; still expires server-side and on backend restart).
+
 ### Fixed
 
+- **Every live lvol on a replicated cluster was reported as an
+  orphaned "cleanup candidate."** Orphan detection allowlisted lvols
+  against the legacy single-replica `lvol-uuid` PV attribute, which
+  replica-set PVs don't carry — so replicas, user snapshots, and epoch
+  snapshots all showed as deletable orphans, cloned onto every disk of
+  their node. Classification now parses each lvol's owner from its
+  name via the identity contract (robust to `_hr` recovery renames),
+  fills the long-empty `provisioned_volumes` per disk, and attributes
+  both provisioned entries and true orphans to the disk whose lvstore
+  actually hosts them.
 - **RWX client unpublish tore down the NFS server's live export.**
   `ControllerUnpublishVolume` treated every departing non-home node
   as a remote block consumer and removed the volume-level NVMe-oF
@@ -35,6 +75,28 @@ covered by the stability guarantee.
   `ctrl_loss_tmo` (~10 minutes). Deletion now waits (bounded, 90 s)
   for the pod object to be removed — kubelet's signal that the volume
   was unmounted and flushed — before target teardown proceeds.
+- Clients are never bound to a Terminating NFS server pod; dead-NFS
+  mountpoint probes are bounded and no longer misread as "not
+  mounted"; `NodeGetVolumeStats` filesystem calls are bounded so a
+  dead NFS mount cannot starve the node plugin.
+- Shared (RWX/ROX) volume expansion is refused loudly instead of
+  silently corrupting state (client-side expand cannot reach the
+  server's backing filesystem).
+- Snapshot timeline shows real creation times (VolumeSnapshotContent /
+  sync-record timestamps) on two lanes — user snapshots and engine
+  epochs — with CR-path user-snapshot deletion that keeps the CR and
+  SPDK content in step; the old always-empty "Topology View" tab and
+  its dead-code renderer are gone.
+- Disk-delete refusals surface the node agent's actual status and
+  reason (e.g. 409 "N logical volumes still exist") instead of a
+  generic 502; the snapshot detail modal's disabled "coming soon"
+  Delete/Clone buttons are removed.
+
+### Changed
+
+- The legacy `spdk-controller-operator` deployment defaults **off**
+  (verified unreachable in the identity audit); remove any explicit
+  `spdkOperator.enabled: true` override when upgrading.
 
 ## [1.5.0] - 2026-07-03
 
