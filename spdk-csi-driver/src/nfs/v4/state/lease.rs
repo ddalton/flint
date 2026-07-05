@@ -88,12 +88,21 @@ impl LeaseManager {
     /// Create a new lease manager
     pub fn new() -> Self {
         let server_start = Instant::now();
-        info!("LeaseManager created - grace period for {:?}", GRACE_PERIOD);
+        // FLINT_NFS_GRACE_SECS overrides the RFC-default 90s grace window.
+        // Conformance rigs need this: pynfs's grace tests (e.g. RECC3)
+        // assume the server is still in grace whenever they run, and a
+        // full suite takes longer than 90s.
+        let grace_period = std::env::var("FLINT_NFS_GRACE_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(GRACE_PERIOD);
+        info!("LeaseManager created - grace period for {:?}", grace_period);
 
         Self {
             leases: DashMap::new(),
             server_start,
-            grace_period: GRACE_PERIOD,
+            grace_period,
         }
     }
 

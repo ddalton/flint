@@ -283,7 +283,22 @@ impl IoOperationHandler {
 
         // Extract filename from claim
         let filename = match &op.claim {
-            OpenClaim::Null(name) => name.clone(),
+            OpenClaim::Null(name) => {
+                if let Some(status) =
+                    crate::nfs::v4::operations::fileops::validate_component_name(name)
+                {
+                    warn!("OPEN: invalid claim name → {:?}", status);
+                    return OpenRes {
+                        status,
+                        stateid: None,
+                        change_info: None,
+                        result_flags: 0,
+                        delegation: OpenDelegationType::None,
+                        attrset: vec![],
+                    };
+                }
+                name.clone()
+            }
             OpenClaim::Fh => {
                 // CLAIM_FH - opening by filehandle, file must exist
                 debug!("OPEN: CLAIM_FH - file must exist");
@@ -369,10 +384,70 @@ impl IoOperationHandler {
                 }
             }
 
-            // Create the file
-            match std::fs::File::create(&file_path) {
+            // Decode the settable subset of createattrs up front — a
+            // malformed or unsupported fattr4 must fail the OPEN before
+            // any filesystem mutation (RFC 8881 §18.16.4).
+            use crate::nfs::v4::operations::fileops::{
+                apply_settable_attrs, attr_numbers_to_bitmap, decode_settable_attrs,
+                SettableAttrs,
+            };
+            let createattrs = match &op.openhow {
+                OpenHow::Create(attrs) | OpenHow::Exclusive4_1 { attrs, .. } => {
+                    match decode_settable_attrs(&attrs.attrmask, &attrs.attr_vals) {
+                        Ok(d) => Some(d),
+                        Err(status) => {
+                            warn!("OPEN(create): undecodable createattrs → {:?}", status);
+                            return OpenRes {
+                                status,
+                                stateid: None,
+                                change_info: None,
+                                result_flags: 0,
+                                delegation: OpenDelegationType::None,
+                                attrset: vec![],
+                            };
+                        }
+                    }
+                }
+                _ => None,
+            };
+
+            // Create-but-don't-truncate: UNCHECKED4 on an existing file
+            // must leave its data alone unless the client asked for
+            // size=0 via createattrs (RFC 8881 §18.16.3). File::create's
+            // implicit O_TRUNC would wipe it.
+            let existed = file_path.exists();
+            match std::fs::OpenOptions::new().write(true).create(true).open(&file_path) {
                 Ok(_) => {
-                    info!("OPEN: Successfully created file {:?}", file_path);
+                    info!(
+                        "OPEN: {} file {:?}",
+                        if existed { "opened existing" } else { "created" },
+                        file_path
+                    );
+
+                    // Apply createattrs: everything on a fresh create;
+                    // only the size request (O_TRUNC) when the file
+                    // already existed — other attrs are ignored then.
+                    let mut applied_attrs: Vec<u32> = Vec::new();
+                    if let Some(want) = &createattrs {
+                        let effective = if existed {
+                            SettableAttrs { size: want.size, ..Default::default() }
+                        } else {
+                            want.clone()
+                        };
+                        let (applied, err) = apply_settable_attrs(&file_path, &effective);
+                        applied_attrs = applied;
+                        if let Some(status) = err {
+                            warn!("OPEN(create): applying createattrs failed → {:?}", status);
+                            return OpenRes {
+                                status,
+                                stateid: None,
+                                change_info: None,
+                                result_flags: 0,
+                                delegation: OpenDelegationType::None,
+                                attrset: attr_numbers_to_bitmap(&applied_attrs),
+                            };
+                        }
+                    }
 
                     // Generate filehandle for the new file
                     match self.fh_mgr.path_to_filehandle(&file_path) {
@@ -434,11 +509,9 @@ impl IoOperationHandler {
                                 }),
                                 result_flags: OPEN4_RESULT_LOCKTYPE_POSIX,
                                 delegation: OpenDelegationType::None,
-                                attrset: match &op.openhow {
-                                    OpenHow::Create(attrs) => attrs.attrmask.clone(),
-                                    OpenHow::Exclusive4_1 { attrs, .. } => attrs.attrmask.clone(),
-                                    _ => vec![],
-                                },
+                                // Attrs actually applied — not an echo of the
+                                // request mask (RFC 8881 §18.16.3 attrset).
+                                attrset: attr_numbers_to_bitmap(&applied_attrs),
                             };
                         }
                         Err(e) => {

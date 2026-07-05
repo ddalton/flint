@@ -275,15 +275,21 @@ impl CompoundDispatcher {
         let has_decode_error = request.operations.iter().any(|o| {
             matches!(o, Operation::BadXdr(_) | Operation::Unsupported(_))
         });
+        // When a compound starts with a valid SEQUENCE but repeats one
+        // later, the ops BEFORE the misplaced SEQUENCE must still run and
+        // produce per-op results — clients read resarray[0] for the leading
+        // SEQUENCE's result (pynfs SEQ2 crashes on an empty resarray). The
+        // misplaced op itself gets the SEQUENCE_POS error in the main loop.
+        let mut sequence_pos_at: Option<usize> = None;
         if request.minor_version >= NFS_V4_MINOR_VERSION_1 && !has_sole && !has_decode_error {
             let mut sequence_seen = false;
-            let mut sequence_pos_violation = false;
+            let mut first_misplaced_seq: Option<usize> = None;
             let mut op_not_in_session = false;
             for (idx, op) in request.operations.iter().enumerate() {
                 let is_seq = matches!(op, Operation::Sequence { .. });
                 if is_seq {
                     if idx != 0 || sequence_seen {
-                        sequence_pos_violation = true;
+                        first_misplaced_seq.get_or_insert(idx);
                     }
                     sequence_seen = true;
                 } else if !sequence_seen {
@@ -292,17 +298,22 @@ impl CompoundDispatcher {
                     op_not_in_session = true;
                 }
             }
-            if sequence_pos_violation {
-                warn!("COMPOUND: SEQUENCE not first / duplicated → SEQUENCE_POS");
-                return CompoundResponse {
-                    status: Nfs4Status::SequencePos,
-                    tag: request.tag,
-                    results: Vec::new(),
-                    raw_reply: None,
-                    cache_slot: None,
-                };
-            }
-            if op_not_in_session && !request.operations.is_empty() {
+            if let Some(idx) = first_misplaced_seq {
+                if op_not_in_session {
+                    // No valid leading SEQUENCE either — nothing may run
+                    // outside a session, so keep the results-less reply.
+                    warn!("COMPOUND: SEQUENCE not first → SEQUENCE_POS");
+                    return CompoundResponse {
+                        status: Nfs4Status::SequencePos,
+                        tag: request.tag,
+                        results: Vec::new(),
+                        raw_reply: None,
+                        cache_slot: None,
+                    };
+                }
+                warn!("COMPOUND: duplicated SEQUENCE at op {} → SEQUENCE_POS", idx);
+                sequence_pos_at = Some(idx);
+            } else if op_not_in_session && !request.operations.is_empty() {
                 warn!("COMPOUND: op without preceding SEQUENCE → OP_NOT_IN_SESSION");
                 return CompoundResponse {
                     status: Nfs4Status::OpNotInSession,
@@ -338,6 +349,15 @@ impl CompoundDispatcher {
 
         for (i, operation) in request.operations.into_iter().enumerate() {
             debug!("COMPOUND[{}]: Processing operation: {:?}", i, operation);
+
+            // Misplaced SEQUENCE (validated above): emit its per-op error
+            // WITHOUT dispatching — running it would corrupt the slot's
+            // replay cache — and stop the compound here.
+            if sequence_pos_at == Some(i) {
+                final_status = Nfs4Status::SequencePos;
+                results.push(OperationResult::Sequence(Nfs4Status::SequencePos, None));
+                break;
+            }
 
             // Log pNFS operations with high visibility
             match &operation {
@@ -865,19 +885,45 @@ impl CompoundDispatcher {
             }
 
             Operation::SetAttr { stateid, attrs } => {
-                // Convert Bytes to Fattr4
-                // For now, we'll treat the bytes as raw attribute values
-                // TODO: Properly decode attribute bitmap + values using XDR
-                let fattr = crate::nfs::v4::operations::fileops::Fattr4 {
-                    attrmask: Vec::new(),  // Empty for now - should be parsed from attrs
-                    attr_vals: attrs.to_vec(),
+                // The decode arm repacked the fattr4 as
+                // [bitmap_len][words...][attrlen][values...]; split it back
+                // into bitmap words + raw values for the handler. (Reading
+                // the blob head as an attr value is exactly the bug that
+                // made every chmod over NFS set mode 0o002 — the bitmap
+                // length word.)
+                let unpack = || -> Option<crate::nfs::v4::operations::fileops::Fattr4> {
+                    let b = attrs.as_ref();
+                    let word_count = u32::from_be_bytes(b.get(0..4)?.try_into().ok()?) as usize;
+                    // Cap: bitmap4 words beyond attr 95 are unused by any
+                    // client; a huge count is a malformed request.
+                    if word_count > 8 {
+                        return None;
+                    }
+                    let mut attrmask = Vec::with_capacity(word_count);
+                    for i in 0..word_count {
+                        let off = 4 + i * 4;
+                        attrmask.push(u32::from_be_bytes(b.get(off..off + 4)?.try_into().ok()?));
+                    }
+                    let len_off = 4 + word_count * 4;
+                    let attr_len =
+                        u32::from_be_bytes(b.get(len_off..len_off + 4)?.try_into().ok()?) as usize;
+                    let vals = b.get(len_off + 4..len_off + 4 + attr_len)?;
+                    Some(crate::nfs::v4::operations::fileops::Fattr4 {
+                        attrmask,
+                        attr_vals: vals.to_vec(),
+                    })
                 };
-                let op = SetAttrOp {
-                    stateid,
-                    obj_attributes: fattr,
-                };
-                let res = self.file_handler.handle_setattr(op, context).await;
-                OperationResult::SetAttr(res.status)
+                match unpack() {
+                    Some(fattr) => {
+                        let op = SetAttrOp {
+                            stateid,
+                            obj_attributes: fattr,
+                        };
+                        let res = self.file_handler.handle_setattr(op, context).await;
+                        OperationResult::SetAttr(res.status, res.attrsset)
+                    }
+                    None => OperationResult::SetAttr(Nfs4Status::BadXdr, vec![]),
+                }
             }
 
             Operation::ReadDir { cookie, cookieverf, dircount, maxcount, attr_request } => {

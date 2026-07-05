@@ -120,6 +120,19 @@ test-nfs-mount: ## Sanity: mount and write a file from the VM (requires nfs-serv
 
 .PHONY: test-nfs-protocol
 test-nfs-protocol: ## Run full pynfs NFSv4.1 conformance suite (--maketree)
+	# pynfs assumes a freshly started server: grace-period tests (RECC3)
+	# expect NFS4ERR_GRACE, which is only correct inside the server's
+	# post-boot grace window. Restart with a clean state DB so every run
+	# sees the same server age.
+	$(MAKE) nfs-server-stop
+	rm -rf $(NFS_EXPORT)/.flint-nfs
+	# Leftovers from an aborted previous run (dangling symlinks, per-test
+	# dirs) make pynfs's own clean_dir abort the whole suite before any
+	# test runs; start from an empty test area. --maketree rebuilds it.
+	rm -rf $(NFS_EXPORT)/tmp
+	# pynfs's grace tests (RECC3 et al.) assume the server is in grace
+	# whenever they run; the suite outlasts the RFC-default 90s window.
+	FLINT_NFS_GRACE_SECS=900 $(MAKE) nfs-server-bg
 	# `--maketree` builds the test directory ($(NFS_EXPORT)/tmp/tree) of
 	# regular file, dir, symlink, socket/fifo/block/char stand-ins that
 	# the suite expects. Without it most tests SKIP. Pre-create /tmp on

@@ -283,6 +283,245 @@ pub struct Fattr4 {
     pub attr_vals: Vec<u8>, // XDR-encoded attribute values
 }
 
+/// A settime4 value from SETATTR / OPEN createattrs (RFC 8881 §3.3.5).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SetTime {
+    ServerTime,
+    ClientTime { seconds: i64, nseconds: u32 },
+}
+
+impl SetTime {
+    fn to_system_time(self) -> std::time::SystemTime {
+        match self {
+            SetTime::ServerTime => std::time::SystemTime::now(),
+            SetTime::ClientTime { seconds, nseconds } => {
+                let base = std::time::UNIX_EPOCH;
+                if seconds >= 0 {
+                    base + std::time::Duration::new(seconds as u64, nseconds)
+                } else {
+                    base - std::time::Duration::new(seconds.unsigned_abs(), 0)
+                }
+            }
+        }
+    }
+}
+
+/// The client-settable attributes we support, decoded from a fattr4
+/// (RFC 8881 §5.6). OWNER / OWNER_GROUP / TIME_CREATE are consumed to
+/// keep the XDR cursor aligned but ignored: this server acts as a single
+/// principal (sec=none/sys with server-side I/O), so identity mapping is
+/// meaningless here.
+#[derive(Debug, Default, Clone)]
+pub struct SettableAttrs {
+    pub size: Option<u64>,
+    pub mode: Option<u32>,
+    pub atime: Option<SetTime>,
+    pub mtime: Option<SetTime>,
+}
+
+/// Decode the settable subset of a fattr4 (bitmap words + packed attr
+/// values). Values are packed in ascending attr-number order.
+///
+/// Errors per RFC 8881 §18.30.4: a recognized-but-read-only attr →
+/// `INVAL`; a writable attr we don't support → `ATTRNOTSUPP`. Both are
+/// hard errors *before* anything is applied — an unknown attr has an
+/// unknown wire size, so nothing after it can be decoded anyway.
+pub fn decode_settable_attrs(
+    attrmask: &[u32],
+    attr_vals: &[u8],
+) -> Result<SettableAttrs, Nfs4Status> {
+    struct Cursor<'a> {
+        buf: &'a [u8],
+        pos: usize,
+    }
+    impl<'a> Cursor<'a> {
+        fn take(&mut self, n: usize) -> Result<&'a [u8], Nfs4Status> {
+            let end = self.pos.checked_add(n).ok_or(Nfs4Status::BadXdr)?;
+            if end > self.buf.len() {
+                return Err(Nfs4Status::BadXdr);
+            }
+            let s = &self.buf[self.pos..end];
+            self.pos = end;
+            Ok(s)
+        }
+        fn u32(&mut self) -> Result<u32, Nfs4Status> {
+            Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
+        }
+        fn u64(&mut self) -> Result<u64, Nfs4Status> {
+            Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
+        }
+        fn i64(&mut self) -> Result<i64, Nfs4Status> {
+            Ok(i64::from_be_bytes(self.take(8)?.try_into().unwrap()))
+        }
+        fn opaque(&mut self) -> Result<(), Nfs4Status> {
+            let len = self.u32()? as usize;
+            let padded = len.checked_add(3).ok_or(Nfs4Status::BadXdr)? & !3;
+            self.take(padded)?;
+            Ok(())
+        }
+        fn settime(&mut self) -> Result<SetTime, Nfs4Status> {
+            const SET_TO_CLIENT_TIME4: u32 = 1;
+            if self.u32()? == SET_TO_CLIENT_TIME4 {
+                Ok(SetTime::ClientTime { seconds: self.i64()?, nseconds: self.u32()? })
+            } else {
+                Ok(SetTime::ServerTime)
+            }
+        }
+    }
+
+    let mut cur = Cursor { buf: attr_vals, pos: 0 };
+    let mut out = SettableAttrs::default();
+
+    for (word_idx, word) in attrmask.iter().enumerate() {
+        for bit in 0..32 {
+            if word & (1 << bit) == 0 {
+                continue;
+            }
+            let attr = word_idx as u32 * 32 + bit;
+            match attr {
+                FATTR4_SIZE => out.size = Some(cur.u64()?),
+                FATTR4_MODE => out.mode = Some(cur.u32()? & 0o7777),
+                FATTR4_OWNER | FATTR4_OWNER_GROUP => cur.opaque()?,
+                FATTR4_TIME_ACCESS_SET => out.atime = Some(cur.settime()?),
+                FATTR4_TIME_MODIFY_SET => out.mtime = Some(cur.settime()?),
+                FATTR4_TIME_CREATE => {
+                    // nfstime4 — settable on filesystems with birth time;
+                    // consume and ignore.
+                    cur.i64()?;
+                    cur.u32()?;
+                }
+                // Writable per the RFC but unsupported here.
+                FATTR4_ACL | FATTR4_HIDDEN | FATTR4_MIMETYPE | FATTR4_SYSTEM
+                | FATTR4_TIME_BACKUP => return Err(Nfs4Status::AttrNotsupp),
+                // Everything else a client could name is read-only.
+                _ => return Err(Nfs4Status::Inval),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Apply decoded settable attrs to `path`. Returns the attr numbers
+/// actually applied (for the SETATTR4res / OPEN4res attrset bitmap); on
+/// failure returns what had been applied before the error, plus the
+/// error, per RFC 8881 §18.30.4.
+///
+/// MODE is applied before SIZE on purpose: truncation needs a writable
+/// open, and a compound that sets both may be un-hiding a 0o000 file.
+pub fn apply_settable_attrs(
+    path: &Path,
+    want: &SettableAttrs,
+) -> (Vec<u32>, Option<Nfs4Status>) {
+    let mut applied: Vec<u32> = Vec::new();
+
+    let lmeta = match path.symlink_metadata() {
+        Ok(m) => m,
+        Err(_) => return (applied, Some(Nfs4Status::NoEnt)),
+    };
+    let is_symlink = lmeta.file_type().is_symlink();
+
+    if let Some(mode) = want.mode {
+        if is_symlink {
+            // Symlink modes are fixed on Unix; treat as a successful no-op
+            // (pynfs clean_dir SETATTRs symlinks before REMOVE).
+            applied.push(FATTR4_MODE);
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                match std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+                    Ok(()) => applied.push(FATTR4_MODE),
+                    Err(e) => {
+                        warn!("SETATTR: chmod {:o} on {:?} failed: {}", mode, path, e);
+                        return (applied, Some(io_error_to_nfs4(&e)));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(size) = want.size {
+        if is_symlink {
+            return (applied, Some(Nfs4Status::Inval));
+        }
+        if lmeta.is_dir() {
+            return (applied, Some(Nfs4Status::IsDir));
+        }
+        match std::fs::OpenOptions::new().write(true).open(path).and_then(|f| f.set_len(size)) {
+            Ok(()) => applied.push(FATTR4_SIZE),
+            Err(e) => {
+                warn!("SETATTR: truncate to {} on {:?} failed: {}", size, path, e);
+                return (applied, Some(io_error_to_nfs4(&e)));
+            }
+        }
+    }
+
+    if want.atime.is_some() || want.mtime.is_some() {
+        if is_symlink {
+            // futimens through File::open would follow the link; skip and
+            // report set — the times on the link itself are cosmetic.
+            want.atime.map(|_| applied.push(FATTR4_TIME_ACCESS_SET));
+            want.mtime.map(|_| applied.push(FATTR4_TIME_MODIFY_SET));
+        } else {
+            let mut times = std::fs::FileTimes::new();
+            if let Some(t) = want.atime {
+                times = times.set_accessed(t.to_system_time());
+            }
+            if let Some(t) = want.mtime {
+                times = times.set_modified(t.to_system_time());
+            }
+            match std::fs::File::open(path).and_then(|f| f.set_times(times)) {
+                Ok(()) => {
+                    want.atime.map(|_| applied.push(FATTR4_TIME_ACCESS_SET));
+                    want.mtime.map(|_| applied.push(FATTR4_TIME_MODIFY_SET));
+                }
+                Err(e) => {
+                    warn!("SETATTR: set times on {:?} failed: {}", path, e);
+                    return (applied, Some(io_error_to_nfs4(&e)));
+                }
+            }
+        }
+    }
+
+    (applied, None)
+}
+
+/// Build a bitmap4 (vec of words) from a list of attr numbers.
+pub fn attr_numbers_to_bitmap(attrs: &[u32]) -> Vec<u32> {
+    let mut words: Vec<u32> = Vec::new();
+    for &a in attrs {
+        let idx = (a / 32) as usize;
+        if words.len() <= idx {
+            words.resize(idx + 1, 0);
+        }
+        words[idx] |= 1 << (a % 32);
+    }
+    words
+}
+
+fn io_error_to_nfs4(e: &std::io::Error) -> Nfs4Status {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
+        std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+        _ => Nfs4Status::Io,
+    }
+}
+
+/// RFC 8881 component-name validation, shared by every op that takes a
+/// filename (LOOKUP, OPEN, CREATE, REMOVE, RENAME, LINK). A zero-length
+/// name is `INVAL` (§18.10.3 and friends); "." / ".." / embedded '/' or
+/// NUL are `BADNAME` — on a POSIX export those are not ordinary names,
+/// and joining them into a path would allow escapes out of the export.
+pub fn validate_component_name(name: &str) -> Option<Nfs4Status> {
+    if name.is_empty() {
+        return Some(Nfs4Status::Inval);
+    }
+    if name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+        return Some(Nfs4Status::BadName);
+    }
+    None
+}
+
 /// SETATTR operation (opcode 34)
 ///
 /// Sets attributes for current filehandle.
@@ -424,8 +663,8 @@ const FATTR4_FSID: u32 = 8;
 const FATTR4_UNIQUE_HANDLES: u32 = 9;
 const FATTR4_LEASE_TIME: u32 = 10;
 const FATTR4_RDATTR_ERROR: u32 = 11;
-const FATTR4_ACLSUPPORT: u32 = 12;
-const FATTR4_ACL: u32 = 13;
+const FATTR4_ACL: u32 = 12;         // FIXED: was 13 (swapped with ACLSUPPORT)
+const FATTR4_ACLSUPPORT: u32 = 13;  // FIXED: was 12 — RFC 8881 §5.6: acl=12, aclsupport=13
 const FATTR4_ARCHIVE: u32 = 14;
 const FATTR4_CANSETTIME: u32 = 15;  // FIXED: was 35
 const FATTR4_CASE_INSENSITIVE: u32 = 16;  // FIXED: was 39
@@ -523,6 +762,12 @@ const SUPPORTED_ATTRS_BITMAP: u64 = (1u64 << FATTR4_TYPE)
     | (1u64 << FATTR4_TIME_ACCESS)
     | (1u64 << FATTR4_TIME_METADATA)
     | (1u64 << FATTR4_TIME_MODIFY)
+    // The *_SET variants are write-only attrs (SETATTR/createattrs). The
+    // Linux client intersects its SETATTR mask with supported_attrs and
+    // silently drops what's missing — without these two advertised,
+    // utimensat() sends an EMPTY SETATTR and file times never change.
+    | (1u64 << FATTR4_TIME_ACCESS_SET)
+    | (1u64 << FATTR4_TIME_MODIFY_SET)
     | (1u64 << FATTR4_MOUNTED_ON_FILEID);
 
 /// Encode NFSv4 attributes based on requested bitmap
@@ -1260,10 +1505,10 @@ fn encode_single_attribute(
         }
         
         FATTR4_ACLSUPPORT => {
-            // ACL support flags
-            // ACL4_SUPPORT_ALLOW_ACL = 0x00000001
-            // ACL4_SUPPORT_DENY_ACL = 0x00000002
-            buf.put_u32(0x00000003); // Support both ALLOW and DENY ACLs
+            // ACL support flags (ALLOW=0x1, DENY=0x2). We advertise none:
+            // SETATTR(acl) returns ATTRNOTSUPP, and claiming support here
+            // while rejecting writes confuses clients.
+            buf.put_u32(0);
             true
         }
         
@@ -1767,6 +2012,11 @@ impl FileOperationHandler {
         debug!("   Component length: {} bytes", op.component.len());
         debug!("   Component bytes (hex): {:02x?}", op.component.as_bytes());
 
+        if let Some(status) = validate_component_name(&op.component) {
+            warn!("LOOKUP: invalid component name → {:?}", status);
+            return LookupRes { status };
+        }
+
         // Check current filehandle
         let current_fh = match &ctx.current_fh {
             Some(fh) => fh,
@@ -2269,86 +2519,28 @@ impl FileOperationHandler {
             }
         };
 
-        // Verify the path exists. `Path::exists()` follows symlinks — for a
-        // dangling symlink (link points at a missing target), that returns
-        // false even though the symlink itself is a valid object we should
-        // be able to operate on. Use `symlink_metadata()` which never follows.
-        let lmeta = match path.symlink_metadata() {
-            Ok(m) => m,
-            Err(_) => {
-                return SetAttrRes {
-                    status: Nfs4Status::NoEnt,
-                    attrsset: vec![],
-                };
+        // `apply_settable_attrs` re-checks existence with symlink_metadata()
+        // (never follows links, so dangling symlinks still count as present).
+        let decoded = match decode_settable_attrs(
+            &op.obj_attributes.attrmask,
+            &op.obj_attributes.attr_vals,
+        ) {
+            Ok(d) => d,
+            Err(status) => {
+                warn!("SETATTR: undecodable/unsupported attrs (mask {:?}) → {:?}",
+                      op.obj_attributes.attrmask, status);
+                return SetAttrRes { status, attrsset: vec![] };
             }
         };
 
-        // Set file attributes
-        // This is a simplified implementation - proper NFSv4 would decode
-        // XDR-encoded attributes and set each requested attribute
-        // For now, we handle common operations like setting permissions
-
-        let mut attrs_set = vec![];
-        let mut errors = vec![];
-
-        // Try to set permissions if specified
-        // In a full implementation, we would decode attr_vals to get the actual values
-        // For now, if any attributes are requested, we try to set basic permissions
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            // If attribute values are provided, try to parse permissions
-            if !op.obj_attributes.attr_vals.is_empty() && op.obj_attributes.attr_vals.len() >= 4 {
-                // Try to read mode from attributes (simplified)
-                // In real implementation, properly decode XDR
-                let mode_bytes = &op.obj_attributes.attr_vals[..std::cmp::min(4, op.obj_attributes.attr_vals.len())];
-                if mode_bytes.len() == 4 {
-                    let mode = u32::from_be_bytes([mode_bytes[0], mode_bytes[1], mode_bytes[2], mode_bytes[3]]);
-
-                    if lmeta.file_type().is_symlink() {
-                        // POSIX `chmod()` follows symlinks. For a dangling
-                        // symlink that fails with ENOENT, but per RFC 5661
-                        // §18.30 SETATTR on a symlink should affect the link
-                        // itself (which on most Unix is essentially a no-op
-                        // — symlinks have a fixed mode of 0777). Report Ok
-                        // so callers like pynfs's clean_dir can proceed to
-                        // the subsequent REMOVE.
-                        debug!("SETATTR: target is a symlink, treating mode change as no-op");
-                        attrs_set.extend_from_slice(&op.obj_attributes.attrmask);
-                    } else {
-                        let permissions = std::fs::Permissions::from_mode(mode);
-                        match std::fs::set_permissions(&path, permissions) {
-                            Ok(_) => {
-                                debug!("SETATTR: Set permissions {:o} on {:?}", mode, path);
-                                attrs_set.extend_from_slice(&op.obj_attributes.attrmask);
-                            }
-                            Err(e) => {
-                                warn!("SETATTR: Failed to set permissions on {:?}: {}", path, e);
-                                errors.push(e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Return status based on whether we successfully set any attributes
-        if errors.is_empty() {
-            SetAttrRes {
-                status: Nfs4Status::Ok,
-                attrsset: op.obj_attributes.attrmask,
-            }
-        } else {
-            // Partial success or failure
-            SetAttrRes {
-                status: if attrs_set.is_empty() {
-                    Nfs4Status::Inval // No attributes could be set
-                } else {
-                    Nfs4Status::Ok // Some attributes were set
-                },
-                attrsset: attrs_set,
-            }
+        let (applied, err) = apply_settable_attrs(&path, &decoded);
+        debug!("SETATTR: applied attrs {:?} on {:?} (err={:?})", applied, path, err);
+        SetAttrRes {
+            // attrsset always reports what was actually set — including on
+            // error, where it covers the attrs applied before the failure
+            // (RFC 8881 §18.30.4).
+            status: err.unwrap_or(Nfs4Status::Ok),
+            attrsset: attr_numbers_to_bitmap(&applied),
         }
     }
 
@@ -2680,6 +2872,11 @@ impl FileOperationHandler {
     ) -> CreateRes {
         debug!("CREATE: type={:?}, name={}", op.objtype, op.objname);
 
+        if let Some(status) = validate_component_name(&op.objname) {
+            warn!("CREATE: invalid object name → {:?}", status);
+            return CreateRes { status, change_info: None, attrset: vec![] };
+        }
+
         // Check current filehandle (parent directory)
         let parent_fh = match &ctx.current_fh {
             Some(fh) => fh,
@@ -2841,6 +3038,11 @@ impl FileOperationHandler {
     ) -> RemoveRes {
         debug!("REMOVE: target={}", op.target);
 
+        if let Some(status) = validate_component_name(&op.target) {
+            warn!("REMOVE: invalid target name → {:?}", status);
+            return RemoveRes { status, change_info: None };
+        }
+
         // Check current filehandle (parent directory)
         let parent_fh = match &ctx.current_fh {
             Some(fh) => fh,
@@ -2867,8 +3069,11 @@ impl FileOperationHandler {
         // Build full path for target
         let target_path = parent_path.join(&op.target);
 
-        // Check if target is a directory or file
-        match tokio::fs::metadata(&target_path).await {
+        // Check if target is a directory or file. symlink_metadata: a
+        // dangling symlink is still a removable directory entry —
+        // metadata() would follow the link, report NotFound, and make the
+        // entry undeletable over NFS.
+        match tokio::fs::symlink_metadata(&target_path).await {
             Ok(metadata) => {
                 let result = if metadata.is_dir() {
                     tokio::fs::remove_dir(&target_path).await
@@ -2892,6 +3097,7 @@ impl FileOperationHandler {
                         let status = match e.kind() {
                             std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                             std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
+                            std::io::ErrorKind::DirectoryNotEmpty => Nfs4Status::NotEmpty,
                             _ => Nfs4Status::Io,
                         };
                         RemoveRes {
@@ -2932,6 +3138,13 @@ impl FileOperationHandler {
         ctx: &CompoundContext,
     ) -> RenameRes {
         debug!("RENAME: {} -> {}", op.oldname, op.newname);
+
+        if let Some(status) =
+            validate_component_name(&op.oldname).or_else(|| validate_component_name(&op.newname))
+        {
+            warn!("RENAME: invalid component name → {:?}", status);
+            return rename_err(status);
+        }
 
         // (1) Both filehandles must be set.
         let source_parent_fh = match &ctx.saved_fh {
@@ -2994,8 +3207,21 @@ impl FileOperationHandler {
         // RFC 5661 §18.26.4: rename to the same name in the same directory
         // is a no-op and the cinfo MUST report no change. Detect by canonical
         // parent paths + identical name.
-        let is_self_rename = op.oldname == op.newname
+        let mut is_self_rename = op.oldname == op.newname
             && source_parent_path == dest_parent_path;
+
+        // POSIX rename(2) extends this: when source and destination are
+        // hard links to the SAME inode, rename does nothing and reports
+        // success — so the cinfo must also show no change (pynfs RNM20).
+        #[cfg(unix)]
+        if !is_self_rename {
+            use std::os::unix::fs::MetadataExt;
+            if let (Ok(s), Ok(d)) = (source_path.symlink_metadata(), dest_path.symlink_metadata()) {
+                if s.dev() == d.dev() && s.ino() == d.ino() && !s.file_type().is_symlink() {
+                    is_self_rename = true;
+                }
+            }
+        }
 
         // Pre-check destination: if it exists, semantics depend on the types
         // of source and dest (RFC 5661 §18.26.4):
@@ -3068,8 +3294,16 @@ impl FileOperationHandler {
     ) -> LinkRes {
         debug!("LINK: new name={}", op.newname);
 
-        // Check current filehandle (existing file to link to)
-        let file_fh = match &ctx.current_fh {
+        if let Some(status) = validate_component_name(&op.newname) {
+            warn!("LINK: invalid new name → {:?}", status);
+            return LinkRes { status, change_info: None };
+        }
+
+        // RFC 8881 §18.9.3: the file to link is the SAVED filehandle; the
+        // target directory is the CURRENT filehandle (clients send
+        // PUTFH(file) SAVEFH PUTFH(dir) LINK). These were swapped, so every
+        // LINK tried to hard-link the directory → EPERM → NFS4ERR_ACCESS.
+        let file_fh = match &ctx.saved_fh {
             Some(fh) => fh,
             None => {
                 return LinkRes {
@@ -3079,8 +3313,7 @@ impl FileOperationHandler {
             }
         };
 
-        // Check saved filehandle (target directory for new link)
-        let target_dir_fh = match &ctx.saved_fh {
+        let target_dir_fh = match &ctx.current_fh {
             Some(fh) => fh,
             None => {
                 return LinkRes {
@@ -3352,5 +3585,122 @@ mod tests {
         let res = handler.handle_access(op, &ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
         assert_ne!(res.access, 0);
+    }
+
+    /// Encode a fattr4 value stream the way a client would: values packed
+    /// in ascending attr-number order.
+    fn fattr_bytes(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    #[test]
+    fn settable_attrs_decode_mode_only() {
+        // chmod 0644: bitmap [0, 1<<(33-32)], value = u32 mode. This wire
+        // shape is exactly the one the old stub misread — it took the
+        // bitmap length word (2) as the mode, so every chmod → 0o002.
+        let attrs = decode_settable_attrs(&[0, 0x2], &0o644u32.to_be_bytes()).unwrap();
+        assert_eq!(attrs.mode, Some(0o644));
+        assert_eq!(attrs.size, None);
+        assert_eq!(attrs.atime, None);
+        assert_eq!(attrs.mtime, None);
+    }
+
+    #[test]
+    fn settable_attrs_decode_size_mode_and_times() {
+        // SIZE(4) + MODE(33) + TIME_ACCESS_SET(48, server) +
+        // TIME_MODIFY_SET(54, client 1234.5678) — values in attr order.
+        let mask = [1u32 << 4, (1 << 1) | (1 << 16) | (1 << 22)];
+        let vals = fattr_bytes(&[
+            &4096u64.to_be_bytes(),      // size
+            &0o600u32.to_be_bytes(),     // mode
+            &0u32.to_be_bytes(),         // atime: SET_TO_SERVER_TIME4
+            &1u32.to_be_bytes(),         // mtime: SET_TO_CLIENT_TIME4
+            &1234i64.to_be_bytes(),      //   seconds
+            &5678u32.to_be_bytes(),      //   nseconds
+        ]);
+        let attrs = decode_settable_attrs(&mask, &vals).unwrap();
+        assert_eq!(attrs.size, Some(4096));
+        assert_eq!(attrs.mode, Some(0o600));
+        assert_eq!(attrs.atime, Some(SetTime::ServerTime));
+        assert_eq!(attrs.mtime, Some(SetTime::ClientTime { seconds: 1234, nseconds: 5678 }));
+    }
+
+    #[test]
+    fn settable_attrs_decode_owner_consumed_not_applied() {
+        // OWNER(36) precedes TIME_MODIFY_SET(54); its opaque bytes must be
+        // consumed (with XDR padding) or the time decodes garbage.
+        let mask = [0u32, (1 << 4) | (1 << 22)];
+        let vals = fattr_bytes(&[
+            &5u32.to_be_bytes(), b"1000\0\0\0\0"[..8].as_ref(), // owner "1000\0" + pad to 8
+            &0u32.to_be_bytes(),                                 // mtime: server time
+        ]);
+        let attrs = decode_settable_attrs(&mask, &vals).unwrap();
+        assert_eq!(attrs.mtime, Some(SetTime::ServerTime));
+        assert_eq!(attrs.mode, None);
+    }
+
+    #[test]
+    fn settable_attrs_reject_readonly_and_unsupported() {
+        // TYPE (attr 1) is read-only → INVAL.
+        assert_eq!(
+            decode_settable_attrs(&[1 << 1], &2u32.to_be_bytes()).unwrap_err(),
+            Nfs4Status::Inval
+        );
+        // ACL (attr 12) is writable-but-unsupported → ATTRNOTSUPP.
+        assert_eq!(
+            decode_settable_attrs(&[1 << 12], &0u32.to_be_bytes()).unwrap_err(),
+            Nfs4Status::AttrNotsupp
+        );
+        // Truncated value stream → BADXDR.
+        assert_eq!(
+            decode_settable_attrs(&[0, 0x2], &[0u8; 2]).unwrap_err(),
+            Nfs4Status::BadXdr
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn apply_settable_attrs_chmod_truncate_times() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("f");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let want = SettableAttrs {
+            size: Some(5),
+            mode: Some(0o640),
+            atime: None,
+            mtime: Some(SetTime::ClientTime { seconds: 1_000_000, nseconds: 0 }),
+        };
+        let (applied, err) = apply_settable_attrs(&path, &want);
+        assert_eq!(err, None);
+        let mut sorted = applied.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![FATTR4_SIZE, FATTR4_MODE, FATTR4_TIME_MODIFY_SET]);
+
+        let meta = path.metadata().unwrap();
+        assert_eq!(meta.len(), 5);
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o640);
+        assert_eq!(
+            meta.modified().unwrap(),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000)
+        );
+
+        // Truncating a directory reports ISDIR and applies nothing else.
+        let (applied, err) = apply_settable_attrs(
+            temp.path(),
+            &SettableAttrs { size: Some(0), ..Default::default() },
+        );
+        assert_eq!(err, Some(Nfs4Status::IsDir));
+        assert!(applied.is_empty());
+    }
+
+    #[test]
+    fn attr_bitmap_roundtrip() {
+        assert_eq!(attr_numbers_to_bitmap(&[]), Vec::<u32>::new());
+        assert_eq!(
+            attr_numbers_to_bitmap(&[FATTR4_SIZE, FATTR4_MODE, FATTR4_TIME_MODIFY_SET]),
+            vec![1 << 4, (1 << 1) | (1 << 22)]
+        );
     }
 }

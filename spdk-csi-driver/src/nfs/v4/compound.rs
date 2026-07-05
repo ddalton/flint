@@ -471,7 +471,7 @@ pub enum OperationResult {
 
     // Attributes
     GetAttr(Nfs4Status, Option<Bytes>),   // encoded attributes
-    SetAttr(Nfs4Status),
+    SetAttr(Nfs4Status, Vec<u32> /* attrsset bitmap words */),
     Verify(Nfs4Status),
     Nverify(Nfs4Status),
     Access(Nfs4Status, Option<(u32, u32)>),  // (supported, access granted)
@@ -545,7 +545,7 @@ impl OperationResult {
             OperationResult::Write(s, _) => *s,
             OperationResult::Commit(s, _) => *s,
             OperationResult::GetAttr(s, _) => *s,
-            OperationResult::SetAttr(s) => *s,
+            OperationResult::SetAttr(s, _) => *s,
             OperationResult::Verify(s) => *s,
             OperationResult::Nverify(s) => *s,
             OperationResult::Access(s, _) => *s,
@@ -1852,15 +1852,15 @@ impl CompoundResponse {
                     }
                 }
             }
-            OperationResult::SetAttr(status) => {
+            OperationResult::SetAttr(status, attrsset) => {
                 // RFC 5661 §18.30.2: SETATTR4res = { status, bitmap4 attrsset }.
-                // The bitmap is required regardless of status (it's empty when
-                // nothing was actually set). Without it, the client's XDR
-                // decoder hits EOF parsing the next op result and the whole
-                // COMPOUND is unreadable.
+                // The bitmap is required regardless of status (on error it
+                // reports the attrs applied before the failure). Without it,
+                // the client's XDR decoder hits EOF parsing the next op
+                // result and the whole COMPOUND is unreadable.
                 encoder.encode_u32(opcode::SETATTR);
                 encoder.encode_status(status);
-                encoder.encode_u32(0);  // attrsset bitmap length = 0
+                encoder.encode_bitmap(&attrsset);
             }
             OperationResult::Verify(status) => {
                 // RFC 5661 §18.30.2: VERIFY4res = nfsstat4 only.
