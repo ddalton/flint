@@ -142,7 +142,20 @@ impl NfsServer {
     /// Create a new NFSv4.2 server
     pub fn new(config: NfsConfig) -> std::io::Result<Self> {
         // Initialize NFSv4.2 components
-        let fh_mgr = Arc::new(FileHandleManager::new(config.export_path.clone()));
+        // Filehandles embed the instance id, so it must be stable across
+        // restarts or every client-held handle goes ESTALE on a bounce and
+        // persisted lock/stateid records stop matching their files. Prefer
+        // the pNFS cluster-shared env id, else derive the same per-volume id
+        // the RWX pod spec would have set — never a boot-time id.
+        let instance_id = std::env::var("PNFS_INSTANCE_ID")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| crate::rwx_nfs::stable_nfs_instance_id(&config.volume_id));
+        let fh_mgr = Arc::new(FileHandleManager::new_with_instance_id(
+            config.export_path.clone(),
+            "volume".to_string(),
+            instance_id,
+        ));
         let (backend, state_lost) = build_state_backend(&config);
         let state_mgr = Arc::new(StateManager::new(&config.volume_id, backend));
         // Locks share the state backend: their stateids always survived a

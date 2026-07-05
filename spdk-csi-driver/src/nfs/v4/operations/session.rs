@@ -644,8 +644,8 @@ impl SessionOperationHandler {
                     sessionid: op.sessionid,
                     sequenceid: op.sequenceid,
                     slotid: op.slotid,
-                    highest_slotid: session.highest_slotid,
-                    target_highest_slotid: 127,
+                    highest_slotid: session.fore_chan_maxrequests.saturating_sub(1),
+                    target_highest_slotid: session.fore_chan_maxrequests.saturating_sub(1),
                 };
             }
             crate::nfs::v4::state::session::SeqStatus::Replay { cached: None } => {
@@ -681,8 +681,15 @@ impl SessionOperationHandler {
             sessionid: op.sessionid,
             sequenceid: op.sequenceid,
             slotid: op.slotid,
-            highest_slotid: session.highest_slotid,
-            target_highest_slotid: 127, // we support up to 128 slots
+            // RFC 8881 §18.46.3: sr_highest_slotid is the highest slot id the
+            // server will currently ACCEPT (ca_maxrequests - 1), not the
+            // highest seen so far. Echoing the highest-seen value (0 on a
+            // fresh session) makes the Linux client shrink its slot table to
+            // ONE slot — and then self-deadlock after a server restart, when
+            // update_open_stateid holds the OPEN's slot while issuing a
+            // nested synchronous TEST_STATEID that waits for that same slot.
+            highest_slotid: session.fore_chan_maxrequests.saturating_sub(1),
+            target_highest_slotid: session.fore_chan_maxrequests.saturating_sub(1),
         }
     }
 
@@ -803,6 +810,13 @@ mod tests {
         // New request → cache slot recorded for the RPC layer.
         assert_eq!(ctx.cache_slot, Some((create_res.sessionid, 0)));
         assert!(ctx.replay_reply.is_none());
+        // sr_highest_slotid must advertise the full negotiated slot range
+        // (ca_maxrequests - 1), not the highest slot used so far. A Linux
+        // client shrinks its slot table to sr_highest_slotid + 1, and a
+        // one-slot table self-deadlocks post-restart when the OPEN path
+        // issues a nested TEST_STATEID while still holding its own slot.
+        assert_eq!(res.highest_slotid, 127);
+        assert_eq!(res.target_highest_slotid, 127);
     }
 
     #[test]

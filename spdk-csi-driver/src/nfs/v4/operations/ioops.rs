@@ -101,6 +101,11 @@ pub const OPEN4_SHARE_DENY_READ: u32 = 0x00000001;
 pub const OPEN4_SHARE_DENY_WRITE: u32 = 0x00000002;
 pub const OPEN4_SHARE_DENY_BOTH: u32 = 0x00000003;
 
+/// OPEN result flag: server supports POSIX-semantics byte-range locks on this
+/// file. The Linux kernel client returns ENOLCK without ever sending a LOCK op
+/// unless this bit is set in the OPEN reply (RFC 8881 §18.16.3).
+pub const OPEN4_RESULT_LOCKTYPE_POSIX: u32 = 0x00000004;
+
 pub struct OpenRes {
     pub status: Nfs4Status,
     pub stateid: Option<StateId>,
@@ -427,7 +432,7 @@ impl IoOperationHandler {
                                     before: 0,
                                     after: 1,
                                 }),
-                                result_flags: 0,
+                                result_flags: OPEN4_RESULT_LOCKTYPE_POSIX,
                                 delegation: OpenDelegationType::None,
                                 attrset: match &op.openhow {
                                     OpenHow::Create(attrs) => attrs.attrmask.clone(),
@@ -572,7 +577,7 @@ impl IoOperationHandler {
                 before: 0,
                 after: 1,
             }),
-            result_flags: 0,
+            result_flags: OPEN4_RESULT_LOCKTYPE_POSIX,
             delegation,
             attrset: vec![],
         }

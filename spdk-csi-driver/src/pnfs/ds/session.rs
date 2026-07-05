@@ -137,7 +137,10 @@ impl DsSessionManager {
             sessionid,
             sequenceid,
             slotid,
-            highest_slotid: 0,  // We're only using slot 0
+            // sr_highest_slotid = highest slot we ACCEPT (RFC 8881 §18.46.3),
+            // not highest in use. Advertising 0 shrinks the Linux client's
+            // slot table to one slot (see nfs/v4/operations/session.rs).
+            highest_slotid: self.max_slots - 1,
             target_highest_slotid: self.max_slots - 1,  // Tell client our max
             status_flags: 0,  // No special flags
         })
