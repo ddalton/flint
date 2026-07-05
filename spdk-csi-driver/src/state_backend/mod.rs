@@ -200,6 +200,29 @@ pub struct StateIdRecord {
     pub revoked: bool,
 }
 
+/// One byte-range lock (LOCK op). The lock's *stateid* was already a
+/// [`StateIdRecord`] (`state_type: Lock`) and survived restart — but the
+/// lock's substance (range, type, owner) lived only in the in-memory
+/// `LockManager`, so after a restart the stateid still validated while
+/// conflict enforcement was silently gone: a second client could take a
+/// conflicting lock the first client still believed it held. Persisting
+/// this record closes that hole; `LockManager::load_records` restores
+/// the table at startup.
+///
+/// `lock_type` uses the NFSv4 wire values (`READ_LT=1`, `WRITE_LT=2`,
+/// `READW_LT=3`, `WRITEW_LT=4`) so the record stays protocol-plain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockRecord {
+    pub other: [u8; 12],
+    pub seqid: u32,
+    pub client_id: u64,
+    pub owner: Vec<u8>,
+    pub filehandle: Vec<u8>,
+    pub lock_type: u32,
+    pub offset: u64,
+    pub length: u64,
+}
+
 /// I/O mode tag mirroring `pnfs::mds::layout::IoMode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IoModeRecord {
@@ -273,6 +296,13 @@ pub trait StateBackend: Send + Sync {
     async fn get_stateid(&self, other: &[u8; 12]) -> StateBackendResult<Option<StateIdRecord>>;
     async fn list_stateids(&self) -> StateBackendResult<Vec<StateIdRecord>>;
     async fn delete_stateid(&self, other: &[u8; 12]) -> StateBackendResult<()>;
+
+    // Byte-range locks (keyed by the lock stateid's `other`, same as
+    // the LockManager's in-memory table)
+    async fn put_lock(&self, l: &LockRecord) -> StateBackendResult<()>;
+    async fn get_lock(&self, other: &[u8; 12]) -> StateBackendResult<Option<LockRecord>>;
+    async fn list_locks(&self) -> StateBackendResult<Vec<LockRecord>>;
+    async fn delete_lock(&self, other: &[u8; 12]) -> StateBackendResult<()>;
 
     // Layouts
     async fn put_layout(&self, l: &LayoutRecord) -> StateBackendResult<()>;
@@ -374,6 +404,22 @@ mod tests {
             Some(stateid.clone())
         );
 
+        let lock = LockRecord {
+            other: [2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            seqid: 1,
+            client_id: 42,
+            owner: b"lock-owner-1".to_vec(),
+            filehandle: b"/foo/bar".to_vec(),
+            lock_type: 2, // WRITE_LT
+            offset: 4096,
+            length: 0, // to EOF
+        };
+        b.put_lock(&lock).await.unwrap();
+        assert_eq!(
+            b.get_lock(&[2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).await.unwrap(),
+            Some(lock.clone())
+        );
+
         let layout = LayoutRecord {
             stateid: [7u8; 16],
             owner_client_id: 42,
@@ -409,6 +455,7 @@ mod tests {
         assert_eq!(b.list_clients().await.unwrap().len(), 1);
         assert_eq!(b.list_sessions().await.unwrap().len(), 1);
         assert_eq!(b.list_stateids().await.unwrap().len(), 1);
+        assert_eq!(b.list_locks().await.unwrap().len(), 1);
         assert_eq!(b.list_layouts().await.unwrap().len(), 1);
 
         // Deletes are idempotent — second delete is Ok, not Err.
@@ -423,6 +470,10 @@ mod tests {
         b.delete_stateid(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).await.unwrap();
         b.delete_stateid(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).await.unwrap();
         assert!(b.get_stateid(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).await.unwrap().is_none());
+
+        b.delete_lock(&[2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).await.unwrap();
+        b.delete_lock(&[2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).await.unwrap();
+        assert!(b.get_lock(&[2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).await.unwrap().is_none());
 
         b.delete_layout(&[7u8; 16]).await.unwrap();
         b.delete_layout(&[7u8; 16]).await.unwrap();

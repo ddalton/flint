@@ -57,6 +57,7 @@ pub struct NfsServer {
     dispatcher: Arc<CompoundDispatcher>,
     gss_manager: Arc<RpcSecGssManager>,
     state_mgr: Arc<StateManager>,
+    lock_mgr: Arc<LockManager>,
 }
 
 /// Pick the NFSv4 state persistence target.
@@ -79,36 +80,45 @@ pub struct NfsServer {
 /// volume down entirely.
 fn build_state_backend(
     config: &NfsConfig,
-) -> Arc<dyn crate::state_backend::StateBackend> {
+) -> (Arc<dyn crate::state_backend::StateBackend>, bool) {
     let setting = std::env::var("FLINT_NFS_STATE").unwrap_or_default();
     select_state_backend(&setting, &config.export_path)
 }
 
+/// Returns the backend plus `state_lost: true` when a prior state DB
+/// existed but could not be used (quarantined-and-recreated, or the
+/// in-memory fallback) — pre-restart state is gone even though the
+/// backend itself is healthy. The caller gates NEW byte-range locks
+/// during grace in that case: with the lock table lost, conflict
+/// detection isn't authoritative until the reclaim window closes.
 fn select_state_backend(
     setting: &str,
     export_path: &Path,
-) -> Arc<dyn crate::state_backend::StateBackend> {
+) -> (Arc<dyn crate::state_backend::StateBackend>, bool) {
     use crate::state_backend::{memory_backend, SqliteBackend};
 
     if setting.eq_ignore_ascii_case("memory") {
         info!("💾 NFSv4 state: in-memory (FLINT_NFS_STATE=memory) — no restart survival");
-        return memory_backend();
+        return (memory_backend(), false);
     }
     let db_path = if setting.is_empty() {
         export_path.join(".flint-nfs").join("state.db")
     } else {
         PathBuf::from(setting)
     };
+    // Whether a previous incarnation left state behind — distinguishes
+    // "fresh volume, nothing to lose" from "state existed and is gone".
+    let had_prior_state = db_path.exists();
     if let Some(dir) = db_path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             tracing::error!("NFSv4 state dir {:?} not creatable ({}) — falling back to in-memory state", dir, e);
-            return memory_backend();
+            return (memory_backend(), had_prior_state);
         }
     }
     match SqliteBackend::open_durable(&db_path) {
         Ok(b) => {
             info!("💾 NFSv4 state: persistent at {:?} (synchronous=FULL)", db_path);
-            Arc::new(b)
+            (Arc::new(b), false)
         }
         Err(e) => {
             tracing::error!("NFSv4 state DB {:?} unusable ({}) — moving it aside and recreating", db_path, e);
@@ -117,11 +127,11 @@ fn select_state_backend(
             match SqliteBackend::open_durable(&db_path) {
                 Ok(b) => {
                     tracing::warn!("NFSv4 state DB recreated (prior state lost; old file at {:?})", quarantine);
-                    Arc::new(b)
+                    (Arc::new(b), had_prior_state)
                 }
                 Err(e) => {
                     tracing::error!("NFSv4 state DB recreate failed ({}) — falling back to in-memory state", e);
-                    memory_backend()
+                    (memory_backend(), had_prior_state)
                 }
             }
         }
@@ -133,24 +143,31 @@ impl NfsServer {
     pub fn new(config: NfsConfig) -> std::io::Result<Self> {
         // Initialize NFSv4.2 components
         let fh_mgr = Arc::new(FileHandleManager::new(config.export_path.clone()));
-        let state_mgr = Arc::new(StateManager::new(
-            &config.volume_id,
-            build_state_backend(&config),
-        ));
-        let lock_mgr = Arc::new(LockManager::new());
+        let (backend, state_lost) = build_state_backend(&config);
+        let state_mgr = Arc::new(StateManager::new(&config.volume_id, backend));
+        // Locks share the state backend: their stateids always survived a
+        // restart (StateIdRecord), so the lock table must too — otherwise
+        // post-restart the stateid validates while mutual exclusion is
+        // silently gone.
+        let lock_mgr = Arc::new(LockManager::with_backend(state_mgr.backend()));
+        if state_lost {
+            // A prior state DB existed but was quarantined/unreadable:
+            // the lock table is gone with it. Gate new locks in grace.
+            lock_mgr.mark_restore_failed();
+        }
 
         // Create COMPOUND dispatcher (creates handlers internally)
         let dispatcher = Arc::new(CompoundDispatcher::new(
             fh_mgr,
             state_mgr.clone(),
-            lock_mgr,
+            lock_mgr.clone(),
         ));
 
         // Initialize RPCSEC_GSS manager
         let keytab_path = std::env::var("KRB5_KTNAME").ok();
         let gss_manager = Arc::new(RpcSecGssManager::new(keytab_path));
 
-        Ok(Self { config, dispatcher, gss_manager, state_mgr })
+        Ok(Self { config, dispatcher, gss_manager, state_mgr, lock_mgr })
     }
 
     /// Start the NFSv4.2 server (TCP only - NFSv4 doesn't use UDP)
@@ -178,6 +195,17 @@ impl NfsServer {
         }
         if let Err(e) = self.state_mgr.load_from_backend().await {
             tracing::error!("NFSv4 state restore failed ({}) — starting with empty state", e);
+            // Lock state is lost with the rest: refuse NEW locks during
+            // grace so a second client can't take a range whose
+            // pre-restart holder we no longer know about.
+            self.lock_mgr.mark_restore_failed();
+        }
+        match self.state_mgr.backend().list_locks().await {
+            Ok(records) => self.lock_mgr.load_records(records),
+            Err(e) => {
+                tracing::error!("NFSv4 lock restore failed ({}) — new locks gated for grace", e);
+                self.lock_mgr.mark_restore_failed();
+            }
         }
 
         // NFSv4 doesn't need portmapper registration (uses well-known port 2049)
@@ -749,7 +777,7 @@ mod state_persistence_tests {
         let export = dir.path().to_path_buf();
 
         // ── Incarnation 1 ────────────────────────────────────────────
-        let mgr1 = StateManager::new("vol-rt", select_state_backend("", &export));
+        let mgr1 = StateManager::new("vol-rt", select_state_backend("", &export).0);
         let outcome = mgr1
             .clients
             .exchange_id(b"client-A".to_vec(), 0xfeed, 0, vec![]);
@@ -787,7 +815,7 @@ mod state_persistence_tests {
         drop(backend);
 
         // ── Incarnation 2: same DB file, fresh managers ─────────────
-        let mgr2 = StateManager::new("vol-rt", select_state_backend("", &export));
+        let mgr2 = StateManager::new("vol-rt", select_state_backend("", &export).0);
         mgr2.load_from_backend().await.unwrap();
 
         // Stateids survive — a retransmitted WRITE with the pre-bounce

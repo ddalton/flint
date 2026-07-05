@@ -26,7 +26,9 @@
 use crate::nfs::v4::protocol::*;
 use crate::nfs::v4::compound::CompoundContext;
 use crate::nfs::v4::state::{StateManager, StateType};
+use crate::state_backend::{spawn_persist, LockRecord, StateBackend};
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -111,6 +113,42 @@ pub struct Lock {
     pub range: LockRange,
 }
 
+impl Lock {
+    fn to_record(&self) -> LockRecord {
+        LockRecord {
+            other: self.stateid.other,
+            seqid: self.stateid.seqid,
+            client_id: self.client_id,
+            owner: self.owner.clone(),
+            filehandle: self.filehandle.clone(),
+            lock_type: self.lock_type as u32,
+            offset: self.range.offset,
+            length: self.range.length,
+        }
+    }
+
+    /// Inverse of [`Lock::to_record`]. `None` on an unknown lock_type —
+    /// the restore path skips (and logs) such rows rather than guessing
+    /// a lock mode.
+    fn from_record(r: &LockRecord) -> Option<Self> {
+        let lock_type = match r.lock_type {
+            1 => LockType::Read,
+            2 => LockType::Write,
+            3 => LockType::ReadWrite,
+            4 => LockType::WriteRead,
+            _ => return None,
+        };
+        Some(Lock {
+            stateid: StateId { seqid: r.seqid, other: r.other },
+            client_id: r.client_id,
+            owner: r.owner.clone(),
+            filehandle: r.filehandle.clone(),
+            lock_type,
+            range: LockRange { offset: r.offset, length: r.length },
+        })
+    }
+}
+
 /// Lock manager - tracks all active locks
 ///
 /// LOCK-FREE DESIGN using DashMap:
@@ -126,32 +164,107 @@ pub struct LockManager {
     /// Locks by filehandle (for conflict detection)
     /// Enables per-file locking - only locks on same file conflict
     locks_by_fh: DashMap<Vec<u8>, Vec<[u8; 12]>>,
+
+    /// Persistence target. `None` (tests, `new()`) keeps the historical
+    /// memory-only behavior; the server constructs with the shared
+    /// state.db backend so locks survive an NFS server-pod restart the
+    /// same way the lock STATEIDS always did. Mutations follow the
+    /// spawn_persist pattern (in-memory first, fire-and-forget persist;
+    /// see state_backend module docs for the accepted crash window).
+    backend: Option<Arc<dyn StateBackend>>,
+
+    /// `false` only when the server tried to restore lock state and the
+    /// backend was unreadable (state LOST, not merely empty). In that
+    /// degraded window, `handle_lock` refuses NEW locks for the grace
+    /// period so a second client cannot grab a range whose pre-restart
+    /// holder the server no longer knows about (RFC 8881 §9.6.3.1).
+    /// Defaults true: a fresh volume or a clean restore has nothing to
+    /// protect, and grace must not tax routine restarts.
+    restored_clean: AtomicBool,
 }
 
 impl LockManager {
-    /// Create a new lock manager
+    /// Create a new lock manager (memory-only; tests and callers that
+    /// don't need restart survival)
     pub fn new() -> Self {
         Self {
             locks: DashMap::new(),
             locks_by_fh: DashMap::new(),
+            backend: None,
+            restored_clean: AtomicBool::new(true),
         }
+    }
+
+    /// Lock manager whose mutations mirror into `backend`; pair with
+    /// [`LockManager::load_records`] at startup.
+    pub fn with_backend(backend: Arc<dyn StateBackend>) -> Self {
+        Self {
+            locks: DashMap::new(),
+            locks_by_fh: DashMap::new(),
+            backend: Some(backend),
+            restored_clean: AtomicBool::new(true),
+        }
+    }
+
+    /// Seed the table from persisted records (startup restore). Rows
+    /// with an unknown lock_type (schema from the future) are skipped
+    /// loudly rather than guessed at.
+    pub fn load_records(&self, records: Vec<LockRecord>) {
+        let mut loaded = 0usize;
+        for record in &records {
+            match Lock::from_record(record) {
+                Some(lock) => {
+                    self.insert_in_memory(lock);
+                    loaded += 1;
+                }
+                None => {
+                    warn!(
+                        "LockManager: skipping persisted lock with unknown lock_type {} (stateid {:02x?})",
+                        record.lock_type, record.other
+                    );
+                }
+            }
+        }
+        if loaded > 0 {
+            info!("LockManager restored {} byte-range locks from backend", loaded);
+        }
+    }
+
+    /// The restore path found the backend unreadable: pre-restart lock
+    /// state is LOST. New locks are refused during grace (see
+    /// `restored_clean` docs).
+    pub fn mark_restore_failed(&self) {
+        self.restored_clean.store(false, Ordering::SeqCst);
+    }
+
+    /// `false` while running with known-lost lock state.
+    pub fn restored_clean(&self) -> bool {
+        self.restored_clean.load(Ordering::SeqCst)
+    }
+
+    fn insert_in_memory(&self, lock: Lock) {
+        let stateid_key = lock.stateid.other;
+        let fh_key = lock.filehandle.clone();
+        self.locks.insert(stateid_key, lock);
+        self.locks_by_fh
+            .entry(fh_key)
+            .or_insert_with(Vec::new)
+            .push(stateid_key);
     }
 
     /// Add a lock
     ///
     /// LOCK-FREE: DashMap handles concurrent inserts without global locks
     pub fn add_lock(&self, lock: Lock) {
-        let stateid_key = lock.stateid.other;
-        let fh_key = lock.filehandle.clone();
+        let record = lock.to_record();
+        self.insert_in_memory(lock);
 
-        // Add to main lock map (lock-free insert)
-        self.locks.insert(stateid_key, lock);
-
-        // Add to filehandle index (lock-free update)
-        self.locks_by_fh
-            .entry(fh_key)
-            .or_insert_with(Vec::new)
-            .push(stateid_key);
+        if let Some(backend) = &self.backend {
+            let backend = Arc::clone(backend);
+            spawn_persist("lock.put", move || async move {
+                backend.put_lock(&record).await
+            });
+        }
     }
 
     /// Check for lock conflicts
@@ -212,6 +325,15 @@ impl LockManager {
             }
         }
 
+        if lock.is_some() {
+            if let Some(backend) = &self.backend {
+                let backend = Arc::clone(backend);
+                spawn_persist("lock.delete", move || async move {
+                    backend.delete_lock(&stateid_key).await
+                });
+            }
+        }
+
         lock
     }
 
@@ -220,6 +342,33 @@ impl LockManager {
     /// LOCK-FREE: Lock-free read, no blocking on concurrent operations
     pub fn get_lock(&self, stateid: &StateId) -> Option<Lock> {
         self.locks.get(&stateid.other).map(|r| r.clone())
+    }
+
+    /// Find a lock identical in everything but stateid — the reclaim
+    /// path's idempotency probe: a client re-LOCKing state the server
+    /// already restored must get the restored lock back, not a
+    /// self-conflict denial.
+    pub fn find_matching(
+        &self,
+        client_id: u64,
+        owner: &[u8],
+        filehandle: &[u8],
+        lock_type: LockType,
+        range: &LockRange,
+    ) -> Option<Lock> {
+        let stateids = self.locks_by_fh.get(filehandle)?;
+        for key in stateids.value() {
+            if let Some(lock) = self.locks.get(key) {
+                if lock.client_id == client_id
+                    && lock.owner == owner
+                    && lock.lock_type == lock_type
+                    && lock.range == *range
+                {
+                    return Some(lock.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Get all locks for a client
@@ -383,17 +532,6 @@ impl LockOperationHandler {
             };
         }
 
-        // Check if this is a lock reclaim (after server reboot)
-        if op.reclaim {
-            if !self.state_mgr.leases.in_grace_period() {
-                return LockRes {
-                    status: Nfs4Status::NoGrace,
-                    stateid: None,
-                    denied: None,
-                };
-            }
-        }
-
         // RFC 5661 §18.10.3: `length == 0` is reserved to mean "lock from
         // offset to EOF". For any non-zero length, `offset + length` MUST not
         // overflow u64; if it does, the server MUST return NFS4ERR_INVAL.
@@ -411,6 +549,67 @@ impl LockOperationHandler {
             offset: op.offset,
             length: op.length,
         };
+
+        // Resolve the owning client from the SEQUENCE-set session id. Without
+        // this, every client's locks were tagged to a hardcoded `client_id=1`,
+        // which made multi-client RWX scenarios silently share lock state and
+        // caused one client's lease expiry to wipe everyone else's locks.
+        let client_id = match ctx.session_id.and_then(|sid|
+            self.state_mgr.sessions.get_session(&sid).map(|s| s.client_id)
+        ) {
+            Some(id) => id,
+            None => {
+                warn!("LOCK: no session in context, returning NFS4ERR_BAD_SESSION");
+                return LockRes {
+                    status: Nfs4Status::BadSession,
+                    stateid: None,
+                    denied: None,
+                };
+            }
+        };
+
+        // Lock reclaim (client detected a server reboot). Only legal in
+        // grace; and if the server RESTORED this exact lock from the
+        // backend, hand the restored stateid back instead of letting the
+        // reclaim self-conflict below.
+        if op.reclaim {
+            if !self.state_mgr.leases.in_grace_period() {
+                return LockRes {
+                    status: Nfs4Status::NoGrace,
+                    stateid: None,
+                    denied: None,
+                };
+            }
+            if let Some(existing) = self.lock_mgr.find_matching(
+                client_id,
+                &op.owner,
+                &current_fh.data,
+                op.locktype,
+                &range,
+            ) {
+                info!("LOCK: reclaim matched restored lock; returning existing stateid");
+                return LockRes {
+                    status: Nfs4Status::Ok,
+                    stateid: Some(existing.stateid),
+                    denied: None,
+                };
+            }
+        } else if !self.lock_mgr.restored_clean()
+            && self.state_mgr.leases.in_grace_period()
+        {
+            // RFC 8881 §9.6.3.1: the server restarted WITHOUT its lock
+            // state (backend unreadable) — a new lock granted now could
+            // stomp a pre-restart holder we no longer know about. Refuse
+            // new locks until grace ends; reclaims (above) still work.
+            // A clean restore never takes this branch: the restored
+            // table makes conflict detection authoritative again.
+            warn!("LOCK: refusing new lock during degraded grace (lock state lost at restart)");
+            return LockRes {
+                status: Nfs4Status::Grace,
+                stateid: None,
+                denied: None,
+            };
+        }
 
         // Check for conflicts
         if let Some(conflicting_lock) = self.lock_mgr.check_conflicts(
@@ -431,24 +630,6 @@ impl LockOperationHandler {
                 }),
             };
         }
-
-        // Resolve the owning client from the SEQUENCE-set session id. Without
-        // this, every client's locks were tagged to a hardcoded `client_id=1`,
-        // which made multi-client RWX scenarios silently share lock state and
-        // caused one client's lease expiry to wipe everyone else's locks.
-        let client_id = match ctx.session_id.and_then(|sid|
-            self.state_mgr.sessions.get_session(&sid).map(|s| s.client_id)
-        ) {
-            Some(id) => id,
-            None => {
-                warn!("LOCK: no session in context, returning NFS4ERR_BAD_SESSION");
-                return LockRes {
-                    status: Nfs4Status::BadSession,
-                    stateid: None,
-                    denied: None,
-                };
-            }
-        };
 
         let lock_stateid = self.state_mgr.stateids.allocate(
             StateType::Lock,
@@ -875,5 +1056,200 @@ mod tests {
 
         let res2 = handler.handle_lock(lock_op2, &ctx);
         assert_eq!(res2.status, Nfs4Status::Ok);
+    }
+
+    // ── Lock persistence (restart survival) ─────────────────────────────
+    //
+    // The lock STATEIDS always survived a restart (StateIdRecord); these
+    // pin that the lock TABLE now does too — the pre-fix behavior was a
+    // post-restart server that validated the client's lock stateid while
+    // silently enforcing nothing (a second client could take a
+    // conflicting lock the first still believed it held).
+
+    use crate::state_backend::{memory_backend, StateBackend};
+
+    /// spawn_persist is fire-and-forget; give the spawned puts/deletes a
+    /// bounded window to land in the backend.
+    async fn settle(backend: &Arc<dyn StateBackend>, want: usize) {
+        for _ in 0..200 {
+            if backend.list_locks().await.unwrap().len() == want {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    fn mk_lock(other: u8, client_id: u64, offset: u64, length: u64) -> Lock {
+        Lock {
+            stateid: StateId { seqid: 1, other: [other; 12] },
+            client_id,
+            owner: format!("owner-{}", client_id).into_bytes(),
+            filehandle: b"/data/file".to_vec(),
+            lock_type: LockType::Write,
+            range: LockRange { offset, length },
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn locks_survive_a_manager_generation() {
+        let backend = memory_backend();
+
+        // Generation 1: grant two locks, release one.
+        let mgr1 = LockManager::with_backend(Arc::clone(&backend));
+        mgr1.add_lock(mk_lock(1, 42, 0, 1024));
+        mgr1.add_lock(mk_lock(2, 43, 4096, 0));
+        settle(&backend, 2).await;
+        mgr1.remove_lock(&StateId { seqid: 1, other: [2; 12] });
+        settle(&backend, 1).await;
+        assert_eq!(backend.list_locks().await.unwrap().len(), 1);
+        drop(mgr1);
+
+        // Generation 2: restart. The restored table enforces the
+        // surviving lock and has forgotten the released one.
+        let mgr2 = LockManager::with_backend(Arc::clone(&backend));
+        mgr2.load_records(backend.list_locks().await.unwrap());
+        assert!(mgr2.restored_clean());
+
+        let restored = mgr2
+            .get_lock(&StateId { seqid: 0, other: [1; 12] })
+            .expect("lock must survive the restart");
+        assert_eq!(restored.client_id, 42);
+        assert_eq!(restored.range, LockRange { offset: 0, length: 1024 });
+
+        // Conflict detection is authoritative again: the range the
+        // restored lock covers is denied to another owner...
+        assert!(mgr2
+            .check_conflicts(b"/data/file", &LockRange { offset: 512, length: 100 }, LockType::Write, None)
+            .is_some());
+        // ...and the released lock's range is free.
+        assert!(mgr2
+            .check_conflicts(b"/data/file", &LockRange { offset: 8192, length: 100 }, LockType::Write, None)
+            .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_lock_wipe_deletes_persisted_records() {
+        let backend = memory_backend();
+        let mgr = LockManager::with_backend(Arc::clone(&backend));
+        mgr.add_lock(mk_lock(1, 42, 0, 100));
+        mgr.add_lock(mk_lock(2, 42, 200, 100));
+        mgr.add_lock(mk_lock(3, 99, 400, 100));
+        settle(&backend, 3).await;
+
+        // Lease expiry path: the dispatcher's courtesy-cleanup calls this.
+        mgr.remove_client_locks(42);
+        settle(&backend, 1).await;
+
+        let left = backend.list_locks().await.unwrap();
+        assert_eq!(left.len(), 1, "only the other client's lock remains");
+        assert_eq!(left[0].client_id, 99);
+    }
+
+    #[test]
+    fn degraded_grace_gates_new_locks_but_not_reclaims() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        let open_stateid = create_test_stateid(&handler, 1);
+
+        // Restart with LOST lock state (unreadable backend). A fresh
+        // LeaseManager is inside its grace window by construction.
+        handler.lock_mgr.mark_restore_failed();
+        assert!(handler.state_mgr.leases.in_grace_period());
+
+        let new_lock = LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 1024,
+            stateid: open_stateid,
+            owner: b"owner1".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        };
+        let res = handler.handle_lock(new_lock, &ctx);
+        assert_eq!(
+            res.status,
+            Nfs4Status::Grace,
+            "new locks must wait out grace when pre-restart lock state is lost"
+        );
+
+        // A reclaim in the same window is the recovery path — it grants.
+        let reclaim = LockOp {
+            locktype: LockType::Write,
+            reclaim: true,
+            offset: 0,
+            length: 1024,
+            stateid: create_test_stateid(&handler, 1),
+            owner: b"owner1".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        };
+        let res = handler.handle_lock(reclaim, &ctx);
+        assert_eq!(res.status, Nfs4Status::Ok);
+        assert!(res.stateid.is_some());
+    }
+
+    #[test]
+    fn clean_restore_never_gates_new_locks() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+
+        // restored_clean defaults true (fresh volume / clean restore):
+        // grace must not tax routine restarts.
+        assert!(handler.state_mgr.leases.in_grace_period());
+        let op = LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 1024,
+            stateid: create_test_stateid(&handler, 1),
+            owner: b"owner1".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        };
+        assert_eq!(handler.handle_lock(op, &ctx).status, Nfs4Status::Ok);
+    }
+
+    #[test]
+    fn reclaim_of_a_restored_lock_returns_it_instead_of_self_conflicting() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let session_id = create_test_session(&handler, 7);
+        ctx.session_id = Some(session_id);
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        let root_fh = ctx.current_fh.as_ref().unwrap().data.clone();
+
+        // Simulate a restart-restored lock for client 7.
+        let restored_stateid = StateId { seqid: 3, other: [9; 12] };
+        handler.lock_mgr.load_records(vec![crate::state_backend::LockRecord {
+            other: restored_stateid.other,
+            seqid: restored_stateid.seqid,
+            client_id: 7,
+            owner: b"owner7".to_vec(),
+            filehandle: root_fh,
+            lock_type: 2, // WRITE_LT
+            offset: 0,
+            length: 4096,
+        }]);
+
+        // The client reclaims the same lock: it must get the restored
+        // stateid back, not a Denied from colliding with itself.
+        let reclaim = LockOp {
+            locktype: LockType::Write,
+            reclaim: true,
+            offset: 0,
+            length: 4096,
+            stateid: create_test_stateid(&handler, 7),
+            owner: b"owner7".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        };
+        let res = handler.handle_lock(reclaim, &ctx);
+        assert_eq!(res.status, Nfs4Status::Ok);
+        assert_eq!(res.stateid, Some(restored_stateid));
     }
 }

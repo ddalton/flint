@@ -12,7 +12,8 @@
 //! cost is paid only on writes.
 
 use super::{
-    ClientRecord, LayoutRecord, SessionRecord, StateBackend, StateBackendResult, StateIdRecord,
+    ClientRecord, LayoutRecord, LockRecord, SessionRecord, StateBackend, StateBackendResult,
+    StateIdRecord,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -26,6 +27,7 @@ pub struct MemoryBackend {
     clients: DashMap<u64, ClientRecord>,
     sessions: DashMap<[u8; 16], SessionRecord>,
     stateids: DashMap<[u8; 12], StateIdRecord>,
+    locks: DashMap<[u8; 12], LockRecord>,
     layouts: DashMap<[u8; 16], LayoutRecord>,
     instance_counter: AtomicU64,
     /// Lazily-initialised per-deployment server id. `OnceLock` makes
@@ -93,6 +95,24 @@ impl StateBackend for MemoryBackend {
 
     async fn delete_stateid(&self, other: &[u8; 12]) -> StateBackendResult<()> {
         self.stateids.remove(other);
+        Ok(())
+    }
+
+    async fn put_lock(&self, l: &LockRecord) -> StateBackendResult<()> {
+        self.locks.insert(l.other, l.clone());
+        Ok(())
+    }
+
+    async fn get_lock(&self, other: &[u8; 12]) -> StateBackendResult<Option<LockRecord>> {
+        Ok(self.locks.get(other).map(|r| r.clone()))
+    }
+
+    async fn list_locks(&self) -> StateBackendResult<Vec<LockRecord>> {
+        Ok(self.locks.iter().map(|r| r.clone()).collect())
+    }
+
+    async fn delete_lock(&self, other: &[u8; 12]) -> StateBackendResult<()> {
+        self.locks.remove(other);
         Ok(())
     }
 

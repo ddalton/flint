@@ -45,7 +45,7 @@
 
 use super::{
     CachedCreateSessionResRecord, ClientRecord, IoModeRecord, LayoutRecord, LayoutSegmentRecord,
-    SessionRecord, StateBackend, StateBackendError, StateBackendResult, StateIdRecord,
+    LockRecord, SessionRecord, StateBackend, StateBackendError, StateBackendResult, StateIdRecord,
     StateTypeRecord,
 };
 use async_trait::async_trait;
@@ -68,7 +68,13 @@ use std::sync::{Arc, Mutex};
 ///        which clients have already done RECLAIM_COMPLETE — without
 ///        this, a second RECLAIM_COMPLETE would silently succeed
 ///        instead of returning `NFS4ERR_COMPLETE_ALREADY`.
-const SCHEMA_VERSION: i64 = 3;
+///   4 → add `locks` (byte-range lock table). Lock STATEIDS already
+///        persisted (v1 `stateids` rows with state_type=Lock) but the
+///        lock substance was memory-only, so after a restart the
+///        stateid validated while mutual exclusion was silently gone.
+///        New table only — handled by the schema-batch's CREATE TABLE
+///        IF NOT EXISTS, like v1 → v2.
+const SCHEMA_VERSION: i64 = 4;
 
 /// Single-file SQLite [`StateBackend`].
 pub struct SqliteBackend {
@@ -202,6 +208,10 @@ impl SqliteBackend {
                         })?;
                     }
                     tracing::info!("SqliteBackend: migrating schema → 3 (clients.reclaim_complete)");
+                }
+                if prev < 4 {
+                    // locks table: created by the schema-batch above.
+                    tracing::info!("SqliteBackend: migrating schema → 4 (locks table)");
                 }
                 conn.execute(
                     "UPDATE schema_version SET version = ?1 WHERE id = 1",
@@ -564,6 +574,69 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn put_lock(&self, l: &LockRecord) -> StateBackendResult<()> {
+        let l = l.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO locks
+                 (other, seqid, client_id, owner, filehandle, lock_type, offset, length)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    l.other.to_vec(),
+                    l.seqid as i64,
+                    u64_to_i64(l.client_id),
+                    l.owner,
+                    l.filehandle,
+                    l.lock_type as i64,
+                    u64_to_i64(l.offset),
+                    u64_to_i64(l.length),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_lock(&self, other: &[u8; 12]) -> StateBackendResult<Option<LockRecord>> {
+        let key = other.to_vec();
+        let row = self
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT other, seqid, client_id, owner, filehandle, lock_type, offset, length
+                     FROM locks WHERE other = ?1",
+                    params![key],
+                    decode_lock_row,
+                )
+                .optional()
+            })
+            .await?;
+        row.transpose()
+    }
+
+    async fn list_locks(&self) -> StateBackendResult<Vec<LockRecord>> {
+        let rows = self
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT other, seqid, client_id, owner, filehandle, lock_type, offset, length
+                     FROM locks",
+                )?;
+                let rows: rusqlite::Result<Vec<_>> =
+                    stmt.query_map([], decode_lock_row)?.collect();
+                rows
+            })
+            .await?;
+        rows.into_iter().collect()
+    }
+
+    async fn delete_lock(&self, other: &[u8; 12]) -> StateBackendResult<()> {
+        let key = other.to_vec();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM locks WHERE other = ?1", params![key])?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn put_layout(&self, l: &LayoutRecord) -> StateBackendResult<()> {
         let l = l.clone();
         self.with_conn(move |conn| {
@@ -783,6 +856,30 @@ fn decode_stateid_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<
     })())
 }
 
+fn decode_lock_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<LockRecord>> {
+    let other: Vec<u8> = r.get(0)?;
+    let seqid: i64 = r.get(1)?;
+    let client_id: i64 = r.get(2)?;
+    let owner: Vec<u8> = r.get(3)?;
+    let filehandle: Vec<u8> = r.get(4)?;
+    let lock_type: i64 = r.get(5)?;
+    let offset: i64 = r.get(6)?;
+    let length: i64 = r.get(7)?;
+
+    Ok((|| -> StateBackendResult<LockRecord> {
+        Ok(LockRecord {
+            other: blob_to_array::<12>(other, "lock.other")?,
+            seqid: seqid as u32,
+            client_id: i64_to_u64(client_id),
+            owner,
+            filehandle,
+            lock_type: lock_type as u32,
+            offset: i64_to_u64(offset),
+            length: i64_to_u64(length),
+        })
+    })())
+}
+
 fn decode_layout_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<LayoutRecord>> {
     let stateid: Vec<u8> = r.get(0)?;
     let owner_client_id: i64 = r.get(1)?;
@@ -854,6 +951,19 @@ CREATE TABLE IF NOT EXISTS stateids (
     client_id INTEGER NOT NULL,
     filehandle BLOB,
     revoked INTEGER NOT NULL
+);
+
+-- Schema v4: byte-range locks (see SCHEMA_VERSION docs). Keyed by the
+-- lock stateid's `other`, mirroring the in-memory LockManager table.
+CREATE TABLE IF NOT EXISTS locks (
+    other BLOB PRIMARY KEY,
+    seqid INTEGER NOT NULL,
+    client_id INTEGER NOT NULL,
+    owner BLOB NOT NULL,
+    filehandle BLOB NOT NULL,
+    lock_type INTEGER NOT NULL,
+    offset INTEGER NOT NULL,
+    length INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS layouts (
