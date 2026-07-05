@@ -15,7 +15,7 @@ images:
   repository: dilipdalton  # Docker Hub registry
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
-    tag: "1.5.0"            # dashboard release: URL state, UI kit, agent disk delete, epoch snapshot labeling
+    tag: "1.6.0"            # topology graph release: identity unification, lvol classification, NFS liveness reconciler
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (SPDK v26.05)
@@ -184,7 +184,7 @@ dashboard:
     port: 8080
   frontend:
     name: spdk-dashboard-frontend
-    tag: "1.5.0"      # deep-linkable URL state, primitive UI kit, code-split bundle, fabricated data removed
+    tag: "1.6.0"      # two-altitude topology graph + drawers, session survives refresh, dead buttons removed
     port: 3000
   resources:
     backend:
