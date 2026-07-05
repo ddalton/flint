@@ -2338,7 +2338,7 @@ impl CompoundDispatcher {
     #[allow(dead_code)]
     fn encode_file_layout_striped(
         segments: &[crate::pnfs::mds::layout::LayoutSegment],
-        _filehandle: &[u8],
+        filehandle: &[u8],
         stripe_unit: u64,
     ) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
@@ -2365,11 +2365,26 @@ impl CompoundDispatcher {
         device_id_bytes[0..8].copy_from_slice(&hash.to_be_bytes());
         device_id_bytes[8..16].copy_from_slice(&hash.to_be_bytes());
         
+        // Rotate the stripe pattern per file: without this every file's
+        // first stripe lands on DS[0], so any file smaller than one stripe
+        // unit (8 MiB — i.e. most files in an ML dataset) lives entirely on
+        // the first DS while the rest idle. nfl_first_stripe_index is the
+        // protocol-native rotation knob (RFC 8881 §13.4.4): the client maps
+        // stripe unit u to device (u + first_stripe_index) % N. Derived
+        // from the filehandle so it's deterministic across LAYOUTGETs,
+        // clients, and server restarts (filehandles embed the stable
+        // per-volume instance id).
+        let first_stripe_index = {
+            let mut h = DefaultHasher::new();
+            filehandle.hash(&mut h);
+            (h.finish() % segments.len() as u64) as u32
+        };
+
         info!("   🔧 Encoding STRIPED FILE layout (RFC 5661 Section 13.3):");
         info!("      Number of DSes in stripe: {}", segments.len());
         info!("      device_id binary (16 bytes): {:02x?}", device_id_bytes);
         info!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
-        info!("      first_stripe_index: 0");
+        info!("      first_stripe_index: {} (per-file rotation)", first_stripe_index);
         info!("      pattern_offset: 0");
         info!("      nfl_fh_list: empty (DSes use MDS filehandle per RFC 8881 §13.4.2)");
         
@@ -2379,8 +2394,8 @@ impl CompoundDispatcher {
         // nfl_util: stripe unit size (u32 per RFC 5661)
         encoder.encode_u32(stripe_unit as u32);
         
-        // nfl_first_stripe_index: which stripe to start with (always 0)
-        encoder.encode_u32(0);
+        // nfl_first_stripe_index: per-file rotation (see above).
+        encoder.encode_u32(first_stripe_index);
         
         // nfl_pattern_offset: offset where stripe pattern starts (always 0)
         encoder.encode_u64(0);
@@ -2999,5 +3014,40 @@ mod tests {
 
         // Different stripe_index (bytes 17-21)
         assert_ne!(&fh1[17..21], &fh2[17..21], "Different stripes should have different stripe_index");
+    }
+
+    #[test]
+    fn striped_layout_rotates_first_stripe_index_per_file() {
+        use crate::pnfs::mds::layout::{IoMode, LayoutSegment};
+        let seg = |id: &str, idx: u32| LayoutSegment {
+            offset: 0,
+            length: u64::MAX,
+            iomode: IoMode::ReadWrite,
+            device_id: id.to_string(),
+            stripe_index: idx,
+            pattern_offset: 0,
+        };
+        let segments = vec![seg("ds-1", 0), seg("ds-2", 1)];
+
+        // nfl_first_stripe_index sits after the 16-byte deviceid + 4-byte
+        // nfl_util in the encoded nfsv4_1_file_layout4.
+        let first_index = |fh: &[u8]| {
+            let enc = CompoundDispatcher::encode_file_layout_striped(&segments, fh, 8 << 20);
+            u32::from_be_bytes(enc[20..24].try_into().unwrap())
+        };
+
+        // Deterministic per file: same filehandle → same rotation.
+        assert_eq!(first_index(b"file-A"), first_index(b"file-A"));
+        // Always within the stripe count.
+        for name in [b"aa".as_ref(), b"bb", b"cc", b"dd", b"ee"] {
+            assert!(first_index(name) < segments.len() as u32);
+        }
+        // Small files must not all start on DS[0]: across a sample of
+        // filehandles both starting indices occur.
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..16u8 {
+            seen.insert(first_index(&[b'f', i]));
+        }
+        assert_eq!(seen.len(), 2, "rotation never picks the second DS");
     }
 }
