@@ -206,6 +206,17 @@ struct CachedFile {
     path: PathBuf,
 }
 
+/// Whether the server may grant delegations (FLINT_NFS_DELEGATIONS=1).
+/// Off by default: see the gate in `try_grant_read_delegation`.
+fn delegations_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FLINT_NFS_DELEGATIONS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
 /// I/O operation handler with file descriptor caching
 pub struct IoOperationHandler {
     state_mgr: Arc<StateManager>,
@@ -668,6 +679,20 @@ impl IoOperationHandler {
         filehandle: &Nfs4FileHandle,
         share_access: u32,
     ) -> OpenDelegationType {
+        // Delegations are disabled unless FLINT_NFS_DELEGATIONS=1: granting
+        // one is only safe with a working recall path (CB_NULL probe +
+        // CB_RECALL + block-conflicting-opens), which doesn't exist yet — a
+        // client holding an unrecallable read delegation may serve stale
+        // cache forever after another client writes. Never granting is
+        // fully RFC-compliant (RFC 8881 §10.4). Note the OPEN encoder
+        // currently hardcodes OPEN_DELEGATE_NONE anyway; this gate keeps
+        // the server from minting phantom delegation records the client
+        // never hears about, and keeps the trap disarmed if the encoder is
+        // ever made honest.
+        if !delegations_enabled() {
+            return OpenDelegationType::None;
+        }
+
         // Only grant read delegations for READ-only opens
         // share_access: 1 = READ, 2 = WRITE, 3 = BOTH
         if share_access != 1 {
@@ -1503,5 +1528,23 @@ mod tests {
 
         let close_res = handler.handle_close(close_op, &ctx);
         assert_eq!(close_res.status, Nfs4Status::Ok);
+    }
+
+    #[test]
+    fn read_only_open_grants_no_delegation_by_default() {
+        // Delegations are gated off (FLINT_NFS_DELEGATIONS unset): a
+        // conflict-free read-only open of an existing file — the case the
+        // grant path fires on — must yield OPEN_DELEGATE_NONE and mint no
+        // server-side delegation record. Granting without a working
+        // CB_RECALL path would let a client cache stale data forever.
+        let (handler, fh_mgr, _temp) = create_test_handler();
+
+        assert!(!delegations_enabled());
+        let delegation = handler.try_grant_read_delegation(
+            1,
+            &fh_mgr.get_root_fh().unwrap(),
+            OPEN4_SHARE_ACCESS_READ,
+        );
+        assert_eq!(delegation, OpenDelegationType::None);
     }
 }
