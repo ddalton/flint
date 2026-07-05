@@ -1,7 +1,8 @@
-// Central API client: holds the bearer token in memory (never localStorage —
-// a page refresh re-authenticates) and stamps every request. A 401 from any
-// endpoint clears the session and notifies the auth hook so the app returns
-// to the login page.
+// Central API client: holds the bearer token in sessionStorage (per-tab,
+// gone when the tab closes — never localStorage) and stamps every request.
+// A page refresh restores the session; the first 401 (expired/revoked
+// token, backend restart) clears it and notifies the auth hook so the app
+// returns to the login page.
 
 import type { components } from './schema';
 
@@ -13,10 +14,36 @@ interface Session {
   role: Role;
 }
 
-let session: Session | null = null;
+const STORAGE_KEY = 'flint-dashboard-session';
+
+const loadSession = (): Session | null => {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Session) : null;
+  } catch {
+    return null;
+  }
+};
+
+let session: Session | null = loadSession();
 let onSessionExpired: (() => void) | null = null;
 
+// Storage failures (private mode, quota) degrade to the old
+// in-memory-only behavior rather than breaking login.
+const storeSession = (next: Session | null) => {
+  session = next;
+  try {
+    if (next) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    else sessionStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* in-memory only */
+  }
+};
+
 export const getRole = (): Role | null => session?.role ?? null;
+
+/** A restored (or live) session exists — the app can boot past login. */
+export const hasSession = (): boolean => session !== null;
 
 export const setOnSessionExpired = (cb: (() => void) | null) => {
   onSessionExpired = cb;
@@ -43,12 +70,12 @@ export const login = async (username: string, password: string): Promise<Role> =
     );
   }
   const body: components['schemas']['LoginResponse'] = await response.json();
-  session = { token: body.token, role: body.role };
+  storeSession({ token: body.token, role: body.role });
   return body.role;
 };
 
 export const logout = () => {
-  session = null;
+  storeSession(null);
 };
 
 /** Drop-in replacement for fetch() that carries the bearer token. */
@@ -59,7 +86,7 @@ export const apiFetch = async (path: string, init: RequestInit = {}): Promise<Re
   }
   const response = await fetch(path, { ...init, headers });
   if (response.status === 401) {
-    session = null;
+    storeSession(null);
     onSessionExpired?.();
   }
   return response;

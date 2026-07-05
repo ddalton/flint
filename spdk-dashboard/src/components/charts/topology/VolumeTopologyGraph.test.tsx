@@ -6,6 +6,8 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { VolumeTopologyGraph } from './VolumeTopologyGraph';
+import { TopologyDrawer } from './TopologyDrawer';
+import { joinMembers } from './buildTopology';
 import type { Disk, ReplicaStatus, Volume } from '../../../hooks/useDashboardData';
 
 function mkVolume(): Volume {
@@ -91,6 +93,54 @@ describe('VolumeTopologyGraph', () => {
     // call target.hasAttribute, which Document doesn't implement in jsdom.
     fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('renders — not "Invalid Date" — when a provisioned entry has no PVC timestamp', () => {
+    const volume = mkVolume();
+    const disk = {
+      allocated_space: 2,
+      blobstore_initialized: true,
+      brought_online: '2026-07-01T00:00:00Z',
+      capacity: 1_000_000_000_000,
+      capacity_gb: 931,
+      device_type: 'nvme',
+      free_space: 900,
+      free_space_display: '900 GB',
+      healthy: true,
+      id: 'w1-nvme0',
+      is_system_disk: false,
+      lvol_count: 1,
+      model: 'X',
+      node: 'worker-1',
+      orphaned_spdk_volumes: [],
+      pci_addr: '0000:00:1f.0',
+      provisioned_volumes: [
+        {
+          // Statically provisioned PV: backend sends an empty timestamp
+          provisioned_at: '',
+          replica_type: 'replica',
+          size: 1024,
+          status: 'healthy',
+          volume_id: volume.id,
+          volume_name: volume.name,
+        },
+      ],
+      read_iops: 0,
+      read_latency: 0,
+      write_iops: 0,
+      write_latency: 0,
+    } as Disk;
+
+    const join = joinMembers(volume, [disk])[0]!;
+    render(
+      <TopologyDrawer
+        volume={volume}
+        detail={{ kind: 'disk', disk, join }}
+        onClose={() => {}}
+      />
+    );
+    expect(screen.getByText('—')).toBeInTheDocument();
+    expect(screen.queryByText(/Invalid Date/)).not.toBeInTheDocument();
   });
 
   it('opens the educational drawer from the About button', () => {

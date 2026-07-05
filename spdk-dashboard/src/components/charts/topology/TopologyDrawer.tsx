@@ -329,7 +329,10 @@ function DetailBody({ volume, detail }: { volume: Volume; detail: TopologyDetail
               <Row k="Type">{provisioned.replica_type}</Row>
               <Row k="Status">{provisioned.status}</Row>
               <Row k="Provisioned">
-                {new Date(provisioned.provisioned_at).toLocaleString()}
+                {/* Empty when the PV has no PVC (statically provisioned) */}
+                {provisioned.provisioned_at
+                  ? new Date(provisioned.provisioned_at).toLocaleString()
+                  : '—'}
               </Row>
             </Section>
           )}

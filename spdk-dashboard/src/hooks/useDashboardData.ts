@@ -331,10 +331,12 @@ export const transformBackendData = (backendData: Schemas['DashboardData']): Das
   };
 };
 
-// Authentication hook (unchanged)
+// Authentication hook. Boots authenticated when a sessionStorage session
+// survived the refresh — if its token is stale (backend restarted), the
+// first API call 401s and the expiry hook drops back to login.
 export const useAuth = () => {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [role, setRole] = useState<api.Role | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(api.hasSession());
+  const [role, setRole] = useState<api.Role | null>(api.getRole());
   const [loading, setLoading] = useState(false);
 
   // Any API call answering 401 (expired/revoked token, backend restart)

@@ -1911,10 +1911,10 @@ async fn proxy_node_agent_endpoint(
                     }
                 } else {
                     println!("   ❌ Node agent returned error status: {}", status);
-                    Ok(warp::reply::with_status(
-                        warp::reply::json(&json!({"success": false, "error": format!("Node agent returned: {}", status)})),
-                        warp::http::StatusCode::BAD_GATEWAY
-                    ))
+                    // Pass the agent's verdict through, status and body alike —
+                    // a refusal (e.g. 409 "lvols exist" from /disks/delete) is
+                    // the operator-facing reason, not a gateway fault.
+                    Ok(agent_error_passthrough(status, response).await)
                 }
             }
             Err(e) => {
@@ -1932,6 +1932,29 @@ async fn proxy_node_agent_endpoint(
             warp::http::StatusCode::NOT_FOUND
         ))
     }
+}
+
+/// Relay a node agent's non-success response verbatim: same status code,
+/// same JSON body (non-JSON bodies are wrapped). Anything that can't map
+/// onto an HTTP status degrades to 502.
+async fn agent_error_passthrough(
+    status: reqwest::StatusCode,
+    response: reqwest::Response,
+) -> warp::reply::WithStatus<warp::reply::Json> {
+    let passthrough_status = warp::http::StatusCode::from_u16(status.as_u16())
+        .unwrap_or(warp::http::StatusCode::BAD_GATEWAY);
+    let bytes = response.bytes().await.unwrap_or_default();
+    let body = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(|_| {
+        json!({
+            "success": false,
+            "error": if bytes.is_empty() {
+                format!("Node agent returned: {}", status)
+            } else {
+                String::from_utf8_lossy(&bytes).to_string()
+            }
+        })
+    });
+    warp::reply::with_status(warp::reply::json(&body), passthrough_status)
 }
 
 /// Proxy node agent endpoints with longer timeout for disk operations
@@ -1975,7 +1998,8 @@ async fn proxy_node_agent_endpoint_long(
         
         match result {
             Ok(response) => {
-                if response.status().is_success() {
+                let status = response.status();
+                if status.is_success() {
                     match response.json::<serde_json::Value>().await {
                         Ok(data) => Ok(warp::reply::with_status(
                             warp::reply::json(&data),
@@ -1987,10 +2011,9 @@ async fn proxy_node_agent_endpoint_long(
                         ))
                     }
                 } else {
-                    Ok(warp::reply::with_status(
-                        warp::reply::json(&json!({"success": false, "error": format!("Node agent returned: {}", response.status())})),
-                        warp::http::StatusCode::BAD_GATEWAY
-                    ))
+                    // Same passthrough as the short proxy: the agent's 409
+                    // refusal reason must reach the operator.
+                    Ok(agent_error_passthrough(status, response).await)
                 }
             }
             Err(e) => {

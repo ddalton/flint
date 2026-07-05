@@ -1,6 +1,6 @@
 import React from 'react';
-import { 
-  Shield, Info, CheckCircle, Server, Copy, Trash2
+import {
+  Shield, Info, CheckCircle, Server
 } from 'lucide-react';
 import type { SnapshotDetails } from './types';
 
@@ -193,29 +193,16 @@ export const SnapshotDetailModal: React.FC<SnapshotDetailModalProps> = ({
           </div>
         </div>
 
-        {/* Modal Footer */}
+        {/* Modal Footer. No Delete/Clone here: this view is SPDK-level and
+            has no VolumeSnapshot CR reference — user snapshots are deleted
+            from the timeline view, whose CR-path delete keeps the CR and
+            the SPDK content in step. */}
         <div className="flex items-center justify-end gap-3 p-6 border-t">
           <button
             onClick={onClose}
             className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md"
           >
             Close
-          </button>
-          <button
-            className="px-4 py-2 bg-blue-600 text-white hover:bg-blue-700 rounded-md flex items-center gap-2"
-            disabled
-            title="Clone functionality coming soon"
-          >
-            <Copy className="w-4 h-4" />
-            Clone Snapshot
-          </button>
-          <button
-            className="px-4 py-2 bg-red-600 text-white hover:bg-red-700 rounded-md flex items-center gap-2"
-            disabled
-            title="Delete functionality coming soon"
-          >
-            <Trash2 className="w-4 h-4" />
-            Delete
           </button>
         </div>
       </div>
