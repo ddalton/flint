@@ -104,6 +104,45 @@ file system`), the replacement raced the lazy unmount and inherited a
 stale staging mount: delete the pod again and let termination finish
 (`--wait=true`) before the replacement schedules.
 
+## Replica failure underneath a DS (the durability payoff)
+
+Drill: `tests/k8s/pnfs-drills/replica-under-ds.sh`. With the DS PVC on
+a `numReplicas: 2` StorageClass, losing one raid leg is **invisible to
+pNFS clients**: measured — raid degrades to 1/2 but stays online, the
+DS keeps serving (files kept landing on it all through the degraded
+window), zero client errors, 1 s stall, checksums clean.
+
+Leg recovery (after the underlying fault is fixed) is initiator-side
+on the DS's node, via `rpc.py` in that node's spdk-tgt container:
+
+    bdev_nvme_attach_controller -b <ctrl> -t tcp -a <leg-node-ip> -s 4420 \
+      -f ipv4 -n nqn.2024-11.com.flint:volume:<pv>_1 \
+      -q nqn.2024-11.com.flint:node:<ds-node>
+    bdev_raid_add_base_bdev raid_<pv> <ctrl>n1
+
+then confirm `bdev_raid_get_bdevs all` shows 2/2 online. (Target-side
+leg failures go through the Tier-2 rebuild machinery instead — see
+docs/tier2-operator-runbook.md.)
+
+To move an existing fleet's NEW ordinals onto a replicated SC: the
+StatefulSet claim template is immutable — `kubectl delete sts
+flint-pnfs-ds --cascade=orphan`, then helm upgrade with the new
+`pnfs.server.dataServers.storage.storageClassName` and count. Existing
+PVCs keep their old SC; only new ordinals get the replicated one.
+
+## Placement pins are per file-key, forever
+
+Placements pin at first LAYOUTGET and persist in sqlite. Two
+operational consequences:
+
+- pNFS pods mount the **export root**, so file names are a global
+  namespace: re-creating a file with a name that was striped under an
+  older, narrower fleet reuses the OLD pin (correct, but the file
+  won't use new DSes). Benchmarks and drills must use unique names.
+- NFS `REMOVE` (rm) does not currently forget the pin — only CSI
+  DeleteVolume does. A recreated same-name file inherits the old
+  stripe map. Tracked as a follow-up in the durable-DS plan.
+
 ## Scaling the DS fleet
 
 UP is safe: `--set pnfs.server.dataServers.count=N+1`. Existing files

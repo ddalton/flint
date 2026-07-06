@@ -513,7 +513,7 @@ drill campaigns):
 runbook sections landed in `docs/tier2-operator-runbook.md` or a new
 `docs/pnfs-operator-runbook.md`.
 
-### Status: 3 of 4 drills green twice, runbook landed (2026-07-06)
+### Status: ALL FOUR drills green twice, runbook landed (2026-07-06)
 
 Scripted suite: `tests/k8s/pnfs-drills/` (lib.sh + one script per
 drill; kubectl-only, cluster-agnostic, KUBECONFIG + CLIENT_NODE env).
@@ -535,10 +535,24 @@ Runbook: `docs/pnfs-operator-runbook.md` with measured numbers.
   placements reload, DSes re-register on their next heartbeat, zero
   recalls, zero errors, **stall 1 s** (the MDS is out of the data
   path; kill -9 variant separately proven in the Phase 3 k8s drill).
-- **Drill 3 (replica failure under a DS): remaining.** Needs an
-  r2-backed DS (new flint-spdk-r2 SC + StatefulSet claim-template
-  change — immutable field, so orphan-delete + recreate) and a
-  leg-kill via the node agent; scoped, not yet run.
+- **Drill 3 (replica failure under a DS): GREEN ×2** (interactive +
+  scripted `replica-under-ds.sh`) — DS-3 added on a new flint-spdk-r2
+  SC (claim template is immutable: orphan-delete the STS + helm
+  upgrade recreates it; existing ordinals keep their r1 PVCs), remote
+  raid1 leg detached initiator-side mid-write: **raid degrades to 1/2
+  but stays online and the DS keeps serving — files kept landing on
+  it through the whole degraded window, zero client errors, stall
+  1 s, checksums clean**. Leg reattach + `bdev_raid_add_base_bdev` →
+  2/2. This is the lvol-backing payoff measured.
+
+Two findings from drill 3's first attempt (both now in the runbook):
+placement pins are per file-key forever, and pNFS pods share the
+export-root namespace — the drill initially reused file names pinned
+hours earlier under the 3-DS fleet, so ZERO stripes landed on the new
+DS (Phase 0 doing its job; drills/benches must use unique names). And
+**NFS REMOVE does not forget placements** — only CSI DeleteVolume
+does; a same-name recreate inherits the old stripe map. Follow-up:
+wire forget_placement into the REMOVE op.
 
 Script gotchas baked into lib.sh for posterity: `grep -q` SIGPIPEs
 producers under pipefail (let grep consume the stream); a readiness
