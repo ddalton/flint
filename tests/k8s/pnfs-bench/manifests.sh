@@ -149,6 +149,19 @@ data:
       health: { enabled: false, port: 0, path: /health }
       metrics: []
 ---
+$(if [ -n "${BENCH_STORAGE_CLASS:-}" ]; then cat <<PVCEOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pnfs-ds${i}-data
+  namespace: $NS
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ${BENCH_STORAGE_CLASS}
+  resources: { requests: { storage: ${BENCH_PVC_SIZE:-50Gi} } }
+---
+PVCEOF
+fi)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -160,7 +173,15 @@ spec:
   template:
     metadata: { labels: { app: pnfs-ds, ds: ds${i} } }
     spec:
-      nodeName: ${ds_node}
+$(if [ -n "${BENCH_STORAGE_CLASS:-}" ]; then
+  # WaitForFirstConsumer PVC binding is scheduler-driven — an explicit
+  # nodeName BYPASSES the scheduler and the PVC never binds. Pin via
+  # nodeSelector for the PVC variant (and get the replica's local leg
+  # provisioned on this exact node).
+  printf '      nodeSelector: { kubernetes.io/hostname: %s }\n' "${ds_node}"
+else
+  printf '      nodeName: %s\n' "${ds_node}"
+fi)
       hostNetwork: true   # DS reports its bind address; hostNetwork
                           # gives a cluster-routable address out of the
                           # box without Service-level NodePort work.
@@ -183,10 +204,19 @@ spec:
           securityContext: { privileged: true }
       volumes:
         - { name: config, configMap: { name: pnfs-ds${i}-config } }
+$(if [ -n "${BENCH_STORAGE_CLASS:-}" ]; then cat <<VOLEOF
+        # Durable-DS variant (ADR 0005): the DS export tree lives on a
+        # flint PVC — set BENCH_STORAGE_CLASS to a numReplicas>=2 class
+        # to measure the replication write cost end to end.
+        - { name: data, persistentVolumeClaim: { claimName: pnfs-ds${i}-data } }
+VOLEOF
+else cat <<VOLEOF
         # Local-disk emptyDir keeps the bench measuring pNFS, not
         # network-attached PV layers. For a perf-tier production
         # deployment, swap to a hostPath on local NVMe.
         - { name: data, emptyDir: {} }
+VOLEOF
+fi)
 EOF
 done
 
