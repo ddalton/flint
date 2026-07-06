@@ -116,8 +116,10 @@ mod ds_sequence_tests {
 
         let result = mgr.handle_sequence(sessionid, 1, 0, 0).unwrap();
         
-        // highest_slotid should be 0 (we're only using slot 0)
-        assert_eq!(result.highest_slotid, 0);
+        // sr_highest_slotid = highest slot the server ACCEPTS
+        // (RFC 8881 §18.46.3), not the highest slot in use — see
+        // ds/session.rs handle_sequence.
+        assert_eq!(result.highest_slotid, 127);
         
         // target_highest_slotid should be 127 (our max)
         assert_eq!(result.target_highest_slotid, 127);
