@@ -214,6 +214,10 @@ test-pnfs-cross-host: ## Multi-host pNFS perf bench against a real K8s cluster �
 test-pnfs-identity: build-pnfs ## DS identity ↔ volume binding guard (Phase 2: stamp, verify, refuse foreign volume)
 	tests/lima/pnfs/identity-drill.sh
 
+.PHONY: test-pnfs-restart-load
+test-pnfs-restart-load: build-pnfs ## MDS kill -9 under load (Phase 3: one-heartbeat re-register, zero recalls, I/O rides through)
+	tests/lima/pnfs/mds-restart-load.sh
+
 .PHONY: test-pnfs-all
 test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + identity tests in sequence
 	$(MAKE) test-pnfs-smoke
@@ -223,3 +227,10 @@ test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + i
 	$(MAKE) test-pnfs-recall
 	$(MAKE) test-pnfs-restart
 	$(MAKE) test-pnfs-identity
+	# test-pnfs-restart-load is NOT in the gate yet: its core Phase 3
+	# assertions pass (one-heartbeat NACK re-register, zero recalls,
+	# boot grace) but the final error-free-client-I/O clause exposes an
+	# OPEN kill-9-recovery bug — post-restart the kernel client's DS
+	# session trunking fails (same-IP rig shape), it abandons the pNFS
+	# path, and MDS-fallback writes DELAY until writeback surfaces EIO.
+	# Run it standalone; wire it in when the recovery bug is fixed.

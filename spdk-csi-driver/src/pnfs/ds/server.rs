@@ -828,11 +828,23 @@ impl DataServer {
         }
     }
 
-    /// Start heartbeat sender in the background
+    /// Start heartbeat sender in the background.
+    ///
+    /// Runs on a DEDICATED OS thread with its own current-thread
+    /// runtime, with its own RegistrationClient (own gRPC channel).
+    /// Phase 3 finding (mds-restart-load drill): the data path's
+    /// block_in_place I/O tiering can occupy every worker of the
+    /// 4-thread main runtime for tens of seconds under sustained
+    /// write load, silently starving a tokio::spawn'd heartbeat —
+    /// the MDS then marks a HEALTHY, busy DS stale and recalls its
+    /// layouts. Liveness signalling must never share a scheduler
+    /// with the data path. (A shared client would not be enough:
+    /// its channel's I/O driver lives on the runtime that created
+    /// it — the main one.)
     fn start_heartbeat_sender(&self) {
-        let registration_client = Arc::clone(&self.registration_client);
         let heartbeat_interval_secs = self.config.mds.heartbeat_interval;
-        
+        let mds_endpoint = self.config.mds.endpoint.clone();
+
         // Capture config data needed for re-registration
         let device_id = self.config.device_id.clone();
         let bind_port = self.config.bind.port;
@@ -840,46 +852,67 @@ impl DataServer {
 
         // Same precedence as initial registration — see advertise_address().
         let advertise_address = self.advertise_address();
-        
+
         let mount_points: Vec<String> = self.config.bdevs
             .iter()
             .map(|b| b.mount_point.clone())
             .collect();
 
-        tokio::spawn(async move {
+        std::thread::Builder::new()
+            .name("ds-heartbeat".into())
+            .spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("heartbeat runtime");
+        rt.block_on(async move {
+            let mut client = RegistrationClient::new(
+                device_id.clone(),
+                mds_endpoint,
+                Duration::from_secs(heartbeat_interval_secs),
+            );
             let mut heartbeat_interval = interval(Duration::from_secs(heartbeat_interval_secs));
             let mut failure_count = 0u32;
 
             loop {
                 heartbeat_interval.tick().await;
 
-                // Send heartbeat via gRPC
-                let mut client = registration_client.lock().await;
-                
                 // TODO: Get actual capacity/usage from filesystem
                 let capacity = 1_000_000_000_000u64;
                 let used = 0u64;
                 let active_connections = 0u32;
 
+                let mut reregister_now = false;
                 match client.heartbeat(capacity, used, active_connections).await {
                     Ok(true) => {
                         debug!("✅ Heartbeat acknowledged");
                         failure_count = 0;
                     }
                     Ok(false) => {
-                        warn!("⚠️ Heartbeat not acknowledged");
-                        failure_count += 1;
+                        // A NACK is not a transport blip: the MDS answered
+                        // and said "unknown device" — it restarted and lost
+                        // its (deliberately in-memory) registry. Waiting out
+                        // the 3-failure threshold here just extends the
+                        // window where LAYOUTGETs refuse because this
+                        // device's placement isn't Active yet. Re-register
+                        // on THIS tick (Phase 3: within one heartbeat).
+                        warn!("⚠️ Heartbeat not acknowledged — MDS doesn't know us; re-registering now");
+                        reregister_now = true;
                     }
                     Err(e) => {
+                        // Transport errors stay on the 3-strike path: the
+                        // MDS may just be mid-restart, and hammering
+                        // register() at a dead endpoint adds nothing over
+                        // the next heartbeat's retry.
                         error!("❌ Heartbeat failed: {}", e);
                         failure_count += 1;
                     }
                 }
 
-                if failure_count >= 3 {
+                if reregister_now || failure_count >= 3 {
                     error!(
-                        "Lost connection to MDS after {} failures, attempting re-registration",
-                        failure_count
+                        "MDS lost this device ({}), attempting re-registration",
+                        if reregister_now { "heartbeat NACK".to_string() } else { format!("{} transport failures", failure_count) }
                     );
                     
                     // Attempt re-registration (use advertise_address, not bind.address!)
@@ -908,9 +941,11 @@ impl DataServer {
                 }
             }
         });
+            })
+            .expect("spawn ds-heartbeat thread");
 
         info!(
-            "Heartbeat sender started (interval: {} seconds)",
+            "Heartbeat sender started on dedicated thread (interval: {} seconds)",
             heartbeat_interval_secs
         );
     }

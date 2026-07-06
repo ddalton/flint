@@ -421,6 +421,52 @@ being prompt and on the MDS not acting before it happens:
 load; DSes re-register within one heartbeat; clients reclaim through
 grace; zero recalls fired for healthy DSes; I/O resumes with no errors.
 
+### Status: IMPLEMENTED 2026-07-06 — core drill green, one clause open
+
+All three items landed:
+- **Heartbeat NACK → immediate re-register** (was 3-strike ≈ 30 s):
+  a NACK means "the MDS answered and doesn't know us" — re-register on
+  that very tick. Transport errors keep the 3-strike path (an MDS
+  mid-restart isn't helped by hammering register()).
+- **Boot grace before the stale-device sweep**: the sweep's first
+  check waits max(heartbeatTimeout, 30 s) after MDS boot so
+  re-introducing DSes are never swept; aligns with the 90 s NFS grace.
+- **Lazy layout reload documented as an invariant** — the boot reload
+  does no registry validation and must not (comment at the reload
+  site); staleness is only judged per-file at grant time.
+
+**Bonus P1 the drill caught (the "under load" clause earning its
+keep): DS heartbeats starved under write load.** The data path's
+block_in_place I/O tiering can occupy all 4 runtime workers for tens
+of seconds, silently starving a tokio::spawn'd heartbeat — the MDS
+would mark a healthy, BUSY DS stale and recall its layouts (load-
+triggered self-DoS). The heartbeat sender now runs on a dedicated OS
+thread with its own current-thread runtime AND its own gRPC channel
+(a shared channel's I/O driver would still live on the starvable main
+runtime). Liveness signalling never shares a scheduler with the data
+path.
+
+Drill: `tests/lima/pnfs/mds-restart-load.sh` (make
+test-pnfs-restart-load) against a NEW dynamic-only MDS config
+(`mds-restart-dynamic.yaml` — the chart shape; the config-listed rigs
+repopulate the registry from config at boot and never exercise the
+NACK path). Green: dynamic boot registration, kill -9 mid-load,
+**both DSes re-registered 10 s after restart via the NACK fast
+path**, zero stale detections, zero recalls. OPEN (drill kept strict,
+not yet wired into test-pnfs-all): the final error-free-client-I/O
+clause fails — post-restart the kernel client's DS **session
+trunking** fails ("Session trunking failed" in dmesg; MDS and DSes
+share server_owner AND, on the lima rig, one IP), the client abandons
+the pNFS path, its fallback MDS writes get stub-IO-guard DELAY (61
+refusals observed), and async writeback eventually surfaces EIO to
+the app. Needs its own fix wave: revisit the DS-shares-MDS
+server_owner trunking design (RFC 8881 allows distinct DS identity)
+and/or make the DS reject BIND_CONN_TO_SESSION for unknown sessions
+in a way that steers the client to a separate session. Note the k8s
+shape (distinct ClusterIPs per DS) may not hit the same-IP trunking
+edge at all — verify on a cluster before concluding the failure mode
+is real in production.
+
 ---
 
 ## Phase 4 — k8s failure drills (~1 week, the real cost)

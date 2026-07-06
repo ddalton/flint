@@ -237,6 +237,14 @@ impl MetadataServer {
             .await
             .map_err(|e| crate::pnfs::Error::Config(format!("list layouts: {}", e)))?;
         let n = layouts.len();
+        // DELIBERATELY LAZY (Phase 3): reloaded layouts and placements
+        // reference devices the (in-memory, empty-at-boot) registry
+        // hasn't seen yet. Do NOT validate or recall here — the DSes
+        // re-introduce themselves within one heartbeat (NACK →
+        // immediate re-register), the stale-device sweep holds for the
+        // boot grace, and generate_layout refuses per-file on ACTUAL
+        // staleness at grant time. Eager validation at this point would
+        // recall every layout in the cluster on every MDS restart.
         self.layout_manager.load_records(layouts);
         info!("📦 MDS reloaded {} persisted layouts from backend", n);
 
@@ -853,6 +861,22 @@ impl MetadataServer {
         let failover_policy = self.config.failover.policy;
 
         tokio::spawn(async move {
+            // Boot grace (Phase 3): a freshly (re)started MDS pre-registers
+            // config-listed DSes with last_heartbeat = boot, and dynamic
+            // DSes only discover the restart via their next heartbeat NACK.
+            // Sweeping before they've had a full timeout window to
+            // re-introduce themselves would mark HEALTHY devices Offline
+            // and fan out CB_LAYOUTRECALL for every layout in the cluster.
+            // Hold the first check for max(heartbeatTimeout, 30s) — clients
+            // are reclaiming state through the 90s NFS grace period during
+            // this window anyway, so nothing is lost by waiting.
+            let boot_grace = std::cmp::max(timeout, Duration::from_secs(30));
+            info!(
+                "Stale-device sweep holds for {}s boot grace (then every 10s, timeout {}s)",
+                boot_grace.as_secs(), timeout.as_secs()
+            );
+            tokio::time::sleep(boot_grace).await;
+
             let mut check_interval = interval(Duration::from_secs(10));
 
             loop {
