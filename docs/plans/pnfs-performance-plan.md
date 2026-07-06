@@ -202,7 +202,46 @@ hardware" already lists.
 
 ## Phase 4 — productionization gates (decide before advertising pNFS)
 
-Not perf work, but perf claims are moot without them:
+**DS durability DECISION (2026-07-05): ship pNFS as an explicitly
+ephemeral high-throughput scratch tier first; lvol-backed durable DSes
+are the follow-on milestone.** Rationale: scaling is proven (ADR 0004)
+and the scratch-tier framing (dataset cache, dataloader staging,
+intermediate artifacts) is honest with instance-NVMe/emptyDir DSes +
+the boot-derived write verifier + documented DS-death behavior.
+Backing each DS with a 3-replica flint lvol (RWO-under-DS) upgrades
+pNFS to durable storage and reuses the Tier-2-validated rebuild
+machinery, but requires real work before it's true: DS pods consuming
+flint PVCs (chart), DS identity stable across pod rescheduling
+(deviceId ↔ PVC binding), MDS layout invalidation when a DS moves
+nodes, and a re-bench (3× replication write amplification). Track as
+its own milestone; do not advertise durability until it lands.
+
+**Phase 4 drill results (2026-07-05, lima rig, post-fix build):**
+- **Basename collision fixed and e2e-validated**: same-basename files in
+  dirA/dirB hold distinct content across cache drops; DS-side storage
+  is path-nested (`<data-dir>/<full-mds-path>`). Unit tests cover the
+  collision, traversal-FH rejection, and the fd-cache interplay.
+- **MDS export accounting confirmed**: after striped writes, export
+  files show full *apparent* size but **0 allocated bytes** — sparse
+  EOF metadata only; all data bytes live on the DSes. No proxy I/O.
+- **Stripe-size config live**: `layout.stripeSize: 1 MiB` spreads a
+  4 MiB file across both DSes (default 8 MiB keeps it on one);
+  readback intact both ways. LAYOUTGET no longer hardcodes 8 MiB.
+- **DS-death under load**: fio write stream survives a 20 s DS
+  kill/restart with zero errors; DS re-registers with the MDS
+  automatically; post-recovery write+readback integrity clean. (Full
+  lease-expiry recall was already gated by `test-pnfs-recall`.)
+- **Write verifier is boot-derived** (was fixed `[0u8;8]`): clients
+  now detect DS restarts and retransmit uncommitted UNSTABLE data.
+- **Rig flake root-caused**: rapidly recreating MDS/DS processes on
+  the same endpoint with `state: memory` wedges lingering kernel
+  clients (errno 524 chains, SEQ_MISORDERED storms) — same signature
+  as the "seq-smoke fails 4th-in-a-row" note. Drill hygiene: reboot
+  the client VM between stack recreations. Production guidance: run
+  the MDS with the **sqlite** state backend so restart recovery uses
+  persistent server identity — memory backend is test-only.
+
+Original gate list — not perf work, but perf claims are moot without them:
 
 1. **DS durability story.** DSes write to `emptyDir` — node loss = data
    loss, no replication. Either back DSes with flint block volumes

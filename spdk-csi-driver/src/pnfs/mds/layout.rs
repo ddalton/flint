@@ -267,6 +267,12 @@ impl LayoutManager {
         }
     }
 
+    /// Configured stripe size (bytes) — advertised as the FILE-layout
+    /// stripe unit in LAYOUTGET replies.
+    pub fn stripe_size(&self) -> u64 {
+        self.stripe_size
+    }
+
     /// Repopulate the in-memory primary + by-owner maps from a backend
     /// snapshot. Called once at MDS startup before the listener
     /// accepts. Note: device-counter increments are NOT replayed —

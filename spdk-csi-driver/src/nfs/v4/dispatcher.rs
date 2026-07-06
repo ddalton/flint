@@ -1800,7 +1800,7 @@ impl CompoundDispatcher {
         // Call pNFS handler
         match pnfs.layoutget(args) {
             Ok(result) => {
-                info!("   Available data servers: {}", result.layouts.len());
+                debug!("   Available data servers: {}", result.layouts.len());
                 
                 // Encode result
                 let mut encoder = XdrEncoder::new();
@@ -1830,14 +1830,16 @@ impl CompoundDispatcher {
                     const LAYOUT_TYPE_NFSV4_1_FILES: u32 = 1;
                     encoder.encode_u32(LAYOUT_TYPE_NFSV4_1_FILES);
 
-                    let stripe_unit: u64 = 8 * 1024 * 1024; // 8 MiB stripe unit
+                    // Stripe unit comes from the MDS configuration
+                    // (layout.stripeSize); trait default is 8 MiB.
+                    let stripe_unit: u64 = pnfs.stripe_unit();
 
                     if layout.segments.is_empty() {
                         warn!("❌ Layout has no segments!");
                         return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
                     }
 
-                    info!("   📤 Encoding FILE layout (RFC 5661 §13.3) with {} segments",
+                    debug!("   📤 Encoding FILE layout (RFC 5661 §13.3) with {} segments",
                           layout.segments.len());
 
                     let layout_content = Self::encode_file_layout_striped(
@@ -1846,14 +1848,14 @@ impl CompoundDispatcher {
                         stripe_unit,
                     );
 
-                    info!("   📤 FILE layout content encoded: {} bytes", layout_content.len());
+                    debug!("   📤 FILE layout content encoded: {} bytes", layout_content.len());
                     encoder.encode_opaque(&layout_content);
                 }
                 
                 let final_response = encoder.finish();
-                info!("✅ LAYOUTGET successful: {} layouts returned", result.layouts.len());
-                info!("✅ Total LAYOUTGET response: {} bytes", final_response.len());
-                info!("✅ Response hex (first 128 bytes): {:02x?}", &final_response[..final_response.len().min(128)]);
+                debug!("✅ LAYOUTGET successful: {} layouts returned", result.layouts.len());
+                debug!("✅ Total LAYOUTGET response: {} bytes", final_response.len());
+                debug!("✅ Response hex (first 128 bytes): {:02x?}", &final_response[..final_response.len().min(128)]);
                 OperationResult::LayoutGet(Nfs4Status::Ok, Some(final_response))
             }
             Err(e) => {
@@ -2255,7 +2257,7 @@ impl CompoundDispatcher {
         
         info!("🔧 Encoding FFLv4 layout (RFC 8435) for '{}':", filename);
         info!("   Segments: {}", segments.len());
-        info!("   Stripe unit: {} bytes", stripe_unit);
+        debug!("   Stripe unit: {} bytes", stripe_unit);
         info!("   Instance ID: {}", instance_id);
         
         // ffl_stripe_unit (u64)

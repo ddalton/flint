@@ -244,6 +244,12 @@ impl IoOperationHandler {
             Some((file, true)) => file,
             _ => {
                 let file_path = self.filehandle_to_path(filehandle)?;
+                // Rebased paths preserve the MDS directory structure,
+                // so the parent tree may not exist yet on this DS.
+                if let Some(parent) = file_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(crate::pnfs::Error::Io)?;
+                }
                 let file = OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -395,11 +401,14 @@ impl IoOperationHandler {
         //
         // The trust model here is: the MDS is the layout authority.
         // The DS extracts the path bytes from the MDS-issued FH and
-        // rebases by basename into its own `base_path`. Each DS
-        // therefore stores its slice of the file under
-        // `<base_path>/<basename>` and pwrites at the kernel-supplied
-        // offset; bytes the kernel routes elsewhere become sparse
-        // holes.
+        // rebases the FULL path under its own `base_path`, preserving
+        // the directory structure. Rebasing by basename (the previous
+        // scheme) made files with equal basenames in different
+        // directories silently share one backing file — found as data
+        // corruption by the ADR 0004 cross-host bench. The DS stores
+        // its slice of each file at the rebased path and pwrites at
+        // the kernel-supplied offset; bytes the kernel routes to
+        // other DSes become sparse holes.
         match self.fh_manager.filehandle_to_path(&nfs_fh) {
             Ok(path) => Ok(path),
             Err(_) => {
@@ -407,12 +416,17 @@ impl IoOperationHandler {
                     .map_err(|e| crate::pnfs::Error::Config(
                         format!("Invalid MDS-issued filehandle: {}", e)
                     ))?;
-                let basename = mds_path.file_name().ok_or_else(|| {
-                    crate::pnfs::Error::Config(
-                        "MDS-issued filehandle path has no basename".to_string()
-                    )
-                })?;
-                let local = self.base_path.join(basename);
+                // Strip the leading '/' so join() nests instead of
+                // replacing; guard against traversal components (the
+                // MDS never mints them, but the FH is client-supplied
+                // bytes on the wire).
+                if mds_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                    return Err(crate::pnfs::Error::Config(
+                        "MDS-issued filehandle path contains '..'".to_string(),
+                    ));
+                }
+                let rel = mds_path.strip_prefix("/").unwrap_or(&mds_path);
+                let local = self.base_path.join(rel);
                 debug!("DS: MDS FH {:?} → local {:?}", mds_path, local);
                 Ok(local)
             }
@@ -425,14 +439,23 @@ impl IoOperationHandler {
     }
     
     /// Generate a write verifier
-    /// 
-    /// The verifier is used to detect server reboots. If a client
-    /// sees a different verifier, it knows the server restarted
-    /// and unstable writes may have been lost.
+    ///
+    /// The verifier detects server restarts: RFC 8881 §18.32 requires
+    /// it to change whenever the server may have lost UNSTABLE writes,
+    /// so the client compares it on every WRITE/COMMIT reply and
+    /// retransmits uncommitted data when it changes. A fixed value
+    /// (the previous implementation) meant a DS crash between an
+    /// UNSTABLE write and its COMMIT silently lost the data.
     fn generate_verifier() -> [u8; 8] {
-        // TODO: Use server boot time or instance ID
-        // For now, return a fixed verifier
-        [0u8; 8]
+        static BOOT_VERIFIER: std::sync::OnceLock<[u8; 8]> = std::sync::OnceLock::new();
+        *BOOT_VERIFIER.get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+                ^ (std::process::id() as u64).rotate_left(32);
+            nanos.to_be_bytes()
+        })
     }
 }
 
@@ -543,6 +566,63 @@ mod tests {
         assert_eq!(w.count, 4);
         let r = h.read(&fh, 0, 8).await.unwrap();
         assert_eq!(&r.data, b"datamore");
+    }
+
+    /// Build an MDS-issued filehandle (foreign instance id + garbage
+    /// hash so strict resolution fails and the lenient rebase path
+    /// runs — exactly what a DS sees on the wire).
+    fn mds_fh(path: &str) -> Vec<u8> {
+        let mut d = vec![1u8];
+        d.extend_from_slice(&0xDEAD_BEEF_u64.to_be_bytes());
+        d.extend_from_slice(&[0u8; 32]);
+        d.extend_from_slice(&(path.len() as u16).to_be_bytes());
+        d.extend_from_slice(path.as_bytes());
+        d
+    }
+
+    /// ADR 0004 P1 regression: files with equal basenames in different
+    /// directories must not share a backing file on the DS.
+    #[tokio::test]
+    async fn same_basename_different_dirs_do_not_collide() {
+        let (h, _dir) = handler();
+        let fh_a = mds_fh("/exports/dirA/data.bin");
+        let fh_b = mds_fh("/exports/dirB/data.bin");
+
+        h.write(&fh_a, 0, bytes::Bytes::from_static(b"AAAA"), WriteStable::FileSync)
+            .await
+            .unwrap();
+        h.write(&fh_b, 0, bytes::Bytes::from_static(b"BBBB"), WriteStable::FileSync)
+            .await
+            .unwrap();
+
+        let ra = h.read(&fh_a, 0, 4).await.unwrap();
+        let rb = h.read(&fh_b, 0, 4).await.unwrap();
+        assert_eq!(&ra.data, b"AAAA", "dirA content clobbered by dirB write");
+        assert_eq!(&rb.data, b"BBBB");
+    }
+
+    /// The FH path is client-supplied wire bytes: '..' must not
+    /// escape the DS data dir.
+    #[tokio::test]
+    async fn traversal_filehandle_rejected() {
+        let (h, _dir) = handler();
+        let fh = mds_fh("/exports/../../etc/passwd");
+        assert!(h.read(&fh, 0, 4).await.is_err());
+        assert!(h
+            .write(&fh, 0, bytes::Bytes::from_static(b"x"), WriteStable::Unstable)
+            .await
+            .is_err());
+    }
+
+    /// RFC 8881 §18.32: the verifier must be stable within one server
+    /// instance and must not be a constant across restarts (a fixed
+    /// zero value silently loses UNSTABLE writes on DS crash).
+    #[test]
+    fn write_verifier_is_boot_derived() {
+        let a = IoOperationHandler::generate_verifier();
+        let b = IoOperationHandler::generate_verifier();
+        assert_eq!(a, b, "verifier must be stable within a process");
+        assert_ne!(a, [0u8; 8], "verifier must not be the fixed zero value");
     }
 
     #[tokio::test]

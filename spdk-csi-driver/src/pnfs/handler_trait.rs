@@ -34,5 +34,13 @@ pub trait PnfsOperations: Send + Sync {
         // Default implementation: return empty list
         Ok(Vec::new())
     }
+
+    /// Stripe unit (bytes) to advertise in FILE layouts (`nfl_util`).
+    /// Overridden by the MDS handler with the configured
+    /// `layout.stripeSize`; the default matches the historical
+    /// hardcoded value.
+    fn stripe_unit(&self) -> u64 {
+        8 * 1024 * 1024
+    }
 }
 

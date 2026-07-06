@@ -697,6 +697,10 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
     fn layoutget(&self, args: LayoutGetArgs) -> Result<LayoutGetResult, LayoutGetError> {
         self.layoutget(args)
     }
+
+    fn stripe_unit(&self) -> u64 {
+        self.layout_manager.stripe_size()
+    }
     
     fn getdeviceinfo(&self, args: GetDeviceInfoArgs) -> Result<GetDeviceInfoResult, GetDeviceInfoError> {
         self.getdeviceinfo(args)
