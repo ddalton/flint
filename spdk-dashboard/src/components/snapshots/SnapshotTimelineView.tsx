@@ -1,9 +1,11 @@
-import React, { useMemo, useState, useLayoutEffect, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useLayoutEffect, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   GitBranch, Database, Search, Camera, Layers, Trash2, Loader2,
 } from 'lucide-react';
 import { getRole } from '../../api/client';
+import { resolveVolumeInput, volumeInputMatches } from './volumeSearch';
+import { Button } from '../ui/Button';
 import {
   useSnapshotTimeline, deleteVolumeSnapshot,
   type TimelineEvent,
@@ -151,10 +153,21 @@ export const SnapshotTimelineView: React.FC<{
   selectedVolume: string;
   onVolumeChange: (volumeId: string) => void;
   availableVolumes: string[];
-}> = ({ selectedVolume, onVolumeChange, availableVolumes }) => {
+  // PV id -> PVC name, for search + display. Optional: absent names just
+  // degrade to id-only matching.
+  volumeNames?: Record<string, string>;
+}> = ({ selectedVolume, onVolumeChange, availableVolumes, volumeNames = {} }) => {
   const isValidVolume = availableVolumes.includes(selectedVolume);
   const { data, isLoading, error } = useSnapshotTimeline(isValidVolume ? selectedVolume : null);
   const queryClient = useQueryClient();
+
+  // What the user typed, decoupled from the resolved selection so typing a
+  // partial name doesn't snap the input to the full pv id mid-keystroke.
+  const [typed, setTyped] = useState(selectedVolume === 'all' ? '' : selectedVolume);
+  useEffect(() => {
+    if (isValidVolume) setTyped(selectedVolume);
+    else if (selectedVolume === 'all') setTyped('');
+  }, [selectedVolume, isValidVolume]);
 
   // Callback-ref + effect-on-element: the container div only mounts once
   // data arrives, so a mount-time effect on a plain ref would observe null
@@ -256,15 +269,28 @@ export const SnapshotTimelineView: React.FC<{
               id="volume-search"
               type="text"
               list="volume-list"
-              value={selectedVolume === 'all' ? '' : selectedVolume}
-              onChange={(e) => onVolumeChange(e.target.value === '' ? 'all' : e.target.value)}
-              placeholder="Search for a volume..."
+              value={typed}
+              onChange={(e) => {
+                const v = e.target.value;
+                setTyped(v);
+                if (v === '') {
+                  onVolumeChange('all');
+                  return;
+                }
+                const resolved = resolveVolumeInput(v, availableVolumes, volumeNames);
+                onVolumeChange(resolved ?? v);
+              }}
+              placeholder="Search by PVC name or volume id..."
               className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <datalist id="volume-list">
-              {availableVolumes.map((volume) => (
-                <option key={volume} value={volume} />
-              ))}
+              {availableVolumes.flatMap((volume) => {
+                const name = volumeNames[volume];
+                return [
+                  <option key={volume} value={volume} label={name} />,
+                  ...(name ? [<option key={`${volume}-name`} value={name} label={volume} />] : []),
+                ];
+              })}
             </datalist>
           </div>
         </div>
@@ -277,9 +303,25 @@ export const SnapshotTimelineView: React.FC<{
             </h3>
             <p className="text-gray-500">
               {selectedVolume === 'all'
-                ? 'Start typing in the search box to find and select a volume.'
-                : `No volume matching "${selectedVolume}" was found. Please select one from the list.`}
+                ? 'Search by PVC name or volume id — only volumes with snapshot history are listed.'
+                : `Nothing matches "${selectedVolume}" exactly. Search by PVC name or volume id.`}
             </p>
+            {selectedVolume !== 'all' && (() => {
+              const candidates = volumeInputMatches(selectedVolume, availableVolumes, volumeNames);
+              if (candidates.length === 0) return null;
+              return (
+                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                  {candidates.slice(0, 5).map(id => (
+                    <Button key={id} variant="link" onClick={() => onVolumeChange(id)}>
+                      {volumeNames[id] ? `${volumeNames[id]} (${id.slice(0, 12)}…)` : id}
+                    </Button>
+                  ))}
+                  {candidates.length > 5 && (
+                    <span className="text-sm text-gray-500">+{candidates.length - 5} more — keep typing</span>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         ) : isLoading ? (
           <div className="flex items-center justify-center py-12 text-gray-500 gap-2">

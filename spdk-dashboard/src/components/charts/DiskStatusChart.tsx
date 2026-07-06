@@ -9,10 +9,17 @@ interface DiskStatusChartProps {
   disks: Disk[];
 }
 
-type DiskStatus = 'Healthy' | 'Uninitialized' | 'Unhealthy';
+type DiskStatus = 'Healthy' | 'Uninitialized' | 'Unhealthy' | 'System';
 
-// Helper function to determine the status of a single disk
+// Helper function to determine the status of a single disk. System disks
+// (EBS root/boot) get their own neutral bucket — they can never host an
+// LVS, so painting them amber "Uninitialized" read as actionable work
+// that wasn't (seen live on runm/runn: every node showed a phantom
+// to-do segment).
 const getDiskStatus = (disk: Disk): DiskStatus => {
+  if (disk.is_system_disk) {
+    return 'System';
+  }
   if (disk.blobstore_initialized) {
     return disk.healthy ? 'Healthy' : 'Unhealthy';
   }
@@ -20,11 +27,13 @@ const getDiskStatus = (disk: Disk): DiskStatus => {
 };
 
 // Status hues come from status.ts — the chart can never drift from the chips
-// (the old version hardcoded the same hexes and would have).
+// (the old version hardcoded the same hexes and would have). System is a
+// deliberate neutral gray: informational, never actionable.
 const DISK_STATUS_HEX: Record<DiskStatus, string> = {
   Healthy: VOLUME_STATE_STYLES.Healthy.hex,
   Uninitialized: VOLUME_STATE_STYLES.Degraded.hex,
   Unhealthy: VOLUME_STATE_STYLES.Failed.hex,
+  System: '#9ca3af',
 };
 
 const AXIS_TICK = { fontSize: 12, fill: '#6b7280' };
@@ -32,7 +41,7 @@ const AXIS_LINE = { stroke: '#e5e7eb' };
 
 export const DiskStatusChart: React.FC<DiskStatusChartProps> = ({ disks }) => {
   const nodeData = disks.reduce((acc, disk) => {
-    const bucket = acc[disk.node] ?? { Healthy: 0, Uninitialized: 0, Unhealthy: 0 };
+    const bucket = acc[disk.node] ?? { Healthy: 0, Uninitialized: 0, Unhealthy: 0, System: 0 };
     acc[disk.node] = bucket;
     bucket[getDiskStatus(disk)]++;
     return acc;
@@ -70,6 +79,7 @@ export const DiskStatusChart: React.FC<DiskStatusChartProps> = ({ disks }) => {
             <Bar dataKey="Healthy" stackId="a" fill={DISK_STATUS_HEX.Healthy} stroke="#ffffff" strokeWidth={1} maxBarSize={40} name="Healthy" />
             <Bar dataKey="Uninitialized" stackId="a" fill={DISK_STATUS_HEX.Uninitialized} stroke="#ffffff" strokeWidth={1} maxBarSize={40} name="Uninitialized" />
             <Bar dataKey="Unhealthy" stackId="a" fill={DISK_STATUS_HEX.Unhealthy} stroke="#ffffff" strokeWidth={1} maxBarSize={40} name="Unhealthy" />
+            <Bar dataKey="System" stackId="a" fill={DISK_STATUS_HEX.System} stroke="#ffffff" strokeWidth={1} maxBarSize={40} name="System" />
           </BarChart>
         </ResponsiveContainer>
       )}

@@ -1,6 +1,6 @@
 import React from 'react';
 import { volumeStateStyle } from '../ui/status';
-import { Database, Settings, AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
+import { Database, Settings } from 'lucide-react';
 import { Card } from '../ui/Card';
 import { Chip } from '../ui/Chip';
 import type { Volume } from '../../hooks/useDashboardData';
@@ -98,32 +98,6 @@ export const VolumeStatusChart: React.FC<VolumeStatusChartProps> = ({ volumes })
         </div>
       )}
 
-      {/* Status summary for volume states only */}
-      {((statusCounts.Failed ?? 0) > 0 || (statusCounts.Degraded ?? 0) > 0) && (
-        <div className="p-3 bg-gray-50 rounded-lg">
-          <h4 className="text-sm font-medium text-gray-700 mb-2">Volume Status Summary</h4>
-          <div className="space-y-1 text-xs">
-            {(statusCounts.Failed ?? 0) > 0 && (
-              <div className="flex items-center gap-2 text-failed-700">
-                <XCircle aria-hidden="true" className="w-3 h-3" />
-                <span>{(statusCounts.Failed ?? 0)} volume{(statusCounts.Failed ?? 0) !== 1 ? 's' : ''} failed - immediate attention required</span>
-              </div>
-            )}
-            {(statusCounts.Degraded ?? 0) > 0 && (
-              <div className="flex items-center gap-2 text-degraded-700">
-                <AlertTriangle aria-hidden="true" className="w-3 h-3" />
-                <span>{(statusCounts.Degraded ?? 0)} volume{(statusCounts.Degraded ?? 0) !== 1 ? 's' : ''} degraded - reduced redundancy but functional</span>
-              </div>
-            )}
-            {(statusCounts.Healthy ?? 0) > 0 && (
-              <div className="flex items-center gap-2 text-healthy-700">
-                <CheckCircle aria-hidden="true" className="w-3 h-3" />
-                <span>{(statusCounts.Healthy ?? 0)} volume{(statusCounts.Healthy ?? 0) !== 1 ? 's' : ''} healthy - all replicas operational</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </Card>
   );
 };

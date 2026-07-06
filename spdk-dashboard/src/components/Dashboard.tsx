@@ -191,7 +191,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     switch (activeTab) {
       case 'overview':
         return (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
             <VolumeStatusChart volumes={data.volumes} />
             <DiskStatusChart disks={data.disks} />
             <div className="lg:col-span-2">

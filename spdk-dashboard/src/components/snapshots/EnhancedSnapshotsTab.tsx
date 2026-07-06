@@ -12,6 +12,7 @@ import { SnapshotStorageView } from './SnapshotStorageView';
 import { SnapshotTimelineView } from './SnapshotTimelineView';
 import { SnapshotDetailModal } from './SnapshotDetailModal';
 import { useOperations } from '../../contexts/OperationsContext';
+import { useDashboardData } from '../../hooks/useDashboardData';
 import { TabSkeleton } from '../ui/Skeleton';
 import { Button, IconButton } from '../ui/Button';
 import type { components } from '../../api/schema';
@@ -61,6 +62,18 @@ export const EnhancedSnapshotsTab: React.FC = () => {
   const availableVolumes = useMemo(() => {
     return Array.from(new Set(snapshots.map(snap => snap.source_volume_id)));
   }, [snapshots]);
+
+  // PV id -> PVC name for the timeline's search (operators know PVC names,
+  // the timeline keys on pv ids). Shares the app-wide dashboard query cache;
+  // no polling from this tab.
+  const { data: dashboardData } = useDashboardData(false);
+  const volumeNames = useMemo(
+    () =>
+      Object.fromEntries(
+        (dashboardData?.volumes ?? []).map(v => [v.id, v.name])
+      ) as Record<string, string>,
+    [dashboardData]
+  );
 
   const [topologyVolume, setTopologyVolume] = useState<string>('all');
 
@@ -249,6 +262,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
             selectedVolume={topologyVolume}
             onVolumeChange={setTopologyVolume}
             availableVolumes={availableVolumes}
+            volumeNames={volumeNames}
           />
         );
       default:

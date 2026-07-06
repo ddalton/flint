@@ -868,3 +868,33 @@ against the real backend. Zero page errors across every tab.
   delete re-drilled: no leak.
 - Dev ergonomics: `vite.config.ts` proxy target is now overridable via
   `VITE_API_PROXY_TARGET` (local :8080 was taken by trove during the run).
+
+### UX follow-ups from the consistency wave (2026-07-06, second pass)
+
+Live-verified against cluster `runn`; gate 135 vitest + tsc -b + lint
+0 errors.
+
+- **Timeline volume search matches PVC names** (`volumeSearch.ts`):
+  exact pv id, exact PVC name, or unique substring of either resolve;
+  ambiguous input shows clickable candidate suggestions instead of a
+  bare "Volume Not Found". The id→name map rides the shared dashboard
+  query (no new fetch). Typing decouples from the resolved selection so
+  the input doesn't snap mid-keystroke.
+- **DiskStatusChart gained a neutral gray "System" bucket** — EBS
+  root/boot disks no longer render as amber "Uninitialized" (they can
+  never host an LVS; the amber read as phantom actionable work on every
+  node).
+- **Overview cards no longer stretch to equal height** (`items-start`)
+  and VolumeStatusChart dropped the prose summary that duplicated its
+  chips — the card now hugs the bar + chips + (conditional) rebuilding
+  callout.
+- **Volumes and Disks tabs got page titles** (icon + `text-page-title`
+  + subtitle), closing the title-presence inconsistency with Disk
+  Setup/Snapshots.
+- The SnapshotDetailModal "delete stub" follow-up from the timeline
+  redesign is stale — the modal deliberately carries no delete (CR-path
+  delete lives in the timeline); noted here to close it.
+
+Remaining (unchanged): Chip adoption in legacy views, raw→semantic
+color sweep incl. status.ts, primitives for the deliberate Button
+carve-outs (segmented control, pagination), timeline brush zoom.

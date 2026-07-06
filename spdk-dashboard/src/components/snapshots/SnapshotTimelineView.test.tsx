@@ -6,6 +6,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { resolveVolumeInput, volumeInputMatches } from './volumeSearch';
 import { SnapshotTimelineView } from './SnapshotTimelineView';
 import { server } from '../../test/server';
 import { makeSnapshotTimeline } from '../../test/fixtures';
@@ -220,5 +221,35 @@ describe('SnapshotTimelineView', () => {
     );
     renderView();
     expect(await screen.findByText('No Snapshot History Yet')).toBeInTheDocument();
+  });
+});
+
+
+// Search resolution: operators type PVC names; the timeline keys on pv ids.
+describe('resolveVolumeInput', () => {
+  const ids = ['pvc-aaa-111', 'pvc-bbb-222'];
+  const names = { 'pvc-aaa-111': 'workload-a', 'pvc-bbb-222': 'workload-b' };
+
+  it('accepts an exact id', () => {
+    expect(resolveVolumeInput('pvc-aaa-111', ids, names)).toBe('pvc-aaa-111');
+  });
+
+  it('resolves an exact PVC name to its id', () => {
+    expect(resolveVolumeInput('workload-a', ids, names)).toBe('pvc-aaa-111');
+  });
+
+  it('resolves a unique substring of a name or id', () => {
+    expect(resolveVolumeInput('load-b', ids, names)).toBe('pvc-bbb-222');
+    expect(resolveVolumeInput('bbb', ids, names)).toBe('pvc-bbb-222');
+  });
+
+  it('refuses ambiguous input but exposes the candidates', () => {
+    expect(resolveVolumeInput('workload', ids, names)).toBeNull();
+    expect(volumeInputMatches('workload', ids, names)).toEqual(ids);
+  });
+
+  it('is empty-safe and works without a name map', () => {
+    expect(resolveVolumeInput('', ids, names)).toBeNull();
+    expect(resolveVolumeInput('aaa', ids, {})).toBe('pvc-aaa-111');
   });
 });

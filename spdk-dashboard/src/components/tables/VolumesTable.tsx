@@ -1,7 +1,7 @@
 import React, { lazy, Suspense, useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router';
 import { apiFetch } from '../../api/client';
-import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert, Trash2 } from 'lucide-react';
+import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert, Trash2, Database } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, DiskFilter, RawSpdkVolume } from '../../hooks/useDashboardData';
 import { filterVolumesByType, isReplicaRecovering } from '../../hooks/useDashboardData';
 import { volumeFilterDisplay, volumeStateStyle } from '../ui/status';
@@ -216,6 +216,16 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
 
   return (
     <div>
+      {/* Page title — same convention as Disk Setup/Snapshots, so every
+          tab announces itself (Volumes/Disks previously opened straight
+          into filter chrome). */}
+      <div className="mb-6 flex items-center gap-3">
+        <Database className="w-8 h-8 text-brand-600" />
+        <div>
+          <h2 className="text-page-title text-gray-900">Volumes</h2>
+          <p className="text-gray-600">PVC volumes and replica health across the cluster</p>
+        </div>
+      </div>
       <div className="space-y-3 mb-4">
         {activeFilter && activeFilter !== 'all' && (
           <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">

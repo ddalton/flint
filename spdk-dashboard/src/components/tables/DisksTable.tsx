@@ -347,6 +347,14 @@ export const DisksTable: React.FC<DisksTableProps> = ({
 
   return (
     <div>
+      {/* Page title — same convention as Disk Setup/Snapshots. */}
+      <div className="mb-6 flex items-center gap-3">
+        <HardDrive className="w-8 h-8 text-brand-600" />
+        <div>
+          <h2 className="text-page-title text-gray-900">Disks</h2>
+          <p className="text-gray-600">Capacity, utilization, and logical volume store state per disk</p>
+        </div>
+      </div>
       {/* Volume-based filters (existing) */}
       {volumeFilter && volumeFilter !== 'all' && !volumeReplicaFilter && (
         <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
