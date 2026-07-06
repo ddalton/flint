@@ -359,6 +359,26 @@ MDS logs identity+endpoint transitions at WARN on re-registration
 **Done when**: unit tests for marker create/verify/mismatch; lima drill
 mounts DS-B's volume into DS-A's pod and observes startup refusal.
 
+### Status: IMPLEMENTED 2026-07-06
+
+`ds/identity.rs` (stamp/verify/refuse, temp+rename write, 4 unit
+tests); `RegisterRequest.identity_created_at` (field 8) reported on
+both register paths; MDS re-registration WARNs endpoint transitions
+and — loudly — identity-stamp transitions. Gate:
+`tests/lima/pnfs/identity-drill.sh` (pure host: stamp →
+verify-with-stable-stamp → foreign-device refusal, exit nonzero,
+marker untouched) via `make test-pnfs-identity`, wired into
+`test-pnfs-all`. 629 lib tests.
+
+Shipped alongside (same day, driver side): **NodeStage self-heal for
+dead NVMe-oF targets** — the attach-failure path re-ensures the
+export on the storage node (convergent ensure_export, fencing
+preserved) and retries once, turning kubelet's mount-retry loop into
+the reconciler. This is restart-survivability piece (1); the manual
+VolumeAttachment-delete recipe below is now only needed on pre-heal
+drivers. Piece (2), initiator ride-through for already-staged
+volumes, remains open.
+
 ---
 
 ## Phase 3 — MDS-restart and re-registration hardening (~3–5 days)
