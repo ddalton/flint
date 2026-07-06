@@ -54,9 +54,15 @@ pub struct DeviceInfo {
     
     /// Last heartbeat timestamp
     pub last_heartbeat: Instant,
-    
+
     /// Number of active layouts using this device
     pub active_layouts: usize,
+
+    /// Creation stamp of the DS's on-volume identity marker (Phase 2).
+    /// Stable for a data volume's lifetime — a CHANGE across
+    /// re-registrations of the same device_id means the DS came back
+    /// with a different volume. 0 = DS predates the field.
+    pub identity_created_at: u64,
 }
 
 /// Device status
@@ -95,7 +101,29 @@ impl DeviceRegistry {
     pub fn register(&self, info: DeviceInfo) -> Result<(), String> {
         let device_id = info.device_id.clone();
         
-        if self.devices.contains_key(&device_id) {
+        if let Some(prev) = self.devices.get(&device_id) {
+            // Identity/endpoint transitions on re-registration are the
+            // operator's early-warning signal (durable-DS plan Phase 2):
+            // an endpoint change is routine on pod reschedule (new pod,
+            // same per-pod Service), but an identity-stamp change means
+            // the device came back serving a DIFFERENT data volume —
+            // its stripes are not the ones clients' layouts address.
+            if prev.primary_endpoint != info.primary_endpoint {
+                warn!(
+                    "🔄 Device {} re-registered with new endpoint: {} → {}",
+                    device_id, prev.primary_endpoint, info.primary_endpoint
+                );
+            }
+            if prev.identity_created_at != 0
+                && info.identity_created_at != 0
+                && prev.identity_created_at != info.identity_created_at
+            {
+                warn!(
+                    "🚨 Device {} re-registered with a DIFFERENT data volume: identity stamp {} → {} — \
+                     existing layouts referencing this device address stripes that volume does not hold",
+                    device_id, prev.identity_created_at, info.identity_created_at
+                );
+            }
             warn!("🔄 Device {} already registered, updating", device_id);
             debug!("   Previous device count: {}", self.count());
         } else {
@@ -321,6 +349,7 @@ impl DeviceInfo {
             status: DeviceStatus::Active,
             last_heartbeat: Instant::now(),
             active_layouts: 0,
+            identity_created_at: 0,
         }
     }
 

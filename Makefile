@@ -210,11 +210,16 @@ test-pnfs-nconnect: build-pnfs ## Single-host nconnect sweep — exposes per-TCP
 test-pnfs-cross-host: ## Multi-host pNFS perf bench against a real K8s cluster — see tests/k8s/pnfs-bench/README.md for required env (KUBECONFIG, PNFS_IMAGE, MDS_NODE, DS_NODES, CLIENT_NODE)
 	tests/k8s/pnfs-bench/cross-host-bench.sh
 
+.PHONY: test-pnfs-identity
+test-pnfs-identity: build-pnfs ## DS identity ↔ volume binding guard (Phase 2: stamp, verify, refuse foreign volume)
+	tests/lima/pnfs/identity-drill.sh
+
 .PHONY: test-pnfs-all
-test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart tests in sequence
+test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + identity tests in sequence
 	$(MAKE) test-pnfs-smoke
 	$(MAKE) test-pnfs-pynfs
 	$(MAKE) test-pnfs-csi
 	$(MAKE) test-pnfs-placement
 	$(MAKE) test-pnfs-recall
 	$(MAKE) test-pnfs-restart
+	$(MAKE) test-pnfs-identity

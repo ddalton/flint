@@ -77,6 +77,7 @@ impl RegistrationClient {
         mount_points: Vec<String>,
         capacity: u64,
         used: u64,
+        identity_created_at: u64,
     ) -> Result<bool> {
         info!(
             "Registering device {} with MDS at {}",
@@ -99,6 +100,7 @@ impl RegistrationClient {
             capacity,
             used,
             protocol_version: 1,
+            identity_created_at,
         });
 
         match client.register_data_server(request).await {

@@ -34,6 +34,9 @@ pub struct DataServer {
     registration_client: Arc<tokio::sync::Mutex<RegistrationClient>>,
     session_mgr: Arc<DsSessionManager>,
     client_mgr: Arc<ClientManager>,
+    /// Creation stamp of the on-volume identity marker (Phase 2);
+    /// reported in RegisterRequest so the MDS can spot volume swaps.
+    identity_created_at: u64,
 }
 
 impl DataServer {
@@ -65,6 +68,24 @@ impl DataServer {
         let io_handler = Arc::new(IoOperationHandler::new(&data_path)?);
         info!("✓ I/O handler initialized with data path: {}", data_path);
 
+        // Identity ↔ volume binding guard (durable-DS plan Phase 2):
+        // refuse to serve a data volume stamped for another device_id —
+        // stripe maps address devices, so serving DS-B's volume as DS-A
+        // corrupts client reads silently. First boot stamps the marker;
+        // the creation stamp rides in RegisterRequest so the MDS can
+        // WARN when a device comes back with a different volume.
+        let identity = super::identity::verify_or_stamp(
+            std::path::Path::new(&data_path),
+            &config.device_id,
+        ).map_err(|e| crate::pnfs::Error::Config(format!(
+            "DS identity guard on {}: {}", data_path, e
+        )))?;
+        info!(
+            "✓ Identity marker verified: device '{}' (volume first stamped at unix {})",
+            identity.device_id, identity.created_at
+        );
+        let identity_created_at = identity.created_at;
+
         // Initialize registration client
         let registration_client = Arc::new(tokio::sync::Mutex::new(
             RegistrationClient::new(
@@ -92,7 +113,7 @@ impl DataServer {
         ));
         info!("✓ Client manager initialized (same server_owner/scope as MDS)");
 
-        Ok(Self { config, io_handler, registration_client, session_mgr, client_mgr })
+        Ok(Self { config, io_handler, registration_client, session_mgr, client_mgr, identity_created_at })
     }
 
     /// Start the data server
@@ -790,6 +811,7 @@ impl DataServer {
             mount_points,
             capacity,
             used,
+            self.identity_created_at,
         ).await {
             Ok(true) => {
                 info!("✅ Successfully registered with MDS");
@@ -814,6 +836,7 @@ impl DataServer {
         // Capture config data needed for re-registration
         let device_id = self.config.device_id.clone();
         let bind_port = self.config.bind.port;
+        let identity_created_at = self.identity_created_at;
 
         // Same precedence as initial registration — see advertise_address().
         let advertise_address = self.advertise_address();
@@ -867,6 +890,7 @@ impl DataServer {
                         mount_points.clone(),
                         capacity,
                         used,
+                        identity_created_at,
                     ).await {
                         Ok(true) => {
                             info!("✅ Re-registration successful");

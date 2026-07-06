@@ -110,6 +110,7 @@ impl MdsControl for MdsControlService {
         device_info.endpoints = req.multipath_endpoints.clone();
         device_info.capacity = req.capacity;
         device_info.used = req.used;
+        device_info.identity_created_at = req.identity_created_at;
 
         // Register with device registry
         match self.device_registry.register(device_info) {

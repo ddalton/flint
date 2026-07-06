@@ -101,6 +101,14 @@ message RegisterRequest {
   
   // Protocol version
   uint32 protocol_version = 7;
+
+  // Unix-seconds creation stamp of the DS's on-volume identity marker
+  // (.flint-ds-identity, durable-DS plan Phase 2). Stamped once at the
+  // volume's first boot and stable for the volume's lifetime, so a
+  // CHANGE across re-registrations of the same device_id means the DS
+  // is serving a different data volume than before — the MDS logs
+  // that transition at WARN. 0 from a DS that predates the field.
+  uint64 identity_created_at = 8;
 }
 
 // Registration response from MDS to DS

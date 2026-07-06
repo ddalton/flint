@@ -20,6 +20,9 @@
 //!
 //! This allows the DS to be optimized purely for I/O performance.
 
+/// DS identity ↔ data-volume binding guard (durable-DS plan Phase 2)
+pub mod identity;
+
 /// Data server I/O operations
 pub mod io;
 
