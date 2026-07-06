@@ -13,6 +13,7 @@ import { SnapshotTimelineView } from './SnapshotTimelineView';
 import { SnapshotDetailModal } from './SnapshotDetailModal';
 import { useOperations } from '../../contexts/OperationsContext';
 import { TabSkeleton } from '../ui/Skeleton';
+import { Button, IconButton } from '../ui/Button';
 import type { components } from '../../api/schema';
 import type {
   SnapshotDetails,
@@ -267,17 +268,17 @@ export const EnhancedSnapshotsTab: React.FC = () => {
           <div className="flex items-center gap-3">
             <Camera className="w-8 h-8 text-blue-600" />
             <div>
-              <h2 className="text-2xl font-bold text-gray-900">Volume Snapshots</h2>
+              <h2 className="text-page-title text-gray-900">Volume Snapshots</h2>
               <p className="text-sm text-gray-600">Storage-aware snapshot management</p>
             </div>
           </div>
-          <button
+          <IconButton
+            icon={RefreshCw}
+            aria-label="Refresh snapshots"
             onClick={fetchSnapshotData}
             disabled={refreshing}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-md disabled:opacity-50"
-          >
-            <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
-          </button>
+            iconClass={refreshing ? 'animate-spin' : ''}
+          />
         </div>
 
         {error && (
@@ -291,40 +292,40 @@ export const EnhancedSnapshotsTab: React.FC = () => {
         <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
           <div className="bg-blue-50 rounded-lg p-4 text-center">
             <Database className="w-6 h-6 text-blue-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-blue-600">{snapshots.length}</p>
+            <p className="text-stat text-blue-600">{snapshots.length}</p>
             <p className="text-sm text-gray-600">Total Snapshots</p>
           </div>
           <div className="bg-green-50 rounded-lg p-4 text-center">
             <CheckCircle className="w-6 h-6 text-green-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-green-600">
+            <p className="text-stat text-green-600">
               {snapshots.filter(s => s.ready_to_use).length}
             </p>
             <p className="text-sm text-gray-600">Ready to Use</p>
           </div>
           <div className="bg-purple-50 rounded-lg p-4 text-center">
             <Layers className="w-6 h-6 text-purple-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-purple-600">
+            <p className="text-stat text-purple-600">
               {snapshots.reduce((sum, s) => sum + (s.replica_bdev_details || []).length, 0)}
             </p>
             <p className="text-sm text-gray-600">Replica Snapshots</p>
           </div>
           <div className="bg-indigo-50 rounded-lg p-4 text-center">
             <HardDrive className="w-6 h-6 text-indigo-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-indigo-600">
+            <p className="text-stat text-indigo-600">
               {formatSize(storageInsights.totalLogicalSize)}
             </p>
             <p className="text-sm text-gray-600">Logical Storage</p>
           </div>
           <div className="bg-orange-50 rounded-lg p-4 text-center">
             <BarChart3 className="w-6 h-6 text-orange-600 mx-auto mb-2" />
-            <p className="text-xl font-bold text-orange-600">
+            <p className="text-stat text-orange-600">
               {formatSize(storageInsights.totalSnapshotOverhead)}
             </p>
             <p className="text-sm text-gray-600">Snapshot Overhead</p>
           </div>
           <div className="bg-yellow-50 rounded-lg p-4 text-center">
             <TrendingUp className="w-6 h-6 text-yellow-600 mx-auto mb-2" />
-            <p className={`text-xl font-bold ${
+            <p className={`text-stat ${
               storageInsights.overallEfficiency < 0.1 ? 'text-green-600' :
               storageInsights.overallEfficiency < 0.3 ? 'text-yellow-600' : 'text-red-600'
             }`}>
@@ -409,14 +410,15 @@ export const EnhancedSnapshotsTab: React.FC = () => {
               </span>
             </div>
 
-            <button
+            <Button
+              variant="link"
+              icon={Filter}
+              className="text-gray-600 hover:text-gray-800"
               onClick={() => setShowFilters(!showFilters)}
-              className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-800"
             >
-              <Filter className="w-4 h-4" />
               Filters
               <ChevronDown className={`w-4 h-4 transition-transform ${showFilters ? 'rotate-180' : ''}`} />
-            </button>
+            </Button>
           </div>
         </div>
 

@@ -756,3 +756,64 @@ Flint 1.7.0, dashboard rolled to working-tree images `snapfleet.*`
   containing ≥1 ghost now draws a red ring + corner dot and its
   aria-label reads "N user snapshots (M without copies)"; unit test added
   (identical-timestamp burst). Re-rolled as `snapfleet.1`.
+
+## UI consistency wave: type ramp, fleet-scale disk views, Button primitive (2026-07-06)
+
+User-reported: font sizes drifted between views, and the per-disk
+initialization display could not scale to 100s of disks. A code audit
+confirmed both; this wave fixes them plus what it touched on the way.
+Verified against a 6-node / 590-disk mock backend (fixtures amplified,
+playwright screenshots) — build + 130 vitest + lint all green.
+
+- **Typography ramp (new, tailwind.config.js):** semantic `fontSize`
+  tokens — `text-page-title` (24px/700), `text-section` (18px/600),
+  `text-stat` (24px/700). The stat-tile number previously rendered at
+  three sizes (30px DisksTable / 24px StatCards / 20px DiskSetupTab +
+  Snapshots); all tiles now use `text-stat`. `Card`'s title had no size
+  class (16px, smaller than the ad-hoc 18px headers beside it) — now
+  `text-section`, and all hand-rolled section/modal headers are
+  tokenized to it. DisksTable's tile labels dropped from 18px-semibold
+  to the label convention every other tile uses.
+- **Disk Setup at fleet scale:** dense rows are the default view (cards
+  remain an option; the dead `'table'` ViewMode is gone). Each node
+  group header gained a **status strip** — one clickable cell per disk
+  (free/driver-bound/LVS-ready/needs-unmount/system, semantic palette),
+  so a 250-disk node reads at a glance even collapsed and cells toggle
+  selection. Grouped bodies render at most 60 rows until "Show all N"
+  (`GROUP_RENDER_CAP`), groups get `content-visibility: auto`, and a
+  fleet >80 disks lands with groups collapsed (decided once, after all
+  node agents have reported). Shift-click range order now mirrors
+  exactly what is rendered (collapsed/capped groups contribute
+  nothing). Full-page height on the 590-disk mock: 17,426px → 1,918px.
+  The scale claim in the info panel is now true as written.
+- **DisksTable pagination:** 25/50/100 per page with the VolumesTable
+  pager contract — the unbounded-rows item from the 2026-07-05
+  assessment is closed. Also fixed en route: "Total Free Space" insight
+  divided GB by 1024³ (always ~0GB), and the orphan-delete flow's
+  `window.location.reload()` is now a `['dashboard']` query
+  invalidation.
+- **Button/IconButton primitive (built at last):**
+  `ui/Button.tsx` — variants primary/secondary/danger/ghost/link, sm/md,
+  icon + spinner support, shared focus ring; `IconButton` requires an
+  aria-label. ~50 raw `<button>`s migrated across 14 files (heaviest:
+  DiskSetupTab, VolumesTable, DisksTable, NodeDetailView). Deliberate
+  carve-outs left raw: segmented controls, aria-pressed facet chips,
+  tree expanders, custom pager number windows.
+- **Overview charts to the topology/timeline quality bar:** the volume
+  pie is replaced by a horizontal stacked status bar (status hexes from
+  `status.ts`, 2px surface gaps, labeled count chips — a pie hides
+  close values); DiskStatusChart lost its hardcoded hexes (imports the
+  `status.ts` tokens), dashed grid → solid hairline, recessive axes,
+  white segment strokes, `maxBarSize`. Both charts now render in the
+  `Card` shell. Palette CVD-validated (worst adjacent pair ΔE 32.7).
+- **Honesty fix:** Disk Setup's delete dialog had "Industry Best
+  Practice Options" checkboxes (migrate/snapshot/force) that were never
+  read nor sent — the agent's `/disks/delete` takes only node+PCI and
+  409s while lvols exist. Replaced with the kit `ConfirmModal` (typed
+  device-name gate kept) describing only what actually happens. Debug
+  `console.log`s and dead commented code in DiskSetupTab removed.
+
+Still open from the design-system section: raw pills vs `Chip` in
+legacy views (81 raw `rounded-full` spans remain, as-touched policy),
+and raw palette classes vs semantic tokens (~31:1) including inside
+`status.ts` itself.

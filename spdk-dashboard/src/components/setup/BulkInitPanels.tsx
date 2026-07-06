@@ -6,6 +6,7 @@ import type { BatchDisk, BatchItem } from './batchSetup';
 import { TYPE_TO_CONFIRM_THRESHOLD, confirmPhrase } from './batchSetup';
 import { ConfirmModal } from '../ui/ConfirmModal';
 import { ProgressBar } from '../ui/ProgressBar';
+import { Button } from '../ui/Button';
 
 export interface ExcludedDisk {
   disk: BatchDisk;
@@ -144,7 +145,7 @@ export const BatchProgressPanel: React.FC<BatchProgressPanelProps> = ({
     <div className="bg-white rounded-lg shadow p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
-          <h3 className="text-lg font-semibold">
+          <h3 className="text-section">
             {running ? 'Initializing disks…' : 'Bulk initialization finished'}
           </h3>
           <span className="text-sm text-gray-600">
@@ -156,29 +157,19 @@ export const BatchProgressPanel: React.FC<BatchProgressPanelProps> = ({
         </div>
         <div className="flex items-center gap-2">
           {running ? (
-            <button
-              onClick={onCancel}
-              className="px-3 py-1.5 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50"
-            >
+            <Button size="sm" onClick={onCancel}>
               Cancel remaining
-            </button>
+            </Button>
           ) : (
             <>
               {counts.failed > 0 && (
-                <button
-                  onClick={onRetryFailed}
-                  className="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700 flex items-center gap-1.5"
-                >
-                  <RotateCcw className="w-4 h-4" />
+                <Button variant="danger" size="sm" icon={RotateCcw} onClick={onRetryFailed}>
                   Retry {counts.failed} failed
-                </button>
+                </Button>
               )}
-              <button
-                onClick={onDismiss}
-                className="px-3 py-1.5 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50"
-              >
+              <Button size="sm" onClick={onDismiss}>
                 Dismiss
-              </button>
+              </Button>
             </>
           )}
         </div>

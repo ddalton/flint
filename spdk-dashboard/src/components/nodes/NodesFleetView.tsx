@@ -156,7 +156,7 @@ export const NodesFleetView: React.FC<NodesFleetViewProps> = ({
             <div className="mb-4 bg-white rounded-lg shadow p-4 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
                 <Server className="w-5 h-5 text-gray-600" />
-                <h3 className="text-lg font-medium text-gray-900 mr-2">Nodes</h3>
+                <h3 className="text-section text-gray-900 mr-2">Nodes</h3>
                 {FACETS.map(({ key, label }) => {
                   const active = facet === key;
                   const count = counts[key];

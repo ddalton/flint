@@ -7,6 +7,7 @@ import { ProgressBar } from '../ui/ProgressBar';
 import { useDiskSetup } from '../../hooks/useDashboardData';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
+import { Button, IconButton } from '../ui/Button';
 
 interface NodeDetailViewProps {
   node: string;
@@ -182,7 +183,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
       {volumeFilter && volumeFilter !== 'all' && filteredVolumes && filteredVolumes.length > 0 && (
         <div id={`filtered-volumes-${node}`} className="bg-gray-50 rounded-lg p-4 border border-blue-200">
           <div className="flex items-center justify-between mb-3">
-            <h4 className="text-lg font-semibold flex items-center gap-2">
+            <h4 className="text-section flex items-center gap-2">
               <Database className="w-5 h-5 text-blue-600" />
               {getFilterDisplayName(volumeFilter)} Volumes on {node}
               <span className="text-sm font-normal text-gray-600">
@@ -258,7 +259,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
 
       <div className="bg-white rounded-lg overflow-hidden border border-gray-200">
         <div className="px-6 py-4 bg-gray-100 border-b flex items-center justify-between">
-          <h4 className="text-lg font-semibold flex items-center gap-2">
+          <h4 className="text-section flex items-center gap-2">
             <HardDrive className="w-5 h-5" />
             NVMe Disks & Logical Volume Stores on {node}
             {volumeFilter && volumeFilter !== 'all' && (
@@ -267,13 +268,9 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
               </span>
             )}
           </h4>
-          <button
-            onClick={() => setShowMemoryDiskModal(true)}
-            className="flex items-center gap-2 px-3 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm"
-          >
-            <Plus className="w-4 h-4" />
+          <Button variant="primary" icon={Plus} onClick={() => setShowMemoryDiskModal(true)}>
             Create Memory Disk
-          </button>
+          </Button>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
@@ -302,13 +299,14 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                     <tr className="hover:bg-gray-50">
                       <td className="px-4 py-4">
                         <div>
-                          <button
+                          <Button
+                            variant="link"
+                            className="hover:underline"
                             onClick={() => onDiskVolumeFilter?.(disk.id)}
-                            className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
                             title={`Click to filter volumes on disk ${disk.id}`}
                           >
                             <div className="text-sm font-medium text-gray-900">{disk.id}</div>
-                          </button>
+                          </Button>
                           <div className="text-xs text-gray-500">{disk.pci_addr}</div>
                         </div>
                       </td>
@@ -365,27 +363,25 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       </td>
                       <td className="px-4 py-4">
                         <div className="flex items-center gap-2">
-                          <button
+                          <Button
+                            variant="link"
+                            className="hover:underline"
                             onClick={() => onDiskVolumeFilter?.(disk.id)}
-                            className="text-blue-600 hover:text-blue-800 hover:underline text-sm"
                             title={`Click to see all volumes on disk ${disk.id}`}
                           >
                             {filteredDiskVolumes.length} volume{filteredDiskVolumes.length !== 1 ? 's' : ''}
                             {volumeFilter && volumeFilter !== 'all' && filteredDiskVolumes.length !== disk.provisioned_volumes.length && (
                               <span className="text-gray-400">/{disk.provisioned_volumes.length}</span>
                             )}
-                          </button>
+                          </Button>
                           {filteredDiskVolumes.length > 0 && (
-                            <button
+                            <IconButton
+                              icon={expandedDisks.has(disk.id) ? ChevronDown : ChevronRight}
+                              aria-label={expandedDisks.has(disk.id) ? 'Collapse volume list' : 'Expand volume list'}
                               onClick={() => toggleDiskExpansion(disk.id)}
-                              className="p-1 text-gray-400 hover:text-gray-600 rounded"
-                            >
-                              {expandedDisks.has(disk.id) ? (
-                                <ChevronDown className="w-4 h-4" />
-                              ) : (
-                                <ChevronRight className="w-4 h-4" />
-                              )}
-                            </button>
+                              className="p-1 text-gray-400 hover:text-gray-600"
+                              iconClass="w-4 h-4"
+                            />
                           )}
                         </div>
                       </td>
@@ -477,17 +473,16 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">Create Memory Disk</h3>
-              <button
+              <h3 className="text-section">Create Memory Disk</h3>
+              <IconButton
+                icon={X}
+                aria-label="Close"
                 onClick={() => {
                   setShowMemoryDiskModal(false);
                   setMemoryDiskError(null);
                 }}
-                className="text-gray-400 hover:text-gray-600"
                 disabled={isCreatingMemoryDisk}
-              >
-                <X className="w-5 h-5" />
-              </button>
+              />
             </div>
 
             <div className="space-y-4">
@@ -553,19 +548,19 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
               )}
 
               <div className="flex gap-3 justify-end pt-4">
-                <button
+                <Button
                   onClick={() => {
                     setShowMemoryDiskModal(false);
                     setMemoryDiskError(null);
                   }}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
                   disabled={isCreatingMemoryDisk}
                 >
                   Cancel
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="primary"
+                  icon={isCreatingMemoryDisk ? undefined : Plus}
                   onClick={handleCreateMemoryDisk}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
                   disabled={isCreatingMemoryDisk}
                 >
                   {isCreatingMemoryDisk ? (
@@ -574,12 +569,9 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       Creating...
                     </>
                   ) : (
-                    <>
-                      <Plus className="w-4 h-4" />
-                      Create
-                    </>
+                    'Create'
                   )}
-                </button>
+                </Button>
               </div>
             </div>
           </div>

@@ -7,6 +7,7 @@ import { parseTab, parseVolumeFilter } from '../routes';
 import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
+import { Button } from './ui/Button';
 import { TabNavigation } from './ui/TabNavigation';
 import { Skeleton, TabSkeleton } from './ui/Skeleton';
 
@@ -273,7 +274,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <div className="flex items-center gap-3">
                   <span className="text-2xl">{filterInfo.icon}</span>
                   <div>
-                    <h3 className="font-semibold text-lg">
+                    <h3 className="text-section">
                       {filterInfo.name}
                     </h3>
                     <p className="text-sm text-gray-600">
@@ -288,12 +289,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       <div className="text-red-700">🔴 {stats.failedVolumes} Failed</div>
                     </div>
                   )}
-                  <button
-                    onClick={handleClearFilter}
-                    className="px-4 py-2 bg-white border border-gray-300 rounded-md hover:bg-gray-50 text-sm font-medium"
-                  >
+                  <Button variant="secondary" onClick={handleClearFilter}>
                     Clear Filter
-                  </button>
+                  </Button>
                 </div>
               </div>
             </div>
@@ -308,7 +306,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <Filter className="w-5 h-5 text-indigo-600" />
               </div>
               <div>
-                <h3 className="text-lg font-semibold text-gray-900">Quick Filters</h3>
+                <h3 className="text-section text-gray-900">Quick Filters</h3>
                 <p className="text-sm text-gray-600">Click any card to filter volumes</p>
               </div>
               {volumeFilter !== 'all' && (
@@ -318,12 +316,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
               )}
             </div>
             {volumeFilter !== 'all' && (
-              <button
-                onClick={handleClearFilter}
-                className="px-4 py-2 bg-white text-indigo-600 rounded-lg shadow-sm hover:shadow-md transition-shadow font-medium text-sm"
-              >
+              <Button variant="secondary" onClick={handleClearFilter}>
                 Clear filter
-              </button>
+              </Button>
             )}
           </div>
           

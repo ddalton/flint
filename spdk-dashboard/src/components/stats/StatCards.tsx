@@ -109,7 +109,7 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
             <div className="flex items-center mb-2">
               <Icon className={`w-8 h-8 ${card.color} mr-3`} />
               <div className="flex-1">
-                <p className="text-2xl font-bold text-gray-900">{card.value}</p>
+                <p className="text-stat text-gray-900">{card.value}</p>
                 <p className="text-sm font-medium text-gray-700">{card.title}</p>
                 {card.subtitle && (
                   <p className="text-xs text-gray-500 mt-1">{card.subtitle}</p>

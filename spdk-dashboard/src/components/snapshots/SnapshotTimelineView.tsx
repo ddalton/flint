@@ -246,7 +246,7 @@ export const SnapshotTimelineView: React.FC<{
     <div className="space-y-6">
       <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
-          <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+          <h3 className="text-section text-gray-900 flex items-center gap-2">
             <GitBranch className="w-5 h-5 text-blue-600" />
             Snapshot Timeline
           </h3>

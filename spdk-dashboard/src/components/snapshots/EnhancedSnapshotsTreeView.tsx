@@ -178,25 +178,25 @@ const VolumeStorageAnalytics: React.FC<{
       {/* Storage Breakdown */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
         <div className="text-center">
-          <div className="text-lg font-bold text-blue-600">
+          <div className="text-stat text-blue-600">
             {formatSize(analytics.total_volume_size)}
           </div>
           <div className="text-xs text-gray-600">Logical Size</div>
         </div>
         <div className="text-center">
-          <div className="text-lg font-bold text-green-600">
+          <div className="text-stat text-green-600">
             {formatSize(analytics.actual_data_size)}
           </div>
           <div className="text-xs text-gray-600">Actual Data</div>
         </div>
         <div className="text-center">
-          <div className="text-lg font-bold text-orange-600">
+          <div className="text-stat text-orange-600">
             {formatSize(analytics.total_snapshot_overhead)}
           </div>
           <div className="text-xs text-gray-600">Snapshot Overhead</div>
         </div>
         <div className="text-center">
-          <div className={`text-lg font-bold ${getEfficiencyColor()}`}>
+          <div className={`text-stat ${getEfficiencyColor()}`}>
             {(efficiency * 100).toFixed(1)}%
           </div>
           <div className="text-xs text-gray-600">Overhead Ratio</div>
@@ -302,7 +302,7 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
                 )}
                 <Database className="w-6 h-6 text-blue-600" />
                 <div>
-                  <h3 className="text-lg font-semibold text-gray-900">
+                  <h3 className="text-section text-gray-900">
                     {volumeData.volume_name}
                   </h3>
                   <p className="text-sm text-gray-600">

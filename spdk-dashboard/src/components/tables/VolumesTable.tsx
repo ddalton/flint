@@ -8,6 +8,7 @@ import { volumeFilterDisplay, volumeStateStyle } from '../ui/status';
 import { VolumeSyncSummary } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
 import { ConfirmModal } from '../ui/ConfirmModal';
+import { Button, IconButton } from '../ui/Button';
 
 // The detail modal is its own chunk — most sessions never open it.
 const VolumeDetailAPI = lazy(() =>
@@ -228,13 +229,9 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               </span>
             </div>
             {onClearFilter && (
-              <button
-                onClick={onClearFilter}
-                className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1"
-              >
-                <X className="w-3 h-3" />
+              <Button variant="link" icon={X} onClick={onClearFilter}>
                 Clear Filter
-              </button>
+              </Button>
             )}
           </div>
         )}
@@ -251,13 +248,14 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               </span>
             </div>
             {onClearDiskFilter && (
-              <button
+              <Button
+                variant="link"
+                icon={X}
+                className="text-purple-600 hover:text-purple-800"
                 onClick={onClearDiskFilter}
-                className="text-purple-600 hover:text-purple-800 text-sm font-medium flex items-center gap-1"
               >
-                <X className="w-3 h-3" />
                 Clear Disk Filter
-              </button>
+              </Button>
             )}
           </div>
         )}
@@ -290,21 +288,23 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               <span className="text-sm text-gray-700">
                 {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredVolumes.length)} of {filteredVolumes.length}
               </span>
-              <button
+              <IconButton
+                icon={ChevronLeft}
+                aria-label="Previous page"
                 onClick={() => goToPage(currentPage - 1)}
                 disabled={currentPage === 1}
-                className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
+                className="p-1"
+                iconClass="w-4 h-4"
+              />
               <span className="px-2 py-1 text-sm">{currentPage} / {totalPages}</span>
-              <button
+              <IconButton
+                icon={ChevronRight}
+                aria-label="Next page"
                 onClick={() => goToPage(currentPage + 1)}
                 disabled={currentPage === totalPages}
-                className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
+                className="p-1"
+                iconClass="w-4 h-4"
+              />
             </div>
           </div>
         </div>
@@ -350,12 +350,13 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                 return (
                   <tr key={volume.id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <button
+                      <Button
+                        variant="link"
+                        className="hover:underline"
                         onClick={() => handleVolumeNameClick(volume)}
-                        className="text-sm font-medium text-blue-600 hover:text-blue-800 hover:underline"
                       >
                         {volume.name}
-                      </button>
+                      </Button>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{volume.size}</td>
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -387,13 +388,14 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                       {extVolume.isRaw ? (
                         <span className="text-gray-400">N/A</span>
                       ) : (
-                        <button
+                        <Button
+                          variant="link"
+                          className="hover:underline"
                           onClick={() => onReplicaClick?.(volume.id, volume.name)}
-                          className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
                           title={`Click to see disks with replicas for ${volume.name}`}
                         >
                           {volume.active_replicas}/{volume.replicas}
-                        </button>
+                        </Button>
                       )}
                       {volume.active_replicas < volume.replicas && (
                         <div className="text-xs text-red-600 mt-1">
@@ -438,23 +440,24 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                         {extVolume.isRaw ? (
                           <>
                             {extVolume.rawVolumeData && (
-                              <button
+                              <IconButton
+                                icon={Trash2}
+                                aria-label="Delete orphaned SPDK volume"
                                 onClick={() => handleDeleteRaw(extVolume.rawVolumeData!)}
-                                className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50"
+                                className="p-1 text-red-500 hover:text-red-700 hover:bg-red-50"
+                                iconClass="w-4 h-4"
                                 title="Delete orphaned SPDK volume"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
+                              />
                             )}
                           </>
                         ) : (
-                          <button
+                          <Button
+                            size="sm"
+                            icon={Info}
                             onClick={() => handleVolumeNameClick(volume)}
-                            className="inline-flex items-center px-3 py-1 border border-transparent text-xs leading-4 font-medium rounded text-blue-700 bg-blue-100 hover:bg-blue-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                           >
-                            <Info className="w-3 h-3 mr-1" />
                             Details
-                          </button>
+                          </Button>
                         )}
                       </div>
                     </td>
@@ -481,20 +484,12 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               Showing {((currentPage - 1) * pageSize) + 1} to {Math.min(currentPage * pageSize, filteredVolumes.length)} of {filteredVolumes.length} results
             </div>
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => goToPage(1)}
-                disabled={currentPage === 1}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
-              >
+              <Button size="sm" onClick={() => goToPage(1)} disabled={currentPage === 1}>
                 First
-              </button>
-              <button
-                onClick={() => goToPage(currentPage - 1)}
-                disabled={currentPage === 1}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
-              >
+              </Button>
+              <Button size="sm" onClick={() => goToPage(currentPage - 1)} disabled={currentPage === 1}>
                 Previous
-              </button>
+              </Button>
               
               {/* Page numbers */}
               {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
@@ -514,20 +509,12 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                 );
               })}
               
-              <button
-                onClick={() => goToPage(currentPage + 1)}
-                disabled={currentPage === totalPages}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
-              >
+              <Button size="sm" onClick={() => goToPage(currentPage + 1)} disabled={currentPage === totalPages}>
                 Next
-              </button>
-              <button
-                onClick={() => goToPage(totalPages)}
-                disabled={currentPage === totalPages}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
-              >
+              </Button>
+              <Button size="sm" onClick={() => goToPage(totalPages)} disabled={currentPage === totalPages}>
                 Last
-              </button>
+              </Button>
             </div>
           </div>
         </div>

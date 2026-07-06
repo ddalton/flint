@@ -10,6 +10,7 @@ import { Skeleton } from '../ui/Skeleton';
 import { ProgressBar } from '../ui/ProgressBar';
 import { useEvents } from '../../hooks/useEvents';
 import { EventTimelinePanel, HotRejoinWindowsPanel } from '../events/EventPanels';
+import { Button, IconButton } from '../ui/Button';
 
 // 2b volume detail: `volumeData` is LIVE — the parent derives it from the
 // polled dashboard query each render, so the replica table and consumer-raid
@@ -55,7 +56,7 @@ function ConsumerRaidCard({ raid }: { raid: ConsumerRaid }) {
   return (
     <div className="bg-gray-50 rounded-lg p-6">
       <div className="flex items-center justify-between mb-1">
-        <h4 className="text-lg font-semibold flex items-center gap-2">
+        <h4 className="text-section flex items-center gap-2">
           <Shield className="w-5 h-5 text-blue-600" />
           Assembled on {raid.node}
         </h4>
@@ -166,7 +167,7 @@ function LegacyReplicaCards({ replicas }: { replicas: ReplicaStatus[] }) {
       {replicas.map((replica, index) => (
         <div key={index} className="bg-gray-50 rounded-lg p-6">
           <div className="flex items-center justify-between mb-4">
-            <h4 className="text-lg font-semibold">Replica on {replica.node}</h4>
+            <h4 className="text-section">Replica on {replica.node}</h4>
             <span className={`px-3 py-1 rounded-full text-sm font-medium ${
               replica.status === 'healthy' || replica.status === 'active'
                 ? 'bg-green-100 text-green-800'
@@ -276,16 +277,11 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
         <div className="bg-white rounded-lg p-8 max-w-md w-full mx-4">
           <div className="text-center">
             <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">Volume Not Available</h3>
+            <h3 className="text-section text-gray-900 mb-2">Volume Not Available</h3>
             <p className="text-sm text-gray-600 mb-4">
               {volumeName} is no longer present in the dashboard data.
             </p>
-            <button
-              onClick={onClose}
-              className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
-            >
-              Close
-            </button>
+            <Button onClick={onClose}>Close</Button>
           </div>
         </div>
       </div>
@@ -307,7 +303,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
   const renderOverviewTab = () => (
     <div className="space-y-6">
       <div className="bg-gray-50 rounded-lg p-6">
-        <h4 className="text-lg font-semibold mb-4">Volume Summary</h4>
+        <h4 className="text-section mb-4">Volume Summary</h4>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div>
             <p className="text-sm text-gray-600">Name</p>
@@ -459,13 +455,9 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           <HardDrive className="w-16 h-16 text-gray-400 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-gray-900 mb-2">No SPDK Details Available</h3>
           <p className="text-gray-600 mb-4">Unable to retrieve SPDK logical volume information for this volume.</p>
-          <button
-            onClick={fetchSpdkDetails}
-            className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-          >
-            <RefreshCw className="w-4 h-4 mr-2" />
+          <Button variant="primary" icon={RefreshCw} onClick={fetchSpdkDetails}>
             Retry
-          </button>
+          </Button>
         </div>
       );
     }
@@ -474,7 +466,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
       <div className="space-y-6">
         {/* SPDK Volume Information */}
         <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg p-6 border border-blue-200">
-          <h4 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <h4 className="text-section mb-4 flex items-center gap-2">
             <HardDrive className="w-5 h-5 text-blue-600" />
             SPDK Logical Volume
           </h4>
@@ -500,11 +492,11 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
 
         {/* Volume Size and Allocation */}
         <div className="bg-white border rounded-lg p-6">
-          <h4 className="text-lg font-semibold mb-4">Volume Allocation</h4>
+          <h4 className="text-section mb-4">Volume Allocation</h4>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
             <div>
               <p className="text-sm text-gray-600">Size (GB)</p>
-              <p className="text-xl font-bold text-blue-600">{(spdkData.size_gb || 0).toFixed(2)}</p>
+              <p className="text-lg font-bold text-blue-600">{(spdkData.size_gb || 0).toFixed(2)}</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Size (Bytes)</p>
@@ -548,7 +540,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
 
         {/* LVS Information */}
         <div className="bg-white border rounded-lg p-6">
-          <h4 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <h4 className="text-section mb-4 flex items-center gap-2">
             <Database className="w-5 h-5 text-indigo-600" />
             Logical Volume Store (LVS)
           </h4>
@@ -648,15 +640,10 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
         <div className="flex items-center justify-between p-6 border-b">
           <div className="flex items-center gap-3">
             <Database className="w-6 h-6 text-blue-600" />
-            <h2 className="text-xl font-semibold">Volume Details: {volumeName}</h2>
+            <h2 className="text-section">Volume Details: {volumeName}</h2>
             <span className="text-xs text-gray-400 hidden md:inline">live</span>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-md"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <IconButton icon={X} aria-label="Close" onClick={onClose} />
         </div>
 
         {/* Tabs */}

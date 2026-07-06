@@ -1,11 +1,13 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../../api/client';
-import { 
+import {
   X, HardDrive, Search, Filter, ChevronDown, SortAsc, SortDesc,
   Server, Database, CheckCircle, Activity, AlertTriangle, Trash2
 } from 'lucide-react';
 import type { Disk, OrphanedVolumeInfo, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 import { filterVolumesByType } from '../../hooks/useDashboardData';
+import { Button } from '../ui/Button';
 import { ConfirmModal } from '../ui/ConfirmModal';
 import { ProgressBar } from '../ui/ProgressBar';
 
@@ -50,6 +52,11 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   const [sortField, setSortField] = useState<DiskSortField>('id');
   const [sortOrder, setSortOrder] = useState<DiskSortOrder>('asc');
   const [showFilters, setShowFilters] = useState(false);
+  // Pagination (same contract as VolumesTable): the table never mounts an
+  // unbounded row list, whatever the fleet size.
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const queryClient = useQueryClient();
 
   // Delete orphaned volume state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -208,6 +215,21 @@ export const DisksTable: React.FC<DisksTableProps> = ({
     healthFilter, lvsFilter, utilizationFilter, capacityRange, sortField, sortOrder
   ]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredDisks.length / pageSize));
+  const paginatedDisks = filteredDisks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  // Reset to first page whenever the visible set changes shape
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [
+    searchTerm, selectedNodes, healthFilter, lvsFilter, utilizationFilter,
+    capacityRange, volumeFilter, volumeReplicaFilter, pageSize,
+  ]);
+
+  const goToPage = (page: number) => {
+    setCurrentPage(Math.max(1, Math.min(totalPages, page)));
+  };
+
   const handleSort = (field: DiskSortField) => {
     if (sortField === field) {
       setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
@@ -287,22 +309,22 @@ export const DisksTable: React.FC<DisksTableProps> = ({
       const result = await response.json();
       
       if (result.success) {
-        console.log('✅ Successfully deleted orphaned volume:', volumeToDelete.volume.spdk_volume_uuid);
         setDeleteSuccess(true);
-        
+
         // Invalidate dashboard cache to force refresh
         try {
           await apiFetch('/api/refresh', { method: 'POST' });
         } catch (e) {
           console.warn('Failed to invalidate cache:', e);
         }
-        
-        // Auto-close after 2 seconds and refresh
+
+        // Auto-close after 2 seconds; a query refetch updates the disk list
+        // in place (no full page reload).
         setTimeout(() => {
           setShowDeleteDialog(false);
           setVolumeToDelete(null);
           setDeleteSuccess(false);
-          window.location.reload(); // Refresh to update disk list
+          queryClient.invalidateQueries({ queryKey: ['dashboard'] });
         }, 2000);
       } else {
         console.error('❌ Failed to delete orphaned volume:', result.error);
@@ -366,7 +388,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Filter className="w-5 h-5 text-gray-600" />
-            <h3 className="text-lg font-medium text-gray-900">Disk Filters</h3>
+            <h3 className="text-section text-gray-900">Disk Filters</h3>
             {activeFilterCount > 0 && (
               <span className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
                 {activeFilterCount} active
@@ -513,10 +535,10 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           <div className="flex items-center">
             <HardDrive className="w-8 h-8 text-blue-600 mr-3" />
             <div>
-              <h3 className="text-lg font-semibold">
+              <h3 className="text-sm font-medium text-gray-700">
                 {activeFilterCount > 0 || volumeFilter || volumeReplicaFilter ? 'Filtered Disks' : 'Total Disks'}
               </h3>
-              <p className="text-3xl font-bold text-blue-600">
+              <p className="text-stat text-blue-600">
                 {filteredDisks.length}
                 {(activeFilterCount > 0 || volumeFilter || volumeReplicaFilter) && (
                   <span className="text-lg text-gray-500">/{stats.totalDisks}</span>
@@ -529,8 +551,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           <div className="flex items-center">
             <CheckCircle className="w-8 h-8 text-green-600 mr-3" />
             <div>
-              <h3 className="text-lg font-semibold">Healthy Disks</h3>
-              <p className="text-3xl font-bold text-green-600">
+              <h3 className="text-sm font-medium text-gray-700">Healthy Disks</h3>
+              <p className="text-stat text-green-600">
                 {filteredDisks.filter(d => d.healthy).length}
               </p>
             </div>
@@ -540,8 +562,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           <div className="flex items-center">
             <Database className="w-8 h-8 text-indigo-600 mr-3" />
             <div>
-              <h3 className="text-lg font-semibold">LVS Initialized</h3>
-              <p className="text-3xl font-bold text-indigo-600">
+              <h3 className="text-sm font-medium text-gray-700">LVS Initialized</h3>
+              <p className="text-stat text-indigo-600">
                 {filteredDisks.filter(d => d.blobstore_initialized).length}
               </p>
             </div>
@@ -551,8 +573,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           <div className="flex items-center">
             <Activity className="w-8 h-8 text-purple-600 mr-3" />
             <div>
-              <h3 className="text-lg font-semibold">Avg Utilization</h3>
-              <p className="text-3xl font-bold text-purple-600">
+              <h3 className="text-sm font-medium text-gray-700">Avg Utilization</h3>
+              <p className="text-stat text-purple-600">
                 {filteredDisks.length > 0 ? 
                   Math.round(filteredDisks.reduce((sum, disk) => 
                     sum + (disk.allocated_space / disk.capacity) * 100, 0
@@ -652,7 +674,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                 </td>
               </tr>
             ) : (
-              filteredDisks.map((disk) => {
+              paginatedDisks.map((disk) => {
                 let displayVolumes = disk.provisioned_volumes;
                 
                 // Apply volume replica filter
@@ -847,6 +869,39 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         </table>
       </div>
 
+      {/* Pagination */}
+      {filteredDisks.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-sm text-gray-700">
+            <span>
+              Showing {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredDisks.length)} of {filteredDisks.length} disks
+            </span>
+            <select
+              value={pageSize}
+              onChange={(e) => setPageSize(Number(e.target.value))}
+              aria-label="Disks per page"
+              className="border border-gray-300 rounded px-2 py-1 text-sm"
+            >
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+            <span>per page</span>
+          </div>
+          {totalPages > 1 && (
+            <div className="flex items-center gap-2">
+              <Button size="sm" onClick={() => goToPage(currentPage - 1)} disabled={currentPage === 1}>
+                Previous
+              </Button>
+              <span className="px-2 py-1 text-sm">{currentPage} / {totalPages}</span>
+              <Button size="sm" onClick={() => goToPage(currentPage + 1)} disabled={currentPage === totalPages}>
+                Next
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Additional Filter Summary */}
       {filteredDisks.length > 0 && activeFilterCount > 0 && (
         <div className="mt-4 p-4 bg-gray-50 rounded-lg">
@@ -922,7 +977,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
             <div>
               <span className="text-blue-700 font-medium">Total Free Space:</span>
               <div className="text-blue-900">
-                {Math.round(filteredDisks.reduce((sum, d) => sum + d.free_space, 0) / (1024**3)).toLocaleString()}GB
+                {/* free_space is already GB (see the Free Space column) */}
+                {Math.round(filteredDisks.reduce((sum, d) => sum + d.free_space, 0)).toLocaleString()}GB
               </div>
             </div>
           </div>

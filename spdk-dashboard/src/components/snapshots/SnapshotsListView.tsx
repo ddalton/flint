@@ -1,8 +1,9 @@
 import React from 'react';
-import { 
-  Camera, Eye, Server, Shield, Info, CheckCircle 
+import {
+  Camera, Eye, Server, Shield, Info, CheckCircle
 } from 'lucide-react';
 import type { SnapshotDetails } from './types';
+import { IconButton } from '../ui/Button';
 
 interface SnapshotsListViewProps {
   snapshots: SnapshotDetails[];
@@ -41,7 +42,7 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
               <div className="flex items-center gap-3">
                 {getSnapshotTypeIcon(snapshot.snapshot_type)}
                 <div>
-                  <h3 className="text-lg font-semibold text-gray-900">
+                  <h3 className="text-section text-gray-900">
                     {snapshot.snapshot_id}
                   </h3>
                   <p className="text-sm text-gray-600">
@@ -65,12 +66,11 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
                 }`}>
                   {snapshot.ready_to_use ? 'Ready' : 'Creating'}
                 </div>
-                <button
+                <IconButton
+                  icon={Eye}
+                  aria-label="View snapshot details"
                   onClick={() => onSnapshotSelect(snapshot)}
-                  className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-md"
-                >
-                  <Eye className="w-5 h-5" />
-                </button>
+                />
               </div>
             </div>
           </div>

@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart as RechartsPieChart, Cell, Pie } from 'recharts';
 import type { SnapshotStorageViewProps } from './types';
+import { Button } from '../ui/Button';
 
 interface StorageAnalysisCard {
   volumeId: string;
@@ -152,7 +153,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             <Database className="w-8 h-8 text-blue-600 mr-3" />
             <div>
               <p className="text-sm font-medium text-gray-600">Total Logical Storage</p>
-              <p className="text-2xl font-bold text-gray-900">{formatSize(aggregateStats.totalLogical)}</p>
+              <p className="text-stat text-gray-900">{formatSize(aggregateStats.totalLogical)}</p>
             </div>
           </div>
         </div>
@@ -162,7 +163,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             <HardDrive className="w-8 h-8 text-green-600 mr-3" />
             <div>
               <p className="text-sm font-medium text-gray-600">Actual Data Used</p>
-              <p className="text-2xl font-bold text-gray-900">{formatSize(aggregateStats.totalActual)}</p>
+              <p className="text-stat text-gray-900">{formatSize(aggregateStats.totalActual)}</p>
             </div>
           </div>
         </div>
@@ -172,7 +173,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             <Layers className="w-8 h-8 text-orange-600 mr-3" />
             <div>
               <p className="text-sm font-medium text-gray-600">Snapshot Overhead</p>
-              <p className="text-2xl font-bold text-gray-900">{formatSize(aggregateStats.totalOverhead)}</p>
+              <p className="text-stat text-gray-900">{formatSize(aggregateStats.totalOverhead)}</p>
               <p className="text-xs text-gray-500">
                 {aggregateStats.totalLogical > 0 
                   ? ((aggregateStats.totalOverhead / aggregateStats.totalLogical) * 100).toFixed(1)
@@ -187,7 +188,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             <BarChart3 className="w-8 h-8 text-purple-600 mr-3" />
             <div>
               <p className="text-sm font-medium text-gray-600">Average Efficiency</p>
-              <p className={`text-2xl font-bold ${getEfficiencyColor(aggregateStats.avgEfficiency)}`}>
+              <p className={`text-stat ${getEfficiencyColor(aggregateStats.avgEfficiency)}`}>
                 {(aggregateStats.avgEfficiency * 100).toFixed(1)}%
               </p>
               <p className="text-xs text-gray-500">overhead ratio</p>
@@ -219,7 +220,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Overall Storage Distribution */}
         <div className="bg-white rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <h3 className="text-section mb-4 flex items-center gap-2">
             <PieChart className="w-5 h-5 text-blue-600" />
             Overall Storage Distribution
           </h3>
@@ -247,7 +248,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
 
         {/* Volume Storage Comparison */}
         <div className="bg-white rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <h3 className="text-section mb-4 flex items-center gap-2">
             <BarChart3 className="w-5 h-5 text-green-600" />
             Volume Storage Breakdown
           </h3>
@@ -277,7 +278,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
       {/* Controls and Filters */}
       <div className="bg-white rounded-lg shadow p-4">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold">Volume Storage Analysis</h3>
+          <h3 className="text-section">Volume Storage Analysis</h3>
           <div className="flex items-center gap-4">
             {/* Search */}
             <div className="relative">
@@ -328,7 +329,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
           <div key={card.volumeId} className="bg-white rounded-lg shadow p-6">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <h4 className="text-lg font-semibold text-gray-900">{card.volumeName}</h4>
+                <h4 className="text-section text-gray-900">{card.volumeName}</h4>
                 <p className="text-sm text-gray-600">{card.volumeId}</p>
               </div>
               <div className={`px-3 py-1 rounded-full text-sm font-medium ${getEfficiencyBadge(card.efficiency)}`}>
@@ -395,17 +396,18 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             )}
 
             {/* View Snapshots Button */}
-            <button
+            <Button
+              variant="primary"
+              className="mt-4 w-full"
               onClick={() => {
                 const firstSnapshot = snapshots.find(s => s.source_volume_id === card.volumeId);
                 if (firstSnapshot) {
                   onSnapshotSelect(firstSnapshot);
                 }
               }}
-              className="mt-4 w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium"
             >
               View {card.snapshotCount} Snapshot{card.snapshotCount !== 1 ? 's' : ''}
-            </button>
+            </Button>
           </div>
         ))}
       </div>

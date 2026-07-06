@@ -55,7 +55,7 @@ export function ConfirmModal({
         <div className="flex items-center gap-3 mb-4">
           <AlertTriangle aria-hidden="true" className="w-8 h-8 text-failed-600 flex-shrink-0" />
           <div>
-            <h3 className="text-lg font-bold text-gray-900">{title}</h3>
+            <h3 className="text-section text-gray-900">{title}</h3>
             {subtitle && <p className="text-sm text-gray-600">{subtitle}</p>}
           </div>
         </div>

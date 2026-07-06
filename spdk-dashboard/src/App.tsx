@@ -4,6 +4,7 @@ import { Database, Loader2 } from 'lucide-react';
 import { Dashboard } from './components/Dashboard';
 import { useAuth, useDashboardData } from './hooks/useDashboardData';
 import { OperationsProvider } from './contexts/OperationsContext';
+import { Button } from './components/ui/Button';
 
 // Login Component
 const LoginPage = ({ onLogin }: { onLogin: (username: string, password: string) => Promise<void> }) => {
@@ -32,13 +33,13 @@ const LoginPage = ({ onLogin }: { onLogin: (username: string, password: string) 
       <header className="bg-white shadow-sm border-b">
         <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center">
           <Database aria-hidden="true" className="w-8 h-8 text-brand-600 mr-3" />
-          <h1 className="text-2xl font-bold text-gray-900">Flint Dashboard</h1>
+          <h1 className="text-page-title text-gray-900">Flint Dashboard</h1>
         </div>
       </header>
 
       <main className="flex-1 flex items-center justify-center px-4 py-12">
         <div className="bg-white rounded-lg shadow w-full max-w-md p-8">
-          <h2 className="text-lg font-semibold text-gray-900 mb-1">Sign in</h2>
+          <h2 className="text-section text-gray-900 mb-1">Sign in</h2>
           <p className="text-sm text-gray-600 mb-6">Storage management console</p>
 
           {error && (
@@ -76,20 +77,16 @@ const LoginPage = ({ onLogin }: { onLogin: (username: string, password: string) 
                 required
               />
             </div>
-            <button
+            <Button
               type="submit"
+              variant="primary"
               disabled={loading}
-              className="w-full bg-brand-600 text-white py-2 px-4 rounded-md text-sm font-medium hover:bg-brand-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600 disabled:opacity-50 flex items-center justify-center gap-2"
+              className="w-full"
+              icon={loading ? Loader2 : undefined}
+              iconClass="animate-spin motion-reduce:animate-none"
             >
-              {loading ? (
-                <>
-                  <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin motion-reduce:animate-none" />
-                  Signing in…
-                </>
-              ) : (
-                'Sign In'
-              )}
-            </button>
+              {loading ? 'Signing in…' : 'Sign In'}
+            </Button>
           </form>
         </div>
       </main>

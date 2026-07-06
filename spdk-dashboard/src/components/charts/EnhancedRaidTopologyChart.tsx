@@ -94,7 +94,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center">
           <Activity className="w-6 h-6 text-blue-600 mr-2" />
-          <h3 className="text-lg font-semibold">
+          <h3 className="text-section">
             {view === 'cluster' ? 'Cluster Topology' : 'Volume Topology'}
           </h3>
         </div>

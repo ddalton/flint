@@ -20,8 +20,10 @@ import {
   type BatchDisk, type BatchItem, type GroupBy, type SetupOneResult, type DiskGroup
 } from './batchSetup';
 import { BulkConfirmModal, BatchProgressPanel, type ExcludedDisk } from './BulkInitPanels';
+import { Button, IconButton } from '../ui/Button';
+import { ConfirmModal } from '../ui/ConfirmModal';
 
-type ViewMode = 'grid' | 'compact' | 'table';
+type ViewMode = 'grid' | 'compact';
 type StatusFilter = 'all' | 'free' | 'driver-bound' | 'lvs-ready' | 'setup-ready' | 'initialize-ready' | 'ready' | 'needs-unmount' | 'system' | 'spdk-ready' | 'driver-ready';
 type SizeFilter = 'all' | 'small' | 'medium' | 'large' | 'xlarge';
 
@@ -183,6 +185,56 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
 
 type DiskWithNode = UnimplementedDisk & { nodeName: string };
 
+// One place mapping a disk's init state onto the semantic palette — used by
+// the per-group status strip and its legend (same buckets as the cards/rows).
+const diskStatusMeta = (disk: UnimplementedDisk): { label: string; cell: string } => {
+  if (disk.is_system_disk) return { label: 'System', cell: 'bg-failed-500' };
+  if (disk.mounted_partitions.length > 0) return { label: 'Needs unmount', cell: 'bg-degraded-400' };
+  if (disk.blobstore_initialized) return { label: 'LVS ready', cell: 'bg-healthy-500' };
+  if (disk.driver_ready) return { label: 'Driver bound', cell: 'bg-brand-500' };
+  return { label: 'Free', cell: 'bg-gray-300' };
+};
+
+const STRIP_LEGEND: { label: string; cell: string }[] = [
+  { label: 'Free', cell: 'bg-gray-300' },
+  { label: 'Driver bound', cell: 'bg-brand-500' },
+  { label: 'LVS ready', cell: 'bg-healthy-500' },
+  { label: 'Needs unmount', cell: 'bg-degraded-400' },
+  { label: 'System', cell: 'bg-failed-500' },
+];
+
+// Fleet-scale scan surface (NodesFleetView pattern): one status cell per
+// disk, so a node with 100s of disks reads at a glance even collapsed.
+// Clicking a cell toggles that disk's selection.
+const DiskStatusStrip: React.FC<{
+  disks: DiskWithNode[];
+  selectedDisks: Set<string>;
+  onToggle: (diskKey: string, selected: boolean) => void;
+}> = ({ disks, selectedDisks, onToggle }) => (
+  <div className="flex flex-wrap gap-1">
+    {disks.map(disk => {
+      const diskKey = `${disk.nodeName}:${disk.pci_address}`;
+      const meta = diskStatusMeta(disk);
+      const selected = selectedDisks.has(diskKey);
+      const selectable = !disk.is_system_disk;
+      return (
+        <button
+          key={diskKey}
+          onClick={() => selectable && onToggle(diskKey, !selected)}
+          disabled={!selectable}
+          aria-label={`${disk.device_name}: ${meta.label}${selected ? ', selected' : ''}`}
+          title={`${disk.device_name} · ${meta.label} · ${Math.round(disk.size_bytes / 1024 ** 3)}GB${selectable ? '' : ' (system disk)'}`}
+          className={`w-4 h-4 rounded-sm ${meta.cell} ${
+            selectable ? 'hover:ring-2 hover:ring-brand-400' : 'cursor-default opacity-60'
+          } focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600 ${
+            selected ? 'ring-2 ring-offset-1 ring-brand-600' : ''
+          }`}
+        />
+      );
+    })}
+  </div>
+);
+
 interface DiskCollectionProps {
   disks: DiskWithNode[];
   selectedDisks: Set<string>;
@@ -253,11 +305,15 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
   const { data: dashboardData } = useDashboardData(false); // Get node names from dashboard
   const { setActiveOperationsCount, setActiveSelectionsCount } = useOperations();
   
-  // UI State
+  // UI State. Dense rows are the default: they stay usable at 100s of
+  // disks per node, where the card grid is a wall of tiles.
   const [selectedDisks, setSelectedDisks] = useState<Set<string>>(new Set());
-  const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [viewMode, setViewMode] = useState<ViewMode>('compact');
   const [groupBy, setGroupBy] = useState<GroupBy>('node');
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  // Groups render at most GROUP_RENDER_CAP disks until explicitly expanded —
+  // the status strip still shows every disk, so nothing is invisible.
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [searchTerm, setSearchTerm] = useState('');
@@ -292,7 +348,6 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
   const [deleteInProgress, setDeleteInProgress] = useState<Set<string>>(new Set());
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
   const [diskToDelete, setDiskToDelete] = useState<{nodeName: string, pciAddr: string, diskName: string, model: string, size: number} | null>(null);
-  const [deleteConfirmationText, setDeleteConfirmationText] = useState('');
 
   // Get node names from dashboard API, fallback to mock node names for mock data alignment
   const knownNodes = dashboardData?.nodes || [
@@ -300,16 +355,6 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
     'worker-node-2', 
     'worker-node-3'
   ];
-
-  // DISABLED: Selection cleanup was causing selections to be cleared
-  // This useEffect was the root cause of the selection clearing issue
-  /*
-  useEffect(() => {
-    console.log(`🚫 [SELECTION_CLEANUP] DISABLED - This was clearing selections!`);
-  }, [nodeData]);
-  */
-
-
 
   useEffect(() => {
     const initialData: Record<string, NodeDiskData> = {};
@@ -337,21 +382,15 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
 
   // Sync selected disks count with global context to prevent auto-refresh during selection
   useEffect(() => {
-    console.log(`🔄 [CONTEXT_SYNC] Updating global selections count: ${selectedDisks.size}`);
     setActiveSelectionsCount(selectedDisks.size);
   }, [selectedDisks, setActiveSelectionsCount]);
 
   const refreshAllNodes = async () => {
     // Prevent discovery interference during active operations or selections
-    if (hasActiveOperations) {
-      console.log('⏸️ [REFRESH] Skipping auto-refresh during active operations to prevent interference');
-      return;
-    }
-    if (selectedDisks.size > 0) {
-      console.log('⏸️ [REFRESH] Skipping auto-refresh while disks are selected to preserve user state');
-      return;
-    }
-    
+    if (hasActiveOperations) return;
+    if (selectedDisks.size > 0) return;
+
+
     setGlobalRefreshing(true);
     const promises = knownNodes.map(node => refreshNodeDisks(node));
     await Promise.allSettled(promises);
@@ -380,14 +419,10 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                                   operationsRef.current.deleteInProgress.size > 0;
       
       const currentSelectedCount = selectedDisksRef.current.size;
-      
+
       // Check only local state - global selections are handled by auto-refresh checkbox
       if (!currentHasOperations && currentSelectedCount === 0) {
-        console.log('✅ [AUTO_REFRESH] Running auto-refresh - no operations or selections');
         refreshAllNodes();
-      } else {
-        const reason = currentHasOperations ? 'active operations' : 'disk selections';
-        console.log(`⏸️ [AUTO_REFRESH] Pausing auto-refresh during ${reason} (ops: ${currentHasOperations}, selections: ${currentSelectedCount})`);
       }
     }, 15000);
 
@@ -518,6 +553,21 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
     [filteredDisks, groupBy]
   );
 
+  // Fleet-scale landing: once, when the whole fleet has reported, start with
+  // all groups collapsed — the status strips still show every disk, and one
+  // click opens the node being worked on. Small clusters stay expanded.
+  // Decided only after every node finished loading (disks arrive per node,
+  // so an early count would undershoot the threshold).
+  const autoCollapsed = useRef(false);
+  useEffect(() => {
+    const nodes = Object.values(nodeData);
+    if (autoCollapsed.current || nodes.length === 0 || nodes.some(d => d.loading)) return;
+    autoCollapsed.current = true;
+    if (allDisks.length > 80 && groupBy !== 'none') {
+      setCollapsedGroups(new Set(groupedDisks.map(group => group.key)));
+    }
+  }, [nodeData, allDisks, groupBy, groupedDisks]);
+
   // Check if driver unbinding is allowed (Driver Bound disks only)
   const canUnbindDriver = useMemo(() => {
     if (selectedDisks.size === 0) return false;
@@ -561,19 +611,30 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
     return null;
   };
 
-  // Pagination (flat view only — grouped views render all filtered disks)
+  // Pagination (flat view only)
   const totalPages = Math.ceil(filteredDisks.length / pageSize);
   const paginatedDisks = filteredDisks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
-  // Selectable disk keys in current render order, for shift-click ranges
+  // Grouped views cap the rows/cards actually mounted per group; the group's
+  // status strip covers the full disk list regardless.
+  const GROUP_RENDER_CAP = 60;
+  const renderedGroupDisks = (group: DiskGroup<DiskWithNode>): DiskWithNode[] =>
+    expandedGroups.has(group.key) ? group.disks : group.disks.slice(0, GROUP_RENDER_CAP);
+
+  // Selectable disk keys in current render order, for shift-click ranges.
+  // Mirrors exactly what is on screen: collapsed groups contribute nothing,
+  // capped groups only their rendered slice — a shift-range can never grab
+  // disks the user cannot see.
   const visibleOrder = useMemo(() => {
     const source = groupBy === 'none'
       ? paginatedDisks
-      : groupedDisks.flatMap(group => group.disks);
+      : groupedDisks.flatMap(group =>
+          collapsedGroups.has(group.key) ? [] : renderedGroupDisks(group));
     return source
       .filter(disk => !disk.is_system_disk)
       .map(disk => `${disk.nodeName}:${disk.pci_address}`);
-  }, [groupBy, paginatedDisks, groupedDisks]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupBy, paginatedDisks, groupedDisks, collapsedGroups, expandedGroups]);
 
   // Statistics
   const stats = useMemo(() => {
@@ -797,7 +858,6 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
     const diskInfo = getSelectedDiskInfo();
     if (diskInfo) {
       setDiskToDelete(diskInfo);
-      setDeleteConfirmationText('');
       setShowDeleteConfirmation(true);
     }
   };
@@ -870,18 +930,18 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
           <div className="flex items-center gap-3">
             <HardDrive className="w-8 h-8 text-blue-600" />
             <div>
-              <h2 className="text-2xl font-bold text-gray-900">Disk Setup for SPDK</h2>
+              <h2 className="text-page-title text-gray-900">Disk Setup for SPDK</h2>
               <p className="text-gray-600">Initialize NVMe disks across {knownNodes.length} nodes</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button
+            <IconButton
+              icon={RefreshCw}
+              aria-label="Refresh disk discovery on all nodes"
               onClick={refreshAllNodes}
               disabled={globalRefreshing}
-              className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-md disabled:opacity-50"
-            >
-              <RefreshCw className={`w-5 h-5 ${globalRefreshing ? 'animate-spin' : ''}`} />
-            </button>
+              iconClass={globalRefreshing ? 'animate-spin' : ''}
+            />
           </div>
         </div>
 
@@ -913,7 +973,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               }}
             >
               <CheckCircle className="w-6 h-6 text-gray-600 mx-auto mb-2" />
-              <p className="text-xl font-bold text-gray-600">{stats.free}</p>
+              <p className="text-stat text-gray-600">{stats.free}</p>
               <p className="text-sm text-gray-600">Free</p>
             </div>
             <div 
@@ -926,7 +986,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               }}
             >
               <Settings className="w-6 h-6 text-blue-600 mx-auto mb-2" />
-              <p className="text-xl font-bold text-blue-600">{stats.driverBound}</p>
+              <p className="text-stat text-blue-600">{stats.driverBound}</p>
               <p className="text-sm text-gray-600">Driver Bound</p>
             </div>
             <div 
@@ -939,7 +999,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               }}
             >
               <AlertTriangle className="w-6 h-6 text-yellow-600 mx-auto mb-2" />
-              <p className="text-xl font-bold text-yellow-600">{stats.needsUnmount}</p>
+              <p className="text-stat text-yellow-600">{stats.needsUnmount}</p>
               <p className="text-sm text-gray-600">Needs Unmount</p>
             </div>
             <div 
@@ -952,7 +1012,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               }}
             >
               <Shield className="w-6 h-6 text-red-600 mx-auto mb-2" />
-              <p className="text-xl font-bold text-red-600">{stats.system}</p>
+              <p className="text-stat text-red-600">{stats.system}</p>
               <p className="text-sm text-gray-600">System Disks</p>
             </div>
             <div 
@@ -965,7 +1025,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               }}
             >
               <CheckCircle className="w-6 h-6 text-green-600 mx-auto mb-2" />
-              <p className="text-xl font-bold text-green-600">{stats.lvsReady}</p>
+              <p className="text-stat text-green-600">{stats.lvsReady}</p>
               <p className="text-sm text-gray-600">LVS Ready</p>
             </div>
           </div>
@@ -1017,19 +1077,17 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
           
           <div className="flex items-center gap-2">
             {activeFilterCount > 0 && (
-              <button
+              <Button
+                variant="link"
+                className="text-gray-600 hover:text-gray-800"
                 onClick={clearAllFilters}
-                className="text-sm text-gray-600 hover:text-gray-800"
               >
                 Clear All
-              </button>
+              </Button>
             )}
-            <button
-              onClick={() => setShowFilters(!showFilters)}
-              className="text-sm text-blue-600 hover:text-blue-800"
-            >
+            <Button variant="link" onClick={() => setShowFilters(!showFilters)}>
               {showFilters ? 'Hide' : 'Show'} Filters
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -1155,6 +1213,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                 onChange={(e) => {
                   setGroupBy(e.target.value as GroupBy);
                   setCollapsedGroups(new Set());
+                  setExpandedGroups(new Set());
                   setCurrentPage(1);
                 }}
                 className="border border-gray-300 rounded px-2 py-1 text-sm"
@@ -1193,21 +1252,23 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               <span className="text-sm text-gray-700">
                 {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredDisks.length)} of {filteredDisks.length}
               </span>
-              <button
+              <IconButton
+                icon={ChevronLeft}
+                aria-label="Previous page"
+                className="p-1"
+                iconClass="w-4 h-4"
                 onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
                 disabled={currentPage === 1}
-                className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
+              />
               <span className="px-2 py-1 text-sm">{currentPage} / {totalPages}</span>
-              <button
+              <IconButton
+                icon={ChevronRight}
+                aria-label="Next page"
+                className="p-1"
+                iconClass="w-4 h-4"
                 onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
                 disabled={currentPage === totalPages}
-                className="p-1 text-gray-500 hover:text-gray-700 disabled:opacity-50"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
+              />
             </div>
           ) : (
             <div className="text-sm text-gray-500">
@@ -1215,6 +1276,18 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
             </div>
           )}
         </div>
+        {groupBy !== 'none' && (
+          <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-4 text-xs text-gray-500">
+            <span>Status strip:</span>
+            {STRIP_LEGEND.map(({ label, cell }) => (
+              <span key={label} className="flex items-center gap-1">
+                <span className={`w-2.5 h-2.5 rounded-sm ${cell}`} />
+                {label}
+              </span>
+            ))}
+            <span className="ml-auto">Click a cell to select · shift-click a checkbox for ranges</span>
+          </div>
+        )}
       </div>
 
       {/* Selection and Setup Controls */}
@@ -1225,55 +1298,39 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               <span className="text-sm font-medium text-gray-700">
                 {selectedDisks.size} disk{selectedDisks.size !== 1 ? 's' : ''} selected
               </span>
-              <button
-                onClick={() => {
-                  const newSelection = new Set<string>();
-                  setSelectedDisks(newSelection);
-                }}
-                className="text-sm text-gray-600 hover:text-gray-800"
+              <Button
+                variant="link"
+                className="text-gray-600 hover:text-gray-800"
+                onClick={() => setSelectedDisks(new Set())}
               >
                 Clear Selection
-              </button>
+              </Button>
             </div>
             <div className="flex items-center gap-2">
               {canDeleteSelectedDisk && (
-                <button
+                <Button
+                  variant="danger"
+                  icon={deleteInProgress.size > 0 ? Settings : Trash2}
+                  iconClass={deleteInProgress.size > 0 ? 'animate-spin' : ''}
                   onClick={handleDeleteDisk}
-                  disabled={Array.from(deleteInProgress).length > 0}
-                  className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
+                  disabled={deleteInProgress.size > 0}
                 >
-                  {Array.from(deleteInProgress).length > 0 ? (
-                    <>
-                      <Settings className="w-4 h-4 animate-spin" />
-                      Deleting...
-                    </>
-                  ) : (
-                    <>
-                      <Trash2 className="w-4 h-4" />
-                      Delete SPDK Disk
-                    </>
-                  )}
-                </button>
+                  {deleteInProgress.size > 0 ? 'Deleting...' : 'Delete SPDK Disk'}
+                </Button>
               )}
               {eligibleBatchDisks.length > 0 && (
-                <button
+                <Button
+                  variant="primary"
+                  icon={batchRunning ? Settings : Play}
+                  iconClass={batchRunning ? 'animate-spin' : ''}
                   onClick={() => setShowBulkConfirm(true)}
                   disabled={batchRunning}
-                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
                   title="Initialize the eligible selected disks (confirmation follows)"
                 >
-                  {batchRunning ? (
-                    <>
-                      <Settings className="w-4 h-4 animate-spin" />
-                      Initializing...
-                    </>
-                  ) : (
-                    <>
-                      <Play className="w-4 h-4" />
-                      Initialize {eligibleBatchDisks.length} disk{eligibleBatchDisks.length !== 1 ? 's' : ''}
-                    </>
-                  )}
-                </button>
+                  {batchRunning
+                    ? 'Initializing...'
+                    : `Initialize ${eligibleBatchDisks.length} disk${eligibleBatchDisks.length !== 1 ? 's' : ''}`}
+                </Button>
               )}
               {eligibleBatchDisks.length === 0 && excludedBatchDisks.length > 0 && (
                 <span className="text-sm text-gray-500">
@@ -1281,24 +1338,16 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                 </span>
               )}
               {canUnbindDriver && (
-                <button
+                <Button
+                  variant="secondary"
+                  icon={unbindDriverInProgress.size > 0 ? Settings : RefreshCw}
+                  iconClass={unbindDriverInProgress.size > 0 ? 'animate-spin' : ''}
                   onClick={unbindDriverSelectedDisks}
-                  disabled={Array.from(unbindDriverInProgress).length > 0}
-                  className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2"
+                  disabled={unbindDriverInProgress.size > 0}
                   title="Unbind SPDK driver from selected disks"
                 >
-                  {Array.from(unbindDriverInProgress).length > 0 ? (
-                    <>
-                      <Settings className="w-4 h-4 animate-spin" />
-                      Unbinding...
-                    </>
-                  ) : (
-                    <>
-                      <RefreshCw className="w-4 h-4" />
-                      Unbind SPDK
-                    </>
-                  )}
-                </button>
+                  {unbindDriverInProgress.size > 0 ? 'Unbinding...' : 'Unbind SPDK'}
+                </Button>
               )}
             </div>
           </div>
@@ -1345,43 +1394,37 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-gray-700">Bulk Actions:</span>
-            <button
+            <Button
+              variant="link"
               onClick={selectAllUninitializedCluster}
-              className="text-sm text-blue-600 hover:text-blue-800"
               title="Select every uninitialized, unmounted, non-system disk on every node"
             >
               Select all uninitialized (cluster)
-            </button>
+            </Button>
             {activeFilterCount > 0 && (
               <>
                 <span className="text-gray-300">|</span>
-                <button
+                <Button
+                  variant="link"
                   onClick={selectFilteredUninitialized}
-                  className="text-sm text-blue-600 hover:text-blue-800"
                   title="Select the uninitialized disks matching the active filters"
                 >
                   Select filtered uninitialized
-                </button>
+                </Button>
               </>
             )}
             {groupBy === 'none' && (
               <>
                 <span className="text-gray-300">|</span>
-                <button
-                  onClick={() => handleSelectAll(true)}
-                  className="text-sm text-blue-600 hover:text-blue-800"
-                >
+                <Button variant="link" onClick={() => handleSelectAll(true)}>
                   Select All (This Page)
-                </button>
+                </Button>
               </>
             )}
             <span className="text-gray-300">|</span>
-            <button
-              onClick={() => setSelectedDisks(new Set())}
-              className="text-sm text-blue-600 hover:text-blue-800"
-            >
+            <Button variant="link" onClick={() => setSelectedDisks(new Set())}>
               Deselect All
-            </button>
+            </Button>
           </div>
 
           <div className="text-sm text-gray-500">
@@ -1395,7 +1438,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
       {/* Setup Results */}
       {Object.keys(setupResults).length > 0 && (
         <div className="bg-white rounded-lg shadow p-4">
-          <h3 className="text-lg font-semibold mb-4">Recent Setup Results</h3>
+          <h3 className="text-section mb-4">Recent Setup Results</h3>
           <div className="space-y-3">
             {Object.entries(setupResults).map(([node, result]) => (
               <div key={node} className={`p-3 rounded border-l-4 ${
@@ -1479,61 +1522,95 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                 disk => selectedDisks.has(`${disk.nodeName}:${disk.pci_address}`)
               ).length;
               const collapsed = collapsedGroups.has(group.key);
+              const visibleDisks = renderedGroupDisks(group);
+              const hiddenCount = group.disks.length - visibleDisks.length;
               return (
-                <div key={group.key}>
-                  <div className="px-6 py-3 bg-gray-50 flex items-center justify-between">
-                    <button
-                      onClick={() => toggleGroupCollapsed(group.key)}
-                      className="flex items-center gap-2 text-left"
-                    >
-                      {collapsed
-                        ? <ChevronRight className="w-4 h-4 text-gray-500" />
-                        : <ChevronDown className="w-4 h-4 text-gray-500" />}
-                      <span className="font-medium text-gray-900">{group.label}</span>
-                      <span className="text-sm text-gray-500">
-                        {uninitCount} uninitialized / {group.disks.length} total
-                      </span>
-                      {selectedInGroup > 0 && (
-                        <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-800 rounded-full">
-                          {selectedInGroup} selected
+                <div
+                  key={group.key}
+                  style={{ contentVisibility: 'auto', containIntrinsicSize: '0 320px' }}
+                >
+                  <div className="px-6 py-3 bg-gray-50 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <button
+                        onClick={() => toggleGroupCollapsed(group.key)}
+                        className="flex items-center gap-2 text-left"
+                      >
+                        {collapsed
+                          ? <ChevronRight className="w-4 h-4 text-gray-500" />
+                          : <ChevronDown className="w-4 h-4 text-gray-500" />}
+                        <span className="font-medium text-gray-900">{group.label}</span>
+                        <span className="text-sm text-gray-500">
+                          {uninitCount} uninitialized / {group.disks.length} total
                         </span>
-                      )}
-                    </button>
-                    <div className="flex items-center gap-3">
-                      {uninitCount > 0 && (
-                        <button
-                          onClick={() => selectGroupUninitialized(group)}
-                          className="text-sm text-blue-600 hover:text-blue-800"
-                        >
-                          Select uninitialized ({uninitCount})
-                        </button>
-                      )}
-                      {selectedInGroup > 0 && (
-                        <button
-                          onClick={() => deselectGroup(group)}
-                          className="text-sm text-gray-600 hover:text-gray-800"
-                        >
-                          Deselect
-                        </button>
-                      )}
+                        {selectedInGroup > 0 && (
+                          <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-800 rounded-full">
+                            {selectedInGroup} selected
+                          </span>
+                        )}
+                      </button>
+                      <div className="flex items-center gap-3">
+                        {uninitCount > 0 && (
+                          <Button
+                            variant="link"
+                            onClick={() => selectGroupUninitialized(group)}
+                          >
+                            Select uninitialized ({uninitCount})
+                          </Button>
+                        )}
+                        {selectedInGroup > 0 && (
+                          <Button
+                            variant="link"
+                            className="text-gray-600 hover:text-gray-800"
+                            onClick={() => deselectGroup(group)}
+                          >
+                            Deselect
+                          </Button>
+                        )}
+                      </div>
                     </div>
+                    {/* Every disk in the group, one cell each — the scan
+                        surface that stays honest however many rows render */}
+                    <DiskStatusStrip
+                      disks={group.disks}
+                      selectedDisks={selectedDisks}
+                      onToggle={(diskKey, selected) => handleDiskSelection(diskKey, selected, false)}
+                    />
                   </div>
                   {!collapsed && (
-                    viewMode === 'grid' ? (
-                      <div className="p-6">
-                        <DiskGrid
-                          disks={group.disks}
+                    <>
+                      {viewMode === 'grid' ? (
+                        <div className="p-6">
+                          <DiskGrid
+                            disks={visibleDisks}
+                            selectedDisks={selectedDisks}
+                            onSelect={handleDiskSelection}
+                          />
+                        </div>
+                      ) : (
+                        <DiskTable
+                          disks={visibleDisks}
                           selectedDisks={selectedDisks}
                           onSelect={handleDiskSelection}
                         />
-                      </div>
-                    ) : (
-                      <DiskTable
-                        disks={group.disks}
-                        selectedDisks={selectedDisks}
-                        onSelect={handleDiskSelection}
-                      />
-                    )
+                      )}
+                      {hiddenCount > 0 && (
+                        <div className="px-6 py-3 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
+                          <span className="text-sm text-gray-500">
+                            Showing first {visibleDisks.length} of {group.disks.length} disks
+                            (all are selectable via the strip above)
+                          </span>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() =>
+                              setExpandedGroups(prev => new Set([...prev, group.key]))
+                            }
+                          >
+                            Show all {group.disks.length}
+                          </Button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               );
@@ -1550,53 +1627,46 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               Showing {((currentPage - 1) * pageSize) + 1} to {Math.min(currentPage * pageSize, filteredDisks.length)} of {filteredDisks.length} results
             </div>
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => setCurrentPage(1)}
-                disabled={currentPage === 1}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
-              >
+              <Button size="sm" onClick={() => setCurrentPage(1)} disabled={currentPage === 1}>
                 First
-              </button>
-              <button
+              </Button>
+              <Button
+                size="sm"
                 onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
                 disabled={currentPage === 1}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
               >
                 Previous
-              </button>
-              
+              </Button>
+
               {/* Page numbers */}
               {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
                 const pageNum = Math.max(1, Math.min(totalPages - 4, currentPage - 2)) + i;
                 return (
-                  <button
+                  <Button
                     key={pageNum}
+                    size="sm"
+                    variant={pageNum === currentPage ? 'primary' : 'secondary'}
                     onClick={() => setCurrentPage(pageNum)}
-                    className={`px-3 py-1 text-sm border rounded ${
-                      pageNum === currentPage
-                        ? 'bg-blue-600 text-white border-blue-600'
-                        : 'border-gray-300 hover:bg-gray-50'
-                    }`}
                   >
                     {pageNum}
-                  </button>
+                  </Button>
                 );
               })}
-              
-              <button
+
+              <Button
+                size="sm"
                 onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
                 disabled={currentPage === totalPages}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
               >
                 Next
-              </button>
-              <button
+              </Button>
+              <Button
+                size="sm"
                 onClick={() => setCurrentPage(totalPages)}
                 disabled={currentPage === totalPages}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
               >
                 Last
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -1614,8 +1684,10 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                 NVMe driver and binding them to a userspace-compatible driver.
               </p>
               <p>
-                <strong>Scale:</strong> This interface can handle hundreds of disks across multiple nodes with 
-                filtering, pagination, and bulk operations.
+                <strong>Scale:</strong> Each node group shows a status strip with one cell per disk
+                and renders the first {GROUP_RENDER_CAP} rows until expanded, so the page stays responsive with
+                hundreds of disks. Filters, search, and bulk selection operate on all disks, not
+                just the rendered rows.
               </p>
               <p>
                 <strong>Safety:</strong> System disks are automatically excluded. Use filters to focus on specific 
@@ -1639,114 +1711,36 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
         />
       )}
 
-      {/* Delete Confirmation Dialog */}
+      {/* Delete Confirmation Dialog (kit ConfirmModal). Only what the agent's
+          /disks/delete actually does is described — it refuses with a 409
+          while lvols exist, so there are no migrate/snapshot options here. */}
       {showDeleteConfirmation && diskToDelete && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
-            <div className="flex items-center gap-3 mb-4">
-              <AlertTriangle className="w-8 h-8 text-red-600" />
-              <h3 className="text-lg font-bold text-gray-900">Delete SPDK Disk</h3>
-            </div>
-            
-            <div className="mb-6">
-              <p className="text-gray-700 mb-4">
-                You are about to delete the SPDK setup for disk:
-              </p>
-              <div className="bg-gray-50 rounded-lg p-4 space-y-2">
-                <div className="flex justify-between">
-                  <span className="font-medium">Device:</span>
-                  <span className="font-mono">{diskToDelete.diskName}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="font-medium">Node:</span>
-                  <span>{diskToDelete.nodeName}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="font-medium">Model:</span>
-                  <span>{diskToDelete.model}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="font-medium">Size:</span>
-                  <span>{diskToDelete.size}GB</span>
-                </div>
-              </div>
-              
-              <div className="mt-4 space-y-3">
-                <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                  <h4 className="font-medium text-blue-900 mb-2">Industry Best Practice Options</h4>
-                  <div className="space-y-2 text-sm text-blue-800">
-                    <label className="flex items-center space-x-2">
-                      <input type="checkbox" className="rounded" defaultChecked />
-                      <span>Migrate single-replica volumes to other disks</span>
-                    </label>
-                    <label className="flex items-center space-x-2">
-                      <input type="checkbox" className="rounded" defaultChecked />
-                      <span>Take snapshots before deletion</span>
-                    </label>
-                    <label className="flex items-center space-x-2">
-                      <input type="checkbox" className="rounded" />
-                      <span>Force delete (skip safety checks)</span>
-                    </label>
-                  </div>
-                </div>
-                
-                <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-                  <p className="text-sm text-yellow-800">
-                    <strong>What will happen:</strong>
-                  </p>
-                  <ul className="mt-2 text-xs text-yellow-700 space-y-1">
-                    <li>• Single-replica volumes will be migrated or deleted</li>
-                    <li>• Multi-replica volumes allowed if ≥2 healthy replicas total</li>
-                    <li>• LVS (Logical Volume Store) will be destroyed</li>
-                    <li>• Disk will be reset to kernel driver mode</li>
-                    <li>• Custom resources will be updated</li>
-                  </ul>
-                </div>
-                
-                <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
-                  <p className="text-sm text-red-800">
-                    <strong>⚠️ Warning:</strong> This action cannot be undone. Any data on 
-                    single-replica volumes will be lost unless migrated or snapshotted first.
-                  </p>
-                </div>
-                
-                <div className="mt-6">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    To confirm deletion, type the device name: <span className="font-mono font-bold">{diskToDelete.diskName}</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={deleteConfirmationText}
-                    onChange={(e) => setDeleteConfirmationText(e.target.value)}
-                    placeholder={`Type "${diskToDelete.diskName}" to confirm`}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="flex gap-3 justify-end">
-              <button
-                onClick={() => {
-                  setShowDeleteConfirmation(false);
-                  setDiskToDelete(null);
-                  setDeleteConfirmationText('');
-                }}
-                className="px-4 py-2 border border-gray-300 text-gray-700 rounded hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmDeleteDisk}
-                disabled={deleteConfirmationText !== diskToDelete.diskName}
-                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                <Trash2 className="w-4 h-4" />
-                Delete Disk
-              </button>
-            </div>
+        <ConfirmModal
+          title="Delete SPDK Disk"
+          subtitle={`${diskToDelete.diskName} on ${diskToDelete.nodeName}`}
+          danger={
+            <>
+              <strong>This cannot be undone.</strong> The logical volume store on
+              this disk is destroyed and the disk is returned to the kernel
+              driver. Deletion is refused while any logical volumes still live
+              on the disk.
+            </>
+          }
+          confirmLabel="Delete Disk"
+          confirmPhrase={diskToDelete.diskName}
+          onConfirm={confirmDeleteDisk}
+          onCancel={() => {
+            setShowDeleteConfirmation(false);
+            setDiskToDelete(null);
+          }}
+        >
+          <div className="space-y-2 text-sm mb-4 bg-gray-50 rounded-lg p-4">
+            <div><strong>Device:</strong> <span className="font-mono">{diskToDelete.diskName}</span></div>
+            <div><strong>Node:</strong> {diskToDelete.nodeName}</div>
+            <div><strong>Model:</strong> {diskToDelete.model}</div>
+            <div><strong>Size:</strong> {diskToDelete.size}GB</div>
           </div>
-        </div>
+        </ConfirmModal>
       )}
     </div>
   );
