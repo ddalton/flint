@@ -379,6 +379,22 @@ VolumeAttachment-delete recipe below is now only needed on pre-heal
 drivers. Piece (2), initiator ride-through for already-staged
 volumes, remains open.
 
+LIVE-VALIDATED 2026-07-06 on runn (images p2heal.0): a full csi-node
+roll reproduced the landmine and the fleet recovered with ZERO
+VolumeAttachment surgery — both failure shapes healed
+(`bdev_nvme_attach_controller` EIO → "Connected after target
+re-ensure (self-heal)" on DS-0's volume, the same PV that needed 4
+manual VA-deletes in the v1.9.0 gate; and a mid-roll local-agent
+refusal that converged on kubelet's next retry). Identity markers
+stamped on all three DS volumes, stamps stable across restarts and an
+FS-error episode, registrations carry them, data shas intact
+throughout. New residual for the runbook: a pod bounce that RACES the
+lazy unmount can inherit a stale read-only staging mount (DS-2, one
+occurrence) — delete with `--wait=true` and let termination finish
+before the replacement schedules; the durable fix is NodeStage
+revalidating an already-mounted staging path (writable? remount/fsck
+if not) — future work alongside ride-through.
+
 ---
 
 ## Phase 3 — MDS-restart and re-registration hardening (~3–5 days)
