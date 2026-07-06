@@ -932,3 +932,16 @@ Validated against a mock 6h/158-epoch/12-snapshot volume via Playwright:
 create/pan/resize/reset drags all correct, and a deep zoom resolves a
 +3 cluster marker into three separately clickable diamonds (the whole
 point). Suites: 145 vitest (10 new), tsc -b clean, no new lint warnings.
+
+LIVE-VALIDATED on cluster runn 2026-07-06 (new frontend on vite dev
+proxying the live backend; real 109-minute history manufactured with
+four spaced VolumeSnapshots on a single-replica volume, including a
+1-second-apart pair): the full view merged the four into a +4 cluster;
+a brushed 7.5-minute window resolved it into singles plus a +2 (the
+1s pair correctly stays merged at that scale — its popover lists both
+members); the CR-path delete worked from the cluster popover while
+zoomed, and the refetch transiently rendered the deleting snapshot as
+a red-ringed ghost (copies reaped before the CR — the honesty
+affordance catching deletion propagation live); click-outside reset
+restored the full view. Zero page errors. Epochs · 0 on a
+single-replica volume is expected (no rebuild-engine sync record).
