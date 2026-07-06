@@ -415,7 +415,7 @@ impl SnapshotController {
         for node in nodes {
             let listed = match self
                 .driver
-                .call_node_agent(&node, "/api/snapshots/list", &serde_json::json!({}))
+                .get_node_agent(&node, "/api/snapshots/list")
                 .await
             {
                 Ok(resp) => resp["snapshots"].as_array().cloned().unwrap_or_default(),
@@ -468,7 +468,7 @@ impl SnapshotController {
 
         for node in nodes {
             match self.driver
-                .call_node_agent(&node, "/api/snapshots/list", &serde_json::json!({}))
+                .get_node_agent(&node, "/api/snapshots/list")
                 .await {
                 Ok(response) => {
                     if let Some(snapshots) = response["snapshots"].as_array() {

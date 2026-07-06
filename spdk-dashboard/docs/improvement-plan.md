@@ -853,5 +853,18 @@ against the real backend. Zero page errors across every tab.
   scan paths (existing VolumeSnapshotContents stay serviceable). The
   contract row lives in docs/identity-contract.md; regression test
   `single_replica_handle_is_name_shaped_and_fits_spdk_limit`.
+  LIVE-VALIDATED on cluster `runn` 2026-07-06 (upgrade-compat drill:
+  stock 1.8.0 minted a uuid handle; controller rolled to the fix; new
+  snapshots minted name handles; timeline lanes render for the
+  single-replica volume; restore-from-name-handle round-tripped the
+  marker file; pre-fix uuid handle still deleted via the legacy path).
+  The drill caught a SECOND live bug the first image leaked on: the
+  agent's `/api/snapshots/list` is GET-only while `call_node_agent`
+  always POSTs — every per-node listing 405'd and the sweep's
+  `continue` swallowed it, so the name-sweep delete reported success
+  while leaking the lvol (the pre-existing PV-gone sweep and the CSI
+  ListSnapshots aggregation shared the flaw). Fixed with a GET twin
+  (`get_node_agent`) used by all three `/api/snapshots/list` callers;
+  delete re-drilled: no leak.
 - Dev ergonomics: `vite.config.ts` proxy target is now overridable via
   `VITE_API_PROXY_TARGET` (local :8080 was taken by trove during the run).

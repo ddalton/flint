@@ -622,6 +622,23 @@ impl SpdkCsiDriver {
     }
 
     /// Call Node Agent HTTP API (CONTROLLER pattern - not direct SPDK)
+    /// GET twin of [`call_node_agent`] for the agent's read-only routes
+    /// (`/api/snapshots/list` is `warp::get()` — POSTing it 405s, and the
+    /// callers' per-node `continue` swallowed that silently: the
+    /// name-sweep delete leaked the lvol it reported deleting. Found live
+    /// 2026-07-06 on runn.)
+    pub async fn get_node_agent(&self, node_name: &str, endpoint: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        debug!(node_name, endpoint, "[CONTROLLER_HTTP] GET node agent");
+        let node_agent_url = self.get_node_agent_url(node_name).await?;
+        let full_url = format!("{}{}", node_agent_url, endpoint);
+        let response = HttpClient::new().get(&full_url).send().await?;
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(format!("Node agent HTTP GET failed: {}", error_text).into());
+        }
+        Ok(response.json().await?)
+    }
+
     pub async fn call_node_agent(&self, node_name: &str, endpoint: &str, payload: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         debug!(node_name, endpoint, "[CONTROLLER_HTTP] Calling node agent");
         
@@ -1495,6 +1512,29 @@ impl SpdkCsiDriver {
             .as_ref()
             .and_then(|s| s.access_modes.clone())
             .unwrap_or_default())
+    }
+
+    /// Whether the PV backing `volume_id` is a pNFS volume (tagged with
+    /// pnfs.flint.io/* volumeAttributes at create time). Used by the
+    /// context-free node RPCs (NodeUnstage) to classify without a
+    /// volume_context. Any API failure reads as `false`: the caller
+    /// falls through to the block-volume path, which has its own
+    /// PV-read fallbacks.
+    pub async fn pv_is_pnfs(&self, volume_id: &str) -> bool {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        let pv_name = crate::identity::storage_id_of_handle(volume_id);
+        match pvs.get(pv_name).await {
+            Ok(pv) => pv
+                .spec
+                .as_ref()
+                .and_then(|s| s.csi.as_ref())
+                .and_then(|csi| csi.volume_attributes.as_ref())
+                .map(|attrs| crate::snapshot::snapshot_csi::is_pnfs_volume_attrs(attrs))
+                .unwrap_or(false),
+            Err(_) => false,
+        }
     }
 
     async fn get_volume_info_from_pv(&self, volume_id: &str) -> Result<VolumeInfo, Box<dyn std::error::Error + Send + Sync>> {

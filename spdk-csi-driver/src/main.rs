@@ -617,7 +617,7 @@ impl MinimalControllerService {
                         // node's snapshots and clone by the copy's uuid.
                         let listed = match self
                             .driver
-                            .call_node_agent(node, "/api/snapshots/list", &serde_json::json!({}))
+                            .get_node_agent(node, "/api/snapshots/list")
                             .await
                         {
                             Ok(resp) => resp["snapshots"].as_array().cloned().unwrap_or_default(),
@@ -1567,6 +1567,25 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
         let mut publish_context = std::collections::HashMap::new();
 
+        // -------------------------------------------------------------
+        // pNFS branch — pNFS volumes have no per-node attach state (the
+        // kernel client mounts the MDS export by name in NodePublish),
+        // but the external-attacher still drives ControllerPublishVolume
+        // because attachRequired is driver-global and the SPDK path
+        // needs it. Without this early return the pNFS PV falls through
+        // to the SPDK PV-metadata lookup, which cannot succeed ("PV
+        // found but missing flint metadata" — found live on runn,
+        // 2026-07-06, first cluster with a real attacher in the loop).
+        // -------------------------------------------------------------
+        if req.volume_context.contains_key(spdk_csi_driver::pnfs_csi::ctx_keys::MDS_IP) {
+            println!("📡 [pNFS] Volume {} needs no attach — returning no-op publish", volume_id);
+            publish_context.insert("volumeType".to_string(), "pnfs".to_string());
+            publish_context.insert("volumeId".to_string(), volume_id.clone());
+            return Ok(tonic::Response::new(
+                spdk_csi_driver::csi::ControllerPublishVolumeResponse { publish_context },
+            ));
+        }
+
         // Check if this is a ROX (ReadOnlyMany) or RWX (ReadWriteMany) volume
         let is_rox = req.volume_capability.as_ref()
             .and_then(|cap| cap.access_mode.as_ref())
@@ -2195,6 +2214,17 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("📦 [NODE_STAGE] Ephemeral volume detected (no PV exists)");
         }
 
+        // pNFS volumes: nothing to stage — the kernel NFS mount happens
+        // per-pod in NodePublishVolume (same shape as the "nfs" branch
+        // below, but detected from volume_context so it holds even if a
+        // future publish path forgets the volumeType marker).
+        if volume_context.contains_key(spdk_csi_driver::pnfs_csi::ctx_keys::MDS_IP) {
+            println!("📡 [NODE_STAGE] pNFS volume — skipping staging (mount happens in NodePublishVolume)");
+            std::fs::create_dir_all(&staging_target_path)
+                .map_err(|e| tonic::Status::internal(format!("Failed to create staging directory: {}", e)))?;
+            return Ok(tonic::Response::new(spdk_csi_driver::csi::NodeStageVolumeResponse {}));
+        }
+
         // For ephemeral volumes (attachRequired=false), publish_context is empty
         // because ControllerPublishVolume is never called. Treat as local volume.
         let volume_type = if publish_context.is_empty() {
@@ -2788,8 +2818,17 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 }
             }
         };
-        if is_shared_nfs_consumer {
-            println!("ℹ️ [NODE] Shared (RWX/ROX) NFS consumer — unmount-only unstage (no SPDK teardown)");
+        // pNFS volumes own no SPDK objects either — same unmount-only
+        // unstage. NodeUnstage is context-free, so classification reads
+        // the PV's volumeAttributes (pnfs.flint.io/* keys).
+        let is_pnfs = !is_shared_nfs_consumer && self.driver.pv_is_pnfs(&actual_volume_id).await;
+
+        if is_shared_nfs_consumer || is_pnfs {
+            if is_pnfs {
+                println!("📡 [NODE] pNFS volume — unmount-only unstage (no SPDK teardown)");
+            } else {
+                println!("ℹ️ [NODE] Shared (RWX/ROX) NFS consumer — unmount-only unstage (no SPDK teardown)");
+            }
             // The staging path is normally NOT mounted for these volumes
             // (NFS lives at the publish targets) — only unmount when it is.
             let is_mounted = std::process::Command::new("mountpoint")
@@ -3005,8 +3044,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // -------------------------------------------------------------
         if let Some(mds_ip) = req.volume_context.get("pnfs.flint.io/mds-ip") {
             use spdk_csi_driver::pnfs_csi::ctx_keys;
+            // Context always carries the port (create_volume stamps the
+            // MDS-reported NFS port); the default is a last resort and
+            // is the RFC-standard port, not the lima rig's 20490.
             let mds_port = req.volume_context.get(ctx_keys::MDS_PORT)
-                .map(String::as_str).unwrap_or("20490");
+                .map(String::as_str).unwrap_or("2049");
             // The kernel mounts the export root, not a per-volume path
             // — pNFS resolves the volume's stripes via LAYOUTGET against
             // the file by name. The volume_file is informational here
