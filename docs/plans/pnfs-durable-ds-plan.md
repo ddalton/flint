@@ -284,8 +284,30 @@ Operational findings (write these into the operator runbook):
   roll: restart DS pods, and scale-cycle the MDS (0 → 1). A bare `kubectl
   delete pod` on the MDS races its ReplicaSet and the replacement
   inherits the dead staging mount (CrashLoop on EIO); scale-to-zero
-  forces the clean unstage. Consider a chart split (spdk-tgt as its
-  own DaemonSet) as a future fix.
+  forces the clean unstage.
+
+  The durable fix is **restart-survivability**, not a chart
+  reshuffle. Splitting spdk-tgt into its own DaemonSet only stops
+  driver-image bumps from restarting it — it does nothing when
+  spdk-tgt itself restarts (its own upgrade, crash, OOM), and any
+  spdk-tgt restart is fatal today because staged volumes don't
+  survive it: the NVMe-oF subsystems NodeStage created are process
+  runtime state (lvolstores reload from disk; the export objects
+  don't), nothing re-publishes them on boot, and the consumer's ext4
+  journal-aborts to permanent EIO in the meantime. Surviving a
+  restart needs two pieces: (1) a reconcile-on-boot pass that
+  re-creates staged volumes' subsystems/listeners with identical
+  NQNs, and (2) initiator ride-through — kernel nvme-tcp queues I/O
+  for ctrl_loss_tmo (~600 s) on connection *loss*, so if the target
+  returns with the same identity before the filesystem sees an
+  error, consumers get a stall instead of EIO. Caveat for (2): a
+  graceful SPDK shutdown may delete namespaces explicitly, which the
+  initiator treats as removal rather than loss — the shutdown path
+  must look like a crash to the initiator. nvmeof backend only; ublk
+  devices die with the process and have no ride-through story. With
+  both pieces in place the DaemonSet split becomes a mere
+  exposure-reducer. Phase 4 should add a "spdk-tgt restart under
+  live pNFS load" drill to validate the ride-through end to end.
 - **In-flight I/O at DS-outage time hangs until client state resets.**
   The stub-IO guard converts the corruption into NFS4ERR_DELAY
   retries, but the kernel never re-drives an already-fallen-back RPC
