@@ -184,11 +184,16 @@ impl SnapshotController {
 
         let size_bytes = response["size_bytes"].as_i64().unwrap_or(0);
 
-        tracing::info!("✅ [SNAPSHOT_CSI] Snapshot created: {}", snapshot_uuid);
+        tracing::info!("✅ [SNAPSHOT_CSI] Snapshot created: {} (uuid {})", snapshot_name, snapshot_uuid);
 
-        // Step 4: Return CSI response
+        // Step 4: Return CSI response. The snapshot id is the lvol NAME, not
+        // the SPDK uuid — identical to the multi-replica path, so every
+        // consumer that joins on the name (delete/restore resolution, the
+        // dashboard timeline's handle==lvol-name join) sees one id shape.
+        // Pre-fix single-replica handles were uuids; delete/restore keep a
+        // uuid fallback so existing VolumeSnapshotContents stay serviceable.
         let snapshot = Snapshot {
-            snapshot_id: snapshot_uuid.clone(),
+            snapshot_id: snapshot_name.clone(),
             source_volume_id: req.source_volume_id.clone(),
             creation_time: Some(prost_types::Timestamp {
                 seconds: timestamp as i64,
@@ -199,7 +204,7 @@ impl SnapshotController {
             group_snapshot_id: String::new(), // Not using group snapshots
         };
 
-        tracing::info!("🎉 [SNAPSHOT_CSI] CreateSnapshot succeeded: {}", snapshot_uuid);
+        tracing::info!("🎉 [SNAPSHOT_CSI] CreateSnapshot succeeded: {}", snapshot_name);
 
         Ok(Response::new(CreateSnapshotResponse {
             snapshot: Some(snapshot),
@@ -290,9 +295,12 @@ impl SnapshotController {
 
         tracing::info!("🗑️ [SNAPSHOT_CSI] DeleteSnapshot: {}", req.snapshot_id);
 
-        // Multi-replica name-shaped ids (§11, phase 5b): fan the delete out
-        // to every replica; tombstone whatever cannot be confirmed gone.
-        // Single-replica ids are SPDK uuids and never parse here.
+        // Name-shaped ids: multi-replica handles always, and single-replica
+        // handles minted since the handle-is-the-lvol-name fix. Fan the
+        // multi-replica delete out to every replica (tombstoning whatever
+        // cannot be confirmed gone); resolve everything else name→uuid per
+        // node. Only pre-fix single-replica handles are SPDK uuids — they
+        // don't parse here and take the legacy uuid scan below.
         if let Some((volume_id, _)) = crate::replica_sync::parse_user_snapshot_id(&req.snapshot_id)
         {
             let volume_id = volume_id.to_string();
@@ -302,7 +310,13 @@ impl SnapshotController {
                         .delete_multi_replica_snapshot(&volume_id, &req.snapshot_id, &replicas)
                         .await;
                 }
-                Ok(None) => {} // single-replica volume: legacy scan below
+                Ok(None) => {
+                    // Single-replica volume with a name handle: the uuid scan
+                    // below can never match a name — resolve by name on every
+                    // node (idempotent; a swept-clean name is a no-op).
+                    self.sweep_snapshot_copies_by_name(&req.snapshot_id).await;
+                    return Ok(Response::new(DeleteSnapshotResponse {}));
+                }
                 Err(_) => {
                     // The volume's PV is gone: no record to tombstone into.
                     // Best-effort sweep — delete the named copy from every
@@ -484,13 +498,17 @@ impl SnapshotController {
                             };
                             
                             // Apply filters if specified
-                            if !req.source_volume_id.is_empty() 
+                            if !req.source_volume_id.is_empty()
                                && snapshot.source_volume_id != req.source_volume_id {
                                 continue;
                             }
-                            
-                            if !req.snapshot_id.is_empty() 
-                               && snapshot.snapshot_id != req.snapshot_id {
+
+                            // Handles are lvol NAMES (single- and multi-replica
+                            // alike since the handle fix); pre-fix single-replica
+                            // handles are uuids — accept either.
+                            if !req.snapshot_id.is_empty()
+                               && snapshot.snapshot_id != req.snapshot_id
+                               && snap["snapshot_name"].as_str() != Some(req.snapshot_id.as_str()) {
                                 continue;
                             }
                             
@@ -728,6 +746,34 @@ mod tests {
         let name = multi_replica_snapshot_name(rwx_id, "snapshot-8579ba0c-eb50-4bbe-bd02-3199e8b4f8f5");
         assert!(name.len() <= SPDK_LVOL_NAME_USABLE, "{} is {} chars", name, name.len());
         assert!(crate::replica_sync::parse_user_snapshot_id(&name).is_some());
+    }
+
+    /// Handle-shape contract (single-replica snapshotHandle fix, 2026-07-06):
+    /// the single-replica CreateSnapshot returns the lvol NAME as the CSI
+    /// snapshot id — the same shape the multi-replica path mints — so
+    /// DeleteSnapshot/restore route through the name-shaped branches and the
+    /// dashboard timeline's handle==lvol-name join holds for BOTH paths.
+    /// (Pre-fix single-replica handles were SPDK uuids; those must keep NOT
+    /// parsing, so they still take the legacy uuid scans.)
+    #[test]
+    fn single_replica_handle_is_name_shaped_and_fits_spdk_limit() {
+        let pvc_id = "pvc-89bde29d-6fe1-41da-83d4-a02ba466cce4";
+        let timestamp: u64 = 1_783_349_909; // epoch seconds, as CreateSnapshot mints
+        let handle = crate::identity::user_snapshot_name(pvc_id, timestamp);
+
+        // Routes through the name-shaped delete/restore branches...
+        assert_eq!(
+            crate::replica_sync::parse_user_snapshot_id(&handle),
+            Some((pvc_id, timestamp))
+        );
+        // ...and is a legal SPDK lvol name for every realistic pvc id.
+        assert!(handle.len() <= SPDK_LVOL_NAME_USABLE, "{} is {} chars", handle, handle.len());
+
+        // A pre-fix uuid handle must NOT parse — it keeps the legacy path.
+        assert_eq!(
+            crate::replica_sync::parse_user_snapshot_id("2a3f0555-5b19-417a-a13b-644f1c6018fb"),
+            None
+        );
     }
 }
 

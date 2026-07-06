@@ -837,7 +837,7 @@ against the real backend. Zero page errors across every tab.
   disks (2 PVCs Bound + writers); stacked status bar + chips correct.
 - **Timeline validated on a 2-replica volume** (violet diamonds at real CR
   times, in_sync replica chips, honest copy counts 2×1 + 2×2 = 6).
-- **NEW BACKEND FINDING (open, not this wave):** on the legacy
+- **NEW BACKEND FINDING (FIXED same day, driver-side):** on the legacy
   single-replica path the CSI `snapshotHandle` is the snapshot **UUID**,
   while the replica-set path returns the SPDK lvol **name** — the timeline
   join (`snapshotHandle == lvol name`) therefore fails for single-replica
@@ -845,6 +845,13 @@ against the real backend. Zero page errors across every tab.
   and the lanes stay empty (the flat list still joins by name and shows
   them). Same name-vs-uuid class as the replica-drill P1s; fix server-side
   (mint the lvol name as the handle on the single-replica path too, per the
-  identity contract).
+  identity contract). FIXED 2026-07-06: single-replica CreateSnapshot now
+  returns the lvol name as the handle (snapshot_csi.rs); DeleteSnapshot
+  resolves name-shaped ids on single-replica volumes via the per-node
+  name sweep; restore resolves name→copy-uuid per node; ListSnapshots
+  filter matches name or uuid. Pre-fix uuid handles keep their legacy
+  scan paths (existing VolumeSnapshotContents stay serviceable). The
+  contract row lives in docs/identity-contract.md; regression test
+  `single_replica_handle_is_name_shaped_and_fits_spdk_limit`.
 - Dev ergonomics: `vite.config.ts` proxy target is now overridable via
   `VITE_API_PROXY_TARGET` (local :8080 was taken by trove during the run).

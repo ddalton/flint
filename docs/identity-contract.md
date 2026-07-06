@@ -15,6 +15,7 @@ parses identity-shaped names — CI lint
 | Storage identity (`storage_id`) | `pvc-<uuid>` | What lvols, NQNs, raids, epoch snapshots and replica records derive from; == the user PV's name |
 | User attachment handle | `pvc-<uuid>` (same string) | RWO: the block consumer. RWX/ROX: NFS clients with NO block path |
 | NFS backing handle | `nfs-server-<storage_id>` | The synthetic PV behind an RWX volume's NFS server pod — the server's own block attachment |
+| CSI snapshot handle | `snap_<storage_id>_<decimal>` (== the lvol name) | Single- AND multi-replica since 2026-07-06 — the SPDK copy's per-node uuid is never a handle. Pre-fix single-replica handles were uuids; delete/restore keep a uuid fallback for VolumeSnapshotContents minted before the fix |
 
 Every RPC entry parses its handle into a `VolumeRef`
 (`Block` / `NfsShared{read_only}` / `NfsBacking`), resolution order:

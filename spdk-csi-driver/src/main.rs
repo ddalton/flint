@@ -555,7 +555,10 @@ impl MinimalControllerService {
         // so the source is picked by VERIFIED presence (listing the
         // replica's lvols), preferring an in-sync replica off the consumer
         // node, and the clone references the copy by its lvs/name alias.
-        // Single-replica ids are SPDK uuids: the legacy all-node scan.
+        // Single-replica handles are ALSO names since the handle fix (only
+        // pre-fix handles are SPDK uuids); a name that resolves to no
+        // replica set is looked up by name per node, uuids by the legacy
+        // get_info scan.
         let mut multi_source: Option<(spdk_csi_driver::minimal_models::ReplicaInfo, String)> =
             None;
         if let Some((src_volume, _)) =
@@ -603,26 +606,50 @@ impl MinimalControllerService {
                 let nodes = self.driver.get_all_nodes().await
                     .map_err(|e| tonic::Status::internal(format!("Failed to list nodes: {}", e)))?;
 
-                let mut snapshot_node = None;
+                let name_shaped =
+                    spdk_csi_driver::replica_sync::parse_user_snapshot_id(snapshot_id).is_some();
+                let mut located: Option<(String, String)> = None;
 
                 for node in &nodes {
-                    let payload = serde_json::json!({
-                        "snapshot_uuid": snapshot_id
-                    });
-
-                    match self.driver.call_node_agent(node, "/api/snapshots/get_info", &payload).await {
-                        Ok(_) => {
-                            snapshot_node = Some(node.clone());
-                            println!("✅ [CONTROLLER] Found snapshot on node: {}", node);
+                    if name_shaped {
+                        // Single-replica name handle: SPDK bdev addressing
+                        // doesn't resolve a bare lvol name, so list the
+                        // node's snapshots and clone by the copy's uuid.
+                        let listed = match self
+                            .driver
+                            .call_node_agent(node, "/api/snapshots/list", &serde_json::json!({}))
+                            .await
+                        {
+                            Ok(resp) => resp["snapshots"].as_array().cloned().unwrap_or_default(),
+                            Err(_) => continue,
+                        };
+                        if let Some(uuid) = listed.iter().find_map(|snap| {
+                            (snap["snapshot_name"].as_str() == Some(snapshot_id))
+                                .then(|| snap["snapshot_uuid"].as_str().unwrap_or("").to_string())
+                        }) {
+                            println!("✅ [CONTROLLER] Found snapshot {} on node {} (uuid {})",
+                                     snapshot_id, node, uuid);
+                            located = Some((node.clone(), uuid));
                             break;
                         }
-                        Err(_) => continue,
+                    } else {
+                        // Legacy uuid handle (pre-fix single-replica VSCs).
+                        let payload = serde_json::json!({
+                            "snapshot_uuid": snapshot_id
+                        });
+                        match self.driver.call_node_agent(node, "/api/snapshots/get_info", &payload).await {
+                            Ok(_) => {
+                                println!("✅ [CONTROLLER] Found snapshot on node: {}", node);
+                                located = Some((node.clone(), snapshot_id.to_string()));
+                                break;
+                            }
+                            Err(_) => continue,
+                        }
                     }
                 }
 
-                let node = snapshot_node
-                    .ok_or_else(|| tonic::Status::not_found(format!("Snapshot {} not found", snapshot_id)))?;
-                (node, snapshot_id.to_string())
+                located
+                    .ok_or_else(|| tonic::Status::not_found(format!("Snapshot {} not found", snapshot_id)))?
             }
         };
 
