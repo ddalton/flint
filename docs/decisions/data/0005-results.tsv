@@ -1,0 +1,22 @@
+# ADR 0005 — durable (r2) DS replication cost, runn 2026-07-06, i4i.large
+# --- backing-layer A/B (fio inside live DS pods) ---
+layer	workload	r1	r2	unit
+backing	seq_write_1M	319	316	MB/s
+backing	seq_read_1M	440	1100	MB/s
+backing	randwrite_4k_qd16	30030	29371	IOPS
+backing	randread_4k_qd16	42604	52413	IOPS
+# --- r2 degrade / rebuild ---
+phase	seq_write_MBs	randwrite_IOPS
+healthy	316	29371
+degraded_1of2	334	29676
+during_rebuild	261	NA
+# rebuild_2GiB_resync_seconds	9
+# --- cross-host multi-client aggregate read (N=4 DS, r2) ---
+clients	aggregate_MiBs	per_client_MiBs	scale
+1	530.2	530.2	1.00
+2	1283.8	641.9	2.42
+3	1992.7	664.2	3.76
+# --- single-client cross-host (client-bound, informational) ---
+n_ds	seq_write_MiBs	seq_read_MiBs
+1	139.9	612.4
+4	230.5	706.2
