@@ -2323,8 +2323,39 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     bdev
                 }
                 Err(e) => {
-                    println!("❌ [NODE] Failed to connect to NVMe-oF target: {}", e);
-                    return Err(tonic::Status::internal(format!("Failed to connect to NVMe-oF: {}", e)));
+                    // SELF-HEAL (v1.9.0 gate finding): NVMe-oF subsystems are
+                    // spdk-tgt runtime state — a restarted spdk-tgt reloads
+                    // its lvolstores but NOT the export objects, so every
+                    // attach retry fails with EIO until someone re-runs
+                    // ControllerPublishVolume (previously: a human deleting
+                    // the VolumeAttachment). setup_nvmeof_target_on_node is
+                    // convergent (ensure_export issues only the missing
+                    // RPCs), so re-ensuring the export here and retrying
+                    // once turns kubelet's mount-retry loop into the
+                    // reconciler. Fencing is preserved: the admitted host is
+                    // this consumer node, same as the controller's publish.
+                    println!("⚠️ [NODE] NVMe-oF attach failed ({}); re-ensuring target export on the storage node and retrying once", e);
+                    let volume_info = self.driver.get_volume_info(&actual_volume_id).await
+                        .map_err(|ve| tonic::Status::internal(format!(
+                            "Failed to connect to NVMe-oF: {} (and could not resolve volume for target re-ensure: {})", e, ve)))?;
+                    let healed_conn = self.driver.setup_nvmeof_target_on_node(
+                        &volume_info.node_name,
+                        &volume_info.lvol_uuid,
+                        &actual_volume_id,
+                        &self.driver.node_id,
+                    ).await.map_err(|se| tonic::Status::internal(format!(
+                        "Failed to connect to NVMe-oF: {} (and target re-ensure failed: {})", e, se)))?;
+                    match self.driver.connect_to_nvmeof_target(&healed_conn).await {
+                        Ok(bdev) => {
+                            println!("✅ [NODE] Connected after target re-ensure (self-heal), bdev: {}", bdev);
+                            bdev
+                        }
+                        Err(e2) => {
+                            println!("❌ [NODE] Failed to connect to NVMe-oF even after target re-ensure: {}", e2);
+                            return Err(tonic::Status::internal(format!(
+                                "Failed to connect to NVMe-oF after target re-ensure: {}", e2)));
+                        }
+                    }
                 }
             }
         } else {
