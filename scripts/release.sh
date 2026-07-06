@@ -70,6 +70,14 @@ dash = values.get("dashboard", {})
 if dash.get("enabled", False):
     print(dash["frontend"]["name"], dash["frontend"]["tag"],
           "spdk-dashboard", "Dockerfile.frontend")
+# pNFS server image (MDS+DS, one image). Gated whenever a tag is set,
+# even though pnfs.server is disabled by default: anyone flipping it
+# on must find the image published — the exact 1.2.0-frontend class
+# of bug this script exists to prevent.
+pnfs = values.get("pnfs", {}).get("server", {})
+if pnfs.get("image", {}).get("tag"):
+    print(pnfs["image"]["name"], pnfs["image"]["tag"],
+          "spdk-csi-driver", "docker/Dockerfile.pnfs")
 PYEOF
 )
 

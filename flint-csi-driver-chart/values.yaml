@@ -15,7 +15,7 @@ images:
   repository: dilipdalton  # Docker Hub registry
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
-    tag: "1.8.0"            # dashboard release: /api/snapshots per-node merge (honest chips) + /api/nodes fleet projection
+    tag: "1.9.0"            # pNFS k8s release: attach/stage/unstage + provision-time ClusterIP + snapshot GET fixes
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (SPDK v26.05)
@@ -184,7 +184,7 @@ dashboard:
     port: 8080
   frontend:
     name: spdk-dashboard-frontend
-    tag: "1.8.0"      # fleet-scale nodes tab (heatmap + facets), ghost-snapshot flag, honest snapshot chips
+    tag: "1.9.0"      # timeline brush zoom (focus+context), PVC-name search, System disk bucket, compact overview
     port: 3000
   resources:
     backend:
@@ -305,7 +305,7 @@ pnfs:
     # MDS + DS ship in one image (both binaries; entrypoint selects).
     image:
       name: flint-pnfs
-      tag: ""   # required when server.enabled — set at release time
+      tag: "1.9.0"   # first published release of the pNFS server image (durable-DS Phase 1)
 
     # FILE-layout stripe unit in bytes. Pinned PER FILE at first
     # LAYOUTGET (Phase 0): changing this affects only files created
