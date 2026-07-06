@@ -46,6 +46,12 @@ pub struct MdsControlService {
     /// placement so a re-created volume at the same path gets a fresh
     /// pin instead of inheriting a stale (possibly unsatisfiable) one.
     layout_manager: crate::pnfs::mds::layout::LayoutManager,
+
+    /// The MDS's NFSv4.1 bind port, returned in CreateVolumeResponse so
+    /// the CSI driver mounts the right port. The driver reached us over
+    /// gRPC — before this field it stamped that gRPC port into the
+    /// kernel mount options (found live on runn, 2026-07-06).
+    nfs_port: u16,
 }
 
 impl MdsControlService {
@@ -58,8 +64,9 @@ impl MdsControlService {
         configured_endpoints: std::collections::HashMap<String, String>,
         export_path: std::path::PathBuf,
         layout_manager: crate::pnfs::mds::layout::LayoutManager,
+        nfs_port: u16,
     ) -> Self {
-        Self { device_registry, configured_endpoints, export_path, layout_manager }
+        Self { device_registry, configured_endpoints, export_path, layout_manager, nfs_port }
     }
 }
 
@@ -219,6 +226,7 @@ impl MdsControl for MdsControlService {
                 export_path: String::new(),
                 volume_file: String::new(),
                 message: "volume_id must be non-empty and contain no '/' or NUL".into(),
+                nfs_port: self.nfs_port as u32,
             }));
         }
 
@@ -239,6 +247,7 @@ impl MdsControl for MdsControlService {
                     export_path: export_str,
                     volume_file: req.volume_id,
                     message: "already exists".into(),
+                    nfs_port: self.nfs_port as u32,
                 }));
             }
             return Ok(Response::new(CreateVolumeResponse {
@@ -249,6 +258,7 @@ impl MdsControl for MdsControlService {
                     "volume {} exists at size {}, requested {}; refusing to resize",
                     req.volume_id, meta.len(), req.size_bytes,
                 ),
+                nfs_port: self.nfs_port as u32,
             }));
         }
 
@@ -262,6 +272,7 @@ impl MdsControl for MdsControlService {
                 export_path: String::new(),
                 volume_file: String::new(),
                 message: format!("export dir not writable: {}", e),
+                nfs_port: self.nfs_port as u32,
             }));
         }
 
@@ -276,6 +287,7 @@ impl MdsControl for MdsControlService {
                     export_path: String::new(),
                     volume_file: String::new(),
                     message: format!("create file: {}", e),
+                    nfs_port: self.nfs_port as u32,
                 }));
             }
         };
@@ -289,6 +301,7 @@ impl MdsControl for MdsControlService {
                 export_path: String::new(),
                 volume_file: String::new(),
                 message: format!("set_len: {}", e),
+                nfs_port: self.nfs_port as u32,
             }));
         }
 
@@ -301,6 +314,7 @@ impl MdsControl for MdsControlService {
             export_path: export_str,
             volume_file: req.volume_id,
             message: String::new(),
+            nfs_port: self.nfs_port as u32,
         }))
     }
 
@@ -397,6 +411,7 @@ mod create_volume_tests {
             std::collections::HashMap::new(),
             export.to_path_buf(),
             layout_manager,
+            2049,
         )
     }
 

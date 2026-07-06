@@ -180,14 +180,36 @@ impl PnfsCsi {
             }));
         }
 
-        // Split the endpoint back into host and port for the
-        // node-publish mount line. `endpoint` always carries a scheme
-        // by construction.
-        let (host, port) = parse_host_port(&self.endpoint)?;
+        // The mount host is the same name we dialed for gRPC (in the
+        // chart both live behind the flint-pnfs-mds Service), but the
+        // mount PORT is not: we dialed the gRPC port, and stamping it
+        // into the context sent the kernel's NFS mount to the gRPC
+        // listener (found live on runn, 2026-07-06). The MDS reports
+        // its NFS bind port in the response; 0 means an older MDS that
+        // predates the field, where the standard 2049 is the best bet.
+        let (host, _grpc_port) = parse_host_port(&self.endpoint)?;
+
+        // Resolve the host to an IPv4 HERE, at provision time, where we
+        // run as a normal pod with ClusterFirst DNS. The kernel mount
+        // executes in the NODE's network context, whose resolver knows
+        // nothing about *.svc.cluster.local (mount.nfs4 "Failed to
+        // resolve server", found live on runn 2026-07-06). A Service
+        // ClusterIP is stable for the Service's lifetime — the same
+        // argument that lets kernel clients cache the per-pod DS
+        // Service IPs from GETDEVICEINFO — and the RWX-NFS path already
+        // publishes raw IPs for the same reason. Unresolvable names
+        // (dev rigs mounting from inside a VM, e.g. host.lima.internal)
+        // pass through unchanged.
+        let host = resolve_mount_host(&host);
+        let nfs_port = if resp.nfs_port > 0 {
+            resp.nfs_port.to_string()
+        } else {
+            "2049".to_string()
+        };
 
         let mut ctx = HashMap::new();
         ctx.insert(ctx_keys::MDS_IP.into(), host);
-        ctx.insert(ctx_keys::MDS_PORT.into(), port);
+        ctx.insert(ctx_keys::MDS_PORT.into(), nfs_port);
         ctx.insert(ctx_keys::EXPORT_PATH.into(), resp.export_path);
         ctx.insert(ctx_keys::VOLUME_FILE.into(), resp.volume_file);
         ctx.insert(ctx_keys::SIZE_BYTES.into(), size_bytes.to_string());
@@ -214,6 +236,26 @@ impl PnfsCsi {
             }));
         }
         Ok(())
+    }
+}
+
+/// Resolve `host` to a dotted-quad IPv4 string for the kernel NFS
+/// mount line. Already-numeric hosts and names the local resolver
+/// can't answer (VM-only rig names) are returned unchanged — the
+/// caller stamps the result into the PV, so "best name we have" is
+/// the right degradation.
+fn resolve_mount_host(host: &str) -> String {
+    use std::net::ToSocketAddrs;
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return host.to_string();
+    }
+    match (host, 0u16).to_socket_addrs() {
+        Ok(addrs) => addrs
+            .filter(|a| a.is_ipv4())
+            .map(|a| a.ip().to_string())
+            .next()
+            .unwrap_or_else(|| host.to_string()),
+        Err(_) => host.to_string(),
     }
 }
 
@@ -335,6 +377,20 @@ mod tests {
         format!("127.0.0.1:{}", addr.port())
     }
 
+    #[test]
+    fn resolve_mount_host_passthrough_and_resolution() {
+        // Numeric hosts never touch the resolver.
+        assert_eq!(resolve_mount_host("10.0.0.5"), "10.0.0.5");
+        // Unresolvable names degrade to themselves (dev-rig names that
+        // only resolve inside the client VM).
+        assert_eq!(
+            resolve_mount_host("definitely-not-a-real-host.invalid"),
+            "definitely-not-a-real-host.invalid",
+        );
+        // A resolvable name becomes an IPv4 literal.
+        assert_eq!(resolve_mount_host("localhost"), "127.0.0.1");
+    }
+
     #[tokio::test]
     async fn create_volume_returns_full_context() {
         let mock = std::sync::Arc::new(MockMds::new(
@@ -343,6 +399,7 @@ mod tests {
                 export_path: "/srv/pnfs".into(),
                 volume_file: "pvc-abc".into(),
                 message: String::new(),
+                nfs_port: 20490,
             },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
@@ -360,7 +417,9 @@ mod tests {
         // The volume_context carries every key the node-publish path
         // needs. If a key is renamed or dropped, this catches it.
         assert_eq!(ctx.get(ctx_keys::MDS_IP).map(String::as_str), Some("127.0.0.1"));
-        assert!(ctx.get(ctx_keys::MDS_PORT).is_some());
+        // The mount port is the MDS's reported NFS port — NOT the gRPC
+        // port we dialed (the original bug this test now pins down).
+        assert_eq!(ctx.get(ctx_keys::MDS_PORT).map(String::as_str), Some("20490"));
         assert_eq!(ctx.get(ctx_keys::EXPORT_PATH).map(String::as_str), Some("/srv/pnfs"));
         assert_eq!(ctx.get(ctx_keys::VOLUME_FILE).map(String::as_str), Some("pvc-abc"));
         assert_eq!(
@@ -377,6 +436,7 @@ mod tests {
                 export_path: String::new(),
                 volume_file: String::new(),
                 message: "size mismatch: existing 4096, requested 8192".into(),
+                nfs_port: 0,
             },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
@@ -398,6 +458,7 @@ mod tests {
                 export_path: "/srv".into(),
                 volume_file: "v".into(),
                 message: String::new(),
+                nfs_port: 2049,
             },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));

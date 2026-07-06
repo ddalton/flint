@@ -35,6 +35,19 @@ pub trait PnfsOperations: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Whether `file_key` (export-relative path) is pNFS-managed —
+    /// i.e. it has a pinned stripe placement, so its bytes live on the
+    /// DS fleet and the MDS's local file is a sparse size-only stub.
+    /// The dispatcher uses this to refuse READ/WRITE through the MDS
+    /// with NFS4ERR_DELAY: the kernel client falls back to MDS I/O
+    /// when a DS is unreachable, and serving the stub returns silent
+    /// zeros (data corruption, found live on runn 2026-07-06 by the
+    /// DS-outage read drill). Default `false` keeps non-striped files
+    /// (never layouted) fully readable/writable through the MDS.
+    fn is_pnfs_managed(&self, _file_key: &str) -> bool {
+        false
+    }
+
     // NOTE: there is deliberately no `stripe_unit()` here. The stripe
     // unit is per-file (pinned on the placement at first LAYOUTGET and
     // carried on each `Layout`) — a global value is exactly the

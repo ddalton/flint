@@ -308,6 +308,7 @@ impl MetadataServer {
     fn start_grpc_server(&self) {
         let device_registry = Arc::clone(&self.device_registry);
         let bind_addr = self.config.bind.address.clone();
+        let nfs_port = self.config.bind.port;
         let export_path = self.export_path.clone();
         let layout_manager = self.layout_manager.as_ref().clone();
         // Build the operator's `device_id → reachable endpoint` map from
@@ -327,7 +328,7 @@ impl MetadataServer {
                 .expect("Invalid gRPC address");
 
             let control_service = MdsControlService::new(
-                device_registry, configured_endpoints, export_path, layout_manager,
+                device_registry, configured_endpoints, export_path, layout_manager, nfs_port,
             );
             let svc = MdsControlServer::new(control_service);
 

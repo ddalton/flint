@@ -747,5 +747,9 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
     fn layoutreturn(&self, args: LayoutReturnArgs) -> Result<(), String> {
         self.layoutreturn(args).map(|_| ()).map_err(|e| format!("{:?}", e))
     }
+
+    fn is_pnfs_managed(&self, file_key: &str) -> bool {
+        self.layout_manager.has_placement(file_key)
+    }
 }
 

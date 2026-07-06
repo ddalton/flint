@@ -173,7 +173,7 @@ have only the docker-compose-era sketches in `docker/README-pnfs.md`
 pNFS PVC striping across all DS pods; `helm upgrade` rolls MDS and DSes
 without client I/O errors (ordered, one DS at a time).
 
-### Status: BUILT 2026-07-06 — live validation pending (needs a cluster)
+### Status: LIVE-VALIDATED 2026-07-06 on runn — see validation record below
 
 Landed in-session:
 - `templates/pnfs-mds.yaml`: ConfigMap (sqlite mandatory, state.db +
@@ -208,10 +208,108 @@ Gates run: helm lint clean; render validated (10 objects at count=3;
 pnfs-disabled render emits zero pNFS objects); 624 lib tests;
 test-pnfs-smoke re-run PASS after the registration-path changes.
 
-Remaining for "Done when": cold `helm install` + upgrade-roll drills
-need a live cluster (runk/runl deleted — provision fresh via trove),
-and the `dilipdalton/flint-pnfs` image (docker/Dockerfile.pnfs, both
-binaries) publishes at the next release like every other image.
+### Live validation record — runn cluster, 2026-07-06
+
+Validated on a fresh 5-node trove cluster (runn: i4i.large CP + 3
+workers + c5d.4xlarge builder; chart revs 2–4 over the trove-installed
+1.8.0 release). Every Phase 1 "Done when" gate passed, and the drill
+found four k8s-only bugs the lima rig structurally cannot reach (no
+external-attacher, no stage/unstage flow, no host-vs-pod DNS split).
+
+Cold install (gate PASS): `helm upgrade` with `pnfs.server.enabled=true`
+brought up MDS + 2 DSes with PVCs Bound on flint-spdk in seconds —
+the fleet dogfoods flint block volumes (`/dev/nvme*` inside pods).
+Bonus live capture: the DS pods raced the MDS at boot, initial
+registration failed, and the heartbeat-NACK → re-register path
+recovered both DSes ~20 s later with their per-pod Service DNS
+endpoints (`FLINT_DS_ADVERTISE_ADDR` beat POD_IP as designed) —
+Phase 3's "partially prebuilt" claim is now live-proven.
+
+Driver bugs found + fixed (all in the CSI driver, none pNFS-server):
+1. **pNFS PVCs could never attach** — ControllerPublishVolume fell
+   into the SPDK PV-metadata lookup ("PV found but missing flint
+   metadata") because attachRequired is driver-global. Fix: no-op
+   publish branch keyed on `pnfs.flint.io/mds-ip` in volume_context,
+   plus a NodeStage no-op branch and a NodeUnstage unmount-only
+   classification via new `Driver::pv_is_pnfs` (context-free RPC reads
+   the PV's attrs).
+2. **Mount port was the gRPC port** — `pnfs_csi::create_volume`
+   stamped the dialed endpoint's port (50051) into
+   `pnfs.flint.io/mds-port`; the kernel would mount NFS against the
+   gRPC listener. Fix: `CreateVolumeResponse.nfs_port` (proto field 5,
+   MDS reports its bind.port; 0 → 2049 fallback for older MDSes). The
+   lima csi-e2e masked this by using its own port variable for mounts.
+3. **Service DNS unresolvable at mount time** — the kernel mount runs
+   in the node's network context (csi-node is hostNetwork, host
+   resolver): `mount.nfs4: Failed to resolve server
+   flint-pnfs-mds.<ns>.svc.cluster.local`. Fix: resolve the MDS host
+   to its (stable) ClusterIP at provision time in create_volume —
+   same convention as the RWX path's raw server IPs; unresolvable
+   dev-rig names pass through.
+4. **DS-outage reads returned silent zeros — data-corruption P1.**
+   With a DS pod gone, its per-pod Service has no endpoints and
+   connections fail fast (ECONNREFUSED); the kernel client immediately
+   falls back to READ-through-MDS, and the MDS served the sparse
+   size-only stub: full-speed reads of zeros, correct length, no
+   error (observed live: wrong sha256 during the outage window, data
+   on DSes intact throughout). Phase 4's old DS-death drill missed
+   this because a same-endpoint restart just retries TCP; the k8s
+   Service shape converts the outage into instant-refusal, which is
+   what triggers the fallback. Fix: **stub-IO guard** — in MDS mode,
+   READ/WRITE on placement-pinned files return NFS4ERR_DELAY
+   (`refuse_stub_io` in the dispatcher + `PnfsOperations::
+   is_pnfs_managed` + `LayoutManager::has_placement`); non-striped
+   files keep full MDS I/O. Re-drill: wrong data eliminated.
+
+Data path (gate PASS): 64 MiB write at 107 MB/s from a busybox pod,
+stripes landed ~36M/~35M across the two DS PVCs, sha256 identical
+across pod delete + fresh mount. LAYOUTGET/LAYOUTCOMMIT/LAYOUTRETURN
+clean in MDS logs; placement pinned on first layout.
+
+MDS restart with live state (gate PASS): image roll (Recreate) cleanly
+unstaged/restaged the PVC; boot reloaded 2 placements + 4 layouts from
+sqlite; all DSes re-registered ≤20 s; data readable after.
+
+Fleet growth 2→3 (gate PASS, the Phase 0 story end-to-end on k8s):
+`dataServers.count=3` → DS-2 with own PVC on a third node (soft
+anti-affinity spread). fileA's sha unchanged and its placement still
+2-wide (zero bytes ever land on DS-2); new fileB stripes 3-wide
+(~16 MiB/DS). Placement refusal never triggered — no re-mapping.
+
+Operational findings (write these into the operator runbook):
+- **csi-node rolls kill mounted flint PVCs.** A chart upgrade that
+  changes the csi-node DaemonSet restarts spdk-tgt in the same pod;
+  every mounted flint volume on the node loses its block device (ext4
+  goes EIO), including the pNFS fleet's own PVCs. After any csi-node
+  roll: restart DS pods, and scale-cycle the MDS (0 → 1). A bare `kubectl
+  delete pod` on the MDS races its ReplicaSet and the replacement
+  inherits the dead staging mount (CrashLoop on EIO); scale-to-zero
+  forces the clean unstage. Consider a chart split (spdk-tgt as its
+  own DaemonSet) as a future fix.
+- **In-flight I/O at DS-outage time hangs until client state resets.**
+  The stub-IO guard converts the corruption into NFS4ERR_DELAY
+  retries, but the kernel never re-drives an already-fallen-back RPC
+  through the pNFS path, even after the DS recovers — and kernel NFS
+  client state is PER NODE (shared superblock): recreating the pod on
+  the same node inherits the wedge; force-deleting wedged pods leaves
+  a detached-superblock retry loop (~220 rps at the MDS ≈ 1% CPU)
+  until node reboot. New I/O from a clean node is unaffected
+  (verified: correct checksums in 0.6 s from another node while the
+  zombie loop ran). Durable fix = **MDS proxy I/O** (MDS serves
+  READ/WRITE by proxying to DSes) — added as a follow-up work item;
+  until then a DS blip can require app-pod rescheduling to another
+  node to unstick mid-flight readers.
+- `helm upgrade --reuse-values` skips NEW chart defaults → nil
+  `pnfs.server.*` template errors. Always pass the full values file.
+- PVs provisioned by a pre-fix driver carry broken volumeAttributes
+  (gRPC port / bare DNS name) and cannot be repaired — attrs are
+  immutable. Not a production concern (the chart shape never worked
+  before the fixes); re-provision.
+
+Validation images (uncommitted-fix builds from this session, built on
+the runn builder): `dilipdalton/flint-pnfs:pnfs-p1.2` and
+`dilipdalton/flint-driver:pnfs-p1.2`. The proper `flint-pnfs` release
+image still publishes at the next release like every other image.
 
 ---
 

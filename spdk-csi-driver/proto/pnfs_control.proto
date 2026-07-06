@@ -62,6 +62,12 @@ message CreateVolumeResponse {
 
   // Error message on failure (created=false). Empty on success.
   string message = 4;
+
+  // Port the MDS serves NFSv4.1 on (its `bind.port`). The CSI driver
+  // dialed the *gRPC* port to make this call — that is not the NFS
+  // port, and mounting against it fails. 0 (an older MDS that predates
+  // this field) → the caller falls back to the standard 2049.
+  uint32 nfs_port = 5;
 }
 
 message DeleteVolumeRequest {

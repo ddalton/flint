@@ -1199,6 +1199,18 @@ impl CompoundDispatcher {
             }
 
             Operation::Read { stateid, offset, count } => {
+                // MDS-mode guard: a striped file's bytes live on the
+                // DSes; the local file is a sparse size-only stub, and
+                // serving it returns silent zeros. The kernel client
+                // falls back to READ-through-MDS whenever a DS is
+                // unreachable (observed live on runn 2026-07-06: an
+                // empty per-DS Service fails fast with ECONNREFUSED and
+                // the client immediately read the stub — wrong data, no
+                // error). DELAY is retryable: the client backs off and
+                // re-drives its layout path until the DS returns.
+                if self.refuse_stub_io(context, "READ") {
+                    return OperationResult::Read(Nfs4Status::Delay, None);
+                }
                 let stateid = match context.resolve_stateid(stateid) {
                     Some(s) => s,
                     None => return OperationResult::Read(Nfs4Status::BadStateId, None),
@@ -1217,6 +1229,13 @@ impl CompoundDispatcher {
             }
 
             Operation::Write { stateid, offset, stable, data } => {
+                // Same MDS-mode guard as READ — a fallback WRITE into
+                // the sparse stub would silently diverge from the DS
+                // stripes (worse than the read case: persistent, not
+                // transient).
+                if self.refuse_stub_io(context, "WRITE") {
+                    return OperationResult::Write(Nfs4Status::Delay, None);
+                }
                 let stateid = match context.resolve_stateid(stateid) {
                     Some(s) => s,
                     None => return OperationResult::Write(Nfs4Status::BadStateId, None),
@@ -1698,7 +1717,46 @@ impl CompoundDispatcher {
     }
     
     // pNFS operation handlers
-    
+
+    /// True when this server is a pNFS MDS and the current filehandle
+    /// names a striped (placement-pinned) file. Such a file's data is
+    /// NOT here — the local file is a sparse stub — so READ/WRITE must
+    /// be refused (NFS4ERR_DELAY) rather than served. Standalone and
+    /// DS roles have no pnfs_handler and skip this entirely; files the
+    /// MDS holds that were never layouted stay fully accessible.
+    fn refuse_stub_io(&self, context: &CompoundContext, op: &str) -> bool {
+        let pnfs = match &self.pnfs_handler {
+            Some(p) => p,
+            None => return false,
+        };
+        let fh = match &context.current_fh {
+            Some(fh) => fh,
+            None => return false,
+        };
+        let path = match self.file_handler.fh_manager().resolve_handle(fh) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let export = self.file_handler.fh_manager().get_export_path().to_path_buf();
+        let file_key = path
+            .strip_prefix(&export)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        if file_key.is_empty() {
+            return false;
+        }
+        if pnfs.is_pnfs_managed(&file_key) {
+            warn!(
+                "⛔ {} through MDS refused for striped file '{}' — data lives on the DSes, the local file is a sparse stub. NFS4ERR_DELAY (client retries its layout path)",
+                op, file_key
+            );
+            return true;
+        }
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn handle_layoutget(
         &self,
         _signal_layout_avail: bool,

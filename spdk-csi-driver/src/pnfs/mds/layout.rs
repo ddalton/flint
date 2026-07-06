@@ -390,6 +390,13 @@ impl LayoutManager {
         self.stripe_groups.get(device_id).map(|g| g.clone())
     }
 
+    /// Whether `file_key` has a pinned stripe placement — i.e. its data
+    /// lives on the DS fleet and the MDS's local file is a sparse
+    /// size-only stub. Read-only: never creates a pin.
+    pub fn has_placement(&self, file_key: &str) -> bool {
+        self.placements.contains_key(file_key)
+    }
+
     /// Drop the pin for a deleted file so a future file at the same
     /// path gets a fresh placement. Stripe-group entries stay — they
     /// are content-addressed and other files may share them.
