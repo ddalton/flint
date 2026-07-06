@@ -4,10 +4,14 @@ import { describe, expect, it } from 'vitest';
 import {
   computeDomain,
   xScale,
+  pxToTime,
   timeTicks,
   bucketEpochs,
   clusterMarkers,
   relTime,
+  hitTestBrush,
+  applyBrushDrag,
+  nudgeWindow,
 } from './timelineLayout';
 
 const NOW = Date.UTC(2026, 6, 4, 21, 25, 0); // 2026-07-04T21:25:00Z
@@ -109,6 +113,80 @@ describe('clusterMarkers', () => {
     expect(clusters).toHaveLength(2);
     expect(clusters[0]!.items).toEqual(['s0', 's1', 's2']);
     expect(clusters[1]!.items).toEqual(['s3']);
+  });
+});
+
+// The brush is pure geometry: pointer px in, zoom window (or null = full
+// view) out. The component only wires DOM events onto these.
+describe('brush geometry', () => {
+  const domain = { min: NOW - 300_000, max: NOW };
+  const win = { min: NOW - 200_000, max: NOW - 100_000 }; // px 300..600 at width 900
+
+  it('pxToTime inverts xScale and clamps to the strip', () => {
+    expect(pxToTime(450, domain, 900)).toBe(NOW - 150_000);
+    expect(pxToTime(-50, domain, 900)).toBe(domain.min);
+    expect(pxToTime(2000, domain, 900)).toBe(domain.max);
+  });
+
+  it('hit-tests edge handles, the window body, and empty strip', () => {
+    expect(hitTestBrush(300, win, domain, 900)).toBe('resize-start');
+    expect(hitTestBrush(606, win, domain, 900)).toBe('resize-end');
+    expect(hitTestBrush(450, win, domain, 900)).toBe('move');
+    expect(hitTestBrush(100, win, domain, 900)).toBe('create');
+    expect(hitTestBrush(450, null, domain, 900)).toBe('create');
+  });
+
+  it('creates a window from a drag in either direction', () => {
+    const w = applyBrushDrag('create', 300, 600, null, domain, 900)!;
+    expect(w.min).toBeCloseTo(NOW - 200_000);
+    expect(w.max).toBeCloseTo(NOW - 100_000);
+    const rev = applyBrushDrag('create', 600, 300, null, domain, 900)!;
+    expect(rev.min).toBeCloseTo(w.min);
+    expect(rev.max).toBeCloseTo(w.max);
+  });
+
+  it('treats a tiny create-drag as a click, which clears the zoom', () => {
+    expect(applyBrushDrag('create', 300, 302, null, domain, 900)).toBeNull();
+  });
+
+  it('never creates a sub-minimum span — a fast flick still yields a usable window', () => {
+    const w = applyBrushDrag('create', 300, 304, null, domain, 900)!;
+    expect(w.max - w.min).toBeGreaterThanOrEqual(1_000);
+  });
+
+  it('move preserves the span and clamps at the domain edges', () => {
+    const moved = applyBrushDrag('move', 400, 490, win, domain, 900)!;
+    expect(moved.max - moved.min).toBe(100_000);
+    expect(moved.min).toBeCloseTo(win.min + 30_000); // 90px * 333.3ms/px
+    const hard = applyBrushDrag('move', 400, 2_000, win, domain, 900)!;
+    expect(hard.max).toBe(domain.max);
+    expect(hard.max - hard.min).toBe(100_000);
+  });
+
+  it('resizes clamp to the domain and respect the minimum span', () => {
+    const wider = applyBrushDrag('resize-end', 600, 750, win, domain, 900)!;
+    expect(wider.min).toBe(win.min);
+    expect(wider.max).toBeCloseTo(NOW - 50_000);
+    // Dragging the end handle left past the start collapses to min span,
+    // never inverts.
+    const collapsed = applyBrushDrag('resize-end', 600, 100, win, domain, 900)!;
+    expect(collapsed.max - collapsed.min).toBe(1_000);
+    const past = applyBrushDrag('resize-start', 300, -500, win, domain, 900)!;
+    expect(past.min).toBe(domain.min);
+  });
+
+  it('keyboard nudges pan and zoom; zooming out past the domain dissolves to full view', () => {
+    const left = nudgeWindow(win, domain, 'left')!;
+    expect(left.min).toBeCloseTo(win.min - 10_000);
+    expect(left.max - left.min).toBe(100_000);
+
+    const pinned = nudgeWindow({ min: NOW - 100_000, max: NOW }, domain, 'right')!;
+    expect(pinned.max).toBe(domain.max); // already at the live edge
+
+    const zoomedIn = nudgeWindow(win, domain, 'in')!;
+    expect(zoomedIn.max - zoomedIn.min).toBeCloseTo(75_000);
+
+    expect(nudgeWindow({ min: NOW - 280_000, max: NOW - 10_000 }, domain, 'out')).toBeNull();
   });
 });
 

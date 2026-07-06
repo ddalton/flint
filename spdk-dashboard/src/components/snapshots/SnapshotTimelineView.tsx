@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useLayoutEffect, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
-  GitBranch, Database, Search, Camera, Layers, Trash2, Loader2,
+  GitBranch, Database, Search, Camera, Layers, Trash2, Loader2, X, ZoomIn,
 } from 'lucide-react';
 import { getRole } from '../../api/client';
 import { resolveVolumeInput, volumeInputMatches } from './volumeSearch';
@@ -11,10 +11,11 @@ import {
   type TimelineEvent,
 } from '../../hooks/useSnapshotTimeline';
 import {
-  computeDomain, timeTicks, bucketEpochs, clusterMarkers, relTime,
+  computeDomain, timeTicks, bucketEpochs, clusterMarkers, pxToTime, relTime,
   type TimeDomain,
 } from './timelineLayout';
 import { ConfirmModal } from '../ui/ConfirmModal';
+import { TimelineBrush } from './TimelineBrush';
 
 // Design (adapted from production observability idioms):
 // - Two lanes, not one: sparse human events (user VolumeSnapshots, diamond
@@ -29,6 +30,10 @@ import { ConfirmModal } from '../ui/ConfirmModal';
 //   annotation-tooltip). Buttons never live in hover-only surfaces.
 // - Colliding user markers merge into a "+N" chip (map cluster-marker
 //   pattern) instead of overdrawing.
+// - Focus+context brush zoom: a miniature full-history strip under the axis
+//   (TimelineBrush) on which a dragged window re-domains the lanes above.
+//   The zoom window is absolute wall-clock, so live refetches extend the
+//   context strip without silently moving a pinned window.
 
 const LANE_USER_Y = 40;
 const LANE_EPOCH_TOP = 78;
@@ -187,6 +192,12 @@ export const SnapshotTimelineView: React.FC<{
 
   const [selection, setSelection] = useState<Selection | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
+  // Brush zoom window (absolute ms). null = full history. A window from one
+  // volume is meaningless on another, so switching volumes resets it.
+  const [zoom, setZoom] = useState<TimeDomain | null>(null);
+  useEffect(() => {
+    setZoom(null);
+  }, [selectedVolume]);
   const [confirming, setConfirming] = useState<TimelineEvent | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -204,26 +215,51 @@ export const SnapshotTimelineView: React.FC<{
     [events, nowMs]
   );
 
+  // The lanes render the zoom window when one is brushed, the full history
+  // otherwise. The context strip below always renders `domain`.
+  const view: TimeDomain | null = zoom ?? domain;
+
   const userClusters = useMemo(() => {
-    if (!domain) return [];
+    if (!view) return [];
     return clusterMarkers(
       userEvents.filter((e) => e.created_at).map((e) => ({ timeMs: eventTimeMs(e), item: e })),
-      domain,
+      view,
       width
     );
-  }, [userEvents, domain, width]);
+  }, [userEvents, view, width]);
 
   const epochBuckets = useMemo(() => {
-    if (!domain) return [];
+    if (!view) return [];
     return bucketEpochs(
       epochEvents.filter((e) => e.created_at).map((e) => ({ timeMs: eventTimeMs(e), item: e })),
-      domain,
+      view,
       width
     );
-  }, [epochEvents, domain, width]);
+  }, [epochEvents, view, width]);
 
   const maxBucket = Math.max(1, ...epochBuckets.map((b) => b.count));
-  const ticks = useMemo(() => (domain ? timeTicks(domain, width) : []), [domain, width]);
+  const ticks = useMemo(() => (view ? timeTicks(view, width) : []), [view, width]);
+
+  const userTimesMs = useMemo(
+    () => userEvents.map(eventTimeMs).filter((t) => Number.isFinite(t)),
+    [userEvents]
+  );
+  const epochTimesMs = useMemo(
+    () => epochEvents.map(eventTimeMs).filter((t) => Number.isFinite(t)),
+    [epochEvents]
+  );
+
+  // Marker x-positions shift when the domain changes, so a pinned popover's
+  // anchor goes stale — close it with the zoom gesture that moved it.
+  const handleZoomChange = useCallback((win: TimeDomain | null) => {
+    setSelection(null);
+    setDeleteError(null);
+    setZoom(win);
+  }, []);
+
+  // The right edge is only "now" when the window reaches it; zoomed into
+  // the past, drawing the live pulse there would be a lie.
+  const showNow = !zoom || (domain !== null && zoom.max >= domain.max - 500);
 
   const onMouseMove = useCallback((ev: React.MouseEvent<SVGSVGElement>) => {
     const rect = ev.currentTarget.getBoundingClientRect();
@@ -368,6 +404,19 @@ export const SnapshotTimelineView: React.FC<{
                 </span>
               </div>
               <div className="flex items-center gap-2">
+                {zoom && (
+                  <span className="flex items-center gap-1.5 px-2 py-0.5 bg-amber-50 text-amber-700 rounded-full font-medium">
+                    <ZoomIn className="w-3 h-3" />
+                    {fmtAbs(zoom.min)} – {fmtAbs(zoom.max)}
+                    <button
+                      onClick={() => handleZoomChange(null)}
+                      aria-label="Reset zoom"
+                      className="p-0.5 -mr-1 rounded-full hover:bg-amber-100"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                )}
                 {data?.current_epoch && (
                   <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded-full font-mono">
                     epoch #{data.current_epoch.split('-').pop()}
@@ -442,15 +491,20 @@ export const SnapshotTimelineView: React.FC<{
                   </g>
                 ))}
 
-                {/* now anchor: hairline + pulse at the right edge */}
-                <line x1={width - 1} y1={LANE_USER_Y - 12} x2={width - 1} y2={AXIS_Y} stroke="#10b981" strokeWidth={1} strokeDasharray="2,3" />
-                <circle cx={width - 1} cy={AXIS_Y} r={3.5} fill="#10b981">
-                  <animate attributeName="r" values="3;5;3" dur="2s" repeatCount="indefinite" />
-                  <animate attributeName="fill-opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite" />
-                </circle>
-                <text x={width - 8} y={LANE_USER_Y - 18} textAnchor="end" fontSize={10} fill="#10b981" fontWeight={600}>
-                  now
-                </text>
+                {/* now anchor: hairline + pulse, only when the window
+                    actually reaches the live edge */}
+                {showNow && (
+                  <>
+                    <line x1={width - 1} y1={LANE_USER_Y - 12} x2={width - 1} y2={AXIS_Y} stroke="#10b981" strokeWidth={1} strokeDasharray="2,3" />
+                    <circle cx={width - 1} cy={AXIS_Y} r={3.5} fill="#10b981">
+                      <animate attributeName="r" values="3;5;3" dur="2s" repeatCount="indefinite" />
+                      <animate attributeName="fill-opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite" />
+                    </circle>
+                    <text x={width - 8} y={LANE_USER_Y - 18} textAnchor="end" fontSize={10} fill="#10b981" fontWeight={600}>
+                      now
+                    </text>
+                  </>
+                )}
 
                 {/* crosshair (read-only hover) */}
                 {hoverX !== null && !selection && (
@@ -458,7 +512,7 @@ export const SnapshotTimelineView: React.FC<{
                     <line x1={hoverX} y1={LANE_USER_Y - 12} x2={hoverX} y2={AXIS_Y} stroke="#9ca3af" strokeWidth={1} strokeDasharray="3,3" />
                     <rect x={Math.min(hoverX + 4, width - 64)} y={AXIS_Y - 18} width={60} height={15} rx={3} fill="#374151" />
                     <text x={Math.min(hoverX + 34, width - 34)} y={AXIS_Y - 7} textAnchor="middle" fontSize={9.5} fill="#fff">
-                      {fmtAbs(domain.min + ((domain.max - domain.min) * hoverX) / width)}
+                      {fmtAbs(pxToTime(hoverX, zoom ?? domain, width))}
                     </text>
                   </g>
                 )}
@@ -477,6 +531,18 @@ export const SnapshotTimelineView: React.FC<{
                   />
                 ))}
               </svg>
+
+              {/* Context strip: the full history in miniature, brushed to zoom */}
+              <div className="mt-1.5">
+                <TimelineBrush
+                  domain={domain}
+                  zoom={zoom}
+                  onZoomChange={handleZoomChange}
+                  width={width}
+                  userTimesMs={userTimesMs}
+                  epochTimesMs={epochTimesMs}
+                />
+              </div>
 
               {/* Pinned popover: metadata + actions (click-committed surface) */}
               {selection && (
@@ -643,6 +709,12 @@ export const SnapshotTimelineView: React.FC<{
                 consistency points the replica-rebuild engine cuts and rotates; their density shows
                 scheduler cadence. Timestamps come from the CR and the PV sync record — never
                 fabricated. The green pulse is “now”.
+              </p>
+              <p>
+                <strong>Zooming:</strong> drag across the miniature full-history strip below the
+                lanes to focus on a time window — drag the window’s edges to resize it, its body
+                to pan, and click outside it (or the ✕ on the zoom chip) to return to the full
+                history. The strip always shows everything, so you never lose orientation.
               </p>
             </div>
           </div>

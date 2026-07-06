@@ -2,7 +2,7 @@
 // VolumeSnapshots as markers, engine epochs as a density ribbon), pinned
 // popover with the CR-path delete, admin-gated.
 import { describe, expect, it, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -208,6 +208,61 @@ describe('SnapshotTimelineView', () => {
     const list = await screen.findByRole('dialog', { name: 'Snapshot details' });
     await user.click(within(list).getByRole('button', { name: /burst-2/ }));
     expect(list).toHaveTextContent('No SPDK copies exist on any node');
+  });
+
+  it('brush-zooms the lanes to a dragged window and resets from the chip', async () => {
+    await login('admin', 'right-password');
+    const user = userEvent.setup();
+    renderView();
+    await screen.findByText(/User snapshots · 3/);
+
+    // Fixture: user snapshots at 280/160/45s ago; domain [now-325.5s, now]
+    // at the 900px JSDOM fallback width puts them at x≈126/458/776. A drag
+    // from 350 to 890 windows in demo-2 and demo-3, excludes demo-1.
+    const brush = screen.getByTestId('timeline-brush');
+    fireEvent.mouseDown(brush, { clientX: 350 });
+    fireEvent.mouseMove(window, { clientX: 890 });
+    fireEvent.mouseUp(window, { clientX: 890 });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'User snapshot snap-demo-1' })
+      ).not.toBeInTheDocument()
+    );
+    expect(screen.getByRole('button', { name: 'User snapshot snap-demo-2' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'User snapshot snap-demo-3' })).toBeInTheDocument();
+    // Legend counts stay full-history totals — zoom navigates, never hides.
+    expect(screen.getByText(/User snapshots · 3/)).toBeInTheDocument();
+    // Zoomed short of the live edge, the "now" pulse would be a lie.
+    expect(screen.queryByText('now')).not.toBeInTheDocument();
+    // The brush window is a keyboard-operable slider on the context strip.
+    expect(screen.getByRole('slider', { name: 'Timeline zoom window' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Reset zoom' }));
+    expect(
+      await screen.findByRole('button', { name: 'User snapshot snap-demo-1' })
+    ).toBeInTheDocument();
+    expect(screen.getByText('now')).toBeInTheDocument();
+  });
+
+  it('clears the zoom from the keyboard (Escape on the window)', async () => {
+    await login('admin', 'right-password');
+    renderView();
+    await screen.findByText(/User snapshots · 3/);
+
+    const brush = screen.getByTestId('timeline-brush');
+    fireEvent.mouseDown(brush, { clientX: 600 });
+    fireEvent.mouseMove(window, { clientX: 800 });
+    fireEvent.mouseUp(window, { clientX: 800 });
+
+    const slider = await screen.findByRole('slider', { name: 'Timeline zoom window' });
+    fireEvent.keyDown(slider, { key: 'Escape' });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('slider', { name: 'Timeline zoom window' })
+      ).not.toBeInTheDocument()
+    );
+    expect(screen.getByText('now')).toBeInTheDocument();
   });
 
   it('explains an empty volume instead of rendering a bare card', async () => {

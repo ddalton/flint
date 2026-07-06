@@ -637,8 +637,9 @@ pure and unit-tested. Suites: 579 Rust / 89 vitest.
 Follow-up candidates: ~~SnapshotDetailModal's disabled Delete stub should
 either wire the CR path (needs the VSC join there too) or be dropped~~
 DROPPED (deliberate: deletes live in the timeline's CR path; the modal is
-SPDK-level and carries no CR reference); brush-to-zoom context strip
-(focus+context) once volumes carry hours of history; ~~`/api/snapshots`
+SPDK-level and carries no CR reference); ~~brush-to-zoom context strip
+(focus+context) once volumes carry hours of history~~ SHIPPED 2026-07-06
+(see below); ~~`/api/snapshots`
 still double-counts per node in the header chips~~ FIXED 2026-07-05
 (see below).
 
@@ -897,4 +898,37 @@ Live-verified against cluster `runn`; gate 135 vitest + tsc -b + lint
 
 Remaining (unchanged): Chip adoption in legacy views, raw→semantic
 color sweep incl. status.ts, primitives for the deliberate Button
-carve-outs (segmented control, pagination), timeline brush zoom.
+carve-outs (segmented control, pagination), ~~timeline brush zoom~~
+(shipped, below).
+
+## Timeline brush zoom — focus+context (2026-07-06)
+
+The deferred "brush-to-zoom context strip" from the timeline redesign is
+in. A miniature always-full-history strip (`TimelineBrush`) renders under
+the lanes: epoch density + user-snapshot ticks + the live-edge tick. Drag
+on it draws a zoom window that re-domains the lanes above; drag the
+window's body to pan, its edge handles to resize; click outside it (or
+the ✕ on the amber range chip in the legend row) to reset. Design
+decisions worth keeping:
+
+- **All brush math is pure** (`pxToTime`/`clampWindow`/`hitTestBrush`/
+  `applyBrushDrag`/`nudgeWindow` in `timelineLayout.ts`, unit-tested);
+  the component only wires mouse events onto it. Windows are absolute
+  wall-clock, so the 10s live refetch extends the context strip without
+  silently moving a pinned window.
+- **Honesty rules preserved**: legend counts stay full-history totals
+  (zoom navigates, never hides); the green "now" pulse renders only when
+  the window actually reaches the live edge — zoomed into the past it
+  would be a lie, so it disappears; the strip always shows everything
+  (orientation is never lost).
+- **Keyboard**: the window is a focusable `role="slider"` — arrows pan,
+  +/- zoom, Escape resets. A create-drag under 3px is a click, which
+  clears the zoom; sub-second flicks clamp to a 1s minimum span.
+- **Interlocks**: zoom change closes the pinned popover (its x anchor
+  goes stale) and switching volumes resets the zoom (a window from one
+  volume is meaningless on another).
+
+Validated against a mock 6h/158-epoch/12-snapshot volume via Playwright:
+create/pan/resize/reset drags all correct, and a deep zoom resolves a
++3 cluster marker into three separately clickable diamonds (the whole
+point). Suites: 145 vitest (10 new), tsc -b clean, no new lint warnings.
