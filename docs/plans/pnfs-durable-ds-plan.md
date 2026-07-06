@@ -284,7 +284,14 @@ Operational findings (write these into the operator runbook):
   roll: restart DS pods, and scale-cycle the MDS (0 → 1). A bare `kubectl
   delete pod` on the MDS races its ReplicaSet and the replacement
   inherits the dead staging mount (CrashLoop on EIO); scale-to-zero
-  forces the clean unstage.
+  forces the clean unstage. If the replacement pod then sticks in
+  ContainerCreating with `bdev_nvme_attach_controller … Input/output
+  error` (v1.9.0 gate, 4× on runn), the volume's NVMe-oF *target* died
+  with spdk-tgt and mount retries alone never re-create it — delete
+  the volume's VolumeAttachment (`kubectl get volumeattachment` →
+  match .spec.source.persistentVolumeName): the external-attacher
+  re-runs ControllerPublishVolume, which re-publishes the target, and
+  the next kubelet mount retry succeeds.
 
   The durable fix is **restart-survivability**, not a chart
   reshuffle. Splitting spdk-tgt into its own DaemonSet only stops
