@@ -100,6 +100,40 @@ must be closed before DS pods start moving.
 **Effort**: ~1 week including the lima drill. **This phase gates all
 others** — nothing below is safe to drill without it.
 
+### Status: IMPLEMENTED 2026-07-06
+
+Everything above landed, plus one gap the implementation pass found:
+**GETDEVICEINFO ignored composite deviceids entirely** — the striped
+arm (`mds/operations/mod.rs`) returned the *current* `list_active()`
+in registry-iteration order for ANY unknown deviceid, so even a pinned
+layout would have resolved to a shuffled/regrown device list on
+re-fetch. Fixed by a stripe-group registry (composite deviceid →
+placement-ordered device ids) populated at grant/load time; unknown
+deviceids are now NOENT, and the composite id + per-file stripe unit
+are computed MDS-side and carried on each `Layout` (the dispatcher no
+longer re-derives them; the global `stripe_unit()` trait method is
+deleted). Placement key = export-relative path (matches DS storage
+keying; CSI volume_id for CSI volumes). `DeleteVolume` drops the pin.
+sqlite schema v5 (`file_placement` table).
+
+Gates run (all green):
+- 623 lib tests incl. 6 new placement tests (restart+reorder via the
+  full persist→list→load loop, fleet growth, refusal, stripe-size
+  pinning, stripe-group registration, forget-and-repin).
+- `make test-pnfs-smoke` — kernel-client mount, 24 MiB write,
+  checksum round-trip, real 2-DS striping.
+- `make test-pnfs-placement` (NEW fleet-growth drill,
+  `tests/lima/pnfs/placement-drill.sh` + `mds-growth.yaml`/`ds3.yaml`):
+  A written under {DS1,DS2}; DS3 started; remount; A's sha256
+  identical, zero A-bytes on DS3; B stripes 3-wide onto DS3. MDS log
+  pins: `striped-A.bin: 2 DSes`, `striped-B.bin: 3 DSes`.
+
+Notes for later phases: the MDS pre-registers every configured
+`dataServers` entry as Active at boot (`mds/server.rs:148`) — a
+configured-but-dead DS is Active until the heartbeat timeout, which
+the growth drill has to sleep past. Phase 3 (restart hardening)
+should revisit boot-time device state.
+
 ---
 
 ## Phase 1 — chart: MDS and DS as first-class citizens (~1 week)

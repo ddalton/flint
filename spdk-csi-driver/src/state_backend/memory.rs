@@ -12,8 +12,8 @@
 //! cost is paid only on writes.
 
 use super::{
-    ClientRecord, LayoutRecord, LockRecord, SessionRecord, StateBackend, StateBackendResult,
-    StateIdRecord,
+    ClientRecord, LayoutRecord, LockRecord, PlacementRecord, SessionRecord, StateBackend,
+    StateBackendResult, StateIdRecord,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -29,6 +29,7 @@ pub struct MemoryBackend {
     stateids: DashMap<[u8; 12], StateIdRecord>,
     locks: DashMap<[u8; 12], LockRecord>,
     layouts: DashMap<[u8; 16], LayoutRecord>,
+    placements: DashMap<String, PlacementRecord>,
     instance_counter: AtomicU64,
     /// Lazily-initialised per-deployment server id. `OnceLock` makes
     /// the first call atomic (no two threads observe different values)
@@ -131,6 +132,24 @@ impl StateBackend for MemoryBackend {
 
     async fn delete_layout(&self, stateid: &[u8; 16]) -> StateBackendResult<()> {
         self.layouts.remove(stateid);
+        Ok(())
+    }
+
+    async fn put_placement(&self, p: &PlacementRecord) -> StateBackendResult<()> {
+        self.placements.insert(p.file_key.clone(), p.clone());
+        Ok(())
+    }
+
+    async fn get_placement(&self, file_key: &str) -> StateBackendResult<Option<PlacementRecord>> {
+        Ok(self.placements.get(file_key).map(|r| r.clone()))
+    }
+
+    async fn list_placements(&self) -> StateBackendResult<Vec<PlacementRecord>> {
+        Ok(self.placements.iter().map(|r| r.clone()).collect())
+    }
+
+    async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()> {
+        self.placements.remove(file_key);
         Ok(())
     }
 

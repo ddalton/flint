@@ -45,8 +45,8 @@
 
 use super::{
     CachedCreateSessionResRecord, ClientRecord, IoModeRecord, LayoutRecord, LayoutSegmentRecord,
-    LockRecord, SessionRecord, StateBackend, StateBackendError, StateBackendResult, StateIdRecord,
-    StateTypeRecord,
+    LockRecord, PlacementRecord, SessionRecord, StateBackend, StateBackendError,
+    StateBackendResult, StateIdRecord, StateTypeRecord,
 };
 use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -74,7 +74,14 @@ use std::sync::{Arc, Mutex};
 ///        stateid validated while mutual exclusion was silently gone.
 ///        New table only — handled by the schema-batch's CREATE TABLE
 ///        IF NOT EXISTS, like v1 → v2.
-const SCHEMA_VERSION: i64 = 4;
+///   5 → add `file_placement` (per-file stripe placement, durable-DS
+///        plan Phase 0). Layout grants pin each file's ordered DS
+///        list + stripe size here; without it the stripe map is
+///        recomputed from the live device registry and silently
+///        re-maps existing data when the fleet changes. New table
+///        only — handled by the schema-batch's CREATE TABLE IF NOT
+///        EXISTS.
+const SCHEMA_VERSION: i64 = 5;
 
 /// Single-file SQLite [`StateBackend`].
 pub struct SqliteBackend {
@@ -212,6 +219,10 @@ impl SqliteBackend {
                 if prev < 4 {
                     // locks table: created by the schema-batch above.
                     tracing::info!("SqliteBackend: migrating schema → 4 (locks table)");
+                }
+                if prev < 5 {
+                    // file_placement table: created by the schema-batch above.
+                    tracing::info!("SqliteBackend: migrating schema → 5 (file_placement table)");
                 }
                 conn.execute(
                     "UPDATE schema_version SET version = ?1 WHERE id = 1",
@@ -706,6 +717,61 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn put_placement(&self, p: &PlacementRecord) -> StateBackendResult<()> {
+        let p = p.clone();
+        self.with_conn(move |conn| {
+            let device_ids_json = serde_json::to_string(&p.device_ids).map_err(|e| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+            })?;
+            conn.execute(
+                "INSERT OR REPLACE INTO file_placement (file_key, stripe_size, device_ids)
+                 VALUES (?1, ?2, ?3)",
+                params![p.file_key, u64_to_i64(p.stripe_size), device_ids_json],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_placement(&self, file_key: &str) -> StateBackendResult<Option<PlacementRecord>> {
+        let key = file_key.to_string();
+        let row = self
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT file_key, stripe_size, device_ids
+                     FROM file_placement WHERE file_key = ?1",
+                    params![key],
+                    decode_placement_row,
+                )
+                .optional()
+            })
+            .await?;
+        row.transpose()
+    }
+
+    async fn list_placements(&self) -> StateBackendResult<Vec<PlacementRecord>> {
+        let rows = self
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT file_key, stripe_size, device_ids FROM file_placement",
+                )?;
+                let rows: rusqlite::Result<Vec<_>> =
+                    stmt.query_map([], decode_placement_row)?.collect();
+                rows
+            })
+            .await?;
+        rows.into_iter().collect()
+    }
+
+    async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()> {
+        let key = file_key.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM file_placement WHERE file_key = ?1", params![key])?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn increment_instance_counter(&self) -> StateBackendResult<u64> {
         // SQLite 3.35+ RETURNING gives us read-and-increment in a
         // single statement, so we don't need a BEGIN/COMMIT pair.
@@ -906,6 +972,24 @@ fn decode_layout_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<L
     })())
 }
 
+fn decode_placement_row(
+    r: &rusqlite::Row,
+) -> rusqlite::Result<StateBackendResult<PlacementRecord>> {
+    let file_key: String = r.get(0)?;
+    let stripe_size: i64 = r.get(1)?;
+    let device_ids_json: String = r.get(2)?;
+
+    Ok((|| -> StateBackendResult<PlacementRecord> {
+        let device_ids: Vec<String> = serde_json::from_str(&device_ids_json)
+            .map_err(|e| StateBackendError::Serialization(format!("device_ids: {}", e)))?;
+        Ok(PlacementRecord {
+            file_key,
+            stripe_size: i64_to_u64(stripe_size),
+            device_ids,
+        })
+    })())
+}
+
 // ── Schema ────────────────────────────────────────────────────────────
 
 const SCHEMA_SQL: &str = r#"
@@ -975,6 +1059,15 @@ CREATE TABLE IF NOT EXISTS layouts (
     segments TEXT NOT NULL,
     iomode INTEGER NOT NULL,
     return_on_close INTEGER NOT NULL
+);
+
+-- Schema v5: per-file stripe placement (durable-DS plan Phase 0).
+-- device_ids is an ordered JSON array; order is load-bearing (it IS
+-- the stripe map). Keyed by export-relative path.
+CREATE TABLE IF NOT EXISTS file_placement (
+    file_key TEXT PRIMARY KEY,
+    stripe_size INTEGER NOT NULL,
+    device_ids TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS instance_counter (

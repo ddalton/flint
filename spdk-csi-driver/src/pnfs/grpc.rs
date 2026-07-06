@@ -41,6 +41,11 @@ pub struct MdsControlService {
     /// under this directory; the CSI driver's NodePublish points the
     /// kernel client at this path.
     export_path: std::path::PathBuf,
+
+    /// Layout manager, for dropping a deleted volume's pinned stripe
+    /// placement so a re-created volume at the same path gets a fresh
+    /// pin instead of inheriting a stale (possibly unsatisfiable) one.
+    layout_manager: crate::pnfs::mds::layout::LayoutManager,
 }
 
 impl MdsControlService {
@@ -52,8 +57,9 @@ impl MdsControlService {
         device_registry: Arc<crate::pnfs::mds::device::DeviceRegistry>,
         configured_endpoints: std::collections::HashMap<String, String>,
         export_path: std::path::PathBuf,
+        layout_manager: crate::pnfs::mds::layout::LayoutManager,
     ) -> Self {
-        Self { device_registry, configured_endpoints, export_path }
+        Self { device_registry, configured_endpoints, export_path, layout_manager }
     }
 }
 
@@ -321,6 +327,9 @@ impl MdsControl for MdsControlService {
         match std::fs::remove_file(&file_path) {
             Ok(()) => {
                 info!("🗑️  DeleteVolume: removed {:?}", file_path);
+                // The placement key is the export-relative path — for
+                // CSI volumes that's exactly the volume_id.
+                self.layout_manager.forget_placement(&req.volume_id);
                 Ok(Response::new(DeleteVolumeResponse {
                     deleted: true,
                     message: String::new(),
@@ -328,6 +337,7 @@ impl MdsControl for MdsControlService {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 info!("🗑️  DeleteVolume: {} already absent", req.volume_id);
+                self.layout_manager.forget_placement(&req.volume_id);
                 Ok(Response::new(DeleteVolumeResponse {
                     deleted: true,
                     message: "already absent".into(),
@@ -375,10 +385,18 @@ mod create_volume_tests {
     use crate::pnfs::mds::device::DeviceRegistry;
 
     fn svc(export: &std::path::Path) -> MdsControlService {
+        let registry = Arc::new(DeviceRegistry::new());
+        let layout_manager = crate::pnfs::mds::layout::LayoutManager::new(
+            Arc::clone(&registry),
+            crate::pnfs::config::LayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            Arc::new(crate::state_backend::MemoryBackend::new()),
+        );
         MdsControlService::new(
-            Arc::new(DeviceRegistry::new()),
+            registry,
             std::collections::HashMap::new(),
             export.to_path_buf(),
+            layout_manager,
         )
     }
 

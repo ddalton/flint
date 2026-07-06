@@ -69,11 +69,14 @@ impl PnfsOperationHandler {
             }
         }
 
-        // Generate layout
+        // Generate layout (grants go through the file's pinned
+        // placement; a pinned-but-missing DS is a refusal, not a
+        // re-map).
         let layout = self.layout_manager
             .generate_layout(
                 args.owner,
                 args.filehandle.clone(),
+                &args.file_key,
                 args.offset,
                 args.length,
                 args.iomode,
@@ -82,6 +85,16 @@ impl PnfsOperationHandler {
                 warn!("❌ Layout generation failed: {}", e);
                 LayoutGetError::LayoutUnavailable
             })?;
+
+        // The grant above pinned (or reused) the placement; surface
+        // its stripe unit + composite deviceid so the encoder
+        // advertises exactly the pinned group.
+        let placement = self
+            .layout_manager
+            .placement_for(&args.file_key)
+            .ok_or(LayoutGetError::LayoutUnavailable)?;
+        let device_id_bin =
+            crate::pnfs::mds::layout::composite_device_id(&placement.device_ids);
 
         info!("✅ LAYOUTGET successful: {} segments returned", layout.segments.len());
 
@@ -94,6 +107,8 @@ impl PnfsOperationHandler {
                 iomode: args.iomode,
                 layout_type: args.layout_type,
                 segments: layout.segments,
+                stripe_unit: placement.stripe_size,
+                device_id_bin,
             }],
         })
     }
@@ -134,31 +149,45 @@ impl PnfsOperationHandler {
                 addr: device_info.primary_endpoint.clone(),
                 multipath: device_info.endpoints.clone(),
             }
-        } else {
-            // Not found as single device - could be composite stripe device
-            // Get ALL active DSes and return them as stripe pattern
-            warn!("🔧 Device not found as single DS - treating as composite stripe device");
-            
-            let devices = self.device_registry.list_active();
-            if devices.is_empty() {
-                warn!("❌ No active devices found");
-                return Err(GetDeviceInfoError::NoEnt);
+        } else if let Some(group) = self.layout_manager.stripe_group_devices(&args.device_id) {
+            // Composite (striped) deviceid: resolve the placement's
+            // ordered device list — the ORDER here is the stripe map
+            // clients apply, so it must come from the pinned group,
+            // never from the registry's current membership/iteration
+            // order. Endpoints stay live (a re-registered DS serves
+            // its new address); a missing group member is NoEnt, not
+            // a silently shuffled stripe pattern.
+            info!(
+                "🔧 Composite stripe deviceid: {} pinned DSes {:?}",
+                group.len(),
+                group
+            );
+
+            let mut endpoints = Vec::with_capacity(group.len());
+            for id in &group {
+                match self.device_registry.get(id) {
+                    Some(d) => endpoints.push(d.primary_endpoint.clone()),
+                    None => {
+                        warn!(
+                            "❌ Stripe-group DS '{}' not registered — refusing GETDEVICEINFO",
+                            id
+                        );
+                        return Err(GetDeviceInfoError::NoEnt);
+                    }
+                }
             }
-            
-            warn!("✅ Found {} active DSes for stripe", devices.len());
-            
-            // Return first DS as primary, rest as multipath (for striping)
-            let mut multipath = Vec::new();
-            for device in devices.iter().skip(1) {
-                multipath.push(device.primary_endpoint.clone());
-                warn!("   Stripe DS: {}", device.primary_endpoint);
-            }
-            
+
             DeviceAddr4 {
                 netid: "tcp".to_string(),
-                addr: devices[0].primary_endpoint.clone(),
-                multipath,
+                addr: endpoints[0].clone(),
+                multipath: endpoints[1..].to_vec(),
             }
+        } else {
+            warn!(
+                "❌ Unknown deviceid {:02x?} — no registered DS and no stripe group",
+                &args.device_id[0..8]
+            );
+            return Err(GetDeviceInfoError::NoEnt);
         };
 
         warn!("📤 Returning device address with {} total DSes", 
@@ -529,6 +558,10 @@ pub struct LayoutGetArgs {
     pub stateid: [u8; 16],
     pub maxcount: u32,
     pub filehandle: Vec<u8>,
+    /// Export-relative path of the file (resolved from the CFH by the
+    /// dispatcher). Keys the pinned per-file placement — the same
+    /// identity the DSes use for path-nested local storage.
+    pub file_key: String,
     /// Identity of the issuing client / session / fsid (set by the
     /// COMPOUND dispatcher from `CompoundContext`). Tracked on the
     /// resulting layout so CB_LAYOUTRECALL can find its session and
@@ -552,6 +585,15 @@ pub struct Layout {
     pub iomode: IoMode,
     pub layout_type: LayoutType,
     pub segments: Vec<LayoutSegment>,
+    /// Stripe unit (`nfl_util`) from the file's pinned placement —
+    /// NOT the live config, which may have changed since the file was
+    /// first striped.
+    pub stripe_unit: u64,
+    /// The composite deviceid advertising this file's stripe group.
+    /// Derived from the placement's ordered device list; the encoder
+    /// must use this verbatim so GETDEVICEINFO resolves to the same
+    /// group.
+    pub device_id_bin: [u8; 16],
 }
 
 /// LAYOUTGET errors
@@ -698,10 +740,6 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         self.layoutget(args)
     }
 
-    fn stripe_unit(&self) -> u64 {
-        self.layout_manager.stripe_size()
-    }
-    
     fn getdeviceinfo(&self, args: GetDeviceInfoArgs) -> Result<GetDeviceInfoResult, GetDeviceInfoError> {
         self.getdeviceinfo(args)
     }

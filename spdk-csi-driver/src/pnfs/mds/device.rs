@@ -142,13 +142,21 @@ impl DeviceRegistry {
         self.devices.iter().map(|entry| entry.clone()).collect()
     }
 
-    /// List all active devices
+    /// List all active devices.
+    ///
+    /// Sorted by device_id: DashMap iteration order is not
+    /// contractual, and callers (placement pinning) treat device
+    /// order as the stripe map. Never return these in raw iteration
+    /// order.
     pub fn list_active(&self) -> Vec<DeviceInfo> {
-        self.devices
+        let mut devices: Vec<DeviceInfo> = self
+            .devices
             .iter()
             .filter(|entry| entry.status == DeviceStatus::Active)
             .map(|entry| entry.clone())
-            .collect()
+            .collect();
+        devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        devices
     }
 
     /// Update device heartbeat

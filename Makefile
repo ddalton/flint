@@ -190,6 +190,10 @@ test-pnfs-pynfs: build-pnfs ## Run pynfs `pnfs` conformance subset against the M
 test-pnfs-csi: build-pnfs ## End-to-end pNFS CSI integration test (gRPC create → mount → I/O → delete)
 	tests/lima/pnfs/csi-e2e.sh
 
+.PHONY: test-pnfs-placement
+test-pnfs-placement: build-pnfs ## Fleet-growth placement drill (durable-DS plan Phase 0: pin survives new DS)
+	tests/lima/pnfs/placement-drill.sh
+
 .PHONY: test-pnfs-recall
 test-pnfs-recall: build-pnfs ## DS-death CB_LAYOUTRECALL e2e (kill DS1, assert MDS recall fires)
 	tests/lima/pnfs/recall.sh
@@ -207,9 +211,10 @@ test-pnfs-cross-host: ## Multi-host pNFS perf bench against a real K8s cluster �
 	tests/k8s/pnfs-bench/cross-host-bench.sh
 
 .PHONY: test-pnfs-all
-test-pnfs-all: ## Run smoke + pynfs + csi-e2e + recall + restart tests in sequence
+test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart tests in sequence
 	$(MAKE) test-pnfs-smoke
 	$(MAKE) test-pnfs-pynfs
 	$(MAKE) test-pnfs-csi
+	$(MAKE) test-pnfs-placement
 	$(MAKE) test-pnfs-recall
 	$(MAKE) test-pnfs-restart

@@ -230,6 +230,19 @@ impl MetadataServer {
         self.layout_manager.load_records(layouts);
         info!("📦 MDS reloaded {} persisted layouts from backend", n);
 
+        // Pinned per-file placements (Phase 0). Must be back before
+        // the first LAYOUTGET: a post-restart grant for a pre-restart
+        // file has to reuse its pin, not mint a fresh one from
+        // whichever DSes re-registered first.
+        let placements = self
+            .backend
+            .list_placements()
+            .await
+            .map_err(|e| crate::pnfs::Error::Config(format!("list placements: {}", e)))?;
+        let n = placements.len();
+        self.layout_manager.load_placement_records(placements);
+        info!("📦 MDS reloaded {} persisted placements from backend", n);
+
         Ok(())
     }
 
@@ -286,6 +299,7 @@ impl MetadataServer {
         let device_registry = Arc::clone(&self.device_registry);
         let bind_addr = self.config.bind.address.clone();
         let export_path = self.export_path.clone();
+        let layout_manager = self.layout_manager.as_ref().clone();
         // Build the operator's `device_id → reachable endpoint` map from
         // the static config. The gRPC service uses this to override the
         // bind-address that registering DSes report (a DS only knows its
@@ -303,7 +317,7 @@ impl MetadataServer {
                 .expect("Invalid gRPC address");
 
             let control_service = MdsControlService::new(
-                device_registry, configured_endpoints, export_path,
+                device_registry, configured_endpoints, export_path, layout_manager,
             );
             let svc = MdsControlServer::new(control_service);
 

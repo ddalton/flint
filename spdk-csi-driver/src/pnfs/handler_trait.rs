@@ -35,12 +35,10 @@ pub trait PnfsOperations: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Stripe unit (bytes) to advertise in FILE layouts (`nfl_util`).
-    /// Overridden by the MDS handler with the configured
-    /// `layout.stripeSize`; the default matches the historical
-    /// hardcoded value.
-    fn stripe_unit(&self) -> u64 {
-        8 * 1024 * 1024
-    }
+    // NOTE: there is deliberately no `stripe_unit()` here. The stripe
+    // unit is per-file (pinned on the placement at first LAYOUTGET and
+    // carried on each `Layout`) — a global value is exactly the
+    // fleet-change re-mapping bug Phase 0 of the durable-DS plan
+    // removed.
 }
 

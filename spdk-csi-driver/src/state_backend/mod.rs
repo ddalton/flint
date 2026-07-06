@@ -258,6 +258,25 @@ pub struct LayoutRecord {
     pub return_on_close: bool,
 }
 
+/// Per-file stripe placement — which DSes (in which order) a file's
+/// stripes live on, pinned at first LAYOUTGET. Layout grants MUST
+/// reuse this record verbatim: the stripe map is a pure function of
+/// `(device_ids order, stripe_size)`, so recomputing it from the live
+/// device registry re-maps existing data whenever the fleet changes
+/// (the Phase 0 P1 in `docs/plans/pnfs-durable-ds-plan.md`).
+///
+/// Keyed by the export-relative path — the same identity the DSes use
+/// for their path-nested local storage, so both layers break (or
+/// survive) identically on rename.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacementRecord {
+    pub file_key: String,
+    pub stripe_size: u64,
+    /// Ordered device ids. Order is load-bearing: stripe unit `u` maps
+    /// to `device_ids[(u + first_stripe_index) % len]`.
+    pub device_ids: Vec<String>,
+}
+
 // ── The trait ─────────────────────────────────────────────────────────
 
 /// Pluggable persistence for NFSv4 / pNFS server state.
@@ -309,6 +328,12 @@ pub trait StateBackend: Send + Sync {
     async fn get_layout(&self, stateid: &[u8; 16]) -> StateBackendResult<Option<LayoutRecord>>;
     async fn list_layouts(&self) -> StateBackendResult<Vec<LayoutRecord>>;
     async fn delete_layout(&self, stateid: &[u8; 16]) -> StateBackendResult<()>;
+
+    // Per-file stripe placements (pNFS Phase 0)
+    async fn put_placement(&self, p: &PlacementRecord) -> StateBackendResult<()>;
+    async fn get_placement(&self, file_key: &str) -> StateBackendResult<Option<PlacementRecord>>;
+    async fn list_placements(&self) -> StateBackendResult<Vec<PlacementRecord>>;
+    async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()>;
 
     /// Atomically bump the persisted instance counter and return the
     /// new value. Called once at MDS start; the value is mixed into
@@ -450,6 +475,17 @@ mod tests {
         b.put_layout(&layout).await.unwrap();
         assert_eq!(b.get_layout(&[7u8; 16]).await.unwrap(), Some(layout.clone()));
 
+        let placement = PlacementRecord {
+            file_key: "vol-1/data/train.bin".into(),
+            stripe_size: 8 * 1024 * 1024,
+            device_ids: vec!["ds-1".into(), "ds-2".into(), "ds-3".into()],
+        };
+        b.put_placement(&placement).await.unwrap();
+        assert_eq!(
+            b.get_placement("vol-1/data/train.bin").await.unwrap(),
+            Some(placement.clone())
+        );
+
         // list_* surfaces what we put in. Use len-then-contains rather
         // than equality so the test is robust to backend ordering.
         assert_eq!(b.list_clients().await.unwrap().len(), 1);
@@ -457,6 +493,7 @@ mod tests {
         assert_eq!(b.list_stateids().await.unwrap().len(), 1);
         assert_eq!(b.list_locks().await.unwrap().len(), 1);
         assert_eq!(b.list_layouts().await.unwrap().len(), 1);
+        assert_eq!(b.list_placements().await.unwrap().len(), 1);
 
         // Deletes are idempotent — second delete is Ok, not Err.
         b.delete_client(42).await.unwrap();
@@ -478,6 +515,10 @@ mod tests {
         b.delete_layout(&[7u8; 16]).await.unwrap();
         b.delete_layout(&[7u8; 16]).await.unwrap();
         assert!(b.get_layout(&[7u8; 16]).await.unwrap().is_none());
+
+        b.delete_placement("vol-1/data/train.bin").await.unwrap();
+        b.delete_placement("vol-1/data/train.bin").await.unwrap();
+        assert!(b.get_placement("vol-1/data/train.bin").await.unwrap().is_none());
     }
 
     /// Instance counter starts at 0, increments monotonically, and

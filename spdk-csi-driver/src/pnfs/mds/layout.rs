@@ -8,10 +8,10 @@
 //! - RFC 8881 Chapter 13 - NFSv4.1 File Layout Type
 //! - RFC 8881 Section 18.43 - LAYOUTGET operation
 
-use crate::pnfs::mds::device::{DeviceInfo, DeviceRegistry};
+use crate::pnfs::mds::device::{DeviceInfo, DeviceRegistry, DeviceStatus};
 use crate::pnfs::config::LayoutPolicy as ConfigLayoutPolicy;
 use crate::state_backend::{
-    spawn_persist, IoModeRecord, LayoutRecord, LayoutSegmentRecord, StateBackend,
+    spawn_persist, IoModeRecord, LayoutRecord, LayoutSegmentRecord, PlacementRecord, StateBackend,
 };
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -48,6 +48,63 @@ pub struct LayoutOwner {
     pub fsid: u64,
 }
 
+/// Per-file stripe placement, pinned at first LAYOUTGET and reused
+/// verbatim by every later grant for the same file. The stripe map is
+/// a pure function of `(device_ids order, stripe_size)` — recomputing
+/// it from the live registry re-maps existing data whenever the fleet
+/// changes or the registry iterates in a different order (the Phase 0
+/// P1 in `docs/plans/pnfs-durable-ds-plan.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePlacement {
+    /// Stripe unit in bytes, pinned from the config in force at first
+    /// grant. A later `layout.stripeSize` change affects new files only.
+    pub stripe_size: u64,
+    /// Ordered device ids. Order is load-bearing: stripe unit `u` maps
+    /// to `device_ids[(u + first_stripe_index) % len]`.
+    pub device_ids: Vec<String>,
+}
+
+impl FilePlacement {
+    fn to_record(&self, file_key: &str) -> PlacementRecord {
+        PlacementRecord {
+            file_key: file_key.to_string(),
+            stripe_size: self.stripe_size,
+            device_ids: self.device_ids.clone(),
+        }
+    }
+
+    fn from_record(r: &PlacementRecord) -> Self {
+        Self {
+            stripe_size: r.stripe_size,
+            device_ids: r.device_ids.clone(),
+        }
+    }
+}
+
+/// The 16-byte pNFS deviceid a striped layout advertises for a given
+/// ordered device set. Content-addressed: files with identical
+/// placements share one deviceid, so kernel clients cache a single
+/// GETDEVICEINFO result per stripe group. The algorithm matches the
+/// historical dispatcher encoding (hash of the device ids in order +
+/// a `STRIPE:` marker) so a stable fleet's ids don't change across
+/// upgrades.
+pub fn composite_device_id(device_ids: &[String]) -> [u8; 16] {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    for id in device_ids {
+        id.hash(&mut hasher);
+    }
+    b"STRIPE:".hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let mut out = [0u8; 16];
+    out[0..8].copy_from_slice(&hash.to_be_bytes());
+    out[8..16].copy_from_slice(&hash.to_be_bytes());
+    out
+}
+
 /// Layout manager - manages layout generation and tracking
 #[derive(Clone)]
 pub struct LayoutManager {
@@ -69,6 +126,16 @@ pub struct LayoutManager {
 
     /// Stripe size in bytes
     stripe_size: u64,
+
+    /// Per-file pinned placements (keyed by export-relative path).
+    /// Source of truth for every grant after the first; persisted so
+    /// the pin survives MDS restart.
+    placements: Arc<DashMap<String, FilePlacement>>,
+
+    /// Composite deviceid → the ordered device ids it stands for.
+    /// GETDEVICEINFO resolves striped deviceids here (in placement
+    /// order), never from the live registry's iteration order.
+    stripe_groups: Arc<DashMap<[u8; 16], Vec<String>>>,
 
     /// Persistence target. Layouts surviving MDS restart prevents the
     /// kernel from issuing fresh LAYOUTGETs (disruptive but functional)
@@ -263,6 +330,8 @@ impl LayoutManager {
             by_owner: Arc::new(DashMap::new()),
             policy: policy_impl,
             stripe_size,
+            placements: Arc::new(DashMap::new()),
+            stripe_groups: Arc::new(DashMap::new()),
             backend,
         }
     }
@@ -293,6 +362,100 @@ impl LayoutManager {
         info!("LayoutManager loaded {} records from backend", self.layouts.len());
     }
 
+    /// Repopulate pinned placements (and their stripe groups) from a
+    /// backend snapshot. Called once at MDS startup, before the
+    /// listener accepts — a post-restart LAYOUTGET for a pre-restart
+    /// file must find its pin, not mint a fresh one from whichever
+    /// DSes happen to have re-registered first.
+    pub fn load_placement_records(&self, records: Vec<PlacementRecord>) {
+        let n = records.len();
+        for r in &records {
+            let placement = FilePlacement::from_record(r);
+            self.stripe_groups
+                .entry(composite_device_id(&placement.device_ids))
+                .or_insert_with(|| placement.device_ids.clone());
+            self.placements.insert(r.file_key.clone(), placement);
+        }
+        info!("LayoutManager loaded {} placements from backend", n);
+    }
+
+    /// The pinned placement for `file_key`, if one exists.
+    pub fn placement_for(&self, file_key: &str) -> Option<FilePlacement> {
+        self.placements.get(file_key).map(|p| p.clone())
+    }
+
+    /// Ordered device ids behind a composite (striped) deviceid, if
+    /// any placement has registered it.
+    pub fn stripe_group_devices(&self, device_id: &[u8; 16]) -> Option<Vec<String>> {
+        self.stripe_groups.get(device_id).map(|g| g.clone())
+    }
+
+    /// Drop the pin for a deleted file so a future file at the same
+    /// path gets a fresh placement. Stripe-group entries stay — they
+    /// are content-addressed and other files may share them.
+    pub fn forget_placement(&self, file_key: &str) {
+        if self.placements.remove(file_key).is_some() {
+            info!("Placement forgotten for deleted file '{}'", file_key);
+        }
+        let backend = Arc::clone(&self.backend);
+        let key = file_key.to_string();
+        spawn_persist(
+            "placement_delete",
+            move || async move { backend.delete_placement(&key).await },
+        );
+    }
+
+    /// Get-or-create the pinned placement for `file_key`.
+    ///
+    /// First grant for a file pins the *sorted* active device set and
+    /// the configured stripe size. `entry()` makes a concurrent
+    /// first-grant race pin exactly one placement (both racers compute
+    /// identical content anyway, since the list is sorted).
+    fn placement_for_grant(&self, file_key: &str) -> Result<FilePlacement, String> {
+        if let Some(p) = self.placements.get(file_key) {
+            return Ok(p.clone());
+        }
+
+        let mut devices = self.device_registry.list_active();
+        if devices.is_empty() {
+            return Err("No active data servers available".to_string());
+        }
+        // list_active() sorts, but the pin must not depend on that:
+        // sort again here so placement content is deterministic even
+        // if the registry's ordering ever regresses.
+        devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        let device_ids: Vec<String> = devices.into_iter().map(|d| d.device_id).collect();
+
+        let placement = self
+            .placements
+            .entry(file_key.to_string())
+            .or_insert_with(|| FilePlacement {
+                stripe_size: self.stripe_size,
+                device_ids,
+            })
+            .clone();
+
+        self.stripe_groups
+            .entry(composite_device_id(&placement.device_ids))
+            .or_insert_with(|| placement.device_ids.clone());
+
+        let backend = Arc::clone(&self.backend);
+        let record = placement.to_record(file_key);
+        spawn_persist(
+            "placement",
+            move || async move { backend.put_placement(&record).await },
+        );
+
+        info!(
+            "📌 Pinned placement for '{}': {} DSes {:?}, stripe_size={}",
+            file_key,
+            placement.device_ids.len(),
+            placement.device_ids,
+            placement.stripe_size,
+        );
+        Ok(placement)
+    }
+
     fn persist(&self, l: &LayoutState) {
         let backend = Arc::clone(&self.backend);
         let record = l.to_record();
@@ -320,20 +483,35 @@ impl LayoutManager {
         &self,
         owner: LayoutOwner,
         filehandle: Vec<u8>,
+        file_key: &str,
         offset: u64,
         length: u64,
         iomode: IoMode,
     ) -> Result<LayoutState, String> {
         use tracing::warn;
-        warn!("💥💥💥 LayoutManager::generate_layout() CALLED 💥💥💥");
-        
-        let devices = self.device_registry.list_active();
-        if devices.is_empty() {
-            return Err("No active data servers available".to_string());
+
+        // Every grant goes through the file's pinned placement — never
+        // the live registry's current membership/order. A file whose
+        // pinned DS is gone gets a refusal (client retries/backs off),
+        // not a silently re-mapped stripe pattern.
+        let placement = self.placement_for_grant(file_key)?;
+        let mut devices = Vec::with_capacity(placement.device_ids.len());
+        for id in &placement.device_ids {
+            match self.device_registry.get(id) {
+                Some(d) if d.status == DeviceStatus::Active => devices.push(d),
+                _ => {
+                    return Err(format!(
+                        "placement device '{}' for '{}' is not active — refusing layout \
+                         rather than re-mapping stripes",
+                        id, file_key,
+                    ));
+                }
+            }
         }
 
         warn!(
-            "💥 Generating layout: offset={}, length={}, iomode={:?}, devices={}",
+            "💥 Generating layout: file='{}', offset={}, length={}, iomode={:?}, devices={}",
+            file_key,
             offset,
             length,
             iomode,
@@ -345,7 +523,7 @@ impl LayoutManager {
                 self.generate_roundrobin_layout(offset, length, &devices)?
             }
             LayoutPolicyImpl::Stripe => {
-                self.generate_stripe_layout(offset, length, &devices)?
+                self.generate_stripe_layout(offset, length, &devices, placement.stripe_size)?
             }
             LayoutPolicyImpl::Locality => {
                 // TODO: Implement locality-aware layout
@@ -422,19 +600,20 @@ impl LayoutManager {
         Ok(segments)
     }
 
-    /// Generate striped layout for parallel I/O
+    /// Generate striped layout for parallel I/O. `stripe_size` comes
+    /// from the file's pinned placement, not the live config.
     fn generate_stripe_layout(
         &self,
         offset: u64,
         length: u64,
         devices: &[DeviceInfo],
+        stripe_size: u64,
     ) -> Result<Vec<LayoutSegment>, String> {
         if devices.is_empty() {
             return Err("No devices available".to_string());
         }
 
         let mut segments = Vec::new();
-        let stripe_size = self.stripe_size;
         let num_devices = devices.len();
 
         // Align offset to stripe boundary
@@ -729,7 +908,9 @@ mod tests {
 
         let layout = manager
             .generate_layout(
-                test_owner(1),                vec![0, 1, 2, 3],
+                test_owner(1),
+                vec![0, 1, 2, 3],
+                "file-a",
                 0,
                 10 * 1024 * 1024,
                 IoMode::ReadWrite,
@@ -763,7 +944,9 @@ mod tests {
 
         let layout = manager
             .generate_layout(
-                test_owner(1),                vec![0, 1, 2, 3],
+                test_owner(1),
+                vec![0, 1, 2, 3],
+                "file-a",
                 0,
                 24 * 1024 * 1024, // 24 MB across 3 devices
                 IoMode::ReadWrite,
@@ -793,7 +976,9 @@ mod tests {
 
         let layout = manager
             .generate_layout(
-                test_owner(1),                vec![0, 1, 2, 3],
+                test_owner(1),
+                vec![0, 1, 2, 3],
+                "file-a",
                 0,
                 10 * 1024 * 1024,
                 IoMode::ReadWrite,
@@ -833,7 +1018,9 @@ mod tests {
         // Generate layout (will use available devices)
         let layout = manager
             .generate_layout(
-                test_owner(1),                vec![0, 1, 2, 3],
+                test_owner(1),
+                vec![0, 1, 2, 3],
+                "file-a",
                 0,
                 10 * 1024 * 1024,
                 IoMode::ReadWrite,
@@ -875,7 +1062,9 @@ mod tests {
         // Generate first layout
         let layout1 = manager
             .generate_layout(
-                test_owner(1),                vec![1, 2, 3, 4],
+                test_owner(1),
+                vec![1, 2, 3, 4],
+                "file-1",
                 0,
                 5 * 1024 * 1024,
                 IoMode::ReadWrite,
@@ -887,7 +1076,9 @@ mod tests {
         // Generate second layout
         let layout2 = manager
             .generate_layout(
-                test_owner(1),                vec![5, 6, 7, 8],
+                test_owner(1),
+                vec![5, 6, 7, 8],
+                "file-2",
                 0,
                 10 * 1024 * 1024,
                 IoMode::ReadWrite,
@@ -929,7 +1120,9 @@ mod tests {
         // Request 24 MB (should create 3 segments of 8 MB each)
         let layout = manager
             .generate_layout(
-                test_owner(1),                vec![0, 1, 2, 3],
+                test_owner(1),
+                vec![0, 1, 2, 3],
+                "file-a",
                 0,
                 24 * 1024 * 1024,
                 IoMode::ReadWrite,
@@ -969,10 +1162,10 @@ mod tests {
         let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024, crate::state_backend::memory_backend());
 
         // Two clients each get two layouts.
-        let l_a1 = mgr.generate_layout(test_owner(1), vec![1], 0, 1024, IoMode::ReadWrite).unwrap();
-        let l_a2 = mgr.generate_layout(test_owner(1), vec![2], 0, 1024, IoMode::ReadWrite).unwrap();
-        let l_b1 = mgr.generate_layout(test_owner(2), vec![3], 0, 1024, IoMode::ReadWrite).unwrap();
-        let l_b2 = mgr.generate_layout(test_owner(2), vec![4], 0, 1024, IoMode::ReadWrite).unwrap();
+        let l_a1 = mgr.generate_layout(test_owner(1), vec![1], "f1", 0, 1024, IoMode::ReadWrite).unwrap();
+        let l_a2 = mgr.generate_layout(test_owner(1), vec![2], "f2", 0, 1024, IoMode::ReadWrite).unwrap();
+        let l_b1 = mgr.generate_layout(test_owner(2), vec![3], "f3", 0, 1024, IoMode::ReadWrite).unwrap();
+        let l_b2 = mgr.generate_layout(test_owner(2), vec![4], "f4", 0, 1024, IoMode::ReadWrite).unwrap();
 
         // layouts_for_client returns the right pair, in the order they were issued.
         assert_eq!(mgr.layouts_for_client(1), vec![l_a1.stateid, l_a2.stateid]);
@@ -1005,8 +1198,8 @@ mod tests {
         // should release only the one matching the filter.
         let owner_fs1 = LayoutOwner { client_id: 7, session_id: [0; 16], fsid: 100 };
         let owner_fs2 = LayoutOwner { client_id: 7, session_id: [0; 16], fsid: 200 };
-        let l_in_fs1 = mgr.generate_layout(owner_fs1, vec![1], 0, 1024, IoMode::Read).unwrap();
-        let l_in_fs2 = mgr.generate_layout(owner_fs2, vec![2], 0, 1024, IoMode::Read).unwrap();
+        let l_in_fs1 = mgr.generate_layout(owner_fs1, vec![1], "f1", 0, 1024, IoMode::Read).unwrap();
+        let l_in_fs2 = mgr.generate_layout(owner_fs2, vec![2], "f2", 0, 1024, IoMode::Read).unwrap();
 
         let dropped = mgr.return_fsid_for_client(7, 100);
         assert_eq!(dropped, vec![l_in_fs1.stateid]);
@@ -1040,7 +1233,7 @@ mod tests {
         let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024, crate::state_backend::memory_backend());
 
         let layout = mgr
-            .generate_layout(test_owner(42), vec![1], 0, 1024, IoMode::ReadWrite)
+            .generate_layout(test_owner(42), vec![1], "f1", 0, 1024, IoMode::ReadWrite)
             .unwrap();
         assert_eq!(mgr.layout_count(), 1);
         assert_eq!(mgr.layouts_for_client(42), vec![layout.stateid]);
@@ -1070,8 +1263,8 @@ mod tests {
         )).unwrap();
         let mgr = LayoutManager::new(registry, ConfigLayoutPolicy::RoundRobin, 8 * 1024 * 1024, crate::state_backend::memory_backend());
 
-        let l_a = mgr.generate_layout(test_owner(1), vec![1], 0, 1024, IoMode::ReadWrite).unwrap();
-        let l_b = mgr.generate_layout(test_owner(2), vec![2], 0, 1024, IoMode::ReadWrite).unwrap();
+        let l_a = mgr.generate_layout(test_owner(1), vec![1], "f1", 0, 1024, IoMode::ReadWrite).unwrap();
+        let l_b = mgr.generate_layout(test_owner(2), vec![2], "f2", 0, 1024, IoMode::ReadWrite).unwrap();
         assert_eq!(mgr.layout_count(), 2);
 
         assert!(mgr.revoke_layout(&l_a.stateid));
@@ -1079,6 +1272,226 @@ mod tests {
         assert!(mgr.get_layout(&l_b.stateid).is_some());
         assert!(mgr.layouts_for_client(1).is_empty());
         assert_eq!(mgr.layouts_for_client(2), vec![l_b.stateid]);
+    }
+
+    // ── Phase 0: per-file placement pinning ──────────────────────────
+    // (docs/plans/pnfs-durable-ds-plan.md — the stripe map must be a
+    // pure function of the pinned placement, never of the live
+    // registry's membership or iteration order.)
+
+    fn stripe_mgr(registry: &Arc<DeviceRegistry>, stripe: u64) -> LayoutManager {
+        LayoutManager::new(
+            Arc::clone(registry),
+            ConfigLayoutPolicy::Stripe,
+            stripe,
+            crate::state_backend::memory_backend(),
+        )
+    }
+
+    fn ds(id: &str) -> DeviceInfo {
+        DeviceInfo::new(id.to_string(), format!("{}:2049", id), vec![])
+    }
+
+    fn segment_devices(l: &LayoutState) -> Vec<String> {
+        l.segments.iter().map(|s| s.device_id.clone()).collect()
+    }
+
+    /// The core Phase 0 property: an MDS restart with the registry
+    /// re-populated in the OPPOSITE order grants the identical stripe
+    /// map, because the placement (not the registry) is the source of
+    /// truth. Exercises the full persist → list → load loop.
+    #[tokio::test]
+    async fn placement_pins_stripe_map_across_restart_and_reorder() {
+        let backend: Arc<dyn StateBackend> =
+            Arc::new(crate::state_backend::MemoryBackend::new());
+
+        let registry1 = Arc::new(DeviceRegistry::new());
+        registry1.register(ds("ds-b")).unwrap();
+        registry1.register(ds("ds-a")).unwrap();
+        let mgr1 = LayoutManager::new(
+            Arc::clone(&registry1),
+            ConfigLayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+
+        let l1 = mgr1
+            .generate_layout(test_owner(1), vec![1], "f", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        // Pinned placement is sorted regardless of registration order.
+        assert_eq!(
+            mgr1.placement_for("f").unwrap().device_ids,
+            vec!["ds-a".to_string(), "ds-b".to_string()]
+        );
+
+        // spawn_persist is fire-and-forget; wait (bounded) for the
+        // record to land before simulating the restart.
+        let mut records = Vec::new();
+        for _ in 0..200 {
+            records = backend.list_placements().await.unwrap();
+            if !records.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(records.len(), 1, "placement was never persisted");
+
+        // "Restart": fresh registry populated in REVERSE order, fresh
+        // manager, placements loaded from the backend.
+        let registry2 = Arc::new(DeviceRegistry::new());
+        registry2.register(ds("ds-a")).unwrap();
+        registry2.register(ds("ds-b")).unwrap();
+        let mgr2 = LayoutManager::new(
+            Arc::clone(&registry2),
+            ConfigLayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        mgr2.load_placement_records(records);
+
+        let l2 = mgr2
+            .generate_layout(test_owner(1), vec![1], "f", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(
+            segment_devices(&l1),
+            segment_devices(&l2),
+            "stripe map re-mapped across restart/reorder — Phase 0 P1 regression"
+        );
+    }
+
+    /// Registering a new DS must not re-map files striped before it
+    /// joined; only new files see the wider fleet.
+    #[test]
+    fn placement_survives_fleet_growth() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        let before = mgr
+            .generate_layout(test_owner(1), vec![1], "old-file", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+
+        registry.register(ds("ds-3")).unwrap();
+
+        let after = mgr
+            .generate_layout(test_owner(1), vec![1], "old-file", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(segment_devices(&before), segment_devices(&after));
+        assert_eq!(
+            mgr.placement_for("old-file").unwrap().device_ids.len(),
+            2,
+            "pre-growth file's placement must stay 2-wide"
+        );
+
+        let fresh = mgr
+            .generate_layout(test_owner(1), vec![2], "new-file", 0, 24 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(mgr.placement_for("new-file").unwrap().device_ids.len(), 3);
+        assert!(segment_devices(&fresh).contains(&"ds-3".to_string()));
+    }
+
+    /// A file whose pinned DS is gone gets a REFUSAL, not a silently
+    /// re-mapped layout over the survivors.
+    #[test]
+    fn placement_refuses_when_pinned_device_missing() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.generate_layout(test_owner(1), vec![1], "f", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+
+        registry.unregister("ds-2").unwrap();
+
+        let err = mgr
+            .generate_layout(test_owner(1), vec![1], "f", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap_err();
+        assert!(
+            err.contains("not active"),
+            "expected refusal mentioning the missing device, got: {}",
+            err
+        );
+
+        // A NEW file pins the surviving fleet fine.
+        mgr.generate_layout(test_owner(1), vec![2], "g", 0, 8 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(
+            mgr.placement_for("g").unwrap().device_ids,
+            vec!["ds-1".to_string()]
+        );
+    }
+
+    /// Stripe size is pinned per file: a config change affects new
+    /// files only.
+    #[test]
+    fn stripe_size_pinned_per_file() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+
+        // "Restarted" manager configured with 1 MiB stripes, but the
+        // old file's placement (8 MiB) is already pinned.
+        let mgr = stripe_mgr(&registry, 1024 * 1024);
+        mgr.load_placement_records(vec![PlacementRecord {
+            file_key: "old-file".into(),
+            stripe_size: 8 * 1024 * 1024,
+            device_ids: vec!["ds-1".into(), "ds-2".into()],
+        }]);
+
+        let old = mgr
+            .generate_layout(test_owner(1), vec![1], "old-file", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert!(
+            old.segments.iter().all(|s| s.length == 8 * 1024 * 1024),
+            "pinned 8 MiB stripe must survive a 1 MiB config"
+        );
+
+        let new = mgr
+            .generate_layout(test_owner(1), vec![2], "new-file", 0, 2 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert!(new.segments.iter().all(|s| s.length == 1024 * 1024));
+    }
+
+    /// Grants register the composite deviceid → ordered-device-list
+    /// mapping that GETDEVICEINFO resolves; order is the placement's.
+    #[test]
+    fn stripe_group_registered_for_getdeviceinfo() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-2")).unwrap();
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.generate_layout(test_owner(1), vec![1], "f", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+
+        let placement = mgr.placement_for("f").unwrap();
+        let group = mgr
+            .stripe_group_devices(&composite_device_id(&placement.device_ids))
+            .expect("stripe group must be registered at grant time");
+        assert_eq!(group, vec!["ds-1".to_string(), "ds-2".to_string()]);
+    }
+
+    /// Deleting a file drops its pin; a re-created file at the same
+    /// path pins the CURRENT fleet.
+    #[test]
+    fn forget_placement_allows_fresh_pin() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.generate_layout(test_owner(1), vec![1], "f", 0, 8 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(mgr.placement_for("f").unwrap().device_ids.len(), 1);
+
+        mgr.forget_placement("f");
+        assert!(mgr.placement_for("f").is_none());
+
+        registry.register(ds("ds-2")).unwrap();
+        mgr.generate_layout(test_owner(1), vec![1], "f", 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(mgr.placement_for("f").unwrap().device_ids.len(), 2);
     }
 }
 

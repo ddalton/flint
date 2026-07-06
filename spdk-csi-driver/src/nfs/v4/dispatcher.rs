@@ -1728,14 +1728,38 @@ impl CompoundDispatcher {
         info!("📥 LAYOUTGET: offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
         
         // Get current filehandle
-        let filehandle = match context.current_fh {
-            Some(ref fh) => fh.data.clone(),
+        let (filehandle, file_key) = match context.current_fh {
+            Some(ref fh) => {
+                // Export-relative path — the stable identity that keys
+                // the file's pinned stripe placement. Raw FH bytes
+                // won't do: they embed the server instance id.
+                let path = match self.file_handler.fh_manager().resolve_handle(fh) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("❌ LAYOUTGET: stale/invalid CFH: {}", e);
+                        return OperationResult::LayoutGet(Nfs4Status::Stale, None);
+                    }
+                };
+                let export = self.file_handler.fh_manager().get_export_path().to_path_buf();
+                let mut file_key = path
+                    .strip_prefix(&export)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned();
+                if file_key.is_empty() {
+                    // LAYOUTGET on the export root itself (kernel
+                    // probes it at mount time) — keep the key non-empty
+                    // so the placement table stays unambiguous.
+                    file_key = "/".to_string();
+                }
+                (fh.data.clone(), file_key)
+            }
             None => {
                 warn!("❌ LAYOUTGET: No current filehandle");
                 return OperationResult::LayoutGet(Nfs4Status::NoFileHandle, None);
             }
         };
-        
+
         // Resolve the calling client and session from the COMPOUND
         // context — RFC 8881 §12.5 ties every layout to the issuing
         // (clientid, sessionid) so CB_LAYOUTRECALL can find the
@@ -1794,6 +1818,7 @@ impl CompoundDispatcher {
             },
             maxcount: _maxcount,
             filehandle: filehandle.clone(),
+            file_key,
             owner,
         };
         
@@ -1830,10 +1855,6 @@ impl CompoundDispatcher {
                     const LAYOUT_TYPE_NFSV4_1_FILES: u32 = 1;
                     encoder.encode_u32(LAYOUT_TYPE_NFSV4_1_FILES);
 
-                    // Stripe unit comes from the MDS configuration
-                    // (layout.stripeSize); trait default is 8 MiB.
-                    let stripe_unit: u64 = pnfs.stripe_unit();
-
                     if layout.segments.is_empty() {
                         warn!("❌ Layout has no segments!");
                         return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
@@ -1842,10 +1863,15 @@ impl CompoundDispatcher {
                     debug!("   📤 Encoding FILE layout (RFC 5661 §13.3) with {} segments",
                           layout.segments.len());
 
+                    // Stripe unit + composite deviceid come from the
+                    // file's pinned placement (carried on the Layout),
+                    // NOT the live config/registry — they must match
+                    // what GETDEVICEINFO will resolve for this group.
                     let layout_content = Self::encode_file_layout_striped(
                         &layout.segments,
                         &filehandle,
-                        stripe_unit,
+                        layout.stripe_unit,
+                        layout.device_id_bin,
                     );
 
                     debug!("   📤 FILE layout content encoded: {} bytes", layout_content.len());
@@ -2342,31 +2368,19 @@ impl CompoundDispatcher {
         segments: &[crate::pnfs::mds::layout::LayoutSegment],
         filehandle: &[u8],
         stripe_unit: u64,
+        device_id_bytes: [u8; 16],
     ) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         if segments.is_empty() {
             warn!("⚠️ encode_file_layout_striped called with no segments!");
             return Bytes::new();
         }
-        
+
         let mut encoder = XdrEncoder::new();
-        
-        // Generate composite device_id for stripe group
-        // Hash ALL device IDs together to create a unique stripe group identifier
-        let mut hasher = DefaultHasher::new();
-        for segment in segments {
-            segment.device_id.hash(&mut hasher);
-        }
-        b"STRIPE:".hash(&mut hasher);  // Add marker to distinguish from single devices
-        let hash = hasher.finish();
-        
-        let mut device_id_bytes = [0u8; 16];
-        device_id_bytes[0..8].copy_from_slice(&hash.to_be_bytes());
-        device_id_bytes[8..16].copy_from_slice(&hash.to_be_bytes());
-        
+
         // Rotate the stripe pattern per file: without this every file's
         // first stripe lands on DS[0], so any file smaller than one stripe
         // unit (8 MiB — i.e. most files in an ML dataset) lives entirely on
@@ -3034,7 +3048,13 @@ mod tests {
         // nfl_first_stripe_index sits after the 16-byte deviceid + 4-byte
         // nfl_util in the encoded nfsv4_1_file_layout4.
         let first_index = |fh: &[u8]| {
-            let enc = CompoundDispatcher::encode_file_layout_striped(&segments, fh, 8 << 20);
+            let device_id = crate::pnfs::mds::layout::composite_device_id(&[
+                "ds-1".to_string(),
+                "ds-2".to_string(),
+            ]);
+            let enc = CompoundDispatcher::encode_file_layout_striped(
+                &segments, fh, 8 << 20, device_id,
+            );
             u32::from_be_bytes(enc[20..24].try_into().unwrap())
         };
 
