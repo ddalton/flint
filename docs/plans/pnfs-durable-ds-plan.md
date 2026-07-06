@@ -467,6 +467,22 @@ shape (distinct ClusterIPs per DS) may not hit the same-IP trunking
 edge at all — verify on a cluster before concluding the failure mode
 is real in production.
 
+**VERIFIED ON K8S 2026-07-06 (runn, flint-pnfs:p3.0): the failure
+does NOT reproduce on the distinct-IP shape — it is a lima same-IP
+rig artifact.** Drill: `pkill -9 flint-pnfs-mds` via nsenter mid-load
+(60 × 4 MiB files from a pod on another node). Results: container
+restart in 2 s, 64 placements reloaded from sqlite, boot-grace line
+held the sweep, all 3 DSes re-registered at +4/+8/+12 s (each on its
+next 10 s heartbeat via the NACK fast path), zero stale detections,
+zero recalls, writer completed with zero errors, all 60 checksums
+correct, client-node dmesg clean (no trunking messages, no
+timeouts). The Phase 3 "Done when" bar is met on the production
+shape end to end. The trunking fix wave is deprioritized to
+rig-hygiene: the lima drill's final clause stays strict as a canary,
+and the drill stays out of test-pnfs-all until the rig shape gets
+per-DS IPs (lima vmnet aliases) or the DS drops the shared
+server_owner.
+
 ---
 
 ## Phase 4 — k8s failure drills (~1 week, the real cost)
