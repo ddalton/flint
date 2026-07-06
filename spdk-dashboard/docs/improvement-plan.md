@@ -817,3 +817,34 @@ Still open from the design-system section: raw pills vs `Chip` in
 legacy views (81 raw `rounded-full` spans remain, as-touched policy),
 and raw palette classes vs semantic tokens (~31:1) including inside
 `status.ts` itself.
+
+### LIVE-VALIDATED on AWS cluster `runm` (2026-07-06)
+
+The wave was validated end-to-end on a trove-provisioned cluster (i4i.large
+on-demand CP + 3× i4i.large spot workers, us-west-1, flint chart 1.8.0
+SPDK mode), driving the working-tree frontend via vite dev + port-forward
+against the real backend. Zero page errors across every tab.
+
+- **Fresh-cluster landing → new Disk Setup UI → real bulk init:** bare `/`
+  auto-landed on Disk Setup with onboarding; per-node status strips showed
+  the real disks (436GB scratch NVMe free + EBS system disk red-celled);
+  "Select all uninitialized (cluster)" → Initialize 4 disks → kit
+  ConfirmModal → batch panel "4 ok"; `/api/nodes` confirmed
+  disks_uninitialized 4→0. Tiles flipped Free 4→0, LVS Ready 0→4; strip
+  cells turned green.
+- **Fleet nodes tab / overview charts / tables:** all rendered from live
+  data in the new Card shells; volumes provisioned on the freshly-initialized
+  disks (2 PVCs Bound + writers); stacked status bar + chips correct.
+- **Timeline validated on a 2-replica volume** (violet diamonds at real CR
+  times, in_sync replica chips, honest copy counts 2×1 + 2×2 = 6).
+- **NEW BACKEND FINDING (open, not this wave):** on the legacy
+  single-replica path the CSI `snapshotHandle` is the snapshot **UUID**,
+  while the replica-set path returns the SPDK lvol **name** — the timeline
+  join (`snapshotHandle == lvol name`) therefore fails for single-replica
+  volumes: their user snapshots come back `orphan: true` with no timestamp
+  and the lanes stay empty (the flat list still joins by name and shows
+  them). Same name-vs-uuid class as the replica-drill P1s; fix server-side
+  (mint the lvol name as the handle on the single-replica path too, per the
+  identity contract).
+- Dev ergonomics: `vite.config.ts` proxy target is now overridable via
+  `VITE_API_PROXY_TARGET` (local :8080 was taken by trove during the run).

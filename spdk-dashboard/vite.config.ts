@@ -27,9 +27,11 @@ export default defineConfig({
     // Same-origin API in dev: point at a real backend (a port-forwarded
     // dashboard pod on 8080) instead of relying on CORS or in-bundle mocks:
     //   kubectl -n flint-system port-forward deploy/spdk-dashboard 8080:8080
+    // Override the target when local 8080 is taken:
+    //   VITE_API_PROXY_TARGET=http://localhost:18080 npm run dev
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:8080',
         changeOrigin: true,
       },
     },
