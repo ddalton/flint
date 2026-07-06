@@ -1,0 +1,160 @@
+{{- /*
+pNFS Metadata Server — deployed when pnfs.enabled AND pnfs.server.enabled.
+
+Shape (durable-DS plan Phase 1):
+- single-replica Deployment, strategy Recreate: the sqlite state.db is
+  single-writer, and the RWO PVC attach is the fence — two MDS pods
+  must never run concurrently.
+- export tree + state.db live on a flint PVC, so MDS state survives
+  pod rescheduling (restart-HA tier: reschedule + 90s grace = RTO).
+- stable ClusterIP Service for both the NFSv4.1 port and the gRPC
+  control port; kernel clients reconnect to the same IP after an MDS
+  roll.
+- dataServers is deliberately EMPTY: DS pods register dynamically over
+  gRPC with their per-pod Service DNS as the advertised endpoint.
+  Config-listed DSes would be pre-registered Active at boot even when
+  dead (mds/server.rs boot pre-registration) — the Phase 3 wart the
+  chart avoids entirely.
+*/}}
+{{- if and .Values.pnfs.enabled .Values.pnfs.server.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flint-pnfs-mds-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-mds
+data:
+  mds.yaml: |
+    apiVersion: flint.io/v1alpha1
+    kind: PnfsConfig
+    mode: mds
+    mds:
+      bind:
+        address: "0.0.0.0"
+        port: 2049
+      layout:
+        type: file
+        stripeSize: {{ int64 .Values.pnfs.server.stripeSize }}
+        policy: stripe
+      dataServers: []
+      state:
+        backend: sqlite
+        config:
+          path: /data/state/state.db
+      failover:
+        heartbeatTimeout: {{ .Values.pnfs.server.mds.heartbeatTimeout }}
+        policy: recall_affected
+        gracePeriod: 60
+    exports:
+      - path: /data/exports
+        fsid: 1
+        options: [rw, sync, no_subtree_check]
+        access:
+          - network: 0.0.0.0/0
+            permissions: rw
+    logging:
+      level: {{ .Values.pnfs.server.logLevel | default "info" }}
+      format: text
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flint-pnfs-mds-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-mds
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.pnfs.server.mds.storage.storageClassName | default .Values.storageClass.name }}
+  resources:
+    requests:
+      storage: {{ .Values.pnfs.server.mds.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-pnfs-mds
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-mds
+spec:
+  # Stable ClusterIP: kernel clients mount this address; it must
+  # survive MDS pod rescheduling.
+  selector:
+    app: flint-pnfs-mds
+  ports:
+    - name: nfs
+      port: 2049
+      targetPort: 2049
+      protocol: TCP
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flint-pnfs-mds
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-mds
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flint-pnfs-mds
+  template:
+    metadata:
+      labels:
+        app: flint-pnfs-mds
+        {{- include "flint-csi-driver-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: mds
+          image: "{{ .Values.images.repository }}/{{ .Values.pnfs.server.image.name }}:{{ required "pnfs.server.image.tag is required when pnfs.server.enabled" .Values.pnfs.server.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/flint-pnfs-mds"]
+          args: ["--config", "/etc/flint/mds.yaml"]
+          env:
+            - name: PNFS_MODE
+              value: "mds"
+            - name: RUST_LOG
+              value: {{ .Values.pnfs.server.logLevel | default "info" | quote }}
+          ports:
+            - containerPort: 2049
+              name: nfs
+            - containerPort: 50051
+              name: grpc
+          readinessProbe:
+            tcpSocket:
+              port: 2049
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/flint
+            - name: data
+              mountPath: /data
+          {{- with .Values.pnfs.server.mds.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: flint-pnfs-mds-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: flint-pnfs-mds-data
+{{- end }}

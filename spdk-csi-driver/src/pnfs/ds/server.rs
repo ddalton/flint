@@ -745,18 +745,34 @@ impl DataServer {
         reply_encoder.finish()
     }
 
+    /// The client-reachable address this DS advertises to the MDS.
+    ///
+    /// Precedence:
+    /// 1. `FLINT_DS_ADVERTISE_ADDR` — a stable address in front of the
+    ///    pod, e.g. a per-pod Service DNS name
+    ///    (`flint-pnfs-ds-0.ns.svc.cluster.local`). The MDS resolves
+    ///    names to IPv4 at GETDEVICEINFO-encode time
+    ///    (`endpoint_to_uaddr`), and a ClusterIP behind the name stays
+    ///    stable across pod reschedules — so kernel clients' cached
+    ///    device info never goes stale.
+    /// 2. `POD_IP` — direct pod address (stale after a reschedule
+    ///    until clients re-fetch device info; fine for scratch tiers).
+    /// 3. The bind address (host-process deployments).
+    fn advertise_address(&self) -> String {
+        std::env::var("FLINT_DS_ADVERTISE_ADDR")
+            .or_else(|_| std::env::var("POD_IP"))
+            .unwrap_or_else(|_| self.config.bind.address.clone())
+    }
+
     /// Register with the MDS via gRPC
     async fn register_with_mds(&self) -> Result<()> {
         let mut client = self.registration_client.lock().await;
-        
-        // Use POD_IP if available (for Kubernetes), otherwise use bind address
-        // In K8s, bind.address is 0.0.0.0 which clients can't reach
-        let advertise_address = std::env::var("POD_IP")
-            .unwrap_or_else(|_| self.config.bind.address.clone());
-        
-        let endpoint = format!("{}:{}", advertise_address, self.config.bind.port);
-        info!("📡 Registering with endpoint: {} (POD_IP={:?})", 
-              endpoint, std::env::var("POD_IP").ok());
+
+        let endpoint = format!("{}:{}", self.advertise_address(), self.config.bind.port);
+        info!("📡 Registering with endpoint: {} (FLINT_DS_ADVERTISE_ADDR={:?}, POD_IP={:?})",
+              endpoint,
+              std::env::var("FLINT_DS_ADVERTISE_ADDR").ok(),
+              std::env::var("POD_IP").ok());
         
         let mount_points: Vec<String> = self.config.bdevs
             .iter()
@@ -798,10 +814,9 @@ impl DataServer {
         // Capture config data needed for re-registration
         let device_id = self.config.device_id.clone();
         let bind_port = self.config.bind.port;
-        
-        // Use POD_IP if available (same as initial registration)
-        let advertise_address = std::env::var("POD_IP")
-            .unwrap_or_else(|_| self.config.bind.address.clone());
+
+        // Same precedence as initial registration — see advertise_address().
+        let advertise_address = self.advertise_address();
         
         let mount_points: Vec<String> = self.config.bdevs
             .iter()

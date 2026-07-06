@@ -97,7 +97,12 @@ spec:
             # if unset (the default), the entire pNFS code path is dormant
             # and SPDK behaviour is byte-identical to the no-pNFS build.
             - name: FLINT_PNFS_MDS_ENDPOINT
-              value: {{ required "pnfs.mdsEndpoint is required when pnfs.enabled is true" .Values.pnfs.mdsEndpoint | quote }}
+              {{- if .Values.pnfs.server.enabled }}
+              # In-chart MDS (pnfs-mds.yaml) — its stable Service.
+              value: {{ .Values.pnfs.mdsEndpoint | default (printf "flint-pnfs-mds.%s.svc.cluster.local:50051" .Release.Namespace) | quote }}
+              {{- else }}
+              value: {{ required "pnfs.mdsEndpoint is required when pnfs.enabled is true and pnfs.server.enabled is false" .Values.pnfs.mdsEndpoint | quote }}
+              {{- end }}
             {{- end }}
           args:
             - "--v={{ .Values.logLevel }}"

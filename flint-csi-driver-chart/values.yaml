@@ -277,28 +277,75 @@ nfs:
 # is dormant and SPDK-only deployments are byte-identical to the
 # pre-pNFS build.
 #
-# Operators are responsible for deploying the MDS + DSes themselves
-# (see deployments/pnfs-mds-deployment.yaml and
-# deployments/pnfs-ds-daemonset.yaml as starting points). The chart
-# does NOT install them automatically because the right shape
-# (single MDS vs HA, DS placement policy, storage backing) is
-# environment-specific.
+# The chart can deploy the MDS + DS fleet itself (pnfs.server.enabled,
+# the durable-DS plan Phase 1 shape: MDS Deployment on a flint PVC +
+# DS StatefulSet with per-pod PVCs and per-pod ClusterIP Services), or
+# point at an externally managed MDS via pnfs.mdsEndpoint.
 pnfs:
   # When false, the FLINT_PNFS_MDS_ENDPOINT env var is omitted and
   # the driver refuses any layout: pnfs StorageClass with a clear
   # FAILED_PRECONDITION error. This is the safe default.
   enabled: false
 
-  # gRPC endpoint of the MDS. Required iff pnfs.enabled is true.
+  # gRPC endpoint of an EXTERNALLY managed MDS. Ignored (and may be
+  # left empty) when pnfs.server.enabled is true — the controller then
+  # defaults to the in-chart flint-pnfs-mds Service.
   # Forms accepted by the driver:
   #   "flint-pnfs-mds:50051"            — bare host:port (http:// added)
   #   "http://flint-pnfs-mds:50051"     — explicit scheme
   #   "https://mds.example.com:50051"   — TLS (channel honours it,
   #                                        though cluster TLS isn't
   #                                        provisioned by this chart)
-  # Default form assumes a Service named "flint-pnfs-mds" in the same
-  # namespace as the controller exposes the gRPC port at 50051.
   mdsEndpoint: ""
+
+  # In-chart pNFS server fleet (durable-DS plan Phase 1).
+  server:
+    enabled: false
+
+    # MDS + DS ship in one image (both binaries; entrypoint selects).
+    image:
+      name: flint-pnfs
+      tag: ""   # required when server.enabled — set at release time
+
+    # FILE-layout stripe unit in bytes. Pinned PER FILE at first
+    # LAYOUTGET (Phase 0): changing this affects only files created
+    # after the change. 8 MiB default; 1-4 MiB suits small-file-heavy
+    # datasets.
+    stripeSize: 8388608
+
+    # RUST_LOG / config log level for MDS + DS pods.
+    logLevel: info
+
+    mds:
+      # Seconds without a DS heartbeat before the MDS marks it offline
+      # and recalls its layouts. DS heartbeatInterval is 10s; keep this
+      # >= 2 missed beats + margin.
+      heartbeatTimeout: 30
+      # PVC backing /data (export tree + sqlite state.db). Defaults to
+      # the chart's own StorageClass — a replicated flint volume makes
+      # MDS state survive node loss.
+      storage:
+        storageClassName: ""   # "" → storageClass.name
+        size: 10Gi
+      resources: {}
+
+    dataServers:
+      # DS fleet width. Scaling UP is safe (new files stripe wider;
+      # existing files keep their pinned placement). Scaling DOWN is
+      # NOT supported until the drain milestone — don't.
+      count: 2
+      heartbeatInterval: 10
+      # PVC per DS (StatefulSet volumeClaimTemplate). On the flint
+      # StorageClass with numReplicas >= 2 this is the durable-DS
+      # story: replica failures rebuild underneath the DS, and a
+      # rescheduled DS pod reattaches its data instead of losing it.
+      storage:
+        storageClassName: ""   # "" → storageClass.name
+        size: 100Gi
+      # Prefer spreading DS pods across nodes (soft anti-affinity) so
+      # one node loss degrades at most one DS.
+      spreadAcrossNodes: true
+      resources: {}
 
 # Block device configuration
 blockDevice:

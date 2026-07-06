@@ -72,6 +72,16 @@ impl MetadataServer {
 
         info!("📂 MDS export path: {:?}", export_path);
 
+        // Create the export root if absent — on a fresh PVC (the k8s
+        // deployment shape) the directory doesn't exist yet. Mirrors
+        // build_state_backend's create_dir_all for the state.db parent.
+        std::fs::create_dir_all(&export_path).map_err(|e| {
+            crate::pnfs::Error::Config(format!(
+                "create export dir {:?}: {}",
+                export_path, e
+            ))
+        })?;
+
         // Initialize state manager. The backend kind comes from
         // `config.state.backend` — `memory` for tests / dev work (no
         // restart survival), `sqlite` for production. The shared

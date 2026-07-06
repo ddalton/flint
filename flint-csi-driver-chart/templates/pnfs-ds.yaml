@@ -1,0 +1,189 @@
+{{- /*
+pNFS Data Servers — deployed when pnfs.enabled AND pnfs.server.enabled.
+
+Shape (durable-DS plan Phase 1):
+- StatefulSet, NOT DaemonSet: identity and PVC binding are the point.
+  Pod flint-pnfs-ds-N owns PVC data-flint-pnfs-ds-N; both follow the
+  pod across nodes, so a reschedule moves the DS *with its data* and
+  no copy ever happens.
+- deviceId = ${POD_NAME} via the config env expansion, so the pNFS
+  deviceid (a hash of this string) is stable across rescheduling.
+- one ClusterIP Service PER ORDINAL, selected via the
+  statefulset.kubernetes.io/pod-name label. The DS advertises that
+  Service's DNS name (FLINT_DS_ADVERTISE_ADDR); the MDS resolves it to
+  the ClusterIP at GETDEVICEINFO-encode time. Because the ClusterIP is
+  stable across reschedules, kernel clients' cached device info never
+  goes stale — this is what makes CB_NOTIFY_DEVICEID unnecessary.
+- scaling UP is safe (Phase 0 pins existing files' placements; new
+  files stripe over the wider fleet). Scaling DOWN is NOT supported
+  until the drain milestone — existing placements would refuse layouts
+  for files pinned to removed DSes.
+*/}}
+{{- if and .Values.pnfs.enabled .Values.pnfs.server.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flint-pnfs-ds-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-ds
+data:
+  ds.yaml: |
+    apiVersion: flint.io/v1alpha1
+    kind: PnfsConfig
+    mode: ds
+    ds:
+      bind:
+        address: "0.0.0.0"
+        port: 2049
+      deviceId: "${POD_NAME}"
+      mds:
+        endpoint: "flint-pnfs-mds.{{ .Release.Namespace }}.svc.cluster.local:50051"
+        heartbeatInterval: {{ .Values.pnfs.server.dataServers.heartbeatInterval }}
+        registrationRetry: 5
+        maxRetries: 0
+      bdevs:
+        - name: data
+          mount_point: /data
+          spdk_volume: data
+    exports:
+      - path: /
+        fsid: 1
+        options: [rw, sync]
+        access:
+          - network: 0.0.0.0/0
+            permissions: rw
+    logging:
+      level: {{ .Values.pnfs.server.logLevel | default "info" }}
+      format: text
+---
+{{- /* Headless Service governing the StatefulSet (pod identity DNS). */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-pnfs-ds-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-ds
+spec:
+  clusterIP: None
+  selector:
+    app: flint-pnfs-ds
+  ports:
+    - name: nfs
+      port: 2049
+---
+{{- /*
+Per-ordinal ClusterIP Services. Named exactly like the pods so
+FLINT_DS_ADVERTISE_ADDR can be "$(POD_NAME).<ns>.svc.cluster.local".
+*/}}
+{{- range $i := until (int .Values.pnfs.server.dataServers.count) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-pnfs-ds-{{ $i }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: pnfs-ds
+spec:
+  selector:
+    statefulset.kubernetes.io/pod-name: flint-pnfs-ds-{{ $i }}
+  ports:
+    - name: nfs
+      port: 2049
+      targetPort: 2049
+      protocol: TCP
+---
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: flint-pnfs-ds
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-ds
+spec:
+  serviceName: flint-pnfs-ds-headless
+  replicas: {{ int .Values.pnfs.server.dataServers.count }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: flint-pnfs-ds
+  template:
+    metadata:
+      labels:
+        app: flint-pnfs-ds
+        {{- include "flint-csi-driver-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- if .Values.pnfs.server.dataServers.spreadAcrossNodes }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: flint-pnfs-ds
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
+      containers:
+        - name: ds
+          image: "{{ .Values.images.repository }}/{{ .Values.pnfs.server.image.name }}:{{ required "pnfs.server.image.tag is required when pnfs.server.enabled" .Values.pnfs.server.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/flint-pnfs-ds"]
+          args: ["--config", "/etc/flint/ds.yaml"]
+          env:
+            - name: PNFS_MODE
+              value: "ds"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # The per-ordinal Service shares the pod's name, so this
+            # resolves to that Service's stable ClusterIP.
+            - name: FLINT_DS_ADVERTISE_ADDR
+              value: "$(POD_NAME).$(POD_NAMESPACE).svc.cluster.local"
+            - name: RUST_LOG
+              value: {{ .Values.pnfs.server.logLevel | default "info" | quote }}
+          ports:
+            - containerPort: 2049
+              name: nfs
+          readinessProbe:
+            tcpSocket:
+              port: 2049
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/flint
+            - name: data
+              mountPath: /data
+          {{- with .Values.pnfs.server.dataServers.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: flint-pnfs-ds-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.pnfs.server.dataServers.storage.storageClassName | default .Values.storageClass.name }}
+        resources:
+          requests:
+            storage: {{ .Values.pnfs.server.dataServers.storage.size }}
+{{- end }}

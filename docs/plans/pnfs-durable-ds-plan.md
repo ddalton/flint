@@ -173,6 +173,46 @@ have only the docker-compose-era sketches in `docker/README-pnfs.md`
 pNFS PVC striping across all DS pods; `helm upgrade` rolls MDS and DSes
 without client I/O errors (ordered, one DS at a time).
 
+### Status: BUILT 2026-07-06 — live validation pending (needs a cluster)
+
+Landed in-session:
+- `templates/pnfs-mds.yaml`: ConfigMap (sqlite mandatory, state.db +
+  exports on one PVC at /data, `dataServers: []` — dynamic gRPC
+  registration only, deliberately avoiding the boot pre-registration
+  wart), PVC on the flint SC, stable ClusterIP Service (2049 + 50051),
+  single-replica Recreate Deployment. MDS now `create_dir_all`s its
+  export root (fresh-PVC boot).
+- `templates/pnfs-ds.yaml`: DS StatefulSet (`podManagementPolicy:
+  Parallel`, soft node anti-affinity), `volumeClaimTemplates` on the
+  flint SC, `deviceId: "${POD_NAME}"`, headless Service + one
+  ClusterIP Service per ordinal named exactly like its pod, so
+  `FLINT_DS_ADVERTISE_ADDR="$(POD_NAME).$(POD_NAMESPACE).svc.cluster.local"`
+  is that Service's DNS name.
+- Endpoint mobility resolved with ZERO protocol code: the DS
+  advertises the per-pod Service DNS name (new
+  `FLINT_DS_ADVERTISE_ADDR` env, precedence over the existing POD_IP
+  path in `ds/server.rs`), and the MDS already resolves hostnames to
+  IPv4 at GETDEVICEINFO-encode time (`endpoint_to_uaddr`). The
+  ClusterIP behind the name is stable across reschedules, so kernel
+  clients' cached device info never goes stale.
+- values: `pnfs.server.*` block (image, stripeSize, mds storage/
+  timeout, dataServers count/storage/anti-affinity); controller's
+  FLINT_PNFS_MDS_ENDPOINT defaults to the in-chart Service when
+  `pnfs.server.enabled`; scale-DOWN documented as unsupported until
+  the drain milestone.
+- PNFS_INSTANCE_ID is deliberately NOT set: the sqlite `server_id`
+  gives MDS FH stability, and the DS-side check is skipped when the
+  env is unset (validated rig shape).
+
+Gates run: helm lint clean; render validated (10 objects at count=3;
+pnfs-disabled render emits zero pNFS objects); 624 lib tests;
+test-pnfs-smoke re-run PASS after the registration-path changes.
+
+Remaining for "Done when": cold `helm install` + upgrade-roll drills
+need a live cluster (runk/runl deleted — provision fresh via trove),
+and the `dilipdalton/flint-pnfs` image (docker/Dockerfile.pnfs, both
+binaries) publishes at the next release like every other image.
+
 ---
 
 ## Phase 2 — DS identity ↔ PVC binding guard (~2–3 days)
