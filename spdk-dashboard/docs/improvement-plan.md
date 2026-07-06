@@ -581,11 +581,13 @@ run 7/8 — ephemeral-inline schedules node-locally and landed on the
 LVS-less builder node; the builder is now cordoned during gate runs,
 runbook updated).
 
-Small items now tracked: the dashboard delete proxy wraps the agent's
+Small items now tracked: ~~the dashboard delete proxy wraps the agent's
 409 + refusal message as a generic 502 "Node agent returned: 409
 Conflict" — pass the agent's status and body through so the UI shows
-WHY the delete was refused (next backend pass); tests/system Makefile
-single-test targets ran kuttl without --config (fixed).
+WHY the delete was refused (next backend pass)~~ FIXED
+(`agent_error_passthrough` relays the agent's status code and JSON body
+verbatim); tests/system Makefile single-test targets ran kuttl without
+--config (fixed).
 
 ## Snapshot timeline redesign (2026-07-04, commit 61bb80b)
 
@@ -632,8 +634,125 @@ still present, still UI-unwired) would silently orphan the CR. RBAC:
 Geometry (domain/ticks/buckets/clusters) lives in `timelineLayout.ts`,
 pure and unit-tested. Suites: 579 Rust / 89 vitest.
 
-Follow-up candidates: SnapshotDetailModal's disabled Delete stub should
-either wire the CR path (needs the VSC join there too) or be dropped;
-brush-to-zoom context strip (focus+context) once volumes carry hours of
-history; `/api/snapshots` still double-counts per node in the header
-chips.
+Follow-up candidates: ~~SnapshotDetailModal's disabled Delete stub should
+either wire the CR path (needs the VSC join there too) or be dropped~~
+DROPPED (deliberate: deletes live in the timeline's CR path; the modal is
+SPDK-level and carries no CR reference); brush-to-zoom context strip
+(focus+context) once volumes carry hours of history; ~~`/api/snapshots`
+still double-counts per node in the header chips~~ FIXED 2026-07-05
+(see below).
+
+## Snapshot chip honesty + fleet-scale nodes tab (2026-07-05)
+
+**Flat `/api/snapshots` merged per-node copies into logical snapshots.**
+The endpoint used to concatenate every node agent's list, so a
+2-replica snapshot was two rows ("Total Snapshots" chip double-counted)
+and `replica_bdev_details` was never sent (the "Replica Snapshots" chip
+summed a phantom field — permanently 0). `get_all_snapshots` now merges
+rows by snapshot name (the cross-node join key, same rule as the
+timeline's `collect_spdk_snapshots`) into one `DashboardSnapshot` per
+logical snapshot with one `replica_bdev_details` entry per node copy.
+The response is a typed contract (`Vec<DashboardSnapshot>` in the
+OpenAPI spec, replacing the "untyped passthrough"); the snapshots tab
+aliases the generated type, and the compiler flushed more dead drift:
+the clone-lineage "relationship enhancer" ran on a field
+(`clone_source_snapshot_id`) the endpoint has never sent — deleted.
+Chips are pinned by a component test against typed MSW fixtures; merge
+logic unit-tested in Rust (name-keyed, node-sorted, serde-default
+tolerant of older agents).
+
+**Ghost snapshots flagged in the timeline** (same day): a user snapshot
+whose SPDK copies were all deleted out-of-band leaves a VolumeSnapshot
+CR that still claims ready while restore would fail — and the flat list
+can't even show it (no copies ⇒ no row). The timeline, being CR-driven,
+is the one surface that still renders it: ghosts (user event, not
+orphan, zero holding nodes) now draw as a hollow red diamond with a "!"
+badge, the legend counts "N without copies", and the pinned popover
+says plainly that the data is gone and the CR delete is the clean-up
+path. DECIDED against the broader "n/m copies vs volume.replicas"
+under-replication chip: current replica count is the wrong baseline
+(legs rebuilt after disk loss don't recreate historical snapshot lvols;
+replica-count changes shift the target; epochs flap mid-rotation) — an
+honest n/m needs copies-at-cut recorded engine-side at snapshot time,
+tracked as a future engine item.
+
+**Nodes tab rebuilt fleet-scale** (owner decision 2026-07-05: full
+redesign over row-compaction — the browse-a-paginated-list model was
+already wrong at the 50-node target's edge):
+- Backend `GET /api/nodes` (viewer-gated): per-node rollup from the
+  same cached aggregate as the other Phase-1 projections — disk/volume/
+  local-NVMe counts, out-of-sync replica count, capacity, and a
+  `health` verdict (critical = unhealthy disk or failed volume/replica;
+  warning = degraded volume or out-of-sync replica; uninitialized
+  disks are deliberately onboarding work, not a health condition).
+  Rollup is a pure function with unit tests; payload grows with node
+  count only.
+- `NodesFleetView` replaces `FilteredNodesView` (deleted): health facet
+  chips with counts (All/Critical/Warning/Ready/Uninit. disks), a
+  status-cell heatmap (one cell per node, click = drill-in + scroll),
+  and a problems-first list of one-line node rows. Rows are
+  `content-visibility: auto` so offscreen rows cost no layout/paint —
+  no pagination. Search still matches disk model/PCI/volume names via
+  the aggregate. Volume-filter context from other tabs is preserved
+  (banner + per-row match counts).
+- Drill-in: a row expands to the full per-disk/per-volume detail
+  (aggregate-fed `NodeDetailView`, now a collapsible card whose header
+  is the projection row), URL-synced as `?node=` scoped to the nodes
+  tab like the other detail params. En route the detail table's
+  allocation bar was fixed — it divided GB by bytes and always read
+  ~0%.
+- `status.ts` gained the node-health vocabulary (`NODE_HEALTH_STYLES`);
+  the heatmap, chips, and rows all render from it.
+
+Still open from the design-system section: the `Button`/`IconButton`
+primitive was never actually built (no such component exists; ~22 files
+still use raw `<button>`) — the as-touched sweep policy stands, but the
+primitive itself is missing.
+
+Disks tab scale posture (assessed 2026-07-05): filtering is already
+exception-first (health/LVS/node/utilization/capacity facets + search +
+sort) and Disk Setup got the bulk/fleet treatment in 2d, but
+`DisksTable` renders ALL filtered rows — no pagination or windowing.
+Fine at the 100s-of-disks target, degrades near ~1000 rows; candidates
+when needed: row windowing like the nodes list, and adopting the
+existing `/api/disks` projection.
+
+## LIVE-VALIDATED end-to-end on AWS (2026-07-05, cluster `runl`)
+
+All of the above was exercised on a real cluster — trove-provisioned
+on-demand CP + 3× i4i.large **spot** workers with NVMe instance storage,
+Flint 1.7.0, dashboard rolled to working-tree images `snapfleet.*`
+(built on a c5d.4xlarge spot builder). Findings and fixes from the run:
+
+- **Build gate (real finding, fixed):** the driver image's pinned rustc
+  1.92 overflowed the trait-solver recursion limit (E0275) on the warp
+  route chain once `/api/nodes` pushed it past ~20 `.or()` filters;
+  local rustc 1.96 compiled it silently. Added `#![recursion_limit =
+  "256"]` to the lib and `csi-driver` bin crate roots; verified against
+  a locally-installed 1.92 toolchain. Without this the release build
+  would have broken.
+- **`/api/nodes` proved new:** 404 on the stock 1.7.0 backend, 200 after
+  the roll — the projection is unambiguously the new code.
+- **Fleet view (9/9 browser checks):** facet counts from the live
+  projection (All·4 / Ready·4 / Uninit·3 / Critical·0), one heatmap cell
+  per node, facet filter narrowing, cell-click drill-in writing `?node=`,
+  and the deep link surviving reload + re-login.
+- **Snapshot chips (proven at API and UI):** a 3-replica volume with
+  three VolumeSnapshots returned **3 logical rows / 9 node copies** from
+  `/api/snapshots` (pre-fix: 9 rows); the tab rendered Total 3 / Replica
+  9 / Ready 3 — the exact bug pair (double-count + phantom-0) both gone.
+- **Ghost drill (real-world path):** deleted all three SPDK copies of one
+  snapshot out-of-band via the node agents, leaving the CR `readyToUse:
+  true`. The flat `/api/snapshots` dropped the row entirely (0 copies ⇒
+  no row — confirming why the flat list *can't* surface ghosts), while
+  the timeline flagged `nodes=0 orphan=false ready=true` and the UI drew
+  the red flag; the popover showed "No SPDK copies exist… restore will
+  fail" with the CR-delete remedy enabled.
+- **New finding + fix (cluster-hidden ghost):** three snapshots cut
+  within 7s collapsed into one `+N` cluster marker, and the collapsed
+  marker gave **no** ghost signal — the red flag only showed in the
+  legend, and the drill-through popover. That is the Decision-1 failure
+  mode (a ghost reading as healthy on a lane scan). Fixed: a cluster
+  containing ≥1 ghost now draws a red ring + corner dot and its
+  aria-label reads "N user snapshots (M without copies)"; unit test added
+  (identical-timestamp burst). Re-rolled as `snapfleet.1`.

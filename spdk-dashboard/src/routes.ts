@@ -36,6 +36,7 @@ export function parseTab(segment: string | undefined): TabId | null {
 const DETAIL_PARAM_HOME: Record<string, TabId> = {
   volume: 'volumes',
   snapshot: 'snapshots',
+  node: 'nodes',
 };
 
 // Search string for a tab link: keeps filter context, drops detail params

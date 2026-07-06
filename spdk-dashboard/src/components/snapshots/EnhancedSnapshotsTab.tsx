@@ -13,11 +13,12 @@ import { SnapshotTimelineView } from './SnapshotTimelineView';
 import { SnapshotDetailModal } from './SnapshotDetailModal';
 import { useOperations } from '../../contexts/OperationsContext';
 import { TabSkeleton } from '../ui/Skeleton';
-import type { 
-  SnapshotDetails, 
-  SnapshotTreeNode, 
-  SnapshotTypeFilter, 
-  SnapshotViewMode 
+import type { components } from '../../api/schema';
+import type {
+  SnapshotDetails,
+  SnapshotTreeNode,
+  SnapshotTypeFilter,
+  SnapshotViewMode
 } from './types';
 
 export const EnhancedSnapshotsTab: React.FC = () => {
@@ -79,7 +80,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
       const snapshotsContentType = snapshotsResponse.headers.get("content-type") || '';
       if (snapshotsResponse.ok && snapshotsContentType.indexOf("application/json") !== -1) {
         const snapshotsData = await snapshotsResponse.json();
-        setSnapshots(enhanceSnapshotsWithRelationships(snapshotsData));
+        setSnapshots(toSnapshotDetails(snapshotsData));
       } else {
         throw new Error(
           snapshotsResponse.ok ? 'Snapshots: non-JSON response' : `Snapshots unavailable (HTTP ${snapshotsResponse.status})`
@@ -108,58 +109,21 @@ export const EnhancedSnapshotsTab: React.FC = () => {
     }
   };
 
-  // What /api/snapshots actually sends (frontend assumption, not a typed
-  // backend contract): SnapshotDetails minus the fields this enhancer
-  // derives, with the id under either name.
-  type BackendSnapshot = Omit<
-    SnapshotDetails,
-    'snapshot_id' | 'parent_snapshot_id' | 'child_snapshot_ids' | 'replica_bdev_details'
-  > & {
-    snapshot_id?: string;
-    snapshot_uuid?: string;
-    replica_bdev_details?: SnapshotDetails['replica_bdev_details'];
-  };
+  // The typed /api/snapshots contract (generated schema): one row per
+  // logical snapshot, per-node copies under replica_bdev_details — a
+  // drifted assumption here is a compile error.
+  type BackendSnapshot = components['schemas']['DashboardSnapshot'];
 
-  // Transform backend data to include relationships
-  const enhanceSnapshotsWithRelationships = (backendSnapshots: BackendSnapshot[]): SnapshotDetails[] => {
-    const relationships = new Map<string, { parent?: string; children: string[] }>();
-    
-    // Build relationship map from clone_source_snapshot_id
-    backendSnapshots.forEach(snap => {
-      // Backend returns snapshot_uuid, frontend expects snapshot_id
-      const snapshotId = snap.snapshot_id || snap.snapshot_uuid || '';
-      if (!relationships.has(snapshotId)) {
-        relationships.set(snapshotId, { children: [] });
-      }
-      
-      if (snap.clone_source_snapshot_id) {
-        // This snapshot has a parent
-        relationships.get(snapshotId)!.parent = snap.clone_source_snapshot_id;
-        
-        // Add this as a child to the parent
-        if (!relationships.has(snap.clone_source_snapshot_id)) {
-          relationships.set(snap.clone_source_snapshot_id, { children: [] });
-        }
-        relationships.get(snap.clone_source_snapshot_id)!.children.push(snapshotId);
-      }
-    });
-
-    // Enhance snapshots with relationship data and map backend fields to frontend interface
-    return backendSnapshots.map(snap => {
-      // Backend returns snapshot_uuid, frontend expects snapshot_id
-      const snapshotId = snap.snapshot_id || snap.snapshot_uuid || '';
-
-      return {
-        ...snap,
-        snapshot_id: snapshotId, // Ensure snapshot_id exists
-        snapshot_type: snap.snapshot_type || 'Bdev', // Default type if not provided
-        parent_snapshot_id: relationships.get(snapshotId)?.parent,
-        child_snapshot_ids: relationships.get(snapshotId)?.children || [],
-        // Ensure replica_bdev_details is always an array
-        replica_bdev_details: snap.replica_bdev_details || []
-      };
-    });
-  };
+  // Map wire rows onto the tab's SnapshotDetails shape. This listing
+  // carries no clone lineage (SPDK lvol listings don't expose it), so
+  // parent/child relationships stay empty.
+  const toSnapshotDetails = (backendSnapshots: BackendSnapshot[]): SnapshotDetails[] =>
+    backendSnapshots.map(snap => ({
+      ...snap,
+      snapshot_id: snap.snapshot_uuid,
+      snapshot_type: 'Bdev',
+      child_snapshot_ids: [],
+    }));
 
   // Filter and search logic
   const filteredSnapshots = useMemo(() => {

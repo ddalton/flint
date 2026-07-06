@@ -38,11 +38,18 @@ const USER_COLOR = '#7c3aed'; // violet-600: user snapshots never read as "error
 const USER_COLOR_SOFT = '#a78bfa';
 const EPOCH_COLOR = '#3b82f6'; // blue-500 ramp for the density ribbon
 const ORPHAN_COLOR = '#9ca3af';
+const GHOST_COLOR = '#dc2626'; // red-600: a ghost IS an error state
 
 interface Selection {
   events: TimelineEvent[];
   x: number;
 }
+
+// Ghost: the VolumeSnapshot CR still exists (and typically still claims
+// ready), but no node's SPDK holds a copy — the data is gone and restore
+// will fail. The inverse of an orphan (SPDK copy without a CR).
+const isGhost = (e: TimelineEvent): boolean =>
+  e.kind === 'user' && !e.orphan && e.nodes.length === 0;
 
 const eventTimeMs = (e: TimelineEvent): number =>
   e.created_at ? new Date(e.created_at).getTime() : NaN;
@@ -60,8 +67,14 @@ const UserMarker: React.FC<{
   onSelect: () => void;
 }> = ({ x, events, selected, onSelect }) => {
   const single = events.length === 1 ? events[0] ?? null : null;
-  const color = single?.orphan ? ORPHAN_COLOR : USER_COLOR;
-  const label = single ? `User snapshot ${single.name}` : `${events.length} user snapshots`;
+  const ghost = single ? isGhost(single) : false;
+  // A cluster can hide a ghost among healthy snapshots — surface it on the
+  // collapsed marker so a scan of the lane never reads a ghost as healthy.
+  const clusterGhosts = single ? 0 : events.filter(isGhost).length;
+  const color = ghost ? GHOST_COLOR : single?.orphan ? ORPHAN_COLOR : USER_COLOR;
+  const label = single
+    ? `User snapshot ${single.name}${ghost ? ' (no copies)' : ''}`
+    : `${events.length} user snapshots${clusterGhosts ? ` (${clusterGhosts} without copies)` : ''}`;
   return (
     <g
       role="button"
@@ -83,24 +96,48 @@ const UserMarker: React.FC<{
       <rect x={x - 12} y={LANE_USER_Y - 14} width={24} height={AXIS_Y - LANE_USER_Y + 14} fill="transparent" />
       <line x1={x} y1={LANE_USER_Y} x2={x} y2={AXIS_Y} stroke={color} strokeWidth={selected ? 2 : 1.5} strokeOpacity={0.55} />
       {single ? (
-        <rect
-          x={-6.5}
-          y={-6.5}
-          width={13}
-          height={13}
-          rx={2}
-          transform={`translate(${x}, ${LANE_USER_Y}) rotate(45)`}
-          fill={single.ready && !single.orphan ? color : '#ffffff'}
-          stroke={color}
-          strokeWidth={2}
-          strokeDasharray={single.orphan ? '3,2' : undefined}
-        />
+        <>
+          <rect
+            x={-6.5}
+            y={-6.5}
+            width={13}
+            height={13}
+            rx={2}
+            transform={`translate(${x}, ${LANE_USER_Y}) rotate(45)`}
+            // A ghost diamond is hollow with a red outline: the CR shell
+            // exists, the data doesn't.
+            fill={single.ready && !single.orphan && !ghost ? color : '#ffffff'}
+            stroke={color}
+            strokeWidth={2}
+            strokeDasharray={single.orphan ? '3,2' : undefined}
+          />
+          {ghost && (
+            <text
+              x={x}
+              y={LANE_USER_Y + 3.5}
+              textAnchor="middle"
+              fontSize={10}
+              fontWeight={700}
+              fill={GHOST_COLOR}
+              pointerEvents="none"
+            >
+              !
+            </text>
+          )}
+        </>
       ) : (
         <>
           <circle cx={x} cy={LANE_USER_Y} r={11} fill={USER_COLOR} />
           <text x={x} y={LANE_USER_Y + 4} textAnchor="middle" fill="#fff" fontSize={11} fontWeight={700}>
             +{events.length}
           </text>
+          {clusterGhosts > 0 && (
+            // Red ring + corner dot: this cluster contains ≥1 ghost.
+            <>
+              <circle cx={x} cy={LANE_USER_Y} r={13} fill="none" stroke={GHOST_COLOR} strokeWidth={2} />
+              <circle cx={x + 10} cy={LANE_USER_Y - 10} r={4} fill={GHOST_COLOR} stroke="#ffffff" strokeWidth={1} />
+            </>
+          )}
         </>
       )}
       {selected && (
@@ -147,6 +184,7 @@ export const SnapshotTimelineView: React.FC<{
   const userEvents = useMemo(() => events.filter((e) => e.kind === 'user'), [events]);
   const epochEvents = useMemo(() => events.filter((e) => e.kind === 'epoch'), [events]);
   const datelessOrphans = useMemo(() => userEvents.filter((e) => !e.created_at), [userEvents]);
+  const ghostCount = useMemo(() => userEvents.filter(isGhost).length, [userEvents]);
 
   const domain: TimeDomain | null = useMemo(
     () => computeDomain(events.map(eventTimeMs), nowMs),
@@ -270,6 +308,11 @@ export const SnapshotTimelineView: React.FC<{
                     style={{ backgroundColor: USER_COLOR }}
                   />
                   User snapshots · {userEvents.length}
+                  {ghostCount > 0 && (
+                    <span className="text-red-600 font-medium">
+                      · {ghostCount} without copies
+                    </span>
+                  )}
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span
@@ -455,8 +498,16 @@ export const SnapshotTimelineView: React.FC<{
                         </div>
                         <div className="flex justify-between gap-2">
                           <dt>Replicas on</dt>
-                          <dd className="text-right">
-                            {selectedEvent.nodes.length ? selectedEvent.nodes.join(', ') : '—'}
+                          <dd
+                            className={`text-right ${
+                              isGhost(selectedEvent) ? 'text-red-600 font-medium' : ''
+                            }`}
+                          >
+                            {selectedEvent.nodes.length
+                              ? selectedEvent.nodes.join(', ')
+                              : isGhost(selectedEvent)
+                                ? 'none'
+                                : '—'}
                           </dd>
                         </div>
                         {selectedEvent.vs_namespace && (
@@ -471,6 +522,15 @@ export const SnapshotTimelineView: React.FC<{
                           </div>
                         )}
                       </dl>
+                      {isGhost(selectedEvent) && (
+                        <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+                          <p className="font-semibold mb-0.5">No SPDK copies exist on any node</p>
+                          <p>
+                            The VolumeSnapshot still reports ready, but its data is gone —
+                            restore will fail. Deleting the snapshot is the clean-up path.
+                          </p>
+                        </div>
+                      )}
                       {deleteError && (
                         <p className="mt-2 text-xs text-failed-600">{deleteError}</p>
                       )}

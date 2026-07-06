@@ -32,6 +32,15 @@ describe('searchForTab', () => {
     expect(toVolumes.get('snapshot')).toBeNull();
   });
 
+  it('scopes the node drill-in param to the nodes tab', () => {
+    const current = new URLSearchParams('filter=degraded&node=runk-aws-1');
+    const toNodes = new URLSearchParams(searchForTab(current, 'nodes'));
+    expect(toNodes.get('node')).toBe('runk-aws-1');
+    expect(toNodes.get('filter')).toBe('degraded');
+    const toVolumes = new URLSearchParams(searchForTab(current, 'volumes'));
+    expect(toVolumes.get('node')).toBeNull();
+  });
+
   it('returns an empty string when nothing survives', () => {
     expect(searchForTab(new URLSearchParams('volume=pvc-1'), 'events')).toBe('');
   });

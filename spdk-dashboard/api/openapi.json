@@ -303,6 +303,51 @@
         }
       }
     },
+    "/api/nodes": {
+      "get": {
+        "tags": [
+          "aggregate"
+        ],
+        "operationId": "nodes_projection",
+        "responses": {
+          "200": {
+            "description": "Per-node fleet rollup (health, disk/volume/sync counts) from the cached aggregate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/expired token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Aggregate build failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/nodes/{node}/disks/delete": {
       "post": {
         "tags": [
@@ -807,13 +852,13 @@
         "operationId": "snapshots",
         "responses": {
           "200": {
-            "description": "Raw SPDK snapshot objects (untyped passthrough)",
+            "description": "Logical snapshots: per-node SPDK copies merged by snapshot name, one replica_bdev_details entry per copy",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object"
+                    "$ref": "#/components/schemas/DashboardSnapshot"
                   }
                 }
               }
@@ -1572,6 +1617,61 @@
           }
         }
       },
+      "DashboardSnapshot": {
+        "type": "object",
+        "description": "One logical snapshot: the per-node SPDK copies merged by snapshot name.\nCopies of the same snapshot share the name; each node's copy is its own\nlvol with its own uuid.",
+        "required": [
+          "snapshot_uuid",
+          "snapshot_name",
+          "source_volume_id",
+          "size_bytes",
+          "creation_time",
+          "ready_to_use",
+          "node",
+          "replica_bdev_details"
+        ],
+        "properties": {
+          "creation_time": {
+            "type": "string",
+            "description": "Node-agent list stamp, not a real creation time (SPDK lvols store\nnone) — real times are the timeline endpoint's job."
+          },
+          "lvs_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node": {
+            "type": "string",
+            "description": "Node of the first copy; the copy list is authoritative."
+          },
+          "ready_to_use": {
+            "type": "boolean"
+          },
+          "replica_bdev_details": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotCopy"
+            },
+            "description": "One entry per node currently holding a copy."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "snapshot_name": {
+            "type": "string"
+          },
+          "snapshot_uuid": {
+            "type": "string",
+            "description": "UUID of the first copy (nodes sorted) — a stable display id, not\nshared by the other copies."
+          },
+          "source_volume_id": {
+            "type": "string"
+          }
+        }
+      },
       "DashboardVolume": {
         "type": "object",
         "required": [
@@ -2280,6 +2380,93 @@
           }
         }
       },
+      "NodeSummary": {
+        "type": "object",
+        "description": "Per-node fleet rollup — the nodes tab's landing payload. Grows with\nnode count only, never with per-volume/per-disk detail (that stays in\nthe aggregate, fetched when one node is drilled into).",
+        "required": [
+          "name",
+          "disks_total",
+          "disks_healthy",
+          "disks_uninitialized",
+          "volumes_total",
+          "local_nvme_volumes",
+          "replicas_out_of_sync",
+          "volumes_not_healthy",
+          "capacity_gb",
+          "allocated_gb",
+          "health"
+        ],
+        "properties": {
+          "allocated_gb": {
+            "type": "number",
+            "format": "double"
+          },
+          "capacity_gb": {
+            "type": "number",
+            "format": "double"
+          },
+          "disks_healthy": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "disks_total": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "disks_uninitialized": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Non-system disks with no blobstore — init candidates (onboarding\nwork, not a health condition).",
+            "minimum": 0
+          },
+          "health": {
+            "type": "string",
+            "description": "Worst condition on the node: \"critical\" | \"warning\" | \"ok\".\ncritical = unhealthy disk or failed volume/replica here;\nwarning = degraded volume or out-of-sync replica here."
+          },
+          "local_nvme_volumes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "replicas_out_of_sync": {
+            "type": "integer",
+            "format": "int32",
+            "description": "This node's replicas not in_sync (stale/standby/rejoining).",
+            "minimum": 0
+          },
+          "volumes_not_healthy": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Volumes with a replica here whose state is not Healthy.",
+            "minimum": 0
+          },
+          "volumes_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Volumes with a replica on this node.",
+            "minimum": 0
+          }
+        }
+      },
+      "NodesResponse": {
+        "type": "object",
+        "required": [
+          "nodes"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeSummary"
+            }
+          }
+        }
+      },
       "NvmeofTargetInfo": {
         "type": "object",
         "required": [
@@ -2584,6 +2771,38 @@
           "viewer",
           "admin"
         ]
+      },
+      "SnapshotCopy": {
+        "type": "object",
+        "description": "Get all snapshots from all nodes\nOne node's copy of a logical snapshot (same shape as the tree\nendpoint's replica_bdev_details entries, which the snapshots tab\nalready renders).",
+        "required": [
+          "node",
+          "name",
+          "aliases",
+          "driver",
+          "snapshot_source_bdev"
+        ],
+        "properties": {
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "driver": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "SPDK lvol snapshot name on that node."
+          },
+          "node": {
+            "type": "string"
+          },
+          "snapshot_source_bdev": {
+            "type": "string"
+          }
+        }
       },
       "SnapshotTimelineEvent": {
         "type": "object",

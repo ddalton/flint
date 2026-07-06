@@ -199,6 +199,82 @@ export function makeNodeDiskStatus(
   };
 }
 
+// /api/nodes fleet rollup fixture — matches makeDashboardData's three
+// nodes: one warning (out-of-sync replica), two ok, one of which has an
+// uninitialized spare disk.
+export function makeNodeSummary(
+  overrides: Partial<Schemas['NodeSummary']> = {}
+): Schemas['NodeSummary'] {
+  return {
+    name: 'runj-aws-1',
+    disks_total: 1,
+    disks_healthy: 1,
+    disks_uninitialized: 0,
+    volumes_total: 1,
+    local_nvme_volumes: 1,
+    replicas_out_of_sync: 0,
+    volumes_not_healthy: 0,
+    capacity_gb: 110.0,
+    allocated_gb: 30.0,
+    health: 'ok',
+    ...overrides,
+  };
+}
+
+export function makeNodesResponse(
+  overrides: Partial<Schemas['NodesResponse']> = {}
+): Schemas['NodesResponse'] {
+  return {
+    nodes: [
+      makeNodeSummary(),
+      makeNodeSummary({
+        name: 'runj-aws-2',
+        replicas_out_of_sync: 1,
+        volumes_not_healthy: 1,
+        health: 'warning',
+      }),
+      makeNodeSummary({ name: 'runj-aws-3', disks_uninitialized: 1, disks_total: 2 }),
+    ],
+    ...overrides,
+  };
+}
+
+// Flat /api/snapshots fixture — logical snapshots with per-node copies
+// merged backend-side. Pre-merge, a 2-replica snapshot appeared once per
+// node (the "Total Snapshots" chip double-counted) and replica_bdev_details
+// was never sent (the "Replica Snapshots" chip always read 0).
+export function makeSnapshotList(): Schemas['DashboardSnapshot'][] {
+  const volume = 'pvc-93edc114-bec7-43a0-8273-5812c2c52d13';
+  const snap = (
+    seq: number,
+    uuid: string,
+    nodes: string[]
+  ): Schemas['DashboardSnapshot'] => {
+    const name = `snap_${volume}_6836626352724501${seq}`;
+    return {
+      snapshot_uuid: uuid,
+      snapshot_name: name,
+      source_volume_id: volume,
+      lvs_name: 'lvs_runk-aws-1_0000-00-1f-0',
+      size_bytes: 2147483648,
+      creation_time: '2026-07-05T00:00:00Z',
+      ready_to_use: true,
+      node: nodes[0] ?? '',
+      replica_bdev_details: nodes.map(node => ({
+        node,
+        name,
+        aliases: [name],
+        driver: 'lvol',
+        snapshot_source_bdev: `vol_${volume}`,
+      })),
+    };
+  };
+  return [
+    snap(1, 'uuid-1', ['runk-aws-1', 'runk-aws-2']),
+    snap(2, 'uuid-2', ['runk-aws-1']),
+  ];
+}
+
 // Snapshot timeline fixture — the runk 2026-07-04 fixture volume shape:
 // three user VolumeSnapshots (real CR times) over a six-epoch retained
 // window, two in-sync replicas. Times are relative to `now` so domain

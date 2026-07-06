@@ -278,6 +278,37 @@ struct EventsResponse {
     windows: Vec<HotRejoinWindow>,
 }
 
+/// Per-node fleet rollup — the nodes tab's landing payload. Grows with
+/// node count only, never with per-volume/per-disk detail (that stays in
+/// the aggregate, fetched when one node is drilled into).
+#[derive(Serialize, Debug, Clone, PartialEq, utoipa::ToSchema)]
+struct NodeSummary {
+    name: String,
+    disks_total: u32,
+    disks_healthy: u32,
+    /// Non-system disks with no blobstore — init candidates (onboarding
+    /// work, not a health condition).
+    disks_uninitialized: u32,
+    /// Volumes with a replica on this node.
+    volumes_total: u32,
+    local_nvme_volumes: u32,
+    /// This node's replicas not in_sync (stale/standby/rejoining).
+    replicas_out_of_sync: u32,
+    /// Volumes with a replica here whose state is not Healthy.
+    volumes_not_healthy: u32,
+    capacity_gb: f64,
+    allocated_gb: f64,
+    /// Worst condition on the node: "critical" | "warning" | "ok".
+    /// critical = unhealthy disk or failed volume/replica here;
+    /// warning = degraded volume or out-of-sync replica here.
+    health: String,
+}
+
+#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
+struct NodesResponse {
+    nodes: Vec<NodeSummary>,
+}
+
 #[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardOverview {
     total_volumes: usize,
@@ -1812,6 +1843,83 @@ async fn get_disks_minimal(
     }
 }
 
+/// Handle GET /api/nodes - per-node fleet rollup from the cached aggregate.
+async fn get_nodes_minimal(
+    state: AppState,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    match fetch_dashboard_data_minimal(&state, None).await {
+        Ok(data) => Ok(warp::reply::with_status(
+            warp::reply::json(&NodesResponse { nodes: node_summaries(&data) }),
+            warp::http::StatusCode::OK,
+        )),
+        Err(e) => Ok(warp::reply::with_status(
+            warp::reply::json(&ApiError { error: format!("Failed to fetch nodes: {}", e) }),
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )),
+    }
+}
+
+/// True when this replica is behind its volume (Tier-2 sync signal when
+/// present, legacy status string otherwise).
+fn replica_out_of_sync(replica: &DashboardReplicaStatus) -> bool {
+    match &replica.sync {
+        Some(sync) => sync.sync_state != "in_sync",
+        None => matches!(replica.status.as_str(), "stale" | "standby" | "rebuilding"),
+    }
+}
+
+/// Per-node rollup of the aggregate (same membership rules as the frontend:
+/// a volume is "on" a node when v.nodes contains it; replica rows are
+/// matched by replica.node).
+fn node_summaries(data: &DashboardData) -> Vec<NodeSummary> {
+    data.nodes
+        .iter()
+        .map(|node| {
+            let disks: Vec<&DashboardDisk> =
+                data.disks.iter().filter(|d| &d.node == node).collect();
+            let volumes: Vec<&DashboardVolume> =
+                data.volumes.iter().filter(|v| v.nodes.contains(node)).collect();
+            let replicas: Vec<&DashboardReplicaStatus> = volumes
+                .iter()
+                .flat_map(|v| v.replica_statuses.iter().filter(|r| &r.node == node))
+                .collect();
+
+            let disks_healthy = disks.iter().filter(|d| d.healthy).count() as u32;
+            let volumes_not_healthy =
+                volumes.iter().filter(|v| v.state != "Healthy").count() as u32;
+            let replicas_out = replicas.iter().filter(|r| replica_out_of_sync(r)).count() as u32;
+
+            let critical = disks_healthy < disks.len() as u32
+                || volumes.iter().any(|v| v.state == "Failed")
+                || replicas.iter().any(|r| r.status == "failed");
+            let health = if critical {
+                "critical"
+            } else if volumes_not_healthy > 0 || replicas_out > 0 {
+                "warning"
+            } else {
+                "ok"
+            };
+
+            NodeSummary {
+                name: node.clone(),
+                disks_total: disks.len() as u32,
+                disks_healthy,
+                disks_uninitialized: disks
+                    .iter()
+                    .filter(|d| !d.is_system_disk && !d.blobstore_initialized)
+                    .count() as u32,
+                volumes_total: volumes.len() as u32,
+                local_nvme_volumes: volumes.iter().filter(|v| v.local_nvme).count() as u32,
+                replicas_out_of_sync: replicas_out,
+                volumes_not_healthy,
+                capacity_gb: disks.iter().map(|d| d.capacity_gb).sum(),
+                allocated_gb: disks.iter().map(|d| d.allocated_space).sum(),
+                health: health.to_string(),
+            }
+        })
+        .collect()
+}
+
 /// Handle GET /api/overview - summary counts only (smallest payload; the
 /// Overview tab's 30s tick no longer ships the full volume/disk/snapshot world).
 async fn get_overview_minimal(
@@ -2032,32 +2140,130 @@ async fn proxy_node_agent_endpoint_long(
 }
 
 /// Get all snapshots from all nodes
+/// One node's copy of a logical snapshot (same shape as the tree
+/// endpoint's replica_bdev_details entries, which the snapshots tab
+/// already renders).
+#[derive(Serialize, Debug, Clone, PartialEq, utoipa::ToSchema)]
+struct SnapshotCopy {
+    node: String,
+    /// SPDK lvol snapshot name on that node.
+    name: String,
+    aliases: Vec<String>,
+    driver: String,
+    snapshot_source_bdev: String,
+}
+
+/// One logical snapshot: the per-node SPDK copies merged by snapshot name.
+/// Copies of the same snapshot share the name; each node's copy is its own
+/// lvol with its own uuid.
+#[derive(Serialize, Debug, Clone, PartialEq, utoipa::ToSchema)]
+struct DashboardSnapshot {
+    /// UUID of the first copy (nodes sorted) — a stable display id, not
+    /// shared by the other copies.
+    snapshot_uuid: String,
+    snapshot_name: String,
+    source_volume_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lvs_name: Option<String>,
+    size_bytes: u64,
+    /// Node-agent list stamp, not a real creation time (SPDK lvols store
+    /// none) — real times are the timeline endpoint's job.
+    creation_time: String,
+    ready_to_use: bool,
+    /// Node of the first copy; the copy list is authoritative.
+    node: String,
+    /// One entry per node currently holding a copy.
+    replica_bdev_details: Vec<SnapshotCopy>,
+}
+
+/// The subset of the node agent's SnapshotInfo the dashboard consumes.
+#[derive(Debug, Clone, Deserialize)]
+struct AgentSnapshotRow {
+    snapshot_uuid: String,
+    snapshot_name: String,
+    source_volume_id: String,
+    #[serde(default)]
+    lvs_name: Option<String>,
+    #[serde(default)]
+    size_bytes: u64,
+    #[serde(default)]
+    creation_time: String,
+    #[serde(default)]
+    ready_to_use: bool,
+}
+
+/// Merge per-node snapshot listings into one row per logical snapshot,
+/// keyed by snapshot name (the cross-node join key — same rule as the
+/// timeline's collect_spdk_snapshots). Output is name-ordered; copies are
+/// node-ordered, and the first copy supplies the row's scalar fields.
+fn merge_snapshot_copies(
+    per_node: Vec<(String, Vec<AgentSnapshotRow>)>,
+) -> Vec<DashboardSnapshot> {
+    let mut by_name: std::collections::BTreeMap<String, Vec<(String, AgentSnapshotRow)>> =
+        Default::default();
+    for (node, rows) in per_node {
+        for row in rows {
+            by_name
+                .entry(row.snapshot_name.clone())
+                .or_default()
+                .push((node.clone(), row));
+        }
+    }
+    by_name
+        .into_iter()
+        .map(|(name, mut copies)| {
+            copies.sort_by(|a, b| a.0.cmp(&b.0));
+            let (first_node, first) = copies[0].clone();
+            DashboardSnapshot {
+                snapshot_uuid: first.snapshot_uuid,
+                snapshot_name: name,
+                source_volume_id: first.source_volume_id,
+                lvs_name: first.lvs_name,
+                size_bytes: first.size_bytes,
+                creation_time: first.creation_time,
+                ready_to_use: copies.iter().all(|(_, c)| c.ready_to_use),
+                node: first_node,
+                replica_bdev_details: copies
+                    .iter()
+                    .map(|(node, c)| SnapshotCopy {
+                        node: node.clone(),
+                        name: c.snapshot_name.clone(),
+                        aliases: vec![c.snapshot_name.clone()],
+                        driver: "lvol".to_string(),
+                        snapshot_source_bdev: crate::identity::lvol_name(&c.source_volume_id),
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
 async fn get_all_snapshots(state: AppState) -> Result<impl Reply, warp::Rejection> {
     println!("📸 [DASHBOARD] Fetching snapshots from all nodes");
-    
+
     let node_agents = state.node_agents.read().await;
-    let mut all_snapshots = Vec::new();
-    
+    let mut per_node = Vec::new();
+
     for (node_name, node_url) in node_agents.iter() {
         println!("   Querying node: {}", node_name);
-        
+
         let client = HttpClient::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|_| warp::reject())?;
-        
+
         let url = format!("{}/api/snapshots/list", node_url);
-        
+
         match client.get(&url).send().await {
             Ok(response) if response.status().is_success() => {
                 if let Ok(data) = response.json::<serde_json::Value>().await {
                     if let Some(snapshots) = data["snapshots"].as_array() {
-                        for snapshot in snapshots {
-                            let mut snapshot_with_node = snapshot.clone();
-                            snapshot_with_node["node"] = json!(node_name);
-                            all_snapshots.push(snapshot_with_node);
-                        }
-                        println!("   ✓ Found {} snapshots on {}", snapshots.len(), node_name);
+                        let rows: Vec<AgentSnapshotRow> = snapshots
+                            .iter()
+                            .filter_map(|s| serde_json::from_value(s.clone()).ok())
+                            .collect();
+                        println!("   ✓ Found {} snapshots on {}", rows.len(), node_name);
+                        per_node.push((node_name.clone(), rows));
                     }
                 }
             }
@@ -2069,9 +2275,14 @@ async fn get_all_snapshots(state: AppState) -> Result<impl Reply, warp::Rejectio
             }
         }
     }
-    
-    println!("✅ [DASHBOARD] Total snapshots found: {}", all_snapshots.len());
-    Ok(warp::reply::json(&all_snapshots))
+
+    let merged = merge_snapshot_copies(per_node);
+    println!(
+        "✅ [DASHBOARD] {} logical snapshots ({} node copies)",
+        merged.len(),
+        merged.iter().map(|s| s.replica_bdev_details.len()).sum::<usize>()
+    );
+    Ok(warp::reply::json(&merged))
 }
 
 /// Query SPDK data from a single node (snapshots + bdevs + lvol stores)
@@ -3118,6 +3329,15 @@ pub fn setup_minimal_dashboard_routes(
         .and(state_filter.clone())
         .and_then(get_disks_minimal);
 
+    // Fleet rollup (path::end keeps it clear of /api/nodes/{node}/disks/*).
+    let nodes_route = warp::path("api")
+        .and(warp::path("nodes"))
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(viewer.clone())
+        .and(state_filter.clone())
+        .and_then(get_nodes_minimal);
+
     // Proxy routes for node agents
     let proxy_uninitialized = warp::path("api")
         .and(warp::path("nodes"))
@@ -3298,6 +3518,7 @@ pub fn setup_minimal_dashboard_routes(
         .or(overview_route)
         .or(volumes_route)
         .or(disks_route)
+        .or(nodes_route)
         .or(events_route)
         .or(proxy_uninitialized)
         .or(proxy_setup)
@@ -3419,6 +3640,14 @@ mod api_doc {
             (status = 500, description = "Aggregate build failed", body = ApiError)))]
     fn disks() {}
 
+    #[utoipa::path(get, path = "/api/nodes", tag = "aggregate",
+        security(("bearerAuth" = [])),
+        responses(
+            (status = 200, description = "Per-node fleet rollup (health, disk/volume/sync counts) from the cached aggregate", body = NodesResponse),
+            (status = 401, description = "Missing/expired token", body = ApiError),
+            (status = 500, description = "Aggregate build failed", body = ApiError)))]
+    fn nodes_projection() {}
+
     #[utoipa::path(get, path = "/api/events", tag = "events",
         params(EventsQuery),
         security(("bearerAuth" = [])),
@@ -3438,7 +3667,7 @@ mod api_doc {
     #[utoipa::path(get, path = "/api/snapshots", tag = "snapshots",
         security(("bearerAuth" = [])),
         responses(
-            (status = 200, description = "Raw SPDK snapshot objects (untyped passthrough)", body = Vec<Object>),
+            (status = 200, description = "Logical snapshots: per-node SPDK copies merged by snapshot name, one replica_bdev_details entry per copy", body = Vec<DashboardSnapshot>),
             (status = 401, description = "Missing/expired token", body = ApiError)))]
     fn snapshots() {}
 
@@ -3548,7 +3777,8 @@ mod api_doc {
         ),
         modifiers(&SecurityAddon),
         paths(
-            healthz, login, dashboard, overview, volumes, disks, events, refresh,
+            healthz, login, dashboard, overview, volumes, disks, nodes_projection,
+            events, refresh,
             snapshots, snapshots_timeline, volumesnapshot_delete,
             node_disk_status, node_disks_uninitialized, node_disks_setup,
             node_disks_initialize, node_disks_reset, node_disks_delete,
@@ -3559,9 +3789,11 @@ mod api_doc {
             ReplicaSyncInfo, NvmfTarget, NvmeofTargetInfo, DashboardRaidStatus,
             RaidMember, RebuildInfo, SpdkValidationStatus, PvcInfo, ProvisionedVolume,
             OrphanedVolumeInfo, ConsumerRaid, ConsumerRaidMember, NodeInfo,
-            DashboardOverview, VolumesResponse, DisksResponse, EventsResponse,
+            DashboardOverview, VolumesResponse, DisksResponse, NodesResponse,
+            NodeSummary, EventsResponse,
             RefreshResponse, ApiError, DashboardEvent, WindowStep, HotRejoinWindow,
             SnapshotTimelineResponse, SnapshotTimelineEvent, TimelineReplica,
+            DashboardSnapshot, SnapshotCopy,
             DeleteVolumeSnapshotResponse,
             DiskSetupRequest, DiskSetupResponse, DeleteDiskRequest, DiskDeleteResponse,
             NodeDiskStatus, NodeDiskListing,
@@ -4734,5 +4966,158 @@ mod tests {
 
         let filtered = filter_disks(disks, &query);
         assert_eq!(filtered.len(), 1);
+    }
+
+    // --- /api/nodes fleet rollup: health = worst condition on the node ---
+
+    fn fleet_data(volumes: Vec<DashboardVolume>, disks: Vec<DashboardDisk>, nodes: Vec<&str>) -> DashboardData {
+        DashboardData {
+            volumes,
+            raw_volumes: vec![],
+            disks,
+            nodes: nodes.into_iter().map(String::from).collect(),
+            node_info: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn node_summaries_roll_up_health_per_node() {
+        let mut bad_disk = create_test_disk("disk-bad", "node-c", true);
+        bad_disk.healthy = false;
+        let data = fleet_data(
+            vec![
+                create_test_volume(
+                    "vol-ok",
+                    "Healthy",
+                    vec!["node-a".to_string(), "node-b".to_string()],
+                    true,
+                    false,
+                ),
+                // Degraded volume with a rebuilding (out-of-sync) replica on node-b.
+                create_test_volume(
+                    "vol-deg",
+                    "Degraded",
+                    vec!["node-b".to_string()],
+                    false,
+                    true,
+                ),
+            ],
+            vec![
+                create_test_disk("disk-a", "node-a", true),
+                create_test_disk("disk-a2", "node-a", false),
+                create_test_disk("disk-b", "node-b", true),
+                bad_disk,
+            ],
+            vec!["node-a", "node-b", "node-c"],
+        );
+
+        let summaries = node_summaries(&data);
+        assert_eq!(summaries.len(), 3);
+
+        let by_name: HashMap<&str, &NodeSummary> =
+            summaries.iter().map(|s| (s.name.as_str(), s)).collect();
+
+        let a = by_name["node-a"];
+        assert_eq!(a.health, "ok");
+        assert_eq!((a.disks_total, a.disks_healthy, a.disks_uninitialized), (2, 2, 1));
+        assert_eq!((a.volumes_total, a.local_nvme_volumes), (1, 1));
+        assert_eq!(a.capacity_gb, 2000.0);
+
+        let b = by_name["node-b"];
+        assert_eq!(b.health, "warning");
+        assert_eq!(b.volumes_not_healthy, 1);
+        assert_eq!(b.replicas_out_of_sync, 1);
+        assert_eq!(b.volumes_total, 2);
+
+        let c = by_name["node-c"];
+        assert_eq!(c.health, "critical");
+        assert_eq!((c.disks_total, c.disks_healthy), (1, 0));
+        assert_eq!(c.volumes_total, 0);
+    }
+
+    #[test]
+    fn node_health_prefers_tier2_sync_signal_over_legacy_status() {
+        // A replica reported "healthy" by the legacy status but stale by the
+        // Tier-2 sync record is out of sync — the sync signal wins.
+        let mut vol = create_test_volume("vol", "Healthy", vec!["node-a".to_string()], false, false);
+        vol.replica_statuses[0].sync = Some(ReplicaSyncInfo {
+            sync_state: "stale".to_string(),
+            last_epoch: Some("epoch-vol-4".to_string()),
+            epoch_lag: Some(2),
+            since: None,
+            reason: None,
+            hot_rejoin: None,
+        });
+        let data = fleet_data(vec![vol], vec![create_test_disk("d", "node-a", true)], vec!["node-a"]);
+
+        let summaries = node_summaries(&data);
+        assert_eq!(summaries[0].replicas_out_of_sync, 1);
+        assert_eq!(summaries[0].health, "warning");
+    }
+
+    // --- flat /api/snapshots: per-node copies merge to one logical row
+    //     (pre-fix, every copy was its own row and the snapshots-tab
+    //     "Total Snapshots" chip counted a 2-replica snapshot twice) ---
+
+    fn agent_row(name: &str, uuid: &str) -> AgentSnapshotRow {
+        serde_json::from_value(json!({
+            "snapshot_uuid": uuid,
+            "snapshot_name": name,
+            "source_volume_id": "pvc-abc",
+            "lvs_name": "lvs_node_0000-00-1f-0",
+            "size_bytes": 1073741824u64,
+            "creation_time": "2026-07-05T00:00:00Z",
+            "ready_to_use": true
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_collapses_per_node_copies_into_one_logical_snapshot() {
+        let merged = merge_snapshot_copies(vec![
+            ("node-b".to_string(), vec![agent_row("snap_pvc-abc_1", "uuid-b")]),
+            ("node-a".to_string(), vec![agent_row("snap_pvc-abc_1", "uuid-a")]),
+        ]);
+
+        assert_eq!(merged.len(), 1);
+        let snap = &merged[0];
+        // Nodes sort, so the first copy (and the row's uuid/node) is node-a's.
+        assert_eq!(snap.snapshot_uuid, "uuid-a");
+        assert_eq!(snap.node, "node-a");
+        assert_eq!(snap.replica_bdev_details.len(), 2);
+        assert_eq!(
+            snap.replica_bdev_details.iter().map(|c| c.node.as_str()).collect::<Vec<_>>(),
+            vec!["node-a", "node-b"]
+        );
+        assert_eq!(
+            snap.replica_bdev_details[0].snapshot_source_bdev,
+            crate::identity::lvol_name("pvc-abc")
+        );
+    }
+
+    #[test]
+    fn merge_keeps_distinct_snapshots_separate() {
+        let merged = merge_snapshot_copies(vec![(
+            "node-a".to_string(),
+            vec![agent_row("snap_pvc-abc_1", "u1"), agent_row("epoch-pvc-abc-7", "u2")],
+        )]);
+
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().all(|s| s.replica_bdev_details.len() == 1));
+    }
+
+    #[test]
+    fn merge_tolerates_agent_rows_missing_optional_fields() {
+        // Older agents may omit lvs_name; serde defaults must hold.
+        let row: AgentSnapshotRow = serde_json::from_value(json!({
+            "snapshot_uuid": "u1",
+            "snapshot_name": "snap_pvc-abc_1",
+            "source_volume_id": "pvc-abc"
+        }))
+        .unwrap();
+        let merged = merge_snapshot_copies(vec![("node-a".to_string(), vec![row])]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].lvs_name, None);
+        assert_eq!(merged[0].size_bytes, 0);
     }
 }

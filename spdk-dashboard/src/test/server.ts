@@ -9,6 +9,7 @@ import {
   makeDashboardData,
   makeEventsResponse,
   makeNodeDiskStatus,
+  makeNodesResponse,
   makeSnapshotTimeline,
 } from './fixtures';
 
@@ -35,6 +36,13 @@ export const handlers = [
       return HttpResponse.json({ error: 'unauthorized' }, { status: 401 });
     }
     return HttpResponse.json(makeDashboardData());
+  }),
+
+  http.get('/api/nodes', ({ request }) => {
+    if (request.headers.get('authorization') !== `Bearer ${TEST_TOKEN}`) {
+      return HttpResponse.json({ error: 'unauthorized' }, { status: 401 });
+    }
+    return HttpResponse.json(makeNodesResponse());
   }),
 
   http.get('/api/events', ({ request }) => {

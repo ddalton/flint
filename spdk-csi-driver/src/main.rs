@@ -1,4 +1,10 @@
 // main.rs - Entry point for Minimal State SPDK CSI Driver
+
+// The dashboard warp route chain's nested filter type overflows the default
+// trait-solver recursion limit on rustc <=1.92 when monomorphized here (the
+// lib carries the same attribute — both crates evaluate the type).
+#![recursion_limit = "256"]
+
 use std::sync::Arc;
 use tonic::transport::Server;
 use kube::Client;

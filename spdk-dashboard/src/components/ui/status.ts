@@ -102,6 +102,56 @@ export function volumeStateStyle(state: string): VolumeStateStyle {
   return VOLUME_STATE_STYLES[state as keyof typeof VOLUME_STATE_STYLES] ?? UNKNOWN_VOLUME_STATE;
 }
 
+// --- Node fleet health (backend NodeSummary.health) ---------------------
+
+export type NodeHealth = 'critical' | 'warning' | 'ok';
+
+export interface NodeHealthStyle {
+  label: string;
+  chip: string;
+  // Heatmap status-cell fill.
+  cell: string;
+  // Sort weight: fleet views put the most broken nodes first.
+  priority: number;
+  description: string;
+}
+
+export const NODE_HEALTH_STYLES: Record<NodeHealth, NodeHealthStyle> = {
+  critical: {
+    label: 'Critical',
+    chip: 'bg-red-100 text-red-800 border-red-200',
+    cell: 'bg-red-500',
+    priority: 0,
+    description: 'Unhealthy disk or failed volume/replica on this node',
+  },
+  warning: {
+    label: 'Warning',
+    chip: 'bg-amber-100 text-amber-800 border-amber-200',
+    cell: 'bg-amber-400',
+    priority: 1,
+    description: 'Degraded volume or out-of-sync replica on this node',
+  },
+  ok: {
+    label: 'Ready',
+    chip: 'bg-green-100 text-green-800 border-green-200',
+    cell: 'bg-green-500',
+    priority: 3,
+    description: 'All disks healthy, all replicas in sync',
+  },
+};
+
+const UNKNOWN_NODE_HEALTH: NodeHealthStyle = {
+  label: 'Unknown',
+  chip: 'bg-gray-100 text-gray-800 border-gray-200',
+  cell: 'bg-gray-400',
+  priority: 2,
+  description: 'Health state not recognized by this frontend',
+};
+
+export function nodeHealthStyle(health: string): NodeHealthStyle {
+  return NODE_HEALTH_STYLES[health as NodeHealth] ?? UNKNOWN_NODE_HEALTH;
+}
+
 // --- Raid-member / legacy replica states --------------------------------
 // Lowercase keys: SPDK member states (online/degraded/failed/rebuilding/
 // spare/removing), the legacy replica statuses, and the Tier-2 sync states

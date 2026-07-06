@@ -2,7 +2,7 @@
 // VolumeSnapshots as markers, engine epochs as a density ribbon), pinned
 // popover with the CR-path delete, admin-gated.
 import { describe, expect, it, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -124,6 +124,89 @@ describe('SnapshotTimelineView', () => {
     const popover = await screen.findByRole('dialog', { name: 'Snapshot details' });
     expect(popover).toHaveTextContent('orphan');
     expect(screen.queryByRole('button', { name: /Delete/ })).not.toBeInTheDocument();
+  });
+
+  it('flags a ghost — CR-backed snapshot whose SPDK copies are all gone', async () => {
+    await login('admin', 'right-password');
+    const base = makeSnapshotTimeline();
+    server.use(
+      http.get('/api/snapshots/timeline', () =>
+        HttpResponse.json({
+          ...base,
+          // snap-demo-2's copies were deleted out-of-band; the CR remains
+          // and still claims ready.
+          events: base.events.map((e) =>
+            e.name === 'snap-demo-2' ? { ...e, nodes: [] } : e
+          ),
+        })
+      )
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    // Legend surfaces the exception; the marker names it for a11y.
+    expect(await screen.findByText(/1 without copies/)).toBeInTheDocument();
+    await user.click(
+      screen.getByRole('button', { name: 'User snapshot snap-demo-2 (no copies)' })
+    );
+
+    const popover = await screen.findByRole('dialog', { name: 'Snapshot details' });
+    expect(popover).toHaveTextContent('none');
+    expect(popover).toHaveTextContent('No SPDK copies exist on any node');
+    expect(popover).toHaveTextContent(/restore will fail/);
+    // Clean-up path stays available: the CR delete is exactly the remedy.
+    expect(within(popover).getByRole('button', { name: /Delete/ })).toBeEnabled();
+
+    // Healthy snapshots are untouched.
+    expect(
+      screen.getByRole('button', { name: 'User snapshot snap-demo-1' })
+    ).toBeInTheDocument();
+  });
+
+  it('surfaces a ghost hidden inside a collapsed cluster marker', async () => {
+    // Three snapshots cut seconds apart collapse into one +N marker (the
+    // live runl drill). The ghost must still read on the cluster, not only
+    // in the legend — else a lane scan misses it.
+    await login('admin', 'right-password');
+    const now = Date.now();
+    // Identical cut time → one x position → guaranteed single cluster,
+    // independent of chart width (the live runl drill's 3-in-7s burst).
+    const cutAt = new Date(now - 5000).toISOString();
+    const burst = (n: number, nodes: string[]) => ({
+      id: `c${n}`, kind: 'user' as const, name: `burst-${n}`, spdk_name: `snap_x_${n}`,
+      created_at: cutAt, size_bytes: 1, ready: true, nodes,
+      vs_namespace: 'default', vs_name: `burst-${n}`, vsc_name: `c${n}`, orphan: false,
+    });
+    server.use(
+      http.get('/api/snapshots/timeline', () =>
+        HttpResponse.json(
+          makeSnapshotTimeline({
+            now: new Date(now).toISOString(),
+            current_epoch: null,
+            events: [
+              burst(1, ['runk-aws-1']),
+              burst(2, []), // ghost: CR present, no copies
+              burst(3, ['runk-aws-1']),
+            ],
+          })
+        )
+      )
+    );
+    const user = userEvent.setup();
+    renderView();
+
+    // The collapsed cluster marker itself announces the contained ghost.
+    const cluster = await screen.findByRole('button', {
+      name: '3 user snapshots (1 without copies)',
+    });
+    expect(cluster).toBeInTheDocument();
+    expect(screen.getByText(/1 without copies/)).toBeInTheDocument();
+
+    // Drilling in still reaches the ghost's warning + delete remedy.
+    await user.click(cluster);
+    const list = await screen.findByRole('dialog', { name: 'Snapshot details' });
+    await user.click(within(list).getByRole('button', { name: /burst-2/ }));
+    expect(list).toHaveTextContent('No SPDK copies exist on any node');
   });
 
   it('explains an empty volume instead of rendering a bare card', async () => {

@@ -1,4 +1,10 @@
 // Minimal State SPDK CSI Driver - Library Modules
+
+// The dashboard's warp route chain (spdk_dashboard_backend_minimal) nests one
+// filter type per `.or(route)`; at 20+ routes the trait solver overflows the
+// default limit of 128 on rustc <=1.92 (E0275 at the /api/nodes addition).
+#![recursion_limit = "256"]
+
 pub mod identity;  // Canonical volume identity: VolumeRef + naming + parsers (identity-unification Phase 0)
 pub mod spdk_native;
 pub mod nvmeof_utils;

@@ -68,6 +68,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["nodes_projection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/nodes/{node}/disks/delete": {
         parameters: {
             query?: never;
@@ -412,6 +428,33 @@ export interface components {
             status: string;
             sync?: null | components["schemas"]["ReplicaSyncInfo"];
         };
+        /**
+         * @description One logical snapshot: the per-node SPDK copies merged by snapshot name.
+         *     Copies of the same snapshot share the name; each node's copy is its own
+         *     lvol with its own uuid.
+         */
+        DashboardSnapshot: {
+            /**
+             * @description Node-agent list stamp, not a real creation time (SPDK lvols store
+             *     none) — real times are the timeline endpoint's job.
+             */
+            creation_time: string;
+            lvs_name?: string | null;
+            /** @description Node of the first copy; the copy list is authoritative. */
+            node: string;
+            ready_to_use: boolean;
+            /** @description One entry per node currently holding a copy. */
+            replica_bdev_details: components["schemas"]["SnapshotCopy"][];
+            /** Format: int64 */
+            size_bytes: number;
+            snapshot_name: string;
+            /**
+             * @description UUID of the first copy (nodes sorted) — a stable display id, not
+             *     shared by the other copies.
+             */
+            snapshot_uuid: string;
+            source_volume_id: string;
+        };
         DashboardVolume: {
             access_method: string;
             /** Format: int32 */
@@ -608,6 +651,54 @@ export interface components {
             memory_utilization_pct: number;
             name: string;
         };
+        /**
+         * @description Per-node fleet rollup — the nodes tab's landing payload. Grows with
+         *     node count only, never with per-volume/per-disk detail (that stays in
+         *     the aggregate, fetched when one node is drilled into).
+         */
+        NodeSummary: {
+            /** Format: double */
+            allocated_gb: number;
+            /** Format: double */
+            capacity_gb: number;
+            /** Format: int32 */
+            disks_healthy: number;
+            /** Format: int32 */
+            disks_total: number;
+            /**
+             * Format: int32
+             * @description Non-system disks with no blobstore — init candidates (onboarding
+             *     work, not a health condition).
+             */
+            disks_uninitialized: number;
+            /**
+             * @description Worst condition on the node: "critical" | "warning" | "ok".
+             *     critical = unhealthy disk or failed volume/replica here;
+             *     warning = degraded volume or out-of-sync replica here.
+             */
+            health: string;
+            /** Format: int32 */
+            local_nvme_volumes: number;
+            name: string;
+            /**
+             * Format: int32
+             * @description This node's replicas not in_sync (stale/standby/rejoining).
+             */
+            replicas_out_of_sync: number;
+            /**
+             * Format: int32
+             * @description Volumes with a replica here whose state is not Healthy.
+             */
+            volumes_not_healthy: number;
+            /**
+             * Format: int32
+             * @description Volumes with a replica on this node.
+             */
+            volumes_total: number;
+        };
+        NodesResponse: {
+            nodes: components["schemas"]["NodeSummary"][];
+        };
         NvmeofTargetInfo: {
             active: boolean;
             bdev_name: string;
@@ -697,6 +788,20 @@ export interface components {
          * @enum {string}
          */
         Role: "viewer" | "admin";
+        /**
+         * @description Get all snapshots from all nodes
+         *     One node's copy of a logical snapshot (same shape as the tree
+         *     endpoint's replica_bdev_details entries, which the snapshots tab
+         *     already renders).
+         */
+        SnapshotCopy: {
+            aliases: string[];
+            driver: string;
+            /** @description SPDK lvol snapshot name on that node. */
+            name: string;
+            node: string;
+            snapshot_source_bdev: string;
+        };
         SnapshotTimelineEvent: {
             /** @description RFC3339. None only for orphans (no CR, and SPDK stores no time). */
             created_at?: string | null;
@@ -932,6 +1037,44 @@ export interface operations {
             };
             /** @description Invalid credentials */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    nodes_projection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Per-node fleet rollup (health, disk/volume/sync counts) from the cached aggregate */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodesResponse"];
+                };
+            };
+            /** @description Missing/expired token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Aggregate build failed */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1315,13 +1458,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Raw SPDK snapshot objects (untyped passthrough) */
+            /** @description Logical snapshots: per-node SPDK copies merged by snapshot name, one replica_bdev_details entry per copy */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>[];
+                    "application/json": components["schemas"]["DashboardSnapshot"][];
                 };
             };
             /** @description Missing/expired token */

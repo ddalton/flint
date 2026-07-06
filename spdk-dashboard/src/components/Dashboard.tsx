@@ -22,8 +22,8 @@ const VolumesTable = lazy(() =>
   import('./tables/VolumesTable').then(m => ({ default: m.VolumesTable })));
 const DisksTable = lazy(() =>
   import('./tables/DisksTable').then(m => ({ default: m.DisksTable })));
-const FilteredNodesView = lazy(() =>
-  import('./nodes/FilteredNodesView').then(m => ({ default: m.FilteredNodesView })));
+const NodesFleetView = lazy(() =>
+  import('./nodes/NodesFleetView').then(m => ({ default: m.NodesFleetView })));
 const DiskSetupTab = lazy(() =>
   import('./setup/DiskSetupTab').then(m => ({ default: m.DiskSetupTab })));
 const EnhancedSnapshotsTab = lazy(() =>
@@ -233,7 +233,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       case 'nodes':
         return (
-          <FilteredNodesView 
+          <NodesFleetView
             data={data}
             activeFilter={volumeFilter}
             onClearFilter={handleClearFilter}
