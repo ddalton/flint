@@ -513,6 +513,38 @@ drill campaigns):
 runbook sections landed in `docs/tier2-operator-runbook.md` or a new
 `docs/pnfs-operator-runbook.md`.
 
+### Status: 3 of 4 drills green twice, runbook landed (2026-07-06)
+
+Scripted suite: `tests/k8s/pnfs-drills/` (lib.sh + one script per
+drill; kubectl-only, cluster-agnostic, KUBECONFIG + CLIENT_NODE env).
+Runbook: `docs/pnfs-operator-runbook.md` with measured numbers.
+
+- **Drill 1 (DS reschedule under load): GREEN ×2** on runn —
+  cross-node reschedule 49–54 s, per-pod ClusterIP unchanged,
+  identity stamp stable (PVC followed), zero errors, all checksums,
+  **max client stall 1 s** (graceful termination keeps the old DS
+  serving while the replacement attaches; the in-flight-wedge
+  residual did not trigger on the graceful path).
+- **Drill 2 (node death): GREEN ×2** — kubelet stopped via nsenter,
+  NotReady in ~37 s, out-of-service taint force-detaches and the
+  StatefulSet replaces the DS on another node **64–70 s after kubelet
+  death**, ClusterIP + volume follow, zero errors, stall 1 s. Node
+  restore automated via SSM (instance resolved by InternalIP — trove
+  nodes have no providerID).
+- **Drill 4 (MDS roll mid-workload): GREEN ×2** — rollout ~40 s,
+  placements reload, DSes re-register on their next heartbeat, zero
+  recalls, zero errors, **stall 1 s** (the MDS is out of the data
+  path; kill -9 variant separately proven in the Phase 3 k8s drill).
+- **Drill 3 (replica failure under a DS): remaining.** Needs an
+  r2-backed DS (new flint-spdk-r2 SC + StatefulSet claim-template
+  change — immutable field, so orphan-delete + recreate) and a
+  leg-kill via the node agent; scoped, not yet run.
+
+Script gotchas baked into lib.sh for posterity: `grep -q` SIGPIPEs
+producers under pipefail (let grep consume the stream); a readiness
+wait right after pod delete can match the OLD Terminating pod (wait
+for the UID to change first).
+
 ---
 
 ## Phase 5 — re-bench and ADR 0005 (~1–2 days cluster time)
