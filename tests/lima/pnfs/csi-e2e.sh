@@ -200,13 +200,12 @@ limactl shell "$LIMA_VM" -- sudo umount "$VM_MOUNT"
 # *filesystem* block size, unrelated to per-file allocation.
 for n in 1 2; do
   ds_dir="/tmp/flint-pnfs-ds${n}"
-  # The DS rebases the FULL MDS-FH path under its export root (the
-  # Phase 4 basename-collision fix, c393f6a) — on macOS that means
-  # /tmp/flint-pnfs-dsN/private/tmp/flint-pnfs-mds-exports/<vol>.
-  # Locate the backing file wherever it landed instead of assuming
-  # the pre-fix flat layout.
-  ds_file=$(find "$ds_dir" -type f -name "$VOLUME_ID" | head -1)
-  [ -n "$ds_file" ] || fail "DS${n} has no file for $VOLUME_ID"
+  # Since the P0-2 identity work, DS stripe files are identity-keyed
+  # ({file_id:016x}.stripeN), never path-named — the volume name does
+  # not appear on a DS. Any allocated stripe file proves DS-path I/O
+  # ran (an MDS-direct fallback would leave the DS empty).
+  ds_file=$(find "$ds_dir" -type f -name "*.stripe*" | head -1)
+  [ -n "$ds_file" ] || fail "DS${n} has no stripe file for $VOLUME_ID"
   ds_blocks=$(stat -f %b "$ds_file")
   ds_alloc=$(( ds_blocks * 512 ))
   [ "$ds_alloc" -gt 0 ] \
