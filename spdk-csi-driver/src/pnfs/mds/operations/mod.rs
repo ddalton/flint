@@ -15,9 +15,13 @@
 //! - RFC 8881 Section 18.44 - LAYOUTRETURN
 //! - RFC 8881 Chapter 13 - NFSv4.1 File Layout Type
 
-use crate::pnfs::mds::layout::{IoMode, LayoutManager, LayoutOwner, LayoutSegment, LayoutType};
+use crate::pnfs::mds::layout::{
+    truncate_gate_key, FilePlacement, IoMode, LayoutManager, LayoutOwner, LayoutSegment,
+    LayoutType,
+};
 use crate::pnfs::mds::device::{DeviceId, DeviceRegistry, DeviceStatus};
 use crate::pnfs::handler_trait::FallbackIoDisposition;
+use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -57,6 +61,10 @@ pub struct PnfsOperationHandler {
     /// pin's stripe files for cleanup (DSes store legacy stripes at
     /// <ds-data-dir>/<export-path-minus-leading-slash>/<file_key>).
     export_fs_path: String,
+
+    /// Cached DsControl clients (MDS → DS), keyed by control endpoint.
+    /// Entries are evicted on RPC failure so retries re-dial fresh.
+    ds_control_clients: Arc<DashMap<String, crate::pnfs::grpc::AuthedDsControlClient>>,
 }
 
 impl PnfsOperationHandler {
@@ -71,6 +79,7 @@ impl PnfsOperationHandler {
             device_registry,
             boot_instant: Instant::now(),
             export_fs_path,
+            ds_control_clients: Arc::new(DashMap::new()),
         }
     }
 
@@ -103,6 +112,19 @@ impl PnfsOperationHandler {
         let Some(placement) = self.layout_manager.placement_for(file_key) else {
             return FallbackIoDisposition::Serve;
         };
+        // Truncate-dirty overrides the healthy-fleet trap check: the
+        // client is (correctly) being refused layouts right now, so its
+        // MDS-fallback I/O is expected, not a trap symptom. Park it
+        // while the confirmation retry runs; ceiling still applies so a
+        // permanently unreachable DS can't livelock the client.
+        let gate = truncate_gate_key(&placement, file_key);
+        if let Some(since) = self.layout_manager.truncate_dirty_since(&gate) {
+            return if Instant::now().saturating_duration_since(since) < ceiling {
+                FallbackIoDisposition::Delay
+            } else {
+                FallbackIoDisposition::FailFast
+            };
+        }
         let now = Instant::now();
         // Longest current outage among the file's pinned DSes.
         let mut worst_outage: Option<Duration> = None;
@@ -137,6 +159,23 @@ impl PnfsOperationHandler {
             "📥 LAYOUTGET: offset={}, length={}, iomode={:?}, layout_type={:?}",
             args.offset, args.length, args.iomode, args.layout_type
         );
+
+        // Truncate-dirty gate: while a size change is unconfirmed on
+        // any pinned DS, a fresh layout would let the client read
+        // stale stripe bytes beyond the new EOF. TRYLATER regardless
+        // of how long it has been dirty — layouts must NEVER expose
+        // stale bytes; the fallback path's ceiling keeps clients from
+        // parking forever.
+        if let Some(placement) = self.layout_manager.placement_for(&args.file_key) {
+            let gate = truncate_gate_key(&placement, &args.file_key);
+            if self.layout_manager.truncate_dirty_since(&gate).is_some() {
+                warn!(
+                    "⏳ LAYOUTGET for truncate-dirty file '{}' → TRYLATER (stripe truncation unconfirmed)",
+                    args.file_key
+                );
+                return Err(LayoutGetError::TryLater);
+            }
+        }
 
         // Check available devices
         let active_devices = self.device_registry.count_by_status(
@@ -695,6 +734,11 @@ pub enum LayoutGetError {
     UnknownLayoutType,
     BadStateId,
     Io,
+    /// Transient refusal (NFS4ERR_LAYOUTTRYLATER): the file is
+    /// truncate-dirty — its new size reached the MDS stub but not yet
+    /// every pinned DS's stripe file, so a fresh layout would expose
+    /// stale bytes beyond the new EOF.
+    TryLater,
 }
 
 /// GETDEVICEINFO arguments (RFC 8881 Section 18.40.1)
@@ -826,7 +870,115 @@ pub enum GetDeviceListError {
 
 
 
+/// One TruncateStripeFile RPC to one DS, through the shared client
+/// cache. Transport failures evict the cached client so the next
+/// attempt re-dials.
+async fn ds_truncate_one(
+    clients: &DashMap<String, crate::pnfs::grpc::AuthedDsControlClient>,
+    endpoint: &str,
+    device_id: &str,
+    rel_path: &str,
+    new_length: u64,
+) -> Result<(), String> {
+    const DIAL_TIMEOUT: Duration = Duration::from_secs(2);
+    const RPC_TIMEOUT: Duration = Duration::from_secs(3);
+
+    let mut client = match clients.get(endpoint).map(|c| c.clone()) {
+        Some(c) => c,
+        None => {
+            let uri = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+                endpoint.to_string()
+            } else {
+                format!("http://{}", endpoint)
+            };
+            let ep = tonic::transport::Channel::from_shared(uri)
+                .map_err(|e| format!("bad DS control endpoint '{}': {}", endpoint, e))?;
+            let channel = tokio::time::timeout(DIAL_TIMEOUT, ep.connect())
+                .await
+                .map_err(|_| format!("dial {} timed out", endpoint))?
+                .map_err(|e| format!("dial {}: {}", endpoint, e))?;
+            let c = crate::pnfs::grpc::authed_ds_control_client(channel);
+            clients.insert(endpoint.to_string(), c.clone());
+            c
+        }
+    };
+
+    let req = crate::pnfs::grpc::TruncateStripeFileRequest {
+        device_id: device_id.to_string(),
+        rel_path: rel_path.to_string(),
+        new_length,
+    };
+    match tokio::time::timeout(RPC_TIMEOUT, client.truncate_stripe_file(tonic::Request::new(req)))
+        .await
+    {
+        Ok(Ok(resp)) => {
+            let r = resp.into_inner();
+            if r.ok {
+                Ok(())
+            } else {
+                // The DS answered and refused — not a channel problem.
+                Err(format!("DS {} refused: {}", device_id, r.message))
+            }
+        }
+        Ok(Err(status)) => {
+            clients.remove(endpoint);
+            Err(format!("DS {} rpc failed: {}", device_id, status))
+        }
+        Err(_) => {
+            clients.remove(endpoint);
+            Err(format!("DS {} rpc timed out", device_id))
+        }
+    }
+}
+
+/// Push `new_size` to every pinned DS's stripe file for one file.
+/// Returns true only when EVERY DS confirmed — anything less leaves
+/// the truncate-dirty gate in place.
+async fn truncate_fanout(
+    device_registry: &DeviceRegistry,
+    clients: &DashMap<String, crate::pnfs::grpc::AuthedDsControlClient>,
+    export_fs_path: &str,
+    file_key: &str,
+    placement: &FilePlacement,
+    new_size: u64,
+) -> bool {
+    let legacy_rel = format!("{}/{}", export_fs_path.trim_start_matches('/'), file_key);
+    let mut all_ok = true;
+    for (slot, device_id) in placement.device_ids.iter().enumerate() {
+        let rel = if placement.file_id != 0 {
+            placement.stripe_rel_path(slot)
+        } else {
+            legacy_rel.clone()
+        };
+        let Some(info) = device_registry.get(device_id) else {
+            warn!(
+                "✂️ truncate('{}'): DS {} not registered with this MDS incarnation",
+                file_key, device_id
+            );
+            all_ok = false;
+            continue;
+        };
+        let Some(endpoint) = info.control_endpoint else {
+            warn!(
+                "✂️ truncate('{}'): DS {} advertises no DsControl listener (set bind.controlPort)",
+                file_key, device_id
+            );
+            all_ok = false;
+            continue;
+        };
+        match ds_truncate_one(clients, &endpoint, device_id, &rel, new_size).await {
+            Ok(()) => debug!("✂️ {}: {} set_len({}) confirmed", device_id, rel, new_size),
+            Err(e) => {
+                warn!("✂️ truncate('{}') on {}: {}", file_key, device_id, e);
+                all_ok = false;
+            }
+        }
+    }
+    all_ok
+}
+
 // Implement PnfsOperations trait for PnfsOperationHandler
+#[tonic::async_trait]
 impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
     fn layoutget(&self, args: LayoutGetArgs) -> Result<LayoutGetResult, LayoutGetError> {
         self.layoutget(args)
@@ -857,6 +1009,70 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
                 self.layout_manager.enqueue_legacy_cleanup(&placement, &rel);
             }
         }
+    }
+
+    async fn note_truncate(&self, file_key: &str, new_size: u64) {
+        let Some(placement) = self.layout_manager.placement_for(file_key) else {
+            // Not striped — the MDS stub IS the file; nothing to push.
+            return;
+        };
+        // Gate before fanning out: from here until every pinned DS
+        // confirms, no fresh layout may expose the file.
+        let gate = truncate_gate_key(&placement, file_key);
+        self.layout_manager.mark_truncate_dirty(&gate, new_size);
+
+        let ok = truncate_fanout(
+            &self.device_registry,
+            &self.ds_control_clients,
+            &self.export_fs_path,
+            file_key,
+            &placement,
+            new_size,
+        )
+        .await;
+        if ok {
+            // Lifts the gate unless a DEEPER cut is still unconfirmed
+            // (that one's retry task owns the gate then).
+            self.layout_manager.clear_truncate_dirty_if(&gate, new_size);
+            return;
+        }
+
+        warn!(
+            "⏳ '{}' parked truncate-dirty — a pinned DS has not confirmed set_len({}); background retry armed",
+            file_key, new_size
+        );
+        let registry = Arc::clone(&self.device_registry);
+        let clients = Arc::clone(&self.ds_control_clients);
+        let manager = Arc::clone(&self.layout_manager);
+        let export = self.export_fs_path.clone();
+        let key = file_key.to_string();
+        tokio::spawn(async move {
+            // Bounded backoff, unbounded duration: a DS that comes back
+            // hours later still gets the cut; the gate keeps the file
+            // safe (and its I/O eventually FailFast) meanwhile. The
+            // placement is captured by value — it is immutable per
+            // identity, so a concurrent RENAME can't stale it.
+            let mut delay = Duration::from_millis(500);
+            loop {
+                tokio::time::sleep(delay).await;
+                // Re-read the deepest pending size each round; the mark
+                // may also have been lifted (file removed, or a deeper
+                // concurrent truncate confirmed everywhere).
+                let Some((_, min_size)) = manager.truncate_dirty_state(&gate) else {
+                    return;
+                };
+                if truncate_fanout(&registry, &clients, &export, &key, &placement, min_size).await
+                {
+                    manager.clear_truncate_dirty_if(&gate, min_size);
+                    info!(
+                        "✂️ deferred stripe truncation for '{}' (set_len {}) confirmed on all pinned DSes",
+                        key, min_size
+                    );
+                    return;
+                }
+                delay = (delay * 2).min(Duration::from_secs(10));
+            }
+        });
     }
 
     fn rename_preserves_data(&self, old_key: &str) -> bool {
@@ -994,5 +1210,65 @@ mod fallback_tests {
             handler.fallback_io_disposition_bounded("f.bin", Duration::ZERO),
             FallbackIoDisposition::FailFast
         );
+    }
+
+    /// While a file is truncate-dirty its MDS-fallback I/O parks even
+    /// though the fleet is healthy (the client is being refused
+    /// layouts by design, not trapped) — and still escalates past the
+    /// ceiling so an unreachable DS can't livelock the client.
+    #[test]
+    fn truncate_dirty_overrides_healthy_failfast_within_ceiling() {
+        let (_registry, handler) = pinned_handler(&["ds-1", "ds-2"], "f.bin");
+        let p = handler.layout_manager.placement_for("f.bin").unwrap();
+        let gate = truncate_gate_key(&p, "f.bin");
+        handler.layout_manager.mark_truncate_dirty(&gate, 0);
+
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", CEILING),
+            FallbackIoDisposition::Delay,
+            "dirty + healthy fleet must park, not spring the client into stale reads"
+        );
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", Duration::ZERO),
+            FallbackIoDisposition::FailFast
+        );
+
+        handler.layout_manager.clear_truncate_dirty_if(&gate, 0);
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", CEILING),
+            FallbackIoDisposition::FailFast,
+            "gate lifted + healthy fleet → back to the trap escape"
+        );
+    }
+
+    /// LAYOUTGET on a truncate-dirty file must be refused TRYLATER —
+    /// a fresh layout would expose stale stripe bytes beyond new EOF.
+    #[test]
+    fn layoutget_gated_while_truncate_dirty() {
+        let (_registry, handler) = pinned_handler(&["ds-1"], "f.bin");
+        let p = handler.layout_manager.placement_for("f.bin").unwrap();
+        let gate = truncate_gate_key(&p, "f.bin");
+        handler.layout_manager.mark_truncate_dirty(&gate, 0);
+
+        let args = LayoutGetArgs {
+            signal_layout_avail: false,
+            layout_type: LayoutType::NfsV4_1Files,
+            iomode: IoMode::Read,
+            offset: 0,
+            length: 4096,
+            minlength: 4096,
+            stateid: [0u8; 16],
+            maxcount: 4096,
+            filehandle: vec![1],
+            file_key: "f.bin".to_string(),
+            owner: owner(),
+        };
+        assert!(
+            matches!(handler.layoutget(args.clone()), Err(LayoutGetError::TryLater)),
+            "dirty file must gate LAYOUTGET"
+        );
+
+        handler.layout_manager.clear_truncate_dirty_if(&gate, 0);
+        assert!(handler.layoutget(args).is_ok(), "gate lifted → layouts flow again");
     }
 }

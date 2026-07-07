@@ -605,6 +605,9 @@ impl OperationResult {
 pub struct OpenHow {
     pub createmode: u32,
     pub attrs: Option<Bytes>,
+    /// The createattrs fattr4 bitmap words — `attrs` is only decodable
+    /// against these. Empty for NOCREATE/EXCLUSIVE4.
+    pub attrmask: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1060,24 +1063,30 @@ impl CompoundRequest {
                             // UNCHECKED4 or GUARDED4 - decode createattrs (fattr4)
                             // fattr4 structure: bitmap4 (array) + attrlist4 (opaque)
                             tracing::trace!("DEBUG OPEN: UNCHECKED4/GUARDED4 - decoding createattrs fattr4, {} bytes before", decoder.remaining());
-                            
-                            // Decode bitmap4 (array of u32)
+
+                            // Decode bitmap4 (array of u32). The words are
+                            // LOAD-BEARING: attr_vals is only decodable
+                            // against them (this decoder used to discard
+                            // them, which silently ignored every OPEN
+                            // createattr — mode on create, size for
+                            // O_CREAT|O_TRUNC).
                             let bitmap_len = decoder.decode_u32()?;
                             tracing::trace!("DEBUG OPEN: bitmap_len={}, {} bytes after", bitmap_len, decoder.remaining());
+                            let mut attrmask = Vec::with_capacity(bitmap_len.min(8) as usize);
                             for _ in 0..bitmap_len {
-                                let _bitmap_word = decoder.decode_u32()?;
+                                attrmask.push(decoder.decode_u32()?);
                             }
-                            
+
                             // Decode attrlist4 (opaque bytes)
                             let attrs = decoder.decode_opaque()?;
-                            tracing::trace!("DEBUG OPEN: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining", 
+                            tracing::trace!("DEBUG OPEN: decoded fattr4: {} bitmap words, {} bytes attrs, {} bytes remaining",
                                      bitmap_len, attrs.len(), decoder.remaining());
-                            OpenHow { createmode, attrs: Some(attrs) }
+                            OpenHow { createmode, attrs: Some(attrs), attrmask }
                         }
                         2 => {
                             // EXCLUSIVE4 - decode verifier only
                             let verf = decoder.decode_fixed_opaque(8)?;
-                            OpenHow { createmode, attrs: Some(verf) }
+                            OpenHow { createmode, attrs: Some(verf), attrmask: Vec::new() }
                         }
                         3 => {
                             // EXCLUSIVE4_1 (NFSv4.1) - createverf4 (8 bytes)
@@ -1094,10 +1103,11 @@ impl CompoundRequest {
                             // breaks.
                             let verf = decoder.decode_fixed_opaque(8)?;
 
-                            // Decode bitmap4
+                            // Decode bitmap4 (kept — see the 0|1 arm)
                             let bitmap_len = decoder.decode_u32()?;
+                            let mut attrmask = Vec::with_capacity(bitmap_len.min(8) as usize);
                             for _ in 0..bitmap_len {
-                                let _bitmap_word = decoder.decode_u32()?;
+                                attrmask.push(decoder.decode_u32()?);
                             }
 
                             // Decode attrlist4
@@ -1105,13 +1115,13 @@ impl CompoundRequest {
                             let mut combined = Vec::with_capacity(8 + attrs.len());
                             combined.extend_from_slice(&verf);
                             combined.extend_from_slice(&attrs);
-                            OpenHow { createmode, attrs: Some(combined.into()) }
+                            OpenHow { createmode, attrs: Some(combined.into()), attrmask }
                         }
-                        _ => OpenHow { createmode: 0, attrs: None },
+                        _ => OpenHow { createmode: 0, attrs: None, attrmask: Vec::new() },
                     }
                 } else {
                     // OPEN4_NOCREATE - no createhow4
-                    OpenHow { createmode: 0, attrs: None }
+                    OpenHow { createmode: 0, attrs: None, attrmask: Vec::new() }
                 };
                 
                 // Claim (discriminated union) - RFC 5661 Section 18.16

@@ -46,6 +46,11 @@ pub enum FallbackIoDisposition {
 ///
 /// This trait allows the NFSv4 dispatcher to optionally support pNFS
 /// without creating a hard dependency on pNFS code.
+///
+/// (`async_trait` because `note_truncate` must complete a network
+/// round-trip to the DS fleet before the dispatcher replies; the other
+/// methods stay synchronous.)
+#[tonic::async_trait]
 pub trait PnfsOperations: Send + Sync {
     /// Handle LAYOUTGET operation (opcode 50)
     fn layoutget(&self, args: LayoutGetArgs) -> Result<LayoutGetResult, LayoutGetError>;
@@ -98,6 +103,16 @@ pub trait PnfsOperations: Send + Sync {
     /// file_id ⇒ fresh DS stripe paths), and enqueue best-effort DS
     /// stripe cleanup.
     fn note_remove(&self, _file_key: &str) {}
+
+    /// A size-changing SETATTR (or OPEN with a size createattr) was
+    /// applied to `file_key`'s MDS stub. For a striped file the stub
+    /// holds only the size — the BYTES live in DS stripe files, and a
+    /// truncate-down must cut them there too or a later extension
+    /// re-exposes them (fsx-found: expected zeros, read stale bytes).
+    /// Implementations push `set_len(new_size)` to every pinned DS
+    /// before returning; on failure they park the file behind a
+    /// LAYOUTGET/fallback gate until a background retry confirms.
+    async fn note_truncate(&self, _file_key: &str, _new_size: u64) {}
 
     /// Whether RENAME of `old_key` can preserve data. False only for
     /// legacy path-keyed pins (file_id 0): their DS stripes live at the

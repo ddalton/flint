@@ -94,6 +94,18 @@ impl FilePlacement {
     }
 }
 
+/// The truncate-dirty gate key for a pinned file. Keyed by the
+/// placement's immutable file identity when it has one, so the gate
+/// follows the file through RENAME for free; legacy pins fall back to
+/// the path key (they can't be renamed anyway — the op is refused).
+pub fn truncate_gate_key(placement: &FilePlacement, file_key: &str) -> String {
+    if placement.file_id != 0 {
+        format!("id:{:016x}", placement.file_id)
+    } else {
+        format!("path:{}", file_key)
+    }
+}
+
 /// Allocate a fresh, unique per-file identity for a new pin. Uses the
 /// uuid crate (already a workspace dep) — collision-free in practice
 /// and free of the determinism trap the old name-hash scheme had
@@ -169,6 +181,19 @@ pub struct LayoutManager {
     /// In-memory + best-effort by design: losing it leaks orphaned
     /// stripe space, never correctness.
     cleanup_queues: Arc<DashMap<String, Vec<String>>>,
+
+    /// Files whose stripe truncation has NOT yet reached every pinned
+    /// DS: gate key (see [`truncate_gate_key`]) → (when it went dirty,
+    /// the SMALLEST unconfirmed target size). While a file is here,
+    /// LAYOUTGET answers TRYLATER and MDS-fallback I/O parks — stale
+    /// bytes beyond the new EOF must never be readable through a fresh
+    /// layout. The min-size tracking makes racing truncates safe: the
+    /// gate only lifts once the DEEPEST requested cut is confirmed
+    /// everywhere (a later, larger set_len can't kill bytes below its
+    /// own length). In-memory: an MDS crash inside the
+    /// (milliseconds-wide) stub-truncate → DS-ack window can lose a
+    /// mark; accepted residual documented in the operator runbook.
+    truncate_dirty: Arc<DashMap<String, (std::time::Instant, u64)>>,
 
     /// Persistence target. Layouts surviving MDS restart prevents the
     /// kernel from issuing fresh LAYOUTGETs (disruptive but functional)
@@ -366,6 +391,7 @@ impl LayoutManager {
             placements: Arc::new(DashMap::new()),
             stripe_groups: Arc::new(DashMap::new()),
             cleanup_queues: Arc::new(DashMap::new()),
+            truncate_dirty: Arc::new(DashMap::new()),
             backend,
         }
     }
@@ -442,6 +468,11 @@ impl LayoutManager {
         if removed.is_some() {
             info!("Placement forgotten for deleted file '{}'", file_key);
         }
+        // A deleted file's unconfirmed truncation is moot — its stripes
+        // are enqueued for deletion outright.
+        if let Some(p) = &removed {
+            self.truncate_dirty.remove(&truncate_gate_key(p, file_key));
+        }
         let backend = Arc::clone(&self.backend);
         let key = file_key.to_string();
         spawn_persist(
@@ -479,6 +510,9 @@ impl LayoutManager {
         let overwritten = self.forget_placement(new_key);
         self.placements.insert(new_key.to_string(), placement.clone());
         self.placements.remove(old_key);
+        // An unconfirmed truncation follows the file automatically:
+        // the gate is keyed by the placement's file identity, which
+        // the rename preserves.
 
         let backend = Arc::clone(&self.backend);
         let record = placement.to_record(new_key);
@@ -541,6 +575,48 @@ impl LayoutManager {
             .remove(device_id)
             .map(|(_, v)| v)
             .unwrap_or_default()
+    }
+
+    /// Mark a file truncate-dirty: `size` has been applied to the MDS
+    /// stub but has NOT been confirmed on every pinned DS's stripe
+    /// file. Keeps the oldest mark and the smallest size if already
+    /// dirty (the ceiling measures the total unconfirmed window; the
+    /// gate lifts only when the deepest cut lands).
+    pub fn mark_truncate_dirty(&self, gate_key: &str, size: u64) {
+        self.truncate_dirty
+            .entry(gate_key.to_string())
+            .and_modify(|(_, min)| *min = (*min).min(size))
+            .or_insert_with(|| (std::time::Instant::now(), size));
+    }
+
+    /// Lift the gate if a fan-out that confirmed `confirmed_size` on
+    /// every pinned DS satisfies the deepest pending cut. Returns
+    /// whether the gate was lifted.
+    pub fn clear_truncate_dirty_if(&self, gate_key: &str, confirmed_size: u64) -> bool {
+        let cleared = self
+            .truncate_dirty
+            .remove_if(gate_key, |_, (_, min)| confirmed_size <= *min)
+            .is_some();
+        if cleared {
+            info!("Truncate-dirty cleared for '{}' (size {} confirmed)", gate_key, confirmed_size);
+        }
+        cleared
+    }
+
+    /// Unconditionally lift the gate (file deleted — its stripes are
+    /// enqueued for deletion outright).
+    pub fn clear_truncate_dirty(&self, gate_key: &str) {
+        self.truncate_dirty.remove(gate_key);
+    }
+
+    /// The gate state: (dirty-since, smallest unconfirmed size).
+    pub fn truncate_dirty_state(&self, gate_key: &str) -> Option<(std::time::Instant, u64)> {
+        self.truncate_dirty.get(gate_key).map(|e| *e.value())
+    }
+
+    /// When the file went truncate-dirty, if it still is.
+    pub fn truncate_dirty_since(&self, gate_key: &str) -> Option<std::time::Instant> {
+        self.truncate_dirty_state(gate_key).map(|(since, _)| since)
     }
 
     /// Get-or-create the pinned placement for `file_key`.
@@ -1743,5 +1819,59 @@ mod tests {
         assert_eq!(ds1, vec![format!("{:016x}.stripe0", p.file_id)]);
         assert_eq!(ds2, vec![format!("{:016x}.stripe1", p.file_id)]);
         assert!(mgr.drain_stripe_cleanup("ds-1").is_empty(), "drain is once-only");
+    }
+
+    /// The truncate-dirty gate lifts only when the DEEPEST pending cut
+    /// is confirmed — a racing larger set_len can't kill bytes below
+    /// its own length, so it must not clear a smaller pending one.
+    #[test]
+    fn truncate_gate_min_size_semantics() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.mark_truncate_dirty("id:00000000000000aa", 100);
+        mgr.mark_truncate_dirty("id:00000000000000aa", 50); // deeper cut
+        mgr.mark_truncate_dirty("id:00000000000000aa", 200); // shallower — no-op on min
+
+        assert!(
+            !mgr.clear_truncate_dirty_if("id:00000000000000aa", 100),
+            "confirming 100 must NOT lift the gate while 50 is pending"
+        );
+        assert!(mgr.truncate_dirty_since("id:00000000000000aa").is_some());
+        assert!(
+            mgr.clear_truncate_dirty_if("id:00000000000000aa", 50),
+            "confirming the deepest cut lifts the gate"
+        );
+        assert!(mgr.truncate_dirty_since("id:00000000000000aa").is_none());
+    }
+
+    /// The gate is keyed by file identity, so it survives RENAME with
+    /// no explicit hand-off, and REMOVE drops it with the pin.
+    #[test]
+    fn truncate_gate_follows_rename_and_dies_with_remove() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.generate_layout(test_owner(1), vec![1], "a", 0, 8 << 20, IoMode::ReadWrite).unwrap();
+        let p = mgr.placement_for("a").unwrap();
+        let gate = truncate_gate_key(&p, "a");
+        mgr.mark_truncate_dirty(&gate, 0);
+
+        mgr.rename_placement("a", "b").unwrap();
+        let p_b = mgr.placement_for("b").unwrap();
+        assert_eq!(
+            truncate_gate_key(&p_b, "b"),
+            gate,
+            "identity key makes the gate rename-proof"
+        );
+        assert!(mgr.truncate_dirty_since(&gate).is_some());
+
+        mgr.forget_placement("b");
+        assert!(
+            mgr.truncate_dirty_since(&gate).is_none(),
+            "REMOVE moots the unconfirmed truncation"
+        );
     }
 }

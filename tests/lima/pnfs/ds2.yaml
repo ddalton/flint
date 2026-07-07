@@ -9,6 +9,8 @@ ds:
   bind:
     address: "0.0.0.0"
     port: 20492
+    # DsControl gRPC listener (MDS → DS commands: stripe truncation).
+    controlPort: 21492
 
   deviceId: ds-host-2
 

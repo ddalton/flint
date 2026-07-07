@@ -982,11 +982,37 @@ impl CompoundDispatcher {
                 };
                 match unpack() {
                     Some(fattr) => {
+                        // A size-set on a striped file must reach the
+                        // DS stripe files too — capture the requested
+                        // size before the handler consumes the attrs.
+                        let requested_size = crate::nfs::v4::operations::fileops::decode_settable_attrs(
+                            &fattr.attrmask,
+                            &fattr.attr_vals,
+                        )
+                        .ok()
+                        .and_then(|d| d.size);
                         let op = SetAttrOp {
                             stateid,
                             obj_attributes: fattr,
                         };
                         let res = self.file_handler.handle_setattr(op, context).await;
+                        // Gate on the APPLIED bitmap, not the status: a
+                        // compound that set size then failed on times
+                        // still truncated the stub (RFC 8881 §18.30.4
+                        // reports it in attrsset) — the stripes must
+                        // follow regardless.
+                        const FATTR4_SIZE_BIT: u32 = 1 << 4; // fattr4 attr 4, word 0
+                        let size_applied = res
+                            .attrsset
+                            .first()
+                            .is_some_and(|w| w & FATTR4_SIZE_BIT != 0);
+                        if size_applied {
+                            if let (Some(pnfs), Some(size)) = (&self.pnfs_handler, requested_size) {
+                                if let Some(key) = self.pnfs_current_fh_key(context) {
+                                    pnfs.note_truncate(&key, size).await;
+                                }
+                            }
+                        }
                         OperationResult::SetAttr(res.status, res.attrsset)
                     }
                     None => OperationResult::SetAttr(Nfs4Status::BadXdr, vec![]),
@@ -1026,7 +1052,7 @@ impl CompoundDispatcher {
                         if let Some(attrs) = openhow.attrs {
                             crate::nfs::v4::operations::ioops::OpenHow::Create(
                                 crate::nfs::v4::operations::fileops::Fattr4 {
-                                    attrmask: Vec::new(),
+                                    attrmask: openhow.attrmask.clone(),
                                     attr_vals: attrs.to_vec(),
                                 }
                             )
@@ -1039,7 +1065,7 @@ impl CompoundDispatcher {
                         let attrs = openhow.attrs.unwrap_or_default();
                         crate::nfs::v4::operations::ioops::OpenHow::Create(
                             crate::nfs::v4::operations::fileops::Fattr4 {
-                                attrmask: Vec::new(),
+                                attrmask: openhow.attrmask.clone(),
                                 attr_vals: attrs.to_vec(),
                             }
                         )
@@ -1077,7 +1103,7 @@ impl CompoundDispatcher {
                                 Vec::new()
                             };
                             (verifier, crate::nfs::v4::operations::fileops::Fattr4 {
-                                attrmask: Vec::new(),
+                                attrmask: openhow.attrmask.clone(),
                                 attr_vals: remaining,
                             })
                         } else {
@@ -1144,6 +1170,22 @@ impl CompoundDispatcher {
                     _ => crate::nfs::v4::operations::ioops::OpenClaim::Fh, // Default to Fh
                 };
 
+                // A size createattr (O_CREAT|O_TRUNC) that lands on an
+                // existing striped file must reach the DS stripe files
+                // too — capture the requested size for the post-success
+                // hook below.
+                let requested_size = match &converted_openhow {
+                    crate::nfs::v4::operations::ioops::OpenHow::Create(a)
+                    | crate::nfs::v4::operations::ioops::OpenHow::Exclusive4_1 { attrs: a, .. } => {
+                        crate::nfs::v4::operations::fileops::decode_settable_attrs(
+                            &a.attrmask,
+                            &a.attr_vals,
+                        )
+                        .ok()
+                        .and_then(|d| d.size)
+                    }
+                    _ => None,
+                };
                 let op = OpenOp {
                     seqid,
                     share_access,
@@ -1153,6 +1195,26 @@ impl CompoundDispatcher {
                     claim: converted_claim,
                 };
                 let res = self.io_handler.handle_open(op, context);
+                {
+                    // OPEN set the current FH to the opened file; a
+                    // fresh create has no pin and no-ops inside. Gate
+                    // on the APPLIED attrset bit (an OPEN that failed
+                    // after truncating couldn't have — the size is the
+                    // only attr applied on the existing-file path —
+                    // but the bitmap is the authoritative record).
+                    const FATTR4_SIZE_BIT: u32 = 1 << 4; // fattr4 attr 4, word 0
+                    let size_applied = res
+                        .attrset
+                        .first()
+                        .is_some_and(|w| w & FATTR4_SIZE_BIT != 0);
+                    if res.status == Nfs4Status::Ok && size_applied {
+                        if let (Some(pnfs), Some(size)) = (&self.pnfs_handler, requested_size) {
+                            if let Some(key) = self.pnfs_current_fh_key(context) {
+                                pnfs.note_truncate(&key, size).await;
+                            }
+                        }
+                    }
+                }
                 if res.status == Nfs4Status::Ok {
                     use crate::nfs::v4::compound::{OpenResult, ChangeInfo};
                     // RFC 8881 §16.2.3.1.2: a successful state-changing op
@@ -1814,6 +1876,23 @@ impl CompoundDispatcher {
         if key.is_empty() { None } else { Some(key) }
     }
 
+    /// Export-relative key of the file the CURRENT FH names (SETATTR's
+    /// and OPEN's target). None when there's no pnfs handler, no FH, or
+    /// the FH doesn't resolve — callers treat None as "not
+    /// pNFS-relevant".
+    fn pnfs_current_fh_key(&self, context: &CompoundContext) -> Option<String> {
+        self.pnfs_handler.as_ref()?;
+        let fh = context.current_fh.as_ref()?;
+        let path = self.file_handler.fh_manager().resolve_handle(fh).ok()?;
+        let export = self.file_handler.fh_manager().get_export_path().to_path_buf();
+        let key = path
+            .strip_prefix(&export)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        if key.is_empty() { None } else { Some(key) }
+    }
+
     /// Disposition for READ/WRITE through the MDS when the current
     /// filehandle names a striped (placement-pinned) file. Such a
     /// file's data is NOT here — the local file is a sparse stub — so
@@ -2059,7 +2138,17 @@ impl CompoundDispatcher {
             }
             Err(e) => {
                 warn!("❌ LAYOUTGET failed: {:?}", e);
-                OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None)
+                let status = match e {
+                    // Truncate-dirty gate: transient — the client
+                    // retries (or falls back to MDS I/O, which parks on
+                    // the same gate) until the DS stripe truncation is
+                    // confirmed.
+                    crate::pnfs::mds::operations::LayoutGetError::TryLater => {
+                        Nfs4Status::LayoutTrylater
+                    }
+                    _ => Nfs4Status::LayoutUnavail,
+                };
+                OperationResult::LayoutGet(status, None)
             }
         }
     }

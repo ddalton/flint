@@ -239,6 +239,45 @@ path-keyed. Consequences:
 - CSI DeleteVolume forgets the volume file's pin and reclaims its
   stripes the same way.
 
+## Truncate propagation (SETATTR size / O_TRUNC)
+
+fsx found the failure mode (2026-07-06): a size-changing SETATTR used
+to truncate only the MDS stub, so a truncate-down left stale bytes in
+the DS stripe files — re-exposed as garbage (POSIX requires zeros)
+when the file later grew. The kernel's files-layout client returns
+its layout on truncate-down (`PNFS_LAYOUTRET_ON_SETATTR`) and
+re-LAYOUTGETs before new I/O, so the fix rides that window
+synchronously:
+
+- Each DS runs a token-gated **DsControl** gRPC listener
+  (`bind.controlPort`, chart default 9091; NetworkPolicy admits only
+  the MDS). Its one command, `TruncateStripeFile`, is
+  identity-guarded, path-guarded, and treats an absent stripe file as
+  success (nothing written = nothing stale).
+- On every applied size change (SETATTR size, and OPEN createattrs
+  size — the `O_CREAT|O_TRUNC` path) the MDS pushes
+  `set_len(new_size)` to every pinned DS **before replying**. Stripe
+  files are sparse/logically-addressed, so the length is uniform
+  across the group. Typical cost: one ~ms RPC per pinned DS.
+- **If any DS can't confirm**, the file parks **truncate-dirty**:
+  LAYOUTGET answers `NFS4ERR_LAYOUTTRYLATER` and MDS-fallback I/O gets
+  the bounded DELAY treatment (Delay within the ceiling, then
+  NFS4ERR_IO) while a background retry pushes until confirmed. The
+  gate is keyed by file identity (rename-proof) and tracks the
+  *smallest* unconfirmed size, so racing truncates can't lift it
+  early. Log lines: `⏳ ... parked truncate-dirty` on entry,
+  `✂️ deferred stripe truncation ... confirmed` on exit.
+- Operators of non-chart deployments MUST set `bind.controlPort` on
+  every DS (and `controlEndpoint` per dataServer in the MDS config if
+  the MDS reaches DSes on a different host than clients do). A DS
+  without a control listener makes every truncate of a striped file
+  park dirty until one appears.
+- Accepted residual: the dirty set is in-memory — an MDS crash inside
+  the milliseconds-wide stub-truncate → DS-ack window loses the mark,
+  and a file whose truncate-down was mid-flight can briefly re-expose
+  stale bytes after a later extension. Double-failure with a
+  microscopic window; revisit if MDS HA lands.
+
 ## Scaling the DS fleet
 
 UP is safe: `--set pnfs.server.dataServers.count=N+1`. Existing files

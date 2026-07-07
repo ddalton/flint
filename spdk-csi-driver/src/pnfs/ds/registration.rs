@@ -74,7 +74,10 @@ impl RegistrationClient {
         }
     }
 
-    /// Register with MDS via gRPC
+    /// Register with MDS via gRPC. `control_port` is the DS's
+    /// DsControl listener port (0 = none) — the MDS pairs it with this
+    /// device's client-reachable host to push synchronous commands
+    /// (stripe truncation).
     pub async fn register(
         &mut self,
         device_id: String,
@@ -83,6 +86,7 @@ impl RegistrationClient {
         capacity: u64,
         used: u64,
         identity_created_at: u64,
+        control_port: u32,
     ) -> Result<bool> {
         info!(
             "Registering device {} with MDS at {}",
@@ -106,6 +110,7 @@ impl RegistrationClient {
             used,
             protocol_version: 1,
             identity_created_at,
+            control_port,
         });
 
         match client.register_data_server(request).await {

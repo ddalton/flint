@@ -79,6 +79,44 @@ message DeleteVolumeResponse {
   string message = 2;
 }
 
+// DS Control Service — the reverse direction: MDS → DS.
+//
+// Served by each DS on its control port (bind.controlPort), protected
+// by the same FLINT_PNFS_CONTROL_TOKEN bearer scheme as MdsControl.
+// Exists for operations whose correctness cannot wait for the
+// heartbeat cycle: a client that truncates a striped file re-acquires
+// layouts immediately after the SETATTR reply, so stale stripe bytes
+// must be gone BEFORE the MDS answers — not one heartbeat later.
+service DsControl {
+  // Set a stripe file's length (both directions; a no-op if the file
+  // does not exist — nothing written means nothing stale). Called by
+  // the MDS while applying a client's size-changing SETATTR/OPEN, so
+  // that bytes beyond the new EOF can never be re-exposed by a later
+  // extension (fsx-found: truncate-down left stale stripe bytes).
+  rpc TruncateStripeFile(TruncateStripeFileRequest) returns (TruncateStripeFileResponse);
+}
+
+message TruncateStripeFileRequest {
+  // The device the MDS believes it is talking to. The DS refuses a
+  // mismatch (identity guard — same rationale as the registration
+  // stamp: mutating another device's volume corrupts silently).
+  string device_id = 1;
+
+  // Stripe file path RELATIVE to the DS data dir.
+  string rel_path = 2;
+
+  // New file length in bytes (the file's new logical size — stripe
+  // files are sparse/logically-addressed, so the length is uniform
+  // across the group).
+  uint64 new_length = 3;
+}
+
+message TruncateStripeFileResponse {
+  bool ok = 1;
+  // Error detail when ok=false. Empty on success.
+  string message = 2;
+}
+
 // Registration request from DS to MDS
 message RegisterRequest {
   // Unique device identifier (e.g., "ds-node1-lvol0")
@@ -109,6 +147,13 @@ message RegisterRequest {
   // is serving a different data volume than before — the MDS logs
   // that transition at WARN. 0 from a DS that predates the field.
   uint64 identity_created_at = 8;
+
+  // Port this DS serves DsControl (MDS → DS gRPC) on. The MDS reaches
+  // it at the same host it uses for NFS I/O (the operator-configured
+  // endpoint when one exists). 0 = DS has no control listener (older
+  // build or unconfigured) — truncate propagation then parks the file
+  // dirty until the listener appears; see the operator runbook.
+  uint32 control_port = 9;
 }
 
 // Registration response from MDS to DS

@@ -111,6 +111,15 @@ pub struct DsConfig {
 pub struct BindConfig {
     pub address: String,
     pub port: u16,
+
+    /// DS only: port for the DsControl gRPC listener (MDS → DS
+    /// commands, e.g. synchronous stripe-file truncation). None (or
+    /// absent in YAML) disables the listener — size-changing SETATTRs
+    /// on striped files then park the file truncate-dirty until the
+    /// MDS can reach a listener, so production DS configs should
+    /// always set it.
+    #[serde(rename = "controlPort", default)]
+    pub control_port: Option<u16>,
 }
 
 /// Layout configuration
@@ -160,6 +169,15 @@ pub struct DataServerInfo {
 
     /// Primary endpoint (IP:port or DNS name)
     pub endpoint: String,
+
+    /// MDS-reachable DsControl endpoint override ("host:port"). The
+    /// default derivation pairs the CLIENT-reachable `endpoint`'s host
+    /// with the DS-reported control port — right whenever MDS and
+    /// clients share a network path to the DS (k8s per-pod Services),
+    /// wrong when they don't (the lima rig: clients reach DSes at
+    /// host.lima.internal, the MDS at 127.0.0.1).
+    #[serde(rename = "controlEndpoint", default)]
+    pub control_endpoint: Option<String>,
 
     /// Additional endpoints for multipath/RDMA
     #[serde(default)]

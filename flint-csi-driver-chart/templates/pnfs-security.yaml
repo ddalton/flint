@@ -91,4 +91,25 @@ spec:
       ports:
         - protocol: TCP
           port: 50051
+---
+# Reverse control direction: DS 9091 (DsControl — synchronous stripe
+# truncation) from the MDS only. Same bearer token as 50051.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flint-pnfs-ds-control
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: flint-pnfs-ds
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: flint-pnfs-mds
+      ports:
+        - protocol: TCP
+          port: 9091
 {{- end }}

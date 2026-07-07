@@ -22,6 +22,8 @@ use tracing::{info, warn};
 // Re-export for convenience
 pub use proto::mds_control_server::{MdsControl, MdsControlServer};
 pub use proto::mds_control_client::MdsControlClient;
+pub use proto::ds_control_server::{DsControl, DsControlServer};
+pub use proto::ds_control_client::DsControlClient;
 
 /// Client-side control-plane auth: attaches FLINT_PNFS_CONTROL_TOKEN
 /// as a Bearer token to every outgoing MdsControl RPC. The token is
@@ -64,6 +66,42 @@ pub fn authed_mds_control_client(channel: tonic::transport::Channel) -> AuthedMd
     MdsControlClient::with_interceptor(channel, ControlTokenInterceptor)
 }
 
+/// A DsControl client (MDS → DS) that carries the control-plane token.
+/// The whole control plane shares one FLINT_PNFS_CONTROL_TOKEN, so the
+/// same interceptor serves both directions.
+pub type AuthedDsControlClient = DsControlClient<
+    tonic::service::interceptor::InterceptedService<
+        tonic::transport::Channel,
+        ControlTokenInterceptor,
+    >,
+>;
+
+/// Build a token-attaching DsControl client over `channel`.
+pub fn authed_ds_control_client(channel: tonic::transport::Channel) -> AuthedDsControlClient {
+    DsControlClient::with_interceptor(channel, ControlTokenInterceptor)
+}
+
+/// Server-side control-plane auth check, shared by the MDS's
+/// MdsControl listener and each DS's DsControl listener: when
+/// FLINT_PNFS_CONTROL_TOKEN is set, require `authorization: Bearer
+/// <token>` on every request; when unset, accept everything (and the
+/// process logs a loud WARN at startup).
+pub fn check_control_token(req: Request<()>) -> Result<Request<()>, Status> {
+    static EXPECTED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let expected = EXPECTED.get_or_init(|| {
+        std::env::var("FLINT_PNFS_CONTROL_TOKEN")
+            .ok()
+            .map(|t| format!("Bearer {}", t))
+    });
+    match expected {
+        None => Ok(req),
+        Some(want) => match req.metadata().get("authorization").and_then(|v| v.to_str().ok()) {
+            Some(got) if got == want => Ok(req),
+            _ => Err(Status::unauthenticated("control-plane token missing or wrong")),
+        },
+    }
+}
+
 /// MDS Control Service Implementation
 ///
 /// This runs on the MDS and handles DS registration, heartbeats, etc.
@@ -78,6 +116,12 @@ pub struct MdsControlService {
     /// the kernel can't reach, and the client silently falls back to
     /// MDS-direct I/O.
     configured_endpoints: std::collections::HashMap<String, String>,
+    /// Operator-supplied DsControl endpoint overrides (`device_id →
+    /// MDS-reachable "host:port"`). Wins over the default derivation
+    /// (client-reachable host + DS-reported control port) — the two
+    /// hosts differ when the MDS and the NFS clients take different
+    /// network paths to the DSes (lima rig).
+    configured_control_endpoints: std::collections::HashMap<String, String>,
     /// Absolute path of the MDS export root. CreateVolume creates files
     /// under this directory; the CSI driver's NodePublish points the
     /// kernel client at this path.
@@ -103,11 +147,19 @@ impl MdsControlService {
     pub fn new(
         device_registry: Arc<crate::pnfs::mds::device::DeviceRegistry>,
         configured_endpoints: std::collections::HashMap<String, String>,
+        configured_control_endpoints: std::collections::HashMap<String, String>,
         export_path: std::path::PathBuf,
         layout_manager: crate::pnfs::mds::layout::LayoutManager,
         nfs_port: u16,
     ) -> Self {
-        Self { device_registry, configured_endpoints, export_path, layout_manager, nfs_port }
+        Self {
+            device_registry,
+            configured_endpoints,
+            configured_control_endpoints,
+            export_path,
+            layout_manager,
+            nfs_port,
+        }
     }
 }
 
@@ -152,6 +204,25 @@ impl MdsControl for MdsControlService {
         device_info.capacity = req.capacity;
         device_info.used = req.used;
         device_info.identity_created_at = req.identity_created_at;
+
+        // DsControl endpoint: an operator override wins (the MDS may
+        // reach the DS on a different host than clients do — lima
+        // rig); otherwise pair the effective endpoint's host with the
+        // reported control port. 0 = no listener (older DS build /
+        // dev config).
+        device_info.control_endpoint =
+            match (self.configured_control_endpoints.get(&req.device_id), req.control_port) {
+                (Some(ce), _) => Some(ce.clone()),
+                (None, 0) => None,
+                (None, port) => {
+                    let host = device_info
+                        .primary_endpoint
+                        .rsplit_once(':')
+                        .map(|(h, _)| h)
+                        .unwrap_or(device_info.primary_endpoint.as_str());
+                    Some(format!("{}:{}", host, port))
+                }
+            };
 
         // Register with device registry
         match self.device_registry.register(device_info) {
@@ -482,6 +553,7 @@ mod create_volume_tests {
         );
         MdsControlService::new(
             registry,
+            std::collections::HashMap::new(),
             std::collections::HashMap::new(),
             export.to_path_buf(),
             layout_manager,

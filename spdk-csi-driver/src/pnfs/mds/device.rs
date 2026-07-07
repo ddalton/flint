@@ -63,6 +63,12 @@ pub struct DeviceInfo {
     /// re-registrations of the same device_id means the DS came back
     /// with a different volume. 0 = DS predates the field.
     pub identity_created_at: u64,
+
+    /// MDS-reachable DsControl gRPC endpoint ("host:port"), derived at
+    /// registration from the device's effective NFS endpoint host and
+    /// its reported control port. None = the DS advertised no control
+    /// listener; truncate propagation to it parks files dirty.
+    pub control_endpoint: Option<String>,
 }
 
 /// Device status
@@ -350,6 +356,7 @@ impl DeviceInfo {
             last_heartbeat: Instant::now(),
             active_layouts: 0,
             identity_created_at: 0,
+            control_endpoint: None,
         }
     }
 

@@ -329,6 +329,19 @@ impl MetadataServer {
             self.config.data_servers.iter()
                 .map(|ds| (ds.device_id.clone(), ds.endpoint.clone()))
                 .collect();
+        // Same idea for the MDS→DS control direction: an explicit
+        // override wins over deriving the control host from the
+        // client-reachable endpoint (they differ on the lima rig,
+        // where clients reach DSes at host.lima.internal but the MDS
+        // reaches them at 127.0.0.1).
+        let configured_control_endpoints: std::collections::HashMap<String, String> =
+            self.config.data_servers.iter()
+                .filter_map(|ds| {
+                    ds.control_endpoint
+                        .as_ref()
+                        .map(|ce| (ds.device_id.clone(), ce.clone()))
+                })
+                .collect();
 
         tokio::spawn(async move {
             // gRPC server on port 50051 (standard gRPC port)
@@ -337,7 +350,12 @@ impl MetadataServer {
                 .expect("Invalid gRPC address");
 
             let control_service = MdsControlService::new(
-                device_registry, configured_endpoints, export_path, layout_manager, nfs_port,
+                device_registry,
+                configured_endpoints,
+                configured_control_endpoints,
+                export_path,
+                layout_manager,
+                nfs_port,
             );
 
             // Control-plane auth: when FLINT_PNFS_CONTROL_TOKEN is set,

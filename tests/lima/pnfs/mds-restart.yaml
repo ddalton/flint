@@ -30,10 +30,16 @@ mds:
   dataServers:
     - deviceId: ds-host-1
       endpoint: "192.168.5.2:20491"
+      # MDS-reachable DsControl endpoint (clients reach the DS via
+      # host.lima.internal; the MDS reaches it locally).
+      controlEndpoint: "127.0.0.1:21491"
       bdevs:
         - lvol0
     - deviceId: ds-host-2
       endpoint: "192.168.5.2:20492"
+      # MDS-reachable DsControl endpoint (clients reach the DS via
+      # host.lima.internal; the MDS reaches it locally).
+      controlEndpoint: "127.0.0.1:21492"
       bdevs:
         - lvol0
 

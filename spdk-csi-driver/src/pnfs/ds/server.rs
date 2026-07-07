@@ -150,6 +150,13 @@ impl DataServer {
         // Start status reporter
         self.start_status_reporter();
 
+        // Start the DsControl gRPC listener (MDS → DS commands). Not
+        // optional in production: without it, a client truncate of a
+        // striped file parks that file dirty on the MDS until this
+        // listener appears (stale stripe bytes must be cut before the
+        // MDS lets I/O resume).
+        self.start_control_listener();
+
         info!("✅ Data Server is ready to serve I/O requests");
         info!("");
 
@@ -844,6 +851,7 @@ impl DataServer {
             capacity,
             used,
             self.identity_created_at,
+            self.config.bind.control_port.unwrap_or(0) as u32,
         ).await {
             Ok(true) => {
                 info!("✅ Successfully registered with MDS");
@@ -880,6 +888,7 @@ impl DataServer {
         // Capture config data needed for re-registration
         let device_id = self.config.device_id.clone();
         let bind_port = self.config.bind.port;
+        let control_port = self.config.bind.control_port.unwrap_or(0) as u32;
         let identity_created_at = self.identity_created_at;
 
         // Same precedence as initial registration — see advertise_address().
@@ -972,6 +981,7 @@ impl DataServer {
                         capacity,
                         used,
                         identity_created_at,
+                        control_port,
                     ).await {
                         Ok(true) => {
                             info!("✅ Re-registration successful");
@@ -1046,6 +1056,54 @@ impl DataServer {
                 Err(e) => warn!("🧹 stripe cleanup failed for {:?}: {}", target, e),
             }
         }
+    }
+
+    /// Start the DsControl gRPC listener (MDS → DS synchronous
+    /// commands, today TruncateStripeFile). Token-gated with the same
+    /// FLINT_PNFS_CONTROL_TOKEN as the MDS's control plane. No
+    /// configured control port = no listener (dev-only; the MDS parks
+    /// truncated striped files dirty until it can reach one).
+    fn start_control_listener(&self) {
+        let Some(port) = self.config.bind.control_port else {
+            warn!(
+                "⚠️ bind.controlPort unset — no DsControl listener; truncates of striped \
+                 files will park them dirty on the MDS (set controlPort in production)"
+            );
+            return;
+        };
+        if std::env::var("FLINT_PNFS_CONTROL_TOKEN").is_err() {
+            warn!(
+                "⚠️ FLINT_PNFS_CONTROL_TOKEN unset — DsControl listener is UNAUTHENTICATED; \
+                 anyone who can reach port {} can truncate stripe files", port
+            );
+        }
+        let addr: std::net::SocketAddr =
+            match format!("{}:{}", self.config.bind.address, port).parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    error!("❌ bad DsControl bind address: {}", e);
+                    return;
+                }
+            };
+        let svc = DsControlService {
+            device_id: self.config.device_id.clone(),
+            data_dir: std::path::PathBuf::from(
+                self.config.bdevs.first().map(|b| b.mount_point.clone())
+                    .unwrap_or_else(|| "/data".to_string()),
+            ),
+        };
+        info!("🎛️ DsControl gRPC listener on {}", addr);
+        tokio::spawn(async move {
+            let server = tonic::transport::Server::builder()
+                .add_service(tonic::service::interceptor::InterceptedService::new(
+                    crate::pnfs::grpc::DsControlServer::new(svc),
+                    crate::pnfs::grpc::check_control_token,
+                ))
+                .serve(addr);
+            if let Err(e) = server.await {
+                error!("❌ DsControl listener died: {}", e);
+            }
+        });
     }
 
     /// Start status reporter in background
@@ -1136,3 +1194,137 @@ impl DataServer {
 }
 
 
+
+/// MDS → DS command surface (DsControl). Deliberately tiny and
+/// paranoid: identity-guarded (a request naming another device_id is
+/// refused — mutating a foreign device's volume corrupts silently),
+/// path-guarded (no absolute or parent-dir components), idempotent
+/// (truncating an absent stripe file is success — nothing written
+/// means nothing stale to cut).
+pub struct DsControlService {
+    device_id: String,
+    data_dir: std::path::PathBuf,
+}
+
+#[tonic::async_trait]
+impl crate::pnfs::grpc::DsControl for DsControlService {
+    async fn truncate_stripe_file(
+        &self,
+        request: tonic::Request<crate::pnfs::grpc::TruncateStripeFileRequest>,
+    ) -> std::result::Result<
+        tonic::Response<crate::pnfs::grpc::TruncateStripeFileResponse>,
+        tonic::Status,
+    > {
+        let req = request.into_inner();
+        let refuse = |message: String| {
+            warn!("🎛️ TruncateStripeFile refused: {}", message);
+            Ok(tonic::Response::new(
+                crate::pnfs::grpc::TruncateStripeFileResponse { ok: false, message },
+            ))
+        };
+        if req.device_id != self.device_id {
+            return refuse(format!(
+                "identity mismatch: request is for '{}', this DS is '{}'",
+                req.device_id, self.device_id
+            ));
+        }
+        let rel = std::path::Path::new(&req.rel_path);
+        if req.rel_path.is_empty()
+            || rel.is_absolute()
+            || rel.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return refuse(format!("suspicious stripe path {:?}", req.rel_path));
+        }
+        let target = self.data_dir.join(rel);
+        match std::fs::OpenOptions::new().write(true).open(&target) {
+            Ok(f) => match f.set_len(req.new_length) {
+                Ok(()) => {
+                    info!("✂️ stripe file {:?} set_len({})", target, req.new_length);
+                    Ok(tonic::Response::new(
+                        crate::pnfs::grpc::TruncateStripeFileResponse {
+                            ok: true,
+                            message: String::new(),
+                        },
+                    ))
+                }
+                Err(e) => refuse(format!("set_len({}) on {:?}: {}", req.new_length, target, e)),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!("✂️ stripe file {:?} absent — nothing to truncate", target);
+                Ok(tonic::Response::new(
+                    crate::pnfs::grpc::TruncateStripeFileResponse {
+                        ok: true,
+                        message: String::new(),
+                    },
+                ))
+            }
+            Err(e) => refuse(format!("open {:?}: {}", target, e)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod ds_control_tests {
+    use super::*;
+    use crate::pnfs::grpc::{DsControl, TruncateStripeFileRequest};
+
+    fn svc(dir: &std::path::Path) -> DsControlService {
+        DsControlService {
+            device_id: "ds-test-1".into(),
+            data_dir: dir.to_path_buf(),
+        }
+    }
+
+    fn req(device_id: &str, rel_path: &str, new_length: u64) -> tonic::Request<TruncateStripeFileRequest> {
+        tonic::Request::new(TruncateStripeFileRequest {
+            device_id: device_id.into(),
+            rel_path: rel_path.into(),
+            new_length,
+        })
+    }
+
+    #[tokio::test]
+    async fn truncates_existing_stripe_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("00000000deadbeef.stripe0");
+        std::fs::write(&path, vec![7u8; 4096]).unwrap();
+        let r = svc(dir.path())
+            .truncate_stripe_file(req("ds-test-1", "00000000deadbeef.stripe0", 1024))
+            .await.unwrap().into_inner();
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 1024);
+    }
+
+    #[tokio::test]
+    async fn absent_stripe_file_is_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = svc(dir.path())
+            .truncate_stripe_file(req("ds-test-1", "no-such.stripe1", 0))
+            .await.unwrap().into_inner();
+        assert!(r.ok, "absent file must be a no-op success: {}", r.message);
+    }
+
+    #[tokio::test]
+    async fn refuses_foreign_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.stripe0");
+        std::fs::write(&path, vec![7u8; 4096]).unwrap();
+        let r = svc(dir.path())
+            .truncate_stripe_file(req("ds-OTHER", "s.stripe0", 0))
+            .await.unwrap().into_inner();
+        assert!(!r.ok);
+        assert!(r.message.contains("identity mismatch"));
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 4096, "file untouched");
+    }
+
+    #[tokio::test]
+    async fn refuses_traversal_and_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["../escape", "/etc/passwd", ""] {
+            let r = svc(dir.path())
+                .truncate_stripe_file(req("ds-test-1", bad, 0))
+                .await.unwrap().into_inner();
+            assert!(!r.ok, "should refuse {:?}", bad);
+        }
+    }
+}

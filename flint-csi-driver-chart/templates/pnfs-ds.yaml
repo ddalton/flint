@@ -37,6 +37,10 @@ data:
       bind:
         address: "0.0.0.0"
         port: 2049
+        # DsControl gRPC listener (MDS → DS commands, e.g. synchronous
+        # stripe truncation on client SETATTR). Token-gated; see
+        # templates/pnfs-security.yaml.
+        controlPort: 9091
       deviceId: "${POD_NAME}"
       mds:
         endpoint: "flint-pnfs-mds.{{ .Release.Namespace }}.svc.cluster.local:50051"
@@ -95,6 +99,10 @@ spec:
     - name: nfs
       port: 2049
       targetPort: 2049
+      protocol: TCP
+    - name: ds-control
+      port: 9091
+      targetPort: 9091
       protocol: TCP
 ---
 {{- end }}
@@ -168,6 +176,8 @@ spec:
           ports:
             - containerPort: 2049
               name: nfs
+            - containerPort: 9091
+              name: ds-control
           readinessProbe:
             tcpSocket:
               port: 2049
