@@ -69,15 +69,22 @@ fn fast_blocking<T>(len: usize, f: impl FnOnce() -> T) -> T {
 ///
 /// `Arc<File>` with no mutex: every operation is positioned I/O
 /// (`read_at`/`write_all_at`) or fsync, all of which take `&File` and
-/// are safe to issue concurrently on one fd. Safe to key by
-/// filehandle because the DS namespace is append-only from the DS's
-/// point of view — it serves no REMOVE/RENAME, so a filehandle's
-/// path→inode mapping never changes under a live fd.
+/// are safe to issue concurrently on one fd. The DS's NFS data path
+/// serves no REMOVE/RENAME, so a filehandle's path→inode mapping
+/// never changes under a live fd — but the MDS's heartbeat-borne
+/// DELETE_STRIPE_FILE instruction unlinks out-of-band, and MUST
+/// evict the entry via [`IoOperationHandler::evict_path`]: an
+/// unlinked-but-open fd keeps the file's blocks allocated, so a
+/// "removed" stripe file otherwise frees no space until the DS
+/// restarts (found by the ENOSPC drill: post-cleanup writes still
+/// hit a full export).
 struct CachedFd {
     file: Arc<File>,
     /// Whether the fd was opened with write access. A READ-populated
     /// read-only fd is upgraded (reopened rw) on the first WRITE.
     writable: bool,
+    /// Resolved local path, so out-of-band deletion can evict by path.
+    path: PathBuf,
 }
 
 /// I/O operation handler for data server
@@ -137,7 +144,7 @@ impl IoOperationHandler {
     /// Insert (or replace) a cached fd, evicting an arbitrary entry if
     /// the cache is full. In-flight ops hold their own `Arc<File>`
     /// clone, so eviction never closes an fd out from under an op.
-    fn insert_fd(&self, filehandle: &[u8], file: Arc<File>, writable: bool) {
+    fn insert_fd(&self, filehandle: &[u8], file: Arc<File>, writable: bool, path: PathBuf) {
         if self.fd_cache.len() >= FD_CACHE_CAP && !self.fd_cache.contains_key(filehandle) {
             // Bind the victim key in its own statement: an `if let`
             // scrutinee would keep the iter shard guard alive across
@@ -148,7 +155,19 @@ impl IoOperationHandler {
             }
         }
         self.fd_cache
-            .insert(filehandle.to_vec(), CachedFd { file, writable });
+            .insert(filehandle.to_vec(), CachedFd { file, writable, path });
+    }
+
+    /// Drop any cached fd(s) for `path`. Called after an out-of-band
+    /// unlink (DELETE_STRIPE_FILE): closing the fd is what actually
+    /// releases the unlinked file's blocks back to the filesystem.
+    /// In-flight ops still hold their own `Arc<File>` clone and finish
+    /// safely; the blocks free when the last clone drops. Returns the
+    /// number of entries evicted.
+    pub fn evict_path(&self, path: &Path) -> usize {
+        let before = self.fd_cache.len();
+        self.fd_cache.retain(|_, v| v.path != path);
+        before - self.fd_cache.len()
     }
 
     /// Handle READ operation (RFC 8881 Section 18.22)
@@ -207,7 +226,7 @@ impl IoOperationHandler {
                     },
                 };
                 let file = Arc::new(file);
-                self.insert_fd(filehandle, Arc::clone(&file), writable);
+                self.insert_fd(filehandle, Arc::clone(&file), writable, file_path);
                 file
             }
         };
@@ -278,7 +297,7 @@ impl IoOperationHandler {
                         crate::pnfs::Error::Io(e)
                     })?;
                 let file = Arc::new(file);
-                self.insert_fd(filehandle, Arc::clone(&file), true);
+                self.insert_fd(filehandle, Arc::clone(&file), true, file_path);
                 file
             }
         };
@@ -580,6 +599,32 @@ mod tests {
 
         h.commit(&fh, 0, 0).await.unwrap();
         assert_eq!(h.fd_cache.len(), 1, "COMMIT must hit the cached fd");
+    }
+
+    #[tokio::test]
+    async fn evict_path_closes_fd_after_out_of_band_unlink() {
+        let (h, dir) = handler();
+        let fh = fh_for(&h, "doomed.stripe0", &dir);
+        let path = dir.path().join("doomed.stripe0");
+
+        h.write(&fh, 0, bytes::Bytes::from_static(b"stripe data"), WriteStable::Unstable)
+            .await
+            .unwrap();
+        assert_eq!(h.fd_cache.len(), 1);
+
+        // Out-of-band unlink (what DELETE_STRIPE_FILE does), then the
+        // eviction that must accompany it.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(h.evict_path(&path), 1, "must drop the cached fd for the unlinked file");
+        assert_eq!(h.fd_cache.len(), 0);
+        assert_eq!(h.evict_path(&path), 0, "second eviction is a no-op");
+
+        // Without the eviction a READ would hit the cached fd and
+        // resurrect the unlinked file's data; with it, the absent
+        // stripe file reads as a hole.
+        let r = h.read(&fh, 0, 11).await.unwrap();
+        assert!(r.eof);
+        assert!(r.data.is_empty(), "unlinked stripe file must read as a hole, not stale data");
     }
 
     #[tokio::test]

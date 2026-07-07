@@ -899,6 +899,10 @@ impl DataServer {
             .map(|b| b.mount_point.clone())
             .collect();
 
+        // For DELETE_STRIPE_FILE fd-cache eviction — unlinking alone
+        // frees nothing while the data path still holds the fd open.
+        let io_handler = Arc::clone(&self.io_handler);
+
         std::thread::Builder::new()
             .name("ds-heartbeat".into())
             .spawn(move || {
@@ -943,7 +947,7 @@ impl DataServer {
                     Ok((true, instructions)) => {
                         debug!("✅ Heartbeat acknowledged");
                         failure_count = 0;
-                        Self::apply_mds_instructions(&data_dir, instructions);
+                        Self::apply_mds_instructions(&data_dir, &io_handler, instructions);
                     }
                     Ok((false, _)) => {
                         // A NACK is not a transport blip: the MDS answered
@@ -1034,7 +1038,18 @@ impl DataServer {
     /// is a path relative to the DS data dir; traversal components are
     /// rejected — the MDS never mints them, but this arrives over the
     /// control channel and costs nothing to check.
-    fn apply_mds_instructions(data_dir: &std::path::Path, instructions: Vec<crate::pnfs::grpc::Instruction>) {
+    ///
+    /// The unlink MUST be paired with an fd-cache eviction: the data
+    /// path caches an open fd per stripe file, and an unlinked-but-open
+    /// file keeps its blocks allocated — without the eviction a
+    /// "removed" stripe file frees no space until the DS restarts
+    /// (ENOSPC-drill finding: the export stayed full after cleanup and
+    /// the next small write died with ENOSPC).
+    fn apply_mds_instructions(
+        data_dir: &std::path::Path,
+        io_handler: &IoOperationHandler,
+        instructions: Vec<crate::pnfs::grpc::Instruction>,
+    ) {
         use crate::pnfs::grpc::InstructionType;
         for ins in instructions {
             if ins.r#type != InstructionType::DeleteStripeFile as i32 {
@@ -1054,6 +1069,13 @@ impl DataServer {
                     debug!("🧹 stripe file already absent: {:?}", target);
                 }
                 Err(e) => warn!("🧹 stripe cleanup failed for {:?}: {}", target, e),
+            }
+            // Evict regardless of unlink outcome — an entry may
+            // survive from an earlier unlink that raced or predates
+            // this code, and a stale fd only ever pins dead blocks.
+            let evicted = io_handler.evict_path(&target);
+            if evicted > 0 {
+                info!("🧹 evicted {} cached fd(s) for {:?} — blocks now freeable", evicted, target);
             }
         }
     }
