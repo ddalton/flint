@@ -130,37 +130,49 @@ echo "✓ MDS + 2 DSes are up"
 echo
 
 # ──────────────────────────────────────────────────────────────────────
-# 2. Mount + start a long-running background write that holds the
-#    layout open. A short `dd` would LAYOUTRETURN on close before
-#    our heartbeat detects DS1 dead — the client must still hold a
-#    layout pointing at DS1 when we kill it for the recall to have
-#    anything to recall. We launch a multi-GiB write in the
-#    background, wait for LAYOUTGET, then kill DS1 mid-write.
+# 2. Mount + start a long-lived writer that HOLDS a layout without
+#    ever touching the DS we are about to kill.
+#
+#    Why not a big sequential dd: since the bounded-DELAY escalation
+#    (510e173), a write that hits the dead DS inside the heartbeat
+#    detection gap (registry still says Active) is failed fast with
+#    NFS4ERR_IO — the kernel then LAYOUTRETURNs and the writer dies,
+#    so by the time the MDS detects the death there are no layouts
+#    left to recall and the drill asserts nothing real.
+#
+#    The recall machinery's real customer is the IDLE-ish holder: a
+#    client whose open file holds a whole-file layout referencing the
+#    dead DS while its I/O happens to land elsewhere. We model that
+#    exactly: one long-lived fd, rewriting the same 1 MiB at offset 0
+#    (stripe 0) forever — then kill the DS stripe 0 does NOT live on.
 # ──────────────────────────────────────────────────────────────────────
-echo "▶ mount + start background write"
+echo "▶ mount + start background stripe-0 writer"
 limactl shell "$LIMA_VM" -- sudo bash -c "
   set -eu
   mountpoint -q /mnt/flint-pnfs && umount -lf /mnt/flint-pnfs || true
   mkdir -p /mnt/flint-pnfs
   mount -t nfs4 -o minorversion=1,proto=tcp,port=${MDS_PORT} \
               ${HOST_ADDR}:/ /mnt/flint-pnfs
-  # Multi-GiB streamed from /dev/zero; bs=1M with oflag=direct keeps
-  # the layout live for the full duration. setsid + nohup + < /dev/null
-  # detach from the shell so the SSH session can return.
   rm -f /tmp/recall-dd.pid /tmp/dd.log
-  setsid nohup dd if=/dev/zero of=/mnt/flint-pnfs/recall.bin \
-       bs=1M count=4096 oflag=direct status=none \
-       < /dev/null > /tmp/dd.log 2>&1 &
+  setsid nohup python3 -c '
+import os, time
+fd = os.open(\"/mnt/flint-pnfs/recall.bin\", os.O_RDWR | os.O_CREAT, 0o644)
+buf = bytes([0xAB]) * (1 << 20)
+while True:
+    os.pwrite(fd, buf, 0)
+    os.fsync(fd)
+    time.sleep(0.5)
+' < /dev/null > /tmp/dd.log 2>&1 &
   echo \$! > /tmp/recall-dd.pid
   disown
   sleep 1
   if ! kill -0 \$(cat /tmp/recall-dd.pid) 2>/dev/null; then
-    echo 'DD_FAILED_TO_START'
+    echo 'WRITER_FAILED_TO_START'
     cat /tmp/dd.log
     exit 1
   fi
-  echo 'BACKGROUND_DD_STARTED'
-" || { echo "✗ background dd setup failed"; exit 1; }
+  echo 'BACKGROUND_WRITER_STARTED'
+" || { echo "✗ background writer setup failed"; exit 1; }
 
 # Wait for the MDS to actually grant a layout. The dd is running so
 # this should fire within ~1-2s of it starting.
@@ -179,26 +191,40 @@ if ! grep -q 'Generated pNFS layout' "$MDS_LOG"; then
 fi
 echo "✓ LAYOUTGET observed in MDS log"
 
-# Sanity check: the issued layout must include ds-host-1, otherwise
-# killing DS1 won't trigger any recall (LayoutManager filters by
-# device touched). Smoke run shape gives 2 segments striping
-# DS1+DS2; assert that here so failures bisect cleanly.
-if ! grep -q 'Segment.*device=ds-host-1' "$MDS_LOG"; then
-  echo "✗ issued layout doesn't touch ds-host-1 — kill won't recall anything"
-  echo "MDS layout segments seen so far:"
+# Sanity check: the issued layout must stripe over both DSes
+# (LayoutManager filters recalls by device touched).
+if ! grep -q 'Segment.*device=ds-host-1' "$MDS_LOG" \
+   || ! grep -q 'Segment.*device=ds-host-2' "$MDS_LOG"; then
+  echo "✗ issued layout doesn't stripe over both DSes"
   grep -E 'Segment [0-9]+: device=' "$MDS_LOG" | head
   exit 1
 fi
-echo "✓ layout includes ds-host-1"
+echo "✓ layout stripes over both DSes"
+
+# Pick the victim: the DS that stripe 0 does NOT live on, so the
+# writer never sends I/O toward the dead DS and the layout stays
+# held through detection. Stripe j lives on segment (j + fsi) % 2 in
+# placement order; the per-file rotation (fsi) and the segment order
+# are both in the MDS log.
+FSI=$(grep -oE 'first_stripe_index: [0-9]+' "$MDS_LOG" | head -1 | grep -oE '[0-9]+')
+SEG0=$(grep -oE 'Segment 0: device=ds-host-[0-9]+' "$MDS_LOG" | head -1 | grep -oE 'ds-host-[0-9]+')
+SEG1=$(grep -oE 'Segment 1: device=ds-host-[0-9]+' "$MDS_LOG" | head -1 | grep -oE 'ds-host-[0-9]+')
+if [ $(( FSI % 2 )) -eq 0 ]; then
+  STRIPE0_OWNER=$SEG0; VICTIM=$SEG1
+else
+  STRIPE0_OWNER=$SEG1; VICTIM=$SEG0
+fi
+VICTIM_N=${VICTIM#ds-host-}
+echo "✓ stripe 0 lives on $STRIPE0_OWNER (fsi=$FSI) → victim: $VICTIM"
 echo
 
 # ──────────────────────────────────────────────────────────────────────
-# 3. Kill DS1, watch the recall chain in the MDS log
+# 3. Kill the victim DS, watch the recall chain in the MDS log
 # ──────────────────────────────────────────────────────────────────────
-DS1_PID="$(cat "$PIDFILE_DIR/flint-pnfs-ds1.pid")"
-echo "▶ killing DS1 (pid=$DS1_PID)"
-kill -9 "$DS1_PID" 2>/dev/null || true
-rm -f "$PIDFILE_DIR/flint-pnfs-ds1.pid"
+VICTIM_PID="$(cat "$PIDFILE_DIR/flint-pnfs-ds${VICTIM_N}.pid")"
+echo "▶ killing $VICTIM (pid=$VICTIM_PID)"
+kill -9 "$VICTIM_PID" 2>/dev/null || true
+rm -f "$PIDFILE_DIR/flint-pnfs-ds${VICTIM_N}.pid"
 
 # Worst case: heartbeatTimeout=5s + check_interval=10s + DS heartbeat
 # stale slack (up to 10s) + 10s post-recall deadline = ~35s. Wait 45s
@@ -265,9 +291,9 @@ limactl shell "$LIMA_VM" -- sudo bash -c "
     DD_PID=\$(cat /tmp/recall-dd.pid)
     if kill -0 \"\$DD_PID\" 2>/dev/null; then
       kill -9 \"\$DD_PID\" 2>/dev/null || true
-      echo '  • background dd was still running (killed)'
+      echo '  • background writer was still running (killed) — expected: its stripe stayed live'
     else
-      echo '  • background dd exited on its own (likely EIO after recall)'
+      echo '  • background writer exited on its own (likely EIO after recall)'
       tail -5 /tmp/dd.log 2>/dev/null | sed 's/^/      /'
     fi
   fi
