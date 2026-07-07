@@ -180,13 +180,31 @@ impl IoOperationHandler {
                     .open(&file_path)
                 {
                     Ok(f) => (f, true),
-                    Err(_) => {
-                        let f = File::open(&file_path).map_err(|e| {
+                    Err(_) => match File::open(&file_path) {
+                        Ok(f) => (f, false),
+                        // A stripe file that doesn't exist is a HOLE,
+                        // not an error: in the sparse layout a slot's
+                        // file only appears on first write, but the
+                        // client legitimately reads here whenever the
+                        // LOGICAL size covers the range (truncate-up,
+                        // fresh sparse files). Answer exactly like a
+                        // read past a short stripe file's EOF — zero
+                        // bytes + eof, which the client zero-fills.
+                        // Returning EIO instead poisoned the file's
+                        // layout for 120 s of MDS-fallback errors
+                        // (fsstress-found: 13 poisonings in 300 ops).
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            debug!(
+                                "DS READ: stripe file {:?} absent — hole, replying eof",
+                                file_path
+                            );
+                            return Ok(ReadResult { eof: true, data: Vec::new() });
+                        }
+                        Err(e) => {
                             warn!("Failed to open file {:?}: {}", file_path, e);
-                            crate::pnfs::Error::Io(e)
-                        })?;
-                        (f, false)
-                    }
+                            return Err(crate::pnfs::Error::Io(e));
+                        }
+                    },
                 };
                 let file = Arc::new(file);
                 self.insert_fd(filehandle, Arc::clone(&file), writable);
@@ -338,10 +356,23 @@ impl IoOperationHandler {
             Some((file, _)) => file,
             None => {
                 let file_path = self.filehandle_to_path(filehandle)?;
-                Arc::new(File::open(&file_path).map_err(|e| {
-                    warn!("Failed to open file for commit {:?}: {}", file_path, e);
-                    crate::pnfs::Error::Io(e)
-                })?)
+                match File::open(&file_path) {
+                    Ok(f) => Arc::new(f),
+                    // No stripe file = nothing was ever written to
+                    // this slot = nothing to commit. Same hole
+                    // semantics as READ.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        debug!(
+                            "DS COMMIT: stripe file {:?} absent — nothing to commit",
+                            file_path
+                        );
+                        return Ok(CommitResult { verifier: Self::generate_verifier() });
+                    }
+                    Err(e) => {
+                        warn!("Failed to open file for commit {:?}: {}", file_path, e);
+                        return Err(crate::pnfs::Error::Io(e));
+                    }
+                }
             }
         };
 
@@ -566,6 +597,22 @@ mod tests {
         assert_eq!(w.count, 4);
         let r = h.read(&fh, 0, 8).await.unwrap();
         assert_eq!(&r.data, b"datamore");
+    }
+
+    #[tokio::test]
+    async fn read_and_commit_of_absent_stripe_file_are_holes_not_errors() {
+        let (h, _dir) = handler();
+        // v2 identity FH for a stripe file that was never written on
+        // this DS. READ must answer zero bytes + eof (the client
+        // zero-fills the hole); EIO here poisons the client's layout
+        // for 120 s. COMMIT must be a no-op success.
+        let fh = crate::nfs::v4::filehandle_pnfs::generate_pnfs_filehandle_from_id(
+            0xABCD, 0xDEAD_BEEF_u64, 0,
+        );
+        let r = h.read(&fh.data, 0, 4096).await.expect("hole read must succeed");
+        assert!(r.data.is_empty());
+        assert!(r.eof);
+        h.commit(&fh.data, 0, 0).await.expect("hole commit must succeed");
     }
 
     /// Build an MDS-issued filehandle (foreign instance id + garbage
