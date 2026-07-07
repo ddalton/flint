@@ -54,7 +54,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ds_bytes() { du -sk "$1" 2>/dev/null | awk '{print $1*1024}'; }
+# Bytes of real payload in a DS export tree. Excludes the Phase 2 identity
+# marker (.flint-ds-identity), which every DS stamps at boot — it is expected
+# on-disk content, not data-path traffic.
+ds_bytes() {
+  find "$1" -type f ! -name '.flint-ds-identity' -print0 2>/dev/null \
+    | xargs -0 stat -f%z 2>/dev/null | awk '{s+=$1} END {print s+0}'
+}
 
 start_ds() {
   local n="$1" cfg="$CFG_DIR/ds$1.yaml"

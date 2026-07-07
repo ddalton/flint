@@ -79,6 +79,34 @@ lvol storage for other volumes, those consumers see the storage node's
 spdk-tgt keep running (kubelet death does not stop containers) — data
 keeps serving; it is the *pods* on the dead node that move.
 
+Validated against a real AWS spot reclaim (runn, 2026-07-06, v1.10.0
+gate): taint → ds replacement Ready on another node in **26 s**, r2
+export PVC re-attached from the surviving replica leg. Three
+real-reclaim extras the drill's kubelet-kill can't show:
+
+- **Delete the Node object once the instance is confirmed terminated**
+  (`kubectl delete node <node>`). A DaemonSet rolling update will
+  otherwise schedule its next pod onto the dead node and wedge the
+  whole roll on a Pending pod (it eats the maxUnavailable budget).
+- **MDS-node blackhole delays DS re-registration.** kill-9 of the MDS
+  process gets DSes an RST → NACK → same-tick re-register. A
+  *reclaimed node* sends nothing: each DS's heartbeat channel sits in
+  TCP retransmit until the kernel gives up. Observed: all DSes
+  re-registered **~6 min** after the replacement MDS came up, with no
+  intervention. Files pinned to not-yet-re-registered DSes are
+  stub-IO-guarded (clients hang-retry) for that window. A per-RPC
+  heartbeat deadline / TCP_USER_TIMEOUT would shrink it (residual).
+- **A DS export claim on a `numReplicas: 1` class dies with its home
+  node — unrecoverably.** Fleets deployed before the r2 claim template
+  keep their original r1 claims (StatefulSet claims are never
+  retrofitted). Check with:
+  `kubectl get pv <pv> -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/replica-count}'`
+  and migrate deliberately: delete the DS's PVC + pod together; the
+  replacement claim provisions from the current (r2) template, the DS
+  stamps a fresh identity marker and rejoins empty. Stripes that lived
+  only on the lost claim are gone; placement pins to that DS name
+  remain and newly written files reuse it safely.
+
 ## After ANY csi-node DaemonSet roll (the landmine)
 
 A csi-node pod-template change restarts spdk-tgt (a native-sidecar
@@ -153,13 +181,20 @@ rather than re-maps).
 
 ## Known residuals (fix work tracked in the durable-DS plan)
 
-- **In-flight I/O wedge on abrupt DS loss**: if a DS's Service has no
-  endpoints, in-flight client RPCs fall back to the MDS, are refused
-  with NFS4ERR_DELAY (the stub-IO guard — the alternative was silent
-  zeros), and the kernel never re-drives them down the pNFS path.
-  Graceful reschedules avoid this (measured stall 1 s); a hard kill
-  mid-I/O can wedge affected processes until their pod is recreated
-  **on another node** — kernel NFS client state is per-node, so
-  same-node restarts inherit the wedge. Durable fix: MDS proxy I/O.
+- **In-flight I/O wedge on abrupt DS loss — and it poisons the whole
+  node**: if a DS's Service has no endpoints, the files-layout client
+  marks that composite **deviceid INVALID (permanent — not the 120 s
+  retryable UNAVAILABLE)**, every read of every file pinned to that
+  device falls back to the MDS, is refused with NFS4ERR_DELAY (the
+  stub-IO guard — the alternative was silent zeros), and the fallback
+  loop never re-drives the pNFS path even after the DS returns.
+  Anatomy measured live (runn, 2026-07-06): retry loop at ~110 ms per
+  stuck file; the deviceid cache hangs off the node's shared
+  nfs_client, so **fresh pods on the same node inherit the poisoning**,
+  and deleted pods leave detached mounts whose in-flight retries spin
+  forever and keep the nfs_client pinned. Files on other deviceids
+  read fine throughout. Remedies: run affected consumers on a
+  different node (verified: same file, clean sha, instantly) or reboot
+  the poisoned node. Durable fix: MDS proxy I/O.
 - **helm --reuse-values** silently nils new chart defaults — always
   pass the full values file.

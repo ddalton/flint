@@ -583,6 +583,38 @@ semantics; `sr_highest_slotid` = highest slot the server *accepts*, RFC
 server's `state/session.rs` tracks max-slot-in-use instead; pynfs
 accepts both, but unifying on the DS's reading is a small follow-up.
 
+### Status: DONE (2026-07-06) — ADR 0005 accepted
+
+Measured on the runn rig (on-demand i4i.large bench nodes; details and
+raw data in `docs/decisions/0005-*.md` + `data/0005-results.tsv`):
+**2-way replication costs ~0% throughput** on this hardware (writes
+0.98–0.99×, reads 1.23–2.50× FASTER — served from the local leg), the
+real price is **2× capacity** plus a brief bounded rebuild window
+(~18% seq-write dip, ~9 s for a 2 GiB working set, invisible to pNFS
+clients). Cross-host scaling shape preserved: N=4 r2 aggregate
+1993 MiB/s @ 3 clients == ADR 0004's r1 1978 MiB/s.
+
+### v1.10.0 release gate (2026-07-06) — shipped Phases 2–5
+
+Live gate on runn upgraded the fleet 1.9.0→1.10.0 **through** the
+csi-node landmine with zero VolumeAttachment surgery (the 1.10.0
+self-heal absorbing its own upgrade). Mid-gate, AWS reclaimed a spot
+worker — an unplanned real-world run of the node-death drill; the
+taint recipe recovered the DS in 26 s. Block + pNFS sentinel sha256
+both verified across the upgrade; fresh r2 provision green; identity
+guard verified markers on all rolled DSes and stamped the one
+recreated claim. New findings, all recorded in the runbook:
+
+- MDS-node blackhole (no RST) delays DS re-registration to the TCP
+  give-up (~6 min observed); a heartbeat RPC deadline would bound it.
+- A DaemonSet roll wedges on a dead-but-undeleted Node object.
+- files-layout clients mark a deviceid INVALID (permanent) after
+  connection refusals → node-wide read livelock against the stub-IO
+  guard that survives pod deletion; remedy = another node or reboot;
+  durable fix = MDS proxy I/O (residual, now priority-ranked).
+- Legacy r1 DS export claims (pre-r2 fleets) die with their home
+  node; migrate by recreating each DS claim deliberately.
+
 ---
 
 ## Follow-on milestone A — DS drain/decommission (investigated, not in scope)
