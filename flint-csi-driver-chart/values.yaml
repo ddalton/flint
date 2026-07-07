@@ -15,7 +15,7 @@ images:
   repository: dilipdalton  # Docker Hub registry
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
-    tag: "1.10.0"           # durable-DS release: NodeStage self-heal for dead NVMe-oF targets (no VA-delete)
+    tag: "1.11.0"           # torture release: OPEN_DOWNGRADE, OPEN-createattrs fix, DATA_SYNC size truth
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (SPDK v26.05)
@@ -336,7 +336,7 @@ pnfs:
     # MDS + DS ship in one image (both binaries; entrypoint selects).
     image:
       name: flint-pnfs
-      tag: "1.10.0"  # durable-DS Phases 2+3: DS identity guard, MDS-restart hardening, heartbeat isolation
+      tag: "1.11.0"  # bounded-DELAY livelock fix, truncate propagation (DsControl), stripe-hole semantics, P0 security batch
 
     # FILE-layout stripe unit in bytes. Pinned PER FILE at first
     # LAYOUTGET (Phase 0): changing this affects only files created
