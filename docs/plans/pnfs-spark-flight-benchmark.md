@@ -377,6 +377,19 @@ filenames** (`p0000.parquet`, skip `.crc`). 120 parts / 3.36 GB landed
 clean and re-read from a fresh mount. This is the Phase 1–2 harness
 pattern until Findings 2/4 are fixed in the driver.
 
+**Parquet-Spark DS-count scaling — taken as the storage curve.** A
+dedicated multi-client Parquet-Spark N=2-vs-N=4 run was *not* executed:
+it would need an **unsupported 4→2 DS scale-down** + a ~16 GB re-stage,
+and its result is bounded by what's already measured — the single-node
+Parquet scan is storage-bound at ~546 MB/s (≈ the raw-read rate), and
+the raw-read DS sweep already gave **N=2→N=4 = 1.81×** with flat per-DS
+bandwidth. Since Parquet-Spark ≈ storage-bound ≈ raw read, the
+Parquet-Spark aggregate tracks that same ~1.8× curve; a separate run
+would be confirmatory only. Decision (2026-07-07): accept the dd
+scaling + the storage-bound Parquet scan as jointly answering it;
+revisit a native multi-client Parquet sweep if/when the DS drain
+milestone makes scale-down safe.
+
 ### Phase 1 — data prep
 
 Download BTS CSVs → a Spark job converts to Parquet (large parts, big row
