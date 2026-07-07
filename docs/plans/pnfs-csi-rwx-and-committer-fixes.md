@@ -1,7 +1,29 @@
 # pNFS CSI RWX isolation + Spark committer — fix plan
 
 **Date**: 2026-07-07
-**Status**: Proposed
+**Status**: Fix 1 IMPLEMENTED + rig-validated (csi-e2e green: isolation,
+subtree mount, striping, delete-reclaims, re-create-empty) with the
+directory-rename placement sweep; Fix 2 documented in the operator
+runbook (no repo code); Fix 3 open.
+
+**Capacity decision (recorded 2026-07-07):** directory model for ALL
+new pNFS CSI volumes — effectively option (c), but the "regression"
+framing dissolved on verification: P0-4's gate (`enospc-drill.sh`)
+asserts DS-statvfs registration + POOL-level bounded ENOSPC; the
+sparse file's `set_len` never enforced anything (a consumer could
+always write past it into pool space). So per-volume enforcement is
+not lost — it never existed. Legacy file volumes keep their exact old
+semantics (same-size re-create ok, resize refused, root mount via
+volume-mode=file back-compat; NodePublish branches on the new
+`pnfs.flint.io/volume-mode` context key so pre-upgrade PVs are
+untouched). Per-volume quota remains future work (option b).
+
+**Bonus finding while implementing:** `note_rename` re-keyed only the
+exact placement key, so renaming a DIRECTORY left child pins at the
+old path — fresh readers would mint new pins and read holes (exactly
+the shape of Spark's rename-based commit). Fixed: prefix sweep
+(`rename_placements_under`) + legacy-pin guard extension
+(`has_legacy_placements_under`).
 **Motivation**: The two blockers found by the Spark-on-pNFS dry-run
 (`docs/plans/pnfs-spark-flight-benchmark.md`, "Phase 0 dry-run results",
 Findings 1 & 2). Raw-read DS scaling is proven (1.81× at N=4); these

@@ -8,16 +8,22 @@
 # the gRPC verbs; the shell wrapping handles mount/umount inside the
 # Lima VM (because macOS NFSv4.1 doesn't support pNFS layouts).
 #
-# What it asserts
-#   1. CreateVolume returns a volume_context carrying the five
+# What it asserts (directory-per-volume model)
+#   1. CreateVolume returns a volume_context carrying the six
 #      pnfs.flint.io/* keys (mds-ip, mds-port, export-path,
-#      volume-file, size-bytes).
-#   2. Mount with those keys + production mount options succeeds.
+#      volume-file, size-bytes, volume-mode) with volume-mode=dir,
+#      and the MDS created a directory.
+#   2. Mounting the per-volume subtree (MDS:/<volume>) with production
+#      mount options succeeds — the NodePublish mount shape.
 #   3. Round-trip data integrity (sha256 written == sha256 read back).
-#   4. Both DSes have file content after the run (real striping).
-#   5. DeleteVolume removes the file from the MDS export.
-#   6. A second CreateVolume after DeleteVolume succeeds (no stale
-#      state on the MDS).
+#   4. Both DSes have stripe content after the run (real striping —
+#      files one level deeper still stripe).
+#   5. ISOLATION: a second volume's mount is empty — it sees neither
+#      the first volume's files nor its sparse image (the Spark
+#      dry-run Finding 1 refutation).
+#   6. DeleteVolume removes the whole subtree.
+#   7. A re-created volume with the same name mounts EMPTY — no
+#      leftover files from the deleted incarnation.
 #
 # Exit 0 = PASS, non-zero = FAIL. Suitable as a Makefile gate.
 
@@ -37,7 +43,9 @@ DS1_EXPORT="/tmp/flint-pnfs-ds1"
 DS2_EXPORT="/tmp/flint-pnfs-ds2"
 MDS_EXPORT_DIR="/tmp/flint-pnfs-mds-exports"
 VM_MOUNT="/mnt/flint-csi-e2e"
+VM_MOUNT2="/mnt/flint-csi-e2e-b"
 VOLUME_ID="pvc-csi-e2e-test"
+VOLUME_ID2="pvc-csi-e2e-other"
 SIZE_BYTES=$((512 * 1024 * 1024))   # 512 MiB — small but big enough
                                      # to land multiple stripes on
                                      # both DSes (8 MiB stripe).
@@ -48,7 +56,8 @@ SIZE_BYTES=$((512 * 1024 * 1024))   # 512 MiB — small but big enough
 
 cleanup() {
   set +e
-  limactl shell "$LIMA_VM" -- sudo umount -lf "$VM_MOUNT" 2>/dev/null
+  limactl shell "$LIMA_VM" -- sudo bash -c \
+    "umount -lf $VM_MOUNT; umount -lf $VM_MOUNT2" 2>/dev/null
   for n in mds ds1 ds2; do
     if [ -f "$PIDFILE_DIR/flint-pnfs-$n.pid" ]; then
       kill "$(cat "$PIDFILE_DIR/flint-pnfs-$n.pid")" 2>/dev/null
@@ -116,7 +125,7 @@ CTX_JSON=$("$BIN_DIR/pnfs-csi-cli" create \
   --size-bytes "$SIZE_BYTES" 2>&1) || { echo "$CTX_JSON"; fail "CreateVolume failed"; }
 echo "  context: $CTX_JSON"
 
-# Assert all five keys are present (the contract from PR 2's
+# Assert all six keys are present (the contract from the
 # pnfs_csi::ctx_keys module — if any of these is missing or renamed,
 # this test catches it before the CSI driver does in production).
 for key in \
@@ -124,52 +133,59 @@ for key in \
     "pnfs.flint.io/mds-port" \
     "pnfs.flint.io/export-path" \
     "pnfs.flint.io/volume-file" \
-    "pnfs.flint.io/size-bytes"; do
+    "pnfs.flint.io/size-bytes" \
+    "pnfs.flint.io/volume-mode"; do
   echo "$CTX_JSON" | jq -e "has(\"$key\")" >/dev/null \
     || fail "volume_context missing required key: $key"
 done
-ok "volume_context carries all five required keys"
+ok "volume_context carries all six required keys"
 
 EXPORT_PATH=$(echo "$CTX_JSON" | jq -r '."pnfs.flint.io/export-path"')
 VOLUME_FILE=$(echo "$CTX_JSON" | jq -r '."pnfs.flint.io/volume-file"')
+VOLUME_MODE=$(echo "$CTX_JSON" | jq -r '."pnfs.flint.io/volume-mode"')
 SIZE_REPORTED=$(echo "$CTX_JSON" | jq -r '."pnfs.flint.io/size-bytes"')
 [ "$SIZE_REPORTED" = "$SIZE_BYTES" ] \
   || fail "size mismatch: requested $SIZE_BYTES, got $SIZE_REPORTED"
+[ "$VOLUME_MODE" = "dir" ] \
+  || fail "new volume should be volume-mode=dir, got '$VOLUME_MODE'"
 
-# Verify the MDS actually created the file at the right size.
-[ -f "$EXPORT_PATH/$VOLUME_FILE" ] \
-  || fail "MDS file not present at $EXPORT_PATH/$VOLUME_FILE"
-FILE_SIZE=$(stat -f %z "$EXPORT_PATH/$VOLUME_FILE")
-[ "$FILE_SIZE" = "$SIZE_BYTES" ] \
-  || fail "MDS file size $FILE_SIZE != requested $SIZE_BYTES"
-ok "MDS-side file present at correct size"
+# Verify the MDS actually created a directory.
+[ -d "$EXPORT_PATH/$VOLUME_FILE" ] \
+  || fail "MDS directory not present at $EXPORT_PATH/$VOLUME_FILE"
+ok "MDS-side directory volume present"
 
 # ──────────────────────────────────────────────────────────────────────
-# (2) Mount with the same options NodePublishVolume uses
+# (2) Mount the per-volume subtree — the NodePublish mount shape
 # ──────────────────────────────────────────────────────────────────────
 
-step "mount on Lima client"
+step "mount per-volume subtree on Lima client"
 limactl shell "$LIMA_VM" -- sudo mkdir -p "$VM_MOUNT"
 
 MOUNT_OPTS="minorversion=1,proto=tcp,port=$MDS_PORT,nconnect=4,rsize=1048576,wsize=1048576,noresvport"
 limactl shell "$LIMA_VM" -- sudo mount -t nfs4 \
   -o "$MOUNT_OPTS" \
-  "$HOST_ADDR:/" "$VM_MOUNT" \
-  || fail "mount failed (see $LOG_DIR/flint-pnfs-mds.log)"
-ok "mounted with production options"
+  "$HOST_ADDR:/$VOLUME_ID" "$VM_MOUNT" \
+  || fail "subtree mount failed (see $LOG_DIR/flint-pnfs-mds.log)"
+ok "mounted MDS:/$VOLUME_ID with production options"
+
+# A fresh volume must be empty — the export root (other volumes, stale
+# files) must NOT be visible.
+ENTRIES=$(limactl shell "$LIMA_VM" -- bash -c "ls -A $VM_MOUNT | wc -l")
+[ "$(echo "$ENTRIES" | tr -d '[:space:]')" = "0" ] \
+  || { limactl shell "$LIMA_VM" -- ls -al "$VM_MOUNT"; fail "fresh volume is not empty ($ENTRIES entries)"; }
+ok "fresh volume mounts empty"
 
 # ──────────────────────────────────────────────────────────────────────
-# (3) Round-trip data integrity
+# (3) Round-trip data integrity (file inside the volume subtree)
 # ──────────────────────────────────────────────────────────────────────
 
 step "write + sha256 round-trip"
 WRITE_HASH=$(limactl shell "$LIMA_VM" -- bash -c "
   set -eu
-  # Write 64 MiB of urandom to the volume's file (named after volume_id).
-  dd if=/dev/urandom of=$VM_MOUNT/$VOLUME_ID bs=1M count=64 conv=notrunc \
+  dd if=/dev/urandom of=$VM_MOUNT/data.bin bs=1M count=64 conv=notrunc \
     2>/dev/null
   sync
-  sha256sum $VM_MOUNT/$VOLUME_ID | awk '{print \$1}'
+  sha256sum $VM_MOUNT/data.bin | awk '{print \$1}'
 ")
 [ -n "$WRITE_HASH" ] || fail "write hash empty"
 ok "wrote 64 MiB, sha256=${WRITE_HASH:0:16}…"
@@ -179,21 +195,19 @@ limactl shell "$LIMA_VM" -- sudo bash -c 'sync && echo 3 > /proc/sys/vm/drop_cac
   >/dev/null 2>&1
 
 READ_HASH=$(limactl shell "$LIMA_VM" -- bash -c \
-  "sha256sum $VM_MOUNT/$VOLUME_ID | awk '{print \$1}'")
+  "sha256sum $VM_MOUNT/data.bin | awk '{print \$1}'")
 [ "$READ_HASH" = "$WRITE_HASH" ] \
   || fail "data corruption: wrote $WRITE_HASH, read back $READ_HASH"
 ok "round-trip hash matches"
 
 # ──────────────────────────────────────────────────────────────────────
-# (4) Per-DS striping evidence
+# (4) Per-DS striping evidence (files one level deeper still stripe)
 # ──────────────────────────────────────────────────────────────────────
 
 step "verifying striping"
-limactl shell "$LIMA_VM" -- sudo umount "$VM_MOUNT"
-
-# Each DS should hold the file (sparse). What matters is that BOTH
-# DSes have actual block allocations; a fall-back-to-MDS-direct path
-# would leave one or both DSes empty.
+# Each DS should hold stripe content. What matters is that BOTH DSes
+# have actual block allocations; a fall-back-to-MDS-direct path would
+# leave one or both DSes empty.
 # macOS BSD `stat -f %b` returns blocks-allocated in 512-byte units
 # (matches the kernel's st_blocks). Multiplying by 512 gives bytes
 # actually on disk for sparse files. Don't use `%B` — that's the
@@ -205,7 +219,7 @@ for n in 1 2; do
   # not appear on a DS. Any allocated stripe file proves DS-path I/O
   # ran (an MDS-direct fallback would leave the DS empty).
   ds_file=$(find "$ds_dir" -type f -name "*.stripe*" | head -1)
-  [ -n "$ds_file" ] || fail "DS${n} has no stripe file for $VOLUME_ID"
+  [ -n "$ds_file" ] || fail "DS${n} has no stripe file for $VOLUME_ID/data.bin"
   ds_blocks=$(stat -f %b "$ds_file")
   ds_alloc=$(( ds_blocks * 512 ))
   [ "$ds_alloc" -gt 0 ] \
@@ -214,46 +228,88 @@ for n in 1 2; do
     'BEGIN { printf "%.1f MiB", b / 1048576 }')"
 done
 
-mds_blocks=$(stat -f %b "$EXPORT_PATH/$VOLUME_FILE" 2>/dev/null || echo 0)
+mds_blocks=$(stat -f %b "$EXPORT_PATH/$VOLUME_FILE/data.bin" 2>/dev/null || echo 0)
 mds_alloc=$(( mds_blocks * 512 ))
 printf '  MDS: %d bytes allocated (should be ~0 — metadata-only)\n' "$mds_alloc"
 ok "both DSes hold real data"
 
 # ──────────────────────────────────────────────────────────────────────
-# (5) DeleteVolume removes the MDS file
+# (5) ISOLATION: a second volume must not see the first volume's data
+# ──────────────────────────────────────────────────────────────────────
+
+step "isolation: second volume sees nothing of the first"
+CTX2_JSON=$("$BIN_DIR/pnfs-csi-cli" create \
+  --endpoint "127.0.0.1:$MDS_GRPC_PORT" \
+  --volume-id "$VOLUME_ID2" \
+  --size-bytes "$SIZE_BYTES" 2>&1) || { echo "$CTX2_JSON"; fail "CreateVolume($VOLUME_ID2) failed"; }
+
+limactl shell "$LIMA_VM" -- sudo mkdir -p "$VM_MOUNT2"
+limactl shell "$LIMA_VM" -- sudo mount -t nfs4 \
+  -o "$MOUNT_OPTS" \
+  "$HOST_ADDR:/$VOLUME_ID2" "$VM_MOUNT2" \
+  || fail "mount of second volume failed"
+
+ENTRIES2=$(limactl shell "$LIMA_VM" -- bash -c "ls -A $VM_MOUNT2 | wc -l")
+[ "$(echo "$ENTRIES2" | tr -d '[:space:]')" = "0" ] \
+  || { limactl shell "$LIMA_VM" -- ls -al "$VM_MOUNT2"; \
+       fail "second volume is not isolated ($ENTRIES2 entries visible)"; }
+
+# ..-traversal out of the subtree must not reach volume 1's data.
+limactl shell "$LIMA_VM" -- bash -c \
+  "cat $VM_MOUNT2/../$VOLUME_ID/data.bin >/dev/null 2>&1" \
+  && fail "second volume can path-traverse into the first"
+
+limactl shell "$LIMA_VM" -- sudo umount "$VM_MOUNT2"
+"$BIN_DIR/pnfs-csi-cli" delete \
+  --endpoint "127.0.0.1:$MDS_GRPC_PORT" \
+  --volume-id "$VOLUME_ID2" >/dev/null || fail "cleanup of $VOLUME_ID2 failed"
+ok "second volume mounts empty and cannot reach the first"
+
+# ──────────────────────────────────────────────────────────────────────
+# (6) DeleteVolume removes the whole subtree
 # ──────────────────────────────────────────────────────────────────────
 
 step "DeleteVolume($VOLUME_ID)"
+limactl shell "$LIMA_VM" -- sudo umount "$VM_MOUNT"
 "$BIN_DIR/pnfs-csi-cli" delete \
   --endpoint "127.0.0.1:$MDS_GRPC_PORT" \
   --volume-id "$VOLUME_ID" \
   || fail "DeleteVolume failed"
 
-[ ! -f "$EXPORT_PATH/$VOLUME_FILE" ] \
-  || fail "MDS file still present after DeleteVolume: $EXPORT_PATH/$VOLUME_FILE"
-ok "MDS file removed"
+[ ! -e "$EXPORT_PATH/$VOLUME_FILE" ] \
+  || fail "MDS subtree still present after DeleteVolume: $EXPORT_PATH/$VOLUME_FILE"
+ok "MDS subtree removed"
 
 # ──────────────────────────────────────────────────────────────────────
-# (6) Second create after delete — no stale state
+# (7) Re-create after delete — fresh and EMPTY (no stale state)
 # ──────────────────────────────────────────────────────────────────────
 
-step "second CreateVolume (verify no stale state)"
-CTX2=$("$BIN_DIR/pnfs-csi-cli" create \
+step "re-CreateVolume (verify no stale state)"
+CTX3=$("$BIN_DIR/pnfs-csi-cli" create \
   --endpoint "127.0.0.1:$MDS_GRPC_PORT" \
   --volume-id "$VOLUME_ID" \
   --size-bytes "$SIZE_BYTES" 2>&1) \
-  || { echo "$CTX2"; fail "second CreateVolume failed"; }
+  || { echo "$CTX3"; fail "second CreateVolume failed"; }
 
-EXPORT_PATH2=$(echo "$CTX2" | jq -r '."pnfs.flint.io/export-path"')
-[ -f "$EXPORT_PATH2/$VOLUME_FILE" ] \
-  || fail "second CreateVolume didn't recreate file"
+EXPORT_PATH3=$(echo "$CTX3" | jq -r '."pnfs.flint.io/export-path"')
+[ -d "$EXPORT_PATH3/$VOLUME_FILE" ] \
+  || fail "re-CreateVolume didn't recreate the directory"
 
-# Clean up the second volume so we leave the MDS in a sane state.
+limactl shell "$LIMA_VM" -- sudo mount -t nfs4 \
+  -o "$MOUNT_OPTS" \
+  "$HOST_ADDR:/$VOLUME_ID" "$VM_MOUNT" \
+  || fail "mount of re-created volume failed"
+ENTRIES3=$(limactl shell "$LIMA_VM" -- bash -c "ls -A $VM_MOUNT | wc -l")
+[ "$(echo "$ENTRIES3" | tr -d '[:space:]')" = "0" ] \
+  || fail "re-created volume shows stale files ($ENTRIES3 entries)"
+limactl shell "$LIMA_VM" -- sudo umount "$VM_MOUNT"
+
+# Clean up the re-created volume so we leave the MDS in a sane state.
 "$BIN_DIR/pnfs-csi-cli" delete \
   --endpoint "127.0.0.1:$MDS_GRPC_PORT" \
   --volume-id "$VOLUME_ID" >/dev/null \
   || fail "final cleanup DeleteVolume failed"
-ok "create-after-delete works (idempotent provisioner is safe)"
+ok "re-created volume is fresh and empty"
 
 # ──────────────────────────────────────────────────────────────────────
 # Summary
@@ -261,8 +317,8 @@ ok "create-after-delete works (idempotent provisioner is safe)"
 
 echo
 echo "════════════════════════════════════════════════════════════════"
-echo "✓ PASS: pNFS CSI integration end-to-end"
+echo "✓ PASS: pNFS CSI integration end-to-end (directory-per-volume)"
 echo "════════════════════════════════════════════════════════════════"
-echo "  Create → mount → write → read → unmount → delete → re-create"
-echo "  All gRPC verbs and the kernel data path exercised."
-echo "  See $LOG_DIR/flint-pnfs-mds.log for the MDS-side trace."
+echo "  Create → subtree mount → write → read → isolation → delete →"
+echo "  re-create-empty. All gRPC verbs and the kernel data path"
+echo "  exercised. See $LOG_DIR/flint-pnfs-mds.log for the MDS trace."

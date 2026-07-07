@@ -30,8 +30,9 @@ service MdsControl {
   // CreateVolume gRPC requests.
   rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
 
-  // Delete a pNFS volume — removes the metadata file. Idempotent:
-  // DeleteVolume on an absent volume is a success.
+  // Delete a pNFS volume — removes its directory subtree (or the
+  // legacy metadata file) and reclaims all DS stripes pinned under
+  // it. Idempotent: DeleteVolume on an absent volume is a success.
   rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
 }
 
@@ -51,13 +52,14 @@ message CreateVolumeResponse {
   // Whether the volume was created (or already existed with matching size).
   bool created = 1;
 
-  // Absolute path of the MDS export root the client should mount
-  // (e.g. "/tmp/flint-pnfs-mds-exports"). The client mounts the
-  // export root, not the per-volume file.
+  // Absolute path of the MDS export root
+  // (e.g. "/tmp/flint-pnfs-mds-exports"). Directory volumes are
+  // subtrees under it; the client mounts `<mds>:/<volume_file>`.
   string export_path = 2;
 
-  // Volume file name relative to `export_path`. Currently equal to
-  // `volume_id`, but kept separate to allow future per-tenant prefixes.
+  // Volume name relative to `export_path` (directory subtree, or the
+  // sparse file for legacy volumes). Currently equal to `volume_id`,
+  // but kept separate to allow future per-tenant prefixes.
   string volume_file = 3;
 
   // Error message on failure (created=false). Empty on success.
@@ -68,6 +70,13 @@ message CreateVolumeResponse {
   // port, and mounting against it fails. 0 (an older MDS that predates
   // this field) → the caller falls back to the standard 2049.
   uint32 nfs_port = 5;
+
+  // True when the volume is a directory subtree (directory-per-volume
+  // model): NodePublish must mount `<mds>:/<volume_file>` so each PVC
+  // gets an isolated namespace. False = legacy sparse-file volume (or
+  // an older MDS that predates the field): NodePublish mounts the
+  // export root as before.
+  bool directory = 6;
 }
 
 message DeleteVolumeRequest {

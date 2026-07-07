@@ -1076,13 +1076,17 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
     }
 
     fn rename_preserves_data(&self, old_key: &str) -> bool {
-        match self.layout_manager.placement_for(old_key) {
+        let self_ok = match self.layout_manager.placement_for(old_key) {
             // Legacy path-keyed pin: DS stripes live at the old path;
             // renaming would strand them (fresh readers get nothing).
             Some(p) => p.file_id != 0,
-            // Unpinned: plain MDS-local file, rename freely.
+            // Unpinned: plain MDS-local file or a directory.
             None => true,
-        }
+        };
+        // A directory rename moves every child's path too — refuse if
+        // any child is a legacy pin (identity-keyed children follow
+        // via the note_rename prefix sweep).
+        self_ok && !self.layout_manager.has_legacy_placements_under(old_key)
     }
 
     fn note_rename(&self, old_key: &str, new_key: &str) {
@@ -1104,6 +1108,17 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
                 // loud, because the file's data is now stranded.
                 warn!("💥 note_rename('{}' → '{}') failed AFTER fs rename: {}", old_key, new_key, e);
             }
+        }
+        // Directory rename: every child placement's path key moved
+        // with it. No-op for file renames.
+        let moved = self
+            .layout_manager
+            .rename_placements_under(old_key, new_key);
+        if moved > 0 {
+            info!(
+                "Directory rename '{}' → '{}': re-keyed {} child placement(s)",
+                old_key, new_key, moved
+            );
         }
     }
 }

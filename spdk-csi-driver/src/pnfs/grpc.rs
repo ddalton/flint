@@ -333,16 +333,26 @@ impl MdsControl for MdsControlService {
         }))
     }
 
-    /// Provision a new pNFS volume by creating its metadata file.
+    /// Provision a new pNFS volume as a **directory subtree**
+    /// `<export>/<volume_id>/` (directory-per-volume model).
     ///
-    /// The file lives under the MDS export and is sized to
-    /// `size_bytes` via `set_len` (sparse). The kernel client mounts
-    /// the export root and discovers this file by name; LAYOUTGET
-    /// against it returns segments striped across all registered DSes.
+    /// Pods mount `MDS:/<volume_id>` — an isolated shared POSIX
+    /// namespace per PVC. Files inside stripe across the DSes exactly
+    /// as before (LAYOUTGET is per-file; the placement keys just gain
+    /// a `<volume_id>/` prefix). The original model — one sparse file
+    /// sized with `set_len`, export ROOT mounted by every pod — gave
+    /// no isolation: every PVC saw the whole export (Spark dry-run
+    /// Finding 1, docs/plans/pnfs-csi-rwx-and-committer-fixes.md).
     ///
-    /// Idempotent: re-creating an existing volume with the same size
-    /// is success; size mismatch is an error so a stale volume_id
-    /// can't silently re-use a smaller file.
+    /// Capacity: `size_bytes` is recorded in the CSI response only.
+    /// Enforcement is pool-level (DS statvfs + bounded ENOSPC, P0-4),
+    /// which is unchanged — the sparse file's size never bounded
+    /// writes either (a consumer could always write past it into pool
+    /// space). Per-volume quota is future work.
+    ///
+    /// Idempotent: re-creating an existing directory volume is
+    /// success. A pre-existing legacy *file* volume keeps its old
+    /// semantics (size match = success, mismatch = error).
     async fn create_volume(
         &self,
         request: Request<CreateVolumeRequest>,
@@ -361,19 +371,35 @@ impl MdsControl for MdsControlService {
                 volume_file: String::new(),
                 message: "volume_id must be non-empty and contain no '/' or NUL".into(),
                 nfs_port: self.nfs_port as u32,
+                directory: false,
             }));
         }
 
         let file_path = self.export_path.join(&req.volume_id);
         let export_str = self.export_path.to_string_lossy().into_owned();
 
-        // Existing-file path: if it's already there at the right size,
-        // success; if size differs, error so the caller doesn't shrink
-        // or grow a live volume by accident.
+        // Existing-volume path. A directory is the current model —
+        // idempotent success. A file is a legacy sparse-file volume:
+        // keep its old semantics (size match = success, mismatch =
+        // refuse) so pre-existing PVs behave unchanged.
         if let Ok(meta) = std::fs::metadata(&file_path) {
+            if meta.is_dir() {
+                info!(
+                    "📦 CreateVolume: directory volume {} already exists",
+                    req.volume_id
+                );
+                return Ok(Response::new(CreateVolumeResponse {
+                    created: true,
+                    export_path: export_str,
+                    volume_file: req.volume_id,
+                    message: "already exists".into(),
+                    nfs_port: self.nfs_port as u32,
+                    directory: true,
+                }));
+            }
             if meta.len() == req.size_bytes {
                 info!(
-                    "📦 CreateVolume: {} already exists at correct size ({} bytes)",
+                    "📦 CreateVolume: legacy file volume {} already exists at correct size ({} bytes)",
                     req.volume_id, req.size_bytes
                 );
                 return Ok(Response::new(CreateVolumeResponse {
@@ -382,6 +408,7 @@ impl MdsControl for MdsControlService {
                     volume_file: req.volume_id,
                     message: "already exists".into(),
                     nfs_port: self.nfs_port as u32,
+                    directory: false,
                 }));
             }
             return Ok(Response::new(CreateVolumeResponse {
@@ -393,6 +420,7 @@ impl MdsControl for MdsControlService {
                     req.volume_id, meta.len(), req.size_bytes,
                 ),
                 nfs_port: self.nfs_port as u32,
+                directory: false,
             }));
         }
 
@@ -407,41 +435,37 @@ impl MdsControl for MdsControlService {
                 volume_file: String::new(),
                 message: format!("export dir not writable: {}", e),
                 nfs_port: self.nfs_port as u32,
+                directory: false,
             }));
         }
 
-        let f = match std::fs::OpenOptions::new()
-            .create_new(true).write(true).open(&file_path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                warn!("CreateVolume: open({:?}): {}", file_path, e);
-                return Ok(Response::new(CreateVolumeResponse {
-                    created: false,
-                    export_path: String::new(),
-                    volume_file: String::new(),
-                    message: format!("create file: {}", e),
-                    nfs_port: self.nfs_port as u32,
-                }));
-            }
-        };
-        if let Err(e) = f.set_len(req.size_bytes) {
-            warn!("CreateVolume: set_len({}): {}", req.size_bytes, e);
-            // Best-effort cleanup so the next attempt isn't blocked by
-            // a half-created file.
-            let _ = std::fs::remove_file(&file_path);
+        if let Err(e) = std::fs::create_dir(&file_path) {
+            warn!("CreateVolume: create_dir({:?}): {}", file_path, e);
             return Ok(Response::new(CreateVolumeResponse {
                 created: false,
                 export_path: String::new(),
                 volume_file: String::new(),
-                message: format!("set_len: {}", e),
+                message: format!("create dir: {}", e),
                 nfs_port: self.nfs_port as u32,
+                directory: false,
             }));
+        }
+        // World-writable like the export rigs: the consuming pod's uid
+        // is arbitrary (Spark executors, app containers) and NFS has
+        // no idmapping story here. The dir, not the export, is the
+        // isolation boundary.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                &file_path,
+                std::fs::Permissions::from_mode(0o777),
+            );
         }
 
         info!(
-            "📦 CreateVolume: created {} ({} bytes) at {:?}",
-            req.volume_id, req.size_bytes, file_path
+            "📦 CreateVolume: created directory volume {} at {:?} ({} bytes requested, pool-enforced)",
+            req.volume_id, file_path, req.size_bytes
         );
         Ok(Response::new(CreateVolumeResponse {
             created: true,
@@ -449,6 +473,7 @@ impl MdsControl for MdsControlService {
             volume_file: req.volume_id,
             message: String::new(),
             nfs_port: self.nfs_port as u32,
+            directory: true,
         }))
     }
 
@@ -472,19 +497,37 @@ impl MdsControl for MdsControlService {
         }
 
         let file_path = self.export_path.join(&req.volume_id);
-        match std::fs::remove_file(&file_path) {
+
+        // Reclaim DS stripes for everything this volume pinned.
+        // Directory volumes own the whole `<volume_id>/…` key prefix;
+        // the exact key covers legacy single-file volumes. Identity-
+        // keyed pins only — legacy pins have no MDS-side rel-path
+        // knowledge here and just leak until scrubbed. Runs on the
+        // already-absent path too: placements can outlive the tree
+        // (e.g. a crash between rm and this reply).
+        let reclaim = |mgr: &crate::pnfs::mds::layout::LayoutManager| {
+            for (key, p) in mgr.forget_placements_under(&req.volume_id) {
+                if p.file_id != 0 {
+                    mgr.enqueue_stripe_cleanup(&p, &key);
+                }
+            }
+            if let Some(p) = mgr.forget_placement(&req.volume_id) {
+                if p.file_id != 0 {
+                    mgr.enqueue_stripe_cleanup(&p, &req.volume_id);
+                }
+            }
+        };
+
+        let removed = match std::fs::symlink_metadata(&file_path) {
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&file_path),
+            Ok(_) => std::fs::remove_file(&file_path),
+            Err(e) => Err(e),
+        };
+
+        match removed {
             Ok(()) => {
                 info!("🗑️  DeleteVolume: removed {:?}", file_path);
-                // The placement key is the export-relative path — for
-                // CSI volumes that's exactly the volume_id. Reclaim
-                // the volume file's DS stripes too (identity-keyed
-                // pins only; legacy pins have no MDS-side rel-path
-                // knowledge here and just leak until scrubbed).
-                if let Some(p) = self.layout_manager.forget_placement(&req.volume_id) {
-                    if p.file_id != 0 {
-                        self.layout_manager.enqueue_stripe_cleanup(&p, &req.volume_id);
-                    }
-                }
+                reclaim(&self.layout_manager);
                 Ok(Response::new(DeleteVolumeResponse {
                     deleted: true,
                     message: String::new(),
@@ -492,11 +535,7 @@ impl MdsControl for MdsControlService {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 info!("🗑️  DeleteVolume: {} already absent", req.volume_id);
-                if let Some(p) = self.layout_manager.forget_placement(&req.volume_id) {
-                    if p.file_id != 0 {
-                        self.layout_manager.enqueue_stripe_cleanup(&p, &req.volume_id);
-                    }
-                }
+                reclaim(&self.layout_manager);
                 Ok(Response::new(DeleteVolumeResponse {
                     deleted: true,
                     message: "already absent".into(),
@@ -572,8 +611,9 @@ mod create_volume_tests {
         })).await.unwrap().into_inner();
         assert!(r.created, "create should succeed: {}", r.message);
         assert_eq!(r.volume_file, "pvc-abc");
+        assert!(r.directory, "new volumes are directory subtrees");
         let path = dir.path().join("pvc-abc");
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 1024 * 1024);
+        assert!(std::fs::metadata(&path).unwrap().is_dir());
 
         let r = s.delete_volume(Request::new(DeleteVolumeRequest {
             volume_id: "pvc-abc".into(),
@@ -583,7 +623,7 @@ mod create_volume_tests {
     }
 
     #[tokio::test]
-    async fn create_idempotent_same_size() {
+    async fn create_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let s = svc(dir.path());
         let req = CreateVolumeRequest { volume_id: "v1".into(), size_bytes: 4096 };
@@ -591,20 +631,97 @@ mod create_volume_tests {
         let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
         assert!(r.created, "second call should also succeed");
         assert_eq!(r.message, "already exists");
+        assert!(r.directory);
     }
 
+    /// A pre-upgrade sparse-file volume keeps its legacy semantics:
+    /// same-size re-create succeeds (directory=false so NodePublish
+    /// keeps the root mount), size mismatch is refused, delete removes
+    /// the file.
     #[tokio::test]
-    async fn create_size_mismatch_errors() {
+    async fn legacy_file_volume_semantics_preserved() {
         let dir = tempfile::tempdir().unwrap();
         let s = svc(dir.path());
-        s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "v1".into(), size_bytes: 4096,
-        })).await.unwrap();
+        let path = dir.path().join("v-legacy");
+        let f = std::fs::OpenOptions::new().create_new(true).write(true).open(&path).unwrap();
+        f.set_len(4096).unwrap();
+
         let r = s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "v1".into(), size_bytes: 8192,
+            volume_id: "v-legacy".into(), size_bytes: 4096,
+        })).await.unwrap().into_inner();
+        assert!(r.created, "same-size re-create of a legacy file: {}", r.message);
+        assert!(!r.directory, "legacy volume must NOT be advertised as a directory");
+
+        let r = s.create_volume(Request::new(CreateVolumeRequest {
+            volume_id: "v-legacy".into(), size_bytes: 8192,
         })).await.unwrap().into_inner();
         assert!(!r.created);
         assert!(r.message.contains("refusing to resize"));
+
+        let r = s.delete_volume(Request::new(DeleteVolumeRequest {
+            volume_id: "v-legacy".into(),
+        })).await.unwrap().into_inner();
+        assert!(r.deleted);
+        assert!(!path.exists());
+    }
+
+    /// Deleting a directory volume reclaims every placement under its
+    /// `<volume_id>/` prefix — and never a sibling volume whose name
+    /// merely starts with the same characters.
+    #[tokio::test]
+    async fn delete_directory_volume_sweeps_placements_prefix_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+
+        for v in ["vol", "volume2"] {
+            let r = s.create_volume(Request::new(CreateVolumeRequest {
+                volume_id: v.into(), size_bytes: 4096,
+            })).await.unwrap().into_inner();
+            assert!(r.created);
+        }
+        let rec = |key: &str| crate::state_backend::PlacementRecord {
+            file_key: key.into(),
+            stripe_size: 8 * 1024 * 1024,
+            device_ids: vec!["ds-a".into(), "ds-b".into()],
+            file_id: 7,
+        };
+        s.layout_manager.load_placement_records(vec![
+            rec("vol/a.parquet"),
+            rec("vol/sub/b.parquet"),
+            rec("volume2/c.parquet"),
+        ]);
+
+        let r = s.delete_volume(Request::new(DeleteVolumeRequest {
+            volume_id: "vol".into(),
+        })).await.unwrap().into_inner();
+        assert!(r.deleted);
+        assert!(!dir.path().join("vol").exists());
+        assert!(!s.layout_manager.has_placement("vol/a.parquet"));
+        assert!(!s.layout_manager.has_placement("vol/sub/b.parquet"));
+        assert!(
+            s.layout_manager.has_placement("volume2/c.parquet"),
+            "prefix sweep must not cross into volume2 (foo vs foobar)"
+        );
+        assert!(dir.path().join("volume2").exists());
+    }
+
+    /// A directory volume with content deletes cleanly (remove_dir_all,
+    /// not the old remove_file which would EISDIR / ENOTEMPTY).
+    #[tokio::test]
+    async fn delete_directory_volume_with_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        s.create_volume(Request::new(CreateVolumeRequest {
+            volume_id: "busy".into(), size_bytes: 4096,
+        })).await.unwrap();
+        std::fs::create_dir_all(dir.path().join("busy/deep/tree")).unwrap();
+        std::fs::write(dir.path().join("busy/deep/tree/f.bin"), b"data").unwrap();
+
+        let r = s.delete_volume(Request::new(DeleteVolumeRequest {
+            volume_id: "busy".into(),
+        })).await.unwrap().into_inner();
+        assert!(r.deleted, "{}", r.message);
+        assert!(!dir.path().join("busy").exists());
     }
 
     #[tokio::test]

@@ -278,6 +278,38 @@ synchronously:
   stale bytes after a later extension. Double-failure with a
   microscopic window; revisit if MDS HA lands.
 
+## Rename-committer apps on pNFS (Spark, Hadoop `file://`)
+
+Findings from the 2026-07-07 Spark dry-run
+(`docs/plans/pnfs-spark-flight-benchmark.md`, Findings 2–4). The read
+path is unaffected; staged/rename-based writers hit two client-side
+walls:
+
+- **`java.io.IOException: Mkdirs failed to create …/_temporary/…`** —
+  Java's `File.mkdirs()` creates a level, re-stats it, and the kernel
+  NFS client answers from a **cached negative lookup** → false →
+  IOException. Not a pNFS bug (shell `mkdir -p` of the same tree
+  succeeds); `lookupcache=none` or `actimeo=0` mounts avoid it but
+  make metadata-heavy reads unusably slow. Don't make them the
+  default.
+- **Long filenames** (Spark's `part-<uuid>….snappy.parquet` + `.crc`)
+  can exceed the MDS filehandle's path budget on pre-fix builds →
+  EIO + undeletable debris (see the fix plan's Fix 3; id-based FHs
+  remove the limit).
+
+**Working recipe (validated on the dry-run cluster):** write Parquet
+to a flint **RWO block PVC** (ext4 — the committer works there), then
+copy finished parts onto the pNFS mount with plain I/O, short names,
+skipping `.crc` sidecars:
+
+```bash
+cp part-*.parquet /pnfs/dataset/   # rename to p0000.parquet … on pre-Fix-3 builds
+```
+
+Native Spark write-back needs a no-rename committer
+(`spark.sql.sources.commitProtocolClass` / direct output committer)
+once long names are safe. Track in the fix plan.
+
 ## Scaling the DS fleet
 
 UP is safe: `--set pnfs.server.dataServers.count=N+1`. Existing files

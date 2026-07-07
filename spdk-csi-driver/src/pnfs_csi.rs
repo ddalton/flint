@@ -11,8 +11,10 @@
 //! controller's `CreateVolume` calls
 //! [`PnfsCsi::create_volume`], which:
 //!   1. Talks to the MDS over gRPC at the operator-configured endpoint.
-//!   2. Asks the MDS to create a sparse, sized file at
-//!      `<export>/<volume_id>`.
+//!   2. Asks the MDS to create the volume's directory subtree at
+//!      `<export>/<volume_id>/` (directory-per-volume; each PVC is an
+//!      isolated shared namespace that NodePublish mounts as
+//!      `MDS:/<volume_id>`).
 //!   3. Returns a `volume_context` map carrying every key the
 //!      `NodePublishVolume` path (PR 3) needs to mount the volume.
 //!
@@ -39,6 +41,11 @@ pub mod ctx_keys {
     pub const EXPORT_PATH: &str = "pnfs.flint.io/export-path";
     pub const VOLUME_FILE: &str = "pnfs.flint.io/volume-file";
     pub const SIZE_BYTES: &str = "pnfs.flint.io/size-bytes";
+    /// "dir" for directory-per-volume PVs (NodePublish mounts the
+    /// `MDS:/<volume>` subtree), "file" for legacy sparse-file PVs
+    /// (NodePublish mounts the export root). Absent on PVs provisioned
+    /// before this key existed — treat as "file".
+    pub const VOLUME_MODE: &str = "pnfs.flint.io/volume-mode";
 }
 
 /// All errors the `pnfs_csi` surface can produce. Each maps to a CSI
@@ -214,6 +221,10 @@ impl PnfsCsi {
         ctx.insert(ctx_keys::EXPORT_PATH.into(), resp.export_path);
         ctx.insert(ctx_keys::VOLUME_FILE.into(), resp.volume_file);
         ctx.insert(ctx_keys::SIZE_BYTES.into(), size_bytes.to_string());
+        ctx.insert(
+            ctx_keys::VOLUME_MODE.into(),
+            if resp.directory { "dir" } else { "file" }.into(),
+        );
         Ok(ctx)
     }
 
@@ -401,6 +412,7 @@ mod tests {
                 volume_file: "pvc-abc".into(),
                 message: String::new(),
                 nfs_port: 20490,
+                directory: true,
             },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
@@ -438,6 +450,7 @@ mod tests {
                 volume_file: String::new(),
                 message: "size mismatch: existing 4096, requested 8192".into(),
                 nfs_port: 0,
+                directory: false,
             },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
@@ -460,6 +473,7 @@ mod tests {
                 volume_file: "v".into(),
                 message: String::new(),
                 nfs_port: 2049,
+                directory: true,
             },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));

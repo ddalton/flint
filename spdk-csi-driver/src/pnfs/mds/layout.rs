@@ -482,6 +482,67 @@ impl LayoutManager {
         removed
     }
 
+    /// Forget every placement whose key lives under `<dir_key>/` and
+    /// return them (with their keys) for stripe cleanup. Used by pNFS
+    /// volume deletion in the directory-per-volume model, where a CSI
+    /// volume owns the whole `<volume_id>/…` subtree. The separator is
+    /// part of the match, so deleting volume `foo` never touches
+    /// `foobar`'s placements.
+    pub fn forget_placements_under(&self, dir_key: &str) -> Vec<(String, FilePlacement)> {
+        let prefix = format!("{}/", dir_key.trim_end_matches('/'));
+        let keys: Vec<String> = self
+            .placements
+            .iter()
+            .filter(|e| e.key().starts_with(&prefix))
+            .map(|e| e.key().clone())
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| self.forget_placement(&k).map(|p| (k, p)))
+            .collect()
+    }
+
+    /// Whether any placement under `<dir_key>/` is a legacy
+    /// (file_id == 0) pin. Those cannot follow a directory rename —
+    /// their DS stripes are keyed by the old path — so the RENAME op
+    /// refuses the whole directory when one is present.
+    pub fn has_legacy_placements_under(&self, dir_key: &str) -> bool {
+        let prefix = format!("{}/", dir_key.trim_end_matches('/'));
+        self.placements
+            .iter()
+            .any(|e| e.key().starts_with(&prefix) && e.value().file_id == 0)
+    }
+
+    /// Re-key every placement under `<old_dir>/` to `<new_dir>/…`
+    /// after a successful directory rename. Without this, a renamed
+    /// directory's children keep their old path keys: a fresh reader
+    /// at the new path finds no pin, LAYOUTGET mints a fresh one, and
+    /// the file reads as holes — silent data loss for any app that
+    /// commits by directory rename (Spark's committer does). Returns
+    /// the number of placements moved. No-op for file renames (a file
+    /// key is never another key's prefix-parent).
+    pub fn rename_placements_under(&self, old_dir: &str, new_dir: &str) -> usize {
+        let prefix = format!("{}/", old_dir.trim_end_matches('/'));
+        let keys: Vec<String> = self
+            .placements
+            .iter()
+            .filter(|e| e.key().starts_with(&prefix))
+            .map(|e| e.key().clone())
+            .collect();
+        let mut moved = 0;
+        for old_key in keys {
+            let suffix = &old_key[prefix.len()..];
+            let new_key = format!("{}/{}", new_dir.trim_end_matches('/'), suffix);
+            match self.rename_placement(&old_key, &new_key) {
+                Ok(_) => moved += 1,
+                Err(e) => tracing::warn!(
+                    "💥 dir-rename re-key '{}' → '{}' failed AFTER fs rename: {}",
+                    old_key, new_key, e
+                ),
+            }
+        }
+        moved
+    }
+
     /// Re-key a pin for NFS RENAME. Only valid for v2 (file_id != 0)
     /// pins — their DS stripes are identity-keyed, so the path key is
     /// pure metadata and the data follows the rename for free. Legacy
@@ -1871,5 +1932,54 @@ mod tests {
             mgr.truncate_dirty_since(&gate).is_none(),
             "REMOVE moots the unconfirmed truncation"
         );
+    }
+
+    /// Directory rename re-keys every child placement (Spark commits
+    /// by renaming its _temporary attempt dir); the `<dir>/` prefix
+    /// match never crosses into a sibling whose name merely shares the
+    /// characters (stage vs stage2).
+    #[test]
+    fn dir_rename_sweeps_children_prefix_safe() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        for f in ["stage/a.parquet", "stage/sub/b.parquet", "stage2/c.parquet"] {
+            mgr.generate_layout(test_owner(1), vec![1], f, 0, 8 << 20, IoMode::ReadWrite)
+                .unwrap();
+        }
+        let id_a = mgr.placement_for("stage/a.parquet").unwrap().file_id;
+
+        let moved = mgr.rename_placements_under("stage", "final");
+        assert_eq!(moved, 2);
+        assert!(mgr.placement_for("stage/a.parquet").is_none());
+        assert_eq!(
+            mgr.placement_for("final/a.parquet").unwrap().file_id,
+            id_a,
+            "identity travels with the re-keyed pin"
+        );
+        assert!(mgr.placement_for("final/sub/b.parquet").is_some());
+        assert!(
+            mgr.placement_for("stage2/c.parquet").is_some(),
+            "sibling with shared name prefix must be untouched"
+        );
+        assert!(!mgr.has_legacy_placements_under("final"));
+    }
+
+    /// A legacy (file_id == 0) pin under a directory blocks that
+    /// directory's rename at the guard.
+    #[test]
+    fn legacy_child_detected_under_dir() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+        mgr.load_placement_records(vec![crate::state_backend::PlacementRecord {
+            file_key: "old/legacy.bin".into(),
+            stripe_size: 8 << 20,
+            device_ids: vec!["ds-1".into()],
+            file_id: 0,
+        }]);
+        assert!(mgr.has_legacy_placements_under("old"));
+        assert!(!mgr.has_legacy_placements_under("old2"));
     }
 }

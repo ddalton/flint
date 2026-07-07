@@ -3080,18 +3080,27 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // is the RFC-standard port, not the lima rig's 20490.
             let mds_port = req.volume_context.get(ctx_keys::MDS_PORT)
                 .map(String::as_str).unwrap_or("2049");
-            // The kernel mounts the export root, not a per-volume path
-            // — pNFS resolves the volume's stripes via LAYOUTGET against
-            // the file by name. The volume_file is informational here
-            // (used by the application inside the pod to find its data).
             let volume_file = req.volume_context.get(ctx_keys::VOLUME_FILE)
                 .map(String::as_str).unwrap_or("");
+            // Directory-per-volume PVs mount their own subtree —
+            // `MDS:/<volume>` — so each PVC is an isolated namespace
+            // (Spark dry-run Finding 1: mounting the export root let
+            // every PVC see every other volume's files). Legacy
+            // sparse-file PVs (volume-mode absent or "file") keep the
+            // old root mount; their consumer finds the sized file by
+            // name and pNFS resolves its stripes via LAYOUTGET.
+            let volume_mode = req.volume_context.get(ctx_keys::VOLUME_MODE)
+                .map(String::as_str).unwrap_or("file");
 
             eprintln!("📡 [pNFS] Mounting volume {} at {}", volume_id, target_path);
             eprintln!("   MDS: {}:{}", mds_ip, mds_port);
-            eprintln!("   Volume file (under export): {}", volume_file);
+            eprintln!("   Volume file (under export): {} (mode: {})", volume_file, volume_mode);
 
-            let nfs_source = format!("{}:/", mds_ip);
+            let nfs_source = if volume_mode == "dir" && !volume_file.is_empty() {
+                format!("{}:/{}", mds_ip, volume_file)
+            } else {
+                format!("{}:/", mds_ip)
+            };
             // Critical mount options:
             //   minorversion=1   — NFSv4.1 required for pNFS layout types
             //                       (kernel won't issue LAYOUTGET on v4.0).
