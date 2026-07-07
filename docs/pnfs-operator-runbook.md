@@ -229,6 +229,15 @@ rather than re-maps).
   — fast EIO in the ambiguity window, parked under the ceiling, an
   armed in-flight loop SPRUNG when the ceiling passes, checksum-clean
   self-recovery, no unstick, no reboot.
+  **Live-validated on runn k8s 2026-07-06** (MDS-only image swap —
+  the guard is MDS-side, so no csi-node roll): ds-3 deleted with all
+  nodes cordoned for a sustained outage; graceful-termination reads
+  still served; ambiguity-window read EIO in ~4 s; Offline-window
+  read parked (280 DELAY refusals ≈ 10 Hz); past-ceiling read EIO
+  fast with the armed loop sprung; after uncordon the SAME live
+  consumer (no pod restart, no unstick) read the full file
+  checksum-clean **1 s after the DS re-registered** — the client's
+  120 s marks had already lapsed during the outage.
   MDS proxy I/O remains the eventual UX upgrade (fallback reads
   succeed slowly instead of erroring); the escalation then becomes
   proxy's error path when a DS is genuinely gone.
