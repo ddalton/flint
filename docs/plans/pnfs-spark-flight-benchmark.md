@@ -1,8 +1,10 @@
 # Spark-on-pNFS flight-data benchmark — plan
 
 **Date**: 2026-07-07
-**Status**: Proposed — Phase 0 dry-run done 2026-07-07 (see "Phase 0
-dry-run results"); two blockers found before the scaling sweep can run
+**Status**: Proposed — Phase 0 dry-run + N=2 baseline + N=2→N=4 raw-read
+scaling done 2026-07-07 (DS side scales linearly, 1.81× at N=4, MDS ~0
+CPU); two CSI/committer blockers still open before the Parquet-Spark
+headline
 **Prior art**: ADR 0004 (`docs/decisions/0004-pnfs-cross-host-scaling.md`,
 cross-host linear scaling with `fio`), `docs/plans/pnfs-performance-plan.md`
 (Phases 0–3 landed), `docs/plans/mds-performance-plan.md` (metadata path
@@ -271,6 +273,47 @@ single run, CSI bypassed. The staged 15.94 GB dataset is left on the
 pNFS export (`/bench/flights`) for reuse. Post-node plan: re-run N=2 on
 the *disaggregated* rig first (measure the co-location cost), then N=4,
 both with Parquet + multi-client fio.
+
+### Phase 3 result — DS-count scaling N=2 vs N=4 (2026-07-07, 8-node)
+
+Cluster expanded to **8 i4i.2xlarge workers** (+ tainted control-plane).
+New nodes auto-prepped by the `flint-node-init` DaemonSet (modules +
+8 GiB hugepages); each needed only a kubelet restart to surface
+hugepages and a one-time LVS `initialize`. pNFS fleet scaled 2→4 DSes
+(`helm upgrade dataServers.count=4`); all 4 registered and spread onto
+distinct nodes (MDS co-located with ds-0). Method: **3 reader pods on
+free non-DS nodes**, each cold-reads the full 15.94 GB dataset with 12
+parallel streams; page cache dropped on all workers first; aggregate =
+sum of per-reader throughput, corroborated by summed per-DS NIC tx.
+Dataset re-staged after scaling so files stripe across all 4 DSes.
+
+| N (DS) | Aggregate read | Per-DS delivered | Per-DS byte balance | Read wall | MDS CPU |
+|---:|---:|---:|---|---:|---:|
+| 2 | **1,983 MB/s** | ~992 MB/s | 50.0 / 50.0 (23.95 / 23.96 GB) | ~24 s | ~0 |
+| 4 | **3,584 MB/s** | ~896 MB/s | 25 / 25 / 25 / 25 (11.93–12.05 GB) | ~13 s | 1 millicore |
+
+**N=4 / N=2 = 1.81× (90% of ideal 2.0×).** Reading:
+- **The DS side scaled linearly.** Per-DS delivered bandwidth is flat
+  (~0.9–1.0 GB/s) from N=2 to N=4, and byte balance is near-perfect at
+  both widths (rotation works — 50/50 at N=2, even quarters at N=4). Add
+  a DS, get its bandwidth.
+- **The 10% shortfall from 2.0× is client-side, not pNFS.** At N=4 the 3
+  readers pulled ~1.2 GB/s each ≈ 80% of the i4i.2xlarge ~12 Gbps NIC —
+  approaching client-NIC saturation. With a 4th reader node (or fatter
+  clients) the aggregate would track the DSes closer to 2×. This is
+  ADR 0004's "client-bound tail" caveat, reproduced.
+- **MDS stayed out of the data path** — 1 millicore during the N=4 read;
+  all 47.96 GB served by the DSes (summed NIC tx = 3 × dataset). Metadata
+  path is not the bottleneck at this scale.
+
+This reproduces ADR 0004's linear-DS-scaling claim (previously `fio` on
+host processes) on a **real k8s/CSI pod deployment with SPDK-NVMe-backed
+DSes**. Gap vs the full plan: still cold-**raw**-read (not the Spark
+application workload — the CSV scan is CPU-bound per the baseline, and
+Parquet + distributed executors are the Phase 1–2 work), converged
+placement, single run, N capped at 4 (8 nodes). N=8 and the
+Parquet-Spark headline need more nodes and the CSI/committer fixes
+(Findings 1–2). Fold into the ADR when those land.
 
 ### Phase 1 — data prep
 
