@@ -12,6 +12,7 @@ import { SnapshotStorageView } from './SnapshotStorageView';
 import { SnapshotTimelineView } from './SnapshotTimelineView';
 import { SnapshotDetailModal } from './SnapshotDetailModal';
 import { useOperations } from '../../contexts/OperationsContext';
+import { SegmentedControl } from '../ui/SegmentedControl';
 import { useDashboardData } from '../../hooks/useDashboardData';
 import { TabSkeleton } from '../ui/Skeleton';
 import { Button, IconButton } from '../ui/Button';
@@ -371,53 +372,17 @@ export const EnhancedSnapshotsTab: React.FC = () => {
         <div className="p-4 border-b border-gray-200">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              {/* Enhanced View Toggle */}
-              <div className="flex border border-gray-300 rounded-md overflow-hidden">
-                <button
-                  onClick={() => setActiveView('storage')}
-                  className={`px-4 py-2 text-sm font-medium ${
-                    activeView === 'storage'
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-white text-gray-700 hover:bg-gray-50'
-                  }`}
-                >
-                  <BarChart3 className="w-4 h-4 mr-2 inline" />
-                  Storage Analysis
-                </button>
-                <button
-                  onClick={() => setActiveView('list')}
-                  className={`px-4 py-2 text-sm font-medium border-l border-gray-300 ${
-                    activeView === 'list'
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-white text-gray-700 hover:bg-gray-50'
-                  }`}
-                >
-                  <FileText className="w-4 h-4 mr-2 inline" />
-                  List View
-                </button>
-                <button
-                  onClick={() => setActiveView('tree')}
-                  className={`px-4 py-2 text-sm font-medium border-l border-gray-300 ${
-                    activeView === 'tree'
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-white text-gray-700 hover:bg-gray-50'
-                  }`}
-                >
-                  <GitBranch className="w-4 h-4 mr-2 inline" />
-                  Tree View
-                </button>
-                <button
-                  onClick={() => setActiveView('timeline')}
-                  className={`px-4 py-2 text-sm font-medium border-l border-gray-300 ${
-                    activeView === 'timeline'
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-white text-gray-700 hover:bg-gray-50'
-                  }`}
-                >
-                  <TrendingUp className="w-4 h-4 mr-2 inline" />
-                  Timeline
-                </button>
-              </div>
+              <SegmentedControl
+                aria-label="Snapshot view"
+                value={activeView}
+                onChange={setActiveView}
+                options={[
+                  { value: 'storage', label: 'Storage Analysis', icon: BarChart3 },
+                  { value: 'list', label: 'List View', icon: FileText },
+                  { value: 'tree', label: 'Tree View', icon: GitBranch },
+                  { value: 'timeline', label: 'Timeline', icon: TrendingUp },
+                ]}
+              />
 
               <span className="text-sm text-gray-500">
                 Showing {filteredSnapshots.length} of {snapshots.length} snapshots

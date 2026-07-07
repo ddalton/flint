@@ -35,6 +35,10 @@ export default {
         insync: colors.green,
         rejoining: colors.purple,
         brand: colors.blue,
+        // Non-sync amber: node warnings, caution banners, the zoom chip.
+        // Distinct from `stale` (also amber) so a future re-hue of either
+        // meaning never drags the other along.
+        warning: colors.amber,
       },
     },
   },

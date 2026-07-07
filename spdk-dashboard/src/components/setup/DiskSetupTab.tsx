@@ -22,6 +22,7 @@ import {
 import { BulkConfirmModal, BatchProgressPanel, type ExcludedDisk } from './BulkInitPanels';
 import { Button, IconButton } from '../ui/Button';
 import { ConfirmModal } from '../ui/ConfirmModal';
+import { SegmentedControl } from '../ui/SegmentedControl';
 
 type ViewMode = 'grid' | 'compact';
 type StatusFilter = 'all' | 'free' | 'driver-bound' | 'lvs-ready' | 'setup-ready' | 'initialize-ready' | 'ready' | 'needs-unmount' | 'system' | 'spdk-ready' | 'driver-ready';
@@ -1189,20 +1190,17 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
             {/* View Mode */}
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-gray-700">View:</span>
-              <div className="flex border border-gray-300 rounded-md overflow-hidden">
-                <button
-                  onClick={() => setViewMode('grid')}
-                  className={`px-3 py-1 text-sm ${viewMode === 'grid' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
-                >
-                  <Grid className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => setViewMode('compact')}
-                  className={`px-3 py-1 text-sm border-l border-gray-300 ${viewMode === 'compact' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
-                >
-                  <List className="w-4 h-4" />
-                </button>
-              </div>
+              <SegmentedControl
+                aria-label="Disk view mode"
+                size="sm"
+                iconOnly
+                value={viewMode}
+                onChange={setViewMode}
+                options={[
+                  { value: 'grid', label: 'Grid view', icon: Grid },
+                  { value: 'compact', label: 'Compact view', icon: List },
+                ]}
+              />
             </div>
 
             {/* Group By */}

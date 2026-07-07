@@ -28,26 +28,26 @@ export type SyncDisplayState = SyncState | 'rejoining';
 export const SYNC_STATE_STYLES: Record<SyncDisplayState, SyncStateStyle> = {
   in_sync: {
     label: 'in sync',
-    chip: 'bg-green-100 text-green-800 border-green-200',
-    dot: 'bg-green-500',
+    chip: 'bg-insync-100 text-insync-800 border-insync-200',
+    dot: 'bg-insync-500',
     description: 'Holds every acknowledged write; eligible raid member',
   },
   stale: {
     label: 'stale',
-    chip: 'bg-amber-100 text-amber-800 border-amber-200',
-    dot: 'bg-amber-500',
+    chip: 'bg-stale-100 text-stale-800 border-stale-200',
+    dot: 'bg-stale-500',
     description: 'Missed acknowledged writes; excluded from assembly until caught up',
   },
   standby: {
     label: 'standby',
-    chip: 'bg-blue-100 text-blue-800 border-blue-200',
-    dot: 'bg-blue-500',
+    chip: 'bg-standby-100 text-standby-800 border-standby-200',
+    dot: 'bg-standby-500',
     description: 'Caught up and chasing epochs; rejoins at the next assembly',
   },
   rejoining: {
     label: 'rejoining',
-    chip: 'bg-purple-100 text-purple-800 border-purple-200',
-    dot: 'bg-purple-500',
+    chip: 'bg-rejoining-100 text-rejoining-800 border-rejoining-200',
+    dot: 'bg-rejoining-500',
     description: 'Hot rejoin in flight',
   },
 };
@@ -66,23 +66,23 @@ export interface VolumeStateStyle {
 
 export const VOLUME_STATE_STYLES: Record<'Healthy' | 'Degraded' | 'Failed', VolumeStateStyle> = {
   Healthy: {
-    badge: 'bg-green-100 text-green-800',
-    chip: 'bg-green-100 text-green-800 border-green-200',
+    badge: 'bg-healthy-100 text-healthy-800',
+    chip: 'bg-healthy-100 text-healthy-800 border-healthy-200',
     hex: '#10b981',
     icon: CheckCircle,
     priority: 0,
   },
   Degraded: {
-    badge: 'bg-yellow-100 text-yellow-800',
-    chip: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+    badge: 'bg-degraded-100 text-degraded-800',
+    chip: 'bg-degraded-100 text-degraded-800 border-degraded-200',
     hex: '#f59e0b',
     icon: AlertTriangle,
     priority: 2,
     tooltip: 'Volume has reduced redundancy but is still functional',
   },
   Failed: {
-    badge: 'bg-red-100 text-red-800',
-    chip: 'bg-red-100 text-red-800 border-red-200',
+    badge: 'bg-failed-100 text-failed-800',
+    chip: 'bg-failed-100 text-failed-800 border-failed-200',
     hex: '#ef4444',
     icon: XCircle,
     priority: 3,
@@ -119,22 +119,22 @@ export interface NodeHealthStyle {
 export const NODE_HEALTH_STYLES: Record<NodeHealth, NodeHealthStyle> = {
   critical: {
     label: 'Critical',
-    chip: 'bg-red-100 text-red-800 border-red-200',
-    cell: 'bg-red-500',
+    chip: 'bg-failed-100 text-failed-800 border-failed-200',
+    cell: 'bg-failed-500',
     priority: 0,
     description: 'Unhealthy disk or failed volume/replica on this node',
   },
   warning: {
     label: 'Warning',
-    chip: 'bg-amber-100 text-amber-800 border-amber-200',
-    cell: 'bg-amber-400',
+    chip: 'bg-warning-100 text-warning-800 border-warning-200',
+    cell: 'bg-warning-400',
     priority: 1,
     description: 'Degraded volume or out-of-sync replica on this node',
   },
   ok: {
     label: 'Ready',
-    chip: 'bg-green-100 text-green-800 border-green-200',
-    cell: 'bg-green-500',
+    chip: 'bg-healthy-100 text-healthy-800 border-healthy-200',
+    cell: 'bg-healthy-500',
     priority: 3,
     description: 'All disks healthy, all replicas in sync',
   },
@@ -168,31 +168,31 @@ export interface MemberStateStyle {
 
 const MEMBER_STATE_STYLES: Record<string, MemberStateStyle> = {
   online: {
-    chip: 'bg-green-100 text-green-800 border-green-200',
+    chip: 'bg-healthy-100 text-healthy-800 border-healthy-200',
     icon: CheckCircle,
-    iconClass: 'text-green-600',
+    iconClass: 'text-healthy-600',
     hex: '#059669',
   },
   healthy: {
-    chip: 'bg-green-100 text-green-800 border-green-200',
+    chip: 'bg-healthy-100 text-healthy-800 border-healthy-200',
     icon: CheckCircle,
-    iconClass: 'text-green-600',
+    iconClass: 'text-healthy-600',
     hex: '#059669',
   },
   degraded: {
-    chip: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+    chip: 'bg-degraded-100 text-degraded-800 border-degraded-200',
     icon: AlertTriangle,
-    iconClass: 'text-yellow-600',
+    iconClass: 'text-degraded-600',
     hex: '#d97706',
   },
   failed: {
-    chip: 'bg-red-100 text-red-800 border-red-200',
+    chip: 'bg-failed-100 text-failed-800 border-failed-200',
     icon: X,
-    iconClass: 'text-red-600',
+    iconClass: 'text-failed-600',
     hex: '#dc2626',
   },
   rebuilding: {
-    chip: 'bg-orange-100 text-orange-800 border-orange-200',
+    chip: 'bg-rebuilding-100 text-rebuilding-800 border-rebuilding-200',
     icon: Settings,
     // Motion with meaning: the gear itself is static — real progress renders
     // through the data-bound sync indicator / ProgressBar.
@@ -200,12 +200,14 @@ const MEMBER_STATE_STYLES: Record<string, MemberStateStyle> = {
     hex: '#ea580c',
   },
   spare: {
-    chip: 'bg-blue-100 text-blue-800 border-blue-200',
+    chip: 'bg-standby-100 text-standby-800 border-standby-200',
     icon: Shield,
-    iconClass: 'text-blue-600',
+    iconClass: 'text-standby-600',
     hex: '#2563eb',
   },
   removing: {
+    // Raw purple on purpose: no semantic alias fits (rejoining also aliases
+    // purple but means the opposite of leaving). Rare legacy SPDK state.
     chip: 'bg-purple-100 text-purple-800 border-purple-200',
     icon: Clock,
     iconClass: 'text-purple-600',
@@ -214,13 +216,13 @@ const MEMBER_STATE_STYLES: Record<string, MemberStateStyle> = {
   stale: {
     chip: SYNC_STATE_STYLES.stale.chip,
     icon: AlertTriangle,
-    iconClass: 'text-amber-600',
+    iconClass: 'text-stale-600',
     hex: '#d97706',
   },
   standby: {
     chip: SYNC_STATE_STYLES.standby.chip,
     icon: Clock,
-    iconClass: 'text-blue-600',
+    iconClass: 'text-standby-600',
     hex: '#2563eb',
   },
 };
@@ -260,8 +262,8 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
     severity: 'info',
     icon: '📊',
     description: 'All volumes in the system',
-    bgColor: 'bg-blue-50',
-    borderColor: 'border-blue-200',
+    bgColor: 'bg-brand-50',
+    borderColor: 'border-brand-200',
   },
   healthy: {
     name: 'Healthy Volumes',
@@ -269,8 +271,8 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
     severity: 'good',
     icon: '✅',
     description: 'All replicas operational',
-    bgColor: 'bg-green-50',
-    borderColor: 'border-green-200',
+    bgColor: 'bg-healthy-50',
+    borderColor: 'border-healthy-200',
   },
   degraded: {
     name: 'Degraded Volumes',
@@ -278,8 +280,8 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
     severity: 'warning',
     icon: '🟡',
     description: 'Volumes with reduced redundancy',
-    bgColor: 'bg-yellow-50',
-    borderColor: 'border-yellow-200',
+    bgColor: 'bg-degraded-50',
+    borderColor: 'border-degraded-200',
   },
   failed: {
     name: 'Failed Volumes',
@@ -287,8 +289,8 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
     severity: 'critical',
     icon: '🔴',
     description: 'Volumes that have completely failed',
-    bgColor: 'bg-red-50',
-    borderColor: 'border-red-200',
+    bgColor: 'bg-failed-50',
+    borderColor: 'border-failed-200',
   },
   faulted: {
     name: 'Faulted Volumes (Degraded + Failed)',
@@ -296,6 +298,8 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
     severity: 'mixed',
     icon: '⚠️',
     description: 'Both degraded and failed volumes',
+    // Raw orange on purpose: "faulted" is a mixed bucket, not the rebuilding
+    // meaning the orange alias carries.
     bgColor: 'bg-orange-50',
     borderColor: 'border-orange-200',
   },
@@ -305,8 +309,8 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
     severity: 'recovery',
     icon: '🔄',
     description: 'Volumes with replica recovery activity (catch-up, standby, or legacy rebuild)',
-    bgColor: 'bg-orange-50',
-    borderColor: 'border-orange-200',
+    bgColor: 'bg-rebuilding-50',
+    borderColor: 'border-rebuilding-200',
   },
   'local-nvme': {
     name: 'Local NVMe Volumes',
@@ -314,8 +318,8 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
     severity: 'performance',
     icon: '⚡',
     description: 'High-performance local storage',
-    bgColor: 'bg-blue-50',
-    borderColor: 'border-blue-200',
+    bgColor: 'bg-brand-50',
+    borderColor: 'border-brand-200',
   },
   orphaned: {
     name: 'Orphaned Volumes (Raw SPDK)',
@@ -323,8 +327,8 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
     severity: 'cleanup',
     icon: '🛡️',
     description: 'Raw SPDK volumes without Kubernetes backing - cleanup candidates',
-    bgColor: 'bg-amber-50',
-    borderColor: 'border-amber-200',
+    bgColor: 'bg-warning-50',
+    borderColor: 'border-warning-200',
   },
 };
 

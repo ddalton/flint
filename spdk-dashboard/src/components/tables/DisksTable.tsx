@@ -7,8 +7,8 @@ import {
 } from 'lucide-react';
 import type { Disk, OrphanedVolumeInfo, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 import { filterVolumesByType } from '../../hooks/useDashboardData';
-import { Button } from '../ui/Button';
 import { ConfirmModal } from '../ui/ConfirmModal';
+import { Pagination } from '../ui/Pagination';
 import { ProgressBar } from '../ui/ProgressBar';
 
 interface DisksTableProps {
@@ -877,38 +877,16 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         </table>
       </div>
 
-      {/* Pagination */}
-      {filteredDisks.length > 0 && (
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-sm text-gray-700">
-            <span>
-              Showing {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredDisks.length)} of {filteredDisks.length} disks
-            </span>
-            <select
-              value={pageSize}
-              onChange={(e) => setPageSize(Number(e.target.value))}
-              aria-label="Disks per page"
-              className="border border-gray-300 rounded px-2 py-1 text-sm"
-            >
-              <option value={25}>25</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-            </select>
-            <span>per page</span>
-          </div>
-          {totalPages > 1 && (
-            <div className="flex items-center gap-2">
-              <Button size="sm" onClick={() => goToPage(currentPage - 1)} disabled={currentPage === 1}>
-                Previous
-              </Button>
-              <span className="px-2 py-1 text-sm">{currentPage} / {totalPages}</span>
-              <Button size="sm" onClick={() => goToPage(currentPage + 1)} disabled={currentPage === totalPages}>
-                Next
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
+      <Pagination
+        className="mt-4"
+        page={currentPage}
+        pageCount={totalPages}
+        onPage={goToPage}
+        pageSize={pageSize}
+        onPageSize={setPageSize}
+        totalItems={filteredDisks.length}
+        itemNoun="disks"
+      />
 
       {/* Additional Filter Summary */}
       {filteredDisks.length > 0 && activeFilterCount > 0 && (

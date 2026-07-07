@@ -8,6 +8,9 @@ import { ProgressBar } from './ProgressBar';
 import { AsyncView } from './AsyncView';
 import { ConfirmModal } from './ConfirmModal';
 import { MemberStateChip, VolumeStateChip } from './Chip';
+import { SegmentedControl } from './SegmentedControl';
+import { Pagination } from './Pagination';
+import { Grid, List } from 'lucide-react';
 
 describe('ProgressBar', () => {
   it('exposes determinate progress via ARIA', () => {
@@ -125,5 +128,78 @@ describe('status chips', () => {
     );
     expect(screen.getByText('Degraded')).toBeInTheDocument();
     expect(screen.getByText('stale')).toBeInTheDocument();
+  });
+});
+
+describe('SegmentedControl', () => {
+  const options = [
+    { value: 'list', label: 'List' },
+    { value: 'tree', label: 'Tree' },
+  ] as const;
+
+  it('marks exactly the active segment pressed and switches on click', async () => {
+    const onChange = vi.fn();
+    render(
+      <SegmentedControl
+        aria-label="Snapshot view"
+        options={[...options]}
+        value="list"
+        onChange={onChange}
+      />
+    );
+    expect(screen.getByRole('group', { name: 'Snapshot view' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Tree' })).toHaveAttribute('aria-pressed', 'false');
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Tree' }));
+    expect(onChange).toHaveBeenCalledWith('tree');
+  });
+
+  it('iconOnly still names every segment (sr-only + title)', () => {
+    render(
+      <SegmentedControl
+        aria-label="Disk view mode"
+        iconOnly
+        options={[
+          { value: 'grid', label: 'Grid view', icon: Grid },
+          { value: 'compact', label: 'Compact view', icon: List },
+        ]}
+        value="compact"
+        onChange={() => {}}
+      />
+    );
+    const grid = screen.getByRole('button', { name: 'Grid view' });
+    expect(grid).toHaveAttribute('title', 'Grid view');
+  });
+});
+
+describe('Pagination', () => {
+  const props = {
+    page: 1,
+    pageCount: 3,
+    onPage: vi.fn(),
+    pageSize: 25,
+    onPageSize: vi.fn(),
+    totalItems: 60,
+    itemNoun: 'disks',
+  };
+
+  it('shows the range, disables Previous on page 1, and pages forward', async () => {
+    const onPage = vi.fn();
+    render(<Pagination {...props} onPage={onPage} />);
+    expect(screen.getByText('Showing 1-25 of 60 disks')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Next page' }));
+    expect(onPage).toHaveBeenCalledWith(2);
+  });
+
+  it('keeps the size selector on a single page but drops the pager', () => {
+    render(<Pagination {...props} pageCount={1} totalItems={10} />);
+    expect(screen.getByLabelText('disks per page')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Next page' })).not.toBeInTheDocument();
+  });
+
+  it('renders nothing with zero rows', () => {
+    const { container } = render(<Pagination {...props} totalItems={0} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });

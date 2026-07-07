@@ -1,7 +1,7 @@
 import React, { lazy, Suspense, useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router';
 import { apiFetch } from '../../api/client';
-import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ChevronLeft, ChevronRight, ShieldAlert, Trash2, Database } from 'lucide-react';
+import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ShieldAlert, Trash2, Database } from 'lucide-react';
 import type { Disk, Volume, VolumeFilter, DiskFilter, RawSpdkVolume } from '../../hooks/useDashboardData';
 import { filterVolumesByType, isReplicaRecovering } from '../../hooks/useDashboardData';
 import { volumeFilterDisplay, volumeStateStyle } from '../ui/status';
@@ -9,6 +9,7 @@ import { VolumeSyncSummary } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
 import { ConfirmModal } from '../ui/ConfirmModal';
 import { Button, IconButton } from '../ui/Button';
+import { Pagination } from '../ui/Pagination';
 
 // The detail modal is its own chunk — most sessions never open it.
 const VolumeDetailAPI = lazy(() =>
@@ -272,51 +273,17 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
       </div>
 
       {/* Pagination Controls - Top */}
-      {totalPages > 1 && (
+      {filteredVolumes.length > 0 && (
         <div className="bg-white rounded-lg shadow p-4 mb-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              {/* Page Size Selector */}
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-gray-700">Show:</span>
-                <select
-                  value={pageSize}
-                  onChange={(e) => setPageSize(Number(e.target.value))}
-                  className="border border-gray-300 rounded px-2 py-1 text-sm"
-                >
-                  <option value={10}>10</option>
-                  <option value={25}>25</option>
-                  <option value={50}>50</option>
-                  <option value={100}>100</option>
-                </select>
-                <span className="text-sm text-gray-700">per page</span>
-              </div>
-            </div>
-
-            {/* Pagination */}
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-gray-700">
-                {((currentPage - 1) * pageSize) + 1}-{Math.min(currentPage * pageSize, filteredVolumes.length)} of {filteredVolumes.length}
-              </span>
-              <IconButton
-                icon={ChevronLeft}
-                aria-label="Previous page"
-                onClick={() => goToPage(currentPage - 1)}
-                disabled={currentPage === 1}
-                className="p-1"
-                iconClass="w-4 h-4"
-              />
-              <span className="px-2 py-1 text-sm">{currentPage} / {totalPages}</span>
-              <IconButton
-                icon={ChevronRight}
-                aria-label="Next page"
-                onClick={() => goToPage(currentPage + 1)}
-                disabled={currentPage === totalPages}
-                className="p-1"
-                iconClass="w-4 h-4"
-              />
-            </div>
-          </div>
+          <Pagination
+            page={currentPage}
+            pageCount={totalPages}
+            onPage={goToPage}
+            pageSize={pageSize}
+            onPageSize={setPageSize}
+            totalItems={filteredVolumes.length}
+            itemNoun="volumes"
+          />
         </div>
       )}
 
