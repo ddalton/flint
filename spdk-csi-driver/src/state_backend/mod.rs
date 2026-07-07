@@ -284,6 +284,23 @@ pub struct PlacementRecord {
     pub file_id: u64,
 }
 
+/// Persistent id↔path mapping behind version-2 (id-based) NFSv4
+/// metadata filehandles. v2 FHs are minted when a path is too long to
+/// embed in the 128-byte handle (RFC 8881 NFS4_FHSIZE); the handle
+/// carries only `(instance_id, file_id)` and this record is what a
+/// restarted server resolves it from. A lost record → NFS4ERR_STALE →
+/// the client re-walks the path — same recovery as any stale handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FhMappingRecord {
+    /// Random non-zero u64 allocated at mint time. Never reused for a
+    /// different path (REMOVE deletes the record; a recreated file
+    /// gets a fresh id — new file, new filehandle, per NFS semantics).
+    pub file_id: u64,
+    /// Absolute (normalized) path the handle resolves to. RENAME
+    /// re-writes this in place — the id follows the file.
+    pub path: String,
+}
+
 // ── The trait ─────────────────────────────────────────────────────────
 
 /// Pluggable persistence for NFSv4 / pNFS server state.
@@ -341,6 +358,12 @@ pub trait StateBackend: Send + Sync {
     async fn get_placement(&self, file_key: &str) -> StateBackendResult<Option<PlacementRecord>>;
     async fn list_placements(&self) -> StateBackendResult<Vec<PlacementRecord>>;
     async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()>;
+
+    // id↔path mappings behind v2 (id-based) metadata filehandles.
+    // put upserts on file_id (RENAME re-writes the path in place).
+    async fn put_fh_mapping(&self, m: &FhMappingRecord) -> StateBackendResult<()>;
+    async fn list_fh_mappings(&self) -> StateBackendResult<Vec<FhMappingRecord>>;
+    async fn delete_fh_mapping(&self, file_id: u64) -> StateBackendResult<()>;
 
     /// Atomically bump the persisted instance counter and return the
     /// new value. Called once at MDS start; the value is mixed into

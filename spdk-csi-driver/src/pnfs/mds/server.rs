@@ -109,6 +109,10 @@ impl MetadataServer {
             "volume".to_string(),
             server_id,
         ));
+        // v2 (id-based) filehandles — minted for paths too long to
+        // embed — resolve through a table persisted alongside the rest
+        // of the NFS state, so they survive MDS restart.
+        fh_manager.attach_backend(Arc::clone(&backend)).await;
 
         let state_mgr = Arc::new(StateManager::new("", Arc::clone(&backend)));
         

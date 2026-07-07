@@ -1,10 +1,20 @@
 # pNFS CSI RWX isolation + Spark committer — fix plan
 
 **Date**: 2026-07-07
-**Status**: Fix 1 IMPLEMENTED + rig-validated (csi-e2e green: isolation,
-subtree mount, striping, delete-reclaims, re-create-empty) with the
-directory-rename placement sweep; Fix 2 documented in the operator
-runbook (no repo code); Fix 3 open.
+**Status**: ALL THREE DONE 2026-07-07. Fix 1 IMPLEMENTED +
+rig-validated (csi-e2e green: isolation, subtree mount, striping,
+delete-reclaims, re-create-empty) with the directory-rename placement
+sweep; Fix 2 documented in the operator runbook (no repo code); Fix 3
+IMPLEMENTED as a hybrid: v1 path-embedded handles stay for paths that
+fit (stateless; legacy pins need the DS to extract the path from the
+MDS handle), and paths past the budget mint a fixed 17-byte **v2
+id-based handle** — `(version=2, instance_id, file_id)` resolved
+through an id↔path table persisted in the state backend (new
+`fh_mappings` sqlite table), loaded before the listener accepts.
+RENAME re-keys the table (v2 handles survive renames — better than v1
+semantics); REMOVE deletes the mapping (recreated file = new id). The
+csi-e2e drill gained a Spark-shaped long-name leg: write →
+rename-commit → read → delete, all clean, no debris.
 
 **Capacity decision (recorded 2026-07-07):** directory model for ALL
 new pNFS CSI volumes — effectively option (c), but the "regression"

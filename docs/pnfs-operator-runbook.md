@@ -293,9 +293,10 @@ walls:
   make metadata-heavy reads unusably slow. Don't make them the
   default.
 - **Long filenames** (Spark's `part-<uuid>….snappy.parquet` + `.crc`)
-  can exceed the MDS filehandle's path budget on pre-fix builds →
-  EIO + undeletable debris (see the fix plan's Fix 3; id-based FHs
-  remove the limit).
+  exceeded the MDS filehandle's ~85-byte path budget on builds up to
+  v1.11.0 → EIO + undeletable debris. FIXED (fix plan's Fix 3): paths
+  past the budget now mint id-based v2 handles (no length limit,
+  rename-stable, restart-persistent via state.db).
 
 **Working recipe (validated on the dry-run cluster):** write Parquet
 to a flint **RWO block PVC** (ext4 — the committer works there), then

@@ -44,9 +44,9 @@
 //! - Enums (`StateTypeRecord`, `IoModeRecord`) ↔ `INTEGER`.
 
 use super::{
-    CachedCreateSessionResRecord, ClientRecord, IoModeRecord, LayoutRecord, LayoutSegmentRecord,
-    LockRecord, PlacementRecord, SessionRecord, StateBackend, StateBackendError,
-    StateBackendResult, StateIdRecord, StateTypeRecord,
+    CachedCreateSessionResRecord, ClientRecord, FhMappingRecord, IoModeRecord, LayoutRecord,
+    LayoutSegmentRecord, LockRecord, PlacementRecord, SessionRecord, StateBackend,
+    StateBackendError, StateBackendResult, StateIdRecord, StateTypeRecord,
 };
 use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -740,6 +740,43 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn put_fh_mapping(&self, m: &FhMappingRecord) -> StateBackendResult<()> {
+        let m = m.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO fh_mappings (file_id, path) VALUES (?1, ?2)",
+                params![u64_to_i64(m.file_id), m.path],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn list_fh_mappings(&self) -> StateBackendResult<Vec<FhMappingRecord>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare("SELECT file_id, path FROM fh_mappings")?;
+            let rows = stmt.query_map([], |row| {
+                Ok(FhMappingRecord {
+                    file_id: i64_to_u64(row.get::<_, i64>(0)?),
+                    path: row.get(1)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .await
+    }
+
+    async fn delete_fh_mapping(&self, file_id: u64) -> StateBackendResult<()> {
+        self.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM fh_mappings WHERE file_id = ?1",
+                params![u64_to_i64(file_id)],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn put_placement(&self, p: &PlacementRecord) -> StateBackendResult<()> {
         let p = p.clone();
         self.with_conn(move |conn| {
@@ -1099,6 +1136,15 @@ CREATE TABLE IF NOT EXISTS file_placement (
 CREATE TABLE IF NOT EXISTS instance_counter (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     value INTEGER NOT NULL
+);
+
+-- id<->path mappings behind v2 (id-based) NFSv4 metadata filehandles.
+-- Minted only for paths too long to embed in the 128-byte handle;
+-- RENAME rewrites path in place (the id follows the file), REMOVE
+-- deletes the row. A lost row = NFS4ERR_STALE = client re-walks.
+CREATE TABLE IF NOT EXISTS fh_mappings (
+    file_id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL
 );
 
 -- Schema v2: persistent per-deployment server identifier. Generated

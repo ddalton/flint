@@ -9,20 +9,49 @@
 // - Deterministic (same path = same handle)
 // - Secure (can't be guessed from path alone)
 //
-// Handle Format (variable length, up to 128 bytes):
-// - Version (1 byte): Handle format version
+// Handle Format v1 (variable length, up to 128 bytes):
+// - Version (1 byte): 1
 // - Instance ID (8 bytes): Server instance identifier
 // - Path Hash (32 bytes): SHA-256 hash of path
 // - Path (variable): Full path string (for verification)
+//
+// Handle Format v2 (fixed 17 bytes) — used when the path does not fit
+// v1's 85-byte budget (RFC 8881 NFS4_FHSIZE is 128; long Spark part
+// names + a volume-dir prefix blow past it and used to fail the OPEN
+// with "Path too long for file handle" → client-visible EIO and
+// un-deletable stripe debris):
+// - Version (1 byte): 2
+// - Instance ID (8 bytes)
+// - File ID (8 bytes): random non-zero id; resolved through the
+//   id↔path table (persisted via the state backend when attached, so
+//   v2 handles survive restart like v1's embedded path does). RENAME
+//   re-keys the table — a v2 handle stays valid across renames.
+// v1 stays the format for paths that fit: it is stateless, and legacy
+// striped pins rely on the DS extracting the path from the MDS handle
+// (parse_path_lenient) — those paths are short by construction.
 
 use super::protocol::Nfs4FileHandle;
 use super::pseudo::{PseudoFilesystem, Export};
+use crate::state_backend::{spawn_persist, FhMappingRecord, StateBackend};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn, info};
+
+/// Fixed length of a v2 (id-based) filehandle.
+const FH_V2_LEN: usize = 1 + 8 + 8;
+
+/// Random non-zero file id for the v2 table. Same construction as the
+/// placement layer's `allocate_file_id`.
+fn allocate_fh_id() -> u64 {
+    let (hi, lo) = uuid::Uuid::new_v4().as_u64_pair();
+    match hi ^ lo {
+        0 => 1,
+        id => id,
+    }
+}
 
 /// File handle manager - maps between paths and file handles
 /// Why a file handle failed validation. The distinction is wire-visible
@@ -60,12 +89,23 @@ pub struct FileHandleManager {
 
     /// Root export path
     export_path: PathBuf,
-    
+
     /// Pseudo-filesystem (RFC 7530 Section 7)
     pseudo_fs: Arc<PseudoFilesystem>,
-    
+
     /// Export name in pseudo-filesystem
     export_name: String,
+
+    /// id↔path table behind v2 (id-based) handles — the paths too long
+    /// to embed. Mirrored to `backend` when one is attached.
+    id_to_path: Arc<RwLock<HashMap<u64, PathBuf>>>,
+    path_to_id: Arc<RwLock<HashMap<PathBuf, u64>>>,
+
+    /// Persistence for the v2 table. Attached after construction
+    /// (`attach_backend`) because the two servers build their pieces
+    /// in different orders. Absent (tests, dev) = v2 handles don't
+    /// survive restart — clients see NFS4ERR_STALE and re-walk.
+    backend: RwLock<Option<Arc<dyn StateBackend>>>,
 }
 
 impl FileHandleManager {
@@ -129,7 +169,34 @@ impl FileHandleManager {
             export_path,
             pseudo_fs,
             export_name,
+            id_to_path: Arc::new(RwLock::new(HashMap::new())),
+            path_to_id: Arc::new(RwLock::new(HashMap::new())),
+            backend: RwLock::new(None),
         }
+    }
+
+    /// Attach the persistence backend for the v2 id↔path table and
+    /// load its persisted mappings. Call once at server construction,
+    /// before the listener accepts — a client re-presenting a
+    /// pre-restart v2 handle must find its mapping, not STALE.
+    pub async fn attach_backend(&self, backend: Arc<dyn StateBackend>) {
+        match backend.list_fh_mappings().await {
+            Ok(records) => {
+                let n = records.len();
+                let mut ids = self.path_to_id.write().unwrap();
+                let mut rev = self.id_to_path.write().unwrap();
+                for r in records {
+                    let path = PathBuf::from(&r.path);
+                    ids.insert(path.clone(), r.file_id);
+                    rev.insert(r.file_id, path);
+                }
+                if n > 0 {
+                    info!("FileHandleManager loaded {} v2 fh mapping(s) from backend", n);
+                }
+            }
+            Err(e) => warn!("FileHandleManager: loading v2 fh mappings failed: {}", e),
+        }
+        *self.backend.write().unwrap() = Some(backend);
     }
 
     /// Generate a file handle for a path
@@ -250,16 +317,27 @@ impl FileHandleManager {
         }
 
         // Regular filehandle validation
-        if handle.data.len() < 41 {
-            return Err(HandleError::Malformed("File handle too short".to_string()));
-        }
-
-        // Check version
-        if handle.data[0] != 1 {
-            return Err(HandleError::Malformed(format!(
-                "Unsupported file handle version: {}",
-                handle.data[0]
-            )));
+        match handle.data[0] {
+            1 => {
+                if handle.data.len() < 41 {
+                    return Err(HandleError::Malformed("File handle too short".to_string()));
+                }
+            }
+            2 => {
+                if handle.data.len() != FH_V2_LEN {
+                    return Err(HandleError::Malformed(format!(
+                        "v2 file handle must be {} bytes, got {}",
+                        FH_V2_LEN,
+                        handle.data.len()
+                    )));
+                }
+            }
+            v => {
+                return Err(HandleError::Malformed(format!(
+                    "Unsupported file handle version: {}",
+                    v
+                )));
+            }
         }
 
         // Extract instance ID
@@ -300,7 +378,8 @@ impl FileHandleManager {
 
         let total_len = 1 + 8 + 32 + 2 + path_bytes.len();
         if total_len > Nfs4FileHandle::MAX_SIZE {
-            return Err("Path too long for file handle".to_string());
+            // Too long to embed — mint an id-based v2 handle instead.
+            return Ok(self.v2_handle_for(path));
         }
 
         let mut data = Vec::with_capacity(total_len);
@@ -321,6 +400,49 @@ impl FileHandleManager {
         data.extend_from_slice(path_bytes);
 
         Ok(Nfs4FileHandle { data })
+    }
+
+    /// Mint (or reuse) a v2 id-based handle for a path too long to
+    /// embed. Allocates a random non-zero file id on first mint and
+    /// mirrors the mapping to the state backend when attached.
+    fn v2_handle_for(&self, path: &Path) -> Nfs4FileHandle {
+        let existing = self.path_to_id.read().unwrap().get(path).copied();
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let mut ids = self.path_to_id.write().unwrap();
+                let mut rev = self.id_to_path.write().unwrap();
+                // Re-check under the write locks (mint races are real:
+                // parallel LOOKUPs of the same long name).
+                if let Some(&id) = ids.get(path) {
+                    id
+                } else {
+                    let mut id = allocate_fh_id();
+                    while rev.contains_key(&id) {
+                        id = allocate_fh_id();
+                    }
+                    ids.insert(path.to_path_buf(), id);
+                    rev.insert(id, path.to_path_buf());
+                    if let Some(backend) = self.backend.read().unwrap().clone() {
+                        let record = FhMappingRecord {
+                            file_id: id,
+                            path: path.to_string_lossy().into_owned(),
+                        };
+                        spawn_persist("fh_mapping", move || async move {
+                            backend.put_fh_mapping(&record).await
+                        });
+                    }
+                    debug!("Minted v2 filehandle id {:016x} for long path {:?}", id, path);
+                    id
+                }
+            }
+        };
+
+        let mut data = Vec::with_capacity(FH_V2_LEN);
+        data.push(2);
+        data.extend_from_slice(&self.instance_id.to_be_bytes());
+        data.extend_from_slice(&id.to_be_bytes());
+        Nfs4FileHandle { data }
     }
 
     /// Extract the path bytes from a version-1 filehandle **without**
@@ -362,6 +484,22 @@ impl FileHandleManager {
         // Validate first
         self.validate_handle(handle).map_err(|e| e.to_string())?;
 
+        // v2 (id-based): resolve through the id↔path table. A missing
+        // entry means the mapping didn't survive (no backend, or the
+        // record was lost) — answered as stale so the client re-walks.
+        if handle.data.first() == Some(&2) {
+            let mut id_bytes = [0u8; 8];
+            id_bytes.copy_from_slice(&handle.data[9..17]);
+            let id = u64::from_be_bytes(id_bytes);
+            return self
+                .id_to_path
+                .read()
+                .unwrap()
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| "Stale file handle: unknown v2 file id".to_string());
+        }
+
         if handle.data.len() < 43 {
             return Err("File handle too short".to_string());
         }
@@ -390,6 +528,93 @@ impl FileHandleManager {
         }
 
         Ok(PathBuf::from(path_str))
+    }
+
+    /// A successful filesystem RENAME old→new: re-key the v2 id↔path
+    /// table for the renamed node AND everything under it (directory
+    /// renames move every descendant's path), so v2 handles stay valid
+    /// across renames. Also drops the v1 path↔handle cache entries for
+    /// the old subtree — v1 handles embed the path and legitimately go
+    /// dead; serving them from cache would resolve to the dead path.
+    pub fn note_fs_rename(&self, old_path: &Path, new_path: &Path) {
+        // v1 caches: drop old-subtree entries (both directions).
+        {
+            let mut p2h = self.path_to_handle.write().unwrap();
+            let mut h2p = self.handle_to_path.write().unwrap();
+            let dead: Vec<PathBuf> = p2h
+                .keys()
+                .filter(|p| p.starts_with(old_path))
+                .cloned()
+                .collect();
+            for p in dead {
+                if let Some(h) = p2h.remove(&p) {
+                    h2p.remove(&h.data);
+                }
+            }
+        }
+        // v2 table: re-key old subtree → new prefix, persist each.
+        let mut ids = self.path_to_id.write().unwrap();
+        let mut rev = self.id_to_path.write().unwrap();
+        let moved: Vec<(PathBuf, u64)> = ids
+            .iter()
+            .filter(|(p, _)| p.starts_with(old_path))
+            .map(|(p, &id)| (p.clone(), id))
+            .collect();
+        let backend = self.backend.read().unwrap().clone();
+        for (old, id) in moved {
+            let suffix = old.strip_prefix(old_path).expect("filtered by starts_with");
+            let new = new_path.join(suffix);
+            ids.remove(&old);
+            ids.insert(new.clone(), id);
+            rev.insert(id, new.clone());
+            if let Some(backend) = backend.clone() {
+                let record = FhMappingRecord {
+                    file_id: id,
+                    path: new.to_string_lossy().into_owned(),
+                };
+                spawn_persist("fh_mapping_rename", move || async move {
+                    backend.put_fh_mapping(&record).await
+                });
+            }
+        }
+    }
+
+    /// A successful filesystem REMOVE: drop v1 cache entries and v2
+    /// mappings for the removed node and (for directories) everything
+    /// under it. A recreated same-name file mints a fresh id — new
+    /// file, new handle, per NFS semantics.
+    pub fn note_fs_remove(&self, path: &Path) {
+        {
+            let mut p2h = self.path_to_handle.write().unwrap();
+            let mut h2p = self.handle_to_path.write().unwrap();
+            let dead: Vec<PathBuf> = p2h
+                .keys()
+                .filter(|p| p.starts_with(path))
+                .cloned()
+                .collect();
+            for p in dead {
+                if let Some(h) = p2h.remove(&p) {
+                    h2p.remove(&h.data);
+                }
+            }
+        }
+        let mut ids = self.path_to_id.write().unwrap();
+        let mut rev = self.id_to_path.write().unwrap();
+        let dead: Vec<(PathBuf, u64)> = ids
+            .iter()
+            .filter(|(p, _)| p.starts_with(path))
+            .map(|(p, &id)| (p.clone(), id))
+            .collect();
+        let backend = self.backend.read().unwrap().clone();
+        for (p, id) in dead {
+            ids.remove(&p);
+            rev.remove(&id);
+            if let Some(backend) = backend.clone() {
+                spawn_persist("fh_mapping_delete", move || async move {
+                    backend.delete_fh_mapping(id).await
+                });
+            }
+        }
     }
 
     /// Normalize a path (resolve . and .., ensure within export)
@@ -585,6 +810,119 @@ mod tests {
         assert_eq!(handle_cache, 1);
 
         // Cleanup
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    fn long_name(prefix: &str) -> String {
+        // Spark-shaped: well past v1's ~85-byte path budget on its own.
+        format!(
+            "{}-00000-a1b2c3d4-e5f6-7890-abcd-ef0123456789-c000.snappy.parquet.{}",
+            prefix,
+            "x".repeat(80)
+        )
+    }
+
+    /// Long paths used to fail the mint outright ("Path too long for
+    /// file handle" → client EIO). They now get a fixed-size v2 handle
+    /// that round-trips, and short paths still mint v1 (stateless,
+    /// legacy-pin compatible).
+    #[test]
+    fn long_path_mints_v2_and_round_trips() {
+        let temp_dir = std::env::temp_dir().join("fh_v2_test");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let manager = FileHandleManager::new(temp_dir.clone());
+
+        let long_path = temp_dir.join(long_name("part"));
+        fs::write(&long_path, b"parquet bytes").unwrap();
+        let fh = manager.path_to_filehandle(&long_path).unwrap();
+        assert_eq!(fh.data[0], 2, "long path must mint a v2 handle");
+        assert_eq!(fh.data.len(), FH_V2_LEN);
+        assert!(manager.validate_handle(&fh).is_ok());
+        let resolved = manager.filehandle_to_path(&fh).unwrap();
+        assert!(resolved.ends_with(long_path.file_name().unwrap()));
+
+        // Deterministic: same path, same handle.
+        assert_eq!(manager.path_to_filehandle(&long_path).unwrap().data, fh.data);
+
+        let short_path = temp_dir.join("short.txt");
+        fs::write(&short_path, b"x").unwrap();
+        let fh1 = manager.path_to_filehandle(&short_path).unwrap();
+        assert_eq!(fh1.data[0], 1, "short path keeps the v1 format");
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// v2 handles survive RENAME — including a parent-directory rename
+    /// — and die with REMOVE.
+    #[test]
+    fn v2_handle_follows_rename_and_dies_with_remove() {
+        let temp_dir = std::env::temp_dir().join("fh_v2_rename_test");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let manager = FileHandleManager::new(temp_dir.clone());
+
+        let stage = temp_dir.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let file = stage.join(long_name("part"));
+        fs::write(&file, b"parquet bytes").unwrap();
+        let fh = manager.path_to_filehandle(&file).unwrap();
+        assert_eq!(fh.data[0], 2);
+
+        // Directory rename: the handle must resolve to the new home.
+        let done = temp_dir.join("done");
+        fs::rename(&stage, &done).unwrap();
+        manager.note_fs_rename(&stage, &done);
+        let resolved = manager.filehandle_to_path(&fh).unwrap();
+        assert!(resolved.starts_with(&done), "v2 handle follows the dir rename: {:?}", resolved);
+
+        // REMOVE forgets the mapping → stale, and a re-created file
+        // gets a DIFFERENT handle (new file, new id).
+        let new_home = done.join(file.file_name().unwrap());
+        manager.note_fs_remove(&new_home);
+        assert!(manager.filehandle_to_path(&fh).is_err());
+        let fh2 = manager.path_to_filehandle(&new_home).unwrap();  // file still on disk
+        assert_ne!(fh2.data, fh.data);
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// With a backend attached, v2 mappings persist and a "restarted"
+    /// manager (same backend, same instance id) resolves the old
+    /// handle. Without persistence the restart answers stale.
+    #[tokio::test]
+    async fn v2_handles_survive_restart_via_backend() {
+        let temp_dir = std::env::temp_dir().join("fh_v2_persist_test");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let backend: std::sync::Arc<dyn StateBackend> =
+            std::sync::Arc::new(crate::state_backend::MemoryBackend::new());
+
+        let m1 = FileHandleManager::new_with_instance_id(temp_dir.clone(), "volume".into(), 42);
+        m1.attach_backend(std::sync::Arc::clone(&backend)).await;
+        let long_path = temp_dir.join(long_name("part"));
+        fs::write(&long_path, b"parquet bytes").unwrap();
+        let fh = m1.path_to_filehandle(&long_path).unwrap();
+        assert_eq!(fh.data[0], 2);
+
+        // spawn_persist is fire-and-forget; wait (bounded) for the record.
+        let mut persisted = Vec::new();
+        for _ in 0..200 {
+            persisted = backend.list_fh_mappings().await.unwrap();
+            if !persisted.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(persisted.len(), 1, "v2 mapping was never persisted");
+
+        // "Restart": fresh manager, same instance id + backend.
+        let m2 = FileHandleManager::new_with_instance_id(temp_dir.clone(), "volume".into(), 42);
+        assert!(
+            m2.filehandle_to_path(&fh).is_err(),
+            "before load the mapping is unknown"
+        );
+        m2.attach_backend(std::sync::Arc::clone(&backend)).await;
+        let resolved = m2.filehandle_to_path(&fh).unwrap();
+        assert!(resolved.ends_with(long_path.file_name().unwrap()));
+
         fs::remove_dir_all(&temp_dir).unwrap();
     }
 }

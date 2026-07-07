@@ -27,7 +27,7 @@ async fn start_test_server() -> (NfsServer, TempDir, u16) {
         read_only: false,
     };
 
-    let server = NfsServer::new(config).unwrap();
+    let server = NfsServer::new(config).await.unwrap();
     let port = 12049; // Use fixed test port
 
     (server, tmpdir, port)

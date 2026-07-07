@@ -3099,6 +3099,7 @@ impl FileOperationHandler {
 
                 match result {
                     Ok(_) => {
+                        self.fh_mgr.note_fs_remove(&target_path);
                         RemoveRes {
                             status: Nfs4Status::Ok,
                             change_info: Some(ChangeInfo {
@@ -3275,6 +3276,10 @@ impl FileOperationHandler {
         // Perform the rename.
         match tokio::fs::rename(&source_path, &dest_path).await {
             Ok(_) => {
+                // Keep the filehandle tables truthful: v2 (id-based)
+                // handles follow the file; stale v1 cache entries for
+                // the old subtree are dropped.
+                self.fh_mgr.note_fs_rename(&source_path, &dest_path);
                 let cinfo = if is_self_rename {
                     // No actual change to the directory.
                     ChangeInfo { atomic: true, before: 1, after: 1 }

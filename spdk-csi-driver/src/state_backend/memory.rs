@@ -12,8 +12,8 @@
 //! cost is paid only on writes.
 
 use super::{
-    ClientRecord, LayoutRecord, LockRecord, PlacementRecord, SessionRecord, StateBackend,
-    StateBackendResult, StateIdRecord,
+    ClientRecord, FhMappingRecord, LayoutRecord, LockRecord, PlacementRecord, SessionRecord,
+    StateBackend, StateBackendResult, StateIdRecord,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -30,6 +30,7 @@ pub struct MemoryBackend {
     locks: DashMap<[u8; 12], LockRecord>,
     layouts: DashMap<[u8; 16], LayoutRecord>,
     placements: DashMap<String, PlacementRecord>,
+    fh_mappings: DashMap<u64, FhMappingRecord>,
     instance_counter: AtomicU64,
     /// Lazily-initialised per-deployment server id. `OnceLock` makes
     /// the first call atomic (no two threads observe different values)
@@ -150,6 +151,20 @@ impl StateBackend for MemoryBackend {
 
     async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()> {
         self.placements.remove(file_key);
+        Ok(())
+    }
+
+    async fn put_fh_mapping(&self, m: &FhMappingRecord) -> StateBackendResult<()> {
+        self.fh_mappings.insert(m.file_id, m.clone());
+        Ok(())
+    }
+
+    async fn list_fh_mappings(&self) -> StateBackendResult<Vec<FhMappingRecord>> {
+        Ok(self.fh_mappings.iter().map(|r| r.clone()).collect())
+    }
+
+    async fn delete_fh_mapping(&self, file_id: u64) -> StateBackendResult<()> {
+        self.fh_mappings.remove(&file_id);
         Ok(())
     }
 

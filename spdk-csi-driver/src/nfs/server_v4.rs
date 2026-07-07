@@ -139,8 +139,10 @@ fn select_state_backend(
 }
 
 impl NfsServer {
-    /// Create a new NFSv4.2 server
-    pub fn new(config: NfsConfig) -> std::io::Result<Self> {
+    /// Create a new NFSv4.2 server. Async because the filehandle
+    /// manager loads its persisted v2 (id-based) handle mappings from
+    /// the state backend before the listener accepts.
+    pub async fn new(config: NfsConfig) -> std::io::Result<Self> {
         // Initialize NFSv4.2 components
         // Filehandles embed the instance id, so it must be stable across
         // restarts or every client-held handle goes ESTALE on a bounce and
@@ -157,6 +159,10 @@ impl NfsServer {
             instance_id,
         ));
         let (backend, state_lost) = build_state_backend(&config);
+        // v2 (id-based) filehandles — minted for paths too long to
+        // embed — resolve through a table persisted alongside the rest
+        // of the NFS state, so they survive server restart.
+        fh_mgr.attach_backend(Arc::clone(&backend)).await;
         let state_mgr = Arc::new(StateManager::new(&config.volume_id, backend));
         // Locks share the state backend: their stateids always survived a
         // restart (StateIdRecord), so the lock table must too — otherwise

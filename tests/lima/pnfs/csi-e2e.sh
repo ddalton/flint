@@ -201,6 +201,38 @@ READ_HASH=$(limactl shell "$LIMA_VM" -- bash -c \
 ok "round-trip hash matches"
 
 # ──────────────────────────────────────────────────────────────────────
+# (3b) Long filenames — id-based (v2) filehandles
+#      Spark part names used to blow the v1 handle's ~85-byte path
+#      budget → EIO on OPEN + un-deletable stripe debris (dry-run
+#      Finding 4). Full lifecycle must work now.
+# ──────────────────────────────────────────────────────────────────────
+
+step "long-filename lifecycle (v2 filehandle)"
+LONG_NAME="part-00000-a1b2c3d4-e5f6-7890-abcd-ef0123456789-c000.snappy.parquet.$(printf 'x%.0s' $(seq 1 60))"
+LONG_HASH=$(limactl shell "$LIMA_VM" -- bash -c "
+  set -eu
+  mkdir -p $VM_MOUNT/spark-output/_temporary/attempt_0
+  dd if=/dev/urandom of=$VM_MOUNT/spark-output/_temporary/attempt_0/$LONG_NAME \
+    bs=1M count=8 conv=notrunc 2>/dev/null
+  sync
+  # commit-by-rename, the committer's shape
+  mv $VM_MOUNT/spark-output/_temporary/attempt_0/$LONG_NAME $VM_MOUNT/spark-output/$LONG_NAME
+  sha256sum $VM_MOUNT/spark-output/$LONG_NAME | awk '{print \$1}'
+") || fail "long-filename write/rename failed (v1 path-length limit regressed?)"
+[ -n "$LONG_HASH" ] || fail "long-filename hash empty"
+
+LONG_HASH2=$(limactl shell "$LIMA_VM" -- bash -c \
+  "sha256sum $VM_MOUNT/spark-output/$LONG_NAME | awk '{print \$1}'")
+[ "$LONG_HASH2" = "$LONG_HASH" ] || fail "long-filename data mismatch after rename"
+
+limactl shell "$LIMA_VM" -- bash -c "
+  set -eu
+  rm $VM_MOUNT/spark-output/$LONG_NAME
+  rm -rf $VM_MOUNT/spark-output
+" || fail "long-filename delete failed (un-deletable debris — Finding 4 shape)"
+ok "long name: write → rename-commit → read → delete all clean"
+
+# ──────────────────────────────────────────────────────────────────────
 # (4) Per-DS striping evidence (files one level deeper still stripe)
 # ──────────────────────────────────────────────────────────────────────
 

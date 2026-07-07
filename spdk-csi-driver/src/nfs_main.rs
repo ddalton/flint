@@ -121,7 +121,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create and start NFS server
-    let server = match NfsServer::new(config) {
+    let server = match NfsServer::new(config).await {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to create NFS server: {}", e);
