@@ -359,5 +359,15 @@ rather than re-maps).
   every NFS mount on the node). Treat it as defense-in-depth on new
   kernels, not the fix; the server-side bounded escalation covers all
   client kernels. AL2023 (6.1) does not have it.
+- **Open/close-heavy workloads pay per-open layout churn (~230 ms/op
+  observed under fsstress).** Layouts are granted with
+  return_on_close, so a metadata-heavy workload (open, small I/O,
+  close, repeat) re-runs LAYOUTGET — and, when the deviceid refcount
+  hits zero between opens, GETDEVICEINFO — on every cycle; sync-heavy
+  op mixes additionally convoy on fsync. Correctness is unaffected
+  (the 2026-07-07 fsx/fsstress gate is green); large-file streaming
+  I/O — the pNFS design target — amortizes one LAYOUTGET across the
+  whole transfer and is unaffected. P1: revisit return_on_close and
+  layout segment caching for the open/close-storm profile.
 - **helm --reuse-values** silently nils new chart defaults — always
   pass the full values file.

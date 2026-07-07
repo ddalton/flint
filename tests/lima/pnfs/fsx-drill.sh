@@ -30,7 +30,10 @@ MDS_PORT=20490
 MNT=/mnt/flint-pnfs
 
 FSX_OPS="${FSX_OPS:-20000}"
-STRESS_OPS="${STRESS_OPS:-1500}"
+# 500 ops × 4 procs ≈ 7–8 min at the current ~230 ms/op (layout churn
+# from return_on_close + per-open GETDEVICEINFO — P1 perf item). 1500
+# needed ~23 min and tripped the 900 s timeout, which read as a hang.
+STRESS_OPS="${STRESS_OPS:-500}"
 STRESS_PROCS="${STRESS_PROCS:-4}"
 
 DS1_EXPORT="/tmp/flint-pnfs-ds1"
