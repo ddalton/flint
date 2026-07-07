@@ -652,7 +652,23 @@ impl DataServer {
                             Ok(write_result) => {
                                 let mut encoder = XdrEncoder::new();
                                 encoder.encode_u32(write_result.count);
-                                encoder.encode_u32(stable);
+                                // committed: NEVER claim FILE_SYNC. FILE_SYNC
+                                // means data AND metadata are durable — but a
+                                // split pNFS DS can't make the file's SIZE
+                                // durable (it lives on the MDS, updated by the
+                                // client's LAYOUTCOMMIT). The Linux files-
+                                // layout client SKIPS layoutcommit bookkeeping
+                                // entirely when a DS write returns FILE_SYNC
+                                // (filelayout_set_layoutcommit), so echoing
+                                // FILE_SYNC made size-extending stable writes
+                                // vanish: stat returned the stale stub size.
+                                // Found by fsx (both buffered flush and
+                                // O_DIRECT) at the FIRST hole-extending write.
+                                // DATA_SYNC is the honest answer: data
+                                // durable, metadata not — the client then
+                                // tracks lwb and sends LAYOUTCOMMIT.
+                                let committed = if stable == 0 { 0 } else { 1 };
+                                encoder.encode_u32(committed);
                                 encoder.encode_fixed_opaque(&write_result.verifier);
                                 (Nfs4Status::Ok, encoder.finish())
                             }
