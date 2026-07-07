@@ -181,20 +181,40 @@ rather than re-maps).
 
 ## Known residuals (fix work tracked in the durable-DS plan)
 
-- **In-flight I/O wedge on abrupt DS loss — and it poisons the whole
-  node**: if a DS's Service has no endpoints, the files-layout client
-  marks that composite **deviceid INVALID (permanent — not the 120 s
-  retryable UNAVAILABLE)**, every read of every file pinned to that
-  device falls back to the MDS, is refused with NFS4ERR_DELAY (the
-  stub-IO guard — the alternative was silent zeros), and the fallback
-  loop never re-drives the pNFS path even after the DS returns.
-  Anatomy measured live (runn, 2026-07-06): retry loop at ~110 ms per
-  stuck file; the deviceid cache hangs off the node's shared
-  nfs_client, so **fresh pods on the same node inherit the poisoning**,
-  and deleted pods leave detached mounts whose in-flight retries spin
-  forever and keep the nfs_client pinned. Files on other deviceids
-  read fine throughout. Remedies: run affected consumers on a
-  different node (verified: same file, clean sha, instantly) or reboot
-  the poisoned node. Durable fix: MDS proxy I/O.
+- **In-flight I/O wedge on abrupt DS loss — the DELAY livelock.**
+  Root cause established by kernel-source analysis (6.1) + live
+  tracepoints on runn (2026-07-06). On a DS connection error the
+  files-layout client marks the deviceid UNAVAILABLE and the layout
+  failed — both marks **self-expire after 120 s** (nothing is
+  permanent) — and RESETs the in-flight page reads TO THE MDS. Those
+  MDS READs are the poison: our stub-IO guard answers NFS4ERR_DELAY,
+  and `nfs4_read_done_cb` retries the identical MDS READ every 100 ms
+  **forever** — the loop never re-enters `pnfs_update_layout()`, so
+  DS recovery is invisible to it. The looping tasks are async rpciod
+  tasks (no process to kill), they hold the page locks, and every
+  "fresh" read of those pages — from any pod on the node, because
+  sharecache aliases all mounts of the export onto one superblock —
+  queues silently behind the locked pages and never reaches pNFS at
+  all. Reads of untouched offsets/files recover by themselves once
+  the 120 s marks lapse (verified live: same file, different offset,
+  clean read from the "poisoned" node).
+  **Unstick recipe (no reboot, validated live on runn)**: on the
+  affected node, mount an alias of the export and force-unmount it —
+  `mount -t nfs4 -o minorversion=1 <mds-ip>:/ /tmp/unstick &&
+  umount -f /tmp/unstick`. MNT_FORCE fires `rpc_killall_tasks` on the
+  shared rpc client: the looping READs die with EIO, pages unlock,
+  the zombie superblock drains, and the next mount starts clean
+  (full-file sha verified afterward from the same node; MDS refusal
+  storm → 0). CAUTION: it kills ALL in-flight RPCs to that server
+  from that node — fine when the only NFS traffic is the storm.
+  **Durable server fix** (residual, priority): the client's fallback
+  contract assumes the MDS will service READs — indefinite DELAY
+  violates it. Either (a) MDS proxy I/O (serve fallback reads from
+  the DSes; spec-intended, best UX), or (b) bound the DELAY window —
+  once the pinned DS is re-registered/healthy (or after ~2× lease),
+  answer the fallback READ with a fatal error instead: the loop
+  exits, pages unlock, and the application's retry re-drives the
+  pNFS path to good data. CB_LAYOUTRECALL / CB_NOTIFY_DEVICEID do
+  NOT help — neither touches the looping READ (verified in source).
 - **helm --reuse-values** silently nils new chart defaults — always
   pass the full values file.
