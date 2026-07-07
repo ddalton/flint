@@ -43,6 +43,11 @@ LIMA_VM="${LIMA_VM:-flint-nfs-client}"
 HOST_ADDR="host.lima.internal"
 MDS_PORT=20490
 MNT=/mnt/flint-pnfs
+# Second mount with attribute/lookup caching OFF: w3-stat measures the
+# server's LOOKUP/GETATTR dispatch floor, and on the normal mount the
+# client's attribute cache answers stat() locally (measured 149k "ops/s"
+# of pure client CPU — invalid).
+MNT_NOAC=/mnt/flint-pnfs-noac
 
 P="${P:-8}"
 N_W1="${N_W1:-250}"
@@ -59,7 +64,7 @@ MDS_EXPORT_DIR="/tmp/flint-pnfs-mds-exports"
 
 cleanup() {
   set +e
-  limactl shell "$LIMA_VM" -- sudo bash -c "pkill -9 -f mdsbench-worker; umount -lf $MNT" 2>/dev/null
+  limactl shell "$LIMA_VM" -- sudo bash -c "pkill -9 -f mdsbench-worker; umount -lf $MNT; umount -lf $MNT_NOAC" 2>/dev/null
   pkill -9 -f "flint-pnfs-mds" 2>/dev/null || true
   pkill -9 -f "flint-pnfs-ds"  2>/dev/null || true
 }
@@ -90,8 +95,10 @@ kill -0 "$MDS_PID" || { echo "✗ MDS died on startup"; tail -20 $LOG_DIR/flint-
 
 limactl shell "$LIMA_VM" -- sudo bash -c "
   umount -lf $MNT 2>/dev/null; rm -rf $MNT
-  mkdir -p $MNT
+  umount -lf $MNT_NOAC 2>/dev/null; rm -rf $MNT_NOAC
+  mkdir -p $MNT $MNT_NOAC
   mount -t nfs4 -o minorversion=1,proto=tcp,port=${MDS_PORT} ${HOST_ADDR}:/ $MNT
+  mount -t nfs4 -o minorversion=1,proto=tcp,port=${MDS_PORT},actimeo=0,lookupcache=none ${HOST_ADDR}:/ $MNT_NOAC
 " || { echo "✗ mount failed"; exit 1; }
 
 # Push the worker (tight loops in python — client-side fork overhead
@@ -129,13 +136,13 @@ mds_cpu_s() {  # cumulative CPU seconds of the MDS process
 }
 log_bytes() { stat -f %z "$LOG_DIR/flint-pnfs-mds.log"; }
 
-run_workload() {  # name mode per_proc_ops total_ops
-  local name=$1 mode=$2 nops=$3 total=$4
+run_workload() {  # name mode per_proc_ops total_ops [bench_root]
+  local name=$1 mode=$2 nops=$3 total=$4 root=${5:-$MNT/bench}
   local c0 c1 b0 b1 t0 t1
   c0=$(mds_cpu_s); b0=$(log_bytes); t0=$(date +%s.%N 2>/dev/null || date +%s)
   limactl shell "$LIMA_VM" -- sudo bash -c "
     for p in \$(seq 1 $P); do
-      python3 /tmp/mdsbench-worker.py $mode $MNT/bench \$p $nops &
+      python3 /tmp/mdsbench-worker.py $mode $root \$p $nops &
     done
     wait
   " || { echo "  ✗ $name workload failed"; return 1; }
@@ -157,7 +164,7 @@ run_workload w1-create create "$N_W1" $((N_W1 * P * 2))   # create+unlink both c
 limactl shell "$LIMA_VM" -- sudo bash -c "
   for p in \$(seq 1 $P); do python3 /tmp/mdsbench-worker.py pool $MNT/bench \$p 50 & done; wait"
 run_workload w2-opencl opencl "$N_W2" $((N_W2 * P))
-run_workload w3-stat   stat   "$N_W3" $((N_W3 * P))
+run_workload w3-stat   stat   "$N_W3" $((N_W3 * P)) "$MNT_NOAC/bench"
 
 # W4: fsstress (only if built in the VM)
 if limactl shell "$LIMA_VM" -- test -x /opt/xfstests/ltp/fsstress; then

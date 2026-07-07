@@ -96,7 +96,10 @@ MDS_LOG="$LOG_DIR/flint-pnfs-mds.log"
 # 1. Start MDS + 2 DSes (MDS uses the recall-tuned config)
 # ──────────────────────────────────────────────────────────────────────
 echo "▶ starting MDS (heartbeatTimeout=5s)"
-PNFS_MODE=mds nohup "$BIN_DIR/flint-pnfs-mds" --config "$CFG_DIR/mds-recall.yaml" \
+# RUST_LOG=debug: the victim-selection markers this drill parses
+# ('Generated pNFS layout', 'Segment N: device=', 'first_stripe_index')
+# are per-op chatter that lives at debug level in production builds.
+RUST_LOG=debug PNFS_MODE=mds nohup "$BIN_DIR/flint-pnfs-mds" --config "$CFG_DIR/mds-recall.yaml" \
   >"$MDS_LOG" 2>&1 &
 echo $! > "$PIDFILE_DIR/flint-pnfs-mds.pid"
 sleep 1

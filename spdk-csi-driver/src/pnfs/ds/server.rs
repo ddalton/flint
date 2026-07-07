@@ -412,11 +412,11 @@ impl DataServer {
                         let _ = decoder.decode_opaque();
                     }
                     
-                    warn!("📥 DS: EXCHANGE_ID REQUEST from client:");
-                    warn!("   client_owner={:?}", String::from_utf8_lossy(&client_owner));
-                    warn!("   verifier=0x{:016x}", verifier);
-                    warn!("   client_flags=0x{:08x}", client_flags);
-                    warn!("   state_protect=0x{:08x}", state_protect);
+                    info!("📥 DS: EXCHANGE_ID REQUEST from client:");
+                    info!("   client_owner={:?}", String::from_utf8_lossy(&client_owner));
+                    info!("   verifier=0x{:016x}", verifier);
+                    info!("   client_flags=0x{:08x}", client_flags);
+                    info!("   state_protect=0x{:08x}", state_protect);
                     
                     // Use ClientManager to get consistent clientid
                     // CRITICAL: This ensures DS returns same clientid as MDS for same client_owner!
@@ -492,14 +492,14 @@ impl DataServer {
                     
                     let result_bytes = encoder.finish();
                     
-                    warn!("🔍 DS EXCHANGE_ID response encoding:");
-                    warn!("   clientid={} (0x{:016x})", clientid, clientid);
-                    warn!("   sequenceid={}", sequenceid);
-                    warn!("   flags=0x{:08x}", response_flags);
-                    warn!("   server_owner={:?}", server_owner);
-                    warn!("   server_scope={:?}", String::from_utf8_lossy(server_scope));
-                    warn!("   Total bytes: {}", result_bytes.len());
-                    warn!("   First 80 bytes: {:02x?}", &result_bytes[..result_bytes.len().min(80)]);
+                    info!("🔍 DS EXCHANGE_ID response encoding:");
+                    info!("   clientid={} (0x{:016x})", clientid, clientid);
+                    info!("   sequenceid={}", sequenceid);
+                    info!("   flags=0x{:08x}", response_flags);
+                    info!("   server_owner={:?}", server_owner);
+                    info!("   server_scope={:?}", String::from_utf8_lossy(server_scope));
+                    info!("   Total bytes: {}", result_bytes.len());
+                    info!("   First 80 bytes: {:02x?}", &result_bytes[..result_bytes.len().min(80)]);
                     
                     (Nfs4Status::Ok, result_bytes)
                 }

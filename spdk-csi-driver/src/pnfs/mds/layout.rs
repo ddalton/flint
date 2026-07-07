@@ -549,7 +549,7 @@ impl LayoutManager {
                 .or_default()
                 .push(rel);
         }
-        info!(
+        debug!(
             "Stripe cleanup enqueued for '{}' (file_id {:016x}, {} DSes)",
             file_key,
             placement.file_id,
@@ -718,8 +718,6 @@ impl LayoutManager {
         length: u64,
         iomode: IoMode,
     ) -> Result<LayoutState, String> {
-        use tracing::warn;
-
         // Every grant goes through the file's pinned placement — never
         // the live registry's current membership/order. A file whose
         // pinned DS is gone gets a refusal (client retries/backs off),
@@ -739,7 +737,7 @@ impl LayoutManager {
             }
         }
 
-        warn!(
+        debug!(
             "💥 Generating layout: file='{}', offset={}, length={}, iomode={:?}, devices={}",
             file_key,
             offset,
@@ -779,18 +777,18 @@ impl LayoutManager {
             .or_insert_with(Vec::new)
             .push(stateid);
 
-        info!(
+        debug!(
             "🎯 Generated pNFS layout with {} segments, stateid={:?}, client={}",
             layout.segments.len(),
             &stateid[0..4],
             owner.client_id,
         );
-        info!("   📊 Layout details:");
+        debug!("   📊 Layout details:");
         for (i, seg) in layout.segments.iter().enumerate() {
-            info!("      Segment {}: device={}, offset={}, length={}", 
+            debug!("      Segment {}: device={}, offset={}, length={}", 
                   i, seg.device_id, seg.offset, seg.length);
         }
-        info!("   ✅ Client will now perform parallel I/O across {} data servers!", layout.segments.len());
+        debug!("   ✅ Client will now perform parallel I/O across {} data servers!", layout.segments.len());
 
         Ok(layout)
     }
@@ -908,7 +906,7 @@ impl LayoutManager {
     /// consistent.
     pub fn return_layout(&self, stateid: &LayoutStateId) -> Result<(), String> {
         if let Some((_, layout)) = self.layouts.remove(stateid) {
-            info!(
+            debug!(
                 "Layout returned: stateid={:?}, segments={}, client={}",
                 &stateid[0..4],
                 layout.segments.len(),

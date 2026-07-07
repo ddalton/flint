@@ -154,8 +154,8 @@ impl PnfsOperationHandler {
         &self,
         args: LayoutGetArgs,
     ) -> Result<LayoutGetResult, LayoutGetError> {
-        warn!("🔥🔥🔥 PnfsOperationHandler::layoutget() CALLED 🔥🔥🔥");
-        info!(
+        debug!("🔥🔥🔥 PnfsOperationHandler::layoutget() CALLED 🔥🔥🔥");
+        debug!(
             "📥 LAYOUTGET: offset={}, length={}, iomode={:?}, layout_type={:?}",
             args.offset, args.length, args.iomode, args.layout_type
         );
@@ -181,7 +181,7 @@ impl PnfsOperationHandler {
         let active_devices = self.device_registry.count_by_status(
             crate::pnfs::mds::device::DeviceStatus::Active
         );
-        info!("   Available data servers: {}", active_devices);
+        debug!("   Available data servers: {}", active_devices);
 
         // Validate layout type (support FILE and FFLv4)
         match args.layout_type {
@@ -221,7 +221,7 @@ impl PnfsOperationHandler {
         let device_id_bin =
             crate::pnfs::mds::layout::composite_device_id(&placement.device_ids);
 
-        info!("✅ LAYOUTGET successful: {} segments returned", layout.segments.len());
+        debug!("✅ LAYOUTGET successful: {} segments returned", layout.segments.len());
 
         Ok(LayoutGetResult {
             return_on_close: layout.return_on_close,
@@ -247,7 +247,7 @@ impl PnfsOperationHandler {
         &self,
         args: GetDeviceInfoArgs,
     ) -> Result<GetDeviceInfoResult, GetDeviceInfoError> {
-        warn!(
+        debug!(
             "🔥 GETDEVICEINFO: device_id={:02x?}, layout_type={:?}",
             &args.device_id[0..8],
             args.layout_type
@@ -267,7 +267,7 @@ impl PnfsOperationHandler {
         // Try to look up device as single DS
         let device_addr = if let Some(device_info) = self.device_registry.get_by_binary_id(&args.device_id) {
             // Single DS device found
-            warn!("✅ Found single device: id={}, primary_endpoint={}", 
+            debug!("✅ Found single device: id={}, primary_endpoint={}", 
                   device_info.device_id, device_info.primary_endpoint);
 
             DeviceAddr4 {
@@ -283,7 +283,7 @@ impl PnfsOperationHandler {
             // order. Endpoints stay live (a re-registered DS serves
             // its new address); a missing group member is NoEnt, not
             // a silently shuffled stripe pattern.
-            info!(
+            debug!(
                 "🔧 Composite stripe deviceid: {} pinned DSes {:?}",
                 group.len(),
                 group
@@ -316,7 +316,7 @@ impl PnfsOperationHandler {
             return Err(GetDeviceInfoError::NoEnt);
         };
 
-        warn!("📤 Returning device address with {} total DSes", 
+        debug!("📤 Returning device address with {} total DSes", 
               1 + device_addr.multipath.len());
 
         Ok(GetDeviceInfoResult {
@@ -371,7 +371,7 @@ impl PnfsOperationHandler {
                 // manager filters internally; we just hand it the keys.
                 let dropped = self.layout_manager
                     .return_fsid_for_client(args.client_id, args.fsid);
-                info!(
+                debug!(
                     "LAYOUTRETURN FSID: released {} layout(s) for client_id={} fsid={}",
                     dropped.len(), args.client_id, args.fsid,
                 );
@@ -381,7 +381,7 @@ impl PnfsOperationHandler {
                 // owned by this client across all filesystems.
                 let dropped = self.layout_manager
                     .return_all_for_client(args.client_id);
-                info!(
+                debug!(
                     "LAYOUTRETURN ALL: released {} layout(s) for client_id={}",
                     dropped.len(), args.client_id,
                 );
@@ -411,14 +411,14 @@ impl PnfsOperationHandler {
 
         // Process error reports
         if !ff_return.ioerr_report.is_empty() {
-            info!(
+            debug!(
                 "📋 LAYOUTRETURN received {} error reports for layout {:?}",
                 ff_return.ioerr_report.len(),
                 &stateid[0..4]
             );
 
             for (i, err_report) in ff_return.ioerr_report.iter().enumerate() {
-                info!(
+                debug!(
                     "   Error report {}: offset={}, length={}, {} device errors",
                     i, err_report.offset, err_report.length, err_report.errors.len()
                 );
@@ -444,22 +444,22 @@ impl PnfsOperationHandler {
 
         // Process statistics reports
         if !ff_return.iostats_report.is_empty() {
-            info!(
+            debug!(
                 "📊 LAYOUTRETURN received {} statistics reports for layout {:?}",
                 ff_return.iostats_report.len(),
                 &stateid[0..4]
             );
 
             for (i, stats) in ff_return.iostats_report.iter().enumerate() {
-                info!(
+                debug!(
                     "   Stats report {}: offset={}, length={}, device={:02x?}",
                     i, stats.offset, stats.length, &stats.device_id[0..4]
                 );
-                info!(
+                debug!(
                     "      Read: {} bytes, {} ops",
                     stats.read.bytes, stats.read.ops
                 );
-                info!(
+                debug!(
                     "      Write: {} bytes, {} ops",
                     stats.write.bytes, stats.write.ops
                 );
@@ -487,7 +487,7 @@ impl PnfsOperationHandler {
         &self,
         args: LayoutCommitArgs,
     ) -> Result<LayoutCommitResult, LayoutCommitError> {
-        info!(
+        debug!(
             "📝 LAYOUTCOMMIT: offset={}, length={}, stateid={:?}",
             args.offset,
             args.length,
@@ -503,7 +503,7 @@ impl PnfsOperationHandler {
             })?;
 
         // Extract file information from layout
-        info!(
+        debug!(
             "   Layout has {} segments for filehandle length={}",
             layout.segments.len(),
             layout.filehandle.len()
@@ -511,7 +511,7 @@ impl PnfsOperationHandler {
 
         // Update file metadata if new offset is provided
         let new_size = if let Some(new_offset) = args.new_offset {
-            info!("   Updating file size to {} bytes", new_offset);
+            debug!("   Updating file size to {} bytes", new_offset);
 
             // Try to update file size via filehandle
             if let Err(e) = self.update_file_size(&layout.filehandle, new_offset) {
@@ -521,7 +521,7 @@ impl PnfsOperationHandler {
 
             Some(new_offset)
         } else {
-            info!("   No size update requested");
+            debug!("   No size update requested");
             None
         };
 
@@ -536,7 +536,7 @@ impl PnfsOperationHandler {
                 .map(|d| d.as_nanos() as u64);
 
             if let Some(time) = now {
-                info!("   Setting mtime to current time: {}", time);
+                debug!("   Setting mtime to current time: {}", time);
                 if let Err(e) = self.update_file_mtime(&layout.filehandle, time) {
                     warn!("   Failed to update mtime: {}", e);
                 }
@@ -545,7 +545,7 @@ impl PnfsOperationHandler {
             now
         };
 
-        info!("   ✅ LAYOUTCOMMIT completed successfully");
+        debug!("   ✅ LAYOUTCOMMIT completed successfully");
 
         Ok(LayoutCommitResult {
             new_size,

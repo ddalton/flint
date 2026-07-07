@@ -12,7 +12,7 @@
 
 use crate::nfs::v4::protocol::*;
 use crate::nfs::v4::compound::CompoundContext;
-use crate::nfs::v4::state::{StateManager, StateType};
+use crate::nfs::v4::state::StateManager;
 use crate::nfs::v4::operations::fileops::Fattr4;
 use crate::nfs::v4::filehandle::FileHandleManager;
 use bytes::Bytes;
@@ -275,7 +275,7 @@ impl IoOperationHandler {
     }
 
     /// Handle OPEN operation
-    pub fn handle_open(
+    pub async fn handle_open(
         &self,
         op: OpenOp,
         ctx: &mut CompoundContext,
@@ -411,7 +411,7 @@ impl IoOperationHandler {
             // malformed or unsupported fattr4 must fail the OPEN before
             // any filesystem mutation (RFC 8881 §18.16.4).
             use crate::nfs::v4::operations::fileops::{
-                apply_settable_attrs, attr_numbers_to_bitmap, decode_settable_attrs,
+                apply_settable_attrs_offloaded, attr_numbers_to_bitmap, decode_settable_attrs,
                 SettableAttrs,
             };
             let createattrs = match &op.openhow {
@@ -438,10 +438,10 @@ impl IoOperationHandler {
             // must leave its data alone unless the client asked for
             // size=0 via createattrs (RFC 8881 §18.16.3). File::create's
             // implicit O_TRUNC would wipe it.
-            let existed = file_path.exists();
-            match std::fs::OpenOptions::new().write(true).create(true).open(&file_path) {
+            let existed = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
+            match tokio::fs::OpenOptions::new().write(true).create(true).open(&file_path).await {
                 Ok(_) => {
-                    info!(
+                    debug!(
                         "OPEN: {} file {:?}",
                         if existed { "opened existing" } else { "created" },
                         file_path
@@ -457,7 +457,8 @@ impl IoOperationHandler {
                         } else {
                             want.clone()
                         };
-                        let (applied, err) = apply_settable_attrs(&file_path, &effective);
+                        let (applied, err) =
+                            apply_settable_attrs_offloaded(file_path.clone(), effective).await;
                         applied_attrs = applied;
                         if let Some(status) = err {
                             warn!("OPEN(create): applying createattrs failed → {:?}", status);
@@ -475,7 +476,7 @@ impl IoOperationHandler {
                     // Generate filehandle for the new file
                     match self.fh_mgr.path_to_filehandle(&file_path) {
                         Ok(new_fh) => {
-                            info!("OPEN: Generated filehandle for new file");
+                            debug!("OPEN: Generated filehandle for new file");
                             // Update current filehandle to the newly created file
                             ctx.set_current_fh(new_fh.clone());
 
@@ -520,7 +521,7 @@ impl IoOperationHandler {
                                 exclusive_verifier,
                             );
 
-                            info!("OPEN: stateid {:?} for client {}", stateid, client_id);
+                            debug!("OPEN: stateid {:?} for client {}", stateid, client_id);
 
                             return OpenRes {
                                 status: Nfs4Status::Ok,
@@ -656,7 +657,7 @@ impl IoOperationHandler {
             None,
         );
 
-        info!("OPEN: stateid {:?} for client {}", stateid, client_id);
+        debug!("OPEN: stateid {:?} for client {}", stateid, client_id);
 
         // Try to grant read delegation if appropriate
         let delegation = self.try_grant_read_delegation(
@@ -782,13 +783,13 @@ impl IoOperationHandler {
 
         // Remove file descriptor from cache (file closes on drop)
         if let Some((_, cached)) = self.fd_cache.remove(&op.stateid.other) {
-            info!("🗑️ FD CACHE CLOSE: Removed and closed FD for {:?} (path: {:?})", op.stateid, cached.path);
+            debug!("🗑️ FD CACHE CLOSE: Removed and closed FD for {:?} (path: {:?})", op.stateid, cached.path);
         } else {
-            info!("⚠️ CLOSE: No cached FD found for {:?} (was already closed or never cached)", op.stateid);
+            debug!("⚠️ CLOSE: No cached FD found for {:?} (was already closed or never cached)", op.stateid);
         }
 
         self.state_mgr.stateids.close_open_state(&op.stateid.other);
-        info!("CLOSE: Removed open state for {:?}", op.stateid);
+        debug!("CLOSE: Removed open state for {:?}", op.stateid);
 
         // Return final stateid (with seqid incremented)
         let final_stateid = StateId {
@@ -1248,6 +1249,7 @@ impl IoOperationHandler {
 mod tests {
     use super::*;
     use crate::nfs::v4::filehandle::FileHandleManager;
+    use crate::nfs::v4::state::StateType;
     use tempfile::TempDir;
 
     fn create_test_handler() -> (IoOperationHandler, Arc<FileHandleManager>, TempDir) {
@@ -1263,8 +1265,8 @@ mod tests {
         (handler, fh_mgr, temp_dir)
     }
 
-    #[test]
-    fn test_open() {
+    #[tokio::test]
+    async fn test_open() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
@@ -1280,14 +1282,14 @@ mod tests {
             claim: OpenClaim::Fh,
         };
 
-        let res = handler.handle_open(op, &mut ctx);
+        let res = handler.handle_open(op, &mut ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
         assert!(res.stateid.is_some());
         assert_eq!(res.delegation, OpenDelegationType::None);
     }
 
-    #[test]
-    fn test_open_close() {
+    #[tokio::test]
+    async fn test_open_close() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
@@ -1304,7 +1306,7 @@ mod tests {
             claim: OpenClaim::Fh,
         };
 
-        let open_res = handler.handle_open(open_op, &mut ctx);
+        let open_res = handler.handle_open(open_op, &mut ctx).await;
         assert_eq!(open_res.status, Nfs4Status::Ok);
         let stateid = open_res.stateid.unwrap();
 
@@ -1339,7 +1341,7 @@ mod tests {
             claim: OpenClaim::Fh,
         };
 
-        let open_res = handler.handle_open(open_op, &mut ctx);
+        let open_res = handler.handle_open(open_op, &mut ctx).await;
         let stateid = open_res.stateid.unwrap();
 
         // READ
@@ -1373,7 +1375,7 @@ mod tests {
             claim: OpenClaim::Fh,
         };
 
-        let open_res = handler.handle_open(open_op, &mut ctx);
+        let open_res = handler.handle_open(open_op, &mut ctx).await;
         let stateid = open_res.stateid.unwrap();
 
         // WRITE
@@ -1409,8 +1411,8 @@ mod tests {
         assert_eq!(commit_res.status, Nfs4Status::Ok);
     }
 
-    #[test]
-    fn test_open_with_file_creation() {
+    #[tokio::test]
+    async fn test_open_with_file_creation() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
@@ -1427,7 +1429,7 @@ mod tests {
             claim: OpenClaim::Null("new-file.txt".to_string()),
         };
 
-        let res = handler.handle_open(op, &mut ctx);
+        let res = handler.handle_open(op, &mut ctx).await;
         
         // Should succeed and create the file
         assert_eq!(res.status, Nfs4Status::Ok);
@@ -1507,8 +1509,8 @@ mod tests {
         assert_eq!(read_res.data.as_ref(), b"test content");
     }
 
-    #[test]
-    fn test_open_without_create() {
+    #[tokio::test]
+    async fn test_open_without_create() {
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
 
@@ -1524,7 +1526,7 @@ mod tests {
             claim: OpenClaim::Null("nonexistent.txt".to_string()),
         };
 
-        let res = handler.handle_open(op, &mut ctx);
+        let res = handler.handle_open(op, &mut ctx).await;
         
         // Should succeed (we don't validate file existence for NoCreate)
         assert_eq!(res.status, Nfs4Status::Ok);
@@ -1550,7 +1552,7 @@ mod tests {
             claim: OpenClaim::Null("workflow-test.txt".to_string()),
         };
 
-        let open_res = handler.handle_open(open_op, &mut ctx);
+        let open_res = handler.handle_open(open_op, &mut ctx).await;
         assert_eq!(open_res.status, Nfs4Status::Ok);
         let stateid = open_res.stateid.unwrap();
 

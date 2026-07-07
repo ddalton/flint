@@ -650,7 +650,7 @@ impl LockOperationHandler {
         // Add to lock manager
         self.lock_mgr.add_lock(lock);
 
-        info!("LOCK: Acquired {:?} lock on range {}+{}", op.locktype, op.offset, op.length);
+        debug!("LOCK: Acquired {:?} lock on range {}+{}", op.locktype, op.offset, op.length);
 
         LockRes {
             status: Nfs4Status::Ok,
@@ -738,7 +738,7 @@ impl LockOperationHandler {
 
         // Remove lock
         if self.lock_mgr.remove_lock(&op.stateid).is_some() {
-            info!("LOCKU: Released lock on range {}+{}", op.offset, op.length);
+            debug!("LOCKU: Released lock on range {}+{}", op.offset, op.length);
 
             // Return updated stateid
             let new_stateid = StateId {

@@ -28,20 +28,44 @@ struct Args {
     verbose: bool,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Async worker count: FLINT_MDS_WORKER_THREADS, else every core on the
+/// node. The old hardcoded 4 capped a 16-core node at 4-core capacity.
+fn worker_threads() -> usize {
+    std::env::var("FLINT_MDS_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        })
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let threads = worker_threads();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()?
+        .block_on(async_main(threads))
+}
+
+async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize logging
-    let log_level = if args.verbose {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
-    };
-
+    // Hot-path per-op chatter lives at debug!; RUST_LOG overrides the
+    // default level (e.g. RUST_LOG=debug recovers it without a rebuild).
+    // The non-blocking writer keeps a slow stdout consumer from ever
+    // backpressuring dispatch; the guard must outlive the server.
+    let default_level = if args.verbose { "debug" } else { "info" };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
+    let (writer, _log_guard) = tracing_appender::non_blocking(std::io::stdout());
     tracing_subscriber::fmt()
-        .with_max_level(log_level)
+        .with_env_filter(filter)
         .with_target(false)
+        .with_writer(writer)
         .init();
 
     info!("╔═══════════════════════════════════════════════════════════╗");
@@ -76,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exports = config.exports;
 
     info!("📊 Configuration:");
+    info!("   • Worker Threads: {} (FLINT_MDS_WORKER_THREADS)", worker_threads);
     info!("   • Bind: {}:{}", mds_config.bind.address, mds_config.bind.port);
     info!("   • Layout Type: {:?}", mds_config.layout.layout_type);
     info!("   • Stripe Size: {} bytes", mds_config.layout.stripe_size);

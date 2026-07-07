@@ -21,7 +21,7 @@ use crate::nfs::v4::operations::lockops::LockManager;
 use bytes::{Bytes, BytesMut};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncReadExt, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
@@ -768,7 +768,7 @@ impl MetadataServer {
         // Decode RPCSEC_GSS credentials
         let gss_cred = match RpcGssCred::decode(&call.cred.body) {
             Ok(cred) => {
-                info!("🔐 GSS Cred: version={}, procedure={}, seq={}, service={:?}",
+                debug!("🔐 GSS Cred: version={}, procedure={}, seq={}, service={:?}",
                       cred.version, cred.procedure, cred.sequence_num, cred.service);
                 cred
             }
@@ -791,7 +791,7 @@ impl MetadataServer {
             }
 
             gss_proc::DATA => {
-                info!("🔐 RPCSEC_GSS_DATA on MDS");
+                debug!("🔐 RPCSEC_GSS_DATA on MDS");
                 // Validate the GSS context
                 if let Err(e) = gss_manager.validate_data(&gss_cred).await {
                     warn!("❌ GSS DATA validation failed: {}", e);
@@ -799,7 +799,7 @@ impl MetadataServer {
                 }
 
                 // GSS validated, proceed with normal COMPOUND processing
-                info!("✅ GSS authentication successful on MDS, processing COMPOUND");
+                debug!("✅ GSS authentication successful on MDS, processing COMPOUND");
                 Self::handle_compound_with_pnfs(call, args, dispatcher, back_channel).await
             }
 

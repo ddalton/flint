@@ -26,7 +26,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Try to create a reflink (CoW clone) on filesystems that support it
 /// (XFS with reflink enabled, Btrfs, OCFS2)
@@ -322,7 +322,7 @@ impl PerfOperationHandler {
         op: CopyOp,
         _ctx: &CompoundContext,
     ) -> CopyRes {
-        info!("COPY: src_offset={}, dst_offset={}, count={}",
+        debug!("COPY: src_offset={}, dst_offset={}, count={}",
               op.src_offset, op.dst_offset, op.count);
 
         // Validate source stateid with relaxed checking (accept seqid=0)
@@ -477,7 +477,7 @@ impl PerfOperationHandler {
 
         match copy_result {
             Ok(Ok(bytes_copied)) => {
-                info!("COPY: Server-side copy completed: {} bytes from {:?} to {:?} (ZERO network transfer!)",
+                debug!("COPY: Server-side copy completed: {} bytes from {:?} to {:?} (ZERO network transfer!)",
                       bytes_copied, src_path_name.as_deref().unwrap_or("unknown"), 
                       dst_path_name.as_deref().unwrap_or("unknown"));
                 CopyRes {
@@ -523,7 +523,7 @@ impl PerfOperationHandler {
         op: CloneOp,
         _ctx: &CompoundContext,
     ) -> CloneRes {
-        info!("CLONE: src_offset={}, dst_offset={}, count={}",
+        debug!("CLONE: src_offset={}, dst_offset={}, count={}",
               op.src_offset, op.dst_offset, op.count);
 
         // Validate source stateid with relaxed checking (accept seqid=0)
@@ -602,7 +602,7 @@ impl PerfOperationHandler {
                 // This creates an instant CoW clone without copying data
                 match try_reflink_clone(&src_path, &dst_path) {
                     Ok(bytes_copied) => {
-                        info!("CLONE: Created CoW reflink clone ({} bytes, INSTANT zero-copy!)", bytes_copied);
+                        debug!("CLONE: Created CoW reflink clone ({} bytes, INSTANT zero-copy!)", bytes_copied);
                         return Ok(bytes_copied);
                     }
                     Err(e) => {
@@ -614,7 +614,7 @@ impl PerfOperationHandler {
                 // Fallback: Regular copy for filesystems without reflink support
                 match std::fs::copy(&src_path, &dst_path) {
                     Ok(bytes_copied) => {
-                        info!("CLONE: Copied entire file ({} bytes, full copy)", bytes_copied);
+                        debug!("CLONE: Copied entire file ({} bytes, full copy)", bytes_copied);
                         Ok(bytes_copied)
                     }
                     Err(e) => Err(e),
@@ -653,7 +653,7 @@ impl PerfOperationHandler {
                     current_dst_offset += bytes_read as u64;
                 }
 
-                info!("CLONE: Copied {} bytes from offset {} to offset {}", 
+                debug!("CLONE: Copied {} bytes from offset {} to offset {}", 
                       actual_count - remaining, src_offset, dst_offset);
                 Ok(actual_count - remaining)
             }
@@ -661,7 +661,7 @@ impl PerfOperationHandler {
 
         match clone_result {
             Ok(Ok(_bytes)) => {
-                info!("CLONE: Successfully cloned file");
+                debug!("CLONE: Successfully cloned file");
                 CloneRes {
                     status: Nfs4Status::Ok,
                 }
@@ -712,7 +712,7 @@ impl PerfOperationHandler {
         // 3. Mark blocks as allocated but don't zero them
         // 4. Update thin provisioning metadata
 
-        info!("ALLOCATE: Would pre-allocate {} bytes at offset {}", op.length, op.offset);
+        debug!("ALLOCATE: Would pre-allocate {} bytes at offset {}", op.length, op.offset);
 
         AllocateRes {
             status: Nfs4Status::Ok,
@@ -747,7 +747,7 @@ impl PerfOperationHandler {
         //
         // This is critical for space efficiency!
 
-        info!("DEALLOCATE: Would unmap {} bytes at offset {} (space reclamation)",
+        debug!("DEALLOCATE: Would unmap {} bytes at offset {} (space reclamation)",
               op.length, op.offset);
 
         DeallocateRes {

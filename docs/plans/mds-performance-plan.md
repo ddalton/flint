@@ -1,7 +1,36 @@
 # MDS performance plan — scaling the metadata path vertically
 
-Status: **PLANNED** (baseline measured 2026-07-07; tiers not started)
+Status: **Tier 1 LANDED 2026-07-07** (all three items + measured A/B below);
+Tiers 2–4 not started
 Harness: `make test-pnfs-mdsbench` (`tests/lima/pnfs/mdsbench.sh`)
+
+## Tier 1 measured results (2026-07-07, same rig as baseline)
+
+Variant `tier1-threads-logs` = worker threads configurable (default
+`available_parallelism`), hot-path WARN/INFO demoted to `debug!`
+(~145 call sites), `tracing_appender::non_blocking` writer, EnvFilter
+(`RUST_LOG` now works):
+
+| workload | baseline | tier1 | delta |
+|----------|---------|-------|-------|
+| w1-create | 368 ops/s · 1.28 cpu_ms/op · 3.24 log_KiB/op | **489 · 0.93 · 0.25** | **+33% ops/s**, −27% cpu/op, −92% log |
+| w2-opencl | 7,004 · 0.22 · 1.25 | **8,689 · 0.14 · 0.00** | **+24% ops/s** |
+| w3-stat | (invalid — client cache) | **3,531 · 0.51 · 0.00** | first VALID number (noac mount) |
+| w4-mixed | 16 · 0.68 · 3.49 | 16 · 0.44 · 0.03 | ops/s flat — protocol-chain-bound, as predicted; Tier 2's lever |
+
+- w1's remaining 0.25 log_KiB/op is the deliberate INFO forensics
+  (pin created / placement forgotten per file lifecycle), not chatter.
+- w3-stat now measures the real LOOKUP/GETATTR dispatch floor via a
+  second `actimeo=0,lookupcache=none` mount (harness change).
+- w4-mixed confirms the baseline read: fsstress wall time is
+  serialized protocol round trips, not MDS compute or logging —
+  `return_on_close=false` (Tier 2) is where that moves.
+- Tier 1.3 (fs ops off the async workers) shipped in the same wave:
+  most handlers already used `tokio::fs`; the stragglers converted
+  were OPEN(create), SETATTR apply (`apply_settable_attrs_offloaded`),
+  ACCESS stat, RENAME dest check, LINK guard, LAYOUTCOMMIT
+  set_len/set_times (spawn_blocking). perfops COPY/CLONE were already
+  offloaded.
 
 ## Why
 

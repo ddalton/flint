@@ -20,7 +20,7 @@ use crate::state_backend::{spawn_persist, StateBackend, StateIdRecord, StateType
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Special stateid for anonymous/READ-only operations
 pub const ANONYMOUS_STATEID: StateId = StateId {
@@ -497,7 +497,7 @@ impl StateIdManager {
             .or_insert_with(Vec::new)
             .push(other);
 
-        info!("StateId allocated: {:?} for client {} (type: {:?})",
+        debug!("StateId allocated: {:?} for client {} (type: {:?})",
               stateid, client_id, state_type);
         stateid
     }
@@ -640,7 +640,7 @@ impl StateIdManager {
 
             self.persist_delete(stateid.other);
 
-            info!("StateId removed: {:?}", stateid);
+            debug!("StateId removed: {:?}", stateid);
         }
     }
 

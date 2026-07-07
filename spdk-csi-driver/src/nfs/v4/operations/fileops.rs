@@ -486,6 +486,22 @@ pub fn apply_settable_attrs(
     (applied, None)
 }
 
+/// `apply_settable_attrs` on the blocking pool: its chmod/truncate/futimens
+/// syscalls hit the export's backing device (a network block device in
+/// production) and must not stall an async worker.
+pub async fn apply_settable_attrs_offloaded(
+    path: PathBuf,
+    want: SettableAttrs,
+) -> (Vec<u32>, Option<Nfs4Status>) {
+    match tokio::task::spawn_blocking(move || apply_settable_attrs(&path, &want)).await {
+        Ok(res) => res,
+        Err(e) => {
+            warn!("SETATTR: spawn_blocking error: {}", e);
+            (Vec::new(), Some(Nfs4Status::ServerFault))
+        }
+    }
+}
+
 /// Build a bitmap4 (vec of words) from a list of attr numbers.
 pub fn attr_numbers_to_bitmap(attrs: &[u32]) -> Vec<u32> {
     let mut words: Vec<u32> = Vec::new();
@@ -1840,7 +1856,7 @@ impl FileOperationHandler {
         _op: PutRootFhOp,
         ctx: &mut CompoundContext,
     ) -> PutRootFhRes {
-        info!("📁 PUTROOTFH - Determining root filehandle to return");
+        debug!("📁 PUTROOTFH - Determining root filehandle to return");
         debug!("   Previous current_fh: {:?}", ctx.current_fh.as_ref().map(|fh| fh.data.len()));
 
         // Check if we have a single export (CSI/direct mount scenario)
@@ -1850,8 +1866,8 @@ impl FileOperationHandler {
         if exports.len() == 1 {
             // OPTION B: Single export - return export root directly (RFC 5661 optimization)
             let export_name = &exports[0];
-            info!("   🎯 Single export detected: '{}'", export_name);
-            info!("   → Using OPTION B: Direct export mount (bypass pseudo-root)");
+            debug!("   🎯 Single export detected: '{}'", export_name);
+            debug!("   → Using OPTION B: Direct export mount (bypass pseudo-root)");
             
             match self.fh_mgr.lookup_export(export_name) {
                 Some(export) => {
@@ -1860,7 +1876,7 @@ impl FileOperationHandler {
                     // Get filehandle for the actual export directory
                     match self.fh_mgr.get_or_create_handle(&export.path) {
                         Ok(fh) => {
-                            info!("   ✅ Returning EXPORT ROOT directly: {} bytes", fh.data.len());
+                            debug!("   ✅ Returning EXPORT ROOT directly: {} bytes", fh.data.len());
                             debug!("   Export FH (hex): {:02x?}", &fh.data[0..std::cmp::min(20, fh.data.len())]);
                             debug!("   → Client can now access files directly without LOOKUP");
                             ctx.current_fh = Some(fh);
@@ -1883,14 +1899,14 @@ impl FileOperationHandler {
             warn!("   ⚠️ No exports configured!");
         } else {
             // OPTION A: Multiple exports - use pseudo-root for browsing
-            info!("   🌳 Multiple exports detected: {:?}", exports);
-            info!("   → Using OPTION A: Pseudo-root with browsing/discovery");
+            debug!("   🌳 Multiple exports detected: {:?}", exports);
+            debug!("   → Using OPTION A: Pseudo-root with browsing/discovery");
         }
 
         // Get pseudo-root filehandle (RFC 7530 Section 7)
         match self.fh_mgr.get_root_fh() {
             Ok(fh) => {
-                info!("   ✅ Returning PSEUDO-ROOT: {} bytes", fh.data.len());
+                debug!("   ✅ Returning PSEUDO-ROOT: {} bytes", fh.data.len());
                 debug!("   Pseudo-root FH (hex): {:02x?}", &fh.data[0..std::cmp::min(20, fh.data.len())]);
                 debug!("   → Client will need LOOKUP to traverse to exports");
                 ctx.current_fh = Some(fh);
@@ -2008,7 +2024,7 @@ impl FileOperationHandler {
         op: LookupOp,
         ctx: &mut CompoundContext,
     ) -> LookupRes {
-        info!("🔍 LOOKUP called: component='{}'", op.component);
+        debug!("🔍 LOOKUP called: component='{}'", op.component);
         debug!("   Component length: {} bytes", op.component.len());
         debug!("   Component bytes (hex): {:02x?}", op.component.as_bytes());
 
@@ -2029,12 +2045,12 @@ impl FileOperationHandler {
         };
 
         let is_pseudo = self.fh_mgr.is_pseudo_root(current_fh);
-        info!("   Current FH: {} bytes, is_pseudo_root={}", current_fh.data.len(), is_pseudo);
+        debug!("   Current FH: {} bytes, is_pseudo_root={}", current_fh.data.len(), is_pseudo);
         debug!("   Current FH (hex): {:02x?}", &current_fh.data[0..std::cmp::min(20, current_fh.data.len())]);
 
         // Special case: LOOKUP "." returns current filehandle unchanged
         if op.component == "." {
-            info!("✅ LOOKUP '.': returning current filehandle (no change)");
+            debug!("✅ LOOKUP '.': returning current filehandle (no change)");
             return LookupRes {
                 status: Nfs4Status::Ok,
             };
@@ -2050,11 +2066,11 @@ impl FileOperationHandler {
 
         // Handle LOOKUP from pseudo-root (RFC 7530 Section 7)
         if is_pseudo {
-            info!("🔍 LOOKUP from PSEUDO-ROOT: component='{}' (looking for export)", op.component);
+            debug!("🔍 LOOKUP from PSEUDO-ROOT: component='{}' (looking for export)", op.component);
             
             // Lookup export by name
             if let Some(export) = self.fh_mgr.lookup_export(&op.component) {
-                info!("✅ Found export '{}' → path {:?}", export.name, export.path);
+                debug!("✅ Found export '{}' → path {:?}", export.name, export.path);
                 
                 // Verify the export path exists
                 match tokio::fs::metadata(&export.path).await {
@@ -2062,12 +2078,12 @@ impl FileOperationHandler {
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::MetadataExt;
-                            info!("   Export metadata: is_dir={}, mode={:o}", 
+                            debug!("   Export metadata: is_dir={}, mode={:o}", 
                                   metadata.is_dir(), metadata.mode());
                         }
                         #[cfg(not(unix))]
                         {
-                            info!("   Export metadata: is_dir={}", metadata.is_dir());
+                            debug!("   Export metadata: is_dir={}", metadata.is_dir());
                         }
                     }
                     Err(e) => {
@@ -2081,7 +2097,7 @@ impl FileOperationHandler {
                 // Create filehandle for the export's actual path
                 match self.fh_mgr.get_or_create_handle(&export.path) {
                     Ok(fh) => {
-                        info!("   Created filehandle: {} bytes", fh.data.len());
+                        debug!("   Created filehandle: {} bytes", fh.data.len());
                         ctx.current_fh = Some(fh);
                         return LookupRes {
                             status: Nfs4Status::Ok,
@@ -2171,7 +2187,7 @@ impl FileOperationHandler {
         // Generate filehandle for target
         match self.fh_mgr.get_or_create_handle(&target_path) {
             Ok(fh) => {
-                info!("✅ LOOKUP succeeded: '{}' → FH {} bytes", op.component, fh.data.len());
+                debug!("✅ LOOKUP succeeded: '{}' → FH {} bytes", op.component, fh.data.len());
                 debug!("   New current FH (hex): {:02x?}", &fh.data[0..std::cmp::min(20, fh.data.len())]);
                 ctx.current_fh = Some(fh);
                 LookupRes {
@@ -2314,8 +2330,8 @@ impl FileOperationHandler {
         op: AccessOp,
         ctx: &CompoundContext,
     ) -> AccessRes {
-        info!("🔐 ACCESS called: mask=0x{:02x}", op.access);
-        info!("   Requested: READ={}, LOOKUP={}, MODIFY={}, EXTEND={}, DELETE={}, EXECUTE={}",
+        debug!("🔐 ACCESS called: mask=0x{:02x}", op.access);
+        debug!("   Requested: READ={}, LOOKUP={}, MODIFY={}, EXTEND={}, DELETE={}, EXECUTE={}",
               op.access & ACCESS4_READ != 0,
               op.access & ACCESS4_LOOKUP != 0,
               op.access & ACCESS4_MODIFY != 0,
@@ -2337,12 +2353,12 @@ impl FileOperationHandler {
         };
 
         let is_pseudo = self.fh_mgr.is_pseudo_root(current_fh);
-        info!("   Current FH: {} bytes, is_pseudo_root={}", current_fh.data.len(), is_pseudo);
+        debug!("   Current FH: {} bytes, is_pseudo_root={}", current_fh.data.len(), is_pseudo);
 
         // Pseudo-root is always accessible for READ and LOOKUP
         if is_pseudo {
             let supported = ACCESS4_READ | ACCESS4_LOOKUP | ACCESS4_EXECUTE;
-            info!("✅ ACCESS on PSEUDO-ROOT - granting: READ | LOOKUP | EXECUTE (mask=0x{:02x})", supported);
+            debug!("✅ ACCESS on PSEUDO-ROOT - granting: READ | LOOKUP | EXECUTE (mask=0x{:02x})", supported);
             return AccessRes {
                 status: Nfs4Status::Ok,
                 supported,
@@ -2372,14 +2388,14 @@ impl FileOperationHandler {
 
         // CRITICAL: Directories always need EXECUTE permission for VFS traversal
         // Even if client doesn't request it, VFS will check MAY_EXEC later
-        if let Ok(metadata) = std::fs::metadata(&path) {
+        if let Ok(metadata) = tokio::fs::metadata(&path).await {
             if metadata.is_dir() {
                 granted |= ACCESS4_EXECUTE;
                 debug!("   → Directory: always granting EXECUTE for VFS traversal");
             }
         }
 
-        info!("✅ ACCESS on REGULAR FILE/DIR - granting: mask=0x{:02x}", granted);
+        debug!("✅ ACCESS on REGULAR FILE/DIR - granting: mask=0x{:02x}", granted);
         debug!("   READ={}, LOOKUP={}, MODIFY={}, EXTEND={}, DELETE={}, EXECUTE={}",
                granted & ACCESS4_READ != 0,
                granted & ACCESS4_LOOKUP != 0,
@@ -2533,7 +2549,7 @@ impl FileOperationHandler {
             }
         };
 
-        let (applied, err) = apply_settable_attrs(&path, &decoded);
+        let (applied, err) = apply_settable_attrs_offloaded(path.clone(), decoded).await;
         debug!("SETATTR: applied attrs {:?} on {:?} (err={:?})", applied, path, err);
         SetAttrRes {
             // attrsset always reports what was actually set — including on
@@ -2567,12 +2583,12 @@ impl FileOperationHandler {
 
         // Handle READDIR on pseudo-root - list exports
         if self.fh_mgr.is_pseudo_root(current_fh) {
-            info!("📂 READDIR on PSEUDO-ROOT");
+            debug!("📂 READDIR on PSEUDO-ROOT");
             debug!("   cookie={}, cookieverf={:?}, dircount={}, maxcount={}", 
                    op.cookie, op.cookieverf, op.dircount, op.maxcount);
             
             let export_names = self.fh_mgr.get_pseudo_fs().list_exports();
-            info!("   Found {} exports: {:?}", export_names.len(), export_names);
+            debug!("   Found {} exports: {:?}", export_names.len(), export_names);
             debug!("   Client requested {} attribute words: {:?}", op.attr_request.len(), op.attr_request);
             debug!("   Requested attribute bitmap: {:?}", op.attr_request);
             
@@ -2589,7 +2605,7 @@ impl FileOperationHandler {
                 // Create attributes for export entry based on what client requested
                 debug!("   Encoding entry '{}': client requested bitmap={:?}", name, op.attr_request);
                 let (attr_vals, supported_bitmap) = encode_export_entry_attributes(name, &op.attr_request, self.pnfs_enabled);
-                info!("   → Returning for '{}': bitmap={:?}, {} bytes", name, supported_bitmap, attr_vals.len());
+                debug!("   → Returning for '{}': bitmap={:?}, {} bytes", name, supported_bitmap, attr_vals.len());
                 
                 // Decode bitmap to show which attributes (debug only)
                 let mut attr_names = vec![];
@@ -2636,7 +2652,7 @@ impl FileOperationHandler {
                 }
             }
             
-            info!("✅ READDIR returning {} export entries (no . or .. per NFSv4 spec), total {} bytes", 
+            debug!("✅ READDIR returning {} export entries (no . or .. per NFSv4 spec), total {} bytes", 
                   entries.len(), total_size);
             debug!("   Entry names: {:?}", entries.iter().map(|e| &e.name).collect::<Vec<_>>());
             
@@ -2937,7 +2953,7 @@ impl FileOperationHandler {
             Nfs4FileType::Symlink => {
                 // Create symlink
                 if let Some(target) = symlink_target {
-                    info!("CREATE: Creating symlink at {:?} pointing to '{}'", obj_path, target);
+                    debug!("CREATE: Creating symlink at {:?} pointing to '{}'", obj_path, target);
                     #[cfg(unix)]
                     {
                         tokio::fs::symlink(&target, &obj_path).await
@@ -3243,9 +3259,10 @@ impl FileOperationHandler {
                     (true, false) => return rename_err(Nfs4Status::Exist),
                     (false, true) => return rename_err(Nfs4Status::Exist),
                     (true, true) => {
-                        // dest is a non-empty dir → NotEmpty
-                        if let Ok(mut entries) = std::fs::read_dir(&dest_path) {
-                            if entries.next().is_some() {
+                        // dest is a non-empty dir → NotEmpty (a read error
+                        // also refuses: we can't prove the dir is empty)
+                        if let Ok(mut entries) = tokio::fs::read_dir(&dest_path).await {
+                            if !matches!(entries.next_entry().await, Ok(None)) {
                                 return rename_err(Nfs4Status::NotEmpty);
                             }
                         }
@@ -3353,7 +3370,7 @@ impl FileOperationHandler {
         // Create hard link
         match tokio::fs::hard_link(&file_path, &link_path).await {
             Ok(_) => {
-                info!("LINK: Successfully created hard link {:?} -> {:?}", link_path, file_path);
+                debug!("LINK: Successfully created hard link {:?} -> {:?}", link_path, file_path);
                 LinkRes {
                     status: Nfs4Status::Ok,
                     change_info: Some(ChangeInfo {
@@ -3417,7 +3434,7 @@ impl FileOperationHandler {
         match tokio::fs::read_link(&link_path).await {
             Ok(target) => {
                 let target_str = target.to_string_lossy().to_string();
-                info!("READLINK: {:?} -> {}", link_path, target_str);
+                debug!("READLINK: {:?} -> {}", link_path, target_str);
                 ReadLinkRes {
                     status: Nfs4Status::Ok,
                     link: Some(target_str),

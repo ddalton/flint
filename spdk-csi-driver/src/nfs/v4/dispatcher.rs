@@ -211,7 +211,7 @@ impl CompoundDispatcher {
         principal: Vec<u8>,
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
     ) -> CompoundResponse {
-        info!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
+        debug!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
 
         // RFC 8881 §8.4.2.4 courtesy-release. Run a quick lease-
         // expiration sweep at the top of every COMPOUND so that any
@@ -405,10 +405,10 @@ impl CompoundDispatcher {
             // Log pNFS operations with high visibility
             match &operation {
                 Operation::LayoutGet { .. } => {
-                    warn!("🔴🔴🔴 ABOUT TO DISPATCH LAYOUTGET OPERATION 🔴🔴🔴");
+                    debug!("🔴🔴🔴 ABOUT TO DISPATCH LAYOUTGET OPERATION 🔴🔴🔴");
                 }
                 Operation::GetDeviceInfo { .. } => {
-                    warn!("🔴🔴🔴 ABOUT TO DISPATCH GETDEVICEINFO OPERATION 🔴🔴🔴");
+                    debug!("🔴🔴🔴 ABOUT TO DISPATCH GETDEVICEINFO OPERATION 🔴🔴🔴");
                 }
                 _ => {}
             }
@@ -484,7 +484,7 @@ impl CompoundDispatcher {
             // Check status
             let status = result.status();
             if status != Nfs4Status::Ok {
-                warn!("COMPOUND[{}]: Operation failed with status {:?}", i, status);
+                debug!("COMPOUND[{}]: Operation failed with status {:?}", i, status);
                 final_status = status;
                 results.push(result);
                 break; // Stop on first error
@@ -1194,7 +1194,7 @@ impl CompoundDispatcher {
                     openhow: converted_openhow,
                     claim: converted_claim,
                 };
-                let res = self.io_handler.handle_open(op, context);
+                let res = self.io_handler.handle_open(op, context).await;
                 {
                     // OPEN set the current FH to the opened file; a
                     // fresh create has no pin and no-ops inside. Gate
@@ -1740,13 +1740,13 @@ impl CompoundDispatcher {
                     Ok(p) => p,
                     Err(_) => return OperationResult::SecInfo(Nfs4Status::Stale),
                 };
-                match std::fs::metadata(&parent_path) {
+                match tokio::fs::metadata(&parent_path).await {
                     Ok(m) if !m.is_dir() => return OperationResult::SecInfo(Nfs4Status::NotDir),
                     Err(_) => return OperationResult::SecInfo(Nfs4Status::Stale),
                     _ => {}
                 }
                 let child = parent_path.join(&component);
-                match std::fs::symlink_metadata(&child) {
+                match tokio::fs::symlink_metadata(&child).await {
                     Ok(_) => {
                         context.clear_current_fh();
                         OperationResult::SecInfo(Nfs4Status::Ok)
@@ -1785,8 +1785,8 @@ impl CompoundDispatcher {
 
             // pNFS operations
             Operation::LayoutGet { signal_layout_avail, layout_type, iomode, offset, length, minlength, stateid, maxcount } => {
-                warn!("🚨🚨🚨 LAYOUTGET OPERATION DISPATCHED IN DISPATCHER.RS 🚨🚨🚨");
-                warn!("   offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
+                debug!("🚨🚨🚨 LAYOUTGET OPERATION DISPATCHED IN DISPATCHER.RS 🚨🚨🚨");
+                debug!("   offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
                 self.handle_layoutget(signal_layout_avail, layout_type, iomode, offset, length, minlength, stateid, maxcount, context)
             }
             
@@ -1808,6 +1808,7 @@ impl CompoundDispatcher {
                     last_write_offset, time_modify,
                     layout_type, layoutupdate, context,
                 )
+                .await
             }
 
             // Unsupported operations — RFC 5661 §15.2 distinguishes:
@@ -1998,8 +1999,8 @@ impl CompoundDispatcher {
             }
         };
         
-        info!("📥📥📥 LAYOUTGET RECEIVED 📥📥📥");
-        info!("📥 LAYOUTGET: offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
+        debug!("📥📥📥 LAYOUTGET RECEIVED 📥📥📥");
+        debug!("📥 LAYOUTGET: offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
         
         // Get current filehandle
         let (filehandle, file_key) = match context.current_fh {
@@ -2197,9 +2198,9 @@ impl CompoundDispatcher {
             }
         };
         
-        info!("🔥🔥🔥 GETDEVICEINFO RECEIVED! 🔥🔥🔥");
-        info!("📥 GETDEVICEINFO: device_id len={}, layout_type={}", device_id.len(), layout_type);
-        info!("📥 Device ID bytes: {:02x?}", device_id);
+        debug!("🔥🔥🔥 GETDEVICEINFO RECEIVED! 🔥🔥🔥");
+        debug!("📥 GETDEVICEINFO: device_id len={}, layout_type={}", device_id.len(), layout_type);
+        debug!("📥 Device ID bytes: {:02x?}", device_id);
         
         // Convert device_id to [u8; 16]
         let mut dev_id: DeviceId = [0; 16];
@@ -2233,11 +2234,11 @@ impl CompoundDispatcher {
                 // Check if this is a striped device (has multipath addresses = multiple DSes)
                 let dev_addr_encoded = if result.device_addr.multipath.is_empty() {
                     // Single DS device
-                    info!("   Single DS device: {}", result.device_addr.addr);
+                    debug!("   Single DS device: {}", result.device_addr.addr);
                     Self::encode_device_addr(&result.device_addr)
                 } else {
                     // Striped device with multiple DSes
-                    info!("   Striped device with {} DSes", result.device_addr.multipath.len() + 1);
+                    debug!("   Striped device with {} DSes", result.device_addr.multipath.len() + 1);
                     
                     // Build array of DeviceAddr4 for each DS
                     let mut addrs = vec![result.device_addr.clone()];
@@ -2257,7 +2258,7 @@ impl CompoundDispatcher {
                 // Notification (empty for now)
                 encoder.encode_u32(0);  // Empty notification array
                 
-                info!("✅ GETDEVICEINFO successful");
+                debug!("✅ GETDEVICEINFO successful");
                 OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(encoder.finish()))
             }
             Err(_e) => {
@@ -2428,7 +2429,7 @@ impl CompoundDispatcher {
 
         match pnfs.layoutreturn(args) {
             Ok(()) => {
-                info!("📥 LAYOUTRETURN ok (client_id={})", client_id);
+                debug!("📥 LAYOUTRETURN ok (client_id={})", client_id);
                 OperationResult::LayoutReturn(Nfs4Status::Ok)
             }
             Err(e) => {
@@ -2461,7 +2462,7 @@ impl CompoundDispatcher {
     /// client routed to *other* DSes — that's expected, the kernel
     /// reassembles the logical extent from the layout, not from MDS
     /// bytes.
-    fn handle_layoutcommit(
+    async fn handle_layoutcommit(
         &self,
         _offset: u64,
         _length: u64,
@@ -2489,42 +2490,57 @@ impl CompoundDispatcher {
             }
         };
 
-        let mut new_size_reported: Option<u64> = None;
-
-        if let Some(lwo) = last_write_offset {
-            // last_write_offset is the offset of the *last byte written*
-            // (RFC 8881 §18.42.1), so EOF is one past that.
-            let candidate = lwo.saturating_add(1);
-            match std::fs::OpenOptions::new().write(true).open(&path) {
-                Ok(file) => {
-                    let cur_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-                    if candidate > cur_size {
-                        if let Err(e) = file.set_len(candidate) {
-                            warn!("LAYOUTCOMMIT: set_len({}, {:?}): {}", candidate, path, e);
-                            return OperationResult::LayoutCommit(Nfs4Status::Io, None);
+        // The open/set_len/set_times sequence hits the export's backing
+        // device — run it on the blocking pool, not an async worker.
+        let blocking_path = path.clone();
+        let applied = tokio::task::spawn_blocking(move || -> Result<Option<u64>, String> {
+            let mut new_size: Option<u64> = None;
+            if let Some(lwo) = last_write_offset {
+                // last_write_offset is the offset of the *last byte written*
+                // (RFC 8881 §18.42.1), so EOF is one past that.
+                let candidate = lwo.saturating_add(1);
+                match std::fs::OpenOptions::new().write(true).open(&blocking_path) {
+                    Ok(file) => {
+                        let cur_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                        if candidate > cur_size {
+                            if let Err(e) = file.set_len(candidate) {
+                                return Err(format!("set_len({}): {}", candidate, e));
+                            }
+                            debug!("📥 LAYOUTCOMMIT: extended {:?} {} → {}", blocking_path, cur_size, candidate);
+                            new_size = Some(candidate);
                         }
-                        info!("📥 LAYOUTCOMMIT: extended {:?} {} → {}", path, cur_size, candidate);
-                        new_size_reported = Some(candidate);
                     }
-                }
-                Err(e) => {
-                    warn!("LAYOUTCOMMIT: open({:?}): {}", path, e);
-                    return OperationResult::LayoutCommit(Nfs4Status::Io, None);
+                    Err(e) => return Err(format!("open: {}", e)),
                 }
             }
-        }
 
-        if let Some((secs, nsecs)) = time_modify {
-            // Best-effort mtime update. The size update is the
-            // load-bearing thing — if mtime doesn't apply we don't
-            // fail the op.
-            let ft = std::fs::FileTimes::new()
-                .set_modified(
-                    std::time::UNIX_EPOCH
-                        + std::time::Duration::new(secs.max(0) as u64, nsecs),
-                );
-            if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
-                let _ = file.set_times(ft);
+            if let Some((secs, nsecs)) = time_modify {
+                // Best-effort mtime update. The size update is the
+                // load-bearing thing — if mtime doesn't apply we don't
+                // fail the op.
+                let ft = std::fs::FileTimes::new()
+                    .set_modified(
+                        std::time::UNIX_EPOCH
+                            + std::time::Duration::new(secs.max(0) as u64, nsecs),
+                    );
+                if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&blocking_path) {
+                    let _ = file.set_times(ft);
+                }
+            }
+            Ok(new_size)
+        })
+        .await;
+
+        let new_size_reported: Option<u64>;
+        match applied {
+            Ok(Ok(new_size)) => new_size_reported = new_size,
+            Ok(Err(e)) => {
+                warn!("LAYOUTCOMMIT: {:?}: {}", path, e);
+                return OperationResult::LayoutCommit(Nfs4Status::Io, None);
+            }
+            Err(e) => {
+                warn!("LAYOUTCOMMIT: spawn_blocking: {}", e);
+                return OperationResult::LayoutCommit(Nfs4Status::ServerFault, None);
             }
         }
 
@@ -2566,10 +2582,10 @@ impl CompoundDispatcher {
         
         let mut encoder = XdrEncoder::new();
         
-        info!("🔧 Encoding FFLv4 layout (RFC 8435) for '{}':", filename);
-        info!("   Segments: {}", segments.len());
+        debug!("🔧 Encoding FFLv4 layout (RFC 8435) for '{}':", filename);
+        debug!("   Segments: {}", segments.len());
         debug!("   Stripe unit: {} bytes", stripe_unit);
-        info!("   Instance ID: {}", instance_id);
+        debug!("   Instance ID: {}", instance_id);
         
         // ffl_stripe_unit (u64)
         encoder.encode_u64(stripe_unit);
@@ -2583,7 +2599,7 @@ impl CompoundDispatcher {
         encoder.encode_u32(segments.len() as u32);  // N data servers
         
         for (i, segment) in segments.iter().enumerate() {
-            info!("   📁 Segment {}: device={}, stripe_index={}", i, segment.device_id, i);
+            debug!("   📁 Segment {}: device={}, stripe_index={}", i, segment.device_id, i);
             
             // Generate DS-specific filehandle for this stripe
             let ds_filehandle = filehandle_pnfs::generate_pnfs_filehandle(
@@ -2592,11 +2608,11 @@ impl CompoundDispatcher {
                 i as u32,  // stripe_index
             );
             
-            info!("      FH for DS: {} bytes, file_id={:016x}, stripe={}",
+            debug!("      FH for DS: {} bytes, file_id={:016x}, stripe={}",
                   ds_filehandle.data.len(),
                   filehandle_pnfs::generate_file_id(filename),
                   i);
-            info!("      FH bytes: {:02x?}", ds_filehandle.data);
+            debug!("      FH bytes: {:02x?}", ds_filehandle.data);
             
             // Convert device_id to binary
             let mut hasher = DefaultHasher::new();
@@ -2642,7 +2658,7 @@ impl CompoundDispatcher {
         encoder.encode_u32(0);
         
         let result = encoder.finish();
-        info!("📦 FFLv4 layout encoded: {} bytes total", result.len());
+        debug!("📦 FFLv4 layout encoded: {} bytes total", result.len());
         result
     }
     
@@ -2691,12 +2707,12 @@ impl CompoundDispatcher {
             (h.finish() % segments.len() as u64) as u32
         };
 
-        info!("   🔧 Encoding STRIPED FILE layout (RFC 5661 Section 13.3):");
-        info!("      Number of DSes in stripe: {}", segments.len());
-        info!("      device_id binary (16 bytes): {:02x?}", device_id_bytes);
-        info!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
-        info!("      first_stripe_index: {} (per-file rotation)", first_stripe_index);
-        info!("      pattern_offset: 0");
+        debug!("   🔧 Encoding STRIPED FILE layout (RFC 5661 Section 13.3):");
+        debug!("      Number of DSes in stripe: {}", segments.len());
+        debug!("      device_id binary (16 bytes): {:02x?}", device_id_bytes);
+        debug!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
+        debug!("      first_stripe_index: {} (per-file rotation)", first_stripe_index);
+        debug!("      pattern_offset: 0");
         
         // Encode deviceid (16 bytes fixed, no length prefix)
         encoder.encode_fixed_opaque(&device_id_bytes);
@@ -2730,7 +2746,7 @@ impl CompoundDispatcher {
                 encoder.encode_opaque(&fh.data);
             }
             let result = encoder.finish();
-            info!(
+            debug!(
                 "      📦 Encoded STRIPED FILE layout: {} bytes total, {} v2 fh(s) (file_id {:016x})",
                 result.len(),
                 segments.len(),
@@ -2746,8 +2762,8 @@ impl CompoundDispatcher {
         encoder.encode_u32(0);
 
         let result = encoder.finish();
-        info!("      📦 Encoded STRIPED FILE layout: {} bytes total, empty nfl_fh_list (legacy pin)", result.len());
-        info!("      📦 First 128 bytes: {:02x?}", &result[..result.len().min(128)]);
+        debug!("      📦 Encoded STRIPED FILE layout: {} bytes total, empty nfl_fh_list (legacy pin)", result.len());
+        debug!("      📦 First 128 bytes: {:02x?}", &result[..result.len().min(128)]);
 
         result
     }
@@ -2774,13 +2790,13 @@ impl CompoundDispatcher {
         device_id_bytes[0..8].copy_from_slice(&hash.to_be_bytes());
         device_id_bytes[8..16].copy_from_slice(&hash.to_be_bytes());
         
-        info!("   🔧 Encoding FILE layout (RFC 5661 Section 13.2):");
-        info!("      device_id string: '{}'", segment.device_id);
-        info!("      device_id binary (16 bytes): {:02x?}", device_id_bytes);
-        info!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
-        info!("      first_stripe_index: {}", segment.stripe_index);
-        info!("      pattern_offset: {}", segment.pattern_offset);
-        info!("      filehandle length: {} bytes", filehandle.len());
+        debug!("   🔧 Encoding FILE layout (RFC 5661 Section 13.2):");
+        debug!("      device_id string: '{}'", segment.device_id);
+        debug!("      device_id binary (16 bytes): {:02x?}", device_id_bytes);
+        debug!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
+        debug!("      first_stripe_index: {}", segment.stripe_index);
+        debug!("      pattern_offset: {}", segment.pattern_offset);
+        debug!("      filehandle length: {} bytes", filehandle.len());
         
         // Encode deviceid (16 bytes fixed, no length prefix)
         encoder.encode_fixed_opaque(&device_id_bytes);
@@ -2801,8 +2817,8 @@ impl CompoundDispatcher {
         encoder.encode_opaque(filehandle);
         
         let result = encoder.finish();
-        info!("      📦 Encoded FILE layout: {} bytes total", result.len());
-        info!("      📦 First 64 bytes: {:02x?}", &result[..result.len().min(64)]);
+        debug!("      📦 Encoded FILE layout: {} bytes total", result.len());
+        debug!("      📦 First 64 bytes: {:02x?}", &result[..result.len().min(64)]);
         
         result
     }
@@ -2818,14 +2834,14 @@ impl CompoundDispatcher {
         
         let mut encoder = XdrEncoder::new();
         
-        info!("🔧 Encoding STRIPED device address with {} DSes", addrs.len());
+        debug!("🔧 Encoding STRIPED device address with {} DSes", addrs.len());
         
         // PART 1: stripe_indices<> array
         // For striping: indices point to each DS in round-robin order
         encoder.encode_u32(addrs.len() as u32);  // stripe_indices count = number of DSes
         for i in 0..addrs.len() {
             encoder.encode_u32(i as u32);  // stripe_indices[i] = i
-            info!("   stripe_index[{}] = {}", i, i);
+            debug!("   stripe_index[{}] = {}", i, i);
         }
         
         // PART 2: multipath_ds_list<> array
@@ -2846,11 +2862,11 @@ impl CompoundDispatcher {
                 .unwrap_or_else(|_| addr.addr.clone());
             encoder.encode_string(&uaddr);
             
-            info!("   DS[{}]: {} ({})", i, addr.addr, uaddr);
+            debug!("   DS[{}]: {} ({})", i, addr.addr, uaddr);
         }
         
         let result = encoder.finish();
-        info!("📦 Striped device address encoded: {} bytes", result.len());
+        debug!("📦 Striped device address encoded: {} bytes", result.len());
         result
     }
     
