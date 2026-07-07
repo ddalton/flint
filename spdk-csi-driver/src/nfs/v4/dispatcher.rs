@@ -1206,10 +1206,21 @@ impl CompoundDispatcher {
                 // unreachable (observed live on runn 2026-07-06: an
                 // empty per-DS Service fails fast with ECONNREFUSED and
                 // the client immediately read the stub — wrong data, no
-                // error). DELAY is retryable: the client backs off and
-                // re-drives its layout path until the DS returns.
-                if self.refuse_stub_io(context, "READ") {
-                    return OperationResult::Read(Nfs4Status::Delay, None);
+                // error). Bounded escalation: DELAY only while a pinned
+                // DS is down and recently so; IO once the fleet is
+                // healthy again (or the outage exceeds the ceiling) —
+                // the fallback loop never re-drives the client's layout
+                // path, so a fatal completion is the only way it ever
+                // recovers (kernel-verified; see the runbook's
+                // "DELAY livelock" section).
+                match self.stub_io_disposition(context, "READ") {
+                    crate::pnfs::FallbackIoDisposition::Serve => {}
+                    crate::pnfs::FallbackIoDisposition::Delay => {
+                        return OperationResult::Read(Nfs4Status::Delay, None);
+                    }
+                    crate::pnfs::FallbackIoDisposition::FailFast => {
+                        return OperationResult::Read(Nfs4Status::Io, None);
+                    }
                 }
                 let stateid = match context.resolve_stateid(stateid) {
                     Some(s) => s,
@@ -1232,9 +1243,15 @@ impl CompoundDispatcher {
                 // Same MDS-mode guard as READ — a fallback WRITE into
                 // the sparse stub would silently diverge from the DS
                 // stripes (worse than the read case: persistent, not
-                // transient).
-                if self.refuse_stub_io(context, "WRITE") {
-                    return OperationResult::Write(Nfs4Status::Delay, None);
+                // transient). Same bounded escalation.
+                match self.stub_io_disposition(context, "WRITE") {
+                    crate::pnfs::FallbackIoDisposition::Serve => {}
+                    crate::pnfs::FallbackIoDisposition::Delay => {
+                        return OperationResult::Write(Nfs4Status::Delay, None);
+                    }
+                    crate::pnfs::FallbackIoDisposition::FailFast => {
+                        return OperationResult::Write(Nfs4Status::Io, None);
+                    }
                 }
                 let stateid = match context.resolve_stateid(stateid) {
                     Some(s) => s,
@@ -1718,24 +1735,33 @@ impl CompoundDispatcher {
     
     // pNFS operation handlers
 
-    /// True when this server is a pNFS MDS and the current filehandle
-    /// names a striped (placement-pinned) file. Such a file's data is
-    /// NOT here — the local file is a sparse stub — so READ/WRITE must
-    /// be refused (NFS4ERR_DELAY) rather than served. Standalone and
-    /// DS roles have no pnfs_handler and skip this entirely; files the
-    /// MDS holds that were never layouted stay fully accessible.
-    fn refuse_stub_io(&self, context: &CompoundContext, op: &str) -> bool {
+    /// Disposition for READ/WRITE through the MDS when the current
+    /// filehandle names a striped (placement-pinned) file. Such a
+    /// file's data is NOT here — the local file is a sparse stub — so
+    /// the op is either parked (NFS4ERR_DELAY, while a pinned DS is
+    /// down within the bounded window) or failed (NFS4ERR_IO, once the
+    /// fleet is healthy or the outage exceeds the ceiling — the only
+    /// completion that springs the kernel client's MDS-fallback loop).
+    /// Standalone and DS roles have no pnfs_handler and serve
+    /// everything; files the MDS holds that were never layouted stay
+    /// fully accessible.
+    fn stub_io_disposition(
+        &self,
+        context: &CompoundContext,
+        op: &str,
+    ) -> crate::pnfs::FallbackIoDisposition {
+        use crate::pnfs::FallbackIoDisposition as D;
         let pnfs = match &self.pnfs_handler {
             Some(p) => p,
-            None => return false,
+            None => return D::Serve,
         };
         let fh = match &context.current_fh {
             Some(fh) => fh,
-            None => return false,
+            None => return D::Serve,
         };
         let path = match self.file_handler.fh_manager().resolve_handle(fh) {
             Ok(p) => p,
-            Err(_) => return false,
+            Err(_) => return D::Serve,
         };
         let export = self.file_handler.fh_manager().get_export_path().to_path_buf();
         let file_key = path
@@ -1744,16 +1770,25 @@ impl CompoundDispatcher {
             .to_string_lossy()
             .into_owned();
         if file_key.is_empty() {
-            return false;
+            return D::Serve;
         }
-        if pnfs.is_pnfs_managed(&file_key) {
-            warn!(
-                "⛔ {} through MDS refused for striped file '{}' — data lives on the DSes, the local file is a sparse stub. NFS4ERR_DELAY (client retries its layout path)",
-                op, file_key
-            );
-            return true;
+        match pnfs.fallback_io_disposition(&file_key) {
+            D::Serve => D::Serve,
+            D::Delay => {
+                warn!(
+                    "⛔ {} through MDS refused for striped file '{}' — data lives on the DSes, the local file is a sparse stub. NFS4ERR_DELAY (pinned DS down, within the bounded window)",
+                    op, file_key
+                );
+                D::Delay
+            }
+            D::FailFast => {
+                warn!(
+                    "⛔ {} through MDS failed fast for striped file '{}' — pinned DSes healthy or outage past ceiling; NFS4ERR_IO springs the client's MDS-fallback loop (runbook: the DELAY livelock)",
+                    op, file_key
+                );
+                D::FailFast
+            }
         }
-        false
     }
 
     #[allow(clippy::too_many_arguments)]

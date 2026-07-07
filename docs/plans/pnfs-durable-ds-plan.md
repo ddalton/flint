@@ -608,10 +608,17 @@ recreated claim. New findings, all recorded in the runbook:
 - MDS-node blackhole (no RST) delays DS re-registration to the TCP
   give-up (~6 min observed); a heartbeat RPC deadline would bound it.
 - A DaemonSet roll wedges on a dead-but-undeleted Node object.
-- files-layout clients mark a deviceid INVALID (permanent) after
-  connection refusals → node-wide read livelock against the stub-IO
-  guard that survives pod deletion; remedy = another node or reboot;
-  durable fix = MDS proxy I/O (residual, now priority-ranked).
+- files-layout clients that fall back to MDS I/O loop on our DELAY
+  forever (100 ms cadence, never re-driving the layout path) →
+  node-wide read livelock that survives pod deletion. Root-caused
+  against kernel 6.1 source + live tracepoints; no-reboot unstick =
+  mount alias + `umount -f`. **FIXED server-side 2026-07-06: bounded
+  DELAY escalation** (NFS4ERR_IO when the pinned DSes are healthy or
+  the outage exceeds FLINT_PNFS_FALLBACK_DELAY_CEILING_SECS=90) —
+  policy unit-tested ×5, end-to-end fallback drill green
+  (`make test-pnfs-fallback`: ambiguity-window EIO, Delay parking,
+  in-flight trap SPRUNG at the ceiling, checksum-clean recovery).
+  MDS proxy I/O remains the UX upgrade on top.
 - Legacy r1 DS export claims (pre-r2 fleets) die with their home
   node; migrate by recreating each DS claim deliberately.
 

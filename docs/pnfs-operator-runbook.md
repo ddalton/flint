@@ -207,14 +207,41 @@ rather than re-maps).
   (full-file sha verified afterward from the same node; MDS refusal
   storm → 0). CAUTION: it kills ALL in-flight RPCs to that server
   from that node — fine when the only NFS traffic is the storm.
-  **Durable server fix** (residual, priority): the client's fallback
-  contract assumes the MDS will service READs — indefinite DELAY
-  violates it. Either (a) MDS proxy I/O (serve fallback reads from
-  the DSes; spec-intended, best UX), or (b) bound the DELAY window —
-  once the pinned DS is re-registered/healthy (or after ~2× lease),
-  answer the fallback READ with a fatal error instead: the loop
-  exits, pages unlock, and the application's retry re-drives the
-  pNFS path to good data. CB_LAYOUTRECALL / CB_NOTIFY_DEVICEID do
-  NOT help — neither touches the looping READ (verified in source).
+  **Server fix — bounded-DELAY escalation (IMPLEMENTED 2026-07-06)**:
+  the client's fallback contract assumes the MDS will service READs —
+  indefinite DELAY violates it. The MDS now answers fallback
+  READ/WRITE on a pinned file with:
+  - NFS4ERR_IO while the registry sees every pinned DS healthy — a
+    fallback arriving then means the CLIENT is trapped, and a fatal
+    completion is the only thing that springs it (pages unlock; the
+    application's retry re-drives the pNFS path once the client's
+    120 s marks lapse);
+  - NFS4ERR_DELAY only while a pinned DS is down (Offline, or not
+    yet registered with this MDS incarnation — outage anchored at
+    MDS boot) AND the outage is under the ceiling
+    (`FLINT_PNFS_FALLBACK_DELAY_CEILING_SECS`, default 90 s — covers
+    the drilled DS-recovery windows);
+  - NFS4ERR_IO past the ceiling.
+  Known ambiguity window: a DS crash the registry hasn't noticed yet
+  (≤ heartbeatTimeout) answers IO, not DELAY — apps see honest,
+  bounded EIO for those seconds; retry-capable apps ride through.
+  Drill: `tests/lima/pnfs/fallback-drill.sh` (make test-pnfs-fallback)
+  — fast EIO in the ambiguity window, parked under the ceiling, an
+  armed in-flight loop SPRUNG when the ceiling passes, checksum-clean
+  self-recovery, no unstick, no reboot.
+  MDS proxy I/O remains the eventual UX upgrade (fallback reads
+  succeed slowly instead of erroring); the escalation then becomes
+  proxy's error path when a DS is genuinely gone.
+  CB_LAYOUTRECALL / CB_NOTIFY_DEVICEID do NOT help this failure
+  class — neither touches the looping READ (verified in source).
+  **Optional client-side hardening (kernel ≥ 6.7 only)**: the kernel
+  gained `nfs.delay_retrans=N` (commit 5b9d31ae1c92) — caps
+  NFS4ERR_DELAY retries — but it is inert without the `softerr` mount
+  option, and `softerr` changes error semantics for the WHOLE mount
+  (any major RPC timeout can surface ETIMEDOUT to applications, not
+  just the fallback loop) and the parameter is module-wide (affects
+  every NFS mount on the node). Treat it as defense-in-depth on new
+  kernels, not the fix; the server-side bounded escalation covers all
+  client kernels. AL2023 (6.1) does not have it.
 - **helm --reuse-values** silently nils new chart defaults — always
   pass the full values file.

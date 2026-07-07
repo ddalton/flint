@@ -16,14 +16,42 @@
 //! - RFC 8881 Chapter 13 - NFSv4.1 File Layout Type
 
 use crate::pnfs::mds::layout::{IoMode, LayoutManager, LayoutOwner, LayoutSegment, LayoutType};
-use crate::pnfs::mds::device::{DeviceId, DeviceRegistry};
+use crate::pnfs::mds::device::{DeviceId, DeviceRegistry, DeviceStatus};
+use crate::pnfs::handler_trait::FallbackIoDisposition;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+
+/// Ceiling on how long a fallback READ/WRITE for a pinned file is
+/// parked with NFS4ERR_DELAY while a pinned DS is down. Past this the
+/// MDS fails the RPC with NFS4ERR_IO instead — an indefinitely-DELAYed
+/// fallback is a client livelock (the kernel's fallback loop never
+/// re-drives its layout path; see docs/pnfs-operator-runbook.md).
+/// 90 s covers the drilled DS-recovery windows (reschedule 49–64 s,
+/// node death + taint 64–70 s) with slack.
+/// Override: FLINT_PNFS_FALLBACK_DELAY_CEILING_SECS.
+const FALLBACK_DELAY_CEILING_DEFAULT: Duration = Duration::from_secs(90);
+
+fn fallback_delay_ceiling() -> Duration {
+    static CEILING: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *CEILING.get_or_init(|| {
+        std::env::var("FLINT_PNFS_FALLBACK_DELAY_CEILING_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(FALLBACK_DELAY_CEILING_DEFAULT)
+    })
+}
 
 /// pNFS operation handler
 pub struct PnfsOperationHandler {
     layout_manager: Arc<LayoutManager>,
     device_registry: Arc<DeviceRegistry>,
+    /// When this handler (≈ the MDS process) came up. Anchors the
+    /// outage clock for pinned devices that have not (re-)registered
+    /// with this MDS incarnation at all — e.g. during the boot grace
+    /// or an MDS-node-blackhole re-register window.
+    boot_instant: Instant,
 }
 
 impl PnfsOperationHandler {
@@ -35,6 +63,51 @@ impl PnfsOperationHandler {
         Self {
             layout_manager,
             device_registry,
+            boot_instant: Instant::now(),
+        }
+    }
+
+    /// Bounded-DELAY escalation for MDS-fallback I/O on a pinned file
+    /// (see `FallbackIoDisposition`). Policy:
+    /// - not pinned → Serve (the MDS holds the real bytes);
+    /// - every pinned DS Active/Degraded → FailFast: a fallback RPC
+    ///   arriving while the fleet is healthy means the CLIENT is stuck
+    ///   in its MDS-fallback trap, and only a fatal error springs it;
+    /// - a pinned DS is down (Offline or never registered with this
+    ///   MDS incarnation) → Delay while the longest such outage is
+    ///   under the ceiling, FailFast after.
+    fn fallback_io_disposition_impl(&self, file_key: &str) -> FallbackIoDisposition {
+        self.fallback_io_disposition_bounded(file_key, fallback_delay_ceiling())
+    }
+
+    /// Ceiling-parameterized core of the policy (tests pass explicit
+    /// ceilings; the env-derived one is process-wide via OnceLock).
+    fn fallback_io_disposition_bounded(
+        &self,
+        file_key: &str,
+        ceiling: Duration,
+    ) -> FallbackIoDisposition {
+        let Some(placement) = self.layout_manager.placement_for(file_key) else {
+            return FallbackIoDisposition::Serve;
+        };
+        let now = Instant::now();
+        // Longest current outage among the file's pinned DSes.
+        let mut worst_outage: Option<Duration> = None;
+        for device_id in &placement.device_ids {
+            let outage = match self.device_registry.get(device_id) {
+                // Degraded still serves I/O — not an outage.
+                Some(d) if d.status != DeviceStatus::Offline => continue,
+                // Offline: down since its last heartbeat.
+                Some(d) => now.saturating_duration_since(d.last_heartbeat),
+                // Unknown to this MDS incarnation: anchor at boot.
+                None => now.saturating_duration_since(self.boot_instant),
+            };
+            worst_outage = Some(worst_outage.map_or(outage, |w| w.max(outage)));
+        }
+        match worst_outage {
+            None => FallbackIoDisposition::FailFast,
+            Some(outage) if outage < ceiling => FallbackIoDisposition::Delay,
+            Some(_) => FallbackIoDisposition::FailFast,
         }
     }
 
@@ -751,5 +824,113 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
     fn is_pnfs_managed(&self, file_key: &str) -> bool {
         self.layout_manager.has_placement(file_key)
     }
+
+    fn fallback_io_disposition(&self, file_key: &str) -> FallbackIoDisposition {
+        self.fallback_io_disposition_impl(file_key)
+    }
 }
 
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use crate::pnfs::mds::device::DeviceInfo;
+    use crate::pnfs::config::LayoutPolicy;
+
+    const CEILING: Duration = Duration::from_secs(90);
+
+    fn ds(id: &str) -> DeviceInfo {
+        DeviceInfo::new(id.to_string(), format!("{}:2049", id), vec![])
+    }
+
+    fn owner() -> LayoutOwner {
+        LayoutOwner { client_id: 1, session_id: [0u8; 16], fsid: 1 }
+    }
+
+    /// Registry with `ids` registered + a handler whose layout manager
+    /// has `file` pinned across all of them.
+    fn pinned_handler(ids: &[&str], file: &str) -> (Arc<DeviceRegistry>, PnfsOperationHandler) {
+        let registry = Arc::new(DeviceRegistry::new());
+        for id in ids {
+            registry.register(ds(id)).unwrap();
+        }
+        let mgr = Arc::new(LayoutManager::new(
+            Arc::clone(&registry),
+            LayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
+        ));
+        mgr.generate_layout(owner(), vec![1], file, 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        let handler = PnfsOperationHandler::new(mgr, Arc::clone(&registry));
+        (registry, handler)
+    }
+
+    #[test]
+    fn unpinned_file_is_served() {
+        let (_registry, handler) = pinned_handler(&["ds-1"], "pinned.bin");
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("never-layouted.bin", CEILING),
+            FallbackIoDisposition::Serve,
+            "files without a placement are MDS-local and must be served"
+        );
+    }
+
+    #[test]
+    fn healthy_fleet_fails_fast() {
+        // A fallback RPC arriving while every pinned DS is healthy
+        // means the CLIENT is trapped — only a fatal error springs it.
+        let (_registry, handler) = pinned_handler(&["ds-1", "ds-2"], "f.bin");
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", CEILING),
+            FallbackIoDisposition::FailFast
+        );
+    }
+
+    #[test]
+    fn recent_outage_delays_then_ceiling_fails_fast() {
+        let (registry, handler) = pinned_handler(&["ds-1", "ds-2"], "f.bin");
+        registry.update_status("ds-2", DeviceStatus::Offline).unwrap();
+        // Outage just started (last_heartbeat ≈ now) → park the client.
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", CEILING),
+            FallbackIoDisposition::Delay
+        );
+        // Same state past the ceiling (ZERO makes any outage "too long").
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", Duration::ZERO),
+            FallbackIoDisposition::FailFast,
+            "an outage past the ceiling must fail fast, not hang apps forever"
+        );
+    }
+
+    #[test]
+    fn degraded_device_is_not_an_outage() {
+        // Degraded still serves I/O → fleet counts as healthy → the
+        // fallback RPC is a trapped client → FailFast.
+        let (registry, handler) = pinned_handler(&["ds-1"], "f.bin");
+        registry.update_status("ds-1", DeviceStatus::Degraded).unwrap();
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", CEILING),
+            FallbackIoDisposition::FailFast
+        );
+    }
+
+    #[test]
+    fn unregistered_device_anchors_outage_at_mds_boot() {
+        // A pinned DS unknown to this MDS incarnation (boot grace /
+        // blackhole re-register window): outage clock starts at
+        // handler boot, so a fresh MDS parks fallbacks (Delay) and
+        // escalates only after the ceiling.
+        let (registry, handler) = pinned_handler(&["ds-1", "ds-2"], "f.bin");
+        registry.unregister("ds-2").unwrap();
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", CEILING),
+            FallbackIoDisposition::Delay
+        );
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", Duration::ZERO),
+            FallbackIoDisposition::FailFast
+        );
+    }
+}

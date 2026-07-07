@@ -111,7 +111,7 @@ pub mod ds;
 
 // Re-exports for convenience
 pub use config::{PnfsConfig, PnfsMode, MdsConfig, DsConfig};
-pub use handler_trait::PnfsOperations;
+pub use handler_trait::{FallbackIoDisposition, PnfsOperations};
 pub use mds::server::MetadataServer;
 pub use ds::server::DataServer;
 
