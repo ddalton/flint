@@ -212,6 +212,13 @@ fleet looks healthy, so the fallback is treated as a trapped client).
 End-to-end ENOSPC preservation arrives with MDS proxy I/O. Drill:
 `tests/lima/pnfs/enospc-drill.sh` (make test-pnfs-enospc).
 
+Deleting striped data frees DS space immediately: the heartbeat-borne
+stripe cleanup both unlinks the stripe file and evicts the DS's cached
+fd for it (`evicted N cached fd(s)` in the DS log). On builds ≤ 1.11
+the fd stayed open, so deletes freed **no space until the DS pod
+restarted** — if a ≤ 1.11 fleet shows `used` not dropping after bulk
+deletes, restart the DS pods to reclaim, then upgrade.
+
 ## Placement pins, file identity, REMOVE and RENAME
 
 Placements pin at first LAYOUTGET and persist in sqlite. Since the
