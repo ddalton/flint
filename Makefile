@@ -218,6 +218,10 @@ test-pnfs-identity: build-pnfs ## DS identity ↔ volume binding guard (Phase 2:
 test-pnfs-fsx: build-pnfs ## fsx + fsstress torture (data integrity across namespace ops)
 	tests/lima/pnfs/fsx-drill.sh
 
+.PHONY: test-pnfs-mdsbench
+test-pnfs-mdsbench: build-pnfs ## MDS metadata-perf bench (LABEL=, MDS_ENV= for A/B; not in the gate)
+	tests/lima/pnfs/mdsbench.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh
