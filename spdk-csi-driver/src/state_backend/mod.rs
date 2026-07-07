@@ -265,9 +265,12 @@ pub struct LayoutRecord {
 /// device registry re-maps existing data whenever the fleet changes
 /// (the Phase 0 P1 in `docs/plans/pnfs-durable-ds-plan.md`).
 ///
-/// Keyed by the export-relative path — the same identity the DSes use
-/// for their path-nested local storage, so both layers break (or
-/// survive) identically on rename.
+/// Keyed by the export-relative path. Files pinned with a nonzero
+/// `file_id` store their DS stripes under identity-derived names
+/// (`{file_id:016x}.stripeN`), so the path key is pure metadata and a
+/// RENAME just re-keys the record. Legacy records (file_id 0) share
+/// the path identity with the DSes' path-nested storage and cannot be
+/// renamed safely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementRecord {
     pub file_key: String,
@@ -275,6 +278,10 @@ pub struct PlacementRecord {
     /// Ordered device ids. Order is load-bearing: stripe unit `u` maps
     /// to `device_ids[(u + first_stripe_index) % len]`.
     pub device_ids: Vec<String>,
+    /// Immutable per-file identity, allocated at pin time. 0 = legacy
+    /// path-keyed pin (pre-upgrade record, serde default).
+    #[serde(default)]
+    pub file_id: u64,
 }
 
 // ── The trait ─────────────────────────────────────────────────────────
@@ -479,6 +486,7 @@ mod tests {
             file_key: "vol-1/data/train.bin".into(),
             stripe_size: 8 * 1024 * 1024,
             device_ids: vec!["ds-1".into(), "ds-2".into(), "ds-3".into()],
+            file_id: 0,
         };
         b.put_placement(&placement).await.unwrap();
         assert_eq!(

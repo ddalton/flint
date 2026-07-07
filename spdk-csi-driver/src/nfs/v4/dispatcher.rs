@@ -1503,20 +1503,68 @@ impl CompoundDispatcher {
 
             Operation::Remove(name) => {
                 use crate::nfs::v4::operations::fileops::RemoveOp;
+                // Resolve the victim's pNFS key BEFORE the fs remove.
+                let removed_key = self.pnfs_file_key(context.current_fh.as_ref(), &name);
                 let op = RemoveOp { target: name };
                 let res = self.file_handler.handle_remove(op, context).await;
+                if res.status == Nfs4Status::Ok {
+                    // Forget the pin + enqueue DS stripe cleanup, so a
+                    // future same-name file gets a fresh placement and
+                    // can never read this file's stripes.
+                    if let (Some(pnfs), Some(key)) = (&self.pnfs_handler, removed_key) {
+                        pnfs.note_remove(&key);
+                    }
+                }
                 OperationResult::Remove(res.status, res.change_info)
             }
 
             Operation::Rename { oldname, newname } => {
                 use crate::nfs::v4::operations::fileops::RenameOp;
+                // RFC 8881 §18.26: SAVED FH = source dir, CURRENT FH =
+                // target dir.
+                let old_key = self.pnfs_file_key(context.saved_fh.as_ref(), &oldname);
+                let new_key = self.pnfs_file_key(context.current_fh.as_ref(), &newname);
+                if let (Some(pnfs), Some(old)) = (&self.pnfs_handler, old_key.as_deref()) {
+                    if !pnfs.rename_preserves_data(old) {
+                        // Legacy path-keyed striped file: its DS
+                        // stripes are keyed by this path; renaming
+                        // would silently serve zeros to fresh readers.
+                        // Refuse loudly instead (files pinned by this
+                        // MDS version are identity-keyed and rename
+                        // fine — only pre-upgrade stripes hit this).
+                        warn!(
+                            "⛔ RENAME '{}' refused: legacy path-keyed striped file — copy to a new name instead",
+                            old
+                        );
+                        return OperationResult::Rename(Nfs4Status::NotSupp, None, None);
+                    }
+                }
                 let op = RenameOp { oldname, newname };
                 let res = self.file_handler.handle_rename(op, context).await;
+                if res.status == Nfs4Status::Ok {
+                    if let (Some(pnfs), Some(old), Some(new)) =
+                        (&self.pnfs_handler, old_key.as_deref(), new_key.as_deref())
+                    {
+                        pnfs.note_rename(old, new);
+                    }
+                }
                 OperationResult::Rename(res.status, res.source_cinfo, res.target_cinfo)
             }
 
             Operation::Link(newname) => {
                 use crate::nfs::v4::operations::fileops::LinkOp;
+                // LINK target = SAVED FH (the existing file). A hard
+                // link to a striped file would give it a second,
+                // UNPINNED name — reads via the link would serve the
+                // sparse stub as silent zeros. Refuse for pinned files.
+                if let Some(pnfs) = &self.pnfs_handler {
+                    if let Some(target_key) = self.pnfs_saved_fh_key(context) {
+                        if !pnfs.link_allowed(&target_key) {
+                            warn!("⛔ LINK to striped file '{}' refused (pin is path-keyed)", target_key);
+                            return OperationResult::Link(Nfs4Status::NotSupp, None);
+                        }
+                    }
+                }
                 let op = LinkOp { newname };
                 let res = self.file_handler.handle_link(op, context).await;
                 OperationResult::Link(res.status, res.change_info)
@@ -1734,6 +1782,37 @@ impl CompoundDispatcher {
     }
     
     // pNFS operation handlers
+
+    /// Export-relative pNFS placement key for `name` inside the
+    /// directory `dir_fh` resolves to. None when there's no pnfs
+    /// handler, no FH, or the FH doesn't resolve — callers treat None
+    /// as "not pNFS-relevant".
+    fn pnfs_file_key(&self, dir_fh: Option<&Nfs4FileHandle>, name: &str) -> Option<String> {
+        self.pnfs_handler.as_ref()?;
+        let dir = self.file_handler.fh_manager().resolve_handle(dir_fh?).ok()?;
+        let full = dir.join(name);
+        let export = self.file_handler.fh_manager().get_export_path().to_path_buf();
+        let key = full
+            .strip_prefix(&export)
+            .unwrap_or(&full)
+            .to_string_lossy()
+            .into_owned();
+        if key.is_empty() { None } else { Some(key) }
+    }
+
+    /// Export-relative key of the file the SAVED FH names (LINK's
+    /// target).
+    fn pnfs_saved_fh_key(&self, context: &CompoundContext) -> Option<String> {
+        let fh = context.saved_fh.as_ref()?;
+        let path = self.file_handler.fh_manager().resolve_handle(fh).ok()?;
+        let export = self.file_handler.fh_manager().get_export_path().to_path_buf();
+        let key = path
+            .strip_prefix(&export)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        if key.is_empty() { None } else { Some(key) }
+    }
 
     /// Disposition for READ/WRITE through the MDS when the current
     /// filehandle names a striped (placement-pinned) file. Such a
@@ -1965,6 +2044,7 @@ impl CompoundDispatcher {
                         &filehandle,
                         layout.stripe_unit,
                         layout.device_id_bin,
+                        layout.file_id,
                     );
 
                     debug!("   📤 FILE layout content encoded: {} bytes", layout_content.len());
@@ -2462,6 +2542,7 @@ impl CompoundDispatcher {
         filehandle: &[u8],
         stripe_unit: u64,
         device_id_bytes: [u8; 16],
+        file_id: u64,
     ) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
         use std::collections::hash_map::DefaultHasher;
@@ -2479,11 +2560,20 @@ impl CompoundDispatcher {
         // unit (8 MiB — i.e. most files in an ML dataset) lives entirely on
         // the first DS while the rest idle. nfl_first_stripe_index is the
         // protocol-native rotation knob (RFC 8881 §13.4.4): the client maps
-        // stripe unit u to device (u + first_stripe_index) % N. Derived
-        // from the filehandle so it's deterministic across LAYOUTGETs,
-        // clients, and server restarts (filehandles embed the stable
-        // per-volume instance id).
-        let first_stripe_index = {
+        // stripe unit u to device (u + first_stripe_index) % N.
+        //
+        // The rotation MUST be derived from something immutable for the
+        // file's lifetime — every LAYOUTGET ever issued for the file has
+        // to agree, or readers reassemble the stripes in a different
+        // order than the writer laid them down. For identity-keyed pins
+        // that is the file_id (rename-stable; the FILEHANDLE is not —
+        // a fresh reader post-rename holds a different FH, which is
+        // exactly how the placement drill caught this). Legacy pins
+        // (file_id 0) keep the historical FH-derived rotation — their
+        // FHs are path-stable because their renames are refused.
+        let first_stripe_index = if file_id != 0 {
+            (file_id % segments.len() as u64) as u32
+        } else {
             let mut h = DefaultHasher::new();
             filehandle.hash(&mut h);
             (h.finish() % segments.len() as u64) as u32
@@ -2495,7 +2585,6 @@ impl CompoundDispatcher {
         info!("      stripe_unit: {} bytes ({} MB)", stripe_unit, stripe_unit / (1024*1024));
         info!("      first_stripe_index: {} (per-file rotation)", first_stripe_index);
         info!("      pattern_offset: 0");
-        info!("      nfl_fh_list: empty (DSes use MDS filehandle per RFC 8881 §13.4.2)");
         
         // Encode deviceid (16 bytes fixed, no length prefix)
         encoder.encode_fixed_opaque(&device_id_bytes);
@@ -2508,18 +2597,46 @@ impl CompoundDispatcher {
         
         // nfl_pattern_offset: offset where stripe pattern starts (always 0)
         encoder.encode_u64(0);
-        
-        // nfl_fh_list: empty list per RFC 8881 §13.4.2 — signals the
-        // kernel to use the MDS filehandle (from LAYOUTGET's current_fh)
-        // for I/O to all DSes. The DSes accept MDS filehandles via
-        // parse_path_lenient. An empty list is the spec-correct encoding
-        // when DSes share the MDS filehandle namespace.
+
+        if file_id != 0 {
+            // nfl_fh_list: one v2 (file-ID based) filehandle per DS
+            // slot. Per RFC 8881 §13.4.2 / Linux filelayout, the FH for
+            // stripe unit u is nfl_fh_list[j] where j is the same index
+            // that selects the DS — so slot j's FH carries
+            // stripe_index=j and the DS stores its stripes at
+            // {file_id:016x}.stripe{j}, independent of the file's PATH.
+            // That identity-keying is what makes RENAME a pure metadata
+            // op and prevents a recreated same-name file from ever
+            // reading its predecessor's stripes.
+            encoder.encode_u32(segments.len() as u32);
+            for j in 0..segments.len() {
+                let fh = crate::nfs::v4::filehandle_pnfs::generate_pnfs_filehandle_from_id(
+                    0, // instance check disabled DS-side (PNFS_INSTANCE_ID unset)
+                    file_id,
+                    j as u32,
+                );
+                encoder.encode_opaque(&fh.data);
+            }
+            let result = encoder.finish();
+            info!(
+                "      📦 Encoded STRIPED FILE layout: {} bytes total, {} v2 fh(s) (file_id {:016x})",
+                result.len(),
+                segments.len(),
+                file_id
+            );
+            return result;
+        }
+
+        // Legacy (file_id == 0) pins: empty nfl_fh_list per RFC 8881
+        // §13.4.2 — signals the kernel to use the MDS filehandle (from
+        // LAYOUTGET's current_fh) for I/O to all DSes. The DSes accept
+        // MDS filehandles via parse_path_lenient (path-rebased storage).
         encoder.encode_u32(0);
 
         let result = encoder.finish();
-        info!("      📦 Encoded STRIPED FILE layout: {} bytes total, empty nfl_fh_list", result.len());
+        info!("      📦 Encoded STRIPED FILE layout: {} bytes total, empty nfl_fh_list (legacy pin)", result.len());
         info!("      📦 First 128 bytes: {:02x?}", &result[..result.len().min(128)]);
-        
+
         result
     }
 
@@ -3146,7 +3263,7 @@ mod tests {
                 "ds-2".to_string(),
             ]);
             let enc = CompoundDispatcher::encode_file_layout_striped(
-                &segments, fh, 8 << 20, device_id,
+                &segments, fh, 8 << 20, device_id, 0,
             );
             u32::from_be_bytes(enc[20..24].try_into().unwrap())
         };

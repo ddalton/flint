@@ -1,0 +1,94 @@
+{{- /*
+pNFS trust boundary (production checklist — see
+docs/pnfs-operator-runbook.md, "Trust model"):
+
+1. Control-plane token: a Bearer token every MDS gRPC (50051) caller
+   must present. Stops arbitrary pods from registering as data servers
+   (attracting stripe writes) or calling CreateVolume/DeleteVolume.
+   The Secret is generated once and reused on upgrades (lookup), or
+   supplied via pnfs.controlToken.existingSecret.
+
+2. NetworkPolicies: NFS data (2049) admits only node-CIDR traffic —
+   mounts originate from the NODE kernel via kubelet NodeStage, never
+   from pod IPs — and the control port (50051) admits only the DS
+   fleet and the CSI controller.
+*/}}
+{{- if and .Values.pnfs.enabled .Values.pnfs.controlToken.enabled (not .Values.pnfs.controlToken.existingSecret) }}
+{{- $secretName := "flint-pnfs-control-token" }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: flint-pnfs
+type: Opaque
+data:
+  {{- if and $existing $existing.data (index $existing.data "token") }}
+  # Reuse the installed token — regenerating on every upgrade would
+  # briefly desync MDS and DS pods mid-roll.
+  token: {{ index $existing.data "token" }}
+  {{- else }}
+  token: {{ randAlphaNum 48 | b64enc }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.pnfs.server.enabled .Values.pnfs.networkPolicy.enabled }}
+---
+# NFS data ports: MDS + DS 2049 from node CIDRs only. Kernel NFS
+# clients connect FROM node IPs (kubelet does the mount), so pod-level
+# selectors cannot express the legitimate client set.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flint-pnfs-nfs-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["flint-pnfs-mds", "flint-pnfs-ds"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- if .Values.pnfs.networkPolicy.nodeCIDRs }}
+        {{- range .Values.pnfs.networkPolicy.nodeCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+        {{- else }}
+        # nodeCIDRs is empty: this admits NOTHING on 2049. Deliberate —
+        # a silently-open fallback would defeat the policy; set
+        # pnfs.networkPolicy.nodeCIDRs.
+        []
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 2049
+---
+# Control plane: MDS 50051 from the DS fleet (registration/heartbeats)
+# and the CSI controller (CreateVolume/DeleteVolume). Defense in depth
+# with the bearer token above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flint-pnfs-control
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: flint-pnfs-mds
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: flint-pnfs-ds
+        - podSelector:
+            matchLabels:
+              app: flint-csi-controller
+      ports:
+        - protocol: TCP
+          port: 50051
+{{- end }}

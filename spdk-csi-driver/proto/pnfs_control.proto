@@ -189,5 +189,11 @@ enum InstructionType {
   INCREASE_HEARTBEAT_FREQUENCY = 1;
   PREPARE_FOR_SHUTDOWN = 2;
   REPORT_CAPACITY_IMMEDIATELY = 3;
+  // Best-effort stripe-file cleanup after NFS REMOVE (or a rename that
+  // overwrote a striped target). `details` = the stripe file's path
+  // RELATIVE to the DS data dir. Correctness never depends on this —
+  // a recreated file gets a fresh file_id and therefore fresh stripe
+  // paths — it only reclaims space.
+  DELETE_STRIPE_FILE = 4;
 }
 

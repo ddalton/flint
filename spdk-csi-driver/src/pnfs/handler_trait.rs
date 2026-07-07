@@ -93,6 +93,36 @@ pub trait PnfsOperations: Send + Sync {
         }
     }
 
+    /// A file was REMOVEd through the MDS namespace: forget its pin so
+    /// a future same-name file gets a fresh placement (and fresh
+    /// file_id ⇒ fresh DS stripe paths), and enqueue best-effort DS
+    /// stripe cleanup.
+    fn note_remove(&self, _file_key: &str) {}
+
+    /// Whether RENAME of `old_key` can preserve data. False only for
+    /// legacy path-keyed pins (file_id 0): their DS stripes live at the
+    /// old rebased path, so fresh readers of the new name would resolve
+    /// to nothing — the op must be REFUSED (today it silently serves
+    /// zeros). v2 pins and unpinned files rename freely.
+    fn rename_preserves_data(&self, _old_key: &str) -> bool {
+        true
+    }
+
+    /// A successful RENAME old→new through the MDS namespace: re-key
+    /// the pin (v2 pins only — data follows the identity, not the
+    /// path). If a pinned file was overwritten at `new_key`, its pin is
+    /// forgotten and its stripes enqueued for cleanup.
+    fn note_rename(&self, _old_key: &str, _new_key: &str) {}
+
+    /// Whether LINK to a pinned file is supported. Pins are keyed by
+    /// path, so a hard link would give the striped file a second name
+    /// with NO pin — reads via the link would serve the sparse stub
+    /// (silent zeros). Refused for pinned files until pins are keyed by
+    /// identity end-to-end.
+    fn link_allowed(&self, target_key: &str) -> bool {
+        !self.is_pnfs_managed(target_key)
+    }
+
     // NOTE: there is deliberately no `stripe_unit()` here. The stripe
     // unit is per-file (pinned on the placement at first LAYOUTGET and
     // carried on each `Layout`) — a global value is exactly the

@@ -153,6 +153,39 @@ echo "  B sha256: $HASH_B"
 
 ds3_after_b=$(ds_bytes "$DS3_EXPORT")
 
+# ── 4b. P0-2: rm + recreate must NOT resurrect old bytes ────────────
+# The recreated file gets a fresh file_id → fresh DS stripe paths; a
+# path-keyed scheme would let the smaller sparse recreate read the old
+# file's bytes in its holes.
+echo "▶ phase 3: rm striped-A, recreate same name (different content), verify"
+PHASE3=$(limactl shell "$LIMA_VM" -- sudo bash -c "
+  set -eu
+  mount -t nfs4 -o minorversion=1,proto=tcp,port=${MDS_PORT} ${HOST_ADDR}:/ /mnt/flint-pnfs
+  rm /mnt/flint-pnfs/striped-A.bin
+  dd if=/dev/urandom of=/mnt/flint-pnfs/striped-A.bin bs=1M count=8 status=none oflag=direct
+  sync
+  sha256sum /mnt/flint-pnfs/striped-A.bin | cut -d' ' -f1     # warm (as written)
+  umount /mnt/flint-pnfs
+  # fresh mount = cold cache: the readback must come from the DSes
+  mount -t nfs4 -o minorversion=1,proto=tcp,port=${MDS_PORT} ${HOST_ADDR}:/ /mnt/flint-pnfs
+  sha256sum /mnt/flint-pnfs/striped-A.bin | cut -d' ' -f1     # cold (from DSes)
+") || { echo "✗ phase 3 rm/recreate failed"; exit 1; }
+HASH_A3_EXPECT=$(echo "$PHASE3" | tail -2 | head -1)
+HASH_A3=$(echo "$PHASE3" | tail -1)
+echo "  recreated A sha256: warm=$HASH_A3_EXPECT cold=$HASH_A3"
+
+# ── 4c. P0-2: rename must carry the data (fresh reader, cold cache) ──
+echo "▶ phase 4: rename striped-B → renamed-B, remount, verify checksum"
+HASH_B2=$(limactl shell "$LIMA_VM" -- sudo bash -c "
+  set -eu
+  mv /mnt/flint-pnfs/striped-B.bin /mnt/flint-pnfs/renamed-B.bin
+  umount /mnt/flint-pnfs
+  mount -t nfs4 -o minorversion=1,proto=tcp,port=${MDS_PORT} ${HOST_ADDR}:/ /mnt/flint-pnfs
+  sha256sum /mnt/flint-pnfs/renamed-B.bin | cut -d' ' -f1
+  umount /mnt/flint-pnfs
+" | tail -2 | head -1) || { echo "✗ phase 4 rename failed"; exit 1; }
+echo "  renamed-B sha256: $HASH_B2 (want B: $HASH_B)"
+
 # ── 5. Verdict ───────────────────────────────────────────────────────
 echo
 echo "▶ Per-DS bytes-on-disk:"
@@ -172,11 +205,17 @@ FAIL=""
   || FAIL="$FAIL\n  - reading A touched DS3, which was never in A's placement"
 [ "${ds3_after_b:-0}" -gt 0 ] \
   || FAIL="$FAIL\n  - B did not stripe onto DS3 — new files must see the grown fleet"
+[ "$HASH_A3" = "$HASH_A3_EXPECT" ] \
+  || FAIL="$FAIL\n  - recreated A read back wrong bytes cold (stale-stripe resurrection — the P0-2 rm/recreate class)"
+[ "$HASH_A3" != "$HASH_A" ] \
+  || FAIL="$FAIL\n  - recreated A read back the OLD file's content?!"
+[ "$HASH_B2" = "$HASH_B" ] \
+  || FAIL="$FAIL\n  - renamed-B checksum mismatch after remount (rename lost the data — the P0-2 rename class)"
 
 if [ -n "$FAIL" ]; then
   echo -e "✗ FAIL:$FAIL"
   echo "  Logs: $LOG_DIR/flint-pnfs-{mds,ds1,ds2,ds3}.log"
   exit 1
 fi
-echo "✓ PASS: A pinned to {DS1,DS2} and intact after growth; B striped 3-wide"
+echo "✓ PASS: A pinned to {DS1,DS2} and intact after growth; B striped 3-wide; rm/recreate isolated; rename carried data"
 exit 0

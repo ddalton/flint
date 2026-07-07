@@ -52,6 +52,11 @@ pub struct PnfsOperationHandler {
     /// with this MDS incarnation at all — e.g. during the boot grace
     /// or an MDS-node-blackhole re-register window.
     boot_instant: Instant,
+    /// The MDS export root's filesystem path (e.g. "/data/exports").
+    /// Needed to compute the DS-side rebased relative path of a LEGACY
+    /// pin's stripe files for cleanup (DSes store legacy stripes at
+    /// <ds-data-dir>/<export-path-minus-leading-slash>/<file_key>).
+    export_fs_path: String,
 }
 
 impl PnfsOperationHandler {
@@ -59,12 +64,20 @@ impl PnfsOperationHandler {
     pub fn new(
         layout_manager: Arc<LayoutManager>,
         device_registry: Arc<DeviceRegistry>,
+        export_fs_path: String,
     ) -> Self {
         Self {
             layout_manager,
             device_registry,
             boot_instant: Instant::now(),
+            export_fs_path,
         }
+    }
+
+    /// DS-relative path of a legacy (path-keyed) pin's stripe file.
+    fn legacy_stripe_rel_path(&self, file_key: &str) -> String {
+        let export_rel = self.export_fs_path.trim_start_matches('/');
+        format!("{}/{}", export_rel, file_key)
     }
 
     /// Bounded-DELAY escalation for MDS-fallback I/O on a pinned file
@@ -182,6 +195,7 @@ impl PnfsOperationHandler {
                 segments: layout.segments,
                 stripe_unit: placement.stripe_size,
                 device_id_bin,
+                file_id: placement.file_id,
             }],
         })
     }
@@ -667,6 +681,11 @@ pub struct Layout {
     /// must use this verbatim so GETDEVICEINFO resolves to the same
     /// group.
     pub device_id_bin: [u8; 16],
+    /// The placement's immutable file identity. Nonzero ⇒ the encoder
+    /// emits per-DS v2 file-ID filehandles in nfl_fh_list (DS storage
+    /// keyed by identity, rename-safe); 0 ⇒ legacy empty fh list (DSes
+    /// rebase the MDS path filehandle).
+    pub file_id: u64,
 }
 
 /// LAYOUTGET errors
@@ -828,6 +847,49 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
     fn fallback_io_disposition(&self, file_key: &str) -> FallbackIoDisposition {
         self.fallback_io_disposition_impl(file_key)
     }
+
+    fn note_remove(&self, file_key: &str) {
+        if let Some(placement) = self.layout_manager.forget_placement(file_key) {
+            if placement.file_id != 0 {
+                self.layout_manager.enqueue_stripe_cleanup(&placement, file_key);
+            } else {
+                let rel = self.legacy_stripe_rel_path(file_key);
+                self.layout_manager.enqueue_legacy_cleanup(&placement, &rel);
+            }
+        }
+    }
+
+    fn rename_preserves_data(&self, old_key: &str) -> bool {
+        match self.layout_manager.placement_for(old_key) {
+            // Legacy path-keyed pin: DS stripes live at the old path;
+            // renaming would strand them (fresh readers get nothing).
+            Some(p) => p.file_id != 0,
+            // Unpinned: plain MDS-local file, rename freely.
+            None => true,
+        }
+    }
+
+    fn note_rename(&self, old_key: &str, new_key: &str) {
+        match self.layout_manager.rename_placement(old_key, new_key) {
+            Ok(Some(overwritten)) => {
+                // Rename-over: the target's old pin is gone; reclaim
+                // its stripes.
+                if overwritten.file_id != 0 {
+                    self.layout_manager.enqueue_stripe_cleanup(&overwritten, new_key);
+                } else {
+                    let rel = self.legacy_stripe_rel_path(new_key);
+                    self.layout_manager.enqueue_legacy_cleanup(&overwritten, &rel);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // rename_preserves_data() gates the op before the fs
+                // rename, so this arm firing means a race or a bug —
+                // loud, because the file's data is now stranded.
+                warn!("💥 note_rename('{}' → '{}') failed AFTER fs rename: {}", old_key, new_key, e);
+            }
+        }
+    }
 }
 
 
@@ -862,7 +924,7 @@ mod fallback_tests {
         ));
         mgr.generate_layout(owner(), vec![1], file, 0, 16 * 1024 * 1024, IoMode::ReadWrite)
             .unwrap();
-        let handler = PnfsOperationHandler::new(mgr, Arc::clone(&registry));
+        let handler = PnfsOperationHandler::new(mgr, Arc::clone(&registry), "/data/exports".into());
         (registry, handler)
     }
 

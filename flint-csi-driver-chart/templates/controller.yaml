@@ -103,6 +103,15 @@ spec:
               {{- else }}
               value: {{ required "pnfs.mdsEndpoint is required when pnfs.enabled is true and pnfs.server.enabled is false" .Values.pnfs.mdsEndpoint | quote }}
               {{- end }}
+            {{- if .Values.pnfs.controlToken.enabled }}
+            # Attached to CreateVolume/DeleteVolume gRPC — see
+            # templates/pnfs-security.yaml.
+            - name: FLINT_PNFS_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.pnfs.controlToken.existingSecret | default "flint-pnfs-control-token" }}
+                  key: token
+            {{- end }}
             {{- end }}
           args:
             - "--v={{ .Values.logLevel }}"

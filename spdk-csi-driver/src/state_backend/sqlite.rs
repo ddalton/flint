@@ -81,7 +81,7 @@ use std::sync::{Arc, Mutex};
 ///        re-maps existing data when the fleet changes. New table
 ///        only — handled by the schema-batch's CREATE TABLE IF NOT
 ///        EXISTS.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Single-file SQLite [`StateBackend`].
 pub struct SqliteBackend {
@@ -223,6 +223,29 @@ impl SqliteBackend {
                 if prev < 5 {
                     // file_placement table: created by the schema-batch above.
                     tracing::info!("SqliteBackend: migrating schema → 5 (file_placement table)");
+                }
+                if prev < 6 {
+                    // file_placement.file_id column. DEFAULT 0 = the
+                    // legacy path-keyed sentinel, which is exactly the
+                    // right meaning for pre-upgrade pins.
+                    let has_col: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('file_placement') WHERE name = 'file_id'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| {
+                        StateBackendError::Storage(format!("migrate v→6 (probe column): {}", e))
+                    })?;
+                    if has_col == 0 {
+                        conn.execute(
+                            "ALTER TABLE file_placement ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
+                            [],
+                        )
+                        .map_err(|e| {
+                            StateBackendError::Storage(format!("migrate v→6 (alter file_placement): {}", e))
+                        })?;
+                    }
+                    tracing::info!("SqliteBackend: migrating schema → 6 (file_placement.file_id)");
                 }
                 conn.execute(
                     "UPDATE schema_version SET version = ?1 WHERE id = 1",
@@ -724,9 +747,9 @@ impl StateBackend for SqliteBackend {
                 rusqlite::Error::ToSqlConversionFailure(Box::new(e))
             })?;
             conn.execute(
-                "INSERT OR REPLACE INTO file_placement (file_key, stripe_size, device_ids)
-                 VALUES (?1, ?2, ?3)",
-                params![p.file_key, u64_to_i64(p.stripe_size), device_ids_json],
+                "INSERT OR REPLACE INTO file_placement (file_key, stripe_size, device_ids, file_id)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![p.file_key, u64_to_i64(p.stripe_size), device_ids_json, u64_to_i64(p.file_id)],
             )?;
             Ok(())
         })
@@ -738,7 +761,7 @@ impl StateBackend for SqliteBackend {
         let row = self
             .with_conn(move |conn| {
                 conn.query_row(
-                    "SELECT file_key, stripe_size, device_ids
+                    "SELECT file_key, stripe_size, device_ids, file_id
                      FROM file_placement WHERE file_key = ?1",
                     params![key],
                     decode_placement_row,
@@ -753,7 +776,7 @@ impl StateBackend for SqliteBackend {
         let rows = self
             .with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT file_key, stripe_size, device_ids FROM file_placement",
+                    "SELECT file_key, stripe_size, device_ids, file_id FROM file_placement",
                 )?;
                 let rows: rusqlite::Result<Vec<_>> =
                     stmt.query_map([], decode_placement_row)?.collect();
@@ -978,6 +1001,7 @@ fn decode_placement_row(
     let file_key: String = r.get(0)?;
     let stripe_size: i64 = r.get(1)?;
     let device_ids_json: String = r.get(2)?;
+    let file_id: i64 = r.get(3)?;
 
     Ok((|| -> StateBackendResult<PlacementRecord> {
         let device_ids: Vec<String> = serde_json::from_str(&device_ids_json)
@@ -986,6 +1010,7 @@ fn decode_placement_row(
             file_key,
             stripe_size: i64_to_u64(stripe_size),
             device_ids,
+            file_id: i64_to_u64(file_id),
         })
     })())
 }
@@ -1067,7 +1092,8 @@ CREATE TABLE IF NOT EXISTS layouts (
 CREATE TABLE IF NOT EXISTS file_placement (
     file_key TEXT PRIMARY KEY,
     stripe_size INTEGER NOT NULL,
-    device_ids TEXT NOT NULL
+    device_ids TEXT NOT NULL,
+    file_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS instance_counter (

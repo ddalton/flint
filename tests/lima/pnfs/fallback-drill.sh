@@ -161,22 +161,14 @@ if [ "$rc" = "0" ]; then FAIL="$FAIL\n  - past-ceiling read SUCCEEDED (should EI
 elif [ "$rc" -ge 124 ] 2>/dev/null; then FAIL="$FAIL\n  - past-ceiling read HUNG — ceiling did not spring the fallback loop (the livelock)";
 else echo "  ✓ fast EIO (rc=$rc)"; fi
 
-# ── 6. Restart DS1, remount, converge ────────────────────────────────
-# The remount gives the VM a fresh NFS client. On this same-IP rig all
-# three servers share host.lima.internal, so the kernel merges them
-# into ONE server identity — a client with pre-restart DS state churns
-# EXCHANGE_ID against the restarted DS and gives up (the documented
-# same-IP trunking artifact, NOT the fallback logic; live-client
-# DS-restart recovery on distinct IPs is the k8s Phase 4 DS-reschedule
-# drill, green ×2). What this step still proves: post-outage, the
-# ceiling left NO immortal fallback loop behind, the mount tears down
-# cleanly, and the data comes back intact.
-echo "▶ restarting DS1; remount + poll until the checksum matches"
+# ── 6. Restart DS1 → the SAME live client must converge ─────────────
+# No remount: since each DS presents its own server identity
+# (flint-pnfs-ds-<id>, the P0-5 fix), the client keeps a separate
+# lease per DS and re-establishes it cleanly against the restarted
+# process — even on this same-IP rig, where the old shared identity
+# made trunking detection churn EXCHANGE_ID forever.
+echo "▶ restarting DS1; polling the SAME client until the checksum matches"
 start_ds 1
-sleep 2
-limactl shell "$LIMA_VM" -- sudo sh -c "umount -lf $MNT 2>/dev/null; \
-  mount -t nfs4 -o minorversion=1,proto=tcp,port=${MDS_PORT} ${HOST_ADDR}:/ $MNT" \
-  || { FAIL="$FAIL\n  - remount failed"; }
 DEADLINE=$(( SECONDS + 160 ))
 RECOVERED=""
 while [ $SECONDS -lt $DEADLINE ]; do

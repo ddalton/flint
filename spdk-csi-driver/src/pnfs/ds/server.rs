@@ -99,19 +99,22 @@ impl DataServer {
         let session_mgr = Arc::new(DsSessionManager::new());
         info!("✓ Session manager initialized (NFSv4.1 support)");
 
-        // Initialize client manager for EXCHANGE_ID (server trunking)
-        // MUST use the same server_owner and server_scope as MDS for trunking to work!
-        // DS state is ephemeral by design — clients reach DSes only
-        // for I/O and re-establish on every mount, so we use an
-        // in-memory backend regardless of the MDS-side persistence
-        // configuration.
+        // Initialize client manager for EXCHANGE_ID. The DS presents
+        // its OWN per-device server identity (flint-pnfs-ds-<id>) —
+        // NOT the MDS's: this DS keeps an independent client table, so
+        // sharing the MDS's server_owner made kernel trunking
+        // detection demand clientid parity with the MDS that only held
+        // by counter-coincidence (restarted DSes churned EXCHANGE_ID
+        // forever). With a unique identity, clients keep a separate
+        // clean lease per DS. DS state is ephemeral by design — the
+        // in-memory backend is correct regardless of MDS persistence.
         let lease_mgr = Arc::new(LeaseManager::new());
         let client_mgr = Arc::new(ClientManager::new(
             lease_mgr,
-            "",
+            &config.device_id,
             crate::state_backend::memory_backend(),
         ));
-        info!("✓ Client manager initialized (same server_owner/scope as MDS)");
+        info!("✓ Client manager initialized (per-DS server identity)");
 
         Ok(Self { config, io_handler, registration_client, session_mgr, client_mgr, identity_created_at })
     }
@@ -653,7 +656,10 @@ impl DataServer {
                                 encoder.encode_fixed_opaque(&write_result.verifier);
                                 (Nfs4Status::Ok, encoder.finish())
                             }
-                            Err(_) => (Nfs4Status::Io, Bytes::new()),
+                            Err(e) => {
+                                warn!("DS WRITE failed at offset {}: {}", offset, e);
+                                (Self::io_error_to_nfs_status(&e), Bytes::new())
+                            }
                         }
                     } else {
                         (Nfs4Status::NoFileHandle, Bytes::new())
@@ -694,7 +700,10 @@ impl DataServer {
                                 encoder.encode_fixed_opaque(&commit_result.verifier);
                                 (Nfs4Status::Ok, encoder.finish())
                             }
-                            Err(_) => (Nfs4Status::Io, Bytes::new()),
+                            Err(e) => {
+                                warn!("DS COMMIT failed at offset {}: {}", offset, e);
+                                (Self::io_error_to_nfs_status(&e), Bytes::new())
+                            }
                         }
                     } else {
                         (Nfs4Status::NoFileHandle, Bytes::new())
@@ -800,10 +809,17 @@ impl DataServer {
             .map(|b| b.mount_point.clone())
             .collect();
         
-        // Calculate total capacity (simplified - sum all mount points)
-        // TODO: Get actual filesystem capacity
-        let capacity = 1_000_000_000_000u64;  // 1 TB placeholder
-        let used = 0u64;
+        // Real capacity truth from the export filesystem (was a 1 TB
+        // placeholder — the registry is only as honest as this number).
+        let (capacity, used) = mount_points
+            .first()
+            .and_then(|mp| nix::sys::statvfs::statvfs(std::path::Path::new(mp)).ok())
+            .map(|vfs| {
+                let total = vfs.blocks() as u64 * vfs.fragment_size() as u64;
+                let avail = vfs.blocks_available() as u64 * vfs.fragment_size() as u64;
+                (total, total.saturating_sub(avail))
+            })
+            .unwrap_or((0, 0));
 
         match client.register(
             self.config.device_id.clone(),
@@ -874,21 +890,37 @@ impl DataServer {
             let mut heartbeat_interval = interval(Duration::from_secs(heartbeat_interval_secs));
             let mut failure_count = 0u32;
 
+            let data_dir = std::path::PathBuf::from(
+                mount_points.first().cloned().unwrap_or_else(|| "/data".to_string()),
+            );
+
             loop {
                 heartbeat_interval.tick().await;
 
-                // TODO: Get actual capacity/usage from filesystem
-                let capacity = 1_000_000_000_000u64;
-                let used = 0u64;
+                // Real capacity truth from the export filesystem —
+                // the registry (and any future capacity-aware
+                // placement) is only as honest as this number.
+                let (capacity, used) = match nix::sys::statvfs::statvfs(&data_dir) {
+                    Ok(vfs) => {
+                        let total = vfs.blocks() as u64 * vfs.fragment_size() as u64;
+                        let avail = vfs.blocks_available() as u64 * vfs.fragment_size() as u64;
+                        (total, total.saturating_sub(avail))
+                    }
+                    Err(e) => {
+                        warn!("statvfs({:?}) failed: {} — reporting zero capacity", data_dir, e);
+                        (0, 0)
+                    }
+                };
                 let active_connections = 0u32;
 
                 let mut reregister_now = false;
                 match client.heartbeat(capacity, used, active_connections).await {
-                    Ok(true) => {
+                    Ok((true, instructions)) => {
                         debug!("✅ Heartbeat acknowledged");
                         failure_count = 0;
+                        Self::apply_mds_instructions(&data_dir, instructions);
                     }
-                    Ok(false) => {
+                    Ok((false, _)) => {
                         // A NACK is not a transport blip: the MDS answered
                         // and said "unknown device" — it restarted and lost
                         // its (deliberately in-memory) registry. Waiting out
@@ -948,6 +980,56 @@ impl DataServer {
             "Heartbeat sender started on dedicated thread (interval: {} seconds)",
             heartbeat_interval_secs
         );
+    }
+
+    /// Map a DS I/O failure to the honest NFS status. ENOSPC/EDQUOT
+    /// must surface as NOSPC/DQUOT so the client (and its
+    /// application) sees "No space left on device" instead of a
+    /// generic EIO — found by the ENOSPC drill: a full DS export
+    /// reported EIO, which reads as data-path breakage rather than
+    /// capacity exhaustion.
+    fn io_error_to_nfs_status(e: &crate::pnfs::Error) -> Nfs4Status {
+        if let crate::pnfs::Error::Io(io_err) = e {
+            // nix::errno wraps the raw OS errno portably (libc isn't a
+            // direct dep; nix already is).
+            match io_err.raw_os_error().map(nix::errno::Errno::from_i32) {
+                Some(nix::errno::Errno::ENOSPC) => return Nfs4Status::NoSpc,
+                Some(nix::errno::Errno::EDQUOT) => return Nfs4Status::DQuot,
+                Some(nix::errno::Errno::EROFS) => return Nfs4Status::RoFs,
+                _ => {}
+            }
+        }
+        Nfs4Status::Io
+    }
+
+    /// Apply MDS-piggybacked heartbeat instructions. Today that's
+    /// DELETE_STRIPE_FILE: best-effort unlink of an orphaned stripe
+    /// file (its MDS-side file was REMOVEd or renamed-over). `details`
+    /// is a path relative to the DS data dir; traversal components are
+    /// rejected — the MDS never mints them, but this arrives over the
+    /// control channel and costs nothing to check.
+    fn apply_mds_instructions(data_dir: &std::path::Path, instructions: Vec<crate::pnfs::grpc::Instruction>) {
+        use crate::pnfs::grpc::InstructionType;
+        for ins in instructions {
+            if ins.r#type != InstructionType::DeleteStripeFile as i32 {
+                continue;
+            }
+            let rel = std::path::Path::new(&ins.details);
+            if rel.is_absolute()
+                || rel.components().any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                warn!("🧹 refusing suspicious cleanup path {:?}", ins.details);
+                continue;
+            }
+            let target = data_dir.join(rel);
+            match std::fs::remove_file(&target) {
+                Ok(()) => info!("🧹 stripe file removed: {:?}", target),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    debug!("🧹 stripe file already absent: {:?}", target);
+                }
+                Err(e) => warn!("🧹 stripe cleanup failed for {:?}: {}", target, e),
+            }
+        }
     }
 
     /// Start status reporter in background

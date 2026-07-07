@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::pnfs::grpc::{
-    CreateVolumeRequest, DeleteVolumeRequest, MdsControlClient,
+    CreateVolumeRequest, DeleteVolumeRequest,
 };
 
 /// Volume context keys written by [`PnfsCsi::create_volume`] and
@@ -136,8 +136,9 @@ impl PnfsCsi {
     }
 
     /// Dial the MDS. Each volume op opens a fresh channel — see the
-    /// rationale on the struct doc-comment.
-    async fn dial(&self) -> Result<MdsControlClient<tonic::transport::Channel>, PnfsError> {
+    /// rationale on the struct doc-comment. The client attaches
+    /// FLINT_PNFS_CONTROL_TOKEN when configured.
+    async fn dial(&self) -> Result<crate::pnfs::grpc::AuthedMdsControlClient, PnfsError> {
         let ep = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
             .map_err(|e| PnfsError::BadEndpoint(format!("{}: {}", self.endpoint, e)))?
             .connect_timeout(self.timeout)
@@ -146,7 +147,7 @@ impl PnfsCsi {
             .connect()
             .await
             .map_err(|e| PnfsError::Transport(format!("connect {}: {}", self.endpoint, e)))?;
-        Ok(MdsControlClient::new(channel))
+        Ok(crate::pnfs::grpc::authed_mds_control_client(channel))
     }
 
     /// Provision a pNFS volume: tell the MDS to create the metadata

@@ -214,6 +214,10 @@ test-pnfs-cross-host: ## Multi-host pNFS perf bench against a real K8s cluster â
 test-pnfs-identity: build-pnfs ## DS identity â†” volume binding guard (Phase 2: stamp, verify, refuse foreign volume)
 	tests/lima/pnfs/identity-drill.sh
 
+.PHONY: test-pnfs-enospc
+test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
+	tests/lima/pnfs/enospc-drill.sh
+
 .PHONY: test-pnfs-fallback
 test-pnfs-fallback: build-pnfs ## Bounded-DELAY fallback escalation (DELAY-livelock fix: fast EIO, parked under ceiling, sprung past it, self-recovery)
 	tests/lima/pnfs/fallback-drill.sh
@@ -223,7 +227,7 @@ test-pnfs-restart-load: build-pnfs ## MDS kill -9 under load (Phase 3: one-heart
 	tests/lima/pnfs/mds-restart-load.sh
 
 .PHONY: test-pnfs-all
-test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + identity + fallback tests in sequence
+test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + identity + fallback + enospc tests in sequence
 	$(MAKE) test-pnfs-smoke
 	$(MAKE) test-pnfs-pynfs
 	$(MAKE) test-pnfs-csi
@@ -232,6 +236,7 @@ test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + i
 	$(MAKE) test-pnfs-restart
 	$(MAKE) test-pnfs-identity
 	$(MAKE) test-pnfs-fallback
+	$(MAKE) test-pnfs-enospc
 	# test-pnfs-restart-load is NOT in the gate yet: its core Phase 3
 	# assertions pass (one-heartbeat NACK re-register, zero recalls,
 	# boot grace) but the final error-free-client-I/O clause exposes an

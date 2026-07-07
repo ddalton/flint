@@ -351,23 +351,36 @@ impl ClientManager {
         // PNFS_MODE can be: "standalone", "mds", "ds"
         // If not set, assume standalone mode (safer default for flint-nfs-server)
         let pnfs_mode = std::env::var("PNFS_MODE").ok();
-        let is_pnfs = pnfs_mode.as_deref() == Some("mds") || pnfs_mode.as_deref() == Some("ds");
+        let is_mds = pnfs_mode.as_deref() == Some("mds");
+        let is_ds = pnfs_mode.as_deref() == Some("ds");
 
-        // Server identifiers: different for pNFS vs standalone
-        // IMPORTANT: Each standalone NFS server MUST have a unique server_owner
-        // to prevent NFSv4 trunking detection from merging connections.
-        let server_owner = if is_pnfs {
+        // Server identifiers.
+        // IMPORTANT: every server that does NOT share clientid state
+        // with another server MUST have a unique server_owner — the
+        // kernel's trunking detection (nfs4_detect_session_trunking)
+        // treats same-owner servers as ONE server and requires
+        // EXCHANGE_ID to return the same clientid on every address.
+        // Each pNFS DS keeps its own independent client table, so a DS
+        // sharing the MDS's owner made clients demand clientid parity
+        // the DS could only deliver by counter-coincidence: fresh-boot
+        // rigs worked, restarted DSes churned EXCHANGE_ID forever
+        // (found by the bounded-DELAY fallback drill, 2026-07-06).
+        // In ds mode `volume_id` carries the device_id.
+        let server_owner = if is_mds {
             "flint-pnfs".to_string()
+        } else if is_ds {
+            format!("flint-pnfs-ds-{}", volume_id)
         } else if volume_id.is_empty() {
             "flint-nfs".to_string()
         } else {
             format!("flint-nfs-{}", volume_id)
         };
 
-        // Read server_scope from environment (allows MDS vs DS differentiation)
-        let server_scope = if is_pnfs {
+        let server_scope = if is_mds {
             std::env::var("PNFS_SERVER_SCOPE")
                 .unwrap_or_else(|_| "flint-pnfs-mds".to_string())
+        } else if is_ds {
+            format!("flint-pnfs-ds-{}", volume_id)
         } else if volume_id.is_empty() {
             "flint-nfs-standalone".to_string()
         } else {

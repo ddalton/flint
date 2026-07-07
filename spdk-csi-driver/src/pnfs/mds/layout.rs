@@ -62,6 +62,11 @@ pub struct FilePlacement {
     /// Ordered device ids. Order is load-bearing: stripe unit `u` maps
     /// to `device_ids[(u + first_stripe_index) % len]`.
     pub device_ids: Vec<String>,
+    /// Immutable per-file identity allocated at pin time (see
+    /// `PlacementRecord::file_id`). Nonzero ⇒ layouts carry per-DS v2
+    /// file-ID filehandles and DS stripes live at
+    /// `{file_id:016x}.stripeN`; 0 ⇒ legacy path-keyed storage.
+    pub file_id: u64,
 }
 
 impl FilePlacement {
@@ -70,6 +75,7 @@ impl FilePlacement {
             file_key: file_key.to_string(),
             stripe_size: self.stripe_size,
             device_ids: self.device_ids.clone(),
+            file_id: self.file_id,
         }
     }
 
@@ -77,7 +83,28 @@ impl FilePlacement {
         Self {
             stripe_size: r.stripe_size,
             device_ids: r.device_ids.clone(),
+            file_id: r.file_id,
         }
+    }
+
+    /// The stripe file this placement's slot-`j` DS stores, relative
+    /// to the DS data dir. Only meaningful for v2 (file_id != 0) pins.
+    pub fn stripe_rel_path(&self, slot: usize) -> String {
+        format!("{:016x}.stripe{}", self.file_id, slot)
+    }
+}
+
+/// Allocate a fresh, unique per-file identity for a new pin. Uses the
+/// uuid crate (already a workspace dep) — collision-free in practice
+/// and free of the determinism trap the old name-hash scheme had
+/// (same name ⇒ same id ⇒ a recreated file could read its
+/// predecessor's stripes).
+fn allocate_file_id() -> u64 {
+    let (hi, lo) = uuid::Uuid::new_v4().as_u64_pair();
+    // 0 is the legacy sentinel — never allocate it.
+    match hi ^ lo {
+        0 => 1,
+        id => id,
     }
 }
 
@@ -136,6 +163,12 @@ pub struct LayoutManager {
     /// GETDEVICEINFO resolves striped deviceids here (in placement
     /// order), never from the live registry's iteration order.
     stripe_groups: Arc<DashMap<[u8; 16], Vec<String>>>,
+
+    /// Per-DS pending stripe-file deletions (paths relative to the DS
+    /// data dir), drained into HeartbeatResponse instructions.
+    /// In-memory + best-effort by design: losing it leaks orphaned
+    /// stripe space, never correctness.
+    cleanup_queues: Arc<DashMap<String, Vec<String>>>,
 
     /// Persistence target. Layouts surviving MDS restart prevents the
     /// kernel from issuing fresh LAYOUTGETs (disruptive but functional)
@@ -332,6 +365,7 @@ impl LayoutManager {
             stripe_size,
             placements: Arc::new(DashMap::new()),
             stripe_groups: Arc::new(DashMap::new()),
+            cleanup_queues: Arc::new(DashMap::new()),
             backend,
         }
     }
@@ -400,8 +434,12 @@ impl LayoutManager {
     /// Drop the pin for a deleted file so a future file at the same
     /// path gets a fresh placement. Stripe-group entries stay — they
     /// are content-addressed and other files may share them.
-    pub fn forget_placement(&self, file_key: &str) {
-        if self.placements.remove(file_key).is_some() {
+    ///
+    /// Returns the removed placement (if any) so the caller can
+    /// enqueue best-effort DS stripe cleanup for it.
+    pub fn forget_placement(&self, file_key: &str) -> Option<FilePlacement> {
+        let removed = self.placements.remove(file_key).map(|(_, p)| p);
+        if removed.is_some() {
             info!("Placement forgotten for deleted file '{}'", file_key);
         }
         let backend = Arc::clone(&self.backend);
@@ -410,6 +448,99 @@ impl LayoutManager {
             "placement_delete",
             move || async move { backend.delete_placement(&key).await },
         );
+        removed
+    }
+
+    /// Re-key a pin for NFS RENAME. Only valid for v2 (file_id != 0)
+    /// pins — their DS stripes are identity-keyed, so the path key is
+    /// pure metadata and the data follows the rename for free. Legacy
+    /// path-keyed pins must be REFUSED at the RENAME op instead (their
+    /// DS stripes live at the old path; fresh readers of the new name
+    /// would resolve to nothing).
+    ///
+    /// If a pinned file already existed at `new_key` (rename-over), its
+    /// pin is dropped and returned so the caller can enqueue its stripe
+    /// cleanup.
+    pub fn rename_placement(
+        &self,
+        old_key: &str,
+        new_key: &str,
+    ) -> Result<Option<FilePlacement>, String> {
+        let Some(placement) = self.placement_for(old_key) else {
+            // Not pinned — nothing to move.
+            return Ok(None);
+        };
+        if placement.file_id == 0 {
+            return Err(format!(
+                "legacy path-keyed pin for '{}' cannot be renamed",
+                old_key
+            ));
+        }
+        let overwritten = self.forget_placement(new_key);
+        self.placements.insert(new_key.to_string(), placement.clone());
+        self.placements.remove(old_key);
+
+        let backend = Arc::clone(&self.backend);
+        let record = placement.to_record(new_key);
+        let old = old_key.to_string();
+        spawn_persist("placement_rename", move || async move {
+            backend.put_placement(&record).await?;
+            backend.delete_placement(&old).await
+        });
+        info!(
+            "Placement re-keyed for rename: '{}' → '{}' (file_id {:016x})",
+            old_key, new_key, placement.file_id
+        );
+        Ok(overwritten)
+    }
+
+    /// Enqueue best-effort deletion of a removed file's stripe files on
+    /// its pinned DSes. Drained into HeartbeatResponse instructions by
+    /// the control service. In-memory only: a lost queue leaks orphaned
+    /// stripe space, never correctness (a recreated file has a fresh
+    /// file_id and therefore fresh stripe paths).
+    pub fn enqueue_stripe_cleanup(&self, placement: &FilePlacement, file_key: &str) {
+        if placement.file_id == 0 {
+            // Legacy pin: stripes live at the path-rebased location,
+            // which the next same-name file would REUSE — deleting them
+            // matters more here, but the relative path depends on the
+            // export root which this layer doesn't know. The operations
+            // layer passes the rebased path via cleanup_legacy_rel_path.
+            return;
+        }
+        for (slot, device_id) in placement.device_ids.iter().enumerate() {
+            let rel = placement.stripe_rel_path(slot);
+            self.cleanup_queues
+                .entry(device_id.clone())
+                .or_default()
+                .push(rel);
+        }
+        info!(
+            "Stripe cleanup enqueued for '{}' (file_id {:016x}, {} DSes)",
+            file_key,
+            placement.file_id,
+            placement.device_ids.len()
+        );
+    }
+
+    /// Enqueue a legacy (path-keyed) stripe file for deletion on every
+    /// DS in the placement. `rel_path` is relative to the DS data dir.
+    pub fn enqueue_legacy_cleanup(&self, placement: &FilePlacement, rel_path: &str) {
+        for device_id in &placement.device_ids {
+            self.cleanup_queues
+                .entry(device_id.clone())
+                .or_default()
+                .push(rel_path.to_string());
+        }
+    }
+
+    /// Drain the pending stripe-cleanup paths for one DS (called by the
+    /// heartbeat handler; the batch rides the HeartbeatResponse).
+    pub fn drain_stripe_cleanup(&self, device_id: &str) -> Vec<String> {
+        self.cleanup_queues
+            .remove(device_id)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
     }
 
     /// Get-or-create the pinned placement for `file_key`.
@@ -431,6 +562,21 @@ impl LayoutManager {
         // sort again here so placement content is deterministic even
         // if the registry's ordering ever regresses.
         devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        // Capacity honesty: pins are forever, so warn loudly when a
+        // new file is being pinned onto a nearly-full DS. (Placement
+        // still proceeds — capacity-aware selection is future work;
+        // the client sees clean NOSPC from the DS if it truly fills.)
+        for d in &devices {
+            if d.capacity > 0 && d.used as f64 / d.capacity as f64 > 0.90 {
+                tracing::warn!(
+                    "📛 pinning '{}' onto nearly-full DS {} ({:.0}% used of {} GiB)",
+                    file_key,
+                    d.device_id,
+                    100.0 * d.used as f64 / d.capacity as f64,
+                    d.capacity / (1024 * 1024 * 1024)
+                );
+            }
+        }
         let device_ids: Vec<String> = devices.into_iter().map(|d| d.device_id).collect();
 
         let placement = self
@@ -439,6 +585,7 @@ impl LayoutManager {
             .or_insert_with(|| FilePlacement {
                 stripe_size: self.stripe_size,
                 device_ids,
+                file_id: allocate_file_id(),
             })
             .clone();
 
@@ -1445,6 +1592,7 @@ mod tests {
             file_key: "old-file".into(),
             stripe_size: 8 * 1024 * 1024,
             device_ids: vec!["ds-1".into(), "ds-2".into()],
+            file_id: 0,
         }]);
 
         let old = mgr
@@ -1500,6 +1648,100 @@ mod tests {
             .unwrap();
         assert_eq!(mgr.placement_for("f").unwrap().device_ids.len(), 2);
     }
+
+    /// P0-2 identity core: every pin allocates a unique nonzero
+    /// file_id, and a forget→re-pin cycle (NFS REMOVE + recreate)
+    /// yields a DIFFERENT id — the recreated file can never resolve
+    /// its predecessor's DS stripe files.
+    #[test]
+    fn remove_recreate_gets_fresh_file_id() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.generate_layout(test_owner(1), vec![1], "f", 0, 8 << 20, IoMode::ReadWrite).unwrap();
+        let first = mgr.placement_for("f").unwrap();
+        assert_ne!(first.file_id, 0, "new pins must be identity-keyed");
+
+        let forgotten = mgr.forget_placement("f").expect("pin existed");
+        assert_eq!(forgotten.file_id, first.file_id);
+
+        mgr.generate_layout(test_owner(1), vec![2], "f", 0, 8 << 20, IoMode::ReadWrite).unwrap();
+        let second = mgr.placement_for("f").unwrap();
+        assert_ne!(second.file_id, 0);
+        assert_ne!(second.file_id, first.file_id, "recreated file must get a fresh identity");
+    }
+
+    /// RENAME re-keys the pin without touching the identity, so the
+    /// data (keyed by file_id on the DSes) follows the new name.
+    #[test]
+    fn rename_moves_pin_keeps_identity() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.generate_layout(test_owner(1), vec![1], "old", 0, 16 << 20, IoMode::ReadWrite).unwrap();
+        let before = mgr.placement_for("old").unwrap();
+
+        let overwritten = mgr.rename_placement("old", "new").unwrap();
+        assert!(overwritten.is_none());
+        assert!(mgr.placement_for("old").is_none());
+        let after = mgr.placement_for("new").unwrap();
+        assert_eq!(after.file_id, before.file_id, "identity must survive rename");
+        assert_eq!(after.device_ids, before.device_ids);
+    }
+
+    /// Rename-over: the clobbered target's pin comes back so the
+    /// caller can reclaim its stripes.
+    #[test]
+    fn rename_over_returns_overwritten_pin() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.generate_layout(test_owner(1), vec![1], "src", 0, 8 << 20, IoMode::ReadWrite).unwrap();
+        mgr.generate_layout(test_owner(1), vec![2], "dst", 0, 8 << 20, IoMode::ReadWrite).unwrap();
+        let dst_id = mgr.placement_for("dst").unwrap().file_id;
+
+        let overwritten = mgr.rename_placement("src", "dst").unwrap().expect("dst pin returned");
+        assert_eq!(overwritten.file_id, dst_id);
+    }
+
+    /// Legacy (file_id 0) pins refuse rename — their DS stripes are
+    /// path-keyed; the op layer surfaces NFS4ERR_NOTSUPP.
+    #[test]
+    fn rename_refuses_legacy_pin() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+        mgr.load_placement_records(vec![PlacementRecord {
+            file_key: "legacy".into(),
+            stripe_size: 8 << 20,
+            device_ids: vec!["ds-1".into()],
+            file_id: 0,
+        }]);
+        assert!(mgr.rename_placement("legacy", "elsewhere").is_err());
+        assert!(mgr.placement_for("legacy").is_some(), "refused rename must not lose the pin");
+    }
+
+    /// Cleanup queue: REMOVE enqueues one stripe path per DS slot,
+    /// drained exactly once per device.
+    #[test]
+    fn cleanup_queue_per_slot_paths() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.generate_layout(test_owner(1), vec![1], "gone", 0, 16 << 20, IoMode::ReadWrite).unwrap();
+        let p = mgr.forget_placement("gone").unwrap();
+        mgr.enqueue_stripe_cleanup(&p, "gone");
+
+        let ds1 = mgr.drain_stripe_cleanup("ds-1");
+        let ds2 = mgr.drain_stripe_cleanup("ds-2");
+        assert_eq!(ds1, vec![format!("{:016x}.stripe0", p.file_id)]);
+        assert_eq!(ds2, vec![format!("{:016x}.stripe1", p.file_id)]);
+        assert!(mgr.drain_stripe_cleanup("ds-1").is_empty(), "drain is once-only");
+    }
 }
-
-

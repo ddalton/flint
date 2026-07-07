@@ -16,6 +16,42 @@ restart in sqlite on its PVC.
 
 ---
 
+## Trust model (production checklist)
+
+The NFS data path runs `sec=null` — RPC AUTH_NONE, no caller
+identity. The trust boundary is therefore **network reachability**,
+and the chart ships two layers to make that boundary real:
+
+1. **Control-plane token** (`pnfs.controlToken`, default ON with the
+   in-chart server): every MDS gRPC call — DS registration,
+   heartbeats, CSI CreateVolume/DeleteVolume — must present a Bearer
+   token from a chart-generated Secret (`flint-pnfs-control-token`;
+   reused across upgrades, or bring your own via
+   `controlToken.existingSecret`). Without it, any pod that can reach
+   50051 can register itself as a data server and new files will
+   stripe onto it — data exfiltration by registration. The MDS logs a
+   loud boot warning when the token is off.
+2. **NetworkPolicies** (`pnfs.networkPolicy`, default OFF — enable in
+   production): 2049 on MDS+DS admits only `nodeCIDRs` (NFS mounts
+   originate from the NODE kernel via kubelet, never from pod IPs —
+   which also means hostNetwork pods share the node's network
+   identity and are inside the boundary); 50051 admits only the DS
+   fleet and the CSI controller pods. Requires a CNI that enforces
+   NetworkPolicy (Cilium does). An empty `nodeCIDRs` with the policy
+   enabled blocks ALL NFS traffic — deliberate, set your node CIDR.
+
+What this does NOT give you: per-user authentication or wire
+encryption. The server has a dormant pure-Rust RPCSEC_GSS/Kerberos
+implementation (krb5/krb5i/krb5p, keytab via `KRB5_KTNAME`) — wiring
+it up (KDC, per-node keytabs, rpc.gssd, `sec=krb5p` mount opts) is
+the documented strong-auth path when a deployment needs it, validated
+via pynfs `--security=krb5`. RPC-with-TLS (`xprtsec=mtls`, RFC 9289)
+becomes attractive once client kernels reach ≥ 6.5. Client-side
+`nfs.delay_retrans` (≥ 6.7, needs `softerr`) is defense-in-depth
+against server DELAY loops, not an auth mechanism.
+
+---
+
 ## MDS pod roll / restart
 
 Drill: `tests/k8s/pnfs-drills/mds-roll.sh` (and the harsher in-place
@@ -158,18 +194,50 @@ flint-pnfs-ds --cascade=orphan`, then helm upgrade with the new
 `pnfs.server.dataServers.storage.storageClassName` and count. Existing
 PVCs keep their old SC; only new ordinals get the replicated one.
 
-## Placement pins are per file-key, forever
+## Capacity and ENOSPC
 
-Placements pin at first LAYOUTGET and persist in sqlite. Two
-operational consequences:
+DSes report real filesystem capacity/used (statvfs of the export
+tree) at registration and on every heartbeat — pre-hardening builds
+reported a hard-coded 1 TB. Pinning a new file onto a DS that is
+> 90 % full logs a `nearly-full DS` warning on the MDS (placement
+still proceeds; capacity-aware selection is future work).
 
-- pNFS pods mount the **export root**, so file names are a global
-  namespace: re-creating a file with a name that was striped under an
-  older, narrower fleet reuses the OLD pin (correct, but the file
-  won't use new DSes). Benchmarks and drills must use unique names.
-- NFS `REMOVE` (rm) does not currently forget the pin — only CSI
-  DeleteVolume does. A recreated same-name file inherits the old
-  stripe map. Tracked as a follow-up in the durable-DS plan.
+When a DS actually fills: the write fails **bounded and clean** — no
+hang, no corruption of already-written stripes — and the DS logs the
+honest cause (`DS WRITE failed … No space left`, returning
+NFS4ERR_NOSPC). Caveat: the APPLICATION currently sees EIO rather
+than ENOSPC, because the kernel responds to any DS write error by
+retrying through the MDS, where the fallback guard fails fast (the
+fleet looks healthy, so the fallback is treated as a trapped client).
+End-to-end ENOSPC preservation arrives with MDS proxy I/O. Drill:
+`tests/lima/pnfs/enospc-drill.sh` (make test-pnfs-enospc).
+
+## Placement pins, file identity, REMOVE and RENAME
+
+Placements pin at first LAYOUTGET and persist in sqlite. Since the
+production-hardening batch (2026-07-06), every new pin also allocates
+an immutable **file_id**, layouts carry per-DS file-ID filehandles,
+and DS stripes live at `{file_id:016x}.stripeN` — identity-keyed, not
+path-keyed. Consequences:
+
+- **REMOVE forgets the pin** and enqueues best-effort DS stripe
+  cleanup (piggybacked on heartbeats). A recreated same-name file
+  gets a fresh placement AND a fresh identity — it can never read its
+  predecessor's stripes, even if cleanup hasn't run yet.
+- **RENAME is a pure metadata op** for identity-keyed files: the pin
+  re-keys, the data follows (the stripe rotation is derived from
+  file_id, so readers under the new name reassemble correctly —
+  drill-verified cold-cache). Rename-over a striped target forgets
+  the target's pin and reclaims its stripes.
+- **Legacy pins** (pre-hardening, file_id 0) keep path-keyed DS
+  storage: their RENAME is REFUSED with NFS4ERR_NOTSUPP (before the
+  fix it silently served zeros to fresh readers) and their REMOVE
+  cleanup covers the path-rebased stripe files. `cp` to a new name to
+  "rename" a legacy striped file.
+- Hard LINKs to striped files are refused (a second name would have
+  no pin and would read the sparse stub).
+- CSI DeleteVolume forgets the volume file's pin and reclaims its
+  stripes the same way.
 
 ## Scaling the DS fleet
 

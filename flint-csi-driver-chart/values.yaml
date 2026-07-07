@@ -298,6 +298,37 @@ pnfs:
   #                                        provisioned by this chart)
   mdsEndpoint: ""
 
+  # ── Control-plane auth ────────────────────────────────────────────
+  # Bearer token required on every MDS gRPC (50051) call: DS
+  # registration/heartbeats and CSI CreateVolume/DeleteVolume. Without
+  # it, ANY pod that can reach 50051 can register itself as a data
+  # server and attract stripe writes. Enabled ⇒ the chart creates a
+  # Secret with a random token (or uses controlToken.existingSecret)
+  # and injects FLINT_PNFS_CONTROL_TOKEN into the MDS, DS fleet, and
+  # CSI controller. Default ON whenever the in-chart server is
+  # deployed — turning it off prints a loud MDS boot warning.
+  controlToken:
+    enabled: true
+    # Name of an existing Secret with key `token` to use instead of a
+    # chart-generated one (e.g. for GitOps-managed secrets).
+    existingSecret: ""
+
+  # ── Network isolation (Tier A) ────────────────────────────────────
+  # NetworkPolicies for the pNFS ports. NFS mounts originate from the
+  # NODE kernel (kubelet NodeStage), so 2049 must admit node-CIDR
+  # traffic — set nodeCIDRs to your node network(s). hostNetwork pods
+  # share the node identity and are admitted too; combine with the
+  # control token (above) for the control plane. Default OFF because a
+  # wrong/missing nodeCIDR breaks every pNFS mount; enable it as part
+  # of the production checklist (see docs/pnfs-operator-runbook.md,
+  # "Trust model").
+  networkPolicy:
+    enabled: false
+    # CIDRs the NFS data ports (2049 on MDS + DSes) accept, e.g.
+    # ["172.31.0.0/16"]. REQUIRED when enabled — an empty list renders
+    # a policy that blocks all NFS traffic.
+    nodeCIDRs: []
+
   # In-chart pNFS server fleet (durable-DS plan Phase 1).
   server:
     enabled: false

@@ -44,7 +44,19 @@ pub fn generate_pnfs_filehandle(
     stripe_index: u32,
 ) -> Nfs4FileHandle {
     let file_id = generate_file_id(filename);
-    
+    generate_pnfs_filehandle_from_id(instance_id, file_id, stripe_index)
+}
+
+/// Generate a v2 filehandle from an ALLOCATED file identity (the
+/// placement's `file_id`). Prefer this over the name-hash variant:
+/// name-derived ids are deterministic, so a recreated same-name file
+/// would collide with its predecessor's DS stripe files — exactly the
+/// stale-data class the allocated id exists to prevent.
+pub fn generate_pnfs_filehandle_from_id(
+    instance_id: u64,
+    file_id: u64,
+    stripe_index: u32,
+) -> Nfs4FileHandle {
     let mut data = Vec::with_capacity(21);
     
     // Version 2 = pNFS file-ID based

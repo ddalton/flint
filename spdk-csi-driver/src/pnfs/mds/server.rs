@@ -132,6 +132,7 @@ impl MetadataServer {
         let operation_handler = Arc::new(PnfsOperationHandler::new(
             Arc::clone(&layout_manager),
             Arc::clone(&device_registry),
+            export_path.to_string_lossy().into_owned(),
         ));
 
         // Initialize NFSv4 dispatcher WITH pNFS support
@@ -338,7 +339,34 @@ impl MetadataServer {
             let control_service = MdsControlService::new(
                 device_registry, configured_endpoints, export_path, layout_manager, nfs_port,
             );
-            let svc = MdsControlServer::new(control_service);
+
+            // Control-plane auth: when FLINT_PNFS_CONTROL_TOKEN is set,
+            // every MdsControl RPC must carry it as a Bearer token.
+            // This is what stops an arbitrary pod from registering
+            // itself as a DS (and attracting stripe writes for new
+            // files) or calling CreateVolume/DeleteVolume. Unset =
+            // open (backward compatible) with a loud boot warning.
+            let token = std::env::var("FLINT_PNFS_CONTROL_TOKEN").ok();
+            match &token {
+                Some(_) => info!("🔐 MDS control plane requires a bearer token"),
+                None => warn!(
+                    "⚠️ FLINT_PNFS_CONTROL_TOKEN unset — MDS control plane is UNAUTHENTICATED \
+                     (any pod that can reach 50051 can register as a DS)"
+                ),
+            }
+            let expected = token.map(|t| format!("Bearer {}", t));
+            let svc = tonic::service::interceptor::InterceptedService::new(
+                MdsControlServer::new(control_service),
+                move |req: tonic::Request<()>| match &expected {
+                    None => Ok(req),
+                    Some(want) => match req.metadata().get("authorization") {
+                        Some(got) if got.to_str().map(|s| s == want).unwrap_or(false) => Ok(req),
+                        _ => Err(tonic::Status::unauthenticated(
+                            "missing or invalid control-plane token",
+                        )),
+                    },
+                },
+            );
 
             info!("🔧 Starting MDS gRPC control server on {}", grpc_addr);
 

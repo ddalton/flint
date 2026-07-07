@@ -23,6 +23,47 @@ use tracing::{info, warn};
 pub use proto::mds_control_server::{MdsControl, MdsControlServer};
 pub use proto::mds_control_client::MdsControlClient;
 
+/// Client-side control-plane auth: attaches FLINT_PNFS_CONTROL_TOKEN
+/// as a Bearer token to every outgoing MdsControl RPC. The token is
+/// read once; unset = no header (matches an MDS with auth disabled).
+#[derive(Clone)]
+pub struct ControlTokenInterceptor;
+
+fn control_token_header() -> Option<&'static tonic::metadata::MetadataValue<tonic::metadata::Ascii>> {
+    static HEADER: std::sync::OnceLock<
+        Option<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>,
+    > = std::sync::OnceLock::new();
+    HEADER
+        .get_or_init(|| {
+            std::env::var("FLINT_PNFS_CONTROL_TOKEN")
+                .ok()
+                .and_then(|t| format!("Bearer {}", t).parse().ok())
+        })
+        .as_ref()
+}
+
+impl tonic::service::Interceptor for ControlTokenInterceptor {
+    fn call(&mut self, mut req: Request<()>) -> Result<Request<()>, Status> {
+        if let Some(header) = control_token_header() {
+            req.metadata_mut().insert("authorization", header.clone());
+        }
+        Ok(req)
+    }
+}
+
+/// An MdsControl client that carries the control-plane token.
+pub type AuthedMdsControlClient = MdsControlClient<
+    tonic::service::interceptor::InterceptedService<
+        tonic::transport::Channel,
+        ControlTokenInterceptor,
+    >,
+>;
+
+/// Build a token-attaching MdsControl client over `channel`.
+pub fn authed_mds_control_client(channel: tonic::transport::Channel) -> AuthedMdsControlClient {
+    MdsControlClient::with_interceptor(channel, ControlTokenInterceptor)
+}
+
 /// MDS Control Service Implementation
 ///
 /// This runs on the MDS and handles DS registration, heartbeats, etc.
@@ -90,8 +131,8 @@ impl MdsControl for MdsControlService {
             .unwrap_or_else(|| req.endpoint.clone());
         if effective_endpoint != req.endpoint {
             info!(
-                "📝 DS Registration: device_id={}, ds-reported endpoint={} → using configured endpoint={}",
-                req.device_id, req.endpoint, effective_endpoint,
+                "📝 DS Registration: device_id={}, ds-reported endpoint={} → using configured endpoint={}, capacity={} bytes",
+                req.device_id, req.endpoint, effective_endpoint, req.capacity,
             );
         } else {
             info!(
@@ -171,9 +212,30 @@ impl MdsControl for MdsControlService {
             warn!("Failed to update status for {}: {}", req.device_id, e);
         }
 
+        // Piggyback pending stripe-file cleanups (from NFS REMOVE /
+        // rename-over of striped files) on the heartbeat response.
+        // Drained once, best-effort: a DS that dies before applying
+        // them leaks orphaned stripe space, never correctness.
+        let instructions: Vec<Instruction> = self
+            .layout_manager
+            .drain_stripe_cleanup(&req.device_id)
+            .into_iter()
+            .map(|rel_path| Instruction {
+                r#type: InstructionType::DeleteStripeFile as i32,
+                details: rel_path,
+            })
+            .collect();
+        if !instructions.is_empty() {
+            info!(
+                "🧹 {} stripe-cleanup instruction(s) → {}",
+                instructions.len(),
+                req.device_id
+            );
+        }
+
         Ok(Response::new(HeartbeatResponse {
             acknowledged: true,
-            instructions: vec![],  // TODO: Add instructions based on MDS state
+            instructions,
         }))
     }
 
@@ -343,8 +405,15 @@ impl MdsControl for MdsControlService {
             Ok(()) => {
                 info!("🗑️  DeleteVolume: removed {:?}", file_path);
                 // The placement key is the export-relative path — for
-                // CSI volumes that's exactly the volume_id.
-                self.layout_manager.forget_placement(&req.volume_id);
+                // CSI volumes that's exactly the volume_id. Reclaim
+                // the volume file's DS stripes too (identity-keyed
+                // pins only; legacy pins have no MDS-side rel-path
+                // knowledge here and just leak until scrubbed).
+                if let Some(p) = self.layout_manager.forget_placement(&req.volume_id) {
+                    if p.file_id != 0 {
+                        self.layout_manager.enqueue_stripe_cleanup(&p, &req.volume_id);
+                    }
+                }
                 Ok(Response::new(DeleteVolumeResponse {
                     deleted: true,
                     message: String::new(),
@@ -352,7 +421,11 @@ impl MdsControl for MdsControlService {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 info!("🗑️  DeleteVolume: {} already absent", req.volume_id);
-                self.layout_manager.forget_placement(&req.volume_id);
+                if let Some(p) = self.layout_manager.forget_placement(&req.volume_id) {
+                    if p.file_id != 0 {
+                        self.layout_manager.enqueue_stripe_cleanup(&p, &req.volume_id);
+                    }
+                }
                 Ok(Response::new(DeleteVolumeResponse {
                     deleted: true,
                     message: "already absent".into(),

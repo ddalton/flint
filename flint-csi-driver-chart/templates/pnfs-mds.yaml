@@ -131,6 +131,15 @@ spec:
               value: "mds"
             - name: RUST_LOG
               value: {{ .Values.pnfs.server.logLevel | default "info" | quote }}
+            {{- if .Values.pnfs.controlToken.enabled }}
+            # Required Bearer token on every MdsControl gRPC — see
+            # templates/pnfs-security.yaml.
+            - name: FLINT_PNFS_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.pnfs.controlToken.existingSecret | default "flint-pnfs-control-token" }}
+                  key: token
+            {{- end }}
           ports:
             - containerPort: 2049
               name: nfs

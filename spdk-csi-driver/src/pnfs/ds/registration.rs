@@ -11,7 +11,7 @@
 //! - Streaming support for future optimizations
 
 use crate::pnfs::Result;
-use crate::pnfs::grpc::{MdsControlClient, RegisterRequest, HeartbeatRequest, UnregisterRequest, HealthStatus};
+use crate::pnfs::grpc::{RegisterRequest, HeartbeatRequest, UnregisterRequest, HealthStatus, Instruction};
 use std::time::Duration;
 use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 pub struct RegistrationClient {
     device_id: String,
     mds_endpoint: String,
-    grpc_client: Option<MdsControlClient<Channel>>,
+    grpc_client: Option<crate::pnfs::grpc::AuthedMdsControlClient>,
 }
 
 impl RegistrationClient {
@@ -53,10 +53,15 @@ impl RegistrationClient {
 
         info!("Connecting to MDS gRPC service at {}", endpoint);
 
-        match MdsControlClient::connect(endpoint).await {
-            Ok(client) => {
+        let channel = Channel::from_shared(endpoint.clone())
+            .map_err(|e| crate::pnfs::Error::Registration(format!("bad MDS endpoint: {}", e)))?
+            .connect()
+            .await;
+        match channel {
+            Ok(channel) => {
                 info!("✅ Connected to MDS gRPC service");
-                self.grpc_client = Some(client);
+                // Carries FLINT_PNFS_CONTROL_TOKEN when configured.
+                self.grpc_client = Some(crate::pnfs::grpc::authed_mds_control_client(channel));
                 Ok(())
             }
             Err(e) => {
@@ -124,17 +129,19 @@ impl RegistrationClient {
         }
     }
 
-    /// Send heartbeat to MDS via gRPC
+    /// Send heartbeat to MDS via gRPC. Returns
+    /// `(acknowledged, instructions)` — the caller applies any
+    /// MDS-piggybacked instructions (e.g. stripe-file cleanup).
     pub async fn heartbeat(
         &mut self,
         capacity: u64,
         used: u64,
         active_connections: u32,
-    ) -> Result<bool> {
+    ) -> Result<(bool, Vec<Instruction>)> {
         // Ensure connected
         if let Err(e) = self.connect().await {
             warn!("Failed to connect for heartbeat: {}", e);
-            return Ok(false);
+            return Ok((false, vec![]));
         }
 
         let client = self.grpc_client.as_mut()
@@ -155,15 +162,15 @@ impl RegistrationClient {
                 let resp = response.into_inner();
                 if resp.acknowledged {
                     debug!("✅ Heartbeat acknowledged by MDS");
-                    Ok(true)
+                    Ok((true, resp.instructions))
                 } else {
                     warn!("⚠️ Heartbeat not acknowledged by MDS");
-                    Ok(false)
+                    Ok((false, resp.instructions))
                 }
             }
             Err(e) => {
                 warn!("❌ Heartbeat gRPC call failed: {}", e);
-                Ok(false)  // Don't fail, just log
+                Ok((false, vec![]))  // Don't fail, just log
             }
         }
     }
