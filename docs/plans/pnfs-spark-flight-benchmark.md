@@ -209,14 +209,49 @@ defect a real application surfaces that the `fio` bench did not:**
    and as root, so it is not a permission or concurrency race — it is an
    NFS close-to-open visibility interaction with the rename-based
    committer. The **read path is unaffected** (full scan + aggregation
-   succeed). **Workaround used:** write results with plain file I/O
-   (collect the small summary to the driver, `open().write()`) — that
-   persists to pNFS cleanly and is re-readable from another mount. Fix
-   direction for real Spark-on-pNFS: use a no-rename / direct output
-   committer, or a shallow output path, rather than the default
-   FileOutputCommitter staging.
+   succeed). **What was tried (2026-07-07):**
+   `spark.hadoop.fs.file.impl=org.apache.hadoop.fs.RawLocalFileSystem`
+   did **not** fix it (same error) — the failing op is Java
+   `File.mkdirs()` itself, not the checksum layer. `lookupcache=none`
+   avoids the mkdir failure (see Finding 3) but makes metadata-heavy
+   reads unusably slow. **Working approach:** write Parquet to a flint
+   **RWO block PVC** (ext4/NVMe — committer works there), then copy the
+   finished files onto the pNFS mount with plain I/O. Fix direction for
+   native Spark-on-pNFS write: a no-rename / direct output committer.
 
-Both are recorded here rather than as a new ADR because the scaling
+3. **NFS negative-lookup caching breaks Java `File.mkdirs()` (root
+   cause of #2).** Shell `mkdir -p a/b/c/d/e` and the exact Spark
+   committer path (`_temporary/0/_temporary/attempt_x`) both succeed on
+   the pNFS mount — so it is **not** a pNFS limitation. Java's
+   `mkdirs()` creates a level, re-`stat`s it, and the NFS client returns
+   a **cached negative lookup** → `mkdirs` returns false → `IOException`.
+   Mounting with `lookupcache=none` (or `actimeo=0`) makes it succeed,
+   confirming the cause. Not flint's bug per se (kernel NFS client
+   behaviour), but it shapes how apps must write to pNFS.
+
+4. **MDS metadata filehandle has an ~85-byte path limit (P2, real
+   usability bug).** Long filenames fail: `OPEN: Failed to generate
+   filehandle for new file: Path too long for file handle` →
+   `COMPOUND … status Io` → the client sees **EIO**. Cause
+   (`nfs/v4/filehandle.rs::generate_handle`): the MDS metadata
+   filehandle is **path-based** — it embeds the literal path *plus* a
+   redundant 32-byte SHA-256 of it: `1 (version) + 8 (instance_id) +
+   32 (hash) + 2 (len) = 43` fixed bytes, and `MAX_SIZE = 128` (the
+   RFC 8881 `NFS4_FHSIZE`), leaving only **85 bytes for the path**.
+   Spark's Parquet part names (`part-00000-<uuid>-c000.snappy.parquet`,
+   ~62 chars, plus the `.crc` sidecar and dir prefix) blow past 85 → the
+   whole write fails, and half-written stripe files are then
+   **un-deletable** (`Remote I/O error`), poisoning that path. This is
+   spec-compliant (128 is the spec max) but self-inflicted: the spec
+   says filehandles are *opaque*, not that the path must be embedded.
+   Flint's **DS-side** pNFS v2 FH (`filehandle_pnfs.rs`) is already
+   id-based (21 bytes, no path) — the MDS metadata FH should adopt the
+   same id↔path table so path length stops mattering. Directly worsens
+   with Finding 1's directory model (deeper `<volume_id>/<name>` paths).
+   **Workaround used:** copy Parquet to pNFS with short names
+   (`p0000.parquet`) and skip `.crc` sidecars.
+
+Both #1 and #2 are recorded here rather than as a new ADR because the scaling
 sweep (the ADR-worthy result) hasn't run yet; fold them into that ADR
 when it does. Neither blocks the *architecture* — the pNFS data path
 reads/writes correctly via the direct mount; they block the *CSI
@@ -314,6 +349,33 @@ Parquet + distributed executors are the Phase 1–2 work), converged
 placement, single run, N capped at 4 (8 nodes). N=8 and the
 Parquet-Spark headline need more nodes and the CSI/committer fixes
 (Findings 1–2). Fold into the ADR when those land.
+
+### CSV vs Parquet — the storage-bound proof (2026-07-07)
+
+The whole reason the plan mandates Parquet: the CSV Spark scan was
+CPU-bound (~88 MB/s parsing text). Converting the *same* 161,652,480
+rows to Parquet (Snappy, 3.36 GB vs 15.94 GB CSV) and running the
+identical carrier aggregation, cold, single-node `local[*]`:
+
+| Format | Scan time | Effective row rate | Bound by |
+|---|---:|---:|---|
+| CSV, 15.94 GB | 180.2 s | 0.9 M rows/s | CPU (text parse) |
+| Parquet, 3.36 GB | **6.15 s** | **26 M rows/s (~29×)** | storage |
+
+3.36 GB / 6.15 s ≈ **546 MB/s** — essentially the raw sequential-read
+storage rate (507 MB/s single-stream). So Parquet flips the Spark scan
+from CPU-bound to **storage-bound**, confirming the plan's mandate:
+columnar + pre-typed + Snappy cuts both bytes-on-wire and CPU/byte.
+
+**How the Parquet got onto pNFS (Fix 2 in practice).** Direct
+`df.write.parquet("file:///…pnfs…")` fails (Findings 2/3/4:
+`File.mkdirs` negative-lookup caching, and long Parquet filenames blow
+the 85-byte MDS filehandle path limit → EIO + un-deletable debris).
+Working recipe used here: write Parquet to a **flint RWO block PVC**
+(ext4/NVMe — committer works), then `cp` to pNFS with **short
+filenames** (`p0000.parquet`, skip `.crc`). 120 parts / 3.36 GB landed
+clean and re-read from a fresh mount. This is the Phase 1–2 harness
+pattern until Findings 2/4 are fixed in the driver.
 
 ### Phase 1 — data prep
 
