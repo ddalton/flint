@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Activity, AlertTriangle, Timer, Zap } from 'lucide-react';
 import { WINDOW_TARGET_MS } from '../../hooks/useEvents';
 import { ProgressBar } from '../ui/ProgressBar';
+import { Chip } from '../ui/Chip';
 import type { EngineEvent, EventCategory, HotRejoinWindow } from '../../hooks/useEvents';
 
 // The after-the-fact surfaces for what the live sync indicator cannot show —
@@ -51,32 +52,31 @@ function WindowRow({ w, showVolume }: { w: HotRejoinWindow; showVolume: boolean 
             valueText={`${w.window_ms}ms of ${WINDOW_TARGET_MS}ms target`}
             tone={overTarget ? 'warn' : 'ok'}
           />
-          <span className={`text-sm font-medium tabular-nums ${overTarget ? 'text-amber-700' : 'text-green-700'}`}>
+          <span className={`text-sm font-medium tabular-nums ${overTarget ? 'text-warning-700' : 'text-healthy-700'}`}>
             {w.window_ms}ms
           </span>
           {overTarget && (
             <span title={`Over the ${WINDOW_TARGET_MS}ms target`}>
-              <AlertTriangle className="w-4 h-4 text-amber-500" />
+              <AlertTriangle className="w-4 h-4 text-warning-500" />
             </span>
           )}
         </div>
       </td>
       <td className="px-4 py-3 whitespace-nowrap">
-        <span
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${
+        <Chip
+          label={w.path}
+          chip={
             w.path === 'inline'
-              ? 'bg-green-100 text-green-800 border-green-200'
-              : 'bg-blue-100 text-blue-800 border-blue-200'
-          }`}
+              ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
+              : 'bg-brand-100 text-brand-800 border-brand-200'
+          }
+          icon={w.path === 'inline' ? Zap : Timer}
           title={
             w.path === 'inline'
               ? 'Final delta copied inside the window — fully redundant immediately'
               : 'Esnap clone in the window; chain localized afterwards'
           }
-        >
-          {w.path === 'inline' ? <Zap className="w-3 h-3" /> : <Timer className="w-3 h-3" />}
-          {w.path}
-        </span>
+        />
         {estimator && <span className="ml-2 text-xs text-gray-500">{estimator} est.</span>}
       </td>
       <td className="px-4 py-3 text-xs text-gray-500">
@@ -92,11 +92,11 @@ function EventRow({ e, showVolume }: { e: EngineEvent; showVolume: boolean }) {
     <div className="flex items-start gap-3 px-4 py-3 hover:bg-gray-50">
       <span
         aria-hidden="true"
-        className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${warning ? 'bg-amber-500' : 'bg-green-500'}`}
+        className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${warning ? 'bg-warning-500' : 'bg-healthy-500'}`}
       />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2">
-          <span className={`text-sm font-semibold ${warning ? 'text-amber-800' : 'text-gray-900'}`}>
+          <span className={`text-sm font-semibold ${warning ? 'text-warning-800' : 'text-gray-900'}`}>
             {e.reason}
           </span>
           {showVolume && (
@@ -192,7 +192,7 @@ export function EventTimelinePanel({
             onClick={() => setCategory('all')}
             className={`px-2 py-1 text-xs rounded-full border ${
               category === 'all'
-                ? 'bg-blue-100 text-blue-800 border-blue-300'
+                ? 'bg-brand-100 text-brand-800 border-brand-300'
                 : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
             }`}
           >
@@ -204,7 +204,7 @@ export function EventTimelinePanel({
               onClick={() => setCategory(c)}
               className={`px-2 py-1 text-xs rounded-full border ${
                 category === c
-                  ? 'bg-blue-100 text-blue-800 border-blue-300'
+                  ? 'bg-brand-100 text-brand-800 border-brand-300'
                   : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
               }`}
             >

@@ -133,15 +133,15 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
   ];
 
   const getEfficiencyColor = (efficiency: number) => {
-    if (efficiency < 0.1) return 'text-green-600';
-    if (efficiency < 0.3) return 'text-yellow-600';
-    return 'text-red-600';
+    if (efficiency < 0.1) return 'text-healthy-600';
+    if (efficiency < 0.3) return 'text-degraded-600';
+    return 'text-failed-600';
   };
 
   const getEfficiencyBadge = (efficiency: number) => {
-    if (efficiency < 0.1) return 'bg-green-100 text-green-800';
-    if (efficiency < 0.3) return 'bg-yellow-100 text-yellow-800';
-    return 'bg-red-100 text-red-800';
+    if (efficiency < 0.1) return 'bg-healthy-100 text-healthy-800';
+    if (efficiency < 0.3) return 'bg-degraded-100 text-degraded-800';
+    return 'bg-failed-100 text-failed-800';
   };
 
   return (
@@ -150,7 +150,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white rounded-lg shadow p-6">
           <div className="flex items-center">
-            <Database className="w-8 h-8 text-blue-600 mr-3" />
+            <Database className="w-8 h-8 text-brand-600 mr-3" />
             <div>
               <p className="text-sm font-medium text-gray-600">Total Logical Storage</p>
               <p className="text-stat text-gray-900">{formatSize(aggregateStats.totalLogical)}</p>
@@ -160,6 +160,8 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
         
         <div className="bg-white rounded-lg shadow p-6">
           <div className="flex items-center">
+            {/* raw on purpose: green/orange here echo the chart's data-series
+                colors (Actual Data / Snapshot Overhead), not health status */}
             <HardDrive className="w-8 h-8 text-green-600 mr-3" />
             <div>
               <p className="text-sm font-medium text-gray-600">Actual Data Used</p>
@@ -199,17 +201,17 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
 
       {/* Efficiency Alerts */}
       {aggregateStats.inefficientVolumes > 0 && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+        <div className="bg-failed-50 border border-failed-200 rounded-lg p-4">
           <div className="flex items-center gap-2 mb-2">
-            <AlertTriangle className="w-5 h-5 text-red-600" />
-            <h3 className="font-medium text-red-800">Storage Efficiency Alert</h3>
+            <AlertTriangle className="w-5 h-5 text-failed-600" />
+            <h3 className="font-medium text-failed-800">Storage Efficiency Alert</h3>
           </div>
-          <p className="text-sm text-red-700">
+          <p className="text-sm text-failed-700">
             {aggregateStats.inefficientVolumes} volume{aggregateStats.inefficientVolumes !== 1 ? 's have' : ' has'} high 
             snapshot overhead (&gt;30% of logical size). Consider cleaning up old snapshots or reviewing snapshot retention policies.
           </p>
           {aggregateStats.storageWasted > 0 && (
-            <p className="text-sm text-red-700 mt-1">
+            <p className="text-sm text-failed-700 mt-1">
               Estimated wasted storage: <strong>{formatSize(aggregateStats.storageWasted)}</strong>
             </p>
           )}
@@ -221,7 +223,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
         {/* Overall Storage Distribution */}
         <div className="bg-white rounded-lg shadow p-6">
           <h3 className="text-section mb-4 flex items-center gap-2">
-            <PieChart className="w-5 h-5 text-blue-600" />
+            <PieChart className="w-5 h-5 text-brand-600" />
             Overall Storage Distribution
           </h3>
           <ResponsiveContainer width="100%" height={300}>
@@ -249,6 +251,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
         {/* Volume Storage Comparison */}
         <div className="bg-white rounded-lg shadow p-6">
           <h3 className="text-section mb-4 flex items-center gap-2">
+            {/* raw on purpose: echoes the green Actual-Data series below, not status */}
             <BarChart3 className="w-5 h-5 text-green-600" />
             Volume Storage Breakdown
           </h3>
@@ -288,7 +291,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
                 placeholder="Search volumes..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-10 pr-4 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="pl-10 pr-4 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
             </div>
 
@@ -296,7 +299,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             <select
               value={filterThreshold}
               onChange={(e) => setFilterThreshold(e.target.value as 'all' | 'high' | 'medium' | 'low')}
-              className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
             >
               <option value="all">All Efficiency Levels</option>
               <option value="high">High Overhead (&gt;30%)</option>
@@ -308,7 +311,7 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as 'overhead' | 'efficiency' | 'count')}
-              className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
             >
               <option value="overhead">Sort by Overhead</option>
               <option value="efficiency">Sort by Efficiency</option>
@@ -332,6 +335,8 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
                 <h4 className="text-section text-gray-900">{card.volumeName}</h4>
                 <p className="text-sm text-gray-600">{card.volumeId}</p>
               </div>
+              {/* not Chip: text-sm/px-3 sizing and borderless look differ from
+                  the Chip primitive — semantic tokens only */}
               <div className={`px-3 py-1 rounded-full text-sm font-medium ${getEfficiencyBadge(card.efficiency)}`}>
                 {(card.efficiency * 100).toFixed(1)}% overhead
               </div>
@@ -343,6 +348,8 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
                 <span className="text-gray-600">Logical Size:</span>
                 <span className="font-medium">{formatSize(card.logicalSize)}</span>
               </div>
+              {/* raw on purpose: green/orange are the chart's data-series
+                  colors (Actual Data / Snapshot Overhead), not status */}
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">Actual Data:</span>
                 <span className="font-medium text-green-600">{formatSize(card.actualDataSize)}</span>
@@ -369,8 +376,8 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
               <div className="w-full bg-gray-200 rounded-full h-2">
                 <div 
                   className={`h-2 rounded-full ${
-                    card.efficiency < 0.1 ? 'bg-green-500' :
-                    card.efficiency < 0.3 ? 'bg-yellow-500' : 'bg-red-500'
+                    card.efficiency < 0.1 ? 'bg-healthy-500' :
+                    card.efficiency < 0.3 ? 'bg-degraded-500' : 'bg-failed-500'
                   }`}
                   style={{ width: `${Math.min(card.efficiency * 100, 100)}%` }}
                 />
@@ -379,15 +386,15 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
 
             {/* Recommendations */}
             {card.recommendations.length > 0 && (
-              <div className="bg-blue-50 border border-blue-200 rounded p-3">
+              <div className="bg-brand-50 border border-brand-200 rounded p-3">
                 <div className="flex items-center gap-2 mb-2">
-                  <Info className="w-4 h-4 text-blue-600" />
-                  <span className="text-sm font-medium text-blue-800">Recommendations</span>
+                  <Info className="w-4 h-4 text-brand-600" />
+                  <span className="text-sm font-medium text-brand-800">Recommendations</span>
                 </div>
-                <ul className="text-sm text-blue-700 space-y-1">
+                <ul className="text-sm text-brand-700 space-y-1">
                   {card.recommendations.slice(0, 3).map((rec, index) => (
                     <li key={index} className="flex items-start gap-1">
-                      <span className="text-blue-500 mt-1">•</span>
+                      <span className="text-brand-500 mt-1">•</span>
                       <span>{rec}</span>
                     </li>
                   ))}
@@ -421,12 +428,12 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
       )}
 
       {/* Storage Optimization Tips */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
-        <h3 className="font-medium text-blue-900 mb-3 flex items-center gap-2">
+      <div className="bg-brand-50 border border-brand-200 rounded-lg p-6">
+        <h3 className="font-medium text-brand-900 mb-3 flex items-center gap-2">
           <TrendingUp className="w-5 h-5" />
           Storage Optimization Tips
         </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-blue-800">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-brand-800">
           <div>
             <p className="font-medium mb-2">Snapshot Management:</p>
             <ul className="space-y-1">

@@ -16,6 +16,7 @@ import { SegmentedControl } from '../ui/SegmentedControl';
 import { useDashboardData } from '../../hooks/useDashboardData';
 import { TabSkeleton } from '../ui/Skeleton';
 import { Button, IconButton } from '../ui/Button';
+import { Chip } from '../ui/Chip';
 import type { components } from '../../api/schema';
 import type {
   SnapshotDetails,
@@ -216,6 +217,8 @@ export const EnhancedSnapshotsTab: React.FC = () => {
     return new Date(timeString).toLocaleString();
   };
 
+  // raw on purpose: snapshot-type identity palette (Bdev=blue, clone=green,
+  // external=purple), a categorical coding, not status.
   const getSnapshotTypeIcon = (type: string) => {
     switch (type) {
       case 'Bdev': return <Camera className="w-4 h-4 text-blue-600" />;
@@ -281,7 +284,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
       <div className="bg-white rounded-lg shadow p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <Camera className="w-8 h-8 text-blue-600" />
+            <Camera className="w-8 h-8 text-brand-600" />
             <div>
               <h2 className="text-page-title text-gray-900">Volume Snapshots</h2>
               <p className="text-sm text-gray-600">Storage-aware snapshot management</p>
@@ -297,7 +300,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
         </div>
 
         {error && (
-          <div className="mb-6 flex items-center gap-2 p-3 bg-red-50 border border-red-200 text-red-700 rounded-md text-sm">
+          <div className="mb-6 flex items-center gap-2 p-3 bg-failed-50 border border-failed-200 text-failed-700 rounded-md text-sm">
             <AlertTriangle className="w-4 h-4 flex-shrink-0" />
             <span>Could not load snapshot data: {error}. Showing last known data.</span>
           </div>
@@ -305,18 +308,19 @@ export const EnhancedSnapshotsTab: React.FC = () => {
 
         {/* Enhanced Statistics with Storage Information */}
         <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
-          <div className="bg-blue-50 rounded-lg p-4 text-center">
-            <Database className="w-6 h-6 text-blue-600 mx-auto mb-2" />
-            <p className="text-stat text-blue-600">{snapshots.length}</p>
+          <div className="bg-brand-50 rounded-lg p-4 text-center">
+            <Database className="w-6 h-6 text-brand-600 mx-auto mb-2" />
+            <p className="text-stat text-brand-600">{snapshots.length}</p>
             <p className="text-sm text-gray-600">Total Snapshots</p>
           </div>
-          <div className="bg-green-50 rounded-lg p-4 text-center">
-            <CheckCircle className="w-6 h-6 text-green-600 mx-auto mb-2" />
-            <p className="text-stat text-green-600">
+          <div className="bg-healthy-50 rounded-lg p-4 text-center">
+            <CheckCircle className="w-6 h-6 text-healthy-600 mx-auto mb-2" />
+            <p className="text-stat text-healthy-600">
               {snapshots.filter(s => s.ready_to_use).length}
             </p>
             <p className="text-sm text-gray-600">Ready to Use</p>
           </div>
+          {/* raw on purpose: purple is the snapshot-identity color, not status */}
           <div className="bg-purple-50 rounded-lg p-4 text-center">
             <Layers className="w-6 h-6 text-purple-600 mx-auto mb-2" />
             <p className="text-stat text-purple-600">
@@ -331,6 +335,8 @@ export const EnhancedSnapshotsTab: React.FC = () => {
             </p>
             <p className="text-sm text-gray-600">Logical Storage</p>
           </div>
+          {/* raw on purpose: orange is the Snapshot-Overhead data-series
+              color (matches the storage charts), not a rebuild status */}
           <div className="bg-orange-50 rounded-lg p-4 text-center">
             <BarChart3 className="w-6 h-6 text-orange-600 mx-auto mb-2" />
             <p className="text-stat text-orange-600">
@@ -338,11 +344,11 @@ export const EnhancedSnapshotsTab: React.FC = () => {
             </p>
             <p className="text-sm text-gray-600">Snapshot Overhead</p>
           </div>
-          <div className="bg-yellow-50 rounded-lg p-4 text-center">
-            <TrendingUp className="w-6 h-6 text-yellow-600 mx-auto mb-2" />
+          <div className="bg-degraded-50 rounded-lg p-4 text-center">
+            <TrendingUp className="w-6 h-6 text-degraded-600 mx-auto mb-2" />
             <p className={`text-stat ${
-              storageInsights.overallEfficiency < 0.1 ? 'text-green-600' :
-              storageInsights.overallEfficiency < 0.3 ? 'text-yellow-600' : 'text-red-600'
+              storageInsights.overallEfficiency < 0.1 ? 'text-healthy-600' :
+              storageInsights.overallEfficiency < 0.3 ? 'text-degraded-600' : 'text-failed-600'
             }`}>
               {(storageInsights.overallEfficiency * 100).toFixed(1)}%
             </p>
@@ -352,14 +358,14 @@ export const EnhancedSnapshotsTab: React.FC = () => {
 
         {/* Storage Efficiency Alert */}
         {storageInsights.inefficientVolumes > 0 && (
-          <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+          <div className="mt-4 p-4 bg-failed-50 border border-failed-200 rounded-lg">
             <div className="flex items-center gap-2">
-              <AlertTriangle className="w-5 h-5 text-red-600" />
-              <span className="font-medium text-red-800">
+              <AlertTriangle className="w-5 h-5 text-failed-600" />
+              <span className="font-medium text-failed-800">
                 Storage Efficiency Warning
               </span>
             </div>
-            <p className="text-sm text-red-700 mt-1">
+            <p className="text-sm text-failed-700 mt-1">
               {storageInsights.inefficientVolumes} volume{storageInsights.inefficientVolumes !== 1 ? 's have' : ' has'} high 
               snapshot overhead (&gt;30%). Switch to Storage View for detailed analysis and recommendations.
             </p>
@@ -417,7 +423,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
                     placeholder="Search snapshots..."
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-500"
                   />
                 </div>
               </div>
@@ -430,7 +436,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
                 <select
                   value={typeFilter}
                   onChange={(e) => setTypeFilter(e.target.value as SnapshotTypeFilter)}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                 >
                   <option value="all">All Types</option>
                   <option value="Bdev">Standard Snapshots</option>
@@ -447,7 +453,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
                 <select
                   value={volumeFilter}
                   onChange={(e) => setVolumeFilter(e.target.value)}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                 >
                   <option value="all">All Volumes</option>
                   {availableVolumes.map(volume => (
@@ -462,20 +468,17 @@ export const EnhancedSnapshotsTab: React.FC = () => {
               <div className="mt-4 pt-4 border-t border-gray-200">
                 <div className="flex items-center gap-2 text-sm">
                   <span className="text-gray-600">Active filters:</span>
+                  {/* Filter-category hues: search=brand (informational);
+                      green/purple are raw on purpose — categorical filter
+                      coding, not health/rejoining status */}
                   {searchTerm && (
-                    <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">
-                      Search: "{searchTerm}"
-                    </span>
+                    <Chip label={`Search: "${searchTerm}"`} chip="bg-brand-100 text-brand-800 border-brand-200" />
                   )}
                   {typeFilter !== 'all' && (
-                    <span className="px-2 py-1 bg-green-100 text-green-800 rounded-full text-xs">
-                      Type: {typeFilter}
-                    </span>
+                    <Chip label={`Type: ${typeFilter}`} chip="bg-green-100 text-green-800 border-green-200" />
                   )}
                   {volumeFilter !== 'all' && (
-                    <span className="px-2 py-1 bg-purple-100 text-purple-800 rounded-full text-xs">
-                      Volume: {volumeFilter}
-                    </span>
+                    <Chip label={`Volume: ${volumeFilter}`} chip="bg-purple-100 text-purple-800 border-purple-200" />
                   )}
                   <button
                     onClick={() => {
@@ -512,16 +515,16 @@ export const EnhancedSnapshotsTab: React.FC = () => {
       )}
 
       {/* Information Panel with Storage Focus */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+      <div className="bg-brand-50 border border-brand-200 rounded-lg p-6">
         <div className="flex items-start gap-3">
-          <div className="w-6 h-6 text-blue-600 mt-1 flex-shrink-0">
+          <div className="w-6 h-6 text-brand-600 mt-1 flex-shrink-0">
             <svg fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
             </svg>
           </div>
           <div>
-            <h4 className="font-medium text-blue-900 mb-2">SPDK Storage-Aware Snapshot Management</h4>
-            <div className="text-sm text-blue-800 space-y-2">
+            <h4 className="font-medium text-brand-900 mb-2">SPDK Storage-Aware Snapshot Management</h4>
+            <div className="text-sm text-brand-800 space-y-2">
               <p>
                 <strong>Storage Analysis:</strong> Track actual storage consumption vs logical snapshot size. 
                 Monitor snapshot overhead and identify inefficient storage usage patterns.

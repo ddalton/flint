@@ -8,6 +8,7 @@ import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } fro
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
 import { Button } from './ui/Button';
+import { Chip } from './ui/Chip';
 import { TabNavigation } from './ui/TabNavigation';
 import { Skeleton, TabSkeleton } from './ui/Skeleton';
 
@@ -285,8 +286,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <div className="flex items-center gap-4">
                   {volumeFilter === 'faulted' && (
                     <div className="text-sm">
-                      <div className="text-yellow-700">🟡 {stats.degradedVolumes} Degraded</div>
-                      <div className="text-red-700">🔴 {stats.failedVolumes} Failed</div>
+                      <div className="text-degraded-700">🟡 {stats.degradedVolumes} Degraded</div>
+                      <div className="text-failed-700">🔴 {stats.failedVolumes} Failed</div>
                     </div>
                   )}
                   <Button variant="secondary" onClick={handleClearFilter}>
@@ -298,8 +299,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         )}
 
-        {/* Filter Cards Section - Enhanced with Gradient */}
-        <div className="bg-gradient-to-r from-blue-50 via-indigo-50 to-purple-50 rounded-lg p-6 mb-8 border border-indigo-200 shadow-md">
+        {/* Filter Cards Section - Enhanced with Gradient. Raw indigo/purple on
+            purpose: decorative gradient chrome, not status colors. */}
+        <div className="bg-gradient-to-r from-brand-50 via-indigo-50 to-purple-50 rounded-lg p-6 mb-8 border border-indigo-200 shadow-md">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-white rounded-lg shadow-sm">
@@ -309,10 +311,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <h3 className="text-section text-gray-900">Quick Filters</h3>
                 <p className="text-sm text-gray-600">Click any card to filter volumes</p>
               </div>
+              {/* Raw indigo on purpose: active-filter accent matching the
+                  Quick Filters chrome, not a status color. */}
               {volumeFilter !== 'all' && (
-                <span className="px-3 py-1 text-sm bg-indigo-100 text-indigo-800 rounded-full font-medium ml-4">
-                  Active: {filterInfo.name}
-                </span>
+                <Chip
+                  label={`Active: ${filterInfo.name}`}
+                  chip="ml-4 bg-indigo-100 text-indigo-800 border-indigo-200"
+                />
               )}
             </div>
             {volumeFilter !== 'all' && (

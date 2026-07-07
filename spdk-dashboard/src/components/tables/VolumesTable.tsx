@@ -229,13 +229,13 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
       </div>
       <div className="space-y-3 mb-4">
         {activeFilter && activeFilter !== 'all' && (
-          <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">
+          <div className="p-3 bg-brand-50 border border-brand-200 rounded-lg flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Filter className="w-4 h-4 text-blue-600" />
-              <span className="text-sm font-medium text-blue-900">
+              <Filter className="w-4 h-4 text-brand-600" />
+              <span className="text-sm font-medium text-brand-900">
                 Filtered by: {getFilterDisplayName(activeFilter)}
               </span>
-              <span className="text-sm text-blue-700">
+              <span className="text-sm text-brand-700">
                 ({filteredVolumes.length} of {volumes.length} volumes)
               </span>
             </div>
@@ -247,6 +247,8 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
           </div>
         )}
 
+        {/* raw purple on purpose: decorative disk-filter accent, not the sync
+            rejoining meaning purple aliases */}
         {diskFilter && (
           <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -345,8 +347,8 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
 
                         {/* SPDK Validation Status Indicator */}
                         {volume.spdk_validation_status && !volume.spdk_validation_status.has_spdk_backing && (
-                          <span 
-                            className="text-red-500" 
+                          <span
+                            className="text-failed-500"
                             title={volume.spdk_validation_status.validation_message || "No SPDK backing found"}
                           >
                             <ShieldAlert className="w-4 h-4" />
@@ -375,7 +377,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                         </Button>
                       )}
                       {volume.active_replicas < volume.replicas && (
-                        <div className="text-xs text-red-600 mt-1">
+                        <div className="text-xs text-failed-600 mt-1">
                           {volume.replicas - volume.active_replicas} replica{volume.replicas - volume.active_replicas !== 1 ? 's' : ''} down
                         </div>
                       )}
@@ -384,7 +386,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                       {extVolume.isRaw ? (
                         <span className="text-gray-400">N/A</span>
                       ) : volume.local_nvme ? (
-                        <div className="flex items-center gap-1 text-green-600">
+                        <div className="flex items-center gap-1 text-healthy-600">
                           <CheckCircle className="w-5 h-5" />
                           <span className="text-xs">High Perf</span>
                         </div>
@@ -398,7 +400,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                       ) : hasSyncData ? (
                         <VolumeSyncSummary volume={volume} />
                       ) : rebuildingActivity ? (
-                        <span className="text-xs text-orange-600 font-medium">rebuild active</span>
+                        <span className="text-xs text-rebuilding-600 font-medium">rebuild active</span>
                       ) : (
                         <span className="text-gray-400 text-sm">-</span>
                       )}
@@ -421,7 +423,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                                 icon={Trash2}
                                 aria-label="Delete orphaned SPDK volume"
                                 onClick={() => handleDeleteRaw(extVolume.rawVolumeData!)}
-                                className="p-1 text-red-500 hover:text-red-700 hover:bg-red-50"
+                                className="p-1 text-failed-500 hover:text-failed-700 hover:bg-failed-50"
                                 iconClass="w-4 h-4"
                                 title="Delete orphaned SPDK volume"
                               />
@@ -440,6 +442,8 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                     </td>
                     {diskFilter && (
                       <td className="px-6 py-4 whitespace-nowrap">
+                        {/* raw purple on purpose: matches the disk-filter banner
+                            accent above, not a status */}
                         <span className="inline-flex px-2 py-1 text-xs bg-purple-100 text-purple-800 rounded-full">
                           {diskFilter}
                         </span>
@@ -477,7 +481,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                     onClick={() => goToPage(pageNum)}
                     className={`px-3 py-1 text-sm border rounded ${
                       pageNum === currentPage
-                        ? 'bg-blue-600 text-white border-blue-600'
+                        ? 'bg-brand-600 text-white border-brand-600'
                         : 'border-gray-300 hover:bg-gray-50'
                     }`}
                   >
@@ -503,19 +507,19 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
           <h4 className="text-sm font-medium text-gray-700 mb-2">Volume Summary</h4>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
             <div className="flex items-center gap-2">
-              <CheckCircle className="w-4 h-4 text-green-600" />
+              <CheckCircle className="w-4 h-4 text-healthy-600" />
               <span>{filteredVolumes.filter(v => v.state === 'Healthy').length} Healthy</span>
             </div>
             <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-yellow-600" />
+              <AlertTriangle className="w-4 h-4 text-degraded-600" />
               <span>{filteredVolumes.filter(v => v.state === 'Degraded').length} Degraded</span>
             </div>
             <div className="flex items-center gap-2">
-              <XCircle className="w-4 h-4 text-red-600" />
+              <XCircle className="w-4 h-4 text-failed-600" />
               <span>{filteredVolumes.filter(v => v.state === 'Failed').length} Failed</span>
             </div>
             <div className="flex items-center gap-2">
-              <Settings className="w-4 h-4 text-orange-600" />
+              <Settings className="w-4 h-4 text-rebuilding-600" />
               <span>{filteredVolumes.filter(v => hasRebuildingActivity(v)).length} With Rebuilding</span>
             </div>
           </div>

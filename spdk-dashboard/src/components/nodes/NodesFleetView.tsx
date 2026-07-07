@@ -167,7 +167,7 @@ export const NodesFleetView: React.FC<NodesFleetViewProps> = ({
                       aria-pressed={active}
                       className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
                         active
-                          ? 'bg-blue-600 text-white border-blue-600'
+                          ? 'bg-brand-600 text-white border-brand-600'
                           : count === 0
                             ? 'bg-gray-50 text-gray-400 border-gray-200'
                             : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
@@ -184,7 +184,7 @@ export const NodesFleetView: React.FC<NodesFleetViewProps> = ({
                         type="checkbox"
                         checked={showNodesWithDisksOnly}
                         onChange={e => onShowNodesWithDisksOnlyChange(e.target.checked)}
-                        className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                        className="w-4 h-4 text-brand-600 border-gray-300 rounded focus:ring-brand-500"
                       />
                       Only nodes with disks
                     </label>
@@ -210,7 +210,7 @@ export const NodesFleetView: React.FC<NodesFleetViewProps> = ({
                   placeholder="Search nodes by name, disk model/ID, volume name, or PCI address..."
                   value={searchTerm}
                   onChange={e => setSearchTerm(e.target.value)}
-                  className="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
                 />
                 {searchTerm && (
                   <button
@@ -226,9 +226,9 @@ export const NodesFleetView: React.FC<NodesFleetViewProps> = ({
 
             {/* Volume-filter context from other tabs */}
             {hasVolumeFilter && (
-              <div className="mb-4 p-3 rounded-lg border bg-blue-50 border-blue-200 flex items-center justify-between">
-                <div className="flex items-center gap-2 text-sm text-blue-900">
-                  <Filter className="w-4 h-4 text-blue-600" />
+              <div className="mb-4 p-3 rounded-lg border bg-brand-50 border-brand-200 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-sm text-brand-900">
+                  <Filter className="w-4 h-4 text-brand-600" />
                   <span>
                     Volume filter: <strong>{getFilterDisplayName(activeFilter)}</strong> —{' '}
                     {filteredVolumes.length} matching volume{filteredVolumes.length !== 1 ? 's' : ''};
@@ -238,7 +238,7 @@ export const NodesFleetView: React.FC<NodesFleetViewProps> = ({
                 {onClearFilter && (
                   <button
                     onClick={onClearFilter}
-                    className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1"
+                    className="text-brand-600 hover:text-brand-800 text-sm font-medium flex items-center gap-1"
                   >
                     <X className="w-3 h-3" />
                     Clear
@@ -270,8 +270,8 @@ export const NodesFleetView: React.FC<NodesFleetViewProps> = ({
                       onClick={() => selectNode(n.name, true)}
                       aria-label={`${n.name}: ${style.label}`}
                       title={`${n.name} — ${style.label}\ndisks ${n.disks_healthy}/${n.disks_total} healthy · ${n.volumes_total} volumes · ${n.replicas_out_of_sync} out of sync`}
-                      className={`w-5 h-5 rounded-sm ${style.cell} hover:ring-2 hover:ring-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 ${
-                        selected ? 'ring-2 ring-offset-1 ring-blue-600' : ''
+                      className={`w-5 h-5 rounded-sm ${style.cell} hover:ring-2 hover:ring-brand-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600 ${
+                        selected ? 'ring-2 ring-offset-1 ring-brand-600' : ''
                       }`}
                     />
                   );

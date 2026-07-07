@@ -46,24 +46,24 @@ const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onS
   const canSelect = !disk.is_system_disk;
 
   const getStatusColor = () => {
-    if (disk.is_system_disk) return 'border-red-200 bg-red-50';
-    if (needsUnmount) return 'border-yellow-200 bg-yellow-50';
-    if (disk.blobstore_initialized) return 'border-green-200 bg-green-50';
-    if (disk.driver_ready) return 'border-blue-200 bg-blue-50';
+    if (disk.is_system_disk) return 'border-failed-200 bg-failed-50';
+    if (needsUnmount) return 'border-degraded-200 bg-degraded-50';
+    if (disk.blobstore_initialized) return 'border-healthy-200 bg-healthy-50';
+    if (disk.driver_ready) return 'border-brand-200 bg-brand-50';
     return 'border-gray-200 bg-gray-50';
   };
 
   const getStatusIcon = () => {
-    if (disk.is_system_disk) return <Shield className="w-4 h-4 text-red-600" />;
-    if (needsUnmount) return <AlertTriangle className="w-4 h-4 text-yellow-600" />;
-    if (disk.blobstore_initialized) return <CheckCircle className="w-4 h-4 text-green-600" />;
-    if (disk.driver_ready) return <Settings className="w-4 h-4 text-blue-600" />;
+    if (disk.is_system_disk) return <Shield className="w-4 h-4 text-failed-600" />;
+    if (needsUnmount) return <AlertTriangle className="w-4 h-4 text-degraded-600" />;
+    if (disk.blobstore_initialized) return <CheckCircle className="w-4 h-4 text-healthy-600" />;
+    if (disk.driver_ready) return <Settings className="w-4 h-4 text-brand-600" />;
     return <CheckCircle className="w-4 h-4 text-gray-600" />;
   };
 
   return (
     <div className={`relative border-2 rounded-lg p-3 transition-all hover:shadow-sm ${
-      isSelected ? `${getStatusColor()} ring-2 ring-blue-500 ring-offset-1` : getStatusColor()
+      isSelected ? `${getStatusColor()} ring-2 ring-brand-500 ring-offset-1` : getStatusColor()
     }`}>
       {canSelect && (
         <input
@@ -90,6 +90,7 @@ const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onS
           </div>
           <div className="flex justify-between">
             <span>Driver:</span>
+            {/* raw indigo on purpose: SPDK-driver accent, no semantic alias */}
             <span className={`font-mono ${disk.spdk_ready ? 'text-indigo-600' : ''}`}>
               {disk.driver}
             </span>
@@ -103,7 +104,7 @@ const CompactDiskCard: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onS
         </div>
         
         {needsUnmount && (
-          <div className="mt-1 text-xs text-yellow-700">
+          <div className="mt-1 text-xs text-degraded-700">
             Mounted: {disk.mounted_partitions.slice(0, 2).join(', ')}
             {disk.mounted_partitions.length > 2 && ` +${disk.mounted_partitions.length - 2}`}
           </div>
@@ -122,17 +123,19 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
   const needsUnmount = disk.mounted_partitions.length > 0;
   const canSelect = !disk.is_system_disk;
 
+  // Borderless status badges on purpose (not Chip): converting would add the
+  // kit border and change the table's look; colors are semantic.
   const getStatusBadge = () => {
-    if (disk.is_system_disk) return <span className="px-2 py-0.5 text-xs bg-red-100 text-red-700 rounded-full">System</span>;
-    if (needsUnmount) return <span className="px-2 py-0.5 text-xs bg-yellow-100 text-yellow-700 rounded-full">Unmount</span>;
-    
+    if (disk.is_system_disk) return <span className="px-2 py-0.5 text-xs bg-failed-100 text-failed-700 rounded-full">System</span>;
+    if (needsUnmount) return <span className="px-2 py-0.5 text-xs bg-degraded-100 text-degraded-700 rounded-full">Unmount</span>;
+
     // Enhanced status logic based on driver and blobstore state
     if (disk.blobstore_initialized) {
       // Both driver and blobstore ready
-      return <span className="px-2 py-0.5 text-xs bg-green-100 text-green-700 rounded-full">LVS Ready</span>;
+      return <span className="px-2 py-0.5 text-xs bg-healthy-100 text-healthy-700 rounded-full">LVS Ready</span>;
     } else if (disk.driver_ready) {
       // Driver ready but needs blobstore initialization
-      return <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded-full">Driver Bound</span>;
+      return <span className="px-2 py-0.5 text-xs bg-brand-100 text-brand-700 rounded-full">Driver Bound</span>;
     } else {
       // Needs full setup (driver binding + blobstore)
       return <span className="px-2 py-0.5 text-xs bg-gray-100 text-gray-700 rounded-full">Free</span>;
@@ -140,7 +143,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
   };
 
   return (
-    <tr className={`hover:bg-gray-50 ${isSelected ? 'bg-blue-50' : ''}`}>
+    <tr className={`hover:bg-gray-50 ${isSelected ? 'bg-brand-50' : ''}`}>
       <td className="px-3 py-2">
         {canSelect && (
           <input
@@ -158,6 +161,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
       <td className="px-3 py-2 text-sm">{sizeGB}GB</td>
       <td className="px-3 py-2">
         <span className={`text-xs font-mono px-2 py-1 rounded ${
+          // raw indigo on purpose: SPDK-driver accent, no semantic alias
           disk.spdk_ready ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-700'
         }`}>
           {disk.driver}
@@ -172,7 +176,7 @@ const CompactDiskRow: React.FC<CompactDiskCardProps> = ({ disk, isSelected, onSe
       </td>
       <td className="px-3 py-2 text-xs">
         {needsUnmount ? (
-          <div className="text-yellow-700">
+          <div className="text-degraded-700">
             {disk.mounted_partitions.slice(0, 1).join(', ')}
             {disk.mounted_partitions.length > 1 && `+${disk.mounted_partitions.length - 1}`}
           </div>
@@ -909,12 +913,12 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
     <div className="space-y-6">
       {/* Fresh-cluster onboarding (state-aware landing routed here) */}
       {onboarding && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+        <div className="bg-brand-50 border border-brand-200 rounded-lg p-4">
           <div className="flex items-start gap-3">
-            <Info className="w-6 h-6 text-blue-600 mt-0.5 flex-shrink-0" />
+            <Info className="w-6 h-6 text-brand-600 mt-0.5 flex-shrink-0" />
             <div>
-              <p className="font-medium text-blue-900">Welcome — no storage is initialized yet</p>
-              <p className="text-sm text-blue-800 mt-1">
+              <p className="font-medium text-brand-900">Welcome — no storage is initialized yet</p>
+              <p className="text-sm text-brand-800 mt-1">
                 Flint found no logical volume stores on this cluster, so you landed here.
                 Select the disks flint should manage and initialize them to start
                 provisioning volumes. System disks are excluded automatically, and any
@@ -929,7 +933,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
       <div className="bg-white rounded-lg shadow p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <HardDrive className="w-8 h-8 text-blue-600" />
+            <HardDrive className="w-8 h-8 text-brand-600" />
             <div>
               <h2 className="text-page-title text-gray-900">Disk Setup for SPDK</h2>
               <p className="text-gray-600">Initialize NVMe disks across {knownNodes.length} nodes</p>
@@ -978,55 +982,55 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               <p className="text-sm text-gray-600">Free</p>
             </div>
             <div 
-              className={`bg-blue-50 rounded-lg p-4 text-center border border-blue-200 cursor-pointer hover:shadow-md transition-all ${
-                statusFilter === 'driver-bound' ? 'ring-2 ring-blue-500 shadow-md' : ''
+              className={`bg-brand-50 rounded-lg p-4 text-center border border-brand-200 cursor-pointer hover:shadow-md transition-all ${
+                statusFilter === 'driver-bound' ? 'ring-2 ring-brand-500 shadow-md' : ''
               }`}
               onClick={() => {
                 setStatusFilter(statusFilter === 'driver-bound' ? 'all' : 'driver-bound');
                 setCurrentPage(1);
               }}
             >
-              <Settings className="w-6 h-6 text-blue-600 mx-auto mb-2" />
-              <p className="text-stat text-blue-600">{stats.driverBound}</p>
+              <Settings className="w-6 h-6 text-brand-600 mx-auto mb-2" />
+              <p className="text-stat text-brand-600">{stats.driverBound}</p>
               <p className="text-sm text-gray-600">Driver Bound</p>
             </div>
             <div 
-              className={`bg-yellow-50 rounded-lg p-4 text-center border border-yellow-200 cursor-pointer hover:shadow-md transition-all ${
-                statusFilter === 'needs-unmount' ? 'ring-2 ring-yellow-500 shadow-md' : ''
+              className={`bg-degraded-50 rounded-lg p-4 text-center border border-degraded-200 cursor-pointer hover:shadow-md transition-all ${
+                statusFilter === 'needs-unmount' ? 'ring-2 ring-degraded-500 shadow-md' : ''
               }`}
               onClick={() => {
                 setStatusFilter(statusFilter === 'needs-unmount' ? 'all' : 'needs-unmount');
                 setCurrentPage(1);
               }}
             >
-              <AlertTriangle className="w-6 h-6 text-yellow-600 mx-auto mb-2" />
-              <p className="text-stat text-yellow-600">{stats.needsUnmount}</p>
+              <AlertTriangle className="w-6 h-6 text-degraded-600 mx-auto mb-2" />
+              <p className="text-stat text-degraded-600">{stats.needsUnmount}</p>
               <p className="text-sm text-gray-600">Needs Unmount</p>
             </div>
             <div 
-              className={`bg-red-50 rounded-lg p-4 text-center border border-red-200 cursor-pointer hover:shadow-md transition-all ${
-                statusFilter === 'system' ? 'ring-2 ring-red-500 shadow-md' : ''
+              className={`bg-failed-50 rounded-lg p-4 text-center border border-failed-200 cursor-pointer hover:shadow-md transition-all ${
+                statusFilter === 'system' ? 'ring-2 ring-failed-500 shadow-md' : ''
               }`}
               onClick={() => {
                 setStatusFilter(statusFilter === 'system' ? 'all' : 'system');
                 setCurrentPage(1);
               }}
             >
-              <Shield className="w-6 h-6 text-red-600 mx-auto mb-2" />
-              <p className="text-stat text-red-600">{stats.system}</p>
+              <Shield className="w-6 h-6 text-failed-600 mx-auto mb-2" />
+              <p className="text-stat text-failed-600">{stats.system}</p>
               <p className="text-sm text-gray-600">System Disks</p>
             </div>
             <div 
-              className={`bg-green-50 rounded-lg p-4 text-center border border-green-200 cursor-pointer hover:shadow-md transition-all ${
-                statusFilter === 'lvs-ready' ? 'ring-2 ring-green-500 shadow-md' : ''
+              className={`bg-healthy-50 rounded-lg p-4 text-center border border-healthy-200 cursor-pointer hover:shadow-md transition-all ${
+                statusFilter === 'lvs-ready' ? 'ring-2 ring-healthy-500 shadow-md' : ''
               }`}
               onClick={() => {
                 setStatusFilter(statusFilter === 'lvs-ready' ? 'all' : 'lvs-ready');
                 setCurrentPage(1);
               }}
             >
-              <CheckCircle className="w-6 h-6 text-green-600 mx-auto mb-2" />
-              <p className="text-stat text-green-600">{stats.lvsReady}</p>
+              <CheckCircle className="w-6 h-6 text-healthy-600 mx-auto mb-2" />
+              <p className="text-stat text-healthy-600">{stats.lvsReady}</p>
               <p className="text-sm text-gray-600">LVS Ready</p>
             </div>
           </div>
@@ -1035,21 +1039,21 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
 
       {/* Unreachable Nodes Warning */}
       {unreachableNodes.length > 0 && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+        <div className="bg-failed-50 border border-failed-200 rounded-lg p-4">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+            <AlertTriangle className="w-5 h-5 text-failed-600 mt-0.5 flex-shrink-0" />
             <div className="min-w-0">
-              <p className="font-medium text-red-800">
+              <p className="font-medium text-failed-800">
                 Disk information unavailable for {unreachableNodes.length} of {knownNodes.length} nodes
               </p>
-              <ul className="mt-1 text-sm text-red-700 space-y-0.5">
+              <ul className="mt-1 text-sm text-failed-700 space-y-0.5">
                 {unreachableNodes.map(data => (
                   <li key={data.node} className="truncate" title={data.error}>
                     <span className="font-mono font-medium">{data.node}</span>: {data.error}
                   </li>
                 ))}
               </ul>
-              <p className="mt-2 text-xs text-red-600">
+              <p className="mt-2 text-xs text-failed-600">
                 Check that the flint-csi-node pod is running on these nodes. Only disks from reachable nodes are shown below.
               </p>
             </div>
@@ -1066,7 +1070,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
               <Filter className="w-5 h-5 text-gray-600" />
               <span className="font-medium">Filters</span>
               {activeFilterCount > 0 && (
-                <span className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
+                <span className="px-2 py-1 text-xs bg-brand-100 text-brand-800 rounded-full">
                   {activeFilterCount} active
                 </span>
               )}
@@ -1104,7 +1108,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                 setSearchTerm(e.target.value);
                 setCurrentPage(1);
               }}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
           </div>
         </div>
@@ -1149,7 +1153,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                     setStatusFilter(e.target.value as StatusFilter);
                     setCurrentPage(1);
                   }}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                 >
                   <option value="all">All Disks</option>
                   <option value="free">Free</option>
@@ -1169,7 +1173,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                     setSizeFilter(e.target.value as SizeFilter);
                     setCurrentPage(1);
                   }}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                 >
                   <option value="all">All Sizes</option>
                   <option value="small">Small (&lt; 500GB)</option>
@@ -1440,7 +1444,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
           <div className="space-y-3">
             {Object.entries(setupResults).map(([node, result]) => (
               <div key={node} className={`p-3 rounded border-l-4 ${
-                result.success ? 'border-green-500 bg-green-50' : 'border-red-500 bg-red-50'
+                result.success ? 'border-healthy-500 bg-healthy-50' : 'border-failed-500 bg-failed-50'
               }`}>
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-medium">{node}</span>
@@ -1449,22 +1453,22 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                   </span>
                 </div>
                 {result.setup_disks && result.setup_disks.length > 0 && (
-                  <div className="text-sm text-green-700 mb-1">
+                  <div className="text-sm text-healthy-700 mb-1">
                     ✓ Setup: {result.setup_disks.length} disk{result.setup_disks.length !== 1 ? 's' : ''}
                   </div>
                 )}
                 {result.failed_disks && result.failed_disks.length > 0 && (
-                  <div className="text-sm text-red-700 mb-1">
+                  <div className="text-sm text-failed-700 mb-1">
                     ✗ Failed: {result.failed_disks.length} disk{result.failed_disks.length !== 1 ? 's' : ''}
                   </div>
                 )}
                 {result.warnings && result.warnings.length > 0 && (
-                  <div className="text-sm text-yellow-700">
+                  <div className="text-sm text-degraded-700">
                     ⚠ {result.warnings.join(', ')}
                   </div>
                 )}
                 {result.error && (
-                  <div className="text-sm text-red-700">
+                  <div className="text-sm text-failed-700">
                     ❌ Error: {result.error}
                   </div>
                 )}
@@ -1541,7 +1545,7 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
                           {uninitCount} uninitialized / {group.disks.length} total
                         </span>
                         {selectedInGroup > 0 && (
-                          <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-800 rounded-full">
+                          <span className="px-2 py-0.5 text-xs bg-brand-100 text-brand-800 rounded-full">
                             {selectedInGroup} selected
                           </span>
                         )}
@@ -1671,12 +1675,12 @@ export const DiskSetupTab: React.FC<DiskSetupTabProps> = ({ onboarding = false }
       )}
 
       {/* Information Panel */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+      <div className="bg-brand-50 border border-brand-200 rounded-lg p-6">
         <div className="flex items-start gap-3">
-          <Info className="w-6 h-6 text-blue-600 mt-1 flex-shrink-0" />
+          <Info className="w-6 h-6 text-brand-600 mt-1 flex-shrink-0" />
           <div>
-            <h4 className="font-medium text-blue-900 mb-2">SPDK Disk Setup Process</h4>
-            <div className="text-sm text-blue-800 space-y-2">
+            <h4 className="font-medium text-brand-900 mb-2">SPDK Disk Setup Process</h4>
+            <div className="text-sm text-brand-800 space-y-2">
               <p>
                 <strong>What this does:</strong> Prepares NVMe disks for SPDK usage by unbinding them from the kernel 
                 NVMe driver and binding them to a userspace-compatible driver.

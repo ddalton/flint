@@ -945,3 +945,49 @@ a red-ringed ghost (copies reaped before the CR — the honesty
 affordance catching deletion propagation live); click-outside reset
 restored the full view. Zero page errors. Epochs · 0 on a
 single-replica volume is expected (no rebuild-engine sync record).
+
+## Design-system debt waves: Chip adoption + semantic colors + carve-out primitives (2026-07-06, post-v1.10.0)
+
+The three carried debts closed in two waves, sequenced as one pass over
+the same touch points (most raw pills also carried raw colors — visiting
+them once converts both).
+
+**Foundation.** status.ts's own class strings moved onto the semantic
+aliases (same hues by construction — healthy=green, degraded=yellow,
+failed=red, rebuilding=orange, stale=amber, standby=blue, insync=green,
+rejoining=purple, brand=blue); a new `warning` alias (amber) covers
+non-sync caution so warning and stale can re-hue independently. Two
+deliberate raw residues are commented in place: `removing` (purple —
+rejoining aliases the same hue but means the opposite) and the `faulted`
+filter (orange — a mixed bucket, not the rebuilding meaning).
+
+**Carve-out primitives.** SegmentedControl (role=group, aria-pressed
+segments, `iconOnly` mode keeping sr-only names — the disk-setup icon
+toggle previously had no accessible name) replaced both hand-rolled view
+switchers. Pagination unified the two table footers, which had already
+drifted (10/25/50/100 vs 25/50/100 sizes, text vs chevron buttons,
+VolumesTable hiding the size selector on one page); the contract is:
+range + size selector whenever rows exist, pager only when pages > 1.
+
+**The sweep** (4 parallel agents, 21 files): raw status classes outside
+the kit fell 227 → 33, semantic token usages rose 36 → 362, Chip-using
+files 4 → 16. Every remaining raw class is a commented deliberate
+carve-out, in four honest categories: data-series coding (capacity
+used/free, IOPS R/W, actual-vs-overhead — charts speak the dataviz
+palette, not status), categorical identity palettes (device types,
+snapshot kinds, filter tags, replica avatars), interactive pills (facet
+chips, stat cards — colors semanticized, structure kept), and
+indigo/violet accents with no semantic alias (NVMe-oF, SPDK driver,
+snapshot identity). Notable real fixes surfaced by the sweep: the
+timeline replica chips now pull SYNC_STATE_STYLES (standby was
+hand-picked yellow, drifted from the design-system blue), and the
+volume-detail State chip renders unmanaged Raw volumes as the shared
+gray Unknown chip instead of a dishonest red.
+
+Validated: 150 vitest, tsc -b clean, eslint 0 errors with only the 4
+pre-existing warnings; 11-page screenshot tour against the fleet-scale
+mock — all surfaces hue-identical (the aliases guarantee it), Chip
+conversions are visual drop-ins. Remaining backlog after these waves:
+none of the three debts — next candidates are the DisksTable row
+windowing (if fleets outgrow pagination) and dark-mode theming (the
+semantic aliases are now the single place to re-hue).

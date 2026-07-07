@@ -16,6 +16,8 @@ import {
 } from './timelineLayout';
 import { ConfirmModal } from '../ui/ConfirmModal';
 import { TimelineBrush } from './TimelineBrush';
+import { Chip } from '../ui/Chip';
+import { SYNC_STATE_STYLES, type SyncDisplayState } from '../ui/status';
 
 // Design (adapted from production observability idioms):
 // - Two lanes, not one: sparse human events (user VolumeSnapshots, diamond
@@ -65,6 +67,13 @@ const fmtSize = (bytes?: number | null) =>
   bytes == null ? '—' : `${(bytes / 1024 ** 3).toFixed(1)}GiB`;
 
 const fmtAbs = (t: number) => new Date(t).toLocaleTimeString();
+
+// Replica chips pull the design-system sync-state styles; a state the
+// design system doesn't know reads as failed (the old red fallback).
+const syncStateChip = (state: string): string =>
+  state in SYNC_STATE_STYLES
+    ? SYNC_STATE_STYLES[state as SyncDisplayState].chip
+    : 'bg-failed-100 text-failed-800 border-failed-200';
 
 /** One diamond flag marker (or a +N cluster chip) on the user lane. */
 const UserMarker: React.FC<{
@@ -296,7 +305,7 @@ export const SnapshotTimelineView: React.FC<{
       <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
         <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
           <h3 className="text-section text-gray-900 flex items-center gap-2">
-            <GitBranch className="w-5 h-5 text-blue-600" />
+            <GitBranch className="w-5 h-5 text-brand-600" />
             Snapshot Timeline
           </h3>
           <div className="relative flex items-center gap-2">
@@ -317,7 +326,7 @@ export const SnapshotTimelineView: React.FC<{
                 onVolumeChange(resolved ?? v);
               }}
               placeholder="Search by PVC name or volume id..."
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
             <datalist id="volume-list">
               {availableVolumes.flatMap((volume) => {
@@ -387,7 +396,7 @@ export const SnapshotTimelineView: React.FC<{
                   />
                   User snapshots · {userEvents.length}
                   {ghostCount > 0 && (
-                    <span className="text-red-600 font-medium">
+                    <span className="text-failed-600 font-medium">
                       · {ghostCount} without copies
                     </span>
                   )}
@@ -405,37 +414,32 @@ export const SnapshotTimelineView: React.FC<{
               </div>
               <div className="flex items-center gap-2">
                 {zoom && (
-                  <span className="flex items-center gap-1.5 px-2 py-0.5 bg-amber-50 text-amber-700 rounded-full font-medium">
+                  // Interactive chip (embedded reset button) — stays hand-rolled.
+                  <span className="flex items-center gap-1.5 px-2 py-0.5 bg-warning-50 text-warning-700 rounded-full font-medium">
                     <ZoomIn className="w-3 h-3" />
                     {fmtAbs(zoom.min)} – {fmtAbs(zoom.max)}
                     <button
                       onClick={() => handleZoomChange(null)}
                       aria-label="Reset zoom"
-                      className="p-0.5 -mr-1 rounded-full hover:bg-amber-100"
+                      className="p-0.5 -mr-1 rounded-full hover:bg-warning-100"
                     >
                       <X className="w-3 h-3" />
                     </button>
                   </span>
                 )}
                 {data?.current_epoch && (
-                  <span className="px-2 py-0.5 bg-blue-50 text-blue-700 rounded-full font-mono">
+                  // Not Chip: font-mono, borderless — Chip would visibly change it.
+                  <span className="px-2 py-0.5 bg-brand-50 text-brand-700 rounded-full font-mono">
                     epoch #{data.current_epoch.split('-').pop()}
                   </span>
                 )}
                 {(data?.replicas ?? []).map((r) => (
-                  <span
+                  <Chip
                     key={r.node}
+                    label={`${r.node} · ${r.sync_state}`}
+                    chip={syncStateChip(r.sync_state)}
                     title={`${r.node}: ${r.sync_state}${r.last_epoch ? ` (last epoch ${r.last_epoch.split('-').pop()})` : ''}`}
-                    className={`px-2 py-0.5 rounded-full ${
-                      r.sync_state === 'in_sync'
-                        ? 'bg-green-50 text-green-700'
-                        : r.sync_state === 'standby'
-                          ? 'bg-yellow-50 text-yellow-700'
-                          : 'bg-red-50 text-red-700'
-                    }`}
-                  >
-                    {r.node} · {r.sync_state}
-                  </span>
+                  />
                 ))}
               </div>
             </div>
@@ -608,7 +612,7 @@ export const SnapshotTimelineView: React.FC<{
                           <dt>Replicas on</dt>
                           <dd
                             className={`text-right ${
-                              isGhost(selectedEvent) ? 'text-red-600 font-medium' : ''
+                              isGhost(selectedEvent) ? 'text-failed-600 font-medium' : ''
                             }`}
                           >
                             {selectedEvent.nodes.length
@@ -631,7 +635,7 @@ export const SnapshotTimelineView: React.FC<{
                         )}
                       </dl>
                       {isGhost(selectedEvent) && (
-                        <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+                        <div className="mt-2 p-2 bg-failed-50 border border-failed-200 rounded text-xs text-failed-700">
                           <p className="font-semibold mb-0.5">No SPDK copies exist on any node</p>
                           <p>
                             The VolumeSnapshot still reports ready, but its data is gone —
@@ -696,12 +700,12 @@ export const SnapshotTimelineView: React.FC<{
         />
       )}
 
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+      <div className="bg-brand-50 border border-brand-200 rounded-lg p-6">
         <div className="flex items-start gap-3">
-          <Layers className="w-6 h-6 text-blue-600 mt-1 flex-shrink-0" />
+          <Layers className="w-6 h-6 text-brand-600 mt-1 flex-shrink-0" />
           <div>
-            <h4 className="font-medium text-blue-900 mb-2">About the Snapshot Timeline</h4>
-            <div className="text-sm text-blue-800 space-y-2">
+            <h4 className="font-medium text-brand-900 mb-2">About the Snapshot Timeline</h4>
+            <div className="text-sm text-brand-800 space-y-2">
               <p>
                 <strong>User snapshots</strong> (violet diamonds) are your VolumeSnapshots, plotted
                 at their real creation time from the Kubernetes CR. Click one to inspect it or

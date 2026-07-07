@@ -3,6 +3,7 @@ import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, 
 import type { Disk, Volume, VolumeFilter, NodeInfo } from '../../hooks/useDashboardData';
 import type { FleetNode } from '../../hooks/useNodesFleet';
 import { volumeFilterDisplay, nodeHealthStyle } from '../ui/status';
+import { Chip, MemberStateChip, VolumeStateChip } from '../ui/Chip';
 import { ProgressBar } from '../ui/ProgressBar';
 import { useDiskSetup } from '../../hooks/useDashboardData';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
@@ -123,15 +124,15 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
         type="button"
         onClick={onToggle}
         aria-expanded={expanded}
-        className="w-full flex items-center gap-3 px-4 py-3 text-left rounded-lg hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
+        className="w-full flex items-center gap-3 px-4 py-3 text-left rounded-lg hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-500"
       >
         {expanded ? (
           <ChevronDown className="w-4 h-4 text-gray-400 flex-shrink-0" />
         ) : (
           <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
         )}
-        <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0">
-          <Server className="w-4 h-4 text-blue-600" />
+        <div className="w-8 h-8 bg-brand-100 rounded-full flex items-center justify-center flex-shrink-0">
+          <Server className="w-4 h-4 text-brand-600" />
         </div>
         <span className="font-semibold text-gray-900 truncate">{node}</span>
         <span
@@ -141,11 +142,15 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
           {healthStyle.label}
         </span>
         {summary.replicas_out_of_sync > 0 && (
-          <span className="px-2 py-0.5 text-xs bg-amber-100 text-amber-800 border border-amber-200 rounded-full flex-shrink-0">
-            {summary.replicas_out_of_sync} out of sync
+          <span className="flex-shrink-0">
+            <Chip
+              label={`${summary.replicas_out_of_sync} out of sync`}
+              chip="bg-stale-100 text-stale-800 border-stale-200"
+            />
           </span>
         )}
         {volumeFilter && volumeFilter !== 'all' && (
+          // Raw purple on purpose: filter-context count, not sync rejoining.
           <span className="px-2 py-0.5 text-xs bg-purple-100 text-purple-800 rounded-full flex-shrink-0">
             {filteredVolumeCount} {getFilterDisplayName(volumeFilter)}
           </span>
@@ -181,10 +186,10 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
 
       {/* Filtered Volumes Summary Section */}
       {volumeFilter && volumeFilter !== 'all' && filteredVolumes && filteredVolumes.length > 0 && (
-        <div id={`filtered-volumes-${node}`} className="bg-gray-50 rounded-lg p-4 border border-blue-200">
+        <div id={`filtered-volumes-${node}`} className="bg-gray-50 rounded-lg p-4 border border-brand-200">
           <div className="flex items-center justify-between mb-3">
             <h4 className="text-section flex items-center gap-2">
-              <Database className="w-5 h-5 text-blue-600" />
+              <Database className="w-5 h-5 text-brand-600" />
               {getFilterDisplayName(volumeFilter)} Volumes on {node}
               <span className="text-sm font-normal text-gray-600">
                 ({filteredVolumes.length} volume{filteredVolumes.length !== 1 ? 's' : ''})
@@ -199,45 +204,40 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
               
               return (
                 <div key={volume.id} className={`p-3 rounded-lg border-2 ${
-                  volume.state === 'Healthy' ? 'border-green-200 bg-green-50' :
-                  volume.state === 'Degraded' ? 'border-yellow-200 bg-yellow-50' :
-                  'border-red-200 bg-red-50'
+                  volume.state === 'Healthy' ? 'border-healthy-200 bg-healthy-50' :
+                  volume.state === 'Degraded' ? 'border-degraded-200 bg-degraded-50' :
+                  'border-failed-200 bg-failed-50'
                 }`}>
                   <div className="flex items-center justify-between mb-2">
                     <span className="font-medium text-gray-900">{volume.name}</span>
                     <span className="text-sm text-gray-600">{volume.size}</span>
                   </div>
-                  
+
                   <div className="flex items-center justify-between mb-2">
-                    <span className={`px-2 py-1 text-xs rounded-full ${
-                      volume.state === 'Healthy' ? 'bg-green-100 text-green-700' :
-                      volume.state === 'Degraded' ? 'bg-yellow-100 text-yellow-700' :
-                      'bg-red-100 text-red-700'
-                    }`}>
-                      {volume.state}
-                    </span>
-                    
+                    <VolumeStateChip state={volume.state} />
+
                     {nodeReplica && (
                       <span className={`px-2 py-1 text-xs rounded ${
-                        nodeReplica.is_local 
-                          ? 'bg-blue-100 text-blue-700' 
-                          : 'bg-purple-100 text-purple-700'
+                        nodeReplica.is_local
+                          ? 'bg-brand-100 text-brand-700'
+                          : // Raw purple on purpose: replica transport type, not sync rejoining.
+                            'bg-purple-100 text-purple-700'
                       }`}>
                         {nodeReplica.is_local ? 'Local NVMe' : 'NVMe-oF'}
                       </span>
                     )}
                   </div>
-                  
+
                   <div className="text-xs text-gray-500 space-y-1">
                     <div>Replicas: {volume.active_replicas}/{volume.replicas}</div>
                     {nodeReplica && (
                       <div>Node Status:
                         <span className={`ml-1 font-medium ${
-                          nodeReplica.status === 'healthy' ? 'text-green-600' :
-                          nodeReplica.status === 'rebuilding' ? 'text-orange-600' :
-                          nodeReplica.status === 'stale' ? 'text-amber-600' :
-                          nodeReplica.status === 'standby' ? 'text-blue-600' :
-                          'text-red-600'
+                          nodeReplica.status === 'healthy' ? 'text-healthy-600' :
+                          nodeReplica.status === 'rebuilding' ? 'text-rebuilding-600' :
+                          nodeReplica.status === 'stale' ? 'text-stale-600' :
+                          nodeReplica.status === 'standby' ? 'text-standby-600' :
+                          'text-failed-600'
                         }`}>
                           {nodeReplica.status}
                         </span>
@@ -340,8 +340,10 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       </td>
                       <td className="px-4 py-4">
                         <div className="space-y-1">
+                          {/* Borderless badge on purpose (not Chip): converting
+                              would add the kit border; colors are semantic. */}
                           <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                            disk.healthy ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                            disk.healthy ? 'bg-healthy-100 text-healthy-800' : 'bg-failed-100 text-failed-800'
                           }`}>
                             {disk.healthy ? 'Healthy' : 'Unhealthy'}
                           </span>
@@ -350,7 +352,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       <td className="px-4 py-4">
                         <div>
                           <span className={`inline-flex px-2 py-1 text-xs rounded-full ${
-                            disk.blobstore_initialized ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
+                            disk.blobstore_initialized ? 'bg-brand-100 text-brand-800' : 'bg-gray-100 text-gray-800'
                           }`}>
                             {disk.blobstore_initialized ? 'Initialized' : 'Not Initialized'}
                           </span>
@@ -412,21 +414,16 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                                     <span className="font-medium text-gray-900">{volume.volume_name}</span>
                                     <div className="flex items-center gap-2">
                                       <span className="text-sm text-gray-600">{volume.size}GB</span>
-                                      <span className={`px-2 py-1 text-xs rounded-full ${
-                                        volume.status === 'healthy' ? 'bg-green-100 text-green-700' :
-                                        volume.status === 'rebuilding' ? 'bg-orange-100 text-orange-700' :
-                                        'bg-red-100 text-red-700'
-                                      }`}>
-                                        {volume.status}
-                                      </span>
+                                      <MemberStateChip state={volume.status} />
                                     </div>
                                   </div>
                                   
                                   <div className="flex items-center justify-between text-xs text-gray-500 mb-2">
                                     <span className={`px-2 py-1 rounded ${
-                                      volume.replica_type === 'Local NVMe' 
-                                        ? 'bg-blue-100 text-blue-700' 
-                                        : 'bg-purple-100 text-purple-700'
+                                      volume.replica_type === 'Local NVMe'
+                                        ? 'bg-brand-100 text-brand-700'
+                                        : // Raw purple on purpose: replica transport type, not sync rejoining.
+                                          'bg-purple-100 text-purple-700'
                                     }`}>
                                       {volume.replica_type}
                                     </span>
@@ -443,12 +440,12 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                                   </div>
                                   
                                   {volume.replica_type === 'Local NVMe' && (
-                                    <div className="mt-2 p-2 bg-blue-50 rounded text-xs">
-                                      <div className="flex items-center gap-1 text-blue-700 mb-1">
+                                    <div className="mt-2 p-2 bg-brand-50 rounded text-xs">
+                                      <div className="flex items-center gap-1 text-brand-700 mb-1">
                                         <Zap className="w-3 h-3" />
                                         <span className="font-medium">High Performance Path</span>
                                       </div>
-                                      <div className="text-blue-600">
+                                      <div className="text-brand-600">
                                         Direct NVMe access • Zero network latency
                                       </div>
                                     </div>
@@ -495,7 +492,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                   value={memoryDiskName}
                   onChange={(e) => setMemoryDiskName(e.target.value)}
                   placeholder="e.g., Malloc0, mem0"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-brand-500 focus:border-brand-500"
                   disabled={isCreatingMemoryDisk}
                 />
                 <p className="text-xs text-gray-500 mt-1">
@@ -521,7 +518,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                   <span>{maxMemorySizeGB} GB</span>
                 </div>
                 {nodeInfo ? (
-                  <div className="bg-blue-50 border border-blue-200 px-3 py-2 rounded text-xs text-blue-700 mt-2">
+                  <div className="bg-brand-50 border border-brand-200 px-3 py-2 rounded text-xs text-brand-700 mt-2">
                     <div className="flex justify-between">
                       <span>Available RAM:</span>
                       <span className="font-medium">{(nodeInfo.memory_available_mb / 1024).toFixed(1)} GB</span>
@@ -532,7 +529,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                     </div>
                   </div>
                 ) : (
-                  <div className="bg-yellow-50 border border-yellow-200 px-3 py-2 rounded text-xs text-yellow-700 mt-2">
+                  <div className="bg-degraded-50 border border-degraded-200 px-3 py-2 rounded text-xs text-degraded-700 mt-2">
                     Node memory information not available. Maximum size limited to {maxMemorySizeGB} GB.
                   </div>
                 )}
@@ -542,7 +539,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
               </div>
 
               {memoryDiskError && (
-                <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm">
+                <div className="bg-failed-50 border border-failed-200 text-failed-700 px-3 py-2 rounded text-sm">
                   {memoryDiskError}
                 </div>
               )}

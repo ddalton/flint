@@ -5,6 +5,7 @@ import {
   RefreshCw, AlertTriangle, X, HardDrive
 } from 'lucide-react';
 import type { ConsumerRaid, ReplicaStatus, Volume, SpdkVolumeDetails } from '../../hooks/useDashboardData';
+import { Chip, VolumeStateChip } from '../ui/Chip';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
 import { Skeleton } from '../ui/Skeleton';
 import { ProgressBar } from '../ui/ProgressBar';
@@ -44,9 +45,9 @@ function ConsumerRaidCard({ raid }: { raid: ConsumerRaid }) {
   const chip =
     raid.state === 'online'
       ? degraded
-        ? 'bg-amber-100 text-amber-800 border-amber-200'
-        : 'bg-green-100 text-green-800 border-green-200'
-      : 'bg-red-100 text-red-800 border-red-200';
+        ? 'bg-warning-100 text-warning-800 border-warning-200'
+        : 'bg-healthy-100 text-healthy-800 border-healthy-200'
+      : 'bg-failed-100 text-failed-800 border-failed-200';
   const label = degraded
     ? `degraded ${raid.num_base_bdevs_operational}/${raid.num_base_bdevs}`
     : raid.state === 'online'
@@ -57,12 +58,10 @@ function ConsumerRaidCard({ raid }: { raid: ConsumerRaid }) {
     <div className="bg-gray-50 rounded-lg p-6">
       <div className="flex items-center justify-between mb-1">
         <h4 className="text-section flex items-center gap-2">
-          <Shield className="w-5 h-5 text-blue-600" />
+          <Shield className="w-5 h-5 text-brand-600" />
           Assembled on {raid.node}
         </h4>
-        <span className={`px-3 py-1 rounded-full text-sm font-medium border ${chip}`}>
-          {label}
-        </span>
+        <Chip label={label} chip={chip} />
       </div>
       <p className="font-mono text-xs text-gray-500 mb-4 break-all">{raid.raid_name}</p>
 
@@ -72,7 +71,7 @@ function ConsumerRaidCard({ raid }: { raid: ConsumerRaid }) {
             <span
               aria-hidden="true"
               className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                member.is_configured ? 'bg-green-500' : 'bg-red-500'
+                member.is_configured ? 'bg-healthy-500' : 'bg-failed-500'
               }`}
             />
             {member.is_configured ? (
@@ -88,7 +87,7 @@ function ConsumerRaidCard({ raid }: { raid: ConsumerRaid }) {
                 </span>
               </>
             ) : (
-              <span className="text-sm font-medium text-red-700">
+              <span className="text-sm font-medium text-failed-700">
                 failed slot — leg removed from the raid
               </span>
             )}
@@ -168,15 +167,16 @@ function LegacyReplicaCards({ replicas }: { replicas: ReplicaStatus[] }) {
         <div key={index} className="bg-gray-50 rounded-lg p-6">
           <div className="flex items-center justify-between mb-4">
             <h4 className="text-section">Replica on {replica.node}</h4>
-            <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-              replica.status === 'healthy' || replica.status === 'active'
-                ? 'bg-green-100 text-green-800'
-                : replica.status === 'rebuilding'
-                ? 'bg-orange-100 text-orange-800'
-                : 'bg-red-100 text-red-800'
-            }`}>
-              {replica.status}
-            </span>
+            <Chip
+              label={replica.status}
+              chip={
+                replica.status === 'healthy' || replica.status === 'active'
+                  ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
+                  : replica.status === 'rebuilding'
+                  ? 'bg-rebuilding-100 text-rebuilding-800 border-rebuilding-200'
+                  : 'bg-failed-100 text-failed-800 border-failed-200'
+              }
+            />
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -223,7 +223,7 @@ function VolumeEventsTab({ volumeId }: { volumeId: string }) {
   }
   if (isError) {
     return (
-      <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
+      <div className="p-4 bg-failed-50 border border-failed-200 rounded-lg text-failed-800 text-sm">
         Failed to load events: {(error as Error).message}
       </div>
     );
@@ -276,7 +276,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
       <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
         <div className="bg-white rounded-lg p-8 max-w-md w-full mx-4">
           <div className="text-center">
-            <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+            <AlertTriangle className="w-12 h-12 text-failed-500 mx-auto mb-4" />
             <h3 className="text-section text-gray-900 mb-2">Volume Not Available</h3>
             <p className="text-sm text-gray-600 mb-4">
               {volumeName} is no longer present in the dashboard data.
@@ -315,13 +315,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           </div>
           <div>
             <p className="text-sm text-gray-600">State</p>
-            <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-              volume.state === 'Healthy' ? 'bg-green-100 text-green-800' :
-              volume.state === 'Degraded' ? 'bg-yellow-100 text-yellow-800' :
-              'bg-red-100 text-red-800'
-            }`}>
-              {volume.state}
-            </span>
+            <VolumeStateChip state={volume.state} />
           </div>
           <div>
             <p className="text-sm text-gray-600">Replicas in sync</p>
@@ -333,13 +327,13 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-white border rounded-lg p-4">
           <div className="flex items-center">
-            <Database className="w-8 h-8 text-blue-600 mr-3" />
+            <Database className="w-8 h-8 text-brand-600 mr-3" />
             <div>
               <p className="text-sm font-medium">Volume Health</p>
               <p className={`text-lg font-bold ${
-                volume.state === 'Healthy' ? 'text-green-600' :
-                volume.state === 'Degraded' ? 'text-yellow-600' :
-                'text-red-600'
+                volume.state === 'Healthy' ? 'text-healthy-600' :
+                volume.state === 'Degraded' ? 'text-degraded-600' :
+                'text-failed-600'
               }`}>
                 {volume.state}
               </p>
@@ -465,9 +459,9 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
     return (
       <div className="space-y-6">
         {/* SPDK Volume Information */}
-        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg p-6 border border-blue-200">
+        <div className="bg-gradient-to-r from-brand-50 to-indigo-50 rounded-lg p-6 border border-brand-200">
           <h4 className="text-section mb-4 flex items-center gap-2">
-            <HardDrive className="w-5 h-5 text-blue-600" />
+            <HardDrive className="w-5 h-5 text-brand-600" />
             SPDK Logical Volume
           </h4>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -496,7 +490,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
             <div>
               <p className="text-sm text-gray-600">Size (GB)</p>
-              <p className="text-lg font-bold text-blue-600">{(spdkData.size_gb || 0).toFixed(2)}</p>
+              <p className="text-lg font-bold text-brand-600">{(spdkData.size_gb || 0).toFixed(2)}</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Size (Bytes)</p>
@@ -515,24 +509,25 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           {/* Volume Properties */}
           <div className="grid grid-cols-3 gap-4">
             <div className="flex items-center gap-2">
-              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                spdkData.is_thin_provisioned ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
-              }`}>
-                {spdkData.is_thin_provisioned ? 'Thin Provisioned' : 'Thick Provisioned'}
-              </span>
+              <Chip
+                label={spdkData.is_thin_provisioned ? 'Thin Provisioned' : 'Thick Provisioned'}
+                chip={spdkData.is_thin_provisioned
+                  ? 'bg-brand-100 text-brand-800 border-brand-200'
+                  : 'bg-gray-100 text-gray-800 border-gray-200'}
+              />
             </div>
             <div className="flex items-center gap-2">
               {spdkData.is_clone && (
-                <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-purple-100 text-purple-800">
-                  Clone
-                </span>
+                // raw purple on purpose: lvol-kind label, not the sync
+                // rejoining meaning purple aliases
+                <Chip label="Clone" chip="bg-purple-100 text-purple-800 border-purple-200" />
               )}
             </div>
             <div className="flex items-center gap-2">
               {spdkData.is_snapshot && (
-                <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-orange-100 text-orange-800">
-                  Snapshot
-                </span>
+                // raw orange on purpose: lvol-kind label, not the rebuild
+                // meaning orange aliases
+                <Chip label="Snapshot" chip="bg-orange-100 text-orange-800 border-orange-200" />
               )}
             </div>
           </div>
@@ -564,6 +559,8 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
           </div>
 
           {/* LVS Capacity */}
+          {/* raw on purpose: used-orange / free-green is capacity data coding
+              (chart-legend colors), not rebuild/health status */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
             <div>
               <p className="text-sm text-gray-600">Total Capacity</p>
@@ -597,7 +594,8 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
             />
           </div>
 
-          {/* Cluster Information */}
+          {/* Cluster Information — raw green/orange on purpose: same
+              free/used capacity data coding as above */}
           <div className="grid grid-cols-3 gap-4 text-sm">
             <div className="bg-gray-50 p-3 rounded">
               <p className="text-gray-600">Total Clusters</p>
@@ -639,7 +637,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b">
           <div className="flex items-center gap-3">
-            <Database className="w-6 h-6 text-blue-600" />
+            <Database className="w-6 h-6 text-brand-600" />
             <h2 className="text-section">Volume Details: {volumeName}</h2>
             <span className="text-xs text-gray-400 hidden md:inline">live</span>
           </div>
@@ -655,7 +653,7 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm ${
                   activeTab === tab.id
-                    ? 'border-blue-500 text-blue-600'
+                    ? 'border-brand-500 text-brand-600'
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >

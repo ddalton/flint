@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import type { SnapshotDetails } from './types';
 import { Button, IconButton } from '../ui/Button';
+import { Chip } from '../ui/Chip';
 
 interface SnapshotDetailModalProps {
   snapshot: SnapshotDetails;
@@ -64,13 +65,12 @@ export const SnapshotDetailModal: React.FC<SnapshotDetailModalProps> = ({
                 </div>
                 <div>
                   <span className="text-sm font-medium text-gray-600">Status:</span>
-                  <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                    snapshot.ready_to_use 
-                      ? 'bg-green-100 text-green-800' 
-                      : 'bg-yellow-100 text-yellow-800'
-                  }`}>
-                    {snapshot.ready_to_use ? 'Ready' : 'Creating'}
-                  </span>
+                  <Chip
+                    label={snapshot.ready_to_use ? 'Ready' : 'Creating'}
+                    chip={snapshot.ready_to_use
+                      ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
+                      : 'bg-degraded-100 text-degraded-800 border-degraded-200'}
+                  />
                 </div>
               </div>
             </div>
@@ -82,10 +82,10 @@ export const SnapshotDetailModal: React.FC<SnapshotDetailModalProps> = ({
                 Replica Snapshot Architecture
               </h3>
               
-              <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <div className="mb-4 p-4 bg-brand-50 border border-brand-200 rounded-lg">
                 <div className="flex items-start gap-3">
-                  <Info className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
-                  <div className="text-sm text-blue-800">
+                  <Info className="w-5 h-5 text-brand-600 mt-0.5 flex-shrink-0" />
+                  <div className="text-sm text-brand-800">
                     <p className="font-medium mb-2">High Availability Design</p>
                     <p>
                       This snapshot maintains the same redundancy as the source volume by creating 
@@ -102,9 +102,11 @@ export const SnapshotDetailModal: React.FC<SnapshotDetailModalProps> = ({
                        className="border border-gray-200 rounded-lg p-4">
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-3">
+                        {/* raw on purpose: replica-identity palette (1=blue,
+                            2=green, 3=purple), a data-series coding, not status */}
                         <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium ${
-                          index === 0 ? 'bg-blue-600' : 
-                          index === 1 ? 'bg-green-600' : 
+                          index === 0 ? 'bg-blue-600' :
+                          index === 1 ? 'bg-green-600' :
                           'bg-purple-600'
                         }`}>
                           {index + 1}
@@ -156,12 +158,12 @@ export const SnapshotDetailModal: React.FC<SnapshotDetailModalProps> = ({
             </div>
 
             {/* Recovery Information */}
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-              <h4 className="font-medium text-green-800 mb-2 flex items-center gap-2">
+            <div className="bg-healthy-50 border border-healthy-200 rounded-lg p-4">
+              <h4 className="font-medium text-healthy-800 mb-2 flex items-center gap-2">
                 <CheckCircle className="w-4 h-4" />
                 Recovery Capabilities
               </h4>
-              <div className="text-sm text-green-700 space-y-2">
+              <div className="text-sm text-healthy-700 space-y-2">
                 <p>
                   • <strong>Node Failure Tolerance:</strong> Data can be recovered even if {snapshot.replica_bdev_details.length - 1} out of {snapshot.replica_bdev_details.length} nodes fail
                 </p>
@@ -179,9 +181,9 @@ export const SnapshotDetailModal: React.FC<SnapshotDetailModalProps> = ({
 
             {/* Clone Information */}
             {snapshot.clone_source_snapshot_id && (
-              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                <h4 className="font-medium text-yellow-800 mb-2">Clone Information</h4>
-                <p className="text-sm text-yellow-700">
+              <div className="bg-degraded-50 border border-degraded-200 rounded-lg p-4">
+                <h4 className="font-medium text-degraded-800 mb-2">Clone Information</h4>
+                <p className="text-sm text-degraded-700">
                   This snapshot was created as a clone from snapshot: <span className="font-mono">{snapshot.clone_source_snapshot_id}</span>
                 </p>
               </div>

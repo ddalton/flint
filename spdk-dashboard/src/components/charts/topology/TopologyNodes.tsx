@@ -79,7 +79,7 @@ export function StatusRing({
           />
         ))}
       </svg>
-      <Icon className="absolute inset-0 m-auto h-4 w-4 text-blue-600" aria-hidden="true" />
+      <Icon className="absolute inset-0 m-auto h-4 w-4 text-brand-600" aria-hidden="true" />
     </div>
   );
 }
@@ -88,6 +88,8 @@ export function AppTopologyNode({ selected }: NodeProps<AppNodeData>) {
   return (
     <NodeCard selected={selected} width="w-44">
       <div className="flex items-center gap-2">
+        {/* Raw purple on purpose: consumer/app identity accent, not the
+            rejoining sync state the purple alias carries. */}
         <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-purple-300 bg-purple-100">
           <Monitor className="h-4 w-4 text-purple-600" aria-hidden="true" />
         </div>
@@ -188,8 +190,10 @@ export function MemberTopologyNode({ data, selected }: NodeProps<MemberNodeData>
         </div>
         {replica &&
           (replica.is_local ? (
-            <Zap className="h-3.5 w-3.5 flex-shrink-0 text-blue-600" aria-label="local access" />
+            <Zap className="h-3.5 w-3.5 flex-shrink-0 text-brand-600" aria-label="local access" />
           ) : (
+            // Raw purple on purpose: network-path accent, not the rejoining
+            // sync state the purple alias carries.
             <Network
               className="h-3.5 w-3.5 flex-shrink-0 text-purple-600"
               aria-label="network access"
@@ -234,7 +238,7 @@ export function DiskTopologyNode({ data, selected }: NodeProps<DiskNodeData>) {
     <NodeCard selected={selected} width="w-52">
       <div className="flex items-center gap-2">
         <HardDrive
-          className={`h-4 w-4 flex-shrink-0 ${d.healthy ? 'text-gray-600' : 'text-red-600'}`}
+          className={`h-4 w-4 flex-shrink-0 ${d.healthy ? 'text-gray-600' : 'text-failed-600'}`}
           aria-hidden="true"
         />
         <div className="min-w-0 flex-1">

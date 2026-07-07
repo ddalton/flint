@@ -24,18 +24,18 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       title: 'Total Volumes',
       value: stats.totalVolumes,
       icon: Database,
-      color: 'text-blue-600',
-      bgColor: 'bg-blue-50',
-      borderColor: 'border-blue-200'
+      color: 'text-brand-600',
+      bgColor: 'bg-brand-50',
+      borderColor: 'border-brand-200'
     },
     {
       id: 'healthy' as VolumeFilter,
       title: 'Healthy',
       value: stats.healthyVolumes,
       icon: CheckCircle,
-      color: 'text-green-600',
-      bgColor: 'bg-green-50',
-      borderColor: 'border-green-200',
+      color: 'text-healthy-600',
+      bgColor: 'bg-healthy-50',
+      borderColor: 'border-healthy-200',
       subtitle: 'All replicas operational'
     },
     {
@@ -43,9 +43,9 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       title: 'Degraded',
       value: stats.degradedVolumes,
       icon: AlertTriangle,
-      color: 'text-yellow-600',
-      bgColor: 'bg-yellow-50',
-      borderColor: 'border-yellow-200',
+      color: 'text-degraded-600',
+      bgColor: 'bg-degraded-50',
+      borderColor: 'border-degraded-200',
       subtitle: 'Reduced redundancy'
     },
     {
@@ -53,9 +53,9 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       title: 'Failed',
       value: stats.failedVolumes,
       icon: XCircle,
-      color: 'text-red-600',
-      bgColor: 'bg-red-50',
-      borderColor: 'border-red-200',
+      color: 'text-failed-600',
+      bgColor: 'bg-failed-50',
+      borderColor: 'border-failed-200',
       subtitle: 'Immediate attention needed'
     },
     {
@@ -63,9 +63,9 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       title: 'With Rebuilding',
       value: stats.volumesWithRebuilding,
       icon: Settings,
-      color: 'text-orange-600',
-      bgColor: 'bg-orange-50',
-      borderColor: 'border-orange-200',
+      color: 'text-rebuilding-600',
+      bgColor: 'bg-rebuilding-50',
+      borderColor: 'border-rebuilding-200',
       subtitle: 'Replica recovery active'
     },
     {
@@ -73,9 +73,9 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       title: 'Local NVMe',
       value: stats.localNVMeVolumes,
       icon: Zap,
-      color: 'text-blue-600',
-      bgColor: 'bg-blue-50',
-      borderColor: 'border-blue-200',
+      color: 'text-brand-600',
+      bgColor: 'bg-brand-50',
+      borderColor: 'border-brand-200',
       subtitle: 'High performance storage'
     },
     {
@@ -83,9 +83,9 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       title: 'Orphaned',
       value: stats.orphanedVolumes,
       icon: Shield,
-      color: 'text-amber-600',
-      bgColor: 'bg-amber-50',
-      borderColor: 'border-amber-200',
+      color: 'text-warning-600',
+      bgColor: 'bg-warning-50',
+      borderColor: 'border-warning-200',
       subtitle: 'Raw SPDK volumes (needs cleanup)'
     }
   ];
@@ -102,7 +102,7 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
             onClick={() => onFilterClick(card.id)}
             className={`bg-white rounded-lg shadow p-4 text-left transition-all duration-200 hover:shadow-lg hover:scale-105 ${
               isActive 
-                ? `ring-2 ring-blue-500 ${card.bgColor} border-2 ${card.borderColor}` 
+                ? `ring-2 ring-brand-500 ${card.bgColor} border-2 ${card.borderColor}`
                 : 'hover:bg-gray-50'
             }`}
           >
@@ -117,7 +117,7 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
               </div>
             </div>
             {isActive && card.id !== 'all' && (
-              <p className="text-xs text-blue-600 font-medium">
+              <p className="text-xs text-brand-600 font-medium">
                 Click to clear filter
               </p>
             )}

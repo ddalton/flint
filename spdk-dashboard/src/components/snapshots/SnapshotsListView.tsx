@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import type { SnapshotDetails } from './types';
 import { IconButton } from '../ui/Button';
+import { Chip } from '../ui/Chip';
 
 interface SnapshotsListViewProps {
   snapshots: SnapshotDetails[];
@@ -59,13 +60,12 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
                     {formatTime(snapshot.creation_time)}
                   </div>
                 </div>
-                <div className={`px-3 py-1 rounded-full text-xs font-medium ${
-                  snapshot.ready_to_use 
-                    ? 'bg-green-100 text-green-800' 
-                    : 'bg-yellow-100 text-yellow-800'
-                }`}>
-                  {snapshot.ready_to_use ? 'Ready' : 'Creating'}
-                </div>
+                <Chip
+                  label={snapshot.ready_to_use ? 'Ready' : 'Creating'}
+                  chip={snapshot.ready_to_use
+                    ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
+                    : 'bg-degraded-100 text-degraded-800 border-degraded-200'}
+                />
                 <IconButton
                   icon={Eye}
                   aria-label="View snapshot details"
@@ -85,10 +85,10 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
                   ({snapshot.replica_bdev_details.length} replica snapshots)
                 </span>
               </h4>
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+              <div className="bg-brand-50 border border-brand-200 rounded-lg p-3 mb-4">
                 <div className="flex items-start gap-2">
-                  <Info className="w-4 h-4 text-blue-600 mt-0.5 flex-shrink-0" />
-                  <div className="text-sm text-blue-800">
+                  <Info className="w-4 h-4 text-brand-600 mt-0.5 flex-shrink-0" />
+                  <div className="text-sm text-brand-800">
                     <p className="font-medium mb-1">High Availability Snapshot</p>
                     <p>
                       This snapshot was created by taking individual snapshots of each volume replica 
@@ -108,6 +108,8 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
                       <Server className="w-4 h-4 text-gray-600" />
                       <span className="font-medium text-gray-900">{replica.node}</span>
                     </div>
+                    {/* raw on purpose: indigo replica-identity tag (no semantic
+                        alias exists); borderless, so Chip would change the look */}
                     <span className="text-xs bg-indigo-100 text-indigo-800 px-2 py-1 rounded-full">
                       Replica {index + 1}
                     </span>
@@ -153,14 +155,14 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
             </div>
 
             {/* Consistency Information */}
-            <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+            <div className="mt-4 p-3 bg-healthy-50 border border-healthy-200 rounded-lg">
               <div className="flex items-center gap-2 mb-2">
-                <CheckCircle className="w-4 h-4 text-green-600" />
-                <span className="text-sm font-medium text-green-800">
+                <CheckCircle className="w-4 h-4 text-healthy-600" />
+                <span className="text-sm font-medium text-healthy-800">
                   Consistency Guarantee
                 </span>
               </div>
-              <p className="text-sm text-green-700">
+              <p className="text-sm text-healthy-700">
                 All replica snapshots were created atomically at {formatTime(snapshot.creation_time)} 
                 ensuring data consistency across all {snapshot.replica_bdev_details.length} replicas.
               </p>

@@ -4,6 +4,7 @@ import {
   HardDrive, BarChart3, TrendingUp, AlertCircle, Info, Zap
 } from 'lucide-react';
 import type { SnapshotTreeNode, SnapshotChainItem, VolumeStorageAnalytics } from './types';
+import { Chip } from '../ui/Chip';
 
 interface EnhancedSnapshotsTreeViewProps {
   snapshotTree: Record<string, SnapshotTreeNode>;
@@ -66,16 +67,17 @@ const SnapshotChainItem: React.FC<{
           </button>
         )}
         
-        {/* Node Content */}
+        {/* Node Content — green leg raw on purpose: chain-node identity
+            coding (snapshot vs active volume), not health status */}
         <div className={`flex-1 p-3 rounded-lg border-l-4 ${
-          isActiveVolume 
-            ? 'border-blue-500 bg-blue-50' 
+          isActiveVolume
+            ? 'border-brand-500 bg-brand-50'
             : 'border-green-500 bg-green-50'
         }`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               {isActiveVolume ? (
-                <Database className="w-4 h-4 text-blue-600" />
+                <Database className="w-4 h-4 text-brand-600" />
               ) : (
                 <Layers className="w-4 h-4 text-green-600" />
               )}
@@ -84,9 +86,7 @@ const SnapshotChainItem: React.FC<{
                   {item.snapshot_id || item.bdev_name}
                 </span>
                 {isActiveVolume && (
-                  <span className="ml-2 px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full">
-                    Active Volume
-                  </span>
+                  <Chip label="Active Volume" chip="ml-2 bg-brand-100 text-brand-800 border-brand-200" />
                 )}
                 <div className="text-xs text-gray-600 mt-1">
                   Bdev: {item.bdev_name}
@@ -157,15 +157,15 @@ const VolumeStorageAnalytics: React.FC<{
 }> = ({ analytics, formatSize }) => {
   const efficiency = analytics.snapshot_efficiency_ratio;
   const getEfficiencyColor = () => {
-    if (efficiency < 0.1) return 'text-green-600';
-    if (efficiency < 0.3) return 'text-yellow-600';
-    return 'text-red-600';
+    if (efficiency < 0.1) return 'text-healthy-600';
+    if (efficiency < 0.3) return 'text-degraded-600';
+    return 'text-failed-600';
   };
 
   const getEfficiencyIcon = () => {
-    if (efficiency < 0.1) return <TrendingUp className="w-4 h-4 text-green-600" />;
-    if (efficiency < 0.3) return <BarChart3 className="w-4 h-4 text-yellow-600" />;
-    return <AlertCircle className="w-4 h-4 text-red-600" />;
+    if (efficiency < 0.1) return <TrendingUp className="w-4 h-4 text-healthy-600" />;
+    if (efficiency < 0.3) return <BarChart3 className="w-4 h-4 text-degraded-600" />;
+    return <AlertCircle className="w-4 h-4 text-failed-600" />;
   };
 
   return (
@@ -178,11 +178,13 @@ const VolumeStorageAnalytics: React.FC<{
       {/* Storage Breakdown */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
         <div className="text-center">
-          <div className="text-stat text-blue-600">
+          <div className="text-stat text-brand-600">
             {formatSize(analytics.total_volume_size)}
           </div>
           <div className="text-xs text-gray-600">Logical Size</div>
         </div>
+        {/* raw on purpose: green/orange are the storage data-series colors
+            (Actual Data / Snapshot Overhead), not status */}
         <div className="text-center">
           <div className="text-stat text-green-600">
             {formatSize(analytics.actual_data_size)}
@@ -212,8 +214,8 @@ const VolumeStorageAnalytics: React.FC<{
         <div className="w-full bg-gray-200 rounded-full h-3">
           <div 
             className={`h-3 rounded-full ${
-              efficiency < 0.1 ? 'bg-green-500' :
-              efficiency < 0.3 ? 'bg-yellow-500' : 'bg-red-500'
+              efficiency < 0.1 ? 'bg-healthy-500' :
+              efficiency < 0.3 ? 'bg-degraded-500' : 'bg-failed-500'
             }`}
             style={{ width: `${Math.min(efficiency * 100, 100)}%` }}
           />
@@ -249,15 +251,15 @@ const VolumeStorageAnalytics: React.FC<{
       
       {/* Recommendations */}
       {analytics.recommendations.length > 0 && (
-        <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded">
+        <div className="mt-4 p-3 bg-brand-50 border border-brand-200 rounded">
           <div className="flex items-center gap-2 mb-2">
-            <Info className="w-4 h-4 text-blue-600" />
-            <span className="text-sm font-medium text-blue-800">Recommendations</span>
+            <Info className="w-4 h-4 text-brand-600" />
+            <span className="text-sm font-medium text-brand-800">Recommendations</span>
           </div>
-          <ul className="text-sm text-blue-700 space-y-1">
+          <ul className="text-sm text-brand-700 space-y-1">
             {analytics.recommendations.map((rec, index) => (
               <li key={index} className="flex items-start gap-1">
-                <span className="text-blue-500 mt-1">•</span>
+                <span className="text-brand-500 mt-1">•</span>
                 <span>{rec}</span>
               </li>
             ))}
@@ -300,7 +302,7 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
                 ) : (
                   <ChevronRight className="w-5 h-5 text-gray-500" />
                 )}
-                <Database className="w-6 h-6 text-blue-600" />
+                <Database className="w-6 h-6 text-brand-600" />
                 <div>
                   <h3 className="text-section text-gray-900">
                     {volumeData.volume_name}
@@ -326,15 +328,15 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
                     <div className="flex items-center">
                       {volumeData.storage_analytics.snapshot_efficiency_ratio < 0.1 ? (
                         <span title="Efficient storage usage">
-                          <Zap className="w-5 h-5 text-green-500" />
+                          <Zap className="w-5 h-5 text-healthy-500" />
                         </span>
                       ) : volumeData.storage_analytics.snapshot_efficiency_ratio < 0.3 ? (
                         <span title="Moderate overhead">
-                          <BarChart3 className="w-5 h-5 text-yellow-500" />
+                          <BarChart3 className="w-5 h-5 text-degraded-500" />
                         </span>
                       ) : (
                         <span title="High storage overhead">
-                          <AlertCircle className="w-5 h-5 text-red-500" />
+                          <AlertCircle className="w-5 h-5 text-failed-500" />
                         </span>
                       )}
                     </div>
@@ -361,12 +363,12 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
               
               {/* Snapshot Chain Error */}
               {volumeData.snapshot_chain.error ? (
-                <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
-                  <div className="flex items-center gap-2 text-red-800">
+                <div className="p-4 bg-failed-50 border border-failed-200 rounded-lg">
+                  <div className="flex items-center gap-2 text-failed-800">
                     <AlertCircle className="w-4 h-4" />
                     <span className="font-medium">Chain Trace Error</span>
                   </div>
-                  <p className="text-sm text-red-700 mt-1">
+                  <p className="text-sm text-failed-700 mt-1">
                     {volumeData.snapshot_chain.error}
                   </p>
                 </div>
@@ -383,12 +385,12 @@ export const EnhancedSnapshotsTreeView: React.FC<EnhancedSnapshotsTreeViewProps>
                   </h4>
                   
                   {/* Active Volume Info */}
-                  <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                  <div className="mb-4 p-3 bg-brand-50 border border-brand-200 rounded-lg">
                     <div className="flex items-center gap-2 mb-1">
-                      <Database className="w-4 h-4 text-blue-600" />
-                      <span className="text-sm font-medium text-blue-800">Active Volume (Head of Chain)</span>
+                      <Database className="w-4 h-4 text-brand-600" />
+                      <span className="text-sm font-medium text-brand-800">Active Volume (Head of Chain)</span>
                     </div>
-                    <div className="text-xs text-blue-700">
+                    <div className="text-xs text-brand-700">
                       <div>Logical Volume Object: {volumeData.snapshot_chain.active_lvol}</div>
                       <div>Total Chain Depth: {volumeData.snapshot_chain.chain_depth} levels</div>
                     </div>

@@ -79,7 +79,7 @@ export function ClusterTopologyGraph({
             <span>link = nodes sharing volume replicas (thicker = more)</span>
             <span>marching dashes = recovery</span>
             {truncatedLinks > 0 && (
-              <span className="font-medium text-amber-700">
+              <span className="font-medium text-warning-700">
                 {truncatedLinks} least-shared links hidden
               </span>
             )}

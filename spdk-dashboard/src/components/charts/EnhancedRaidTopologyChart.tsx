@@ -3,6 +3,7 @@ import {
   Database, Activity, Zap, Network, AlertTriangle, Shield, Settings, Search, ChevronDown
 } from 'lucide-react';
 import type { Volume, Disk, NodeInfo } from '../../hooks/useDashboardData';
+import { Chip, VolumeStateChip } from '../ui/Chip';
 import { VolumeTopologyGraph } from './topology/VolumeTopologyGraph';
 import { ClusterTopologyGraph } from './topology/ClusterTopologyGraph';
 import { raidLevelDisplayName } from './topology/buildTopology';
@@ -93,7 +94,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
     <div className="bg-white rounded-lg shadow-lg p-6">
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center">
-          <Activity className="w-6 h-6 text-blue-600 mr-2" />
+          <Activity className="w-6 h-6 text-brand-600 mr-2" />
           <h3 className="text-section">
             {view === 'cluster' ? 'Cluster Topology' : 'Volume Topology'}
           </h3>
@@ -113,7 +114,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                 onClick={() => setView(mode)}
                 className={`px-3 py-2 text-sm font-medium capitalize transition-colors ${
                   view === mode
-                    ? 'bg-blue-600 text-white'
+                    ? 'bg-brand-600 text-white'
                     : 'bg-white text-gray-600 hover:bg-gray-50'
                 }`}
               >
@@ -127,7 +128,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
           <div className="relative" ref={dropdownRef}>
             <button
               onClick={openDropdown}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white hover:bg-gray-50 min-w-[300px] text-left"
+              className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white hover:bg-gray-50 min-w-[300px] text-left"
             >
               <Database className="w-4 h-4 text-gray-500" />
               <div className="flex-1 min-w-0">
@@ -156,7 +157,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                       placeholder="Search volumes by name, ID, state, or node..."
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
-                      className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-500 text-sm"
                     />
                   </div>
                   {searchTerm && (
@@ -178,7 +179,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                         key={volume.id}
                         onClick={() => handleVolumeSelect(volume.id)}
                         className={`w-full px-4 py-3 text-left hover:bg-gray-50 border-b border-gray-100 last:border-b-0 transition-colors ${
-                          selectedVolume === volume.id ? 'bg-blue-50 border-blue-200' : ''
+                          selectedVolume === volume.id ? 'bg-brand-50 border-brand-200' : ''
                         }`}
                       >
                         <div className="flex items-center justify-between">
@@ -190,13 +191,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                               ID: {volume.id.length > 20 ? `${volume.id.substring(0, 20)}...` : volume.id}
                             </div>
                             <div className="flex items-center gap-2 mt-1">
-                              <span className={`px-2 py-0.5 text-xs rounded-full ${
-                                volume.state === 'Healthy' ? 'bg-green-100 text-green-700' :
-                                volume.state === 'Degraded' ? 'bg-yellow-100 text-yellow-700' :
-                                'bg-red-100 text-red-700'
-                              }`}>
-                                {volume.state}
-                              </span>
+                              <VolumeStateChip state={volume.state} />
                               <span className="text-xs text-gray-500">{volume.size}</span>
                               <span className="text-xs text-gray-500">
                                 {volume.active_replicas}/{volume.replicas} replicas
@@ -205,7 +200,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                           </div>
                           {volume.replica_statuses.some(r => r.sync && r.sync.sync_state !== 'in_sync') && (
                             <div className="ml-3 flex-shrink-0" title="Replica recovery in progress">
-                              <AlertTriangle className="w-4 h-4 text-amber-500" />
+                              <AlertTriangle className="w-4 h-4 text-stale-500" />
                             </div>
                           )}
                         </div>
@@ -236,13 +231,13 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                       </div>
                       <div className="flex justify-between">
                         <span>Healthy:</span>
-                        <span className="text-green-600 font-medium">
+                        <span className="text-healthy-600 font-medium">
                           {volumes.filter(v => v.state === 'Healthy').length}
                         </span>
                       </div>
                       <div className="flex justify-between">
                         <span>With Issues:</span>
-                        <span className="text-red-600 font-medium">
+                        <span className="text-failed-600 font-medium">
                           {volumes.filter(v => v.state !== 'Healthy').length}
                         </span>
                       </div>
@@ -271,6 +266,8 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
         <>
       {/* Missing live metrics: honest empty-state note, graph still renders
           from replica statuses. */}
+      {/* Raw yellow on purpose: generic caution note about missing metrics —
+          not the degraded volume state the yellow alias carries. */}
       {!raidStatus && (
         <div className="mb-4 p-4 bg-yellow-50 border-l-4 border-yellow-400">
           <div className="flex">
@@ -291,48 +288,55 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
 
       {/* Status Summary */}
       <div className="mt-4 flex justify-center gap-4 flex-wrap">
-        <span
-          className={`px-4 py-2 rounded-full text-sm font-medium ${
+        <Chip
+          label={`${selectedVolumeInfo.active_replicas}/${selectedVolumeInfo.replicas} Active Replicas`}
+          chip={
             selectedVolumeInfo.active_replicas === selectedVolumeInfo.replicas
-              ? 'bg-green-100 text-green-800'
+              ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
               : selectedVolumeInfo.active_replicas > 0
-              ? 'bg-yellow-100 text-yellow-800'
-              : 'bg-red-100 text-red-800'
-          }`}
-        >
-          {selectedVolumeInfo.active_replicas}/{selectedVolumeInfo.replicas} Active Replicas
-        </span>
+              ? 'bg-degraded-100 text-degraded-800 border-degraded-200'
+              : 'bg-failed-100 text-failed-800 border-failed-200'
+          }
+        />
 
         {raidStatus && (
-          <span className={`px-4 py-2 rounded-full text-sm font-medium flex items-center gap-1 ${
-            raidStatus.state === 'online' ? 'bg-green-100 text-green-800' :
-            raidStatus.state === 'degraded' ? 'bg-yellow-100 text-yellow-800' :
-            'bg-red-100 text-red-800'
-          }`}>
-            <Shield className="w-4 h-4" />
-            {raidLevelDisplayName(raidStatus.raid_level)} {raidStatus.state.toUpperCase()}
-          </span>
+          <Chip
+            icon={Shield}
+            label={`${raidLevelDisplayName(raidStatus.raid_level)} ${raidStatus.state.toUpperCase()}`}
+            chip={
+              raidStatus.state === 'online'
+                ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
+                : raidStatus.state === 'degraded'
+                ? 'bg-degraded-100 text-degraded-800 border-degraded-200'
+                : 'bg-failed-100 text-failed-800 border-failed-200'
+            }
+          />
         )}
 
         {selectedVolumeInfo.local_nvme && (
-          <span className="px-4 py-2 rounded-full text-sm font-medium bg-blue-100 text-blue-800 flex items-center gap-1">
-            <Zap className="w-4 h-4" />
-            High Performance Path
-          </span>
+          <Chip
+            icon={Zap}
+            label="High Performance Path"
+            chip="bg-brand-100 text-brand-800 border-brand-200"
+          />
         )}
 
+        {/* Raw indigo on purpose: NVMe-oF transport accent, not a status —
+            no semantic alias fits. */}
         {hasNvmeof && (
-          <span className="px-4 py-2 rounded-full text-sm font-medium bg-indigo-100 text-indigo-800 flex items-center gap-1">
-            <Network className="w-4 h-4" />
-            NVMe-oF Enabled
-          </span>
+          <Chip
+            icon={Network}
+            label="NVMe-oF Enabled"
+            chip="bg-indigo-100 text-indigo-800 border-indigo-200"
+          />
         )}
 
         {raidStatus?.rebuild_info && (
-          <span className="px-4 py-2 rounded-full text-sm font-medium bg-orange-100 text-orange-800 flex items-center gap-1">
-            <Settings className="w-4 h-4" />
-            RAID Rebuild in Progress ({raidStatus.rebuild_info.progress_percentage.toFixed(1)}%)
-          </span>
+          <Chip
+            icon={Settings}
+            label={`RAID Rebuild in Progress (${raidStatus.rebuild_info.progress_percentage.toFixed(1)}%)`}
+            chip="bg-rebuilding-100 text-rebuilding-800 border-rebuilding-200"
+          />
         )}
       </div>
         </>

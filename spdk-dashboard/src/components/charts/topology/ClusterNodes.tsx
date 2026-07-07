@@ -33,7 +33,7 @@ export function ClusterTopologyNode({ data, selected }: NodeProps<ClusterNodeDat
           <p className="text-xs text-gray-500">
             {node.disks.length} disk{node.disks.length === 1 ? '' : 's'}
             {unhealthyDisks > 0 && (
-              <span className="font-medium text-red-600"> ({unhealthyDisks} unhealthy)</span>
+              <span className="font-medium text-failed-600"> ({unhealthyDisks} unhealthy)</span>
             )}
             {totalGb > 0 && ` • ${Math.round(freeGb)}/${Math.round(totalGb)} GB free`}
           </p>
@@ -41,7 +41,7 @@ export function ClusterTopologyNode({ data, selected }: NodeProps<ClusterNodeDat
             {node.replicaCount} replica{node.replicaCount === 1 ? '' : 's'} •{' '}
             {node.volumes.length} volume{node.volumes.length === 1 ? '' : 's'}
             {brokenVolumes > 0 && (
-              <span className="font-medium text-yellow-700"> ({brokenVolumes} not healthy)</span>
+              <span className="font-medium text-degraded-700"> ({brokenVolumes} not healthy)</span>
             )}
           </p>
         </div>

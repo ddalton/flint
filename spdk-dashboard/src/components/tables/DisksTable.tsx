@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import type { Disk, OrphanedVolumeInfo, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 import { filterVolumesByType } from '../../hooks/useDashboardData';
+import { Chip } from '../ui/Chip';
 import { ConfirmModal } from '../ui/ConfirmModal';
 import { Pagination } from '../ui/Pagination';
 import { ProgressBar } from '../ui/ProgressBar';
@@ -357,31 +358,31 @@ export const DisksTable: React.FC<DisksTableProps> = ({
       </div>
       {/* Volume-based filters (existing) */}
       {volumeFilter && volumeFilter !== 'all' && !volumeReplicaFilter && (
-        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-          <div className="text-sm font-medium text-blue-900">
+        <div className="mb-4 p-3 bg-brand-50 border border-brand-200 rounded-lg">
+          <div className="text-sm font-medium text-brand-900">
             Showing disks with {getFilterDisplayName(volumeFilter)}
           </div>
-          <div className="text-sm text-blue-700">
+          <div className="text-sm text-brand-700">
             {filteredDisks.length} of {disks.length} disks have {getFilterDisplayName(volumeFilter)}
           </div>
         </div>
       )}
 
       {volumeReplicaFilter && targetVolume && (
-        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg flex items-center justify-between">
+        <div className="mb-4 p-3 bg-healthy-50 border border-healthy-200 rounded-lg flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <HardDrive className="w-4 h-4 text-green-600" />
-            <span className="text-sm font-medium text-green-900">
+            <HardDrive className="w-4 h-4 text-healthy-600" />
+            <span className="text-sm font-medium text-healthy-900">
               Showing disks with replicas for volume: {targetVolume.name}
             </span>
-            <span className="text-sm text-green-700">
+            <span className="text-sm text-healthy-700">
               ({filteredDisks.length} disk{filteredDisks.length !== 1 ? 's' : ''} contain{filteredDisks.length === 1 ? 's' : ''} replicas)
             </span>
           </div>
           {onClearVolumeReplicaFilter && (
             <button
               onClick={onClearVolumeReplicaFilter}
-              className="text-green-600 hover:text-green-800 text-sm font-medium flex items-center gap-1"
+              className="text-healthy-600 hover:text-healthy-800 text-sm font-medium flex items-center gap-1"
             >
               <X className="w-3 h-3" />
               Clear Volume Filter
@@ -398,7 +399,9 @@ export const DisksTable: React.FC<DisksTableProps> = ({
             <Filter className="w-5 h-5 text-gray-600" />
             <h3 className="text-section text-gray-900">Disk Filters</h3>
             {activeFilterCount > 0 && (
-              <span className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
+              // Count badge (not a status Chip — Chip's border/padding would
+              // change its look)
+              <span className="px-2 py-1 text-xs bg-brand-100 text-brand-800 rounded-full">
                 {activeFilterCount} active
               </span>
             )}
@@ -432,7 +435,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
               placeholder="Search disks by ID, node, model, or PCI address..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
             />
           </div>
         </div>
@@ -473,7 +476,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                 <select
                   value={healthFilter}
                   onChange={(e) => setHealthFilter(e.target.value as DiskHealthFilter)}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                 >
                   <option value="all">All Disks</option>
                   <option value="healthy">Healthy Only</option>
@@ -487,7 +490,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                 <select
                   value={lvsFilter}
                   onChange={(e) => setLVSFilter(e.target.value as DiskLVSFilter)}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                 >
                   <option value="all">All Disks</option>
                   <option value="initialized">Initialized Only</option>
@@ -501,7 +504,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                 <select
                   value={utilizationFilter}
                   onChange={(e) => setUtilizationFilter(e.target.value as DiskUtilizationFilter)}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                 >
                   <option value="all">All Levels</option>
                   <option value="low">Low (&lt; 25%)</option>
@@ -520,7 +523,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                     placeholder="Min"
                     value={capacityRange.min}
                     onChange={(e) => setCapacityRange({ ...capacityRange, min: e.target.value })}
-                    className="flex-1 border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="flex-1 border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                   />
                   <span className="text-gray-500">to</span>
                   <input
@@ -528,7 +531,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                     placeholder="Max"
                     value={capacityRange.max}
                     onChange={(e) => setCapacityRange({ ...capacityRange, max: e.target.value })}
-                    className="flex-1 border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="flex-1 border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                   />
                 </div>
               </div>
@@ -541,12 +544,12 @@ export const DisksTable: React.FC<DisksTableProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-gray-50 rounded-lg p-4">
           <div className="flex items-center">
-            <HardDrive className="w-8 h-8 text-blue-600 mr-3" />
+            <HardDrive className="w-8 h-8 text-brand-600 mr-3" />
             <div>
               <h3 className="text-sm font-medium text-gray-700">
                 {activeFilterCount > 0 || volumeFilter || volumeReplicaFilter ? 'Filtered Disks' : 'Total Disks'}
               </h3>
-              <p className="text-stat text-blue-600">
+              <p className="text-stat text-brand-600">
                 {filteredDisks.length}
                 {(activeFilterCount > 0 || volumeFilter || volumeReplicaFilter) && (
                   <span className="text-lg text-gray-500">/{stats.totalDisks}</span>
@@ -557,10 +560,10 @@ export const DisksTable: React.FC<DisksTableProps> = ({
         </div>
         <div className="bg-gray-50 rounded-lg p-4">
           <div className="flex items-center">
-            <CheckCircle className="w-8 h-8 text-green-600 mr-3" />
+            <CheckCircle className="w-8 h-8 text-healthy-600 mr-3" />
             <div>
               <h3 className="text-sm font-medium text-gray-700">Healthy Disks</h3>
-              <p className="text-stat text-green-600">
+              <p className="text-stat text-healthy-600">
                 {filteredDisks.filter(d => d.healthy).length}
               </p>
             </div>
@@ -727,7 +730,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                             onDiskClick?.(disk.id);
                           }
                         }}
-                        className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                        className="text-brand-600 hover:text-brand-800 hover:underline font-medium"
                       >
                         {disk.id}
                       </button>
@@ -740,6 +743,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       <div className="flex items-center gap-2">
+                        {/* raw on purpose: categorical device-type palette
+                            (NVMe/SCSI/VirtIO/IDE), not status colors */}
                         <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded ${
                           disk.device_type === 'NVMe' ? 'bg-purple-100 text-purple-800' :
                           disk.device_type === 'SCSI/SATA' ? 'bg-blue-100 text-blue-800' :
@@ -767,25 +772,29 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                        disk.healthy ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                      }`}>
-                        {disk.healthy ? 'Healthy' : 'Unhealthy'}
-                      </span>
+                      <Chip
+                        label={disk.healthy ? 'Healthy' : 'Unhealthy'}
+                        chip={disk.healthy
+                          ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
+                          : 'bg-failed-100 text-failed-800 border-failed-200'}
+                      />
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                        disk.blobstore_initialized ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
-                      }`}>
-                        {disk.blobstore_initialized ? 'Yes' : 'No'}
-                      </span>
+                      <Chip
+                        label={disk.blobstore_initialized ? 'Yes' : 'No'}
+                        chip={disk.blobstore_initialized
+                          ? 'bg-brand-100 text-brand-800 border-brand-200'
+                          : 'bg-gray-100 text-gray-800 border-gray-200'}
+                      />
                       {disk.blobstore_initialized && (
                         <div className="text-xs text-gray-500 mt-1">
                           <div className="flex items-center gap-1">
                             <span>{disk.lvol_count} logical volumes</span>
                             {disk.orphaned_spdk_volumes && disk.orphaned_spdk_volumes.length > 0 && (
-                              <span 
-                                className="text-orange-500 flex items-center gap-1" 
+                              // raw on purpose: generic caution about orphaned
+                              // volumes, not the rebuild meaning orange aliases
+                              <span
+                                className="text-orange-500 flex items-center gap-1"
                                 title={`${disk.orphaned_spdk_volumes.length} orphaned SPDK volume${disk.orphaned_spdk_volumes.length !== 1 ? 's' : ''} (${disk.orphaned_spdk_volumes.reduce((total, orphan) => total + orphan.size_gb, 0).toFixed(1)}GB)`}
                               >
                                 <AlertTriangle className="w-3 h-3" />
@@ -797,6 +806,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                           {/* Show individual orphaned volumes with delete buttons */}
                           {disk.orphaned_spdk_volumes && disk.orphaned_spdk_volumes.length > 0 && (
                             <div className="mt-2 space-y-1">
+                              {/* raw orange on purpose: orphaned-volume caution,
+                                  not the rebuild meaning orange aliases */}
                               {disk.orphaned_spdk_volumes.map((orphan, idx) => (
                                 <div key={idx} className="flex items-center justify-between bg-orange-50 rounded px-2 py-1">
                                   <div className="flex-1">
@@ -805,7 +816,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                                   </div>
                                   <button
                                     onClick={() => handleDeleteOrphanedVolume(orphan, disk.node)}
-                                    className="ml-2 text-red-500 hover:text-red-700 hover:bg-red-100 rounded p-1"
+                                    className="ml-2 text-failed-500 hover:text-failed-700 hover:bg-failed-100 rounded p-1"
                                     title={`Delete orphaned volume ${orphan.spdk_volume_name}`}
                                   >
                                     <Trash2 className="w-3 h-3" />
@@ -819,6 +830,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       <div className="space-y-1" title="5-minute average activity">
+                        {/* raw on purpose: read/write data coding (chart-legend
+                            colors), not status */}
                         <div className="flex items-center gap-1">
                           <span className="text-xs text-green-600">R:</span>
                           <span className="text-xs">{disk.read_iops.toLocaleString()} IOPS</span>
@@ -835,7 +848,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                     <td className="px-6 py-4 whitespace-nowrap">
                       <button
                         onClick={() => onDiskClick?.(disk.id)}
-                        className="text-blue-600 hover:text-blue-800 hover:underline text-sm"
+                        className="text-brand-600 hover:text-brand-800 hover:underline text-sm"
                       >
                         {displayVolumes.length} volume{displayVolumes.length !== 1 ? 's' : ''}
                         {((volumeFilter && volumeFilter !== 'all') || volumeReplicaFilter) && 
@@ -843,7 +856,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                           <span className="text-gray-400">/{disk.provisioned_volumes.length}</span>
                         )}
                         {volumeReplicaFilter && targetVolume && (
-                          <span className="block text-xs text-green-600 mt-1">
+                          <span className="block text-xs text-healthy-600 mt-1">
                             {targetVolume.name} replicas
                           </span>
                         )}
@@ -853,9 +866,9 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                           {displayVolumes.slice(0, 2).map((vol, idx) => (
                             <div key={idx} className="text-xs text-gray-500 flex items-center gap-1">
                               <div className={`w-2 h-2 rounded-full ${
-                                vol.status === 'healthy' ? 'bg-green-500' :
-                                vol.status === 'rebuilding' ? 'bg-orange-500' :
-                                'bg-red-500'
+                                vol.status === 'healthy' ? 'bg-healthy-500' :
+                                vol.status === 'rebuilding' ? 'bg-rebuilding-500' :
+                                'bg-failed-500'
                               }`}></div>
                               <span className="truncate max-w-[8rem]">{vol.volume_name}</span>
                               <span className="text-gray-400">({vol.size}GB)</span>
@@ -892,9 +905,12 @@ export const DisksTable: React.FC<DisksTableProps> = ({
       {filteredDisks.length > 0 && activeFilterCount > 0 && (
         <div className="mt-4 p-4 bg-gray-50 rounded-lg">
           <h4 className="text-sm font-medium text-gray-700 mb-2">Applied Filters Summary</h4>
+          {/* Filter-summary tags, not status pills (Chip's border/padding would
+              change their look). Purple/indigo/orange/yellow are raw on purpose:
+              a decorative per-filter category palette, not status meanings. */}
           <div className="flex flex-wrap gap-2 text-xs">
             {searchTerm && (
-              <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full">
+              <span className="px-2 py-1 bg-brand-100 text-brand-800 rounded-full">
                 Search: "{searchTerm}"
               </span>
             )}
@@ -904,7 +920,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
               </span>
             )}
             {healthFilter !== 'all' && (
-              <span className="px-2 py-1 bg-green-100 text-green-800 rounded-full">
+              <span className="px-2 py-1 bg-healthy-100 text-healthy-800 rounded-full">
                 Health: {healthFilter}
               </span>
             )}
@@ -934,35 +950,35 @@ export const DisksTable: React.FC<DisksTableProps> = ({
 
       {/* Performance Insights */}
       {filteredDisks.length > 10 && (
-        <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-          <h4 className="text-sm font-medium text-blue-800 mb-2 flex items-center gap-2">
+        <div className="mt-4 p-4 bg-brand-50 border border-brand-200 rounded-lg">
+          <h4 className="text-sm font-medium text-brand-800 mb-2 flex items-center gap-2">
             <Activity className="w-4 h-4" />
             Performance Insights
           </h4>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
             <div>
-              <span className="text-blue-700 font-medium">Highest Read IOPS:</span>
-              <div className="text-blue-900">
+              <span className="text-brand-700 font-medium">Highest Read IOPS:</span>
+              <div className="text-brand-900">
                 {Math.max(...filteredDisks.map(d => d.read_iops)).toLocaleString()} IOPS
                 <span className="text-xs text-gray-500 ml-1">(5min avg)</span>
               </div>
             </div>
             <div>
-              <span className="text-blue-700 font-medium">Highest Write IOPS:</span>
-              <div className="text-blue-900">
+              <span className="text-brand-700 font-medium">Highest Write IOPS:</span>
+              <div className="text-brand-900">
                 {Math.max(...filteredDisks.map(d => d.write_iops)).toLocaleString()} IOPS
                 <span className="text-xs text-gray-500 ml-1">(5min avg)</span>
               </div>
             </div>
             <div>
-              <span className="text-blue-700 font-medium">Total Capacity:</span>
-              <div className="text-blue-900">
+              <span className="text-brand-700 font-medium">Total Capacity:</span>
+              <div className="text-brand-900">
                 {filteredDisks.reduce((sum, d) => sum + d.capacity_gb, 0).toLocaleString()}GB
               </div>
             </div>
             <div>
-              <span className="text-blue-700 font-medium">Total Free Space:</span>
-              <div className="text-blue-900">
+              <span className="text-brand-700 font-medium">Total Free Space:</span>
+              <div className="text-brand-900">
                 {/* free_space is already GB (see the Free Space column) */}
                 {Math.round(filteredDisks.reduce((sum, d) => sum + d.free_space, 0)).toLocaleString()}GB
               </div>
@@ -979,7 +995,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
               setHealthFilter('unhealthy');
               setShowFilters(true);
             }}
-            className="px-3 py-1 text-xs bg-red-100 text-red-800 rounded-full hover:bg-red-200 transition-colors"
+            className="px-3 py-1 text-xs bg-failed-100 text-failed-800 rounded-full hover:bg-failed-200 transition-colors"
           >
             Show Unhealthy Only
           </button>
@@ -997,6 +1013,8 @@ export const DisksTable: React.FC<DisksTableProps> = ({
               setUtilizationFilter('high');
               setShowFilters(true);
             }}
+            // raw orange on purpose: high-utilization caution, not the rebuild
+            // meaning orange aliases
             className="px-3 py-1 text-xs bg-orange-100 text-orange-800 rounded-full hover:bg-orange-200 transition-colors"
           >
             Show High Utilization
@@ -1006,7 +1024,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
               setSortField('read_iops');
               setSortOrder('desc');
             }}
-            className="px-3 py-1 text-xs bg-blue-100 text-blue-800 rounded-full hover:bg-blue-200 transition-colors"
+            className="px-3 py-1 text-xs bg-brand-100 text-brand-800 rounded-full hover:bg-brand-200 transition-colors"
           >
             Sort by Performance
           </button>

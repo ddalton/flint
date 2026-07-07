@@ -107,9 +107,9 @@ export const BulkConfirmModal: React.FC<BulkConfirmModalProps> = ({
 
 const STATUS_RENDER: Record<BatchItem['status'], { icon: React.ReactNode; label: string; text: string }> = {
   pending: { icon: <Clock className="w-4 h-4 text-gray-400" />, label: 'Pending', text: 'text-gray-500' },
-  running: { icon: <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />, label: 'Running', text: 'text-blue-700' },
-  ok: { icon: <CheckCircle className="w-4 h-4 text-green-600" />, label: 'Initialized', text: 'text-green-700' },
-  failed: { icon: <XCircle className="w-4 h-4 text-red-600" />, label: 'Failed', text: 'text-red-700' },
+  running: { icon: <Loader2 className="w-4 h-4 text-brand-600 animate-spin" />, label: 'Running', text: 'text-brand-700' },
+  ok: { icon: <CheckCircle className="w-4 h-4 text-healthy-600" />, label: 'Initialized', text: 'text-healthy-700' },
+  failed: { icon: <XCircle className="w-4 h-4 text-failed-600" />, label: 'Failed', text: 'text-failed-700' },
   skipped: { icon: <MinusCircle className="w-4 h-4 text-gray-400" />, label: 'Skipped', text: 'text-gray-500' },
 };
 
@@ -150,7 +150,7 @@ export const BatchProgressPanel: React.FC<BatchProgressPanelProps> = ({
           </h3>
           <span className="text-sm text-gray-600">
             {counts.ok} ok
-            {counts.failed > 0 && <span className="text-red-700"> · {counts.failed} failed</span>}
+            {counts.failed > 0 && <span className="text-failed-700"> · {counts.failed} failed</span>}
             {counts.skipped > 0 && <span> · {counts.skipped} skipped</span>}
             {running && <span> · {counts.pending + counts.running} remaining</span>}
           </span>
@@ -202,7 +202,7 @@ export const BatchProgressPanel: React.FC<BatchProgressPanelProps> = ({
                       <span className="font-mono text-xs text-gray-400">{item.disk.pci}</span>
                       <span className={`text-xs ${render.text}`}>{render.label}</span>
                       {item.error && (
-                        <span className="text-xs text-red-600 truncate" title={item.error}>
+                        <span className="text-xs text-failed-600 truncate" title={item.error}>
                           — {item.error}
                         </span>
                       )}

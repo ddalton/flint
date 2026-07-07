@@ -2,6 +2,7 @@ import React from 'react';
 import { Database, RefreshCw, LogOut, AlertTriangle } from 'lucide-react';
 import { useOperations } from '../../contexts/OperationsContext';
 import { Button, IconButton } from '../ui/Button';
+import { Chip } from '../ui/Chip';
 
 interface DashboardHeaderProps {
   autoRefresh: boolean;
@@ -25,19 +26,17 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
         <div className="flex justify-between items-center py-4">
           <div className="flex items-center gap-4">
             <div className="flex items-center">
-              <Database className="w-8 h-8 text-blue-600 mr-3" />
+              <Database className="w-8 h-8 text-brand-600 mr-3" />
               <h1 className="text-page-title text-gray-900">Flint Dashboard</h1>
             </div>
             {connectionError && (
-              <div
-                className="flex items-center gap-2 px-3 py-1 bg-red-100 border border-red-300 rounded-full"
+              <Chip
+                icon={AlertTriangle}
+                iconClass="text-failed-600"
+                label="Backend unreachable — showing last known data"
+                chip="bg-failed-100 text-failed-800 border-failed-300"
                 title={connectionError}
-              >
-                <AlertTriangle className="w-4 h-4 text-red-600" />
-                <span className="text-sm font-medium text-red-800">
-                  Backend unreachable — showing last known data
-                </span>
-              </div>
+              />
             )}
           </div>
           
