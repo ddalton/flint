@@ -1260,6 +1260,29 @@ impl CompoundDispatcher {
                 OperationResult::Close(res.status, res.stateid)
             }
 
+            Operation::OpenDowngrade { stateid, seqid: _, share_access, share_deny } => {
+                // Resolve the "current stateid" sentinel (RFC 8881 §16.2.3.1.2).
+                let stateid = match context.resolve_stateid(stateid) {
+                    Some(s) => s,
+                    None => return OperationResult::OpenDowngrade(Nfs4Status::BadStateId, None),
+                };
+                match self.state_mgr.stateids.downgrade_open(&stateid, share_access, share_deny) {
+                    Ok(refreshed) => {
+                        // §16.2.3.1.2: a successful state-changing op
+                        // populates the current stateid.
+                        context.current_stateid = Some(refreshed);
+                        OperationResult::OpenDowngrade(Nfs4Status::Ok, Some(refreshed))
+                    }
+                    Err(status) => {
+                        warn!(
+                            "OPEN_DOWNGRADE failed: {:?} (access={:#x}, deny={:#x})",
+                            status, share_access, share_deny
+                        );
+                        OperationResult::OpenDowngrade(status, None)
+                    }
+                }
+            }
+
             Operation::Read { stateid, offset, count } => {
                 // MDS-mode guard: a striped file's bytes live on the
                 // DSes; the local file is a sparse size-only stub, and

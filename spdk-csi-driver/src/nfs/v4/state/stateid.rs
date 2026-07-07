@@ -342,6 +342,57 @@ impl StateIdManager {
         stateid
     }
 
+    /// OPEN_DOWNGRADE (RFC 8881 §18.18): replace an open's share
+    /// masks with a SUBSET of what previous OPENs established, bump
+    /// the seqid, and return the refreshed stateid. The kernel sends
+    /// this on partial close of dup'd fds with mixed open modes;
+    /// answering NotSupp kicked it into state recovery around every
+    /// such close (fsstress-found: layout thrash + MDS-fallback EIO
+    /// storms on a healthy fleet).
+    ///
+    /// Errors per §18.18.3: unknown stateid → BAD_STATEID; requested
+    /// masks not a subset of the current ones (or empty access) →
+    /// INVAL.
+    pub fn downgrade_open(
+        &self,
+        stateid: &crate::nfs::v4::protocol::StateId,
+        share_access: u32,
+        share_deny: u32,
+    ) -> Result<crate::nfs::v4::protocol::StateId, crate::nfs::v4::protocol::Nfs4Status> {
+        use crate::nfs::v4::protocol::{Nfs4Status, StateId};
+        // open_states is keyed by (client, owner, fh); the wire gives
+        // us only the stateid — scan for the matching entry. Downgrades
+        // are rare relative to I/O; O(n) here is fine.
+        let key = self
+            .open_states
+            .iter()
+            .find(|e| e.value().stateid_other == stateid.other)
+            .map(|e| e.key().clone());
+        let Some(key) = key else {
+            return Err(Nfs4Status::BadStateId);
+        };
+        let Some(mut entry) = self.open_states.get_mut(&key) else {
+            return Err(Nfs4Status::BadStateId);
+        };
+        // The new masks must be a subset of the union previous OPENs
+        // established, and access must name at least one mode.
+        if share_access == 0
+            || share_access & !entry.share_access != 0
+            || share_deny & !entry.share_deny != 0
+        {
+            return Err(Nfs4Status::Inval);
+        }
+        entry.seqid = entry.seqid.wrapping_add(1);
+        entry.share_access = share_access;
+        entry.share_deny = share_deny;
+        let refreshed = StateId { seqid: entry.seqid, other: entry.stateid_other };
+        if let Some(mut master) = self.states.get_mut(&entry.stateid_other) {
+            master.seqid = entry.seqid;
+            master.stateid.seqid = entry.seqid;
+        }
+        Ok(refreshed)
+    }
+
     /// EXCLUSIVE4 / EXCLUSIVE4_1 retry semantics: if any prior open
     /// on this filehandle was an exclusive create with `verifier`,
     /// return its OpenState. RFC 8881 §18.16.5: a retry with the
@@ -988,5 +1039,38 @@ mod tests {
 
         // Read bypass stateid should validate
         assert!(mgr.validate(&READ_BYPASS_STATEID).is_ok());
+    }
+
+    #[test]
+    fn open_downgrade_shrinks_masks_and_bumps_seqid() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        // BOTH access (3), deny NONE.
+        let sid = mgr.record_open(1, b"owner".to_vec(), b"fh".to_vec(), 3, 0, None);
+
+        let refreshed = mgr
+            .downgrade_open(&sid, 1 /* READ only */, 0)
+            .expect("subset downgrade must succeed");
+        assert_eq!(refreshed.other, sid.other, "same open, refreshed seqid");
+        assert_eq!(refreshed.seqid, sid.seqid.wrapping_add(1));
+
+        let state = mgr.find_open(1, b"owner", b"fh").unwrap();
+        assert_eq!(state.share_access, 1);
+        assert_eq!(state.share_deny, 0);
+    }
+
+    #[test]
+    fn open_downgrade_refuses_upgrades_and_unknown_stateids() {
+        use crate::nfs::v4::protocol::Nfs4Status;
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        // READ only.
+        let sid = mgr.record_open(1, b"owner".to_vec(), b"fh".to_vec(), 1, 0, None);
+
+        // Asking for WRITE (2) is an upgrade → INVAL.
+        assert_eq!(mgr.downgrade_open(&sid, 2, 0), Err(Nfs4Status::Inval));
+        // Empty access is meaningless → INVAL.
+        assert_eq!(mgr.downgrade_open(&sid, 0, 0), Err(Nfs4Status::Inval));
+        // Unknown stateid → BAD_STATEID.
+        let bogus = StateId { seqid: 1, other: [9u8; 12] };
+        assert_eq!(mgr.downgrade_open(&bogus, 1, 0), Err(Nfs4Status::BadStateId));
     }
 }

@@ -147,6 +147,12 @@ pub enum Operation {
         seqid: u32,
         stateid: StateId,
     },
+    OpenDowngrade {
+        stateid: StateId,
+        seqid: u32,
+        share_access: u32,
+        share_deny: u32,
+    },
     Read {
         stateid: StateId,
         offset: u64,
@@ -480,6 +486,7 @@ pub enum OperationResult {
     // File I/O
     Open(Nfs4Status, Option<OpenResult>),
     Close(Nfs4Status, Option<StateId>),
+    OpenDowngrade(Nfs4Status, Option<StateId>),
     Read(Nfs4Status, Option<ReadResult>),
     Write(Nfs4Status, Option<WriteResult>),
     Commit(Nfs4Status, Option<[u8; 8]>),  // verifier
@@ -556,6 +563,7 @@ impl OperationResult {
             OperationResult::ReadDir(s, _) => *s,
             OperationResult::Open(s, _) => *s,
             OperationResult::Close(s, _) => *s,
+            OperationResult::OpenDowngrade(s, _) => *s,
             OperationResult::Read(s, _) => *s,
             OperationResult::Write(s, _) => *s,
             OperationResult::Commit(s, _) => *s,
@@ -1181,6 +1189,18 @@ impl CompoundRequest {
                 let seqid = decoder.decode_u32()?;
                 let stateid = decoder.decode_stateid()?;
                 Ok(Operation::Close { seqid, stateid })
+            }
+            opcode::OPEN_DOWNGRADE => {
+                // OPEN_DOWNGRADE4args (RFC 8881 §18.18.1): open_stateid,
+                // seqid, share_access, share_deny. The kernel sends this
+                // on partial close of dup'd fds with mixed open modes —
+                // fsstress storms it; NotSupp used to kick the client
+                // into state recovery around every such close.
+                let stateid = decoder.decode_stateid()?;
+                let seqid = decoder.decode_u32()?;
+                let share_access = decoder.decode_u32()?;
+                let share_deny = decoder.decode_u32()?;
+                Ok(Operation::OpenDowngrade { stateid, seqid, share_access, share_deny })
             }
             opcode::READ => {
                 let stateid = decoder.decode_stateid()?;
@@ -1997,6 +2017,15 @@ impl CompoundResponse {
             }
             OperationResult::Close(status, stateid) => {
                 encoder.encode_u32(opcode::CLOSE);
+                encoder.encode_status(status);
+                if status == Nfs4Status::Ok {
+                    if let Some(sid) = stateid {
+                        encoder.encode_stateid(&sid);
+                    }
+                }
+            }
+            OperationResult::OpenDowngrade(status, stateid) => {
+                encoder.encode_u32(opcode::OPEN_DOWNGRADE);
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(sid) = stateid {
