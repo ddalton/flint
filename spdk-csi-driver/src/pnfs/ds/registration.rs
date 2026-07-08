@@ -137,11 +137,18 @@ impl RegistrationClient {
     /// Send heartbeat to MDS via gRPC. Returns
     /// `(acknowledged, instructions)` — the caller applies any
     /// MDS-piggybacked instructions (e.g. stripe-file cleanup).
+    ///
+    /// `health` is the DS's own data-path readiness (see the caller's
+    /// storage probe): reporting `Unhealthy` makes the MDS mark this
+    /// device Offline so it is dropped from new layouts (`layout.rs`
+    /// only selects `Active` devices) instead of silently EIO'ing the
+    /// clients it keeps striping onto a dead backing store.
     pub async fn heartbeat(
         &mut self,
         capacity: u64,
         used: u64,
         active_connections: u32,
+        health: HealthStatus,
     ) -> Result<(bool, Vec<Instruction>)> {
         // Ensure connected
         if let Err(e) = self.connect().await {
@@ -159,7 +166,7 @@ impl RegistrationClient {
             capacity,
             used,
             active_connections,
-            health: HealthStatus::Healthy as i32,
+            health: health as i32,
         });
 
         match client.heartbeat(request).await {

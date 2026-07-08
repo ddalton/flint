@@ -888,6 +888,47 @@ impl DataServer {
         Ok(())
     }
 
+    /// Probe the export storage's DATA path with a real write + fsync.
+    ///
+    /// `statvfs` (used above for capacity) reads the cached superblock
+    /// and succeeds even when the backing store is EIO'd — the exact
+    /// gap that let a storage-dead DS keep heart­beating "Healthy" while
+    /// every client write to it returned EIO. This forces actual I/O to
+    /// the device (create/truncate a hidden probe file, write a few
+    /// bytes, `sync_all`) and returns `Unhealthy` on any failure so the
+    /// MDS marks the device Offline and stops striping new files onto
+    /// it. The probe file is overwritten in place each tick (no
+    /// accumulation) and sits alongside `.flint-ds-identity`.
+    ///
+    /// Cheap (a few bytes + one fsync). The caller bounds it with a
+    /// timeout so a D-state hang on a wedged mount degrades to
+    /// `Unhealthy` rather than stalling the heartbeat/re-register loop.
+    fn probe_storage_health(data_dir: &std::path::Path) -> crate::pnfs::grpc::HealthStatus {
+        use crate::pnfs::grpc::HealthStatus;
+        use std::io::Write;
+        let probe = data_dir.join(".flint-ds-health");
+        let result = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&probe)?;
+            f.write_all(b"flint-ds-health\n")?;
+            f.sync_all()?; // the step that actually reaches the device
+            Ok(())
+        })();
+        match result {
+            Ok(()) => HealthStatus::Healthy,
+            Err(e) => {
+                warn!(
+                    "🩺 DS storage health probe failed on {:?}: {} — reporting Unhealthy",
+                    data_dir, e
+                );
+                HealthStatus::Unhealthy
+            }
+        }
+    }
+
     /// Start heartbeat sender in the background.
     ///
     /// Runs on a DEDICATED OS thread with its own current-thread
@@ -976,8 +1017,29 @@ impl DataServer {
                 };
                 let active_connections = 0u32;
 
+                // Data-path readiness (distinct from the gRPC liveness
+                // this heartbeat itself proves). Bounded so a wedged
+                // mount that hangs in D-state degrades to Unhealthy
+                // instead of freezing this loop (which also drives
+                // re-registration). Timeout / probe-panic => Unhealthy.
+                let health = {
+                    let dir = data_dir.clone();
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        tokio::task::spawn_blocking(move || Self::probe_storage_health(&dir)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(h)) => h,
+                        _ => {
+                            warn!("🩺 DS storage health probe timed out/panicked — reporting Unhealthy");
+                            crate::pnfs::grpc::HealthStatus::Unhealthy
+                        }
+                    }
+                };
+
                 let mut reregister_now = false;
-                match client.heartbeat(capacity, used, active_connections).await {
+                match client.heartbeat(capacity, used, active_connections, health).await {
                     Ok((true, instructions)) => {
                         debug!("✅ Heartbeat acknowledged");
                         failure_count = 0;
@@ -1382,5 +1444,41 @@ mod ds_control_tests {
                 .await.unwrap().into_inner();
             assert!(!r.ok, "should refuse {:?}", bad);
         }
+    }
+}
+
+#[cfg(test)]
+mod storage_health_probe_tests {
+    use super::*;
+    use crate::pnfs::grpc::HealthStatus;
+
+    #[test]
+    fn healthy_on_writable_export() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            DataServer::probe_storage_health(dir.path()),
+            HealthStatus::Healthy
+        );
+        // Probe file exists and is overwritten in place (no accumulation).
+        let probe = dir.path().join(".flint-ds-health");
+        assert!(probe.exists());
+        DataServer::probe_storage_health(dir.path());
+        let entries = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() == std::ffi::OsStr::new(".flint-ds-health"))
+            .count();
+        assert_eq!(entries, 1, "probe file overwritten, not accumulated");
+    }
+
+    #[test]
+    fn unhealthy_when_export_unwritable() {
+        // Parent directory does not exist → create/write fails → the
+        // storage-dead signal the MDS needs to drop this DS from layouts.
+        let bogus = std::path::Path::new("/flint-nonexistent-export-xyz/data");
+        assert_eq!(
+            DataServer::probe_storage_health(bogus),
+            HealthStatus::Unhealthy
+        );
     }
 }
