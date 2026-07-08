@@ -1,9 +1,36 @@
 # MDS sharding — per-volume shards for aggregate metadata scaling
 
-Status: **Phases 0–4 CODE-COMPLETE 2026-07-07** (decision 2026-07-07:
-sharding is the chosen perf direction; perf-plan Tiers 2–3 shelved).
+Status: **Phases 0–4 CODE-COMPLETE 2026-07-07, HARDENED + RE-VALIDATED
+2026-07-08** (decision 2026-07-07: sharding is the chosen perf
+direction; perf-plan Tiers 2–3 shelved).
 All local-rig validated (drill + bench green); live multi-node k8s
 validation + release pending a fresh cluster.
+
+2026-07-08 hardening (all cluster-free, 6th unpushed commit 10051a3):
+- **Create/delete shard-agreement invariant test** (`pnfs_csi.rs`,
+  `create_pick_and_delete_route_agree_on_shard`): the controller stamps
+  the shard pin at CreateVolume and re-derives it at DeleteVolume/expand
+  across two separate RPCs, so nothing live asserts that
+  `route(shard_volume_id(name, pick_for_create(name)))` returns the same
+  shard with the bare name. The test proves it over 256 names against
+  the real FNV pick — any drift between `shard_volume_id` and
+  `parse_shard_suffix`/`route` (which would create on one shard, delete
+  against another → orphans) now fails the unit gate. 666 lib tests.
+- **Chart render matrix** (`helm template`, both counts): `count=1`
+  renders byte-identical legacy object names (Deployment
+  `flint-pnfs-mds`, PVC `flint-pnfs-mds-data`) — the in-place-upgrade
+  claim, additive-only (new per-shard Service + `SHARD_ENDPOINTS`/
+  `SHARD_ID=0` env). `count=2` adds `flint-pnfs-mds-1`
+  Deployment/PVC/Service; controller gets the ordered shard-endpoint
+  list, each MDS its own `FLINT_MDS_SHARD_ID`, the DS none (fans out via
+  its ConfigMap `mds.endpoints` list); NetworkPolicies select by
+  `flint.io/role`, so shard ≥ 1 is reachable on DS:9091 (Phase-0 trap
+  confirmed avoided).
+- **pynfs subset at baseline** (FAIL=3 SKIP=258 == the pinned baseline;
+  the 3 are BLOCK-layout `st_getdevicelist` tests, expected for a
+  FILE-layout server — not a regression).
+- **Full lima gate GREEN 11/11** (smoke, pynfs, csi, placement, recall,
+  restart, identity, fallback, enospc, fsx, shard), exit 0.
 Prereqs shipped: dir-per-volume CSI (v1.12.0), per-pod Service pattern
 (v1.9.0, durable-DS Phase 1), MDS restart hardening (v1.10.0)
 
