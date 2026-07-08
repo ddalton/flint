@@ -170,6 +170,20 @@ spec:
         flint.io/mds-shard: {{ $i | quote }}
         {{- include "flint-csi-driver-chart.selectorLabels" $ | nindent 8 }}
     spec:
+      {{- /* Spread MDS shards across nodes: a node loss should take down
+      at most one shard, and co-locating shards negates the per-shard
+      cross-node parallelism that sharding exists to provide. Soft
+      (preferred) so scheduling never wedges when schedulable nodes <
+      shard count (e.g. a single-node test cluster). */}}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    flint.io/role: pnfs-mds
+                topologyKey: kubernetes.io/hostname
       {{- with $.Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
