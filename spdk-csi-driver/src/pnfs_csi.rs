@@ -712,6 +712,32 @@ mod tests {
         assert!(matches!(err, PnfsError::ShardRouting(_)), "got: {err}");
     }
 
+    #[test]
+    fn create_pick_and_delete_route_agree_on_shard() {
+        // The load-bearing invariant of the whole scheme: a volume created
+        // on the shard chosen by `pick_for_create` must, via the pin
+        // stamped into its volume_id by `shard_volume_id`, `route` back to
+        // that SAME shard with the bare name recovered on delete/expand.
+        // The controller wires these three calls across separate RPCs
+        // (create stamps, delete routes) so no live path ever asserts the
+        // composition — if `shard_volume_id` and `parse_shard_suffix`/
+        // `route` drifted, volumes would be created on one shard and
+        // deleted against another (silent orphans). Prove it over many
+        // names against the real FNV pick, not a hardcoded shard.
+        let shards = PnfsShards::new(vec![
+            "h0:1".into(), "h1:1".into(), "h2:1".into(),
+            "h3:1".into(), "h4:1".into(),
+        ]);
+        for i in 0..256 {
+            let name = format!("pvc-{i:040x}");
+            let (picked, _) = shards.pick_for_create(&name);
+            let pinned = shards.shard_volume_id(&name, picked);
+            let (routed, _, bare) = shards.route(&pinned).unwrap();
+            assert_eq!(routed, picked, "create/delete shard disagree for {name}");
+            assert_eq!(bare, name, "route must recover the bare name for {name}");
+        }
+    }
+
     #[tokio::test]
     async fn sharded_ops_route_to_owning_shard() {
         let canned_create = CreateVolumeResponse {
