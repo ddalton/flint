@@ -304,6 +304,15 @@ impl Default for FailoverPolicy {
 pub struct MdsEndpointConfig {
     pub endpoint: String,
 
+    /// MDS shard endpoints (mds-sharding-plan.md Phase 2). When
+    /// non-empty the DS registers and heartbeats with EVERY listed
+    /// shard, each on its own independent client/failure state;
+    /// `endpoint` above is then ignored. Empty (the default, and what
+    /// pre-sharding configs deserialize to) = single-MDS behavior via
+    /// `endpoint`.
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+
     #[serde(rename = "heartbeatInterval", default = "default_heartbeat_interval")]
     pub heartbeat_interval: u64,
 
@@ -312,6 +321,18 @@ pub struct MdsEndpointConfig {
 
     #[serde(rename = "maxRetries", default)]
     pub max_retries: u32,
+}
+
+impl MdsEndpointConfig {
+    /// The effective registration set: `endpoints` when non-empty,
+    /// else the single legacy `endpoint`.
+    pub fn effective_endpoints(&self) -> Vec<String> {
+        if self.endpoints.is_empty() {
+            vec![self.endpoint.clone()]
+        } else {
+            self.endpoints.clone()
+        }
+    }
 }
 
 /// Block device configuration
@@ -651,6 +672,28 @@ impl PnfsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_endpoints_prefers_shard_list() {
+        // Pre-sharding YAML (no `endpoints` key) → the single legacy
+        // endpoint. This is exactly what old configs deserialize to.
+        let single: MdsEndpointConfig = serde_yaml::from_str(
+            "endpoint: \"mds:50051\"\nheartbeatInterval: 10\n",
+        )
+        .unwrap();
+        assert_eq!(single.effective_endpoints(), vec!["mds:50051".to_string()]);
+
+        // Sharded YAML → the list, order preserved (index = shard id);
+        // the legacy endpoint is ignored.
+        let sharded: MdsEndpointConfig = serde_yaml::from_str(
+            "endpoint: \"legacy:50051\"\nendpoints:\n  - \"mds-0:50051\"\n  - \"mds-1:50051\"\nheartbeatInterval: 10\n",
+        )
+        .unwrap();
+        assert_eq!(
+            sharded.effective_endpoints(),
+            vec!["mds-0:50051".to_string(), "mds-1:50051".to_string()],
+        );
+    }
 
     #[test]
     fn test_default_config() {

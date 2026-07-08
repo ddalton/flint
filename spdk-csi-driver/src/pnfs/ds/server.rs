@@ -31,7 +31,10 @@ use tracing::{debug, error, info, warn};
 pub struct DataServer {
     config: DsConfig,
     io_handler: Arc<IoOperationHandler>,
-    registration_client: Arc<tokio::sync::Mutex<RegistrationClient>>,
+    /// (endpoint, client) per MDS shard — the DS registers and
+    /// heartbeats with every shard independently (sharding Phase 2).
+    /// Single-MDS configs hold exactly one entry.
+    registration_clients: Vec<(String, Arc<tokio::sync::Mutex<RegistrationClient>>)>,
     session_mgr: Arc<DsSessionManager>,
     client_mgr: Arc<ClientManager>,
     /// Creation stamp of the on-volume identity marker (Phase 2);
@@ -86,14 +89,25 @@ impl DataServer {
         );
         let identity_created_at = identity.created_at;
 
-        // Initialize registration client
-        let registration_client = Arc::new(tokio::sync::Mutex::new(
-            RegistrationClient::new(
-                config.device_id.clone(),
-                config.mds.endpoint.clone(),
-                Duration::from_secs(config.mds.heartbeat_interval),
-            )
-        ));
+        // One registration client per MDS shard (mds-sharding-plan.md
+        // Phase 2): the DS registers with EVERY shard so each can
+        // grant layouts against this device. Each client keeps its own
+        // channel and failure state — shards share nothing, and a dead
+        // shard must not affect registration with the others.
+        let registration_clients: Vec<(String, Arc<tokio::sync::Mutex<RegistrationClient>>)> =
+            config
+                .mds
+                .effective_endpoints()
+                .into_iter()
+                .map(|ep| {
+                    let client = Arc::new(tokio::sync::Mutex::new(RegistrationClient::new(
+                        config.device_id.clone(),
+                        ep.clone(),
+                        Duration::from_secs(config.mds.heartbeat_interval),
+                    )));
+                    (ep, client)
+                })
+                .collect();
 
         // Initialize session manager (for NFSv4.1 SEQUENCE operations)
         let session_mgr = Arc::new(DsSessionManager::new());
@@ -116,7 +130,7 @@ impl DataServer {
         ));
         info!("✓ Client manager initialized (per-DS server identity)");
 
-        Ok(Self { config, io_handler, registration_client, session_mgr, client_mgr, identity_created_at })
+        Ok(Self { config, io_handler, registration_clients, session_mgr, client_mgr, identity_created_at })
     }
 
     /// Start the data server
@@ -127,7 +141,9 @@ impl DataServer {
         info!("");
         info!("Device ID: {}", self.config.device_id);
         info!("Listening on: {}:{}", self.config.bind.address, self.config.bind.port);
-        info!("MDS Endpoint: {}", self.config.mds.endpoint);
+        for (i, (ep, _)) in self.registration_clients.iter().enumerate() {
+            info!("MDS Endpoint [shard {}]: {}", i, ep);
+        }
         info!("Block Devices: {}", self.config.bdevs.len());
         for bdev in &self.config.bdevs {
             info!("  - {} mounted at {}", bdev.name, bdev.mount_point);
@@ -137,8 +153,7 @@ impl DataServer {
         }
         info!("");
 
-        // Register with MDS
-        info!("Registering with MDS at {}...", self.config.mds.endpoint);
+        // Register with every MDS shard
         if let Err(e) = self.register_with_mds().await {
             error!("Failed to register with MDS: {}", e);
             error!("Continuing anyway, will retry...");
@@ -817,21 +832,22 @@ impl DataServer {
             .unwrap_or_else(|_| self.config.bind.address.clone())
     }
 
-    /// Register with the MDS via gRPC
+    /// Register with every MDS shard via gRPC. Per-shard outcomes are
+    /// independent — a dead shard logs and is left to that shard's
+    /// heartbeat thread to repair; it must not block registration with
+    /// the healthy ones.
     async fn register_with_mds(&self) -> Result<()> {
-        let mut client = self.registration_client.lock().await;
-
         let endpoint = format!("{}:{}", self.advertise_address(), self.config.bind.port);
         info!("📡 Registering with endpoint: {} (FLINT_DS_ADVERTISE_ADDR={:?}, POD_IP={:?})",
               endpoint,
               std::env::var("FLINT_DS_ADVERTISE_ADDR").ok(),
               std::env::var("POD_IP").ok());
-        
+
         let mount_points: Vec<String> = self.config.bdevs
             .iter()
             .map(|b| b.mount_point.clone())
             .collect();
-        
+
         // Real capacity truth from the export filesystem (was a 1 TB
         // placeholder — the registry is only as honest as this number).
         let (capacity, used) = mount_points
@@ -844,28 +860,32 @@ impl DataServer {
             })
             .unwrap_or((0, 0));
 
-        match client.register(
-            self.config.device_id.clone(),
-            endpoint,
-            mount_points,
-            capacity,
-            used,
-            self.identity_created_at,
-            self.config.bind.control_port.unwrap_or(0) as u32,
-        ).await {
-            Ok(true) => {
-                info!("✅ Successfully registered with MDS");
-                Ok(())
-            }
-            Ok(false) => {
-                warn!("⚠️ Registration was rejected by MDS");
-                Ok(())  // Don't fail, will retry
-            }
-            Err(e) => {
-                error!("❌ Registration failed: {}", e);
-                Ok(())  // Don't fail, will retry
+        for (shard, (mds_ep, client)) in self.registration_clients.iter().enumerate() {
+            info!("Registering with MDS at {} [shard {}]...", mds_ep, shard);
+            let mut client = client.lock().await;
+            match client.register(
+                self.config.device_id.clone(),
+                endpoint.clone(),
+                mount_points.clone(),
+                capacity,
+                used,
+                self.identity_created_at,
+                self.config.bind.control_port.unwrap_or(0) as u32,
+            ).await {
+                Ok(true) => {
+                    info!("✅ Successfully registered with MDS ({})", mds_ep);
+                }
+                Ok(false) => {
+                    warn!("⚠️ Registration was rejected by MDS ({})", mds_ep);
+                    // Don't fail, will retry
+                }
+                Err(e) => {
+                    error!("❌ Registration failed ({}): {}", mds_ep, e);
+                    // Don't fail, will retry
+                }
             }
         }
+        Ok(())
     }
 
     /// Start heartbeat sender in the background.
@@ -882,8 +902,19 @@ impl DataServer {
     /// its channel's I/O driver lives on the runtime that created
     /// it — the main one.)
     fn start_heartbeat_sender(&self) {
+        // One dedicated thread PER SHARD (sharding Phase 2): each
+        // shard's liveness, NACK/re-register cycle, and failure
+        // counter are fully independent — a dead or slow shard must
+        // never delay heartbeats to the others. Single-MDS configs
+        // spawn exactly one thread, byte-identical behavior to
+        // pre-sharding.
+        for (shard, (mds_endpoint, _)) in self.registration_clients.iter().enumerate() {
+            self.start_heartbeat_thread(shard, mds_endpoint.clone());
+        }
+    }
+
+    fn start_heartbeat_thread(&self, shard: usize, mds_endpoint: String) {
         let heartbeat_interval_secs = self.config.mds.heartbeat_interval;
-        let mds_endpoint = self.config.mds.endpoint.clone();
 
         // Capture config data needed for re-registration
         let device_id = self.config.device_id.clone();
@@ -901,10 +932,13 @@ impl DataServer {
 
         // For DELETE_STRIPE_FILE fd-cache eviction — unlinking alone
         // frees nothing while the data path still holds the fd open.
+        // Shared across shard threads: each shard only enqueues
+        // cleanups for ITS volumes' files (file_id namespaces are
+        // disjoint by the shard-bits construction).
         let io_handler = Arc::clone(&self.io_handler);
 
         std::thread::Builder::new()
-            .name("ds-heartbeat".into())
+            .name(format!("ds-heartbeat-{}", shard))
             .spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -913,7 +947,7 @@ impl DataServer {
         rt.block_on(async move {
             let mut client = RegistrationClient::new(
                 device_id.clone(),
-                mds_endpoint,
+                mds_endpoint.clone(),
                 Duration::from_secs(heartbeat_interval_secs),
             );
             let mut heartbeat_interval = interval(Duration::from_secs(heartbeat_interval_secs));
@@ -957,7 +991,7 @@ impl DataServer {
                         // window where LAYOUTGETs refuse because this
                         // device's placement isn't Active yet. Re-register
                         // on THIS tick (Phase 3: within one heartbeat).
-                        warn!("⚠️ Heartbeat not acknowledged — MDS doesn't know us; re-registering now");
+                        warn!("⚠️ Heartbeat not acknowledged — MDS doesn't know us; re-registering now ({})", mds_endpoint);
                         reregister_now = true;
                     }
                     Err(e) => {
@@ -965,7 +999,7 @@ impl DataServer {
                         // MDS may just be mid-restart, and hammering
                         // register() at a dead endpoint adds nothing over
                         // the next heartbeat's retry.
-                        error!("❌ Heartbeat failed: {}", e);
+                        error!("❌ Heartbeat failed ({}): {}", mds_endpoint, e);
                         failure_count += 1;
                     }
                 }
@@ -988,15 +1022,15 @@ impl DataServer {
                         control_port,
                     ).await {
                         Ok(true) => {
-                            info!("✅ Re-registration successful");
+                            info!("✅ Re-registration successful ({})", mds_endpoint);
                             failure_count = 0;
                         }
                         Ok(false) => {
-                            warn!("⚠️ Re-registration rejected by MDS, will retry");
+                            warn!("⚠️ Re-registration rejected by MDS ({}), will retry", mds_endpoint);
                             failure_count = 0;  // Reset to try again later
                         }
                         Err(e) => {
-                            error!("❌ Re-registration failed: {}, will retry", e);
+                            error!("❌ Re-registration failed ({}): {}, will retry", mds_endpoint, e);
                             failure_count = 0;  // Reset to try again later
                         }
                     }
@@ -1007,8 +1041,8 @@ impl DataServer {
             .expect("spawn ds-heartbeat thread");
 
         info!(
-            "Heartbeat sender started on dedicated thread (interval: {} seconds)",
-            heartbeat_interval_secs
+            "Heartbeat sender started on dedicated thread ds-heartbeat-{} (interval: {} seconds)",
+            shard, heartbeat_interval_secs
         );
     }
 

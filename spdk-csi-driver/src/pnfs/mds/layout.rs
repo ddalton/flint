@@ -111,13 +111,41 @@ pub fn truncate_gate_key(placement: &FilePlacement, file_key: &str) -> String {
 /// and free of the determinism trap the old name-hash scheme had
 /// (same name ⇒ same id ⇒ a recreated file could read its
 /// predecessor's stripes).
-fn allocate_file_id() -> u64 {
-    let (hi, lo) = uuid::Uuid::new_v4().as_u64_pair();
+/// This MDS's shard ordinal (FLINT_MDS_SHARD_ID; 0 when unset — the
+/// single-MDS case and shard 0 are the same namespace). Masked to
+/// 8 bits: the file_id namespace prefix.
+fn shard_ordinal() -> u64 {
+    static ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        std::env::var("FLINT_MDS_SHARD_ID")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|v| v & 0xff)
+            .unwrap_or(0)
+    })
+}
+
+/// Compose a file_id: shard ordinal in the top 8 bits, 56 bits of
+/// randomness below. Stripe files are named `{file_id:x}.stripeN` in
+/// a flat per-DS namespace shared by ALL shards (sharding Phase 2),
+/// so cross-shard ids must be disjoint BY CONSTRUCTION — random-u64
+/// collisions would silently cross-wire two volumes' stripes, a class
+/// we don't accept probabilistically when determinism costs one shift.
+/// (Pre-sharding ids used the full random u64; they all live on
+/// shard 0 and keep working — the residual legacy-vs-shard>0 overlap
+/// is the same birthday bound as before, on a finite legacy set.)
+fn compose_file_id(shard: u64, hi: u64, lo: u64) -> u64 {
+    let id = ((shard & 0xff) << 56) | ((hi ^ lo) & 0x00ff_ffff_ffff_ffff);
     // 0 is the legacy sentinel — never allocate it.
-    match hi ^ lo {
+    match id {
         0 => 1,
         id => id,
     }
+}
+
+fn allocate_file_id() -> u64 {
+    let (hi, lo) = uuid::Uuid::new_v4().as_u64_pair();
+    compose_file_id(shard_ordinal(), hi, lo)
 }
 
 /// The 16-byte pNFS deviceid a striped layout advertises for a given
@@ -1176,6 +1204,26 @@ mod tests {
             session_id: [0u8; 16],
             fsid: 1,
         }
+    }
+
+    #[test]
+    fn file_ids_are_shard_disjoint_by_construction() {
+        // Top byte = shard ordinal, regardless of the random bits.
+        assert_eq!(compose_file_id(0, 0xdead_beef, 0x1234) >> 56, 0);
+        assert_eq!(compose_file_id(5, 0xdead_beef, 0x1234) >> 56, 5);
+        assert_eq!(compose_file_id(255, u64::MAX, 0) >> 56, 255);
+        // Ordinals beyond 8 bits wrap into it (chart never renders
+        // >255 shards; the mask just keeps the layout invariant).
+        assert_eq!(compose_file_id(256 + 3, 1, 2) >> 56, 3);
+
+        // Identical randomness on different shards can never collide.
+        assert_ne!(compose_file_id(1, 42, 7), compose_file_id(2, 42, 7));
+
+        // The zero sentinel is never allocated, even for shard 0 with
+        // zero randomness.
+        assert_eq!(compose_file_id(0, 0, 0), 1);
+        // ...and shard-0 ids keep the low-56 randomness intact.
+        assert_eq!(compose_file_id(0, 0xab, 0), 0xab);
     }
 
     #[test]

@@ -348,8 +348,15 @@ impl MetadataServer {
                 .collect();
 
         tokio::spawn(async move {
-            // gRPC server on port 50051 (standard gRPC port)
-            let grpc_addr = format!("{}:50051", bind_addr)
+            // gRPC control port: 50051 unless FLINT_MDS_GRPC_PORT
+            // overrides. The override exists for the multi-shard lima
+            // rig, where N MDS processes share one host IP; k8s shards
+            // each have their own pod IP and stay on 50051.
+            let grpc_port = std::env::var("FLINT_MDS_GRPC_PORT")
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok())
+                .unwrap_or(50051);
+            let grpc_addr = format!("{}:{}", bind_addr, grpc_port)
                 .parse()
                 .expect("Invalid gRPC address");
 
@@ -406,7 +413,10 @@ impl MetadataServer {
             }
         });
 
-        info!("gRPC control server started on port 50051 (for DS registration)");
+        info!(
+            "gRPC control server started on port {} (for DS registration)",
+            std::env::var("FLINT_MDS_GRPC_PORT").unwrap_or_else(|_| "50051".into())
+        );
     }
 
     /// Serve pNFS over TCP

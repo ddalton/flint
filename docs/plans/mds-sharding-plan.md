@@ -172,10 +172,20 @@ negligible overhead.
   GC'd leak) and gates an honest expand refusal. Chart renders
   FLINT_PNFS_MDS_SHARD_ENDPOINTS (ordered, index = shard) alongside
   the legacy single-endpoint var for older driver images.
-- **Phase 2 — DS fan-out + file_id shard bits.** Acceptance: both
-  shards grant layouts against the same DS fleet; stripe files from
-  two shards coexist; cleanup from each shard removes only its own;
-  identity drill unchanged.
+- **Phase 2 — DS fan-out + file_id shard bits. CODE DONE 2026-07-07.**
+  `MdsEndpointConfig.endpoints` (list, index = shard; empty = legacy
+  single `endpoint`); the DS builds one registration client and one
+  DEDICATED heartbeat thread per shard (`ds-heartbeat-<i>`) — fully
+  independent failure/NACK/re-register state. `compose_file_id` puts
+  the shard ordinal (FLINT_MDS_SHARD_ID) in the top 8 bits over 56
+  random bits. FLINT_MDS_GRPC_PORT override added for multi-shard
+  single-host rigs (k8s pods keep 50051). Two-shard localhost smoke
+  PASSED: DS registered with both shards; shard-1 kill produced
+  failures/NACK-retries ONLY on ds-heartbeat-1 while shard 0 stayed
+  clean; shard-1 restart recovered via NACK → same-tick re-register.
+  Remaining acceptance (data-path legs: layouts from both shards over
+  one DS fleet, cleanup disjointness, identity drill) runs with the
+  Phase 3 drills.
 - **Phase 3 — drills + runbook.** New drills: shard-down blast radius
   (volumes on the healthy shard keep full service through a shard-0
   kill), per-shard landmine scale-cycle, dual-shard fsx concurrently.

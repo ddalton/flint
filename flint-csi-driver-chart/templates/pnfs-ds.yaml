@@ -43,7 +43,17 @@ data:
         controlPort: 9091
       deviceId: "${POD_NAME}"
       mds:
+        # Legacy single-endpoint (shard-0 alias Service) — read by DS
+        # images older than the sharding release; ignored when the
+        # shard list below is present and non-empty.
         endpoint: "flint-pnfs-mds.{{ .Release.Namespace }}.svc.cluster.local:50051"
+        # MDS shard endpoints (index = shard id): the DS registers and
+        # heartbeats with EVERY shard, each on an independent client
+        # and failure state (mds-sharding-plan.md Phase 2).
+        endpoints:
+          {{- range $i := until (int (.Values.pnfs.server.mds.count | default 1)) }}
+          - "flint-pnfs-mds-{{ $i }}.{{ $.Release.Namespace }}.svc.cluster.local:50051"
+          {{- end }}
         heartbeatInterval: {{ .Values.pnfs.server.dataServers.heartbeatInterval }}
         registrationRetry: 5
         maxRetries: 0
