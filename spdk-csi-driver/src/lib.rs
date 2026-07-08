@@ -9,6 +9,7 @@ pub mod identity;  // Canonical volume identity: VolumeRef + naming + parsers (i
 pub mod spdk_native;
 pub mod nvmeof_utils;
 pub mod nvmeof_export;  // Convergent NVMe-oF export (phase 0 idempotency fix)
+pub mod nvme_recovery;  // Graceful recovery from spdk-tgt hard stop/restart (#1 reconcile-on-loss, #2 survivable reconnect, #3 disconnect-before-reuse)
 pub mod replica_sync;  // Persistent per-replica sync state on the PV (incremental-rebuild phase 1)
 pub mod epoch_scheduler;  // Common-epoch snapshot scheduler (incremental-rebuild phase 2)
 pub mod catchup;  // Replica catch-up orchestrator / warm standby + reassembly admission (incremental-rebuild phases 3/4)

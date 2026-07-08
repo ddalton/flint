@@ -41,6 +41,21 @@ pub struct NodeAgent {
     /// Dead-controller strike counts (reconnect-looping flint controllers),
     /// keyed by controller name — see `reap_dead_controllers`.
     controller_reap_strikes: Arc<tokio::sync::Mutex<std::collections::HashMap<String, u32>>>,
+    /// #1: NVMe-oF targets this node currently exports, keyed by NQN, with
+    /// the params needed to RE-create each (recorded on create, dropped on
+    /// delete, seeded from live SPDK at startup). The fast loss-detector
+    /// diffs the keys against SPDK's live subsystems and re-exports any
+    /// missing one directly — covering single-replica volumes (DS/MDS
+    /// state.db, plain RWO) that the replica-only periodic reconcile skips.
+    exported_targets: Arc<tokio::sync::Mutex<std::collections::HashMap<String, TargetExport>>>,
+}
+
+/// #1: the params to reconstruct one NVMe-oF export after spdk-tgt drops it.
+#[derive(Debug, Clone)]
+struct TargetExport {
+    bdev_name: String,
+    target_ip: String,
+    target_port: u16,
 }
 
 impl NodeAgent {
@@ -62,6 +77,7 @@ impl NodeAgent {
             data_path_raid_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             data_path_warned: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            exported_targets: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -87,6 +103,7 @@ impl NodeAgent {
             data_path_raid_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             data_path_warned: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            exported_targets: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -247,6 +264,26 @@ impl NodeAgent {
             }
         });
 
+        // #1 seed: adopt exports this node is already serving (created by a
+        // prior node-agent process) so the loss-detector protects them too.
+        self.seed_exported_nqns_from_spdk().await;
+
+        // #1 fast export loss-detector: a tight (10s) loop that re-exports
+        // immediately when spdk-tgt drops a subsystem it should be serving
+        // (hard stop/restart), so recovery is seconds not up to a monitor
+        // tick. Separate from the 60s monitor so its cadence is independent.
+        let loss_agent = Arc::new(self.clone());
+        let loss_task = tokio::spawn(async move {
+            let mut loss_interval = interval(Duration::from_secs(10));
+            loss_interval.tick().await; // first tick immediate; skip it
+            loop {
+                loss_interval.tick().await;
+                if let Err(e) = loss_agent.reconcile_exports_if_lost().await {
+                    debug!(error = %e, "[MONITOR] Export loss-detector failed (non-fatal)");
+                }
+            }
+        });
+
         // Setup HTTP API routes
         let routes = self.setup_routes();
 
@@ -269,6 +306,9 @@ impl NodeAgent {
             }
             _ = monitor_task => {
                 info!("[NODE_AGENT] Monitor task stopped");
+            }
+            _ = loss_task => {
+                info!("[NODE_AGENT] Export loss-detector task stopped");
             }
         }
 
@@ -1146,15 +1186,31 @@ impl NodeAgent {
         let target_ip = request["target_ip"].as_str().unwrap_or("127.0.0.1");
         let target_port = request["target_port"].as_u64().unwrap_or(4420) as u16;
 
-        // 1. Check if already connected (idempotency)
+        // 1. Check if already connected (idempotency) — but ONLY reuse a
+        // controller that is actually `live`. #3: after an spdk-tgt hard
+        // stop the consumer's controller is wedged (dead/connecting) yet its
+        // /dev node lingers; returning it here made NodeStage remount the
+        // dead device and CrashLoop the consumer. A non-live controller is
+        // disconnected so we fall through to re-create the target and
+        // reconnect fresh.
         if let Ok(existing_device) = Self::find_nvme_device_by_nqn(nqn).await {
-            debug!(device = %existing_device, "[HTTP_API] NVMe device already exists (idempotent)");
-            let response = json!({
-                "device_path": existing_device,
-                "nvme_device": Self::extract_nvme_controller(&existing_device),
-                "nqn": nqn
-            });
-            return Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK));
+            let state = Self::nvme_controller_state_for_nqn(nqn).await.unwrap_or_default();
+            if crate::nvme_recovery::controller_state_is_live(&state) {
+                debug!(device = %existing_device, "[HTTP_API] NVMe device already exists and is live (idempotent)");
+                let response = json!({
+                    "device_path": existing_device,
+                    "nvme_device": Self::extract_nvme_controller(&existing_device),
+                    "nqn": nqn
+                });
+                return Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK));
+            }
+            warn!(
+                device = %existing_device, state = %state,
+                "[HTTP_API] Stale/wedged NVMe controller for NQN — disconnecting before reconnect (#3)"
+            );
+            if let Err(e) = Self::kernel_nvme_disconnect(nqn).await {
+                warn!(error = %e, "[HTTP_API] Disconnect of stale controller failed (continuing to reconnect)");
+            }
         }
 
         // 2. Create NVMe-oF target on SPDK
@@ -1257,6 +1313,10 @@ impl NodeAgent {
             Err(e) => warn!(error = %e, "[HTTP_API] Failed to delete subsystem (may not exist)"),
         }
 
+        // #1: stop tracking this export so the loss-detector doesn't try to
+        // re-create a deliberately-deleted subsystem.
+        node_agent.exported_targets.lock().await.remove(nqn);
+
         let response = json!({
             "success": true,
             "message": "NVMe-oF device deleted"
@@ -1272,16 +1332,25 @@ impl NodeAgent {
         target_ip: &str,
         target_port: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Convergent export (phase 0 fix): completes whatever subset of
-        // {subsystem, namespace, listener} is missing instead of blindly
-        // creating (duplicates fail -32602) or blindly reusing (a subsystem
-        // can exist with namespaces but no listener after a partial attempt).
-        // This also covers the NodeUnstageVolume-never-ran case the old
-        // stale-subsystem cleanup handled: a leftover export for the same
-        // bdev is simply converged upon and reused, and a namespace pointing
-        // at a stale bdev is replaced.
+        node_agent
+            .ensure_export_for(nqn, bdev_name, target_ip, target_port)
+            .await
+    }
+
+    /// Convergent local NVMe-oF export for one volume + registry tracking
+    /// (#1). Completes whatever subset of {subsystem, namespace, listener}
+    /// is missing (phase 0 fix) — so it is equally the CREATE path and the
+    /// RE-CREATE path the loss-detector calls after spdk-tgt drops the
+    /// subsystem. Records the export params so the detector can rebuild it.
+    async fn ensure_export_for(
+        &self,
+        nqn: &str,
+        bdev_name: &str,
+        target_ip: &str,
+        target_port: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Fencing: this export is consumed by the local kernel initiator.
-        let allowed = vec![crate::nvmeof_export::flint_host_nqn(&node_agent.node_name)];
+        let allowed = vec![crate::nvmeof_export::flint_host_nqn(&self.node_name)];
         // Kernel-facing namespace: pin a deterministic identity so an
         // in-place rebuild after spdk-tgt restart presents the SAME
         // namespace and the initiator reattaches (phase-6 layer 2).
@@ -1297,7 +1366,18 @@ impl NodeAgent {
             allowed_hosts: crate::nvmeof_export::fencing_enabled().then_some(allowed.as_slice()),
             ns_identity: Some((&ns_uuid, &ns_nguid)),
         };
-        crate::nvmeof_export::ensure_export(&node_agent.disk_service, &spec).await?;
+        crate::nvmeof_export::ensure_export(&self.disk_service, &spec).await?;
+
+        // #1: remember this export so the fast loss-detector can notice if
+        // spdk-tgt later drops it (restart) and re-create it directly.
+        self.exported_targets.lock().await.insert(
+            nqn.to_string(),
+            TargetExport {
+                bdev_name: bdev_name.to_string(),
+                target_ip: target_ip.to_string(),
+                target_port,
+            },
+        );
 
         Ok(())
     }
@@ -1312,15 +1392,22 @@ impl NodeAgent {
         // Stable per-node host NQN so the target's host fencing can admit
         // exactly this node (doc §3); matches the SPDK initiator identity.
         let hostnqn = crate::nvmeof_export::flint_host_nqn(node_name);
+        // #2 survivable reconnect: hold the controller reconnecting across an
+        // spdk-tgt bounce (with #1 re-exporting the subsystem) so I/O
+        // auto-restores instead of the kernel default giving up. Tunable via
+        // FLINT_NVME_CTRL_LOSS_TMO / FLINT_NVME_RECONNECT_DELAY.
+        let policy = crate::nvme_recovery::ReconnectPolicy::from_env();
+        let mut args: Vec<String> = vec![
+            "connect".into(),
+            "-t".into(), "tcp".into(),
+            "-a".into(), target_ip.to_string(),
+            "-s".into(), target_port.to_string(),
+            "-n".into(), nqn.to_string(),
+            "-q".into(), hostnqn,
+        ];
+        args.extend(policy.connect_args());
         let output = tokio::process::Command::new("nvme")
-            .args(&[
-                "connect",
-                "-t", "tcp",
-                "-a", target_ip,
-                "-s", &target_port.to_string(),
-                "-n", nqn,
-                "-q", &hostnqn,
-            ])
+            .args(&args)
             .output()
             .await?;
 
@@ -1391,6 +1478,29 @@ impl NodeAgent {
         }
 
         Err(format!("No NVMe device found for NQN: {}", nqn).into())
+    }
+
+    /// Helper (#3): the kernel controller state for `nqn`, from
+    /// `/sys/class/nvme/nvmeX/state` (e.g. `live`, `connecting`, `resetting`,
+    /// `deleting`). `None` if no controller for this NQN exists. Used to tell
+    /// a REUSABLE (`live`) controller from a stale/wedged one that must be
+    /// disconnected before reconnecting.
+    async fn nvme_controller_state_for_nqn(nqn: &str) -> Option<String> {
+        let nvme_path = std::path::Path::new("/sys/class/nvme");
+        let entries = std::fs::read_dir(nvme_path).ok()?;
+        for entry in entries.flatten() {
+            let subsysnqn_path = entry.path().join("subsysnqn");
+            if let Ok(subsys_nqn) = std::fs::read_to_string(&subsysnqn_path) {
+                if subsys_nqn.trim() == nqn {
+                    let state = std::fs::read_to_string(entry.path().join("state"))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    return Some(state);
+                }
+            }
+        }
+        None
     }
 
     /// Helper: Extract NVMe controller name from device path
@@ -1755,6 +1865,138 @@ impl NodeAgent {
     /// Reconcile replica targets on node startup
     /// Queries PVs with labels matching this node's UID and sets up NVMe-oF targets
     /// for any local replicas, enabling RAID bdevs on other nodes to reconnect.
+    /// #1: seed the exported-NQN registry from SPDK's current flint volume
+    /// subsystems at startup, so the loss-detector protects exports this
+    /// node is already serving (created by a PREVIOUS node-agent process —
+    /// e.g. after a driver update / node-DS roll), not only ones this
+    /// process staged. Best-effort: on any RPC failure the registry stays as
+    /// is and the 60s PV-based reconcile remains the backstop.
+    async fn seed_exported_nqns_from_spdk(&self) {
+        const FLINT_VOLUME_NQN_PREFIX: &str = "nqn.2024-11.com.flint:volume:";
+        let resp = match self
+            .disk_service
+            .call_spdk_rpc(&serde_json::json!({ "method": "nvmf_get_subsystems" }))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                debug!(error = %e, "[NVME-RECOVERY #1] seed: nvmf_get_subsystems failed (backstop reconcile still runs)");
+                return;
+            }
+        };
+        let subs = resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let mut seeded = 0usize;
+        let mut reg = self.exported_targets.lock().await;
+        for s in &subs {
+            let Some(nqn) = s.get("nqn").and_then(|n| n.as_str()) else { continue };
+            if !nqn.starts_with(FLINT_VOLUME_NQN_PREFIX) {
+                continue;
+            }
+            // Reconstruct the re-export params from the live subsystem.
+            let bdev_name = s
+                .get("namespaces")
+                .and_then(|n| n.as_array())
+                .and_then(|nss| nss.first())
+                .and_then(|ns| ns.get("bdev_name"))
+                .and_then(|b| b.as_str());
+            let listener = s
+                .get("listen_addresses")
+                .and_then(|l| l.as_array())
+                .and_then(|ls| ls.first());
+            // Listener may be flat or nested under "address" (SPDK version).
+            let addr = listener.map(|l| l.get("address").unwrap_or(l));
+            let traddr = addr.and_then(|a| a.get("traddr")).and_then(|t| t.as_str());
+            let trsvcid = addr
+                .and_then(|a| a.get("trsvcid"))
+                .and_then(|t| t.as_str())
+                .and_then(|t| t.parse::<u16>().ok());
+            if let (Some(bdev_name), Some(traddr), Some(trsvcid)) = (bdev_name, traddr, trsvcid) {
+                reg.insert(
+                    nqn.to_string(),
+                    TargetExport {
+                        bdev_name: bdev_name.to_string(),
+                        target_ip: traddr.to_string(),
+                        target_port: trsvcid,
+                    },
+                );
+                seeded += 1;
+            }
+        }
+        if seeded > 0 {
+            info!(count = seeded, "[NVME-RECOVERY #1] seeded export registry from live SPDK subsystems");
+        }
+    }
+
+    /// #1 fast loss-detector: if SPDK is missing any NQN this node believes
+    /// it exports (spdk-tgt restarted or dropped a subsystem), re-export
+    /// everything IMMEDIATELY instead of waiting out the 60s periodic
+    /// reconcile — so the client's held-open controller (#2) reconnects
+    /// within seconds. Cheap: one `nvmf_get_subsystems` + a set diff; a noop
+    /// (no reconcile) whenever every tracked export is present.
+    async fn reconcile_exports_if_lost(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let targets = self.exported_targets.lock().await.clone();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let resp = self
+            .disk_service
+            .call_spdk_rpc(&serde_json::json!({ "method": "nvmf_get_subsystems" }))
+            .await?;
+        // A subsystem counts as present only when COMPLETE (has a namespace
+        // AND a listener). A post-restart re-export that created the
+        // subsystem but couldn't add_ns yet (lvol bdev not reloaded) is
+        // NOT satisfied → it stays in `missing` and the convergent
+        // ensure_export runs again next tick until the namespace lands.
+        let satisfied: std::collections::HashSet<String> = resp
+            .get("result")
+            .and_then(|r| r.as_array())
+            .map(|subs| {
+                subs.iter()
+                    .filter_map(|s| {
+                        let nqn = s.get("nqn").and_then(|n| n.as_str())?;
+                        let has_ns = s
+                            .get("namespaces")
+                            .and_then(|n| n.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        let has_listener = s
+                            .get("listen_addresses")
+                            .and_then(|l| l.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        crate::nvme_recovery::subsystem_is_satisfied(has_ns, has_listener)
+                            .then(|| nqn.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let registered: std::collections::HashSet<String> = targets.keys().cloned().collect();
+        let missing = crate::nvme_recovery::missing_exports(&registered, &satisfied);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        warn!(
+            missing_count = missing.len(),
+            missing = format!("{:?}", missing),
+            "[NVME-RECOVERY #1] SPDK missing exported subsystem(s) — spdk-tgt likely restarted; re-creating directly"
+        );
+        // Re-create each missing subsystem DIRECTLY from the recorded params
+        // (covers single-replica volumes the replica-only periodic reconcile
+        // skips). Idempotent + stable ns identity, so the client's held-open
+        // controller (#2) reattaches to the same namespace.
+        for nqn in &missing {
+            if let Some(rec) = targets.get(nqn) {
+                if let Err(e) = self
+                    .ensure_export_for(nqn, &rec.bdev_name, &rec.target_ip, rec.target_port)
+                    .await
+                {
+                    warn!(nqn = %nqn, error = %e, "[NVME-RECOVERY #1] re-export failed (retry next tick)");
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn reconcile_replica_targets(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let node_uid = self.node_uid.read().await.clone();
         debug!(node_name = %self.node_name, node_uid, "[RECONCILE] Starting replica target reconciliation");
@@ -2952,6 +3194,12 @@ impl NodeAgent {
             .await
             .map_err(|e| format!("Failed to ensure NVMe-oF export for {}: {}", nqn, e))?;
 
+        // NOTE: this is the MULTI-replica export path (ns_identity: None,
+        // consumed by a remote SPDK raid bdev). It is NOT tracked in the #1
+        // registry — the loss-detector re-exports with kernel-facing
+        // stable-ns semantics, wrong here; the 60s reconcile_replica_targets
+        // owns re-export for replica volumes.
+
         debug!(nqn, "[RECONCILE] NVMe-oF target ready");
         Ok(())
     }
@@ -3097,6 +3345,7 @@ impl Clone for NodeAgent {
             data_path_raid_seen: self.data_path_raid_seen.clone(),
             data_path_warned: self.data_path_warned.clone(),
             controller_reap_strikes: self.controller_reap_strikes.clone(),
+            exported_targets: self.exported_targets.clone(),
         }
     }
 }
