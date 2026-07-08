@@ -159,11 +159,19 @@ negligible overhead.
   env, the flint-pnfs-mds-0 Service) — no renames, no removals, so a
   pre-sharding install upgrades in place with its PVC untouched; N=3
   renders 3 Deployments/PVCs/Services with shard 0 on legacy names.
-- **Phase 1 — CSI routing.** Shard pick + stamp + suffixed volume_id +
-  Delete/Expand routing + pre-shard fallback. Acceptance: N=2 kind/lima
-  rig — volumes land on both shards, mounts hit the right shard,
-  delete reclaims on the right shard, legacy unsuffixed volume routes
-  to shard 0.
+- **Phase 1 — CSI routing. CODE DONE 2026-07-07** (unit-covered; the
+  live N=2 rig legs run with the Phase 3 drills, since a multi-shard
+  fleet is only functional once Phase 2's DS fan-out exists).
+  `PnfsShards` in pnfs_csi.rs: pick = FNV-1a(name) % N — retry-stable
+  by design (least-loaded could double-provision on provisioner
+  retries; recorded as future work needing an ownership pre-check);
+  pin travels as `~m<shard>` volume_id suffix; route() strips it and
+  sends the BARE name to the MDS; no suffix ⇒ shard 0; out-of-range
+  pin ⇒ ShardRouting error naming the scale-down mistake. The suffix
+  doubles as the pNFS marker in DeleteVolume (closes the PV-already-
+  GC'd leak) and gates an honest expand refusal. Chart renders
+  FLINT_PNFS_MDS_SHARD_ENDPOINTS (ordered, index = shard) alongside
+  the legacy single-endpoint var for older driver images.
 - **Phase 2 — DS fan-out + file_id shard bits.** Acceptance: both
   shards grant layouts against the same DS fleet; stripe files from
   two shards coexist; cleanup from each shard removes only its own;

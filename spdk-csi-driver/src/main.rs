@@ -379,12 +379,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // before this change. The Arc lets the same handle feed both
     // controller (CreateVolume / DeleteVolume) and node
     // (NodePublishVolume) services.
-    let pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsCsi>> =
-        spdk_csi_driver::pnfs_csi::PnfsCsi::from_env().map(Arc::new);
+    let pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsShards>> =
+        spdk_csi_driver::pnfs_csi::PnfsShards::from_env().map(Arc::new);
     if let Some(p) = &pnfs_csi {
-        eprintln!("🔧 [pNFS] enabled — MDS endpoint: {}", p.endpoint());
+        eprintln!(
+            "🔧 [pNFS] enabled — {} MDS shard(s), shard 0 at {}",
+            p.count(),
+            p.endpoint_of(0)
+        );
     } else {
-        eprintln!("ℹ️  [pNFS] disabled (FLINT_PNFS_MDS_ENDPOINT not set)");
+        eprintln!(
+            "ℹ️  [pNFS] disabled (neither FLINT_PNFS_MDS_SHARD_ENDPOINTS nor \
+             FLINT_PNFS_MDS_ENDPOINT set)"
+        );
     }
 
     let identity_service = MinimalIdentityService::new();
@@ -515,20 +522,21 @@ impl spdk_csi_driver::csi::identity_server::Identity for MinimalIdentityService 
 /// Minimal Controller Service Implementation  
 struct MinimalControllerService {
     driver: Arc<SpdkCsiDriver>,
-    /// pNFS MDS handle. `Some` only when `FLINT_PNFS_MDS_ENDPOINT` is
-    /// set in the environment at startup; `None` otherwise. The
-    /// SPDK code paths never read this field — it is consulted
+    /// pNFS MDS shard set. `Some` only when
+    /// `FLINT_PNFS_MDS_SHARD_ENDPOINTS` (or the legacy
+    /// `FLINT_PNFS_MDS_ENDPOINT`) is set at startup; `None` otherwise.
+    /// The SPDK code paths never read this field — it is consulted
     /// exclusively by the `parameters.layout: pnfs` branch in
     /// `create_volume` (and the corresponding paths in
     /// `delete_volume`). Keeps SPDK behaviour byte-identical when
     /// pNFS is not configured.
-    pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsCsi>>,
+    pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsShards>>,
 }
 
 impl MinimalControllerService {
     fn new(
         driver: Arc<SpdkCsiDriver>,
-        pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsCsi>>,
+        pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsShards>>,
     ) -> Self {
         Self { driver, pnfs_csi }
     }
@@ -997,12 +1005,20 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 } else { None })
                 .unwrap_or(1024 * 1024 * 1024) as u64;
 
+            // Shard pick: hash-of-name — retry-stable (the provisioner
+            // retries by name; a load-based pick could double-provision
+            // on two shards). The pin travels in the returned volume_id
+            // (`<name>~m<shard>`) so delete/expand route statelessly.
+            let (shard, shard_client) = pnfs.pick_for_create(&volume_id);
             println!(
-                "📡 [pNFS] Volume {} via MDS at {} ({} bytes)",
-                volume_id, pnfs.endpoint(), size_bytes,
+                "📡 [pNFS] Volume {} via MDS shard {} at {} ({} bytes)",
+                volume_id,
+                shard,
+                shard_client.endpoint(),
+                size_bytes,
             );
 
-            let ctx = match pnfs.create_volume(&volume_id, size_bytes).await {
+            let ctx = match shard_client.create_volume(&volume_id, size_bytes).await {
                 Ok(ctx) => ctx,
                 Err(e) => {
                     eprintln!("❌ [pNFS] CreateVolume failed: {}", e);
@@ -1019,21 +1035,24 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                             tonic::Status::unavailable(format!("pNFS transport: {}", msg)),
                         PnfsError::BadEndpoint(msg) =>
                             tonic::Status::internal(format!("pNFS endpoint: {}", msg)),
+                        PnfsError::ShardRouting(msg) =>
+                            tonic::Status::failed_precondition(format!("pNFS sharding: {}", msg)),
                     };
                     return Err(status);
                 }
             };
 
+            let pinned_volume_id = pnfs.shard_volume_id(&volume_id, shard);
             let response = spdk_csi_driver::csi::CreateVolumeResponse {
                 volume: Some(spdk_csi_driver::csi::Volume {
                     capacity_bytes: size_bytes as i64,
-                    volume_id: volume_id.clone(),
+                    volume_id: pinned_volume_id.clone(),
                     volume_context: ctx,
                     content_source: None,
                     accessible_topology: vec![],
                 }),
             };
-            println!("✅ [pNFS] Volume {} created", volume_id);
+            println!("✅ [pNFS] Volume {} created (shard {})", pinned_volume_id, shard);
             return Ok(tonic::Response::new(response));
         }
 
@@ -1321,40 +1340,61 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         if let Some(pnfs) = self.pnfs_csi.as_ref() {
             use k8s_openapi::api::core::v1::PersistentVolume;
             use kube::Api;
-            let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
-            // Best-effort lookup: if the PV is already gone (k8s
-            // garbage collection ran first), we still want to try
-            // the MDS delete in case the volume_id matches and the
-            // MDS still has the file. The MDS-side delete is itself
-            // idempotent (returns success on absent volume).
-            let is_pnfs = match pvs.list(&Default::default()).await {
-                Ok(list) => list.items.iter().any(|pv| {
-                    pv.spec.as_ref()
-                        .and_then(|s| s.csi.as_ref())
-                        .filter(|csi| csi.volume_handle == volume_id)
-                        .and_then(|csi| csi.volume_attributes.as_ref())
-                        .map(|attrs| attrs.contains_key("pnfs.flint.io/mds-ip"))
-                        .unwrap_or(false)
-                }),
-                Err(_) => false,
+            // A shard-pinned volume_id (`<name>~m<shard>`) is only ever
+            // minted by the pNFS create path — it alone marks the volume
+            // as pNFS, no PV lookup needed. That also closes the
+            // pre-sharding gap where a PV that k8s GC'd first made
+            // `is_pnfs` false and the MDS-side directory leaked.
+            let suffix_pinned =
+                spdk_csi_driver::pnfs_csi::parse_shard_suffix(&volume_id).is_some();
+            let is_pnfs = suffix_pinned || {
+                let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+                // Best-effort lookup for pre-sharding ids: if the PV is
+                // already gone (k8s garbage collection ran first), we
+                // still want to try the MDS delete in case the volume_id
+                // matches and the MDS still has the file. The MDS-side
+                // delete is itself idempotent (success on absent volume).
+                match pvs.list(&Default::default()).await {
+                    Ok(list) => list.items.iter().any(|pv| {
+                        pv.spec.as_ref()
+                            .and_then(|s| s.csi.as_ref())
+                            .filter(|csi| csi.volume_handle == volume_id)
+                            .and_then(|csi| csi.volume_attributes.as_ref())
+                            .map(|attrs| attrs.contains_key("pnfs.flint.io/mds-ip"))
+                            .unwrap_or(false)
+                    }),
+                    Err(_) => false,
+                }
             };
             if is_pnfs {
-                println!("🗑️ [pNFS] Deleting volume {} via MDS at {}",
-                         volume_id, pnfs.endpoint());
-                if let Err(e) = pnfs.delete_volume(&volume_id).await {
+                use spdk_csi_driver::pnfs_csi::PnfsError;
+                let to_status = |e: PnfsError| match e {
+                    PnfsError::Mds(msg) =>
+                        tonic::Status::failed_precondition(format!("pNFS MDS: {}", msg)),
+                    PnfsError::Transport(msg) =>
+                        tonic::Status::unavailable(format!("pNFS transport: {}", msg)),
+                    PnfsError::BadEndpoint(msg) =>
+                        tonic::Status::internal(format!("pNFS endpoint: {}", msg)),
+                    PnfsError::ShardRouting(msg) =>
+                        tonic::Status::failed_precondition(format!("pNFS sharding: {}", msg)),
+                };
+                // Route by the pin; bare (pre-sharding) ids go to shard 0,
+                // and the MDS receives the BARE name — the suffix is a CSI
+                // routing artifact, not part of the volume's identity.
+                let (shard, shard_client, bare_id) = match pnfs.route(&volume_id) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("❌ [pNFS] DeleteVolume routing failed: {}", e);
+                        return Err(to_status(e));
+                    }
+                };
+                println!("🗑️ [pNFS] Deleting volume {} via MDS shard {} at {}",
+                         bare_id, shard, shard_client.endpoint());
+                if let Err(e) = shard_client.delete_volume(bare_id).await {
                     eprintln!("❌ [pNFS] DeleteVolume failed: {}", e);
-                    use spdk_csi_driver::pnfs_csi::PnfsError;
-                    let status = match e {
-                        PnfsError::Mds(msg) =>
-                            tonic::Status::failed_precondition(format!("pNFS MDS: {}", msg)),
-                        PnfsError::Transport(msg) =>
-                            tonic::Status::unavailable(format!("pNFS transport: {}", msg)),
-                        PnfsError::BadEndpoint(msg) =>
-                            tonic::Status::internal(format!("pNFS endpoint: {}", msg)),
-                    };
-                    return Err(status);
+                    return Err(to_status(e));
                 }
-                println!("✅ [pNFS] Volume {} deleted", volume_id);
+                println!("✅ [pNFS] Volume {} deleted (shard {})", bare_id, shard);
                 return Ok(tonic::Response::new(
                     spdk_csi_driver::csi::DeleteVolumeResponse {},
                 ));
@@ -2033,6 +2073,19 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .required_bytes as u64;
 
         println!("📏 [CONTROLLER] Expanding volume {} to {} bytes", volume_id, new_size_bytes);
+
+        // pNFS volumes don't support expansion yet. Shard-pinned ids
+        // (`~m<shard>`) are pNFS by construction — refuse here with the
+        // honest reason instead of falling through to the PV-name
+        // lookup below, which would 404 (PV names lack the pin suffix)
+        // and misreport the situation as "volume not found".
+        if spdk_csi_driver::pnfs_csi::parse_shard_suffix(&volume_id).is_some() {
+            return Err(tonic::Status::failed_precondition(
+                "pNFS volumes do not support expansion yet — capacity is enforced \
+                 pool-side at the data servers (see the operator runbook's capacity \
+                 section)",
+            ));
+        }
 
         // Dispatch on PV volume_attributes rather than swallowing metadata-lookup errors:
         // a transient K8s API failure must not be mistaken for "this is an NFS volume"

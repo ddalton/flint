@@ -98,11 +98,23 @@ spec:
             # and SPDK behaviour is byte-identical to the no-pNFS build.
             - name: FLINT_PNFS_MDS_ENDPOINT
               {{- if .Values.pnfs.server.enabled }}
-              # In-chart MDS (pnfs-mds.yaml) — its stable Service.
+              # In-chart MDS (pnfs-mds.yaml) — the shard-0 alias Service.
+              # Kept alongside the shard list below so driver images
+              # older than the sharding release still find their MDS.
               value: {{ .Values.pnfs.mdsEndpoint | default (printf "flint-pnfs-mds.%s.svc.cluster.local:50051" .Release.Namespace) | quote }}
               {{- else }}
               value: {{ required "pnfs.mdsEndpoint is required when pnfs.enabled is true and pnfs.server.enabled is false" .Values.pnfs.mdsEndpoint | quote }}
               {{- end }}
+            {{- if .Values.pnfs.server.enabled }}
+            # Ordered shard endpoints (index = shard id) — the driver's
+            # PnfsShards::from_env prefers this over the single-endpoint
+            # var. Rendered from pnfs.server.mds.count
+            # (mds-sharding-plan.md Phase 1); volumes pin to a shard at
+            # CreateVolume via hash(name) % N and carry the pin in their
+            # volume_id (`~m<shard>`).
+            - name: FLINT_PNFS_MDS_SHARD_ENDPOINTS
+              value: {{ $eps := list }}{{ range $i := until (int (.Values.pnfs.server.mds.count | default 1)) }}{{ $eps = append $eps (printf "flint-pnfs-mds-%d.%s.svc.cluster.local:50051" $i $.Release.Namespace) }}{{ end }}{{ join "," $eps | quote }}
+            {{- end }}
             {{- if .Values.pnfs.controlToken.enabled }}
             # Attached to CreateVolume/DeleteVolume gRPC — see
             # templates/pnfs-security.yaml.

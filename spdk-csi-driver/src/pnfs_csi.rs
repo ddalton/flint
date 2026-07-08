@@ -60,6 +60,11 @@ pub enum PnfsError {
     Mds(String),
     /// The endpoint string is malformed or empty.
     BadEndpoint(String),
+    /// The volume_id's shard suffix points at a shard this controller
+    /// is not configured with (mds.count scaled below a shard that
+    /// still owns volumes) — a configuration error, not a retryable
+    /// condition.
+    ShardRouting(String),
 }
 
 impl std::fmt::Display for PnfsError {
@@ -68,6 +73,7 @@ impl std::fmt::Display for PnfsError {
             Self::Transport(m) => write!(f, "pNFS transport: {}", m),
             Self::Mds(m) => write!(f, "pNFS MDS: {}", m),
             Self::BadEndpoint(m) => write!(f, "pNFS bad endpoint: {}", m),
+            Self::ShardRouting(m) => write!(f, "pNFS shard routing: {}", m),
         }
     }
 }
@@ -249,6 +255,129 @@ impl PnfsCsi {
         }
         Ok(())
     }
+}
+
+/// The MDS shard set (mds-sharding-plan.md Phase 1).
+///
+/// N independent MDSes; each volume is pinned to one shard at
+/// CreateVolume and carries the pin in its volume_id forever
+/// (`<name>~m<shard>`). Routing is therefore stateless: create picks
+/// by hash of the CSI name, everything else parses the suffix.
+///
+/// Hash-of-name, NOT least-loaded, and deliberately so: the CSI
+/// provisioner retries CreateVolume by name, and a load-based pick
+/// could choose a different shard on retry — provisioning the volume
+/// twice on two shards. hash(name) % N is retry-stable with zero
+/// cross-shard state. (N changing between an attempt and its retry is
+/// a helm-upgrade-mid-provision race we accept and document.)
+#[derive(Clone, Debug)]
+pub struct PnfsShards {
+    shards: Vec<PnfsCsi>,
+}
+
+/// The shard-pin marker in CSI volume_ids. `~` cannot appear in the
+/// K8s-generated `pvc-<uuid>` names the provisioner sends, so the
+/// suffix is unambiguous; a volume_id WITHOUT it is a pre-sharding
+/// volume, which by upgrade construction lives on shard 0.
+const SHARD_SUFFIX_MARK: &str = "~m";
+
+impl PnfsShards {
+    /// Construct from the environment.
+    ///
+    /// * `FLINT_PNFS_MDS_SHARD_ENDPOINTS` — comma-separated, ordered:
+    ///   index = shard id. Rendered by the chart from
+    ///   `pnfs.server.mds.count`.
+    /// * `FLINT_PNFS_MDS_ENDPOINT` — legacy single-MDS var; used as a
+    ///   one-shard set when the list is absent (older charts).
+    ///
+    /// `None` ⇒ pNFS is not enabled on this driver.
+    pub fn from_env() -> Option<Self> {
+        if let Ok(raw) = std::env::var("FLINT_PNFS_MDS_SHARD_ENDPOINTS") {
+            let eps: Vec<&str> = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !eps.is_empty() {
+                return Some(Self {
+                    shards: eps.into_iter().map(PnfsCsi::new).collect(),
+                });
+            }
+        }
+        PnfsCsi::from_env().map(|single| Self { shards: vec![single] })
+    }
+
+    /// Test/direct constructor.
+    pub fn new(endpoints: Vec<String>) -> Self {
+        assert!(!endpoints.is_empty(), "PnfsShards needs >= 1 endpoint");
+        Self { shards: endpoints.into_iter().map(PnfsCsi::new).collect() }
+    }
+
+    pub fn count(&self) -> usize {
+        self.shards.len()
+    }
+
+    /// Pick the shard for a NEW volume: FNV-1a of the CSI name mod N.
+    pub fn pick_for_create(&self, name: &str) -> (usize, &PnfsCsi) {
+        let shard = (fnv1a(name) % self.shards.len() as u64) as usize;
+        (shard, &self.shards[shard])
+    }
+
+    /// Stamp the shard pin into the CSI volume_id returned for `name`.
+    pub fn shard_volume_id(&self, name: &str, shard: usize) -> String {
+        format!("{}{}{}", name, SHARD_SUFFIX_MARK, shard)
+    }
+
+    /// Route an existing volume_id to its owning shard. Returns
+    /// (shard, client, bare MDS-side volume name). No suffix ⇒
+    /// shard 0 (pre-sharding volume).
+    pub fn route<'a, 'b>(
+        &'a self,
+        volume_id: &'b str,
+    ) -> Result<(usize, &'a PnfsCsi, &'b str), PnfsError> {
+        let (bare, shard) = match parse_shard_suffix(volume_id) {
+            Some((bare, shard)) => (bare, shard),
+            None => (volume_id, 0),
+        };
+        let client = self.shards.get(shard).ok_or_else(|| {
+            PnfsError::ShardRouting(format!(
+                "volume {} is pinned to MDS shard {} but only {} shard(s) are configured — \
+                 was pnfs.server.mds.count scaled below a shard that still owns volumes?",
+                volume_id,
+                shard,
+                self.shards.len()
+            ))
+        })?;
+        Ok((shard, client, bare))
+    }
+
+    /// Endpoint string of shard `i` (logging).
+    pub fn endpoint_of(&self, shard: usize) -> &str {
+        self.shards[shard].endpoint()
+    }
+}
+
+/// Parse `<bare>~m<shard>` — `None` for pre-sharding ids. Only a
+/// trailing, all-digits suffix counts; anything else is part of the
+/// name.
+pub fn parse_shard_suffix(volume_id: &str) -> Option<(&str, usize)> {
+    let at = volume_id.rfind(SHARD_SUFFIX_MARK)?;
+    let digits = &volume_id[at + SHARD_SUFFIX_MARK.len()..];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((&volume_id[..at], digits.parse().ok()?))
+}
+
+/// FNV-1a, dependency-free and stable across releases — the shard pick
+/// for a given name must never change under us.
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// Resolve `host` to a dotted-quad IPv4 string for the kernel NFS
@@ -526,5 +655,101 @@ mod tests {
             let expected = expect.map(|(h, p)| (h.to_string(), p.to_string()));
             assert_eq!(got, expected, "input: {}", input);
         }
+    }
+
+    #[test]
+    fn shard_suffix_round_trip_and_rejects() {
+        let shards = PnfsShards::new(vec!["h0:1".into(), "h1:1".into(), "h2:1".into()]);
+        let id = shards.shard_volume_id("pvc-abc-123", 2);
+        assert_eq!(id, "pvc-abc-123~m2");
+        assert_eq!(parse_shard_suffix(&id), Some(("pvc-abc-123", 2)));
+
+        // Pre-sharding / non-pin shapes are NOT pins.
+        assert_eq!(parse_shard_suffix("pvc-abc-123"), None);
+        assert_eq!(parse_shard_suffix("pvc-abc~m"), None); // no digits
+        assert_eq!(parse_shard_suffix("pvc-abc~mx1"), None); // non-digit
+        assert_eq!(parse_shard_suffix("pvc-abc~m1z"), None); // trailing junk
+    }
+
+    #[test]
+    fn fnv1a_matches_published_vectors() {
+        // The shard pick for a name must never change across releases —
+        // an implementation drift would re-route existing names. Pin
+        // the hash to the published FNV-1a test vectors.
+        assert_eq!(fnv1a(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a("a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a("foobar"), 0x85944171f73967e8);
+    }
+
+    #[test]
+    fn pick_for_create_stable_and_covers_shards() {
+        let shards = PnfsShards::new(vec!["h0:1".into(), "h1:1".into(), "h2:1".into(), "h3:1".into()]);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..32 {
+            let name = format!("pvc-{i:032x}");
+            let (a, _) = shards.pick_for_create(&name);
+            let (b, _) = shards.pick_for_create(&name);
+            assert_eq!(a, b, "pick must be deterministic");
+            seen.insert(a);
+        }
+        assert!(seen.len() > 1, "32 names must spread over >1 of 4 shards");
+    }
+
+    #[test]
+    fn route_legacy_to_shard0_and_out_of_range_errors() {
+        let shards = PnfsShards::new(vec!["h0:1".into(), "h1:1".into()]);
+
+        // Bare id = pre-sharding volume = shard 0, bare name unchanged.
+        let (shard, _, bare) = shards.route("pvc-legacy").unwrap();
+        assert_eq!((shard, bare), (0, "pvc-legacy"));
+
+        // Pinned id routes to its shard with the suffix stripped.
+        let (shard, _, bare) = shards.route("pvc-new~m1").unwrap();
+        assert_eq!((shard, bare), (1, "pvc-new"));
+
+        // A pin beyond the configured set is a configuration error.
+        let err = shards.route("pvc-orphan~m7").unwrap_err();
+        assert!(matches!(err, PnfsError::ShardRouting(_)), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn sharded_ops_route_to_owning_shard() {
+        let canned_create = CreateVolumeResponse {
+            created: true,
+            message: String::new(),
+            export_path: "/data/exports".into(),
+            volume_file: "pvc-routed".into(),
+            nfs_port: 2049,
+            directory: true,
+        };
+        let canned_delete = DeleteVolumeResponse { deleted: true, message: String::new() };
+        let mock0 = std::sync::Arc::new(MockMds::new(canned_create.clone(), canned_delete.clone()));
+        let mock1 = std::sync::Arc::new(MockMds::new(canned_create, canned_delete));
+        let ep0 = start_mock_mds(std::sync::Arc::clone(&mock0)).await;
+        let ep1 = start_mock_mds(std::sync::Arc::clone(&mock1)).await;
+        let shards = PnfsShards::new(vec![ep0, ep1]);
+
+        // Deleting an explicitly shard-1-pinned id must reach shard 1
+        // with the BARE name, and never touch shard 0.
+        let (shard, client, bare) = shards.route("pvc-routed~m1").unwrap();
+        assert_eq!(shard, 1);
+        client.delete_volume(bare).await.unwrap();
+        assert_eq!(
+            mock1.last_delete_volume_id.lock().unwrap().as_deref(),
+            Some("pvc-routed"),
+        );
+        assert!(mock0.last_delete_volume_id.lock().unwrap().is_none());
+
+        // Create through the hash pick lands on exactly the picked
+        // shard, with the bare name on the wire.
+        let name = "pvc-create-route";
+        let (picked, client) = shards.pick_for_create(name);
+        client.create_volume(name, 1 << 20).await.unwrap();
+        let (m_hit, m_miss) = if picked == 0 { (&mock0, &mock1) } else { (&mock1, &mock0) };
+        assert_eq!(
+            m_hit.last_create_volume_id.lock().unwrap().as_deref(),
+            Some(name),
+        );
+        assert!(m_miss.last_create_volume_id.lock().unwrap().is_none());
     }
 }
