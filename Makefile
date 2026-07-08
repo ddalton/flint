@@ -238,6 +238,10 @@ test-pnfs-restart-load: build-pnfs ## MDS kill -9 under load (Phase 3: one-heart
 test-pnfs-shard: build-pnfs ## MDS sharding: 2 shards / shared DS fleet — fan-out, distinct identity, disjoint file_ids, scoped cleanup, blast radius, restart recovery
 	tests/lima/pnfs/shard-drill.sh
 
+.PHONY: test-pnfs-shard-bench
+test-pnfs-shard-bench: build-pnfs ## MDS sharding aggregate throughput (SHARDS=, P=; not in the gate). Server-parallelism via MDS cores-busy; wall-clock host-capped
+	tests/lima/pnfs/shard-bench.sh
+
 .PHONY: test-pnfs-all
 test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + identity + fallback + enospc + fsx + shard tests in sequence
 	$(MAKE) test-pnfs-smoke
