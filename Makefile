@@ -234,8 +234,12 @@ test-pnfs-fallback: build-pnfs ## Bounded-DELAY fallback escalation (DELAY-livel
 test-pnfs-restart-load: build-pnfs ## MDS kill -9 under load (Phase 3: one-heartbeat re-register, zero recalls, I/O rides through)
 	tests/lima/pnfs/mds-restart-load.sh
 
+.PHONY: test-pnfs-shard
+test-pnfs-shard: build-pnfs ## MDS sharding: 2 shards / shared DS fleet — fan-out, distinct identity, disjoint file_ids, scoped cleanup, blast radius, restart recovery
+	tests/lima/pnfs/shard-drill.sh
+
 .PHONY: test-pnfs-all
-test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + identity + fallback + enospc + fsx tests in sequence
+test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + identity + fallback + enospc + fsx + shard tests in sequence
 	$(MAKE) test-pnfs-smoke
 	$(MAKE) test-pnfs-pynfs
 	$(MAKE) test-pnfs-csi
@@ -246,6 +250,7 @@ test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + i
 	$(MAKE) test-pnfs-fallback
 	$(MAKE) test-pnfs-enospc
 	$(MAKE) test-pnfs-fsx
+	$(MAKE) test-pnfs-shard
 	# test-pnfs-restart-load is NOT in the gate yet: its core Phase 3
 	# assertions pass (one-heartbeat NACK re-register, zero recalls,
 	# boot grace) but the final error-free-client-I/O clause exposes an

@@ -326,6 +326,45 @@ over the wider fleet. DOWN is NOT supported until the drain milestone
 — a removed DS strands every file pinned to it (LAYOUTGET refuses
 rather than re-maps).
 
+## MDS shards (metadata scale-out)
+
+`pnfs.server.mds.count: N` runs N independent MDS shards — each its
+own Deployment, PVC (state.db + export tree), and ClusterIP Service
+`flint-pnfs-mds-<i>`. Every DS registers with **all** shards; each
+shard grants layouts against the shared DS fleet with its own
+`file_id` namespace (shard ordinal in the top byte, so stripe files
+never collide). Volumes are **pinned to a shard at CreateVolume** by a
+hash of the volume name and never move; the pin rides in the CSI
+`volume_id` as a `~m<shard>` suffix.
+
+- **N=1 (default)** is byte-identical to the pre-sharding single MDS.
+  Shard 0 keeps every legacy object name, so bumping count from 1
+  adopts the existing MDS in place; no data moves.
+- **Requires images ≥ 1.13.0** (CSI shard routing + DS fan-out). On
+  older images, leave count at 1.
+- **Which shard owns a volume?** Read the PV: the `volume_id` suffix
+  (`…~m2` ⇒ shard 2), or `pnfs.flint.io/mds-ip` = that shard's Service
+  IP. Volumes with no suffix are pre-sharding and live on shard 0.
+- **Per-shard incidents** (the CreateVolume-DeadlineExceeded landmine,
+  a wedged export) scope to that shard's volumes. Fix is the same
+  MDS scale-cycle, targeted: `kubectl -n flint-system scale
+  deploy/flint-pnfs-mds-<i> --replicas=0` then back to `1` (shard 0's
+  Deployment is `flint-pnfs-mds`, no suffix).
+- **Scale UP** (`--set pnfs.server.mds.count=N+1`, full values): adds
+  empty shards; new volumes' hash spreads onto them. Existing volumes
+  stay put. The DS config gains the new shard endpoints on the same
+  upgrade, so the DSes roll and register with the new shards.
+- **Scale DOWN is refused** while a removed shard owns any volume —
+  DeleteVolume/mount for a `~m<removed>` id returns a shard-routing
+  error naming the mistake. Only shrink below a shard once its volumes
+  are all deleted.
+
+Drill: `tests/lima/pnfs/shard-drill.sh` (`make test-pnfs-shard`) — two
+shards over one DS fleet: fan-out registration, distinct server
+identity (no cross-shard trunking), disjoint `file_id`s, scoped
+cleanup, shard-0 kill leaves shard 1 in full service, restart
+recovery over sqlite.
+
 ## Known residuals (fix work tracked in the durable-DS plan)
 
 - **In-flight I/O wedge on abrupt DS loss — the DELAY livelock.**

@@ -186,11 +186,20 @@ negligible overhead.
   Remaining acceptance (data-path legs: layouts from both shards over
   one DS fleet, cleanup disjointness, identity drill) runs with the
   Phase 3 drills.
-- **Phase 3 — drills + runbook.** New drills: shard-down blast radius
-  (volumes on the healthy shard keep full service through a shard-0
-  kill), per-shard landmine scale-cycle, dual-shard fsx concurrently.
-  Runbook: "which shard owns volume X" (read the PV), per-shard
-  scale-cycle, scale-out/scale-in rules.
+- **Phase 3 — drills + runbook. DONE 2026-07-07.**
+  `tests/lima/pnfs/shard-drill.sh` (wired into `test-pnfs-all` as
+  `test-pnfs-shard`): two shards over one DS fleet — fan-out
+  registration, distinct server identity (client.rs stamps
+  `flint-pnfs-<shard>` server_owner/scope so no cross-shard trunking;
+  shard 0 keeps legacy strings), disjoint `file_id` top bytes, scoped
+  heartbeat cleanup (poll until shard-1 stripes gone — the fan-out is
+  per-DS over 1-2 heartbeats), shard-0 kill leaves shard 1 full
+  service, shard-0 restart-over-sqlite recovers the same mount. Green
+  x2 standalone. Runbook "MDS shards" section: ownership lookup (read
+  the PV suffix / mds-ip), per-shard scale-cycle, scale up/down rules,
+  images >= 1.13.0. (Two harness bugs found + fixed en route: leftover
+  loop var poisoning `local s=$1 gp=$((..s))` → both shards on one
+  gRPC port; cleanup assertion racing the second DS's heartbeat.)
 - **Phase 4 — bench.** mdsbench against N=2/N=4 with per-shard volume
   pools; acceptance: aggregate w1-create ≥ 1.8× at N=2, ≥ 3.5× at N=4
   of single-shard baseline; single-volume numbers unchanged (proves

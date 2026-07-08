@@ -366,8 +366,24 @@ impl ClientManager {
         // rigs worked, restarted DSes churned EXCHANGE_ID forever
         // (found by the bounded-DELAY fallback drill, 2026-07-06).
         // In ds mode `volume_id` carries the device_id.
+        //
+        // MDS SHARDS are the same story (mds-sharding-plan.md): N
+        // independent MDSes with disjoint client tables. A client
+        // mounting volumes from two shards must see two distinct
+        // owners or it will demand cross-shard clientid parity.
+        // Shard 0 (and the unset-env single-MDS case) keeps the exact
+        // legacy strings so a pre-sharding upgrade never changes the
+        // server identity under live clients (server_scope stability
+        // is what lets their state survive a server restart).
+        let shard_suffix = std::env::var("FLINT_MDS_SHARD_ID")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .map(|v| format!("-{}", v))
+            .unwrap_or_default();
+
         let server_owner = if is_mds {
-            "flint-pnfs".to_string()
+            format!("flint-pnfs{}", shard_suffix)
         } else if is_ds {
             format!("flint-pnfs-ds-{}", volume_id)
         } else if volume_id.is_empty() {
@@ -378,7 +394,7 @@ impl ClientManager {
 
         let server_scope = if is_mds {
             std::env::var("PNFS_SERVER_SCOPE")
-                .unwrap_or_else(|_| "flint-pnfs-mds".to_string())
+                .unwrap_or_else(|_| format!("flint-pnfs-mds{}", shard_suffix))
         } else if is_ds {
             format!("flint-pnfs-ds-{}", volume_id)
         } else if volume_id.is_empty() {
