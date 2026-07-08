@@ -1,7 +1,11 @@
 # MDS performance plan — scaling the metadata path vertically
 
-Status: **Tier 1 LANDED 2026-07-07** (all three items + measured A/B below);
-Tiers 2–4 not started
+Status: **Tier 1 LANDED 2026-07-07** (all three items + measured A/B below).
+**DECISION 2026-07-07: Tiers 2–3 are SHELVED** — the chosen scaling
+direction is per-volume MDS sharding (`mds-sharding-plan.md`, was
+Tier 4). Tier 2's return_on_close lever stays documented here in case
+per-volume latency ever becomes the bottleneck again, but no further
+single-process work is planned.
 Harness: `make test-pnfs-mdsbench` (`tests/lima/pnfs/mdsbench.sh`)
 
 ## Tier 1 measured results (2026-07-07, same rig as baseline)

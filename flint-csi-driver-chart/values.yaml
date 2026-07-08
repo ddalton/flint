@@ -348,6 +348,14 @@ pnfs:
     logLevel: info
 
     mds:
+      # MDS shard count (mds-sharding-plan.md). Each shard is an
+      # independent single-replica MDS owning a disjoint set of
+      # volumes, pinned at CreateVolume. 1 = the classic single MDS
+      # (renders identically to pre-sharding charts; shard 0 keeps all
+      # legacy object names, so upgrades adopt in place). Scale DOWN
+      # only if the removed shards own zero volumes. count > 1 needs
+      # images >= 1.13.0 (CSI shard routing + DS fan-out registration).
+      count: 1
       # Seconds without a DS heartbeat before the MDS marks it offline
       # and recalls its layouts. DS heartbeatInterval is 10s; keep this
       # >= 2 missed beats + margin.

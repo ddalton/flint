@@ -1,22 +1,36 @@
 {{- /*
-pNFS Metadata Server — deployed when pnfs.enabled AND pnfs.server.enabled.
+pNFS Metadata Server(s) — deployed when pnfs.enabled AND pnfs.server.enabled.
 
-Shape (durable-DS plan Phase 1):
-- single-replica Deployment, strategy Recreate: the sqlite state.db is
-  single-writer, and the RWO PVC attach is the fence — two MDS pods
-  must never run concurrently.
-- export tree + state.db live on a flint PVC, so MDS state survives
-  pod rescheduling (restart-HA tier: reschedule + 90s grace = RTO).
-- stable ClusterIP Service for both the NFSv4.1 port and the gRPC
-  control port; kernel clients reconnect to the same IP after an MDS
-  roll.
+Shape (mds-sharding-plan.md Phase 0; durable-DS Phase 1 lineage):
+- N INDEPENDENT single-replica Deployments (pnfs.server.mds.count,
+  default 1), each with strategy Recreate: every shard's sqlite
+  state.db is single-writer, and the RWO PVC attach is the fence — two
+  pods of the SAME shard must never run concurrently. Shards share
+  nothing with each other.
+- Ranged Deployments, NOT a StatefulSet: volumeClaimTemplates would
+  rename shard 0's PVC and force a data migration on upgrade. Here
+  shard 0 keeps the exact pre-sharding names (Deployment/Service
+  `flint-pnfs-mds`, PVC `flint-pnfs-mds-data`), so upgrading a
+  count:1 install adopts everything in place — and count:1 renders
+  semantically identical to the pre-sharding chart.
+- Per-shard stable ClusterIP Services `flint-pnfs-mds-<i>` (all
+  shards, 0 included, for uniform enumeration by the CSI controller).
+  The legacy `flint-pnfs-mds` Service remains as an alias for shard 0:
+  pre-sharding PVs have its ClusterIP stamped in their volume context,
+  and the DS config points at it until Phase 2 fan-out.
+- One shared ConfigMap: shard config is identical; only
+  FLINT_MDS_SHARD_ID differs (injected per Deployment; folded into
+  file_id allocation from Phase 2 so stripe-file namespaces are
+  disjoint by construction).
 - dataServers is deliberately EMPTY: DS pods register dynamically over
-  gRPC with their per-pod Service DNS as the advertised endpoint.
-  Config-listed DSes would be pre-registered Active at boot even when
-  dead (mds/server.rs boot pre-registration) — the Phase 3 wart the
-  chart avoids entirely.
+  gRPC. Until Phase 2 (DS fan-out) lands in the images, only shard 0
+  receives DS registrations — set count > 1 only with images that
+  ship the fan-out.
+- Volumes are pinned to their shard at CreateVolume and never move;
+  scale count DOWN only if the removed shards own zero volumes.
 */}}
 {{- if and .Values.pnfs.enabled .Values.pnfs.server.enabled }}
+{{- $count := int (.Values.pnfs.server.mds.count | default 1) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -58,21 +72,9 @@ data:
       level: {{ .Values.pnfs.server.logLevel | default "info" }}
       format: text
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: flint-pnfs-mds-data
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
-    app.kubernetes.io/component: pnfs-mds
-spec:
-  accessModes: ["ReadWriteOnce"]
-  storageClassName: {{ .Values.pnfs.server.mds.storage.storageClassName | default .Values.storageClass.name }}
-  resources:
-    requests:
-      storage: {{ .Values.pnfs.server.mds.storage.size }}
----
+{{- /* Legacy alias Service — shard 0. Pre-sharding PVs carry this
+Service's ClusterIP in pnfs.flint.io/mds-ip, and the DS config points
+here until Phase 2; it must survive sharding untouched. */}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -82,10 +84,56 @@ metadata:
     {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
     app.kubernetes.io/component: pnfs-mds
 spec:
-  # Stable ClusterIP: kernel clients mount this address; it must
-  # survive MDS pod rescheduling.
   selector:
     app: flint-pnfs-mds
+  ports:
+    - name: nfs
+      port: 2049
+      targetPort: 2049
+      protocol: TCP
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP
+{{- range $i := until $count }}
+{{- /* Shard 0 keeps every pre-sharding object name; shards >= 1 get
+-<i> suffixed names. Pod label app: <deployment-name> throughout —
+Deployment selectors are immutable, and shard 0's must stay exactly
+`app: flint-pnfs-mds` for in-place upgrade. */}}
+{{- $name := ternary "flint-pnfs-mds" (printf "flint-pnfs-mds-%d" $i) (eq $i 0) }}
+{{- $pvc := ternary "flint-pnfs-mds-data" (printf "flint-pnfs-mds-data-%d" $i) (eq $i 0) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $pvc }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: pnfs-mds
+    flint.io/mds-shard: {{ $i | quote }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ $.Values.pnfs.server.mds.storage.storageClassName | default $.Values.storageClass.name }}
+  resources:
+    requests:
+      storage: {{ $.Values.pnfs.server.mds.storage.size }}
+---
+{{- /* Uniform per-shard Service (0..N-1) — the CSI controller
+enumerates these for shard assignment and stamps this Service's
+ClusterIP into new PVs' volume context. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-pnfs-mds-{{ $i }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: pnfs-mds
+    flint.io/mds-shard: {{ $i | quote }}
+spec:
+  selector:
+    app: {{ $name }}
   ports:
     - name: nfs
       port: 2049
@@ -99,45 +147,52 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: flint-pnfs-mds
-  namespace: {{ .Release.Namespace }}
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
     app.kubernetes.io/component: pnfs-mds
+    flint.io/mds-shard: {{ $i | quote }}
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: flint-pnfs-mds
+      app: {{ $name }}
   template:
     metadata:
       labels:
-        app: flint-pnfs-mds
-        {{- include "flint-csi-driver-chart.selectorLabels" . | nindent 8 }}
+        app: {{ $name }}
+        # Shard-agnostic role label — the NetworkPolicies select on
+        # this (per-shard `app` values can't be enumerated there).
+        flint.io/role: pnfs-mds
+        flint.io/mds-shard: {{ $i | quote }}
+        {{- include "flint-csi-driver-chart.selectorLabels" $ | nindent 8 }}
     spec:
-      {{- with .Values.priorityClassName }}
+      {{- with $.Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
       containers:
         - name: mds
-          image: "{{ .Values.images.repository }}/{{ .Values.pnfs.server.image.name }}:{{ required "pnfs.server.image.tag is required when pnfs.server.enabled" .Values.pnfs.server.image.tag }}"
+          image: "{{ $.Values.images.repository }}/{{ $.Values.pnfs.server.image.name }}:{{ required "pnfs.server.image.tag is required when pnfs.server.enabled" $.Values.pnfs.server.image.tag }}"
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/flint-pnfs-mds"]
           args: ["--config", "/etc/flint/mds.yaml"]
           env:
             - name: PNFS_MODE
               value: "mds"
+            - name: FLINT_MDS_SHARD_ID
+              value: {{ $i | quote }}
             - name: RUST_LOG
-              value: {{ .Values.pnfs.server.logLevel | default "info" | quote }}
-            {{- if .Values.pnfs.controlToken.enabled }}
+              value: {{ $.Values.pnfs.server.logLevel | default "info" | quote }}
+            {{- if $.Values.pnfs.controlToken.enabled }}
             # Required Bearer token on every MdsControl gRPC — see
             # templates/pnfs-security.yaml.
             - name: FLINT_PNFS_CONTROL_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.pnfs.controlToken.existingSecret | default "flint-pnfs-control-token" }}
+                  name: {{ $.Values.pnfs.controlToken.existingSecret | default "flint-pnfs-control-token" }}
                   key: token
             {{- end }}
           ports:
@@ -155,7 +210,7 @@ spec:
               mountPath: /etc/flint
             - name: data
               mountPath: /data
-          {{- with .Values.pnfs.server.mds.resources }}
+          {{- with $.Values.pnfs.server.mds.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -165,5 +220,6 @@ spec:
             name: flint-pnfs-mds-config
         - name: data
           persistentVolumeClaim:
-            claimName: flint-pnfs-mds-data
+            claimName: {{ $pvc }}
+{{- end }}
 {{- end }}

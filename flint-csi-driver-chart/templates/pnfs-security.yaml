@@ -45,10 +45,13 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   podSelector:
+    # Role labels, not per-shard `app` values: MDS shards are
+    # app: flint-pnfs-mds-<i> (mds-sharding-plan.md Phase 0) and must
+    # all sit behind this policy.
     matchExpressions:
-      - key: app
+      - key: flint.io/role
         operator: In
-        values: ["flint-pnfs-mds", "flint-pnfs-ds"]
+        values: ["pnfs-mds", "pnfs-ds"]
   policyTypes: ["Ingress"]
   ingress:
     - from:
@@ -78,13 +81,13 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: flint-pnfs-mds
+      flint.io/role: pnfs-mds
   policyTypes: ["Ingress"]
   ingress:
     - from:
         - podSelector:
             matchLabels:
-              app: flint-pnfs-ds
+              flint.io/role: pnfs-ds
         - podSelector:
             matchLabels:
               app: flint-csi-controller
@@ -102,13 +105,13 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: flint-pnfs-ds
+      flint.io/role: pnfs-ds
   policyTypes: ["Ingress"]
   ingress:
     - from:
         - podSelector:
             matchLabels:
-              app: flint-pnfs-mds
+              flint.io/role: pnfs-mds
       ports:
         - protocol: TCP
           port: 9091

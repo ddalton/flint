@@ -125,6 +125,9 @@ spec:
     metadata:
       labels:
         app: flint-pnfs-ds
+        # Role label paired with the MDS pods' flint.io/role — the
+        # NetworkPolicies select the fleet by role, not per-shard app.
+        flint.io/role: pnfs-ds
         {{- include "flint-csi-driver-chart.selectorLabels" . | nindent 8 }}
     spec:
       {{- with .Values.priorityClassName }}

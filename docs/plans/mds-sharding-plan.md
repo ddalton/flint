@@ -1,7 +1,7 @@
 # MDS sharding — per-volume shards for aggregate metadata scaling
 
-Status: **PROPOSED** (Tier 4 of `mds-performance-plan.md`, split out as
-its own proposal per that plan)
+Status: **IN PROGRESS** (decision 2026-07-07: sharding is the chosen
+perf direction; perf-plan Tiers 2–3 shelved)
 Prereqs shipped: dir-per-volume CSI (v1.12.0), per-pod Service pattern
 (v1.9.0, durable-DS Phase 1), MDS restart hardening (v1.10.0)
 
@@ -49,7 +49,7 @@ What users and machines actually touch:
 | App pods / PVC authors | StorageClass `flint-pnfs` | **yes** — unchanged, the CSI layer hides everything |
 | Kernel client (NodePublish) | per-shard Service IP stamped in the PV's `pnfs.flint.io/mds-ip` | per-shard, stamped automatically at provision |
 | CSI controller (Create/DeleteVolume) | the owning shard's gRPC :50051 | routed by controller (see §Assignment) |
-| DS registration/heartbeat | ALL shards, discovered via one headless Service | one *discovery* name, N targets |
+| DS registration/heartbeat | ALL shards — endpoint list rendered into the DS config by the chart (count is template-time) | one config key, N targets |
 | Dashboard / operators | `/api/*` aggregates all shards | yes (aggregation) |
 | Manual mounts / runbook recipes | a specific shard's Service | per-shard (recipes gain a "which shard owns this volume" lookup: it's in the PV) |
 
@@ -58,16 +58,30 @@ is untouched. Nobody types an MDS address today; nobody will after.
 
 ## Design
 
-### Chart: MDS Deployment → StatefulSet (default N=1)
+### Chart: N ranged single-replica Deployments (default N=1)
 
-- `pnfs.server.mds.count: N` (default **1** — rendering identical
-  behavior to today; sharding is opt-in).
-- Per-pod ClusterIP Services `flint-pnfs-mds-{i}` — the exact template
-  pattern the DS StatefulSet already uses (durable-DS Phase 1,
-  f814676), plus one headless Service for discovery.
-- Per-pod PVC (state.db + exports tree). Each shard's exports hold
+(Amended at Phase 0 implementation: ranged Deployments, NOT a
+StatefulSet. volumeClaimTemplates would rename shard 0's PVC and
+force a data migration on every upgrade from a pre-sharding install;
+ranged Deployments let shard 0 keep the exact legacy object names —
+Deployment/Service `flint-pnfs-mds`, PVC `flint-pnfs-mds-data` — so
+upgrades adopt in place with zero surgery. Each Deployment keeps
+`strategy: Recreate`, preserving the per-shard sqlite single-writer
+fence the pre-sharding chart documents.)
+
+- `pnfs.server.mds.count: N` (default **1** — renders semantically
+  identical to the pre-sharding chart, verified by diff; sharding is
+  opt-in).
+- Per-shard stable ClusterIP Services `flint-pnfs-mds-{i}` for ALL
+  ordinals (uniform enumeration); the legacy `flint-pnfs-mds` Service
+  stays as a shard-0 alias (pre-shard PVs have its IP stamped; the DS
+  config points at it until Phase 2).
+- Per-shard PVC (state.db + exports tree). Each shard's exports hold
   only its own volumes' directories.
-- `FLINT_MDS_SHARD_ID={i}` injected from the pod ordinal.
+- `FLINT_MDS_SHARD_ID={i}` injected per Deployment.
+- All MDS/DS pods carry `flint.io/role` labels; the Tier-A
+  NetworkPolicies select by role (per-shard `app` values can't be
+  enumerated in a selector).
 
 ### Assignment: pin at CreateVolume, never move
 
@@ -89,11 +103,13 @@ is untouched. Nobody types an MDS address today; nobody will after.
 
 ### DS: register with every shard
 
-- `mds.endpoint: String` becomes an endpoint list (config), or
-  discovery via the MDS headless Service. One registration client per
-  shard endpoint — the existing client in a loop; per-shard
-  re-register/NACK state kept independently (the Phase 3 heartbeat
-  thread already isolates liveness from the data path).
+- `mds.endpoint: String` becomes an endpoint list in the DS config;
+  the chart renders all shard Service DNS names (scale changes are a
+  helm upgrade ⇒ DS config change ⇒ rolling DS restart — explicit and
+  observable). One registration client per shard endpoint — the
+  existing client in a loop; per-shard re-register/NACK state kept
+  independently (the Phase 3 heartbeat thread already isolates
+  liveness from the data path).
 - Heartbeats to N shards cost N small RPCs/interval — noise.
 - Stripe-cleanup instructions arrive from all shards and merge safely:
   shards own disjoint files (see file_id below), and DELETE_STRIPE_FILE
@@ -136,11 +152,13 @@ negligible overhead.
 
 ## Phases
 
-- **Phase 0 — chart topology.** StatefulSet + per-pod Services +
-  headless discovery, `count: 1` default. Acceptance: helm render
-  identical semantics at N=1; upgrade from Deployment preserves the
-  existing PVC (shard 0 adopts it — verify state.db + exports carry
-  over).
+- **Phase 0 — chart topology. DONE 2026-07-07.** Ranged single-replica
+  Deployments + per-shard Services + role-labeled NetworkPolicies,
+  `count: 1` default. Acceptance met: N=1 render diff vs the v1.12.0
+  chart is strictly additive (role/shard labels, FLINT_MDS_SHARD_ID
+  env, the flint-pnfs-mds-0 Service) — no renames, no removals, so a
+  pre-sharding install upgrades in place with its PVC untouched; N=3
+  renders 3 Deployments/PVCs/Services with shard 0 on legacy names.
 - **Phase 1 — CSI routing.** Shard pick + stamp + suffixed volume_id +
   Delete/Expand routing + pre-shard fallback. Acceptance: N=2 kind/lima
   rig — volumes land on both shards, mounts hit the right shard,
@@ -189,6 +207,6 @@ is what makes it clean.
   and runbook work in Phase 3 is not optional polish — without it,
   debugging "which shard owns this volume" costs every incident
   minutes.
-- **Tier 2 interaction**: land Tier 2 first if possible (disjoint
-  code, but both change gate baselines — sequencing avoids attributing
-  a regression to the wrong change).
+- **Tier 2 interaction**: moot — Tiers 2–3 shelved by decision
+  2026-07-07; sharding proceeds alone, so gate-baseline changes are
+  attributable to it by construction.
