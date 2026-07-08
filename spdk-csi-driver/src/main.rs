@@ -498,15 +498,25 @@ impl spdk_csi_driver::csi::identity_server::Identity for MinimalIdentityService 
     ) -> Result<tonic::Response<spdk_csi_driver::csi::GetPluginCapabilitiesResponse>, tonic::Status> {
         println!("🔵 [GRPC] Identity.GetPluginCapabilities called");
         use spdk_csi_driver::csi::{plugin_capability::service::Type as ServiceType, PluginCapability, plugin_capability::Service};
-        
+
         let capabilities = vec![
             PluginCapability {
                 r#type: Some(spdk_csi_driver::csi::plugin_capability::Type::Service(Service {
                     r#type: ServiceType::ControllerService as i32,
                 })),
             },
+            // Topology awareness: nodes report their name via NodeGetInfo
+            // (TOPOLOGY_NODE_KEY) so external-provisioner passes the
+            // WaitForFirstConsumer-selected node as `preferred` on
+            // CreateVolume, and single-replica placement lands the lvol on
+            // the consuming pod's node. Degrades to max-free when absent.
+            PluginCapability {
+                r#type: Some(spdk_csi_driver::csi::plugin_capability::Type::Service(Service {
+                    r#type: ServiceType::VolumeAccessibilityConstraints as i32,
+                })),
+            },
         ];
-        
+
         Ok(tonic::Response::new(spdk_csi_driver::csi::GetPluginCapabilitiesResponse { capabilities }))
     }
 
@@ -1212,8 +1222,23 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         println!("📊 [CONTROLLER] Volume {} - Size: {} bytes, Replicas: {}, Thin: {}, RWX: {}, ROX: {}",
                  volume_id, size_bytes, replica_count, thin_provision, is_rwx, is_rox);
 
+        // Topology hint: for a WaitForFirstConsumer bind the CO passes the
+        // node the consuming pod scheduled onto as `preferred`. Steers
+        // single-replica placement onto that node (data locality; and lets
+        // anti-affinity-spread pods pull their disks apart). Empty for
+        // Immediate binding or topology-unaware COs → max-free fallback.
+        let preferred_nodes = spdk_csi_driver::preferred_nodes_from_topology(
+            req.accessibility_requirements.as_ref(),
+        );
+        if !preferred_nodes.is_empty() {
+            println!(
+                "📍 [CONTROLLER] Volume {} topology-preferred nodes: {:?}",
+                volume_id, preferred_nodes
+            );
+        }
+
         // Call the driver's create volume method
-        match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision).await {
+        match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision, &preferred_nodes).await {
             Ok(result) => {
                 println!("✅ [CONTROLLER] Volume {} created successfully with {} replica(s)", 
                          volume_id, result.replicas.len());
@@ -4174,10 +4199,20 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         _request: tonic::Request<spdk_csi_driver::csi::NodeGetInfoRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeGetInfoResponse>, tonic::Status> {
         println!("🔵 [GRPC] Node.NodeGetInfo called");
+        // Advertise this node's identity as a topology segment so
+        // external-provisioner can steer WaitForFirstConsumer creates to
+        // the consuming pod's node (see TOPOLOGY_NODE_KEY). The segment
+        // value is NODE_ID (spec.nodeName), matching the names the
+        // controller's placement compares against.
+        let mut segments = std::collections::HashMap::new();
+        segments.insert(
+            spdk_csi_driver::TOPOLOGY_NODE_KEY.to_string(),
+            self.driver.node_id.clone(),
+        );
         Ok(tonic::Response::new(spdk_csi_driver::csi::NodeGetInfoResponse {
             node_id: self.driver.node_id.clone(),
             max_volumes_per_node: 0, // 0 means unlimited
-            accessible_topology: None,
+            accessible_topology: Some(spdk_csi_driver::csi::Topology { segments }),
         }))
     }
 }

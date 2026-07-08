@@ -44,3 +44,74 @@ pub mod csi {
 
 // Export minimal models instead of CRD models
 pub use minimal_models::*;
+
+/// CSI topology segment key advertised by every node (NodeGetInfo) and
+/// consumed by the controller's single-replica placement. The segment
+/// value is the k8s node name (== NODE_ID == the names get_all_nodes()
+/// returns), so a `preferred` topology from a WaitForFirstConsumer bind
+/// names the node the consuming pod scheduled onto. Placement honors it
+/// so a single-replica volume's lvol lands on the same node as its pod
+/// (data locality; and it lets anti-affinity-spread pods — e.g. sharded
+/// MDS shards — pull their state.db disks onto distinct nodes). Absent /
+/// unparseable topology degrades to the historical max-free placement.
+pub const TOPOLOGY_NODE_KEY: &str = "topology.flint.csi.storage.io/node";
+
+/// Extract the ordered list of preferred node names from a CreateVolume
+/// request's `accessibility_requirements`. Reads the [`TOPOLOGY_NODE_KEY`]
+/// segment out of each `preferred` topology, preserving the CO's order
+/// (the CO lists the selected node first for WaitForFirstConsumer binds).
+/// Returns empty when there is no requirement or no recognizable segment —
+/// which the placement path treats as "no hint, use max-free".
+pub fn preferred_nodes_from_topology(
+    accessibility: Option<&csi::TopologyRequirement>,
+) -> Vec<String> {
+    accessibility
+        .map(|tr| {
+            tr.preferred
+                .iter()
+                .filter_map(|t| t.segments.get(TOPOLOGY_NODE_KEY).cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod topology_tests {
+    use super::*;
+    use csi::{Topology, TopologyRequirement};
+    use std::collections::HashMap;
+
+    fn topo(node: &str) -> Topology {
+        let mut segments = HashMap::new();
+        segments.insert(TOPOLOGY_NODE_KEY.to_string(), node.to_string());
+        Topology { segments }
+    }
+
+    #[test]
+    fn none_requirement_yields_empty() {
+        assert!(preferred_nodes_from_topology(None).is_empty());
+    }
+
+    #[test]
+    fn reads_preferred_in_order() {
+        let req = TopologyRequirement {
+            requisite: vec![topo("node-a"), topo("node-b")],
+            preferred: vec![topo("node-b"), topo("node-a")],
+        };
+        assert_eq!(
+            preferred_nodes_from_topology(Some(&req)),
+            vec!["node-b".to_string(), "node-a".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignores_foreign_segment_keys() {
+        let mut segments = HashMap::new();
+        segments.insert("topology.kubernetes.io/zone".to_string(), "us-west-1a".to_string());
+        let req = TopologyRequirement {
+            requisite: vec![],
+            preferred: vec![Topology { segments }],
+        };
+        assert!(preferred_nodes_from_topology(Some(&req)).is_empty());
+    }
+}

@@ -122,8 +122,19 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
-    /// Select a node for single-replica volume using capacity cache
-    async fn select_node_for_single_replica(&self, size_bytes: u64) -> Result<String, MinimalStateError> {
+    /// Select a node for single-replica volume using capacity cache.
+    ///
+    /// `preferred_nodes` is the ordered list of node names from the CSI
+    /// request's topology hint (see [`crate::TOPOLOGY_NODE_KEY`]). When a
+    /// preferred node has enough free capacity it wins; otherwise (empty
+    /// hint, or no preferred node has room) placement falls back to the
+    /// historical max-free choice. Passing `&[]` is byte-identical to the
+    /// pre-topology behaviour.
+    async fn select_node_for_single_replica(
+        &self,
+        size_bytes: u64,
+        preferred_nodes: &[String],
+    ) -> Result<String, MinimalStateError> {
         let size_gb = size_bytes / (1024 * 1024 * 1024);
         debug!(size_gb, "[DRIVER] Selecting node for single-replica volume");
 
@@ -171,11 +182,18 @@ impl SpdkCsiDriver {
             });
         }
 
-        // Sort by free capacity (descending) for load balancing
-        candidates.sort_by(|a, b| b.free_capacity.cmp(&a.free_capacity));
-
-        // Select node with most free space
-        let selected = &candidates[0];
+        // Choose: first preferred node that has capacity, else max-free.
+        let candidate_pairs: Vec<(String, u64)> = candidates
+            .iter()
+            .map(|c| (c.node_name.clone(), c.free_capacity))
+            .collect();
+        let chosen_name = pick_placement_node(&candidate_pairs, preferred_nodes)
+            .expect("candidates is non-empty (checked above)");
+        let honored_preferred = preferred_nodes.iter().any(|p| p == &chosen_name);
+        let selected = candidates
+            .iter()
+            .find(|c| c.node_name == chosen_name)
+            .expect("chosen node came from candidates");
 
         // Reserve capacity (optimistic locking)
         self.capacity_cache.reserve_capacity(&selected.node_name, size_bytes).await?;
@@ -183,7 +201,7 @@ impl SpdkCsiDriver {
         let node_name = &selected.node_name;
         let free_gb = selected.free_capacity / (1024 * 1024 * 1024);
         let total_gb = selected.total_capacity / (1024 * 1024 * 1024);
-        info!(node_name, free_gb, total_gb, "[DRIVER] Selected node");
+        info!(node_name, free_gb, total_gb, honored_preferred, "[DRIVER] Selected node");
 
         Ok(selected.node_name.clone())
     }
@@ -359,15 +377,18 @@ impl SpdkCsiDriver {
         })
     }
 
-    /// Create single-replica volume (existing logic, unchanged)
+    /// Create single-replica volume. `preferred_nodes` steers placement
+    /// toward the CSI topology hint (WaitForFirstConsumer's selected node)
+    /// when it has capacity; `&[]` preserves the historical max-free pick.
     async fn create_single_replica_volume(
         &self,
         volume_id: &str,
         size_bytes: u64,
         thin_provision: bool,
+        preferred_nodes: &[String],
     ) -> Result<VolumeCreationResult, MinimalStateError> {
         // Select node dynamically using capacity cache
-        let node_name = match self.select_node_for_single_replica(size_bytes).await {
+        let node_name = match self.select_node_for_single_replica(size_bytes, preferred_nodes).await {
             Ok(node) => node,
             Err(e) => {
                 let err = e.to_string();
@@ -461,14 +482,19 @@ impl SpdkCsiDriver {
         })
     }
 
-    /// Create volume using minimal state architecture (routing to single or multi-replica)
-    pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32, thin_provision: bool) -> Result<VolumeCreationResult, MinimalStateError> {
+    /// Create volume using minimal state architecture (routing to single or multi-replica).
+    ///
+    /// `preferred_nodes` is the CSI topology hint (WaitForFirstConsumer's
+    /// selected node); it only steers single-replica placement. Multi-replica
+    /// (RAID) placement already spreads replicas across distinct nodes and
+    /// ignores the hint. Pass `&[]` for topology-unaware callers.
+    pub async fn create_volume(&self, volume_id: &str, size_bytes: u64, replica_count: u32, thin_provision: bool, preferred_nodes: &[String]) -> Result<VolumeCreationResult, MinimalStateError> {
         debug!(volume_id, size_bytes, replica_count, thin_provision, "[DRIVER] Creating volume");
 
         // Route based on replica count
         if replica_count == 1 {
             // Single replica: Use existing path (zero changes to existing logic)
-            return self.create_single_replica_volume(volume_id, size_bytes, thin_provision).await;
+            return self.create_single_replica_volume(volume_id, size_bytes, thin_provision, preferred_nodes).await;
         }
 
         // Multi-replica: RAID 1 requires minimum 2 replicas
@@ -2677,6 +2703,34 @@ impl SpdkCsiDriver {
     }
 }
 
+/// Pick the placement node for a single-replica volume: the first node in
+/// `preferred` (topology hint order) that is also a viable candidate, else
+/// the candidate with the most free capacity.
+///
+/// `candidates` is `(node_name, free_capacity)` for every node already known
+/// to have enough room (any order). Pure and total so it can be unit-tested
+/// without a cluster; the async caller wraps it with capacity discovery and
+/// reservation. Returns `None` only when `candidates` is empty. An empty
+/// `preferred` (or one naming only nodes without capacity) yields the
+/// max-free node — byte-identical to the pre-topology behaviour.
+pub fn pick_placement_node(candidates: &[(String, u64)], preferred: &[String]) -> Option<String> {
+    if candidates.is_empty() {
+        return None;
+    }
+    // Honor the first preferred node that is a viable candidate.
+    for want in preferred {
+        if let Some((name, _)) = candidates.iter().find(|(name, _)| name == want) {
+            return Some(name.clone());
+        }
+    }
+    // Fallback: most free capacity. max_by is stable on the first max seen;
+    // matches the previous sort-desc-then-[0] selection.
+    candidates
+        .iter()
+        .max_by(|a, b| a.1.cmp(&b.1))
+        .map(|(name, _)| name.clone())
+}
+
 /// Volume information
 #[derive(Debug, Clone)]
 pub struct VolumeInfo {
@@ -2805,5 +2859,65 @@ mod local_export_tests {
         assert!(flint_subsystems_exporting_bdev(&serde_json::json!(null), "x").is_empty());
         assert!(flint_subsystems_exporting_bdev(&serde_json::json!({}), "x").is_empty());
         assert!(flint_subsystems_exporting_bdev(&serde_json::json!([{"no_nqn": true}]), "x").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::pick_placement_node;
+
+    fn c(pairs: &[(&str, u64)]) -> Vec<(String, u64)> {
+        pairs.iter().map(|(n, f)| (n.to_string(), *f)).collect()
+    }
+
+    #[test]
+    fn empty_candidates_is_none() {
+        assert_eq!(pick_placement_node(&[], &["a".to_string()]), None);
+    }
+
+    #[test]
+    fn empty_preferred_picks_max_free() {
+        // No topology hint => historical behaviour: most free capacity wins.
+        let cands = c(&[("a", 10), ("b", 100), ("cc", 50)]);
+        assert_eq!(pick_placement_node(&cands, &[]).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn preferred_with_capacity_wins_over_max_free() {
+        // "a" is preferred and viable even though "b" has far more room.
+        let cands = c(&[("a", 10), ("b", 100)]);
+        assert_eq!(
+            pick_placement_node(&cands, &["a".to_string()]).as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn preferred_without_capacity_falls_back_to_max_free() {
+        // "z" is preferred but not a candidate (no capacity) => max-free "b".
+        let cands = c(&[("a", 10), ("b", 100)]);
+        assert_eq!(
+            pick_placement_node(&cands, &["z".to_string()]).as_deref(),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn first_viable_preferred_wins_in_hint_order() {
+        // Ordered hint: "z" has no capacity, so the next preferred "a" wins
+        // even though "b" is also preferred and has more room.
+        let cands = c(&[("a", 10), ("b", 100)]);
+        let preferred = vec!["z".to_string(), "a".to_string(), "b".to_string()];
+        assert_eq!(pick_placement_node(&cands, &preferred).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn single_candidate_returned_regardless_of_hint() {
+        let cands = c(&[("only", 5)]);
+        assert_eq!(pick_placement_node(&cands, &[]).as_deref(), Some("only"));
+        assert_eq!(
+            pick_placement_node(&cands, &["other".to_string()]).as_deref(),
+            Some("only")
+        );
     }
 }
