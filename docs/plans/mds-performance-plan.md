@@ -194,6 +194,9 @@ Re-run this A/B after the demotion to get the true logging cost.
    StatefulSet + per-volume endpoint assignment at provision time.
    This multiplies whatever per-MDS ceiling Tiers 1–3 establish; it
    does not replace them (intra-volume load still hits one MDS).
+   **Full proposal: `mds-sharding-plan.md`** (endpoint model, shard
+   assignment, DS fan-out registration, file_id disjointness, phases
+   + drills).
 9. **MDS proxy I/O** (fallback UX; P1 list) — orthogonal to
    throughput, listed for completeness.
 
