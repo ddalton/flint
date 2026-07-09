@@ -54,11 +54,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Bytes of real payload in a DS export tree. Excludes the Phase 2 identity
-# marker (.flint-ds-identity), which every DS stamps at boot — it is expected
-# on-disk content, not data-path traffic.
+# Bytes of real payload in a DS export tree. Excludes DS-stamped control
+# files that are expected on-disk content, not data-path traffic: the Phase 2
+# identity marker (.flint-ds-identity, stamped at boot) and the storage-health
+# probe (.flint-ds-health, rewritten+fsync'd every heartbeat by the DS health
+# self-check — else a heartbeat during an A-read reads as "A touched this DS").
 ds_bytes() {
-  find "$1" -type f ! -name '.flint-ds-identity' -print0 2>/dev/null \
+  find "$1" -type f ! -name '.flint-ds-identity' ! -name '.flint-ds-health' -print0 2>/dev/null \
     | xargs -0 stat -f%z 2>/dev/null | awk '{s+=$1} END {print s+0}'
 }
 
