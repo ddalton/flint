@@ -65,7 +65,53 @@ _TBD._
 
 ## Findings
 
-### F1 (probable flint P0) — lost fsync-acked write under force-delete detach/reattach
+### F1 — RECLASSIFIED 2026-07-13: concurrent postmasters, not a storage bug
+
+**Verdict: NOT a flint storage defect.** Reproduced first-try on the fresh
+`runt` cluster with the replacement pod's attempt-0 log intact, which the
+first incident was missing. The log proves temporal overlap: attempt-0 read
+`pg_control` at 13:42:01.625 whose "last known up" stamp was **13:42:01** —
+written by the *old* postmaster, still alive after the force delete. Then
+attempt-0's recovery failed with `xlog flush request 1/12FFF7A0 is not
+satisfied --- flushed only to 1/12FFF6F0` — a heap page whose LSN advanced
+**past attempt-0's view of end-of-WAL, while it ran**, because the old
+postmaster was still writing through the same node-shared mount.
+
+**Mechanism (documented k8s foot-gun, not flint):** `kubectl delete pod
+--grace-period=0 --force` removes the API object immediately; the STS
+controller creates the replacement at once; the same node satisfies WFFC; and
+RWO is **node-scoped**, so kubelet happily NodePublishes the same staged
+volume to the new pod while the old containers still run. Two postmasters,
+one PGDATA, one shared page cache. `postmaster.pid` cannot protect across
+containers (separate PID namespaces). Every anomaly in the original F1
+analysis — the "reverted" `pg_control` (8 KB read-modify-write clobber by the
+stale-read instance), the missing/recycled WAL segments (the old postmaster's
+checkpoint legally recycled them), the zeroed `6A` shell — is explained with
+zero storage-layer misbehavior.
+
+On `runt` the picture was further muddied by an independent failure hit 6 s
+later: kubelet DiskPressure evicted the csi-node pod (see **F2**), killing
+spdk-tgt under the wedged mount and producing the reconnect-loop/EIO tail.
+
+**What this changes:**
+- Drill 1.3's original PASS bar ("ledger clean after WAL replay") was
+  mis-specified for RWO: Kubernetes explicitly documents that force-deleting
+  StatefulSet pods can violate at-most-one semantics. With RWO the DB *can*
+  legally corrupt itself. The drill's flint-scoped bar is: CSI hygiene stays
+  clean (exactly one VA, healthy session, no orphaned mounts, clean
+  detach/reattach) — which it did, in both incidents.
+- flint advertises `SINGLE_NODE_SINGLE_WRITER` (RWOP). A **1.3b RWOP drill**
+  is added: with `ReadWriteOncePod`, kubelet must refuse the second pod's
+  mount until the first is fully unpublished — force-delete must then be
+  corruption-free end-to-end.
+- The open durability question (does a *hard spdk-tgt kill* lose fsync-acked
+  writes?) is exactly drill **1.9**'s ledger check — the durability leg the
+  v1.15.0 grace3/grace4 drills (which validated liveness/resumption) never
+  exercised.
+
+Original (now superseded) analysis kept below for the record.
+
+#### Original F1 writeup (superseded)
 
 **Drill 1.3** (`kubectl delete pod pg-0 --grace-period=0 --force`, same-node
 replacement, RWO r1 on `runs-aws-3`): the replacement pod's postgres went into
@@ -117,6 +163,36 @@ treat **force-delete of a busy pod on v1.15.0 as data-loss-capable**.
 Evidence files: `pg_controldata.txt`, `pg_wal-forensics.txt`,
 `pg_control.bin`, `wal-segment-6E.bin.gz`, `dmesg-runs-aws-3.txt`,
 `driver-logs.txt`, `db-verdict.txt`.
+
+### F2 (real flint chart bug, FIXED) — csi-node evictable under DiskPressure
+
+The chart set **no `priorityClassName`** on the csi-node DaemonSet (or the
+controller). On `runt`, the 8 GB root EBS crossed the kubelet
+ephemeral-storage eviction threshold at 13:42:08 (images + churn) and kubelet
+chose the csi-node pod for eviction — **killing spdk-tgt under every mounted
+flint PVC on the node** (the csi-node-roll landmine, self-inflicted), then
+kept evicting each DS replacement until pressure cleared (6 evictions,
+13:42–13:50). NVMe sessions reconnect-looped (`ctrl_loss_tmo=1800`), and the
+pre-existing mount was wedged until manual controller delete via sysfs.
+
+**Fix (shipped in-repo, applied live to runt):** chart now sets
+`priorityClassName: system-node-critical` on the csi-node DS and
+`system-cluster-critical` on the controller (values-overridable:
+`node.priorityClassName` / `controller.priorityClassName`). Kubelet never
+selects system-node-critical pods for resource eviction.
+
+Unstick recipe recorded: dead controller in reconnect loop blocks unmount →
+`echo 1 > /sys/class/nvme/<ctrl>/delete_controller` (host has no nvme CLI),
+then pod teardown proceeds and the PV deletes cleanly through the driver.
+
+### F3 (environment/trove) — 8 GB worker root is too small
+
+Base images + flint images + one workload image (~4.8 GB) leave <2.5 GB
+headroom; pod churn crosses the 85% eviction threshold within minutes of
+harness deploy. Kubelet's reclaim also deletes just-pulled images (the
+re-pull hit a Docker Hub 502 mid-recovery). Trove backlog: bigger root
+volume (or dedicated imagefs on the instance store). Campaign mitigation:
+F2's priority fix + accepting workload-pod evictions as legitimate chaos.
 
 ### Other findings
 

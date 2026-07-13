@@ -21,6 +21,11 @@ spec:
       serviceAccountName: flint-csi-node
       hostNetwork: true
       terminationGracePeriodSeconds: 30
+      # CSI node plugin must never be evicted: a kubelet DiskPressure eviction
+      # of this pod kills spdk-tgt under live mounts (EIO for every flint PVC
+      # on the node). Found live in the 2026-07 attach/detach chaos campaign
+      # (finding F2, docs/attach-detach-campaign-2026-07.md).
+      priorityClassName: {{ .Values.node.priorityClassName | default "system-node-critical" }}
       securityContext: {}
       {{- with .Values.tolerations }}
       tolerations:

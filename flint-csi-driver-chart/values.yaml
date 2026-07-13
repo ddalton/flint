@@ -479,3 +479,12 @@ reservedDevices:
   #   0000:02:00.0: High-performance device for database workloads
   #   0000:03:00.0: Reserved for ML training
   annotations: ""
+
+# Pod priority (campaign finding F2 — see docs/attach-detach-campaign-2026-07.md):
+# the csi-node pod hosts spdk-tgt; a kubelet eviction (e.g. DiskPressure) kills
+# the storage target under every mounted flint PVC on the node. node pods must
+# be system-node-critical so kubelet never chooses them for eviction.
+node:
+  priorityClassName: system-node-critical
+controller:
+  priorityClassName: system-cluster-critical

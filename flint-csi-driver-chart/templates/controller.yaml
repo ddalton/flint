@@ -23,6 +23,9 @@ spec:
         component: csi-controller
     spec:
       serviceAccountName: flint-csi-controller
+      # Keep the provisioning/attach control plane ahead of workload pods in
+      # scheduling and eviction (campaign finding F2).
+      priorityClassName: {{ .Values.controller.priorityClassName | default "system-cluster-critical" }}
       containers:
         - name: flint-csi-controller
           image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
