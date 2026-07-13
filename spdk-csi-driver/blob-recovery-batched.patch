@@ -1,0 +1,219 @@
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+index 08b79153d..85569bd21 100644
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -3947,6 +3947,13 @@ struct spdk_bs_load_ctx {
+ 
+ 	bool					force_recover;
+ 
++	/* Batched md-scan recovery (reads only; processing semantics are
++	 * identical to the upstream single-page scan). */
++	struct spdk_blob_md_page	*batch_pages;
++	uint32_t			batch_start;
++	uint32_t			batch_count;
++	uint32_t			batch_pos;
++
+ 	/* These fields are used in the spdk_bs_dump path. */
+ 	bool					dumping;
+ 	FILE					*fp;
+@@ -4800,13 +4807,37 @@ bs_load_write_used_md(struct spdk_bs_load_ctx *ctx)
+ }
+ 
+ static void
+-bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
++bs_load_replay_md_done(struct spdk_bs_load_ctx *ctx)
+ {
+ 	uint64_t num_md_clusters;
+ 	uint64_t i;
+ 
++	/* Claim all of the clusters used by the metadata */
++	num_md_clusters = spdk_divide_round_up(
++				  ctx->super->md_start + ctx->super->md_len, ctx->bs->pages_per_cluster);
++	for (i = 0; i < num_md_clusters; i++) {
++		spdk_bit_array_set(ctx->used_clusters, i);
++	}
++	ctx->bs->num_free_clusters -= num_md_clusters;
++	spdk_free(ctx->page);
++	ctx->page = NULL;
++	bs_load_write_used_md(ctx);
++}
++
++static void bs_load_replay_batch_process(struct spdk_bs_load_ctx *ctx);
++
++static void
++bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
++{
+ 	ctx->in_page_chain = false;
+ 
++	if (ctx->batch_pages != NULL) {
++		/* Batched scan: a chain / extent-page detour for one blob has
++		 * completed — resume processing the current batch. */
++		bs_load_replay_batch_process(ctx);
++		return;
++	}
++
+ 	do {
+ 		ctx->page_index++;
+ 	} while (spdk_bit_array_get(ctx->bs->used_md_pages, ctx->page_index) == true);
+@@ -4815,15 +4846,7 @@ bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
+ 		ctx->cur_page = ctx->page_index;
+ 		bs_load_replay_cur_md_page(ctx);
+ 	} else {
+-		/* Claim all of the clusters used by the metadata */
+-		num_md_clusters = spdk_divide_round_up(
+-					  ctx->super->md_start + ctx->super->md_len, ctx->bs->pages_per_cluster);
+-		for (i = 0; i < num_md_clusters; i++) {
+-			spdk_bit_array_set(ctx->used_clusters, i);
+-		}
+-		ctx->bs->num_free_clusters -= num_md_clusters;
+-		spdk_free(ctx->page);
+-		bs_load_write_used_md(ctx);
++		bs_load_replay_md_done(ctx);
+ 	}
+ }
+ 
+@@ -4936,6 +4959,131 @@ bs_load_replay_md_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+ 	bs_load_replay_md_chain_cpl(ctx);
+ }
+ 
++/* Batch size for recovery md-scan reads. 64 pages = 256KB per round trip. */
++#define BS_RECOVERY_READ_BATCH 64
++
++static void bs_load_replay_batch_read(struct spdk_bs_load_ctx *ctx);
++
++static void
++bs_load_replay_batch_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
++{
++	struct spdk_bs_load_ctx *ctx = cb_arg;
++
++	if (bserrno != 0) {
++		spdk_free(ctx->batch_pages);
++		ctx->batch_pages = NULL;
++		bs_load_ctx_fail(ctx, bserrno);
++		return;
++	}
++
++	ctx->batch_pos = 0;
++	bs_load_replay_batch_process(ctx);
++}
++
++/* Process batch elements sequentially with semantics identical to the
++ * upstream bs_load_replay_md_cpl: skip pages already claimed by an earlier
++ * blob's page chain, claim + parse valid sequence-0 pages, follow page
++ * chains and replay extent pages through the upstream single-page paths
++ * (their completions land in bs_load_replay_md_chain_cpl, which resumes
++ * this batch). */
++static void
++bs_load_replay_batch_process(struct spdk_bs_load_ctx *ctx)
++{
++	struct spdk_blob_md_page *page;
++	uint32_t page_num;
++
++	while (ctx->batch_pos < ctx->batch_count) {
++		page_num = ctx->batch_start + ctx->batch_pos;
++		ctx->batch_pos++;
++
++		if (spdk_bit_array_get(ctx->bs->used_md_pages, page_num) == true) {
++			/* Already claimed while following a page chain. */
++			continue;
++		}
++
++		memcpy(ctx->page, (uint8_t *)ctx->batch_pages + (uint64_t)(ctx->batch_pos - 1) * ctx->bs->md_page_size,
++		       ctx->bs->md_page_size);
++		ctx->cur_page = page_num;
++		ctx->page_index = page_num;
++		page = ctx->page;
++
++		if (bs_load_cur_md_page_valid(ctx) == true) {
++			if (page->sequence_num == 0) {
++				spdk_spin_lock(&ctx->bs->used_lock);
++				bs_claim_md_page(ctx->bs, page_num);
++				spdk_spin_unlock(&ctx->bs->used_lock);
++				SPDK_NOTICELOG("Recover: blob 0x%" PRIx32 "\n", page_num);
++				spdk_bit_array_set(ctx->bs->used_blobids, page_num);
++				if (bs_load_replay_md_parse_page(ctx, page)) {
++					spdk_free(ctx->batch_pages);
++					ctx->batch_pages = NULL;
++					bs_load_ctx_fail(ctx, -EILSEQ);
++					return;
++				}
++				if (page->next != SPDK_INVALID_MD_PAGE) {
++					ctx->in_page_chain = true;
++					ctx->cur_page = page->next;
++					bs_load_replay_cur_md_page(ctx);
++					return;
++				}
++				if (ctx->num_extent_pages != 0) {
++					bs_load_replay_extent_pages(ctx);
++					return;
++				}
++			}
++			/* sequence_num != 0 outside a chain: orphaned chain
++			 * page — ignored, as upstream does. */
++		}
++	}
++
++	spdk_free(ctx->batch_pages);
++	ctx->batch_pages = NULL;
++	bs_load_replay_batch_read(ctx);
++}
++
++static void
++bs_load_replay_batch_read(struct spdk_bs_load_ctx *ctx)
++{
++	spdk_bs_batch_t *batch;
++	uint32_t batch_size, i, next_page;
++	uint64_t lba;
++
++	/* Skip pages already claimed via chains so we do not re-read them. */
++	next_page = ctx->batch_start + ctx->batch_count;
++	while (next_page < ctx->super->md_len &&
++	       spdk_bit_array_get(ctx->bs->used_md_pages, next_page) == true) {
++		next_page++;
++	}
++
++	if (next_page >= ctx->super->md_len) {
++		bs_load_replay_md_done(ctx);
++		return;
++	}
++
++	batch_size = spdk_min(BS_RECOVERY_READ_BATCH, ctx->super->md_len - next_page);
++	ctx->batch_start = next_page;
++	ctx->batch_count = batch_size;
++
++	ctx->batch_pages = spdk_zmalloc((uint64_t)ctx->bs->md_page_size * batch_size,
++					ctx->bs->md_page_size,
++					NULL, SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
++	if (ctx->batch_pages == NULL) {
++		/* Fall back to the upstream single-page scan from this point. */
++		ctx->page_index = next_page;
++		ctx->cur_page = next_page;
++		bs_load_replay_cur_md_page(ctx);
++		return;
++	}
++
++	batch = bs_sequence_to_batch(ctx->seq, bs_load_replay_batch_cpl, ctx);
++	for (i = 0; i < batch_size; i++) {
++		lba = bs_md_page_to_lba(ctx->bs, ctx->batch_start + i);
++		bs_batch_read_dev(batch, (uint8_t *)ctx->batch_pages + (uint64_t)i * ctx->bs->md_page_size,
++				  lba, bs_byte_to_lba(ctx->bs, ctx->bs->md_page_size));
++	}
++	bs_batch_close(batch);
++}
++
+ static void
+ bs_load_replay_cur_md_page(struct spdk_bs_load_ctx *ctx)
+ {
+@@ -4959,7 +5107,11 @@ bs_load_replay_md(struct spdk_bs_load_ctx *ctx)
+ 		bs_load_ctx_fail(ctx, -ENOMEM);
+ 		return;
+ 	}
+-	bs_load_replay_cur_md_page(ctx);
++	SPDK_NOTICELOG("Recovery: batched md scan (%u pages/batch, md_len=%u)\n",
++		       BS_RECOVERY_READ_BATCH, ctx->super->md_len);
++	ctx->batch_start = 0;
++	ctx->batch_count = 0;
++	bs_load_replay_batch_read(ctx);
+ }
+ 
+ static void

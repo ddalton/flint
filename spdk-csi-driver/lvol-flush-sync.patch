@@ -1,0 +1,97 @@
+diff --git a/module/bdev/lvol/vbdev_lvol.c b/module/bdev/lvol/vbdev_lvol.c
+index 470b0628f..123c390f2 100644
+--- a/module/bdev/lvol/vbdev_lvol.c
++++ b/module/bdev/lvol/vbdev_lvol.c
+@@ -853,6 +853,7 @@ vbdev_lvol_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
+ 	case SPDK_BDEV_IO_TYPE_READ:
+ 	case SPDK_BDEV_IO_TYPE_SEEK_DATA:
+ 	case SPDK_BDEV_IO_TYPE_SEEK_HOLE:
++	case SPDK_BDEV_IO_TYPE_FLUSH:
+ 		return true;
+ 	default:
+ 		return false;
+@@ -906,6 +907,74 @@ lvol_seek_hole(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io)
+ 	spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
+ }
+ 
++/* FLUSH: persist any unsynced blob metadata (thin-provision cluster
++ * allocations, size changes).  Data writes complete against the base bdev
++ * before the initiator issues FLUSH; what a target-process crash would lose
++ * is the blob metadata that maps them.  spdk_blob_sync_md() completes
++ * immediately when the blob is already clean, so steady-state flushes are
++ * cheap.  It must run on the lvolstore's md thread; the bdev completion must
++ * happen back on the submitting thread.
++ */
++struct vbdev_lvol_flush_ctx {
++	struct spdk_lvol	*lvol;
++	struct spdk_bdev_io	*bdev_io;
++	struct spdk_thread	*orig_thread;
++	int			rc;
++};
++
++static void
++lvol_flush_io_complete(void *arg)
++{
++	struct vbdev_lvol_flush_ctx *fctx = arg;
++
++	spdk_bdev_io_complete(fctx->bdev_io,
++			      fctx->rc == 0 ? SPDK_BDEV_IO_STATUS_SUCCESS : SPDK_BDEV_IO_STATUS_FAILED);
++	free(fctx);
++}
++
++static void
++lvol_flush_sync_md_cb(void *cb_arg, int lvolerrno)
++{
++	struct vbdev_lvol_flush_ctx *fctx = cb_arg;
++
++	fctx->rc = lvolerrno;
++	spdk_thread_send_msg(fctx->orig_thread, lvol_flush_io_complete, fctx);
++}
++
++static void
++lvol_flush_on_md_thread(void *arg)
++{
++	struct vbdev_lvol_flush_ctx *fctx = arg;
++
++	if (spdk_blob_is_read_only(fctx->lvol->blob)) {
++		fctx->rc = 0;
++		spdk_thread_send_msg(fctx->orig_thread, lvol_flush_io_complete, fctx);
++		return;
++	}
++	spdk_blob_sync_md(fctx->lvol->blob, lvol_flush_sync_md_cb, fctx);
++}
++
++static void
++lvol_flush(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io)
++{
++	struct vbdev_lvol_flush_ctx *fctx;
++
++	fctx = calloc(1, sizeof(*fctx));
++	if (fctx == NULL) {
++		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_NOMEM);
++		return;
++	}
++	fctx->lvol = lvol;
++	fctx->bdev_io = bdev_io;
++	fctx->orig_thread = spdk_get_thread();
++
++	if (fctx->orig_thread == lvol->lvol_store->thread) {
++		lvol_flush_on_md_thread(fctx);
++	} else {
++		spdk_thread_send_msg(lvol->lvol_store->thread, lvol_flush_on_md_thread, fctx);
++	}
++}
++
+ static void
+ lvol_write_zeroes(struct spdk_lvol *lvol, struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
+ {
+@@ -1002,6 +1071,9 @@ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_
+ 	case SPDK_BDEV_IO_TYPE_SEEK_HOLE:
+ 		lvol_seek_hole(lvol, bdev_io);
+ 		break;
++	case SPDK_BDEV_IO_TYPE_FLUSH:
++		lvol_flush(lvol, bdev_io);
++		break;
+ 	default:
+ 		SPDK_INFOLOG(vbdev_lvol, "lvol: unsupported I/O type %d\n", bdev_io->type);
+ 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);

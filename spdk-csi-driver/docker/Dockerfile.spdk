@@ -36,9 +36,9 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /spdk
 
 # Copy patches
-COPY lvol-flush.patch /tmp/
+COPY lvol-flush-sync.patch /tmp/
 COPY ublk-debug.patch /tmp/
-COPY blob-recovery-optimized.patch /tmp/
+COPY blob-recovery-batched.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
 COPY nvmf-hostlog.patch /tmp/
 COPY raid-skip-rebuild.patch /tmp/
@@ -56,15 +56,21 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # Enhanced SPDK_ERRLOG (listener address) in lib/nvmf/ctrlr.c
     patch -p1 < /tmp/nvmf-hostlog.patch && \
     echo "✅ nvmf host log patch applied" && \
-    # Apply lvol flush support patch (fixes sync hang on ublk devices)
-    patch -p1 < /tmp/lvol-flush.patch && \
-    echo "✅ FLUSH patch applied to lvol bdev" && \
+    # lvol FLUSH: sync blob metadata (F5 fix — the old patch acked flushes
+    # as no-ops; a hard spdk-tgt death then lost every allocation/creation
+    # since the last clean unload. See docs/attach-detach-campaign-2026-07.md)
+    patch -p1 < /tmp/lvol-flush-sync.patch && \
+    echo "✅ lvol FLUSH→sync_md patch applied" && \
     # Apply ublk debug logging patch
     patch -p1 < /tmp/ublk-debug.patch && \
     echo "✅ ublk debug logging patch applied" && \
-    # Apply combined blobstore recovery optimization (progress logging + 60x batching speedup)
-    patch -p1 < /tmp/blob-recovery-optimized.patch && \
-    echo "✅ Blobstore recovery optimization applied (logging + 60x batching)" && \
+    # Batched-read md scan for bs_recover, corrected (F5 fix): the old
+    # blob-recovery-optimized.patch DROPPED valid on-media blobs (skipped
+    # chains + extent pages, freed buffers early) — recovery after a hard
+    # kill silently emptied the lvolstore. This version keeps the batched
+    # reads but processes pages with upstream-identical semantics.
+    patch -p1 < /tmp/blob-recovery-batched.patch && \
+    echo "✅ Batched recovery (corrected) applied" && \
     # Apply blobstore shutdown debug logging patch
     patch -p1 < /tmp/blob-shutdown-debug.patch && \
     echo "✅ Blobstore shutdown debug logging patch applied" && \
