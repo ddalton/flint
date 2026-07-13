@@ -313,6 +313,67 @@ ever persists blobstore md at runtime.
 Evidence: `tests/chaos/artifacts/expD-1783953943/` (spdk-tgt gen-2/gen-3
 logs incl. the `bs_recover` line, csi-driver NVME-RECOVERY loop, LVS views).
 
+### F5 fix + validation (2026-07-13, spdk-tgt:1.6.0-f5fix.0)
+
+Patches reworked (`blob-recovery-batched.patch` — batched reads with
+upstream-identical processing; `lvol-flush-sync.patch` — FLUSH →
+`spdk_blob_sync_md` on the lvolstore md thread). Unit gate on the builder
+node: **blob_ut 500/500** (206,448 asserts; every `blob_dirty_shutdown`
+recovery sub-case through the batched path), lvol_ut 37/37, vbdev_lvol_ut
+23/23. Image `dilipdalton/spdk-tgt:1.6.0-f5fix.0` (digest 62664caf) deployed
+to runt's DS (roll performed with zero PVs — landmine-safe).
+
+First live gate run recovered the blobs (`Recover: blob 0x0 / 0x1` NOTICEs)
+— but surfaced **F7** (below). After F7 remediation (clean stores),
+**D-redux-2 PASSED the full gate**:
+
+- kill: `pkill -9 spdk_tgt` under pgbench on the lvol-local node →
+  `bs_recover` → batched scan of all 893,592 md pages in **4.6 s** →
+  `Recover: blob 0x0 / 0x1` → `Lvol store found — begin parsing` →
+  reconcile re-export → initiator reconnect → **I/O resumed at +45 s**,
+  consumer pod untouched (same UID, restarts 0→0)
+- **WARM verify: PASS** — all 687 acked writes present, `pg_amcheck
+  --heapallindexed` clean, writable
+- **COLD verify: PASS** — cordon + graceful delete → cross-node reschedule
+  (fresh session, cold cache) — all 956 acked writes present, amcheck clean
+- **kill-2: PASS, and harder than designed** — during the second kill on the
+  same (already-recovered) store, kubelet evicted pg-0 off its node
+  (XFS-dynamic "inode" pressure = F3 space pressure in disguise; the
+  csi-node itself survived — the F2 priority fix held), and the STS
+  replacement landed on the lvol host **while its spdk-tgt was
+  mid-recovery** — NodeStage retried until the bdev appeared, pod Ready
+  ~70 s after the kill. Ledger: **all 1,423 acked writes present**, amcheck
+  clean. Recovery idempotency + eviction + cross-node move mid-recovery,
+  zero loss.
+
+Compare the identical drill on the broken bits: lvol vanished entirely,
+I/O wedged forever. **F5 is fixed.** Follow-ups that remain open on the
+flint side: F6 (reconcile escalation + VolumeCondition), F7 fleet
+remediation (or tolerant-recovery mode), packaging the fixed spdk-tgt into
+the next release (this campaign ran `1.6.0-f5fix.0`).
+
+### F7 — stores that ran the broken recovery are poisoned for strict recovery
+
+The old broken recovery "deleted" lost blobs by rewriting empty used-masks
+while leaving their (valid, CRC-intact) md pages on media. Normal blobstore
+deletes zero md pages (`blob_persist_zero_pages`), so healthy stores never
+contain valid orphan pages — but stores that ever ran the broken recovery
+do. The corrected (upstream-semantics) recovery then finds the stale blob,
+replays its extent table — whose extent pages have since been reused by
+newer blobs — hits an id mismatch (`bs_load_cur_extent_page_valid`) and
+fails the whole store load with `-EILSEQ` (identical to what vanilla
+upstream recovery would do). Observed live: D-redux-1 recovered stale blob
+`0x1` (`lvol_pvc-fa92d8e6…`, deleted in Experiment D) and the LVS load
+failed; the consumer stayed wedged.
+
+**Remediation (applied to runt):** wipe super+masks+md region (`dd` first
+4.4 GB) + agent re-initialize on all three workers; controller scale-cycle.
+**Fleet implication:** any deployed store that experienced a hard spdk-tgt
+death on the broken-recovery images carries latent orphan pages; before
+relying on the fixed recovery, stores must be rebuilt — or recovery needs an
+opt-in tolerant mode (skip-and-WARN on blobs with dangling extent pages
+instead of failing the store). Recorded as follow-up work.
+
 ### Other findings
 
 - **P0-a / P0-b** (trove provisioning) — see Phase 0. Not flint bugs; recorded
