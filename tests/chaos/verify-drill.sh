@@ -32,15 +32,19 @@ else
   note "pg-0 NOT Ready within ${READY_TIMEOUT}s"
 fi
 POST_NODE=$(pg_node); POST_UID=$(pg_uid); POST_RESTARTS=$(pg_restarts)
-RESTART_DELTA=$(( ${POST_RESTARTS:-0} - ${PRE_RESTARTS:-0} ))
+RESTART_DELTA="?"
 if [ -n "${PRE_UID:-}" ]; then
   if [ "$POST_UID" = "${PRE_UID}" ]; then KIND="in-place"; else KIND="rescheduled"; fi
+  # restart delta is only meaningful in-place; a replacement pod resets the
+  # counter, so report its absolute (should be 0) instead.
+  if [ "$KIND" = "in-place" ]; then RESTART_DELTA=$(( ${POST_RESTARTS:-0} - ${PRE_RESTARTS:-0} ))
+  else RESTART_DELTA="new:${POST_RESTARTS:-0}"; fi
   case "$EXPECT_RESCHEDULE" in
     none) [ "$KIND" = "in-place" ] || { FAILED="$FAILED attribution"; note "expected in-place, got $KIND"; } ;;
     same) { [ "$KIND" = "rescheduled" ] && [ "$POST_NODE" = "${PRE_NODE:-}" ]; } || { FAILED="$FAILED attribution"; note "expected same-node replace"; } ;;
     cross) { [ "$KIND" = "rescheduled" ] && [ "$POST_NODE" != "${PRE_NODE:-}" ]; } || { FAILED="$FAILED attribution"; note "expected cross-node replace"; } ;;
   esac
-  ok "attribution: $KIND (${PRE_NODE:-?}→${POST_NODE:-?}, postgres restarts +${RESTART_DELTA})"
+  ok "attribution: $KIND (${PRE_NODE:-?}→${POST_NODE:-?}, postgres restarts ${RESTART_DELTA})"
 fi
 
 # 2. DB verdict ---------------------------------------------------------------
@@ -67,16 +71,30 @@ STALE=$(stale_vas 120)
 [ "$VA_OK" = "Y" ] && ok "VA consistent (1 VA on $POST_NODE, none stale)"
 
 # 4. NVMe sessions ------------------------------------------------------------
+# Fail if a LIVE volume's controller isn't `live` (our data path is broken).
+# Orphaned sessions (controller for a deleted PV) are a leak: recorded and
+# failed only when NEW ones appear during this drill (pre-existing cruft is
+# tolerated but always reported).
 step "4/7 nvme sessions"
 NVME_OK=Y
 for n in $(worker_nodes); do
-  OUT=$(nvme_subsys "$n")
-  echo "== $n ==" >> "$ART/nvme.txt"; echo "$OUT" >> "$ART/nvme.txt"
-  if echo "$OUT" | grep -q "connecting"; then
-    NVME_OK=N; FAILED="$FAILED nvme"; note "$n: controller stuck connecting"
-  fi
+  echo "== $n ==" >> "$ART/nvme.txt"; nvme_subsys "$n" >> "$ART/nvme.txt"
 done
-[ "$NVME_OK" = "Y" ] && ok "no controllers stuck connecting (state in $ART/nvme.txt)"
+# our pg volume must be present and live somewhere
+if [ -n "$PV" ] && [ "$T_READY" -ge 0 ]; then
+  PV_STATE=$(for n in $(worker_nodes); do flint_sessions "$n"; done | awk -v pv="$PV" '$1==pv {print $2}' | head -1)
+  if [ "$PV_STATE" = "live" ]; then ok "pg volume session live"
+  else NVME_OK=N; FAILED="$FAILED nvme"; note "pg volume session state='${PV_STATE:-absent}' (want live)"; fi
+fi
+ORPH=$(orphan_flint_sessions); echo "${ORPH:-none}" > "$ART/orphan-sessions.txt"
+N_ORPH=$(printf '%s' "$ORPH" | grep -c . || true)
+if [ "$N_ORPH" -gt "${PRE_ORPHANS:-0}" ]; then
+  NVME_OK=N; FAILED="$FAILED nvme-leak"
+  note "orphaned nvme sessions rose ${PRE_ORPHANS:-0}→$N_ORPH (leak):"; echo "$ORPH" | sed 's/^/    /'
+elif [ "$N_ORPH" -gt 0 ]; then
+  note "$N_ORPH pre-existing orphaned session(s) (no increase; see orphan-sessions.txt)"
+fi
+[ "$NVME_OK" = "Y" ] && ok "nvme clean (live volume healthy, no new leaks)"
 
 # 5. mounts -------------------------------------------------------------------
 step "5/7 orphaned mounts"

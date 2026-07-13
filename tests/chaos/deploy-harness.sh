@@ -24,7 +24,8 @@ export NS SC ACCESS_MODE
 up() {
   need_env
   step "deploying harness (ns=$NS sc=$SC mode=$MODE scale=${SCALE:-200})"
-  { emit_ns; emit_secret; emit_svc; emit_sts; emit_load; } | kubectl apply -f - >/dev/null
+  { emit_ns; echo ---; emit_secret; echo ---; emit_svc; echo ---; emit_sts; echo ---; emit_load; } \
+    | kubectl apply -f - >/dev/null || fail "apply failed"
   ok "core objects applied"
 
   kubectl wait --for=condition=Ready pod/$PG -n "$NS" --timeout=300s >/dev/null \

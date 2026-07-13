@@ -180,6 +180,35 @@ nvme_subsys() { # <node> — nvme list-subsys from the csi driver container
   kubectl exec -n "$DRIVER_NS" "$pod" -c flint-csi-driver -- nvme list-subsys 2>/dev/null
 }
 
+# Flint volume NVMe controllers on a node as "pv<TAB>state" lines. NQN form:
+# nqn.2024-11.com.flint:volume:<pv>. Only flint volume subsystems (skips the
+# node's EBS/instance-store pcie controllers).
+flint_sessions() { # <node>
+  nvme_subsys "$1" | awk '
+    /com\.flint:volume:/ { split($0, a, "com.flint:volume:"); pv=a[2]; next }
+    pv && /[[:space:]](live|connecting|resetting|deleting)$/ { print pv "\t" $NF; pv="" }'
+}
+
+# Set of live flint PV names (one per line).
+live_flint_pvs() {
+  kubectl get pv -o json | jq -r '.items[]
+    | select(.spec.csi.driver=="flint.csi.storage.io") | .metadata.name'
+}
+
+# Orphaned flint sessions across the fleet: a controller whose PV no longer
+# exists (leak — target lvol gone, initiator still reconnecting). Prints
+# "node pv state" lines. Empty = clean.
+orphan_flint_sessions() {
+  local live n pv st
+  live=$(live_flint_pvs)
+  for n in $(worker_nodes); do
+    while IFS=$'\t' read -r pv st; do
+      [ -n "$pv" ] || continue
+      echo "$live" | grep -qx "$pv" || echo "$n $pv $st"
+    done < <(flint_sessions "$n")
+  done
+}
+
 globalmounts() { # <node> — count of staged flint volumes on the node
   local pod
   pod=$(csi_node_pod "$1")

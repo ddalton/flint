@@ -16,9 +16,10 @@ pre() {
   need_env
   harness_healthy
   PRE_NODE=$(pg_node); PRE_UID=$(pg_uid); PRE_RESTARTS=$(pg_restarts)
-  export PRE_NODE PRE_UID PRE_RESTARTS
+  PRE_ORPHANS=$(orphan_flint_sessions | grep -c . || true)
+  export PRE_NODE PRE_UID PRE_RESTARTS PRE_ORPHANS
   T0=$(epoch)
-  step "T0=$T0 pg-0 on $PRE_NODE (uid ${PRE_UID:0:8}, restarts $PRE_RESTARTS)"
+  step "T0=$T0 pg-0 on $PRE_NODE (uid ${PRE_UID:0:8}, restarts $PRE_RESTARTS, orphans $PRE_ORPHANS)"
 }
 
 verify() { # [env overrides passed by caller]
