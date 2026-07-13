@@ -1,0 +1,80 @@
+[ 1840.961643] nvme nvme2: Failed reconnect attempt 60
+[ 1840.962294] nvme nvme2: Reconnecting in 5 seconds...
+[ 1846.001222] nvme nvme2: Connect for subsystem nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff is not allowed, hostnqn: nqn.2024-11.com.flint:node:runs-aws-3
+[ 1846.003303] nvme nvme2: failed to connect queue: 0 ret=388
+[ 1846.004031] nvme nvme2: Failed reconnect attempt 61
+[ 1846.004676] nvme nvme2: Reconnecting in 5 seconds...
+[ 1851.034210] nvme nvme2: Connect for subsystem nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff is not allowed, hostnqn: nqn.2024-11.com.flint:node:runs-aws-3
+[ 1851.036299] nvme nvme2: failed to connect queue: 0 ret=388
+[ 1851.037024] nvme nvme2: Failed reconnect attempt 62
+[ 1851.037674] nvme nvme2: Reconnecting in 5 seconds...
+[ 1856.077605] nvme nvme2: Connect for subsystem nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff is not allowed, hostnqn: nqn.2024-11.com.flint:node:runs-aws-3
+[ 1856.079730] nvme nvme2: failed to connect queue: 0 ret=388
+[ 1856.080455] nvme nvme2: Failed reconnect attempt 63
+[ 1856.081127] nvme nvme2: Reconnecting in 5 seconds...
+[ 1861.121242] nvme nvme2: Connect for subsystem nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff is not allowed, hostnqn: nqn.2024-11.com.flint:node:runs-aws-3
+[ 1861.123323] nvme nvme2: failed to connect queue: 0 ret=388
+[ 1861.124050] nvme nvme2: Failed reconnect attempt 64
+[ 1861.124708] nvme nvme2: Reconnecting in 5 seconds...
+[ 1866.153535] nvme nvme2: Connect for subsystem nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff is not allowed, hostnqn: nqn.2024-11.com.flint:node:runs-aws-3
+[ 1866.155623] nvme nvme2: failed to connect queue: 0 ret=388
+[ 1866.156352] nvme nvme2: Failed reconnect attempt 65
+[ 1866.156995] nvme nvme2: Reconnecting in 5 seconds...
+[ 1871.195828] nvme nvme2: Connect for subsystem nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff is not allowed, hostnqn: nqn.2024-11.com.flint:node:runs-aws-3
+[ 1871.197890] nvme nvme2: failed to connect queue: 0 ret=388
+[ 1871.198634] nvme nvme2: Failed reconnect attempt 66
+[ 1871.199291] nvme nvme2: Reconnecting in 5 seconds...
+[ 1876.238437] nvme nvme2: Connect for subsystem nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff is not allowed, hostnqn: nqn.2024-11.com.flint:node:runs-aws-3
+[ 1876.240510] nvme nvme2: failed to connect queue: 0 ret=388
+[ 1876.241767] nvme nvme2: Failed reconnect attempt 67
+[ 1876.242304] nvme nvme2: Reconnecting in 5 seconds...
+[ 1881.272795] nvme nvme2: Connect for subsystem nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff is not allowed, hostnqn: nqn.2024-11.com.flint:node:runs-aws-3
+[ 1881.274897] nvme nvme2: failed to connect queue: 0 ret=388
+[ 1881.275630] nvme nvme2: Failed reconnect attempt 68
+[ 1881.276289] nvme nvme2: Reconnecting in 5 seconds...
+[ 1886.315371] nvme nvme2: Connect Invalid Data Parameter, subsysnqn "nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff"
+[ 1886.316980] nvme nvme2: failed to connect queue: 0 ret=386
+[ 1886.317702] nvme nvme2: Failed reconnect attempt 69
+[ 1886.318367] nvme nvme2: Reconnecting in 5 seconds...
+[ 1891.357982] nvme nvme2: Connect Invalid Data Parameter, subsysnqn "nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff"
+[ 1891.359599] nvme nvme2: failed to connect queue: 0 ret=386
+[ 1891.360333] nvme nvme2: Failed reconnect attempt 70
+[ 1891.360996] nvme nvme2: Reconnecting in 5 seconds...
+[ 1894.593179] block nvme1n1: No UUID available providing old NGUID
+[ 1894.595219] nvme nvme2: Removing ctrl: NQN "nqn.2024-11.com.flint:volume:pvc-1e70dd6c-ab03-4ed4-95e2-37bd73c02bff"
+[ 1894.596656] nvme nvme2: Property Set error: 880, offset 0x14
+[ 1895.027638] block nvme1n1: No UUID available providing old NGUID
+[ 1966.364824] block nvme1n1: No UUID available providing old NGUID
+[ 1969.055004] block nvme1n1: No UUID available providing old NGUID
+[ 1972.755067] block nvme1n1: No UUID available providing old NGUID
+[ 2031.793740] block nvme1n1: No UUID available providing old NGUID
+[ 2033.573131] block nvme1n1: No UUID available providing old NGUID
+[ 2035.561714] block nvme1n1: No UUID available providing old NGUID
+[ 2056.496633] block nvme1n1: No UUID available providing old NGUID
+[ 2058.764615] EXT4-fs (nvme3n1): unmounting filesystem.
+[ 2058.773127] block nvme1n1: No UUID available providing old NGUID
+[ 2058.774700] nvme nvme3: Removing ctrl: NQN "nqn.2024-11.com.flint:volume:pvc-fc36a8a3-8c8d-4b72-902c-287f0f27a432"
+[ 2058.878251] block nvme1n1: No UUID available providing old NGUID
+[ 2059.010033] block nvme1n1: No UUID available providing old NGUID
+[ 2059.016137] nvme nvme2: creating 4 I/O queues.
+[ 2059.055661] nvme nvme2: mapped 4/0/0 default/read/poll queues.
+[ 2059.056699] nvme nvme2: new ctrl: NQN "nqn.2024-11.com.flint:volume:pvc-fc36a8a3-8c8d-4b72-902c-287f0f27a432", addr 127.0.0.1:4420
+[ 2059.883387] EXT4-fs (nvme2n1): mounted filesystem with ordered data mode. Quota mode: none.
+[ 2060.234475] eth0: renamed from tmp462a5
+[ 2060.284458] IPv6: ADDRCONF(NETDEV_CHANGE): eth0: link becomes ready
+[ 2060.285257] IPv6: ADDRCONF(NETDEV_CHANGE): lxc004e2da5425c: link becomes ready
+[ 2102.934504] block nvme1n1: No UUID available providing old NGUID
+[ 2104.677458] block nvme1n1: No UUID available providing old NGUID
+[ 2106.669908] block nvme1n1: No UUID available providing old NGUID
+[ 2217.935592] block nvme1n1: No UUID available providing old NGUID
+[ 2218.532705] eth0: renamed from tmp3f67c
+[ 2218.576669] IPv6: ADDRCONF(NETDEV_CHANGE): eth0: link becomes ready
+[ 2218.577468] IPv6: ADDRCONF(NETDEV_CHANGE): lxc1ae735a6f60c: link becomes ready
+[ 2828.890117] block nvme1n1: No UUID available providing old NGUID
+[ 2830.920117] block nvme1n1: No UUID available providing old NGUID
+[ 3082.358394] eth0: renamed from tmp027c1
+[ 3082.398380] IPv6: ADDRCONF(NETDEV_CHANGE): eth0: link becomes ready
+[ 3082.399169] IPv6: ADDRCONF(NETDEV_CHANGE): lxc95ec45dd8f33: link becomes ready
+[ 3241.673139] eth0: renamed from tmp5783d
+[ 3241.720666] IPv6: ADDRCONF(NETDEV_CHANGE): eth0: link becomes ready
+[ 3241.721462] IPv6: ADDRCONF(NETDEV_CHANGE): lxcec41cc78e726: link becomes ready

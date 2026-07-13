@@ -1,0 +1,107 @@
+total 1507348
+drwx------.  3 postgres postgres    12288 Jul 13 05:33 .
+drwx------. 19 postgres root         4096 Jul 13 05:53 ..
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 00000001000000030000006A
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 00000001000000030000006E
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 00000001000000030000006F
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000070
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000071
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000072
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000073
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000074
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000075
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000076
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000077
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000078
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000079
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 00000001000000030000007A
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 00000001000000030000007B
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000007C
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000007D
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000007E
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000007F
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000080
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000081
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000082
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000083
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000084
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000085
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000086
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000087
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000088
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 000000010000000300000089
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000008A
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000008B
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:31 00000001000000030000008C
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000008D
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000008E
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000008F
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000090
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000091
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000092
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000093
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000094
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000095
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000096
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000097
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000098
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 000000010000000300000099
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000009A
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000009B
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000009C
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000009D
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000009E
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 00000001000000030000009F
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A0
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A1
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A2
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A3
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A4
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A5
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A6
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A7
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A8
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000A9
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000AA
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000AB
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000AC
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000AD
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000AE
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000AF
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000B0
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000B1
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000B2
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000B3
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000B4
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000B5
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000B6
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000B7
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000B8
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000B9
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000BA
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:32 0000000100000003000000BB
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000BC
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000BD
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000BE
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000BF
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000C0
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000C1
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000C2
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000C3
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000C4
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000C5
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000C6
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000C7
+-rw-------.  1 postgres postgres 16777216 Jul 13 05:33 0000000100000003000000C8
+drwx------.  2 postgres postgres     4096 Jul 13 05:24 archive_status
+=== waldump tail of segment 6E ===
+first record is after 3/6E9FE000, at 3/6E9FEC78, skipping over 3192 bytes
+rmgr: Heap2       len (rec/tot):     59/    59, tx:          0, lsn: 3/6E9FEC78, prev 3/6E9FCC90, desc: PRUNE snapshotConflictHorizon: 881836, nredirected: 1, ndead: 0, nunused: 0, redirected: [1->65], dead: [], unused: [], blkref #0: rel 1663/16384/16412 blk 56676
+rmgr: Heap        len (rec/tot):     74/    74, tx:     919480, lsn: 3/6E9FECB8, prev 3/6E9FEC78, desc: HOT_UPDATE old_xmax: 919480, old_off: 47, old_infobits: [], flags: 0x60, new_xmax: 0, new_off: 66, blkref #0: rel 1663/16384/16412 blk 56676
+rmgr: Heap        len (rec/tot):     72/    72, tx:     919479, lsn: 3/6E9FED08, prev 3/6E9FECB8, desc: HOT_UPDATE old_xmax: 919479, old_off: 101, old_infobits: [], flags: 0x20, new_xmax: 0, new_off: 130, blkref #0: rel 1663/16384/16415 blk 16
+rmgr: Transaction len (rec/tot):     34/    34, tx:     919480, lsn: 3/6E9FED50, prev 3/6E9FED08, desc: ABORT 2026-07-13 05:33:34.337940 UTC
+rmgr: Transaction len (rec/tot):     34/    34, tx:     919479, lsn: 3/6E9FED78, prev 3/6E9FED50, desc: ABORT 2026-07-13 05:33:34.338813 UTC
+rmgr: Standby     len (rec/tot):     50/    50, tx:          0, lsn: 3/6E9FEDA0, prev 3/6E9FED78, desc: RUNNING_XACTS nextXid 919481 latestCompletedXid 919480 oldestRunningXid 919481
+rmgr: XLOG        len (rec/tot):    114/   114, tx:          0, lsn: 3/6E9FEDD8, prev 3/6E9FEDA0, desc: CHECKPOINT_ONLINE redo 3/655168B8; tli 1; prev tli 1; fpw true; xid 0:903662; oid 40961; multi 1; offset 0; oldest xid 723 in DB 1; oldest multi 1 in DB 1; oldest/newest commit timestamp xid: 0/0; oldest running xid 903660; online
+rmgr: XLOG        len (rec/tot):    114/   114, tx:          0, lsn: 3/6E9FEE50, prev 3/6E9FEDD8, desc: CHECKPOINT_SHUTDOWN redo 3/6E9FEE50; tli 1; prev tli 1; fpw true; xid 0:919481; oid 32772; multi 1; offset 0; oldest xid 723 in DB 1; oldest multi 1 in DB 1; oldest/newest commit timestamp xid: 0/0; oldest running xid 0; shutdown
+pg_waldump: error: error in WAL record at 3/6E9FEE50: invalid record length at 3/6E9FEEC8: expected at least 24, got 0

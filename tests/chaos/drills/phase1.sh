@@ -11,6 +11,9 @@ cd "$(dirname "$0")/.."
 . ./lib.sh
 
 DRILL=${1:?drill id, e.g. 1.2}
+# PHASE_LABEL lets the Phase-2 regression subset reuse these drills against a
+# harness deployed on flint-r2 (PHASE_LABEL=2 ./drills/phase1.sh 1.4).
+PHASE_LABEL=${PHASE_LABEL:-1}
 
 pre() {
   need_env
@@ -23,7 +26,7 @@ pre() {
 }
 
 verify() { # [env overrides passed by caller]
-  ./verify-drill.sh 1 "$DRILL" "$T0"
+  ./verify-drill.sh "$PHASE_LABEL" "$DRILL" "$T0"
 }
 
 wait_acks_fresh() { # [budget_s] — until the ledger is acking again
@@ -265,7 +268,7 @@ case "$DRILL" in
   aws ec2 wait instance-running --region "$AWS_REGION" --instance-ids "$IID"
   wait_node_ready "$PRE_NODE" 600 || note "node not Ready after restart — check kubelet/agent"
   note "instance-store wiped on stop/start: watch node agent re-init + any ghost-lvol fallout"
-  csv_append "$(rfc3339 "$T0"),1,1.13,-,-,-,$PRE_NODE,-,-,-,-,-,-,PASS,\"clean-failure drill: teardown clean, node restored\""
+  csv_append "$(rfc3339 "$T0"),$PHASE_LABEL,1.13,-,-,-,$PRE_NODE,-,-,-,-,-,-,PASS,\"clean-failure drill: teardown clean, node restored\""
   SC=flint MODE=RWO ./deploy-harness.sh up
   ;;
 
@@ -286,7 +289,7 @@ case "$DRILL" in
   ok "clean failure: teardown succeeded after node termination"
   untaint_oos "$PRE_NODE"; TAINTED=""
   kubectl delete node "$PRE_NODE" >/dev/null 2>&1
-  csv_append "$(rfc3339 "$T0"),1,1.14,-,-,-,$PRE_NODE,-,-,-,-,-,-,PASS,\"node terminate: teardown clean; scale replacement via trove\""
+  csv_append "$(rfc3339 "$T0"),$PHASE_LABEL,1.14,-,-,-,$PRE_NODE,-,-,-,-,-,-,PASS,\"node terminate: teardown clean; scale replacement via trove\""
   note "NEXT: scale replacement worker via trove, then deploy-harness.sh up"
   ;;
 
