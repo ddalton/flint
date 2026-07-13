@@ -6,7 +6,7 @@
 #   SC=flint-r2 MODE=RWO ./deploy-harness.sh reset  # down + up
 #   SC=flint MODE=RWX WITNESS=1 ./deploy-harness.sh up
 #
-# MODE: RWO | RWX (maps to PVC accessModes). SCALE: pgbench scale (200).
+# MODE: RWO | RWOP | RWX (maps to PVC accessModes). SCALE: pgbench scale (200).
 set -uo pipefail
 cd "$(dirname "$0")"
 . ./lib.sh
@@ -15,9 +15,10 @@ cd "$(dirname "$0")"
 SC=${SC:-flint}
 MODE=${MODE:-RWO}
 case "$MODE" in
-  RWO) ACCESS_MODE=ReadWriteOnce ;;
-  RWX) ACCESS_MODE=ReadWriteMany ;;
-  *) fail "MODE must be RWO or RWX" ;;
+  RWO)  ACCESS_MODE=ReadWriteOnce ;;
+  RWOP) ACCESS_MODE=ReadWriteOncePod ;;   # pod-fenced: kubelet refuses 2nd pod (drill 1.3b)
+  RWX)  ACCESS_MODE=ReadWriteMany ;;
+  *) fail "MODE must be RWO, RWOP or RWX" ;;
 esac
 export NS SC ACCESS_MODE
 

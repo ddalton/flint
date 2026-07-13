@@ -194,6 +194,62 @@ re-pull hit a Docker Hub 502 mid-recovery). Trove backlog: bigger root
 volume (or dedicated imagefs on the instance store). Campaign mitigation:
 F2's priority fix + accepting workload-pod evictions as legitimate chaos.
 
+### F5 (**P0 — data loss**) — hard spdk-tgt death loses fsync-acked data; a young lvol vanishes entirely
+
+**Experiment D (drill 1.9p), 2026-07-13 on runt — 100% reproduction, first try:**
+
+1. Fresh volume (thin lvol, flint default `thinProvision=true`), pgbench +
+   ledger load for ~7 min (`lvols: 1, free: 884636MB` in the driver's LVS
+   view). All postgres commits fsync-acked through NVMe FLUSH.
+2. `pkill -9 -f spdk_tgt` on the lvol's node (the exact kill vector the
+   v1.15.0 graceful-recovery feature targets; sidecar restarted cleanly,
+   consumer pod untouched).
+3. spdk-tgt gen-3 startup: `blobstore bs_recover: Performing recovery on
+   blobstore` (unclean-shutdown path) → `Lvol store found … examination done`
+   → **`lvols: 0, free: 890101MB`** — the lvol is GONE from the recovered
+   metadata; its ~5.5 GB returned to free space. Every fsync-acked byte lost.
+4. Aftermath (**F6**): reconcile-on-loss (#1) re-creates the subsystem but
+   `nvmf_subsystem_add_ns` fails forever (`bdev … cannot be opened,
+   error=-19` — the bdev no longer exists) retrying every 10 s; the
+   initiator reconnect-loops against a listener that exports nothing; the
+   consumer's disk I/O hangs indefinitely (35+ min observed) while the pod
+   stays **Ready** (its probe, `pg_isready`, touches no disk).
+
+**Why v1.15.0's grace3/grace4 validation missed it:** those drills used aged
+volumes (metadata long since synced by a prior clean unload) and verified
+*liveness* — held-open fds, I/O resumption — through the still-warm page
+cache. They never verified *durability* of recent writes, and never killed
+the target while the blobstore held unsynced metadata.
+
+**Mechanism (two candidates, isolation = follow-up):** flint never issues any
+blobstore/blob md sync (`grep -r sync_md` over the driver: zero hits;
+`thin_provision` defaults true at `main.rs:1135`). SPDK persists thin-lvol
+cluster allocations — and evidently, on this v26.05 build, even blob
+creation — only at clean unload / explicit `spdk_blob_sync_md`. Alternative
+or compounding: `bdev_uring` buffered-vs-O_DIRECT semantics (gen-N buffered
+writes in host page cache never reaching media, gen-N+1 reading the device
+directly). Either way the contract is broken: **NVMe FLUSH is acked for data
+whose metadata (or content) does not survive target process death.**
+
+This retro-explains **incident 2** (the 14:10 DS roll under load → mixed
+old/new on-disk state: a clean SIGTERM unload racing its 30 s grace under
+active connections, then partial metadata persistence), and plausibly the
+original runs incident (eviction storm = repeated hard kills).
+
+**Fix directions to evaluate:**
+- Sync blobstore md after `bdev_lvol_create` and periodically / after FLUSH
+  (correctness first, then measure).
+- Verify `bdev_uring` flush semantics (does an NVMe FLUSH reach `fdatasync`/
+  media?); consider O_DIRECT or bdev_aio comparison.
+- Mitigation candidate to test: `thinProvision: "false"` in the SC (thick
+  lvols allocate at create) — **Experiment T** below.
+- F6 independently: reconcile-on-loss must escalate when the bdev is gone
+  (surface VolumeCondition, mark the volume failed) instead of silent
+  infinite retry under a Ready pod.
+
+Evidence: `tests/chaos/artifacts/expD-1783953943/` (spdk-tgt gen-2/gen-3
+logs incl. the `bs_recover` line, csi-driver NVME-RECOVERY loop, LVS views).
+
 ### Other findings
 
 - **P0-a / P0-b** (trove provisioning) — see Phase 0. Not flint bugs; recorded
