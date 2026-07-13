@@ -1,0 +1,206 @@
+# Shared helpers for the flint CSI attach/detach chaos campaign.
+# Each drill sources this. Patterns ported from tests/k8s/pnfs-drills/lib.sh
+# (step/fail, wait_pod_replaced, SSM restore) and
+# scripts/cleanup-stuck-volumeattachments.sh (VA predicates).
+#
+# Env:
+#   KUBECONFIG   required
+#   NS           workload namespace          (flint-chaos)
+#   DRIVER_NS    flint chart namespace       (flint-system)
+#   AWS_REGION   region for SSM/EC2 drills   (us-west-1)
+#   AWS_PROFILE  should be rolesanywhere for the ☠ drills
+
+NS=${NS:-flint-chaos}
+DRIVER_NS=${DRIVER_NS:-flint-system}
+AWS_REGION=${AWS_REGION:-us-west-1}
+CHAOS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+RESULTS=${RESULTS:-$CHAOS_DIR/results.csv}
+ARTIFACTS=${ARTIFACTS:-$CHAOS_DIR/artifacts}
+
+step() { printf '\n▶ %s\n' "$*"; }
+ok()   { printf '  ✓ %s\n' "$*"; }
+note() { printf '  · %s\n' "$*"; }
+fail() { printf '\n✗ %s\n' "$*" >&2; exit 1; }
+
+epoch()   { date +%s; }
+rfc3339() { date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ; }  # BSD date (macOS)
+
+need_env() {
+  [ -n "${KUBECONFIG:-}" ] || fail "KUBECONFIG not set"
+  kubectl get nodes >/dev/null 2>&1 || fail "cluster unreachable"
+}
+
+# ---- workload accessors ---------------------------------------------------
+
+PG=pg-0
+pg_node()     { kubectl get pod -n "$NS" $PG -o jsonpath='{.spec.nodeName}' 2>/dev/null; }
+pg_uid()      { kubectl get pod -n "$NS" $PG -o jsonpath='{.metadata.uid}' 2>/dev/null; }
+pg_restarts() { kubectl get pod -n "$NS" $PG -o jsonpath='{.status.containerStatuses[?(@.name=="postgres")].restartCount}' 2>/dev/null; }
+pg_pv()       { kubectl get pvc -n "$NS" data-pg-0 -o jsonpath='{.spec.volumeName}' 2>/dev/null; }
+load_pod()    { kubectl get pod -n "$NS" -l app=pg-load --field-selector status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null; }
+
+controller_pod() { kubectl get pod -n "$DRIVER_NS" -l app=flint-csi-controller --field-selector status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null; }
+csi_node_pod() { # <node>
+  kubectl get pod -n "$DRIVER_NS" -l app=flint-csi-node \
+    --field-selector "spec.nodeName=$1" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+worker_nodes() {
+  kubectl get nodes -l '!node-role.kubernetes.io/control-plane' \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+}
+
+harness_healthy() {
+  kubectl wait --for=condition=Ready pod/$PG -n "$NS" --timeout=30s >/dev/null 2>&1 \
+    || fail "pg-0 not Ready — deploy/reset the harness first"
+  [ -n "$(load_pod)" ] || fail "pg-load not Running"
+  local last now
+  last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+  now=$(epoch)
+  [ -n "$last" ] && [ $(( now - last )) -lt 30 ] || fail "ledger not acking (last ack ${last:-none}, now $now) — is the load running?"
+  ok "harness healthy (pg-0 Ready, ledger acking)"
+}
+
+# Ensure load has been running against a healthy DB for >=N seconds of acks.
+warm_load() { # [secs]
+  local want=${1:-60} t0
+  t0=$(epoch)
+  note "warming load ${want}s"
+  sleep "$want"
+  harness_healthy
+}
+
+# ---- kill-vector helpers --------------------------------------------------
+
+# kubelet control via a privileged nsenter pod (kubelet must be alive to
+# START it, so this only works for stop; restore goes via SSM).
+kubelet_stop() { # <node>
+  local n=$1
+  kubectl run "kubelet-kill-$$" --image=busybox:1.36 --restart=Never \
+    --overrides="{\"spec\":{\"nodeName\":\"${n}\",\"hostPID\":true,\"containers\":[{\"name\":\"k\",\"image\":\"busybox:1.36\",\"command\":[\"nsenter\",\"-t\",\"1\",\"-m\",\"-u\",\"-i\",\"-n\",\"--\",\"sh\",\"-c\",\"systemctl stop kubelet && echo STOPPED\"],\"securityContext\":{\"privileged\":true}}]}}" >/dev/null
+  sleep 8
+  kubectl delete pod "kubelet-kill-$$" --wait=false >/dev/null 2>&1
+}
+
+instance_id_for_node() { # <node> — providerID, falling back to InternalIP match
+  local n=$1 id ip
+  id=$(kubectl get node "$n" -o jsonpath='{.spec.providerID}' 2>/dev/null | sed 's|.*/||')
+  if [ -z "$id" ] && command -v aws >/dev/null; then
+    ip=$(kubectl get node "$n" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+    id=$(aws ec2 describe-instances --region "$AWS_REGION" \
+      --filters "Name=private-ip-address,Values=${ip}" "Name=instance-state-name,Values=running" \
+      --query "Reservations[].Instances[].InstanceId" --output text 2>/dev/null)
+  fi
+  echo "$id"
+}
+
+ssm_run() { # <instance-id> <command...>
+  local iid=$1; shift
+  aws ssm send-command --region "$AWS_REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript --parameters commands="$*" \
+    --query 'Command.CommandId' --output text
+}
+
+kubelet_start_ssm() { # <instance-id>
+  ssm_run "$1" "systemctl start kubelet" >/dev/null \
+    && note "kubelet start sent via SSM to $1"
+}
+
+taint_oos()   { kubectl taint nodes "$1" node.kubernetes.io/out-of-service=nodeshutdown:NoExecute >/dev/null; }
+untaint_oos() { kubectl taint nodes "$1" node.kubernetes.io/out-of-service- >/dev/null 2>&1; }
+
+wait_node_notready() { # <node> [budget_s]
+  local n=$1 budget=${2:-180} st i
+  for i in $(seq 1 $(( budget / 5 ))); do
+    st=$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+    [ "$st" != "True" ] && return 0
+    sleep 5
+  done
+  return 1
+}
+
+wait_node_ready() { # <node> [budget_s]
+  local n=$1 budget=${2:-300} st i
+  for i in $(seq 1 $(( budget / 5 ))); do
+    st=$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+    [ "$st" = "True" ] && return 0
+    sleep 5
+  done
+  return 1
+}
+
+# From pnfs-drills/lib.sh: `kubectl wait` right after a delete can match the
+# OLD Terminating pod — wait for the UID to change first, then readiness.
+wait_pod_replaced() { # <ns> <pod> <old_uid> <budget_s>
+  local ns=$1 pod=$2 old_uid=$3 budget=$4 i uid ready
+  for i in $(seq 1 $(( budget / 5 ))); do
+    uid=$(kubectl get pod -n "$ns" "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+    ready=$(kubectl get pod -n "$ns" "$pod" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)
+    [ -n "$uid" ] && [ "$uid" != "$old_uid" ] && [ "$ready" = "true" ] && return 0
+    sleep 5
+  done
+  return 1
+}
+
+# ---- observation helpers --------------------------------------------------
+
+# Max gap (s) between consecutive ledger acks since t0. The honest stall
+# metric: resolution ≈ insert cadence (~0.2s) + psql connect time.
+max_stall_since() { # <t0>
+  local t0=$1
+  kubectl exec -n "$NS" "$(load_pod)" -- sh -c "awk -v t0=$t0 '\$2>=t0' /acked/acked.log" 2>/dev/null \
+    | awk 'NR>1 { gap=$2-prev; if (gap>max) max=gap } { prev=$2 } END { print max+0 }'
+}
+
+va_for_pv() { # <pv> — name of the VolumeAttachment for a PV ("" if none)
+  kubectl get volumeattachments -o json \
+    | jq -r --arg pv "$1" '.items[] | select(.spec.source.persistentVolumeName==$pv) | .metadata.name'
+}
+
+va_node_for_pv() { # <pv>
+  kubectl get volumeattachments -o json \
+    | jq -r --arg pv "$1" '.items[] | select(.spec.source.persistentVolumeName==$pv) | .spec.nodeName'
+}
+
+# Stale VAs: carrying a deletionTimestamp older than <age>s, or attached to a
+# PV that no longer exists (predicates from cleanup-stuck-volumeattachments.sh).
+stale_vas() { # [age_s]
+  local age=${1:-120} now
+  now=$(epoch)
+  kubectl get volumeattachments -o json | jq -r --argjson now "$now" --argjson age "$age" '
+    .items[]
+    | select(.metadata.deletionTimestamp != null)
+    | select((($now - (.metadata.deletionTimestamp | fromdateiso8601))) > $age)
+    | .metadata.name'
+}
+
+nvme_subsys() { # <node> — nvme list-subsys from the csi driver container
+  local pod
+  pod=$(csi_node_pod "$1")
+  [ -n "$pod" ] || { echo "NO-CSI-NODE-POD"; return; }
+  kubectl exec -n "$DRIVER_NS" "$pod" -c flint-csi-driver -- nvme list-subsys 2>/dev/null
+}
+
+globalmounts() { # <node> — count of staged flint volumes on the node
+  local pod
+  pod=$(csi_node_pod "$1")
+  [ -n "$pod" ] || { echo "-1"; return; }
+  kubectl exec -n "$DRIVER_NS" "$pod" -c flint-csi-driver -- \
+    sh -c 'ls -d /var/lib/kubelet/plugins/kubernetes.io/csi/*/*/globalmount 2>/dev/null | wc -l' | tr -d ' '
+}
+
+# Pod-mount orphans: kubelet pod-dir mounts whose pod UID is no longer live.
+orphan_pod_mounts() { # <node>
+  local pod live
+  pod=$(csi_node_pod "$1")
+  [ -n "$pod" ] || return 0
+  live=$(kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}')
+  kubectl exec -n "$DRIVER_NS" "$pod" -c flint-csi-driver -- \
+    sh -c "grep -o '/var/lib/kubelet/pods/[0-9a-f-]*' /proc/mounts | sort -u" 2>/dev/null \
+    | sed 's|.*/pods/||' \
+    | while read -r uid; do echo "$live" | grep -q "^$uid$" || echo "$uid"; done
+}
+
+csv_append() { # phase,drill,... (writes header on first use)
+  [ -f "$RESULTS" ] || echo "date,phase,drill,t_ready_s,stall_s,restarts_delta,pre_node,post_node,va_ok,nvme_ok,mounts_ok,db_verdict,logscan,verdict,notes" > "$RESULTS"
+  echo "$*" >> "$RESULTS"
+}
