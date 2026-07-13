@@ -1,0 +1,20 @@
+== nvme list-subsys ==
+nvme-subsys2 - NQN=nqn.2024-11.com.flint:volume:pvc-401d87df-e609-4ae3-b5e0-d183eb676f65
+               hostnqn=nqn.2024-11.com.flint:node:runt-aws-1
+               iopolicy=(null)
+\
+ +- nvme2 tcp traddr=127.0.0.1,trsvcid=4420,src_addr=127.0.0.1 live
+
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS45317D4662F9254B0
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2a70bc-9808-1caf-7cec-1992b89aef86
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol0b6dced94ab22c7cf
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2a70bc-9808-1caf-7cec-1992b89aef86
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== globalmounts ==
+1
