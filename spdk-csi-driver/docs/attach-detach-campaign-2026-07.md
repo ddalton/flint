@@ -236,13 +236,76 @@ old/new on-disk state: a clean SIGTERM unload racing its 30 s grace under
 active connections, then partial metadata persistence), and plausibly the
 original runs incident (eviction storm = repeated hard kills).
 
-**Fix directions to evaluate:**
-- Sync blobstore md after `bdev_lvol_create` and periodically / after FLUSH
-  (correctness first, then measure).
-- Verify `bdev_uring` flush semantics (does an NVMe FLUSH reach `fdatasync`/
-  media?); consider O_DIRECT or bdev_aio comparison.
-- Mitigation candidate to test: `thinProvision: "false"` in the SC (thick
-  lvols allocate at create) — **Experiment T** below.
+**Experiment T (same kill, thick lvol — `thinProvision: "false"`): NO
+mitigation.** Pre-kill `lvols: 1, free: 869621MB` (the full 20 GiB truly
+allocated at create); post-kill `lvols: 0, free: 890101MB` — the thick lvol
+vanished identically, I/O never resumed (300 s+). So blob *existence* is
+only persisted at clean unload, independent of provisioning mode.
+
+**Refined mechanism:** blobstore metadata (blob existence, cluster maps) is
+written to media only on clean unload (SIGTERM path) or explicit
+`spdk_blob_sync_md` — which flint never issues. Data-cluster writes for
+*previously-synced* blobs go to media directly and survive process death —
+which is exactly why the aged volumes in grace3/grace4 survived hard kills
+(their md was synced by earlier clean restarts) while any volume created
+since the last clean shutdown is silently **un-created** by the next hard
+death, and thin allocations/resizes on older volumes roll back.
+
+**ROOT CAUSE PINNED (Experiment R, 2026-07-13): flint's own
+`blob-recovery-optimized.patch` drops valid on-media blobs during recovery.**
+
+Discriminating experiment on a fresh volume (`pvc-9b07e1d5…`, lvol-local on
+runt-aws-1):
+
+1. Pre-kill raw scan of `/dev/nvme1n1`: the lvol's creation md page IS on
+   media (name xattr at device offset 356414 → device page 87). Creation
+   `blob_persist` works; O_DIRECT confirmed on the spdk_tgt fds
+   (`flags=01140002`).
+2. `pkill -9 spdk_tgt` → sidecar gen+1 → `bs_recover` runs the **patched**
+   path (`Recovery: Using batched reads (64 pages/batch)` NOTICE — patch
+   confirmed active in the deployed `spdk-tgt:1.5.0`) → `lvols: 0`.
+3. Post-kill scan: **the md page is still on media, byte-identical offset**,
+   and decodes perfectly by upstream validity rules — `id=0x1_00000002`
+   matches its md-region position (page_index 2 with `md_start=85` per the
+   superblock), `sequence_num=0`, `next=0xffffffff` (single page), CRC set.
+   Upstream `bs_load_replay_md` would recover this blob; the batched
+   replacement skipped it and then durably rewrote the store as empty
+   (used-masks flushed by `bs_load_write_used_md`).
+
+Additional defects visible in the patch by inspection, independent of the
+exact skip bug: it never follows blob md page chains (`in_page_chain` can
+never become true — multi-page blobs lose all pages after the first); it
+never calls `bs_load_replay_extent_pages` (extent-table cluster allocations
+are never replayed — silent data truncation even where the blob survives);
+and at end-of-scan `bs_load_replay_md_chain_cpl` calls `spdk_free(ctx->page)`
+on a pointer into the already-freed batch buffer (invalid free / UAF).
+
+**Companion bug — `lvol-flush.patch`:** makes lvol advertise FLUSH and
+completes every flush as an immediate no-op success ("blobstore handles
+persistence" — it does not; "the underlying base bdev handles actual flush" —
+it is never forwarded, and `bdev_uring` supports only READ/WRITE). Every
+fsync through the stack is acked without flushing anything. In practice
+O_DIRECT completion has been covering data writes, but the FLUSH contract is
+void — device volatile-cache loss on power failure is unhandled, and nothing
+ever persists blobstore md at runtime.
+
+**Fix plan:**
+- **Revert `blob-recovery-optimized.patch`** — take upstream recovery's
+  correctness over scan speed (the batched scan of this 893,592-page md
+  region took ~4.5 s; upstream's serial scan is slower but this is a
+  crash-recovery path). If the optimization is wanted later, it must be
+  rebuilt with chain-following, extent-page replay, per-page parity with
+  upstream, and an A/B recovery test against a store with multi-page +
+  extent-table + freshly-created blobs.
+- Rework `lvol-flush.patch` to forward FLUSH to the base bdev (bdev_uring
+  needs real flush support) and/or sync blob md on flush; at minimum stop
+  acking flushes as no-ops.
+- Rebuild spdk-tgt, and gate on Experiments D/T/R as regression drills
+  (create → write → `kill -9` → recover → ledger + amcheck + cold-reader
+  verify).
+- Until fixed: treat any hard spdk-tgt death as data-loss-capable; the only
+  safe restart is clean SIGTERM with generous grace (the 30 s DS default
+  under load is itself suspect — incident 2).
 - F6 independently: reconcile-on-loss must escalate when the bdev is gone
   (surface VolumeCondition, mark the volume failed) instead of silent
   infinite retry under a Ready pod.
