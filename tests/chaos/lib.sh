@@ -209,6 +209,68 @@ orphan_flint_sessions() {
   done
 }
 
+# ---- ublk-backend analogs (BLOCK_DEVICE_BACKEND=ublk clusters) --------------
+# In ublk mode the kernel-facing device is /dev/ublkb<id> served by spdk-tgt;
+# there are NO kernel nvme sessions (the remote leg lives inside SPDK as a
+# bdev_nvme initiator controller). Liveness = the PV's ublk disk is served on
+# the pod's node; leak = a served disk / initiator controller whose PV is gone.
+backend_mode() { # ublk | nvmeof — from the csi-node DS env, cached per run
+  if [ -z "${_BACKEND_MODE:-}" ]; then
+    _BACKEND_MODE=$(kubectl get ds -n "$DRIVER_NS" -o json 2>/dev/null | jq -r '
+      [.items[].spec.template.spec.containers[]? | select(.name=="flint-csi-driver")
+       | .env[]? | select(.name=="BLOCK_DEVICE_BACKEND") | .value][0] // "nvmeof"')
+    _BACKEND_MODE=${_BACKEND_MODE:-nvmeof}
+  fi
+  echo "$_BACKEND_MODE"
+}
+
+agent_spdk_rpc() { # <node> <json-body> — SPDK RPC via the node agent HTTP proxy
+  local pod; pod=$(csi_node_pod "$1")
+  [ -n "$pod" ] || return 1
+  kubectl exec -n "$DRIVER_NS" "$pod" -c flint-csi-driver -- \
+    curl -s -m 10 -X POST http://127.0.0.1:9081/api/spdk/rpc \
+    -H 'Content-Type: application/json' -d "$2" 2>/dev/null
+}
+
+flint_ublk_disks() { # <node> — "id<TAB>bdev" lines of ublk disks SPDK serves
+  agent_spdk_rpc "$1" '{"method":"ublk_get_disks"}' \
+    | jq -r '.result[]? | "\(.id // .ublk_id)\t\(.bdev_name)"' 2>/dev/null
+}
+
+pv_ublk_id() { # <pv> — stage-time id annotation (authoritative)
+  kubectl get pv "$1" -o jsonpath='{.metadata.annotations.flint\.io/ublk-id}' 2>/dev/null
+}
+
+# SPDK-initiator controllers for flint volumes on a node, as bare pv names
+# (controller name = nvme_<nqn mangled>, nqn tail = ...com_flint_volume_<pv>).
+flint_spdk_controllers() { # <node>
+  agent_spdk_rpc "$1" '{"method":"bdev_nvme_get_controllers"}' \
+    | jq -r '.result[]? | .name' 2>/dev/null | sed -n 's/.*com_flint_volume_//p'
+}
+
+# Orphans in ublk mode: a served ublk disk whose id maps to no live PV, or an
+# SPDK initiator controller whose PV is gone. "node kind detail" lines.
+orphan_ublk_paths() {
+  local live live_ids n id bdev pv
+  live=$(live_flint_pvs)
+  live_ids=$(for pv in $live; do pv_ublk_id "$pv"; done | grep . || true)
+  for n in $(worker_nodes); do
+    while IFS=$'\t' read -r id bdev; do
+      [ -n "$id" ] || continue
+      echo "$live_ids" | grep -qx "$id" || echo "$n ublk $id($bdev)"
+    done < <(flint_ublk_disks "$n")
+    while read -r pv; do
+      [ -n "$pv" ] || continue
+      echo "$live" | grep -qx "$pv" || echo "$n ctrl $pv"
+    done < <(flint_spdk_controllers "$n")
+  done
+}
+
+# Backend-dispatching orphan check — use this in drivers and verify.
+orphan_data_paths() {
+  if [ "$(backend_mode)" = "ublk" ]; then orphan_ublk_paths; else orphan_flint_sessions; fi
+}
+
 globalmounts() { # <node> — count of staged flint volumes on the node
   local pod
   pod=$(csi_node_pod "$1")

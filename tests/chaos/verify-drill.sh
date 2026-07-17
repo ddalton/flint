@@ -70,31 +70,47 @@ STALE=$(stale_vas 120)
 [ -z "$STALE" ] || { VA_OK=N; FAILED="$FAILED stale-va"; note "stale VAs: $STALE"; }
 [ "$VA_OK" = "Y" ] && ok "VA consistent (1 VA on $POST_NODE, none stale)"
 
-# 4. NVMe sessions ------------------------------------------------------------
-# Fail if a LIVE volume's controller isn't `live` (our data path is broken).
-# Orphaned sessions (controller for a deleted PV) are a leak: recorded and
-# failed only when NEW ones appear during this drill (pre-existing cruft is
-# tolerated but always reported).
-step "4/7 nvme sessions"
+# 4. Data-path sessions --------------------------------------------------------
+# Fail if the LIVE volume's data path is broken. Backend-aware: nvmeof mode
+# checks kernel nvme sessions; ublk mode checks the ublk disk is served by
+# spdk-tgt on the pod's node (there are no kernel sessions — the remote leg
+# is an SPDK-internal initiator controller). Orphans (path for a deleted PV)
+# are a leak: recorded, failed only when NEW ones appear during this drill.
+step "4/7 data-path sessions ($(backend_mode))"
 NVME_OK=Y
-for n in $(worker_nodes); do
-  echo "== $n ==" >> "$ART/nvme.txt"; nvme_subsys "$n" >> "$ART/nvme.txt"
-done
-# our pg volume must be present and live somewhere
-if [ -n "$PV" ] && [ "$T_READY" -ge 0 ]; then
-  PV_STATE=$(for n in $(worker_nodes); do flint_sessions "$n"; done | awk -v pv="$PV" '$1==pv {print $2}' | head -1)
-  if [ "$PV_STATE" = "live" ]; then ok "pg volume session live"
-  else NVME_OK=N; FAILED="$FAILED nvme"; note "pg volume session state='${PV_STATE:-absent}' (want live)"; fi
+if [ "$(backend_mode)" = "ublk" ]; then
+  for n in $(worker_nodes); do
+    { echo "== $n =="; flint_ublk_disks "$n"; flint_spdk_controllers "$n" | sed 's/^/ctrl /'; } >> "$ART/ublk.txt"
+  done
+  if [ -n "$PV" ] && [ "$T_READY" -ge 0 ]; then
+    UBLK_ID=$(pv_ublk_id "$PV")
+    if [ -n "$UBLK_ID" ] && flint_ublk_disks "$POST_NODE" | awk -v id="$UBLK_ID" -F'\t' '$1==id{f=1} END{exit !f}'; then
+      ok "pg ublk disk $UBLK_ID served on $POST_NODE"
+    else
+      NVME_OK=N; FAILED="$FAILED nvme"
+      note "pg ublk disk id='${UBLK_ID:-?}' not served on $POST_NODE"
+    fi
+  fi
+else
+  for n in $(worker_nodes); do
+    echo "== $n ==" >> "$ART/nvme.txt"; nvme_subsys "$n" >> "$ART/nvme.txt"
+  done
+  # our pg volume must be present and live somewhere
+  if [ -n "$PV" ] && [ "$T_READY" -ge 0 ]; then
+    PV_STATE=$(for n in $(worker_nodes); do flint_sessions "$n"; done | awk -v pv="$PV" '$1==pv {print $2}' | head -1)
+    if [ "$PV_STATE" = "live" ]; then ok "pg volume session live"
+    else NVME_OK=N; FAILED="$FAILED nvme"; note "pg volume session state='${PV_STATE:-absent}' (want live)"; fi
+  fi
 fi
-ORPH=$(orphan_flint_sessions); echo "${ORPH:-none}" > "$ART/orphan-sessions.txt"
+ORPH=$(orphan_data_paths); echo "${ORPH:-none}" > "$ART/orphan-sessions.txt"
 N_ORPH=$(printf '%s' "$ORPH" | grep -c . || true)
 if [ "$N_ORPH" -gt "${PRE_ORPHANS:-0}" ]; then
   NVME_OK=N; FAILED="$FAILED nvme-leak"
-  note "orphaned nvme sessions rose ${PRE_ORPHANS:-0}→$N_ORPH (leak):"; echo "$ORPH" | sed 's/^/    /'
+  note "orphaned data paths rose ${PRE_ORPHANS:-0}→$N_ORPH (leak):"; echo "$ORPH" | sed 's/^/    /'
 elif [ "$N_ORPH" -gt 0 ]; then
-  note "$N_ORPH pre-existing orphaned session(s) (no increase; see orphan-sessions.txt)"
+  note "$N_ORPH pre-existing orphaned path(s) (no increase; see orphan-sessions.txt)"
 fi
-[ "$NVME_OK" = "Y" ] && ok "nvme clean (live volume healthy, no new leaks)"
+[ "$NVME_OK" = "Y" ] && ok "data path clean (live volume healthy, no new leaks)"
 
 # 5. mounts -------------------------------------------------------------------
 step "5/7 orphaned mounts"
