@@ -56,6 +56,12 @@ pub struct NodeAgent {
     /// UBLK_F_USER_RECOVERY the kernel device (and the mount on top of it)
     /// survives an spdk-tgt death waiting for a new server.
     expected_ublk: Arc<tokio::sync::Mutex<std::collections::HashMap<u32, String>>>,
+    /// Remote-chain companions to `expected_ublk`: bdev name → (volume
+    /// NQN, storage node) for consumer-side hybrid chains, so the fast
+    /// detector can re-drive the SPDK-initiator attach too — not just the
+    /// ublk disk — when a roll takes both sides down (1u/1.15: waiting on
+    /// 60s monitor ticks lost the race against the liveness bounce).
+    expected_remote: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (String, String)>>>,
 }
 
 /// #1: the params to reconstruct one NVMe-oF export after spdk-tgt drops it.
@@ -87,6 +93,7 @@ impl NodeAgent {
             controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             exported_targets: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             expected_ublk: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            expected_remote: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -114,6 +121,7 @@ impl NodeAgent {
             controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             exported_targets: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             expected_ublk: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            expected_remote: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -2467,7 +2475,14 @@ impl NodeAgent {
                         Ok(b) => b,
                         Err(e) => {
                             warn!(volume_id = %pv_name, error = %e,
-                                  "[REHYDRATE] lvol not loaded yet — retrying next tick");
+                                  "[REHYDRATE] lvol not loaded yet — seeding fast detector");
+                            // Ride the 10s loop, not the 60s monitor:
+                            // ensure_ublk_disk fails benignly until the
+                            // lvol loads, then recovers/starts.
+                            self.expected_ublk
+                                .lock()
+                                .await
+                                .insert(ublk_id, lvol_uuid.clone());
                             continue;
                         }
                     };
@@ -2607,8 +2622,18 @@ impl NodeAgent {
                             rebuilt += 1;
                         }
                         Ok(false) => {}
-                        Err(e) => warn!(nqn = %nqn, error = %e,
-                              "[REHYDRATE] remote ublk chain rebuild failed (will retry)"),
+                        Err(e) => {
+                            warn!(nqn = %nqn, error = %e,
+                              "[REHYDRATE] remote ublk chain rebuild failed — seeding fast detector");
+                            self.expected_remote.lock().await.insert(
+                                expected_bdev.clone(),
+                                (nqn.clone(), storage_node.clone()),
+                            );
+                            self.expected_ublk
+                                .lock()
+                                .await
+                                .insert(ublk_id, expected_bdev.clone());
+                        }
                     }
                     continue;
                 }
@@ -3053,6 +3078,18 @@ impl NodeAgent {
         for (id, bdev) in &expected {
             if live.contains_key(id) {
                 continue;
+            }
+            // Hybrid chains: the ublk disk sits on an SPDK-initiator bdev
+            // that may itself be gone — re-drive the remote attach first.
+            let remote = self.expected_remote.lock().await.get(bdev).cloned();
+            if let Some((nqn, storage_node)) = remote {
+                if !self.bdev_exists(bdev).await {
+                    if let Err(e) = self.ensure_remote_attach(&nqn, &storage_node).await {
+                        debug!(nqn = %nqn, error = %e,
+                            "[UBLK-DETECTOR] remote attach not ready (will retry)");
+                        continue;
+                    }
+                }
             }
             match self.ensure_ublk_disk(*id, bdev, Some(&live)).await {
                 Ok(_) => {}
@@ -4203,6 +4240,7 @@ impl Clone for NodeAgent {
             controller_reap_strikes: self.controller_reap_strikes.clone(),
             exported_targets: self.exported_targets.clone(),
             expected_ublk: self.expected_ublk.clone(),
+            expected_remote: self.expected_remote.clone(),
         }
     }
 }
