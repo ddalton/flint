@@ -2448,7 +2448,16 @@ impl SpdkCsiDriver {
                 // Stable per-node identity so the target's host fencing can
                 // admit exactly this consumer (doc §3). Default initiator
                 // NQNs are random, which makes host filtering impossible.
-                "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_id)
+                "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_id),
+                // Survivable reconnect (chaos drill 1u/B3): without these,
+                // a storage-node outage of ~a minute makes the initiator
+                // DROP the bdev, which cascades into the ublk disk being
+                // stopped and the consumer mount destroyed — the SPDK-
+                // initiator mirror of the kernel-side ctrl-loss-tmo that
+                // v1.15.0 graceful-recovery #2 added to the loopback path.
+                // -1 = retry forever; I/O queues until the target returns.
+                "ctrlr_loss_timeout_sec": -1,
+                "reconnect_delay_sec": 2
             }
         });
 

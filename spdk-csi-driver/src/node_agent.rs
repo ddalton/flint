@@ -2766,7 +2766,12 @@ impl NodeAgent {
                         "trsvcid": self.driver.nvmeof_target_port.to_string(),
                         "subnqn": nqn,
                         "adrfam": "IPv4",
-                        "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_name)
+                        "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_name),
+                        // Survivable reconnect — see connect_to_nvmeof_target
+                        // (chaos drill 1u/B3: default attach drops the bdev
+                        // during a storage outage, destroying the ublk chain).
+                        "ctrlr_loss_timeout_sec": -1,
+                        "reconnect_delay_sec": 2
                     }
                 }))
                 .await
