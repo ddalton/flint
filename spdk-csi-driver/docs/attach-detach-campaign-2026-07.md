@@ -1,16 +1,21 @@
 # CSI attach/detach chaos campaign — 2026-07
 
-**Status:** ACTIVE 2026-07-17 on `runu` — phase 1 complete through 1.15
-(1.14 node-terminate deferred to campaign end). Two new P1s: **F8** (amnesiac
-csi-node restart, drills 1.9b + 1.15) and **F9** (stale NodeUnstage kills live
-cross-node subsystem); **F8/F9 driver fixes in progress**, phase-1 rerun on
-fixed bits planned. **Under test:** shipped **v1.15.0** (chart 1.15.0,
-`dilipdalton/flint-driver:1.15.0`) + `spdk-tgt:1.6.0-f5fix.1` (F5 recovery
-patches). **Cluster:** trove project 38 `runu` — 5× i4i.xlarge on-demand
-(1 CP + 3 workers + cordoned builder `runu-aws-4`), k8s v1.34.9. Earlier
-clusters: `runs` (project 36, deleted 2026-07-13), `runt` (deleted
-2026-07-16 mid-campaign). **Harness:** `tests/chaos/` (Postgres 16 + pgbench
-+ acked-write ledger oracle).
+**Status:** PHASE 1 COMPLETE 2026-07-17 — **F8/F9 fixed and live-validated.**
+Stock v1.15.0 run found F8 (amnesiac csi-node restart, drills 1.9b + 1.15)
+and F9 (stale NodeUnstage kills live cross-node subsystem); fixes landed
+(`f723440`: ground-truth export rehydration + NodeUnstage sole-consumer
+guard) and the phase-1 rerun on `flint-driver:1.15.0-f8f9.0` is green —
+headline: **1.9b self-heals in 15s and 1.15 (full DS roll) rides through
+with NO pod bounce, 46s max stall, both rehydrator paths exercised on a
+live cross-node attachment** (details in the rerun section below). 1.14
+node-terminate deferred to campaign end; F9 guard still needs its own
+dedicated drill (kubelet-dead + cross-node re-attach + revive). **Under
+test:** v1.15.0 + F8/F9 fixes + `spdk-tgt:1.6.0-f5fix.1`. **Cluster:**
+trove project 38 `runu` (torn down 2026-07-17 at pause; provision fresh to
+resume — the trove spot bug is fixed, see Other findings). **Harness:**
+`tests/chaos/` (Postgres 16 + pgbench + acked-write ledger oracle).
+**Next:** phase 2 (r2) + phase 3 (RWX) via `drills/phase2.sh`/`phase3.sh`,
+F9 dedicated drill, 1.14, VolumeCondition surfacing (F8 residual).
 
 ## Goal
 
@@ -69,6 +74,40 @@ _Results table filled from `tests/chaos/results.csv` as drills complete._
 | 1.13 | ☠ EC2 stop of pg's node | — | — | PASS | teardown clean with dead backing volume; node restore needed manual EC2 start (rolesanywhere lacks ec2:StartInstances) + disk re-init |
 | 1.14 | ☠ EC2 terminate of pg's node | | | DEFERRED | destroys a worker; run at campaign end with trove replacement queued |
 | 1.15 | ☠ full csi-node DS roll | 1756s | 1261s | **FAIL — F8b** | landmine reproduced; **pod-bounce recovery failed same-node** (see F8 addendum); db PASS (zero lost acked writes); manual recovery 44s once dead session force-dropped |
+
+### Phase-1 rerun on the F8/F9 fixes (2026-07-17, `flint-driver:1.15.0-f8f9.0`)
+
+Fixes in `f723440` — **F8:** `rehydrate_exports_from_ground_truth` in the
+node agent (startup + 60s monitor tick) rebuilds exports from PVs +
+VolumeAttachments: loopback exports for locally-staged volumes
+(registry-tracked, the 10s loss-detector owns them from there),
+storage-side exports fenced to cross-node consumers, and the
+remote-attach + loopback chain on consumer nodes. **F9:** the agent's
+delete_nvmeof endpoint (NodeUnstage path) fails closed — skips
+`nvmf_delete_subsystem` and just fences this node out whenever live
+foreign controllers exist or the VA names another node. DS-only image
+swap (controller paths untouched); 689 lib tests (6 new).
+
+| # | Result | Notes |
+|---|---|---|
+| 1.1 | PASS 8s | in-place, zero CSI calls |
+| 1.2 | PASS 6s | |
+| 1.3 | expected-FAIL (F1) | WAL replay startup failure, CrashLoop — same class as runs/runt runs; CSI hygiene clean; mandatory reset applied |
+| 1.4 | PASS 17s | cross-node migration |
+| 1.5 | PASS 32s | drain |
+| 1.6 | PASS 16s | controller killed mid-attach |
+| 1.7 | PASS 10s | controller killed mid-detach |
+| 1.8 | PASS 102s | controller scaled 0 for 60s |
+| 1.9 | PASS 38s | tgt hard kill (SSM), io-resume path unchanged |
+| **1.9b** | **PASS, 15s stall** | **F8 validated**: csi-node POD delete self-heals — `[REHYDRATE] rebuilt loopback export from ground truth` at agent startup, kernel session reconnects, zero intervention (was: wedged forever, consumer bounce required) |
+| 1.10 | PASS | churn ×20, tot_gm=1 vas=1, no leaks |
+| 1.11/1.12 | skipped | kubelet-death paths untouched by the fixes; both PASSED same-day on stock v1.15.0. (A first 1.11 attempt was killed by a runner timeout mid-drill; the `trap restore EXIT` restored kubelet via SSM as designed. Aftermath exposed a kubelet post-restart quirk: it never issued NodeUnstage for the orphaned mount, wedging the VA 25min until a kubelet restart — k8s-level, recorded for the backlog) |
+| **1.15** | **PASS, 46s stall, NO bounce** | **F8 validated at DS-roll scale**: roll hit BOTH sides of a live cross-node attachment; aws-2 rehydrated the storage-side export, aws-1 the remote-consumer chain; I/O resumed with no pod action. A concurrent F3-class ephemeral-storage eviction of pg-0 on aws-1 was absorbed too (VA handoff 4s — vs 25min stuck that morning) |
+
+Ledger reconciliation: zero lost acked writes across the rerun (1.3's
+loss is the documented F1 force-delete semantics). F9's guard shipped in
+the same image but still needs a dedicated drill (kubelet-dead +
+cross-node re-attach + revived-node stale unstage).
 
 ### Verify contamination across drills (2026-07-13 batch — 1.4/1.5 verdicts invalidated)
 
@@ -531,15 +570,44 @@ runu-aws-3 2026-07-17), so loopback NVMe-oF is the only working local path
 on these nodes. **And squeezed from the other end:** the Sept-2025 upstream
 ublk rework (explicit queue/tag ids, split `nr_io_ready`/`nr_queues_ready`)
 broke SPDK's ublk target on kernels ≥6.14 (Ubuntu 6.14.0-33 / 6.17
-confirmed; spdk/spdk#3758, open sighting, no fix landed) — the
-kernel↔userspace ublk API is still churning. Worst case is not graceful:
-Longhorn's SPDK-based v2 engine hits a 100%-reproducible kernel NULL-deref
-panic in `ublk_init_queues` (node reboot) attaching ublk volumes on Ubuntu
-24.04 / 6.17.0-1017-aws (longhorn/longhorn#13509) — i.e. an API mismatch
-can take down the NODE, not just the volume. Re-evaluate + benchmark
-(pgbench/fio, ublk vs loopback) only once the fleet kernel ships ublk_drv
-AND SPDK's compat layer has settled against it; pin and panic-test the
-exact kernel/SPDK pair before any rollout.
+confirmed; spdk/spdk#3758, filed against v25.05) — and Longhorn's
+SPDK-based v2 engine hit a 100%-reproducible kernel NULL-deref panic in
+`ublk_init_queues` (node reboot) on Ubuntu 24.04 / 6.17.0-1017-aws
+(longhorn/longhorn#13509) — i.e. an API mismatch can take down the NODE,
+not just the volume. **RESOLVED for our stack on kernel 6.18.29:**
+validated 2026-07-17 — the SHIPPED `spdk-tgt:1.6.0-f5fix.1` (SPDK v26.05
+d519b163c) runs ublk cleanly on 6.18.29-061829-generic (mainline), no
+panic, clean start/stop.
+
+**Measured A/B (2026-07-17):** one x86 spot i4i.large (2 vCPU), Ubuntu
+24.04 + mainline 6.18.29, the shipped spdk-tgt image (`spdk_tgt -m 0x1`),
+same 1 GiB malloc bdev (RAM-backed ⇒ pure exposure-path measurement),
+identical fio suites (io_uring, direct=1, 20s/5s ramp). ublk: 1 queue,
+QD 128. NVMe-oF loopback: kernel initiator over 127.0.0.1:4420.
+
+| case | ublk | NVMe-oF loopback | delta |
+|---|---|---|---|
+| 4k randread QD1 | 41.0k IOPS, 17.8µs avg, p99 27.5µs | 33.4k IOPS, 20.0µs avg, p99 35.6µs | **ublk +23% IOPS, −2.2µs** |
+| 4k randread QD32 | 123.9k IOPS | 59.3k IOPS | **ublk +109%** |
+| 4k randwrite QD32 | 117.3k IOPS | 58.2k IOPS | **ublk +101%** |
+| 128k seq read QD8 | 2388 MiB/s, p99 2.0ms | 2869 MiB/s, p99 473µs | **loopback +20% BW, far better tail** |
+
+Read: for small-block DB-style I/O the loopback TCP double-traversal
+costs ~half the achievable IOPS — ublk is ~2× at QD32 and modestly better
+at QD1. For large sequential transfers loopback nvme-tcp WINS (+20% BW)
+and has a much tighter tail; ublk's per-op copy path and single server
+queue dominate there (untuned — more ublk queues may close it). Caveats:
+2-vCPU box (fio and the reactor contend), malloc backend, local hop only.
+
+**Conclusion:** the hybrid (ublk local hop + NVMe-oF cross-node) is a
+real win for the IOPS-bound path and is viable on kernel 6.18.29+ with
+our shipped image — but the fleet runs AL2023 6.1 with no ublk_drv, so
+adoption is gated on a fleet kernel change (or a custom kernel/AMI in
+trove, whose cloud-init is AL2023/dnf-specific today). Sequential-heavy
+workloads would keep loopback. Follow-ups if pursued: driver ublk path
+needs F8-rehydrator coverage (ublk daemon state dies with the pod too;
+SPDK v26.05 has `ublk_recover_disk` for the reattach) and per-workload
+backend selection.
 
 ### Other findings
 
