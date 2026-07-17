@@ -18,16 +18,20 @@ FAILED=""
 
 step "db verdict (since $(rfc3339 "$T0"))"
 
+# Every check is timeout-wrapped: a dead volume hangs psql/amcheck forever
+# (1.9b wedged the whole batch inside this script for 20+ min).
+TMO=$(command -v timeout || command -v gtimeout)
+
 # 1. up
-kubectl exec -n "$NS" $PG -c postgres -- pg_isready -q -U postgres \
-  && ok "pg_isready" || { FAILED="$FAILED isready"; note "pg_isready FAILED"; }
+$TMO 30 kubectl exec -n "$NS" $PG -c postgres -- pg_isready -q -U postgres \
+  && ok "pg_isready" || { FAILED="$FAILED isready"; note "pg_isready FAILED (or 30s timeout)"; }
 
 # 2. ledger reconciliation (acked ⊆ ledger)
 LP=$(load_pod)
 if [ -n "$LP" ]; then
   MISSING=$(comm -23 \
-    <(kubectl exec -n "$NS" "$LP" -- sh -c 'cut -d" " -f1 /acked/acked.log 2>/dev/null' | sort -n) \
-    <(kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -Atqc \
+    <($TMO 120 kubectl exec -n "$NS" "$LP" -- sh -c 'cut -d" " -f1 /acked/acked.log 2>/dev/null' | sort -n) \
+    <($TMO 120 kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -Atqc \
         'SELECT seq FROM ledger ORDER BY seq' | sort -n))
   if [ -z "$MISSING" ]; then
     ACKED=$(kubectl exec -n "$NS" "$LP" -- sh -c 'wc -l < /acked/acked.log 2>/dev/null' | tr -d ' ')
@@ -42,10 +46,10 @@ fi
 
 # 3. physical integrity
 if [ "${QUICK:-0}" != "1" ]; then
-  if kubectl exec -n "$NS" $PG -c postgres -- pg_amcheck -U postgres -d bench --heapallindexed >/dev/null 2>&1; then
+  if $TMO 600 kubectl exec -n "$NS" $PG -c postgres -- pg_amcheck -U postgres -d bench --heapallindexed >/dev/null 2>&1; then
     ok "pg_amcheck clean"
   else
-    FAILED="$FAILED amcheck"; note "pg_amcheck FAILED"
+    FAILED="$FAILED amcheck"; note "pg_amcheck FAILED (or 600s timeout)"
   fi
 else
   note "amcheck skipped (QUICK=1)"
@@ -59,7 +63,7 @@ if [ "${BAD:-0}" -eq 0 ]; then ok "postgres log clean"; else
 fi
 
 # 5. writability
-if [ -n "$LP" ] && kubectl exec -n "$NS" "$LP" -- pgbench -n -c 2 -T 5 bench >/dev/null 2>&1; then
+if [ -n "$LP" ] && $TMO 60 kubectl exec -n "$NS" "$LP" -- pgbench -n -c 2 -T 5 bench >/dev/null 2>&1; then
   ok "writability probe"
 else
   FAILED="$FAILED write-probe"; note "writability probe FAILED"

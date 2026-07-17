@@ -29,12 +29,14 @@ verify() { # [env overrides passed by caller]
   ./verify-drill.sh "$PHASE_LABEL" "$DRILL" "$T0"
 }
 
-wait_acks_fresh() { # [budget_s] — until the ledger is acking again
+wait_acks_fresh() { # [budget_s] — until the ledger acks something NEWER than T0
+  # (age-only checking races: the final pre-kill ack looks "fresh" for 5s,
+  #  which let 1.9b record a bogus io_resume while I/O was actually dead)
   local budget=${1:-180} last now i
   for i in $(seq 1 $(( budget / 5 ))); do
     last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
     now=$(epoch)
-    [ -n "$last" ] && [ $(( now - last )) -lt 5 ] && return 0
+    [ -n "$last" ] && [ "$last" -gt "${T0:-0}" ] && [ $(( now - last )) -lt 5 ] && return 0
     sleep 5
   done
   return 1

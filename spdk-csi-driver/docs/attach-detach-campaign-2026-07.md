@@ -392,6 +392,40 @@ relying on the fixed recovery, stores must be rebuilt — or recovery needs an
 opt-in tolerant mode (skip-and-WARN on blobs with dangling extent pages
 instead of failing the store). Recorded as follow-up work.
 
+### F8 — csi-node pod restart is amnesiac: exports never re-created, health checks lie (drill 1.9b, 2026-07-17)
+
+Drill 1.9b (delete the whole csi-node pod on pg's node, so node-agent +
+csi-driver + spdk-tgt all restart) on **v1.15.0 + f5fix.1** reproduced the
+documented landmine and exposed its mechanism:
+
+- spdk-tgt restarts and re-loads the LVS from disk, but the **NVMe-oF
+  subsystem/listener/namespace exports are runtime state** that only
+  reconcile-on-loss re-creates — and the reconciler's staged-volume records
+  are **in-memory in the csi-driver container**. After a pod-level restart
+  the reconcile loop runs happily with `success=0 skip=0 error=0`: it has
+  nothing to reconcile. (This is why a bare spdk-tgt kill recovers in
+  ~45–67s — the surviving csi-driver still knows the volume — but a pod
+  delete never recovers.)
+- The host initiator survives on ctrl-loss-tmo and reconnect-loops against
+  the missing export **forever** (ECONNREFUSED ×253 observed, 5s cadence).
+- The node's volume health check reported `healthy=true` and the consumer
+  pod stayed Ready throughout — 20+ minutes of dead I/O, zero signals
+  (same silent-hang family as F6).
+- **Recovery validated:** force-delete the consumer pod. The replacement's
+  ControllerUnpublish/Publish cycle rebuilt the export (replacement landed
+  cross-node and attached remotely); ~7 min total, **zero VA surgery**.
+- Evidence: `tests/chaos/artifacts/1-1.9b-landmine-1784250607/`.
+
+Fix directions (flint work, with F6): reconcile from persistent ground truth
+(this node's VolumeAttachments / kubelet staging dir), not an in-memory set;
+make the DS/volume health probe actually touch the export path; surface
+VolumeCondition so consumers aren't silently dead.
+
+Harness hardening from the same incident (both fixed): `wait_acks_fresh`
+raced (the final pre-kill ack looks "fresh" — now requires an ack newer than
+T0), and verify-db had no timeouts (a dead volume wedged the whole batch
+inside pg_amcheck — every check is now timeout-wrapped).
+
 ### Other findings
 
 - **P0-a / P0-b** (trove provisioning) — see Phase 0. Not flint bugs; recorded
