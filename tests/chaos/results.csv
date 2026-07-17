@@ -14,3 +14,8 @@ date,phase,drill,t_ready_s,stall_s,restarts_delta,pre_node,post_node,va_ok,nvme_
 2026-07-17T01:04:12Z,1,1.7,10,5,new:0,runu-aws-2,runu-aws-2,Y,Y,Y,PASS,Y,PASS,"controller killed mid-detach"
 2026-07-17T01:05:21Z,1,1.8,98,66,new:0,runu-aws-2,runu-aws-3,Y,Y,Y,PASS,Y,PASS,"controller scaled 0 for 60s mid-migration"
 2026-07-17T01:10:07Z,1,1.9b,-1,never,new:0,runu-aws-3,runu-aws-3,Y,Y,Y,FAIL,Y,FAIL,"csi-node POD delete: landmine reproduced on v1.15.0+f5fix.1 — export never re-created (initiator ECONNREFUSED x253), reconciler amnesiac (0 items after pod restart), health check lies healthy, pod stays Ready; recovery = consumer bounce"
+2026-07-17T01:45:17Z,1,1.9,49,41,0,runu-aws-2,runu-aws-2,Y,Y,Y,PASS,Y,PASS,"spdk-tgt hard kill; io_resume=49s"
+2026-07-17T01:47:00Z,1,1.10,241,15,new:0,runu-aws-2,runu-aws-1,Y,Y,Y,PASS,Y,PASS,"churn x20; tot_gm=1 vas=1"
+2026-07-17T01:52:01Z,1,1.11,989,944,new:0,runu-aws-1,runu-aws-2,Y,Y,Y,PASS,Y,PASS,"kubelet-stop slow path: notready=48s evict=347s va_detach=-1s then taint"
+2026-07-17T02:09:31Z,1,1.12,446,391,new:0,runu-aws-2,runu-aws-1,Y,Y,Y,PASS,Y,PASS,"kubelet-stop+taint: notready=57s; READY CONTAMINATED: F3 disk-pressure taint on aws-1 blocked scheduling ~6min (env, not flint) — clean rerun follows"
+2026-07-17T02:20:19Z,1,1.12,314,262,new:0,runu-aws-2,runu-aws-1,Y,Y,Y,PASS,Y,PASS,"kubelet-stop+taint: notready=57s"

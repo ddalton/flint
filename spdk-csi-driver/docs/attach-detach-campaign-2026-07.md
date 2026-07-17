@@ -426,6 +426,49 @@ raced (the final pre-kill ack looks "fresh" — now requires an ack newer than
 T0), and verify-db had no timeouts (a dead volume wedged the whole batch
 inside pg_amcheck — every check is now timeout-wrapped).
 
+### F9 (**P1 — cross-node data-plane kill**) — stale NodeUnstage deletes a live subsystem (2026-07-17)
+
+Between drills, a revived node's deferred cleanup destroyed the volume it no
+longer owned. Timeline (all UTC, volume pvc-c15f47dd, single replica **on
+runu-aws-2**, evidence `tests/chaos/artifacts/1-1.13pre-rofs-1784255332/`):
+
+- 02:20 drill 1.12-rerun: kubelet stopped on aws-2 (pg's node) + oos taint.
+  Pod force-deleted by GC — but aws-2's kubelet is dead, so its containers
+  and mounts survive untouched.
+- 02:21:35 ControllerUnpublish(aws-2) — **fencing works**: aws-2's host NQN
+  removed from the subsystem. 02:25:14 ControllerPublish(aws-1) repeats the
+  defensive `nvmf_subsystem_remove_host` (#3 disconnect-before-reuse). The
+  replacement pod on aws-1 attaches cross-node to aws-2's target; Ready
+  02:25:33; verify PASSES (writes flowing).
+- ~02:26 the drill's cleanup restarts aws-2's kubelet. It finds the stale
+  pod dir → NodeUnpublish (02:26:33.4) → **NodeUnstage (02:26:33.5) →
+  `delete_nvmeof_block_device()` (driver.rs ~1175) → agent
+  `/api/blockdev/delete_nvmeof` → `nvmf_delete_subsystem(<volume NQN>)` on
+  aws-2's spdk-tgt — the subsystem actively serving aws-1's live
+  attachment.**
+- 02:26:37 aws-1 dmesg: `Buffer I/O error on dev nvme2n1 … lost async page
+  write` → ext4 remounts RO → postgres FATAL "Read-only file system" →
+  error spam fills aws-1's 8 GB root → kubelet evicts pg-0 for
+  ephemeral-storage (02:29:44) → F3-style disk-pressure taints on two nodes.
+- The harness's post-drill health gate caught it (1.13's preflight refused
+  to start), and teardown after the incident was clean (ns + PVs deleted,
+  no finalizer hang).
+
+**The bug:** NodeUnstage's contract is initiator-side cleanup (unmount +
+disconnect the local session). `nvmf_delete_subsystem` is target-lifecycle
+work — correct only while the unstaging node is the sole consumer. After a
+force-detach + cross-node re-attach, the stale node's late unstage deletes
+the export under the live consumer. Host-level fencing (F/#3) doesn't
+protect the subsystem object itself.
+
+**Fix directions (post-campaign, with F8/F6):** NodeUnstage must not delete
+a subsystem that (a) it didn't stage, or (b) has any other live host/VA —
+guard by checking the subsystem's host list / this node's VA ground truth;
+target teardown belongs to ControllerUnpublish-of-last-attachment or volume
+deletion. Durability note: acked writes were WAL-fsynced to the (intact)
+lvol before the kill — this is an availability P1, not a lost-acked-write
+P0; the post-reset ledger reconciliation will confirm.
+
 ### Other findings
 
 - **P0-a / P0-b** (trove provisioning) — see Phase 0. Not flint bugs; recorded
