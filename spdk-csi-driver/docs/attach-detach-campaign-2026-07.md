@@ -125,6 +125,67 @@ rerun. **Rule adopted: any drill whose expected outcome includes DB corruption
 (1.3, ☠ drills) is followed by a mandatory `deploy-harness.sh reset` before
 the next drill's T0.**
 
+## Phase 1u — ublk backend (2026-07-17, cluster runv, `flint-driver:1.15.0-ublk.2`)
+
+Release gate: rerun the phase-1 checks with `blockDevice.backend=ublk` —
+same-node volumes are PURE ublk (no NVMe-oF anywhere in the path), remote
+volumes are the NVMe-oF + ublk HYBRID (SPDK initiator between nodes, ublk
+for the kernel-facing exposure; no loopback re-export). Cluster: runv, 4×
+i4i.xlarge SPOT workers (first real spot provision — trove fix 9963af2
+validated live) + i4i.large on-demand CP, workers on mainline kernel
+6.18.29 (AL2023 deb-extraction recipe; kmod-29 can't read .ko.zst —
+decompress the module tree; force nvme/ena into the dracut initramfs or
+the node bricks: AL2023's 6.1 kernel has nvme BUILT-IN so hostonly mode
+omits it). spdk-tgt v26.05 sets UBLK_F_USER_RECOVERY(_REISSUE) on every
+disk on this kernel.
+
+### Bring-up findings (all fixed before the drills)
+
+- **U1 (P1): CSI ublk mode could not mount a volume at all —
+  `numQueues=8` vs 4 vCPUs.** The kernel EINVALs UBLK ADD_DEV when
+  nr_hw_queues > CPU count; the chart's tuning default (8) exceeded
+  i4i.xlarge's 4 vCPUs, so every `ublk_start_disk` failed. Bisected live
+  (nq=1/2/4 ok at any depth, nq=8 EINVAL). Fix: agent clamps num_queues
+  to host CPUs (41a3290).
+- **U2: ublk ids — misdiagnosis corrected.** First read of U1's EINVAL
+  blamed the legacy 20-bit volume-id hash (419736 as ublk id); in fact
+  the kernel accepts ids up to ~1M and `ublks_max` (default 64) bounds
+  the CONCURRENT DEVICE COUNT per node, not the id value — the live disk
+  runs happily as id 419736. The allocator that came out of the
+  misdiagnosis (bca965e) is kept deliberately: fresh stages get small
+  sequential ids, the create endpoint is now idempotent-by-bdev, the
+  ACTUAL id rides back in the response and lands in the PV annotation
+  (the authority for unstage/rehydration). 64 devices/node is a real
+  ublk-mode limit nvmeof mode doesn't have — document, don't fight.
+- **U3 (validation of the F8 machinery): the ground-truth rehydrator
+  staged the first volume.** With the stage path broken by U1, the fixed
+  agent's startup rehydration pass found the attached PV and started the
+  ublk disk (hash-id fallback, clamped queues) BEFORE kubelet's next
+  mount retry — which then adopted it idempotently. The F8-for-ublk
+  design worked on its very first live exercise.
+
+Sanity (both data-path shapes, one PVC): same-node = pure ublk
+(`/dev/ublkb419736` on the lvol bdev, ZERO nvmf subsystems); pod moved to
+aws-2 = hybrid (storage-side export fenced to `node:runv-aws-2`, SPDK
+initiator controller on the consumer, ublk id 0 on the `nvme_…n1` bdev);
+data written same-node read back intact cross-node.
+
+Verify oracle: step 4 is backend-aware (088cec0) — ublk mode checks the
+PV's ublk disk is served on the pod's node and counts orphaned
+disks/initiator controllers; there are no kernel nvme sessions to check.
+
+### Leg A — same-node (pure ublk)
+
+| # | Result | Notes |
+|---|---|---|
+| _pending_ | | |
+
+### Leg B — remote placement (NVMe-oF + ublk hybrid)
+
+| # | Result | Notes |
+|---|---|---|
+| _pending_ | | |
+
 ## Phase 2 — RWO, numReplicas=2 (RAID1)
 
 _TBD._
