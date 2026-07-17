@@ -3096,6 +3096,43 @@ impl NodeAgent {
                     }
                 }
             }
+            // r2 chains: a REGISTERED raid bdev that's missing is always a
+            // post-stage loss (entries only exist after a successful
+            // serve), so the 10s tick can drive the full in-place repair
+            // without the 3-strike monitor's in-flight-NodeStage guard —
+            // dropping RAID-host tgt-kill recovery from ~4min to seconds.
+            // The 60s monitor stays as the backstop for unregistered
+            // chains (fresh agent restarts rebuild the registry lazily).
+            if !self.bdev_exists(bdev).await {
+                if let Some(volume_id) = crate::identity::parse_raid_name(bdev) {
+                    let pv_name = crate::identity::storage_id_of_handle(volume_id);
+                    let pvs: Api<PersistentVolume> =
+                        Api::all(self.driver.kube_client.clone());
+                    match pvs.get(&pv_name).await {
+                        Ok(pv) => {
+                            let handle = pv
+                                .spec
+                                .as_ref()
+                                .and_then(|s| s.csi.as_ref())
+                                .map(|c| c.volume_handle.clone())
+                                .unwrap_or_else(|| volume_id.to_string());
+                            match self.repair_data_path(&pv, &handle).await {
+                                Ok(()) => {
+                                    info!(ublk_id = id, bdev = %bdev,
+                                        "[UBLK-DETECTOR] r2 raid chain rebuilt in place");
+                                    continue;
+                                }
+                                Err(e) => {
+                                    debug!(ublk_id = id, bdev = %bdev, error = %e,
+                                        "[UBLK-DETECTOR] r2 raid rebuild not ready (will retry)");
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(_) => { /* PV gone/API blip — reaper or next tick */ }
+                    }
+                }
+            }
             match self.ensure_ublk_disk(*id, bdev, Some(&live)).await {
                 Ok(_) => {}
                 Err(e) => {
