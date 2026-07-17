@@ -302,6 +302,20 @@ their T0s. Full forensics:
 The clean 1.12u verdict comes from a fresh volume with fsck-on-stage
 active from first mount.
 
+**Fix v3 — `-f` is load-bearing (same day):** the fresh-volume 1.12u
+rerun (T0=1784323394) FAILED THROUGH the v2 fix: `e2fsck -p` exited 0
+(journal replayed, superblock clean flag trusted, full check skipped),
+mount proceeded, postgres died at runtime on `base/5/pg_internal.init`
+EUCLEAN and crash-looped — container restarts don't re-stage, so a
+corrupt-mounted volume never heals. A force-detach corrupts metadata
+WITHOUT setting the ext4 error flag (the kernel sets it only when it
+later trips over the damage), so preen's clean-flag shortcut is exactly
+wrong here — and upstream `fsck -a` (SafeFormatAndMount) shares the
+shortcut, so "parity" was a weaker bar than the drill demands. v3:
+`e2fsck -fp` (forced full check, preen repairs) on every ext stage,
+`-fy` escalation unchanged. Cost = metadata scan per stage; stages are
+attach-time-rare and correctness wins.
+
 ### Verdict
 
 ublk mode passes the full phase-1 matrix on the final stack

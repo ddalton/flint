@@ -2805,9 +2805,22 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                     // replays its log on mount, and mkfs.xfs writes no
                                     // fsck-checkable state (fsck.xfs is a stub).
                                     if fs_type.starts_with("ext") {
-                                        println!("🔧 [NODE] fsck -p {} before mount", device_path);
+                                        // -f is load-bearing: without it e2fsck
+                                        // trusts the superblock clean flag after
+                                        // journal replay and skips the full
+                                        // check — but a force-detach corrupts
+                                        // metadata WITHOUT setting the error
+                                        // flag (the kernel only sets it when it
+                                        // later trips over the damage at
+                                        // runtime, EUCLEAN). Drill 1u/1.12 on a
+                                        // fresh volume: plain -p exited 0 and
+                                        // postgres died on pg_internal.init.
+                                        // Cost is a full metadata scan per
+                                        // stage; stages are rare (attach-time
+                                        // only) and correctness wins.
+                                        println!("🔧 [NODE] fsck -fp {} before mount", device_path);
                                         match std::process::Command::new("e2fsck")
-                                            .arg("-p")
+                                            .arg("-fp")
                                             .arg(&device_path)
                                             .output()
                                         {
