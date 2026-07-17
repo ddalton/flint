@@ -1076,8 +1076,17 @@ impl SpdkCsiDriver {
             }
         });
 
-        self.call_node_agent(&self.node_id, "/api/ublk/create", &ublk_params).await?;
+        let response = self.call_node_agent(&self.node_id, "/api/ublk/create", &ublk_params).await?;
 
+        // The agent allocates the REAL id — the kernel bounds ADD_DEV ids
+        // to ublks_max (default 64), so the hashed id above is only a
+        // legacy hint. The actual id rides back in the response and is
+        // what lands in the PV annotation for unstage/rehydration.
+        let ublk_id = response
+            .get("ublk_id")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .unwrap_or(ublk_id);
         let device_path = format!("/dev/ublkb{}", ublk_id);
 
         // Wait for device to appear

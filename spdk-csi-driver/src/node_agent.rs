@@ -1122,17 +1122,44 @@ impl NodeAgent {
         // ensure_ublk_disk consults live SPDK state, recovers a surviving
         // kernel device, or starts fresh — and registers the disk with the
         // fast loss-detector.
-        if let (Some(ublk_id), Some(bdev_name)) =
+        if let (Some(_requested_id), Some(bdev_name)) =
             (params["ublk_id"].as_u64(), params["bdev_name"].as_str())
         {
             let live = node_agent.snapshot_ublk_disks().await;
+            // The requested id is the legacy 20-bit hash — unusable (the
+            // kernel bounds ids to ublks_max, default 64). Reuse the id
+            // already serving this bdev (idempotent restage), else
+            // allocate the smallest free one. The ACTUAL id rides back in
+            // the response; the driver stores it in the PV annotation,
+            // which unstage and rehydration treat as the authority.
+            let ublk_id = match live
+                .as_ref()
+                .and_then(|l| l.iter().find(|(_, b)| b.as_str() == bdev_name))
+                .map(|(id, _)| *id)
+            {
+                Some(id) => id,
+                None => match node_agent.alloc_ublk_id(live.as_ref()).await {
+                    Some(id) => id,
+                    None => {
+                        let error_response = json!({
+                            "success": false,
+                            "error": "no free ublk id (ublks_max exhausted)"
+                        });
+                        return Ok(warp::reply::with_status(
+                            warp::reply::json(&error_response),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
+                    }
+                },
+            };
             return match node_agent
-                .ensure_ublk_disk(ublk_id as u32, bdev_name, live.as_ref())
+                .ensure_ublk_disk(ublk_id, bdev_name, live.as_ref())
                 .await
             {
                 Ok(_) => {
                     let success_response = json!({
-                        "result": format!("/dev/ublkb{}", ublk_id)
+                        "result": format!("/dev/ublkb{}", ublk_id),
+                        "ublk_id": ublk_id
                     });
                     Ok(warp::reply::with_status(warp::reply::json(&success_response), StatusCode::OK))
                 }
@@ -2226,6 +2253,30 @@ impl NodeAgent {
         Ok(true)
     }
 
+    /// Smallest usable ublk id. The kernel bounds ADD_DEV ids to
+    /// `ublks_max` (default 64; SPDK sizes its control ring from the same
+    /// sysfs knob), so the legacy 20-bit volume-id hash is unusable as an
+    /// id — the kernel EINVALs it. Skips ids SPDK serves, ids this agent
+    /// has promised (registry), and ids with a lingering kernel device
+    /// node (a quiesced stranger from a previous life must not be
+    /// adopted by an unrelated volume).
+    async fn alloc_ublk_id(
+        &self,
+        live: Option<&std::collections::HashMap<u32, String>>,
+    ) -> Option<u32> {
+        let max = std::fs::read_to_string("/sys/module/ublk_drv/parameters/ublks_max")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(64);
+        let reserved = self.expected_ublk.lock().await;
+        (0..max).find(|id| {
+            live.map_or(true, |l| !l.contains_key(id))
+                && !reserved.contains_key(id)
+                && !std::path::Path::new(&format!("/dev/ublkb{}", id)).exists()
+        })
+    }
+
     /// Whether `sub` (an `nvmf_get_subsystems` entry) already serves the
     /// desired export: a namespace (optionally backed by `want_bdev`), a
     /// listener on `want_traddr`, and — when a host is required — that
@@ -2379,14 +2430,20 @@ impl NodeAgent {
                 if is_ublk {
                     // ublk backend: the kernel consumes /dev/ublkb<id> on
                     // the lvol bdev directly — no loopback export exists.
-                    let ublk_id = self.resolve_ublk_id(&pv, &csi.volume_handle);
-                    if let Some(bdev) = ublk_disks.as_ref().and_then(|l| l.get(&ublk_id)) {
+                    // Ids are agent-allocated (kernel bounds them to
+                    // ublks_max), so match live disks by BACKING BDEV; the
+                    // PV annotation is the id's persistent record.
+                    if let Some((id, bdev)) = ublk_disks
+                        .as_ref()
+                        .and_then(|l| l.iter().find(|(_, b)| b.as_str() == lvol_uuid.as_str()))
+                    {
                         // Serving — backfill detector ownership (covers
                         // agent-only restarts, like the seed pass does for
                         // loopback exports).
-                        self.expected_ublk.lock().await.insert(ublk_id, bdev.clone());
+                        self.expected_ublk.lock().await.insert(*id, bdev.clone());
                         continue;
                     }
+                    let ublk_id = self.resolve_ublk_id(&pv, &csi.volume_handle);
                     let bdev = match self.verify_local_lvol(lvol_uuid).await {
                         Ok(b) => b,
                         Err(e) => {
@@ -2508,14 +2565,17 @@ impl NodeAgent {
                     // AND the ublk disk is served.
                     let controller_name = crate::identity::initiator_controller_name(&nqn);
                     let expected_bdev = format!("{}n1", controller_name);
-                    let ublk_id = self.resolve_ublk_id(&pv, &csi.volume_handle);
-                    let disk_ok = ublk_disks
+                    let served = ublk_disks
                         .as_ref()
-                        .map_or(false, |l| l.get(&ublk_id) == Some(&expected_bdev));
-                    if disk_ok && self.bdev_exists(&expected_bdev).await {
-                        self.expected_ublk.lock().await.insert(ublk_id, expected_bdev);
-                        continue;
+                        .and_then(|l| l.iter().find(|(_, b)| b.as_str() == expected_bdev))
+                        .map(|(id, _)| *id);
+                    if let Some(id) = served {
+                        if self.bdev_exists(&expected_bdev).await {
+                            self.expected_ublk.lock().await.insert(id, expected_bdev);
+                            continue;
+                        }
                     }
+                    let ublk_id = self.resolve_ublk_id(&pv, &csi.volume_handle);
                     let outcome = match self.ensure_remote_attach(&nqn, storage_node).await {
                         Ok(bdev) => self.ensure_ublk_disk(ublk_id, &bdev, ublk_disks.as_ref()).await,
                         Err(e) => Err(e),
