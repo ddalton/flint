@@ -268,6 +268,20 @@ ext-family filesystems (0/1/2 = clean/fixed/fixed-reboot → proceed; ≥4
 surfaces). xfs is exempt (log-replays on mount; fsck.xfs is a stub).
 Ships in v1.16.0.
 
+**Escalation follow-up (same day):** the actual 1.12u volume exceeded
+preen — `e2fsck -fn` showed multiply-claimed blocks shared between two
+`pg_wal` segments, directory entries pointing at deleted inodes, and
+bitmap drift (all confined to `pg_wal`: WAL recycling was in flight at
+the sever). `e2fsck -p` exits 4 on that class, so preen-only wedges the
+volume in a MountDevice retry loop forever — fail-closed but
+unattended-unrecoverable. Fix v2: on preen exit ≥4, escalate ONCE to
+`e2fsck -fy` (the exact command an operator would run by hand); mount
+if ≤2, refuse only if full repair also fails. Durability arbiter above
+the fs layer is the workload's own crash recovery (postgres WAL
+replay), which the drill's acked-write ledger oracle checks — fs-level
+`-fy` answers can only drop data postgres never fsynced or can rebuild;
+if that assumption is ever wrong the oracle fails the drill.
+
 ### Verdict
 
 ublk mode passes the full phase-1 matrix on the final stack

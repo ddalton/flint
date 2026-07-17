@@ -2822,16 +2822,51 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                                         println!("✅ [NODE] e2fsck repaired {} (code {}): {}", device_path, code, log.trim());
                                                     }
                                                 } else {
-                                                    // Do not mount a filesystem fsck
-                                                    // could not repair — a dirty mount
-                                                    // corrupts further. Fail so kubelet
-                                                    // retries (and surfaces the state).
-                                                    let err = String::from_utf8_lossy(&out.stderr);
-                                                    println!("❌ [NODE] e2fsck could not repair {} (code {}): {} {}", device_path, code, log.trim(), err.trim());
-                                                    return Err(tonic::Status::internal(format!(
-                                                        "e2fsck could not repair {} (code {}) — refusing to mount a corrupt filesystem",
-                                                        device_path, code
-                                                    )));
+                                                    // Preen can't fix everything a
+                                                    // force-detach leaves behind (drill
+                                                    // 1u/1.12 hit multiply-claimed WAL
+                                                    // blocks + dangling dir entries →
+                                                    // code 4). Escalate once to full
+                                                    // auto-repair — the same command an
+                                                    // operator would run by hand — and
+                                                    // only refuse the mount if that
+                                                    // also fails. The workload's own
+                                                    // crash recovery (e.g. postgres WAL
+                                                    // replay) is the arbiter of data
+                                                    // durability above the fs layer.
+                                                    println!("⚠️ [NODE] e2fsck -p could not repair {} (code {}); escalating to e2fsck -fy", device_path, code);
+                                                    match std::process::Command::new("e2fsck")
+                                                        .arg("-fy")
+                                                        .arg(&device_path)
+                                                        .output()
+                                                    {
+                                                        Ok(out2) => {
+                                                            let code2 = out2.status.code().unwrap_or(-1);
+                                                            let log2 = String::from_utf8_lossy(&out2.stdout);
+                                                            if code2 <= 2 {
+                                                                println!("✅ [NODE] e2fsck -fy repaired {} (code {}): {}", device_path, code2, log2.trim());
+                                                            } else {
+                                                                // Do not mount a filesystem
+                                                                // fsck could not repair — a
+                                                                // dirty mount corrupts
+                                                                // further. Fail so kubelet
+                                                                // retries (and surfaces the
+                                                                // state).
+                                                                let err2 = String::from_utf8_lossy(&out2.stderr);
+                                                                println!("❌ [NODE] e2fsck -fy could not repair {} (code {}): {} {}", device_path, code2, log2.trim(), err2.trim());
+                                                                return Err(tonic::Status::internal(format!(
+                                                                    "e2fsck -fy could not repair {} (code {}) — refusing to mount a corrupt filesystem",
+                                                                    device_path, code2
+                                                                )));
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            return Err(tonic::Status::internal(format!(
+                                                                "e2fsck -fy exec failed on {} after preen found uncorrected errors: {}",
+                                                                device_path, e
+                                                            )));
+                                                        }
+                                                    }
                                                 }
                                             }
                                             Err(e) => {
