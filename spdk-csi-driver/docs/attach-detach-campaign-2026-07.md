@@ -339,13 +339,32 @@ Single-sever damage is exactly the class `-fp` repairs unattended; the
 `-fy` escalation stays as the backstop for compounded damage. U8
 CLOSED: v3 (fcd4578) is the shipping behavior.
 
+### 1.14u (EC2 terminate, 2026-07-17) — PASS with caveat
+
+First-ever run of 1.14 (open since the nvmeof phase). Terminated pg's
+node (aws-2) for real; topology had split compute from storage after
+1.12u's reschedule, so the single-replica lvol (on aws-3) survived.
+Data-plane teardown was clean and prompt: lvol deleted, export removed,
+NFS residue cleaned, provisioner deleted the PV object. The only
+residue was the VolumeAttachment for the mid-teardown rescheduled pod
+on aws-3 — kube-controller-manager's attach-detach forced-detach timer
+cleared it ~6 min after pod deletion (upstream pacing, not a flint
+leak), which exceeded deploy-harness down's 120s PV-wait budget and
+flagged a spurious "finalizer hang". Verdict PASS; harness note: the
+node-loss teardown path needs a ~7 min budget.
+
 ### Verdict
 
 ublk mode passes the full phase-1 matrix on the final stack
-(`flint-driver:1.15.0-ublk.5` + `spdk-tgt:1.6.0-f5fix.1` + chart
+(`flint-driver:1.15.0-ublk.8` + `spdk-tgt:1.6.0-f5fix.1` + chart
 entrypoint wrapper) with recovery times equal to or better than nvmeof
 mode, and the DS-roll landmine — nvmeof mode's documented known limit —
-is FIXED in ublk mode (18s in-place ride-through). **Release gate:**
+is FIXED in ublk mode (18s in-place ride-through). Phase-I completion
+(2026-07-17): dedicated F9 drill PASS (guard_hits=1, stall 41s), 1.12u
+PASS after the U8 fsck wave (v1 no-fsck → v2 -fy escalation → v3
+forced -f; two condemned volumes on the way — see U8), 1.14u PASS
+(clean node-loss teardown, AD-timer caveat). The fsck work means
+ublk.8, not ublk.5, is the release digest. **Release gate:**
 the fixes are validation-tagged only; packaging must ship the f5fix
 spdk-tgt (HARD ublk dependency — every roll is a dirty tgt restart by
 design) and the chart wrapper together with the driver. Residuals for
