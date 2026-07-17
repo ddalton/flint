@@ -97,7 +97,23 @@ spec:
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           {{- end }}
           imagePullPolicy: Always
-          {{- if or .Values.spdkTarget.kindMode.enabled .Values.spdkTarget.extraArgs }}
+          {{- if and (eq (.Values.blockDevice.backend | default "ublk") "ublk") (not .Values.spdkTarget.kindMode.enabled) }}
+          # ublk mode: spdk_tgt must die UNCLEANLY on pod stop — its graceful
+          # SIGTERM fini STOP_DEVs every ublk disk, deleting the kernel
+          # gendisks live mounts sit on (drill 1u/1.9b). And PID-1 signal
+          # immunity means nothing inside the container can SIGKILL an
+          # exec'd spdk_tgt (spdk_kill_instance SIGKILL returns true and
+          # kills nothing). So run it as a CHILD of a shell PID 1 whose
+          # TERM trap SIGKILLs it: devices quiesce (UBLK_F_USER_RECOVERY)
+          # and the next agent recovers them in place, mounts intact.
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              /usr/local/bin/spdk-csi-start.sh {{ range .Values.spdkTarget.extraArgs }}{{ . | quote }} {{ end }}&
+              C=$!
+              trap 'kill -9 $C 2>/dev/null' TERM INT
+              wait $C
+          {{- else if or .Values.spdkTarget.kindMode.enabled .Values.spdkTarget.extraArgs }}
           args:
             {{- if .Values.spdkTarget.kindMode.enabled }}
             - "--no-huge"
@@ -184,11 +200,18 @@ spec:
                         # nvmeof-mode rolls survivable). Dirty blobstore
                         # restarts are the F5-hardened, drill-1.9-proven
                         # path.
-                        try:
-                            print(f"[{time.strftime(\"%c\")}] preStop: ublk backend - hard-killing SPDK so devices quiesce for user recovery")
-                            spdk_rpc("spdk_kill_instance", {"sig_name": "SIGKILL"})
-                        except Exception as e:
-                            print(f"[{time.strftime(\"%c\")}] preStop: kill failed (SPDK may already be down): {e}")
+                        # NOT via spdk_kill_instance: its sig_name decoder
+                        # silently no-ops on "SIGKILL" (the RPC returns true
+                        # and nothing dies — found live: the tgt survived the
+                        # "kill" and k8s SIGTERM then ran the graceful fini,
+                        # STOP_DEVing every disk). PID 1 IS spdk_tgt (exec'd
+                        # by the entrypoint), so kill it directly.
+                        # No RPC/self kill here: spdk_tgt as PID 1 ignores
+                        # even SIGKILL from inside its own pid namespace.
+                        # The ublk-mode entrypoint wrapper runs spdk_tgt as
+                        # a CHILD and converts the container SIGTERM into
+                        # SIGKILL of it — devices quiesce there.
+                        print(f"[{time.strftime(\"%c\")}] preStop: ublk backend - no-op (entrypoint trap SIGKILLs spdk_tgt on TERM)")
                         raise SystemExit(0)
 
                     try:
@@ -332,7 +355,23 @@ spec:
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           {{- end }}
           imagePullPolicy: Always
-          {{- if or .Values.spdkTarget.kindMode.enabled .Values.spdkTarget.extraArgs }}
+          {{- if and (eq (.Values.blockDevice.backend | default "ublk") "ublk") (not .Values.spdkTarget.kindMode.enabled) }}
+          # ublk mode: spdk_tgt must die UNCLEANLY on pod stop — its graceful
+          # SIGTERM fini STOP_DEVs every ublk disk, deleting the kernel
+          # gendisks live mounts sit on (drill 1u/1.9b). And PID-1 signal
+          # immunity means nothing inside the container can SIGKILL an
+          # exec'd spdk_tgt (spdk_kill_instance SIGKILL returns true and
+          # kills nothing). So run it as a CHILD of a shell PID 1 whose
+          # TERM trap SIGKILLs it: devices quiesce (UBLK_F_USER_RECOVERY)
+          # and the next agent recovers them in place, mounts intact.
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              /usr/local/bin/spdk-csi-start.sh {{ range .Values.spdkTarget.extraArgs }}{{ . | quote }} {{ end }}&
+              C=$!
+              trap 'kill -9 $C 2>/dev/null' TERM INT
+              wait $C
+          {{- else if or .Values.spdkTarget.kindMode.enabled .Values.spdkTarget.extraArgs }}
           args:
             {{- if .Values.spdkTarget.kindMode.enabled }}
             - "--no-huge"
