@@ -249,6 +249,25 @@ quiescent until reboot (harmless).
 | B2 (1.9 consumer-side) | PASS 54s | consumer tgt SIGKILL: initiator re-attach + ublk recover, mount preserved |
 | B3 (storage-side tgt SIGKILL) | first run FAIL → **U7**; rerun **PASS 59s** | without reconnect tuning the initiator DROPS the bdev during the outage → SPDK bdev-event stops the ublk disk → gendisk destroyed → mounts swept → crash-loop until pod bounce. Fix: `ctrlr_loss_timeout_sec=-1, reconnect_delay_sec=2` on both attach sites (the SPDK-initiator mirror of v1.15.0 #2's kernel ctrl-loss-tmo). Rerun: consumer chain held, same mount, stall ≈ storage outage |
 
+### U8 (found during Phase-I completion, 2026-07-17) — no fsck before mount
+
+Drill 1.12u (kubelet stop + out-of-service taint, forced reschedule)
+FAILED: postgres crash-looped with `pg_wal/...: Structure needs
+cleaning` (EUCLEAN). Root cause is NOT ublk-specific — NodeStage mounts
+an existing filesystem directly (`mount <dev> <path>`) with **no fsck
+first**, missing the `SafeFormatAndMount` parity every production CSI
+driver has. A kubelet-death + force-detach cuts writes off mid-cycle
+and leaves ext4 with its error flag set; the journal replay on the next
+mount is insufficient, so the fs comes back read-only-errored and the
+workload cannot use it until a manual e2fsck. nvmeof mode has the SAME
+gap — its earlier 1.12 PASS was luck (the lazy-umount + bounded-sync
+happened to flush cleanly before the device died); the brutal ublk
+force-detach hit the window reliably. Fix: `e2fsck -p` before mount for
+ext-family filesystems (0/1/2 = clean/fixed/fixed-reboot → proceed; ≥4
+= refuse to mount a corrupt fs so kubelet retries and the state
+surfaces). xfs is exempt (log-replays on mount; fsck.xfs is a stub).
+Ships in v1.16.0.
+
 ### Verdict
 
 ublk mode passes the full phase-1 matrix on the final stack

@@ -2793,6 +2793,56 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                 if is_mounted {
                                     println!("✅ [NODE] Staging path already mounted (idempotent)");
                                 } else {
+                                    // fsck-before-mount (SafeFormatAndMount parity).
+                                    // Chaos drill 1u/1.12 (U8): kubelet-death +
+                                    // force-detach leaves ext4 with its error flag
+                                    // set (in-flight writes cut off mid-cycle); the
+                                    // journal replay on the next mount is not enough
+                                    // and the fs comes back EUCLEAN ("Structure needs
+                                    // cleaning") — postgres crash-loops on its WAL.
+                                    // A freshly-mkfs'd device is clean so preen is a
+                                    // no-op there. Only ext-family needs this: xfs
+                                    // replays its log on mount, and mkfs.xfs writes no
+                                    // fsck-checkable state (fsck.xfs is a stub).
+                                    if fs_type.starts_with("ext") {
+                                        println!("🔧 [NODE] fsck -p {} before mount", device_path);
+                                        match std::process::Command::new("e2fsck")
+                                            .arg("-p")
+                                            .arg(&device_path)
+                                            .output()
+                                        {
+                                            Ok(out) => {
+                                                // e2fsck -p: 0=clean, 1=fixed,
+                                                // 2=fixed+reboot-advised (fine in a
+                                                // container). >=4 = uncorrected/fatal.
+                                                let code = out.status.code().unwrap_or(-1);
+                                                let log = String::from_utf8_lossy(&out.stdout);
+                                                if code <= 2 {
+                                                    if code != 0 {
+                                                        println!("✅ [NODE] e2fsck repaired {} (code {}): {}", device_path, code, log.trim());
+                                                    }
+                                                } else {
+                                                    // Do not mount a filesystem fsck
+                                                    // could not repair — a dirty mount
+                                                    // corrupts further. Fail so kubelet
+                                                    // retries (and surfaces the state).
+                                                    let err = String::from_utf8_lossy(&out.stderr);
+                                                    println!("❌ [NODE] e2fsck could not repair {} (code {}): {} {}", device_path, code, log.trim(), err.trim());
+                                                    return Err(tonic::Status::internal(format!(
+                                                        "e2fsck could not repair {} (code {}) — refusing to mount a corrupt filesystem",
+                                                        device_path, code
+                                                    )));
+                                                }
+                                            }
+                                            Err(e) => {
+                                                // Tool missing/exec failure is not a
+                                                // reason to skip mounting a healthy fs;
+                                                // warn and proceed (mount's own journal
+                                                // replay still runs).
+                                                println!("⚠️ [NODE] e2fsck exec failed ({}); mounting anyway", e);
+                                            }
+                                        }
+                                    }
                                     // Mount the device to staging path
                                     println!("🔧 [NODE] Mounting {} to {}", device_path, staging_target_path);
                                     let mount_output = std::process::Command::new("mount")
