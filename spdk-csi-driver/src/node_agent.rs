@@ -2439,6 +2439,29 @@ impl NodeAgent {
                 .and_then(|c| c.parse::<u32>().ok())
                 .unwrap_or(1);
             if replica_count > 1 {
+                // …but the CONSUMER-side ublk chain (raid → ublk disk) is
+                // seeded here, or an agent restart forgets it entirely
+                // (2u/2.2b: csi-node pod delete on the RAID host left the
+                // volume dead until the 60s monitor's 3-strike repair,
+                // ~3.4min; seeded, the detector's repair path takes it in
+                // seconds). Serving disks backfill by raid-bdev match;
+                // missing ones seed the expected pair for rebuild.
+                if is_ublk {
+                    if va_map.get(&pv_name) == Some(&self.node_name) {
+                        let raid_bdev = crate::identity::raid_name(&csi.volume_handle);
+                        if let Some((id, bdev)) = ublk_disks
+                            .as_ref()
+                            .and_then(|l| l.iter().find(|(_, b)| b.as_str() == raid_bdev.as_str()))
+                        {
+                            self.expected_ublk.lock().await.insert(*id, bdev.clone());
+                        } else {
+                            let ublk_id = self.resolve_ublk_id(&pv, &csi.volume_handle);
+                            warn!(ublk_id, volume_id = %pv_name,
+                                  "[REHYDRATE] seeding r2 raid chain for the fast detector");
+                            self.expected_ublk.lock().await.insert(ublk_id, raid_bdev);
+                        }
+                    }
+                }
                 continue;
             }
             let Some(storage_node) = attrs.get("flint.csi.storage.io/node-name") else { continue };
