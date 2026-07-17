@@ -55,3 +55,7 @@ date,phase,drill,t_ready_s,stall_s,restarts_delta,pre_node,post_node,va_ok,nvme_
 2026-07-17T19:56:05Z,1u,1.9,58,54,0,runv-aws-3,runv-aws-3,Y,Y,Y,PASS,Y,PASS,"spdk-tgt hard kill; io_resume=58s"
 2026-07-17T19:58:07Z,1u,B3-tgt-storage,-1,1,7,runv-aws-3,runv-aws-3,Y,Y,Y,FAIL,Y,FAIL,"LEG B3: STORAGE-side tgt SIGKILL, consumer untouched; io_resume=-1s failed: ready db"
 2026-07-17T20:25:35Z,1u,B3-tgt-storage,62,59,0,runv-aws-3,runv-aws-3,Y,Y,Y,PASS,Y,PASS,"LEG B3 rerun on ublk.5 (U7 survivable reconnect): storage-side tgt SIGKILL, consumer untouched; io_resume=62s"
+2026-07-17T20:38:45Z,1u,F9-stale-unstage,227,41,new:0,runv-aws-2,runv-aws-3,Y,Y,Y,PASS,Y,PASS,"DEDICATED F9 DRILL: kubelet-dead runv-aws-2, force-detach, re-attach runv-aws-3, revive; guard_hits=1"
+2026-07-17T20:44:17Z,1u,1.12,-1,1,new:3,runv-aws-3,runv-aws-2,Y,Y,Y,FAIL,Y,FAIL,"kubelet-stop+taint: notready=52s failed: ready db"
+2026-07-17T21:23:14Z,1u,1.12,-1,1,new:3,runv-aws-2,runv-aws-4,Y,Y,Y,FAIL,Y,FAIL,"kubelet-stop+taint: notready=57s failed: ready db"
+2026-07-17T21:47:19Z,1u,1.12,61,16,new:0,runv-aws-3,runv-aws-2,Y,Y,Y,PASS,Y,PASS,"kubelet-stop+taint: notready=46s"

@@ -316,6 +316,29 @@ shortcut, so "parity" was a weaker bar than the drill demands. v3:
 `-fy` escalation unchanged. Cost = metadata scan per stage; stages are
 attach-time-rare and correctness wins.
 
+**Corrupt-mount window is itself destructive:** v3's restage of that
+volume repaired exactly the file postgres died on (`pg_internal.init` →
+deleted inode, CLEARED, code 1) and mounted — but recovery then died
+FATAL on a TRUNCATED `pg_xact/0000` ("read too few bytes" mid-redo),
+postgres's own hint being restore-from-backup. The clog tail was
+checkpoint-fsynced pre-sever; what killed it was the pre-v3 window
+where postgres ran 3-6 WAL-redo attempts ON the corrupt-mounted fs,
+writing pg_xact through broken metadata. Lesson: every mount of an
+unchecked post-sever fs compounds damage — the fix must be in place
+BEFORE the first post-sever mount, which is precisely what v3
+guarantees from here on. Volume condemned (second one); the clean
+1.12u verdict needs the pristine sequence sever → `-fp` → first mount.
+
+**1.12u PASS (ublk.8, T0=1784324839):** pristine sequence on a fresh
+volume with v3 active from first mount — ready 61s, max stall 16s,
+attribution rescheduled aws-3→aws-2 restarts 0, db verdict FULL PASS
+(ledger reconciliation zero acked loss + amcheck clean), VA consistent,
+data path clean, no orphan growth. Stage log on the target node:
+`fsck -fp` → "recovering journal" + preen repairs (code 1) → mount.
+Single-sever damage is exactly the class `-fp` repairs unattended; the
+`-fy` escalation stays as the backstop for compounded damage. U8
+CLOSED: v3 (fcd4578) is the shipping behavior.
+
 ### Verdict
 
 ublk mode passes the full phase-1 matrix on the final stack
