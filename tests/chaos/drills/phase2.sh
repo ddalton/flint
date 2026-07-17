@@ -137,9 +137,19 @@ case "$DRILL" in
   CNP=$(csi_node_pod "$RAID_HOST")
   kubectl delete pod -n "$DRIVER_NS" "$CNP" --wait=false
   note "csi-node POD on RAID host $RAID_HOST deleted (F8 probe: expect no self-recovery)"
+  # The old pod's tgt keeps serving through graceful termination (~30s) —
+  # measuring acks from T0 races it (the first run recorded a bogus
+  # "resumed 1s" while the kill hadn't landed). Outage starts when the
+  # old pod is GONE; acks must be newer than that.
+  kubectl wait --for=delete pod -n "$DRIVER_NS" "$CNP" --timeout=180s >/dev/null 2>&1
+  T_GONE=$(epoch)
+  note "old csi-node pod fully terminated at +$(( T_GONE - T0 ))s (outage starts)"
   kubectl wait --for=condition=Ready pod -l app=flint-csi-node -n "$DRIVER_NS" \
     --field-selector "spec.nodeName=$RAID_HOST" --timeout=180s >/dev/null 2>&1
-  if wait_acks_fresh 300; then
+  ORIG_T0=$T0; T0=$T_GONE
+  RESUMED=0; wait_acks_fresh 300 && RESUMED=1
+  T0=$ORIG_T0
+  if [ "$RESUMED" = "1" ]; then
     T_RESUME=$(( $(epoch) - T0 ))
     ok "I/O resumed ${T_RESUME}s — BETTER than F8 predicts (r2 divergence, record it)"
     EXPECT_RESCHEDULE=none READY_TIMEOUT=120 NOTES="RAID-host csi-node POD delete: SELF-RECOVERED io_resume=${T_RESUME}s" verify
@@ -226,6 +236,31 @@ case "$DRILL" in
   [ "$TOT_GM" -eq 1 ] || note "LEAK? total globalmounts=$TOT_GM (want 1)"
   [ "$N_VA" -eq 1 ] || note "LEAK? volumeattachments=$N_VA (want 1)"
   NOTES="churn x10 degraded; tot_gm=$TOT_GM vas=$N_VA" verify
+  ;;
+
+2.7) # r3: kill BOTH remote legs simultaneously → serve continues on the
+     # single local leg; both legs must re-join (survivable reconnect)
+  pre_r2
+  REMOTES=$(replica_nodes "$PV" | grep -v "^$RAID_HOST$")
+  N_REMOTES=$(echo "$REMOTES" | grep -c .)
+  [ "$N_REMOTES" -ge 2 ] || fail "need >=2 remote legs (r3 harness) — found $N_REMOTES"
+  for r in $REMOTES; do
+    CNP=$(csi_node_pod "$r")
+    kubectl delete pod -n "$DRIVER_NS" "$CNP" --wait=false
+    note "csi-node pod on remote leg $r deleted"
+  done
+  WORST=0
+  for i in $(seq 1 24); do
+    last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+    age=$(( $(epoch) - ${last:-0} ))
+    [ "$age" -gt "$WORST" ] && WORST=$age
+    sleep 5
+  done
+  [ "$WORST" -le 30 ] && ok "I/O rode through DOUBLE remote-leg loss (worst ack age ${WORST}s)" \
+                      || note "I/O impact: worst ack age ${WORST}s"
+  note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=60 \
+    NOTES="r3 DOUBLE remote-leg kill; worst_ack_age=${WORST}s; raid=$(raid_summary "$RAID_HOST" | head -1)" verify
   ;;
 
 *) fail "unknown drill '$DRILL' (phase-1 regression subset: PHASE_LABEL=2 ./drills/phase1.sh <id>)" ;;
