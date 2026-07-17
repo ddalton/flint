@@ -515,6 +515,32 @@ deletion. Durability note: acked writes were WAL-fsynced to the (intact)
 lvol before the kill — this is an availability P1, not a lost-acked-write
 P0; the post-reset ledger reconciliation will confirm.
 
+### Follow-up: ublk for the local hop (post-campaign evaluation)
+
+The kernel-facing hop is today a loopback NVMe-oF session (kernel initiator
+→ TCP over lo → local spdk-tgt) — double TCP traversal plus
+subsystem/listener/fencing state for a same-host handoff. The
+SPDK-recommended shape is ublk for local exposure, NVMe-oF only cross-node.
+Resilience-wise it can match the post-F8 path: SPDK v26.05 ships
+`ublk_recover_disk` (+ `test/ublk/ublk_recovery.sh`) for daemon-death
+reattach via `UBLK_F_USER_RECOVERY`, and the F8 ground-truth rehydrator
+would drive the ublk last hop the same way it drives `ensure_export`.
+**Blocked on the fleet kernel:** AL2023 6.1 does not build
+`CONFIG_BLK_DEV_UBLK` (`modprobe ublk_drv` → not found, verified on
+runu-aws-3 2026-07-17), so loopback NVMe-oF is the only working local path
+on these nodes. **And squeezed from the other end:** the Sept-2025 upstream
+ublk rework (explicit queue/tag ids, split `nr_io_ready`/`nr_queues_ready`)
+broke SPDK's ublk target on kernels ≥6.14 (Ubuntu 6.14.0-33 / 6.17
+confirmed; spdk/spdk#3758, open sighting, no fix landed) — the
+kernel↔userspace ublk API is still churning. Worst case is not graceful:
+Longhorn's SPDK-based v2 engine hits a 100%-reproducible kernel NULL-deref
+panic in `ublk_init_queues` (node reboot) attaching ublk volumes on Ubuntu
+24.04 / 6.17.0-1017-aws (longhorn/longhorn#13509) — i.e. an API mismatch
+can take down the NODE, not just the volume. Re-evaluate + benchmark
+(pgbench/fio, ublk vs loopback) only once the fleet kernel ships ublk_drv
+AND SPDK's compat layer has settled against it; pin and panic-test the
+exact kernel/SPDK pair before any rollout.
+
 ### Other findings
 
 - **P0-a / P0-b** (trove provisioning) — see Phase 0. Not flint bugs; recorded
