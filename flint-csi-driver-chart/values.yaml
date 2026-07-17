@@ -15,11 +15,11 @@ images:
   repository: dilipdalton  # Docker Hub registry
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
-    tag: "1.15.0"           # Graceful spdk-tgt hard-restart recovery: reconcile-on-loss + survivable reconnect + disconnect-before-reuse
+    tag: "1.16.0"           # The ublk release: F8/F9 hardening, ublk-mode chaos-validated (agent-allocated ids, quiesce+recover rolls, survivable initiator reconnect)
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (SPDK v26.05)
-    tag: "1.5.0"            # SPDK v26.05 + raid skip_rebuild/leased-quiesce patch v3 (unchanged; promoted from 1.4.0)
+    tag: "1.6.0"            # SPDK v26.05 + F5 dirty-restart fixes (blob-recovery-batched + lvol-flush-sync) — HARD dependency for ublk mode (every roll is a dirty tgt restart)
   # NFS Server for ReadWriteMany (RWX) volumes
   # By default, uses the same image as flintCsiDriver (which includes flint-nfs-server binary)
   # Uncomment to override with a separate NFS server image
