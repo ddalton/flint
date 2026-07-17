@@ -224,17 +224,47 @@ block-backed volumes itself. Also: coredump storage disabled fleet-wide
 node with DiskPressure); kernel devices of dead malloc probes linger
 quiescent until reboot (harmless).
 
-### Leg A — same-node (pure ublk)
+### Leg A — same-node (pure ublk) — ALL PASS
 
 | # | Result | Notes |
 |---|---|---|
-| _pending_ | | |
+| 1.1 | PASS 8s | in-place |
+| 1.2 | PASS 6s | DB pod kill, pure ublk — no NVMe-oF anywhere |
+| 1.3 | PASS 22s | historically expected-FAIL (F1 WAL-replay corruption); probabilistic — do not celebrate |
+| 1.4 | PASS 17s | cross-node migration (hybrid attach + F9-guarded unstage) |
+| 1.5 | PASS 33s | drain |
+| 1.6 | PASS 16s | controller killed mid-attach |
+| 1.7 | PASS 15s | controller killed mid-detach |
+| 1.8 | PASS 108s | controller scaled 0 ×60s mid-migration |
+| 1.9 | PASS 43s | tgt SIGKILL (host pkill): quiesce → recover, mount preserved, agent's 10s detector |
+| 1.9b | PASS 18s | csi-node POD delete — after the five-run saga (see above); `recovered quiesced kernel device (mount preserved)` |
+| 1.10 | PASS | churn ×20; agent-allocated ids, no leaks |
+| 1.15 | PASS 18s (rerun; first run 425s via bounce) | ☠ full DS roll under load: **in-place, zero pod action** on the seeded-detector stack — BEATS the v1.15.0 documented known-limit (roll kills single-replica mounts). An unlabeled extra data point: pg also rode through the ublk.4→ublk.5 deployment rolls untouched |
 
-### Leg B — remote placement (NVMe-oF + ublk hybrid)
+### Leg B — remote placement (NVMe-oF + ublk hybrid; storage node cordoned to pin placement)
 
 | # | Result | Notes |
 |---|---|---|
-| _pending_ | | |
+| B1 (1.2 remote) | PASS 11s | pod kill: replacement rescheduled to the STORAGE node (VA handoff, disk-locality winning); remote placement dissolves naturally |
+| B2 (1.9 consumer-side) | PASS 54s | consumer tgt SIGKILL: initiator re-attach + ublk recover, mount preserved |
+| B3 (storage-side tgt SIGKILL) | first run FAIL → **U7**; rerun **PASS 59s** | without reconnect tuning the initiator DROPS the bdev during the outage → SPDK bdev-event stops the ublk disk → gendisk destroyed → mounts swept → crash-loop until pod bounce. Fix: `ctrlr_loss_timeout_sec=-1, reconnect_delay_sec=2` on both attach sites (the SPDK-initiator mirror of v1.15.0 #2's kernel ctrl-loss-tmo). Rerun: consumer chain held, same mount, stall ≈ storage outage |
+
+### Verdict
+
+ublk mode passes the full phase-1 matrix on the final stack
+(`flint-driver:1.15.0-ublk.5` + `spdk-tgt:1.6.0-f5fix.1` + chart
+entrypoint wrapper) with recovery times equal to or better than nvmeof
+mode, and the DS-roll landmine — nvmeof mode's documented known limit —
+is FIXED in ublk mode (18s in-place ride-through). **Release gate:**
+the fixes are validation-tagged only; packaging must ship the f5fix
+spdk-tgt (HARD ublk dependency — every roll is a dirty tgt restart by
+design) and the chart wrapper together with the driver. Residuals for
+the backlog: U6 teardown tarpit (NodeUnpublish residue clearing),
+storage-side export rehydrate rides the 60s tick (case-(b) seeding
+would cut B3's stall to ~20s), stores damaged by pre-F5 dirty kills
+are terminally unloadable (re-init required — keep wipefs+init recipe
+handy), lingering quiesced kernel devices for dead unattributable
+bdevs clear only on reboot.
 
 ## Phase 2 — RWO, numReplicas=2 (RAID1)
 
