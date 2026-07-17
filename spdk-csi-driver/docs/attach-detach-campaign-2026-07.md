@@ -1,13 +1,16 @@
 # CSI attach/detach chaos campaign — 2026-07
 
-**Status:** PAUSED 2026-07-13 at drill 1.3 — **probable P0 found** (lost
-fsync-acked write under force-delete detach/reattach, see Findings); cluster
-torn down on request, campaign resumes on a fresh cluster. **Under test:**
-shipped **v1.15.0** (chart 1.15.0, `dilipdalton/flint-driver:1.15.0`), no code
-changes. **Cluster:** trove project 36 `runs` — 4× i4i.xlarge (1 CP + 3
-workers), k8s v1.34.9, 937 GB instance-store NVMe per worker (DELETED
-2026-07-13). **Harness:** `tests/chaos/` (Postgres 16 + pgbench + acked-write
-ledger oracle).
+**Status:** ACTIVE 2026-07-17 on `runu` — phase 1 complete through 1.15
+(1.14 node-terminate deferred to campaign end). Two new P1s: **F8** (amnesiac
+csi-node restart, drills 1.9b + 1.15) and **F9** (stale NodeUnstage kills live
+cross-node subsystem); **F8/F9 driver fixes in progress**, phase-1 rerun on
+fixed bits planned. **Under test:** shipped **v1.15.0** (chart 1.15.0,
+`dilipdalton/flint-driver:1.15.0`) + `spdk-tgt:1.6.0-f5fix.1` (F5 recovery
+patches). **Cluster:** trove project 38 `runu` — 5× i4i.xlarge on-demand
+(1 CP + 3 workers + cordoned builder `runu-aws-4`), k8s v1.34.9. Earlier
+clusters: `runs` (project 36, deleted 2026-07-13), `runt` (deleted
+2026-07-16 mid-campaign). **Harness:** `tests/chaos/` (Postgres 16 + pgbench
++ acked-write ledger oracle).
 
 ## Goal
 
@@ -53,9 +56,19 @@ _Results table filled from `tests/chaos/results.csv` as drills complete._
 | 1.1 | in-container postmaster SIGKILL | 22s | 22s | PASS | runs; repro'd on runt — in-place restart, zero CSI calls |
 | 1.2 | graceful pod delete | 11s | 9s | PASS | runt, F5-fixed bits; clean shutdown |
 | 1.3 | force delete (`--grace-period=0 --force`) | 6s | 3s | CSI PASS / db N/A | DB corruption = expected F1 semantics (bar re-scoped to CSI hygiene); runt |
-| 1.4 | cordon + delete, cross-node | 27s | 24s | **INVALIDATED** | ran on 1.3's corrupted DB without reset — see "verify contamination" below; rerun required |
-| 1.5 | drain | 954s | 19s | **INVALIDATED** | PASS on paper, but same contaminated lineage; rerun required |
-| 1.6–1.15 | — | | | NOT RUN | resume on fresh cluster (runt deleted 2026-07-16) |
+| 1.4 | cordon + delete, cross-node | 22s | 20s | PASS | runu rerun (runt verdict was contamination-invalidated, see below); clean cross-node migration |
+| 1.5 | drain | 32s | 15s | PASS | runu rerun; drain-ordered detach clean |
+| 1.6 | controller killed mid-attach | 16s | 13s | PASS | runu; in-flight ControllerPublish survives controller restart |
+| 1.7 | controller killed mid-detach | 10s | 5s | PASS | runu |
+| 1.8 | controller scaled 0 for 60s mid-migration | 98s | 66s | PASS | runu; attach parks until controller returns, no VA surgery |
+| 1.9 | spdk-tgt hard kill (process only) | 49s | 41s | PASS | runu; v1.15.0 graceful recovery, io_resume=49s, restartCount stable |
+| 1.9b | csi-node POD delete on pg's node | never | never | **FAIL — F8** | landmine mechanism exposed: amnesiac reconciler, exports never rebuilt, health check lies; recovery = consumer bounce (cross-node) |
+| 1.10 | churn ×20 create/delete | 241s | 15s | PASS | runu; tot_gm=1 vas=1, no NVMe session leak |
+| 1.11 | kubelet stop, slow path | 989s | 944s | PASS | runu; k8s eviction timing dominates (notready=48s evict=347s) |
+| 1.12 | kubelet stop + oos taint | 314s | 262s | PASS | runu clean rerun (first attempt READY-contaminated by F3 disk-pressure taint, env) |
+| 1.13 | ☠ EC2 stop of pg's node | — | — | PASS | teardown clean with dead backing volume; node restore needed manual EC2 start (rolesanywhere lacks ec2:StartInstances) + disk re-init |
+| 1.14 | ☠ EC2 terminate of pg's node | | | DEFERRED | destroys a worker; run at campaign end with trove replacement queued |
+| 1.15 | ☠ full csi-node DS roll | 1756s | 1261s | **FAIL — F8b** | landmine reproduced; **pod-bounce recovery failed same-node** (see F8 addendum); db PASS (zero lost acked writes); manual recovery 44s once dead session force-dropped |
 
 ### Verify contamination across drills (2026-07-13 batch — 1.4/1.5 verdicts invalidated)
 
@@ -420,6 +433,39 @@ Fix directions (flint work, with F6): reconcile from persistent ground truth
 (this node's VolumeAttachments / kubelet staging dir), not an in-memory set;
 make the DS/volume health probe actually touch the export path; surface
 VolumeCondition so consumers aren't silently dead.
+
+**F8b addendum (drill 1.15, full DS roll, 2026-07-17): the validated
+"consumer bounce" recovery only works cross-node.** The 1.15 bounce
+rescheduled pg-0 onto the **same node** (runu-aws-2) and never recovered:
+
+- Same-node replacement reuses the already-staged volume — kubelet issues no
+  NodeStage, so NodeStage self-heal never runs and the amnesiac reconciler
+  (F8) never rebuilds the export. Post-roll the tgt is so bare that even the
+  discovery listener refuses connections (ECONNREFUSED on 127.0.0.1:4420) —
+  there is nothing target-side for the initiator's reconnect loop to find.
+- The doomed postmaster sits in D-state on the dead session; kubelet cannot
+  complete the kill (`FailedKillPod: KillContainer ... DeadlineExceeded`),
+  so the old sandbox pins the mount while the new pod's postgres fails
+  readiness against the same dead filesystem. Wedged 20+ min until manual
+  intervention (would self-clear only at ctrl_loss_tmo=1800s).
+- **Working manual recipe (validated live):** cordon the node → force the
+  dead initiator session down (`echo 1 > /sys/class/nvme/<ctrl>/
+  delete_controller`, D-state clears instantly) → delete the consumer pod.
+  Cross-node republish then rebuilt the export on the bare tgt
+  (`volumeType:"remote"`, listener on the node IP) and pg-0 was Ready in
+  **44s** — versus ~7 min in 1.9b, where the stuck unstage had to wait out
+  the 6-min force-detach window. Ledger reconciliation: **zero lost acked
+  writes** (db PASS).
+- StatefulSet consumers have no scale-cycle escape hatch equivalent to
+  Deployments: a bare pod delete can land same-node any time the node has
+  capacity. Until F8 is fixed, treat the landmine recipe for STS as
+  cordon-first, then bounce.
+
+Environmental note from the same verify: the orphaned-mounts check flagged
+kubelet-leaked tmpfs/hugetlbfs mounts for deleted pods on **all four** nodes
+(including ones the drill never touched) — residue of the F9 eviction storm
+(~2.2k Evicted dashboard pods, since deleted; leaked mounts unmounted).
+Zero flint volume mounts were orphaned; not a flint defect.
 
 Harness hardening from the same incident (both fixed): `wait_acks_fresh`
 raced (the final pre-kill ack looks "fresh" — now requires an ack newer than
