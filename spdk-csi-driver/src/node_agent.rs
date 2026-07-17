@@ -2225,10 +2225,17 @@ impl NodeAgent {
             }
         }
 
+        // The kernel EINVALs ADD_DEV when nr_hw_queues exceeds the CPU
+        // count (found live on runv: chart numQueues=8 vs 4 vCPUs), so
+        // clamp the tuning knob to the host.
+        let host_cpus = std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(1);
         let num_queues = std::env::var("UBLK_NUM_QUEUES")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(4);
+            .unwrap_or(4)
+            .clamp(1, host_cpus);
         let queue_depth = std::env::var("UBLK_QUEUE_DEPTH")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
