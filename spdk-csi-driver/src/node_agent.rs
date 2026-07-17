@@ -249,6 +249,9 @@ impl NodeAgent {
                 if let Err(e) = monitor_agent.reconcile_replica_targets().await {
                     warn!(error = %e, "[MONITOR] Replica reconciliation failed (non-fatal)");
                 }
+                if let Err(e) = monitor_agent.rehydrate_exports_from_ground_truth().await {
+                    warn!(error = %e, "[MONITOR] Export rehydration failed (non-fatal)");
+                }
                 if let Err(e) = monitor_agent.monitor_raid_health().await {
                     warn!(error = %e, "[MONITOR] Raid health check failed (non-fatal)");
                 }
@@ -267,6 +270,14 @@ impl NodeAgent {
         // #1 seed: adopt exports this node is already serving (created by a
         // prior node-agent process) so the loss-detector protects them too.
         self.seed_exported_nqns_from_spdk().await;
+
+        // F8: ground-truth rehydration. A pod-level restart (DaemonSet
+        // roll) leaves BOTH the registry and the target empty — seeding
+        // from live subsystems finds nothing, and without this pass the
+        // node's staged volumes hang in reconnect forever.
+        if let Err(e) = self.rehydrate_exports_from_ground_truth().await {
+            warn!(error = %e, "[NODE_AGENT] Export rehydration failed (non-fatal; monitor loop retries)");
+        }
 
         // #1 fast export loss-detector: a tight (10s) loop that re-exports
         // immediately when spdk-tgt drops a subsystem it should be serving
@@ -1300,6 +1311,70 @@ impl NodeAgent {
             // Don't fail - continue to cleanup target
         }
 
+        // F9 guard (attach/detach campaign): NodeUnstage cleanup is
+        // initiator-scoped — deleting the subsystem is only safe while this
+        // node is the volume's sole consumer. After a force-detach +
+        // cross-node re-attach, a revived node's deferred unstage would
+        // otherwise nvmf_delete_subsystem the export actively serving the
+        // new consumer (host fencing does not protect the subsystem object
+        // itself). Fail closed: on evidence of a foreign consumer, skip the
+        // delete — a leaked subsystem is reconciled later (orphan sweep /
+        // F8 rehydration); a deleted live one is a cross-node data-plane
+        // kill — and just fence this node out.
+        let own_host = crate::nvmeof_export::flint_host_nqn(&node_agent.node_name);
+        let mut foreign_reason: Option<String> = None;
+        // (a) live controllers on the subsystem from another host?
+        if let Ok(resp) = node_agent
+            .disk_service
+            .call_spdk_rpc(&json!({
+                "method": "nvmf_subsystem_get_controllers",
+                "params": { "nqn": nqn }
+            }))
+            .await
+        {
+            let foreign: Vec<String> = resp
+                .get("result")
+                .and_then(|r| r.as_array())
+                .map(|cs| {
+                    cs.iter()
+                        .filter_map(|c| c.get("hostnqn").and_then(|h| h.as_str()))
+                        .filter(|h| *h != own_host)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !foreign.is_empty() {
+                foreign_reason = Some(format!("live foreign controller(s): {}", foreign.join(", ")));
+            }
+        } // Err ⇒ subsystem likely gone; the delete below is a no-op either way.
+        // (b) VolumeAttachment ground truth: volume attached to another node?
+        if foreign_reason.is_none() {
+            if let Some(owner) = crate::identity::classify_subsystem_nqn(nqn) {
+                if let Some(attached) = node_agent.get_attached_node(&owner).await {
+                    if attached != node_agent.node_name {
+                        foreign_reason = Some(format!("VolumeAttachment owned by {}", attached));
+                    }
+                }
+            }
+        }
+        if let Some(reason) = foreign_reason {
+            warn!(nqn = %nqn, reason = %reason,
+                "[HTTP_API] F9 guard: subsystem is serving another consumer — skipping delete, fencing this node out");
+            let _ = node_agent
+                .disk_service
+                .call_spdk_rpc(&json!({
+                    "method": "nvmf_subsystem_remove_host",
+                    "params": { "nqn": nqn, "host": own_host }
+                }))
+                .await;
+            node_agent.exported_targets.lock().await.remove(nqn);
+            let response = json!({
+                "success": true,
+                "message": "initiator cleanup done; subsystem retained (in use by another consumer)"
+            });
+            return Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK));
+        }
+
         // 2. Remove SPDK target
         let delete_params = json!({
             "method": "nvmf_delete_subsystem",
@@ -1925,6 +2000,352 @@ impl NodeAgent {
         if seeded > 0 {
             info!(count = seeded, "[NVME-RECOVERY #1] seeded export registry from live SPDK subsystems");
         }
+    }
+
+    /// Stage-time kernel-facing endpoint (mirrors the driver's
+    /// create_nvmeof_block_device): loopback unless NVMEOF_LOCAL_TARGET_IP
+    /// overrides, port from NVMEOF_TARGET_PORT.
+    fn local_export_endpoint() -> (String, u16) {
+        let ip = std::env::var("NVMEOF_LOCAL_TARGET_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let port = std::env::var("NVMEOF_TARGET_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(4420);
+        (ip, port)
+    }
+
+    /// Whether `sub` (an `nvmf_get_subsystems` entry) already serves the
+    /// desired export: a namespace (optionally backed by `want_bdev`), a
+    /// listener on `want_traddr`, and — when a host is required — that
+    /// host admitted. Used by rehydration to make the common
+    /// nothing-to-do pass free of mutation RPCs.
+    fn export_satisfied(
+        sub: Option<&serde_json::Value>,
+        want_bdev: Option<&str>,
+        want_traddr: &str,
+        want_host: Option<&str>,
+    ) -> bool {
+        let Some(sub) = sub else { return false };
+        let ns_ok = sub
+            .get("namespaces")
+            .and_then(|n| n.as_array())
+            .map(|nss| {
+                !nss.is_empty()
+                    && want_bdev
+                        .map(|b| {
+                            nss.iter().any(|ns| {
+                                ns.get("bdev_name").and_then(|v| v.as_str()) == Some(b)
+                                    || ns.get("uuid").and_then(|v| v.as_str()) == Some(b)
+                            })
+                        })
+                        .unwrap_or(true)
+            })
+            .unwrap_or(false);
+        let listener_ok = sub
+            .get("listen_addresses")
+            .and_then(|l| l.as_array())
+            .map(|ls| {
+                ls.iter().any(|l| {
+                    let addr = l.get("address").unwrap_or(l);
+                    addr.get("traddr").and_then(|t| t.as_str()) == Some(want_traddr)
+                })
+            })
+            .unwrap_or(false);
+        let host_ok = match want_host {
+            None => true,
+            Some(h) => {
+                sub.get("hosts")
+                    .and_then(|hs| hs.as_array())
+                    .map(|hs| hs.iter().any(|e| e.get("nqn").and_then(|n| n.as_str()) == Some(h)))
+                    .unwrap_or(false)
+                    || sub
+                        .get("allow_any_host")
+                        .and_then(|a| a.as_bool())
+                        .unwrap_or(false)
+            }
+        };
+        ns_ok && listener_ok && host_ok
+    }
+
+    /// F8 (attach/detach campaign): rebuild this node's exports from
+    /// PERSISTENT ground truth — PVs + VolumeAttachments — not just live
+    /// SPDK state. `seed_exported_nqns_from_spdk` can only adopt exports
+    /// that still exist in the target; after a csi-node POD restart
+    /// (agent + spdk-tgt die together, e.g. a DaemonSet roll) the target
+    /// comes back BARE and the registry starts empty, so the loss-detector
+    /// protects nothing and every staged volume hangs in reconnect forever
+    /// (drills 1.9b/1.15). The durable truth outlives the pod: an attached
+    /// VolumeAttachment plus the PV's volumeAttributes say exactly which
+    /// exports this node must serve. Convergent and idempotent; runs at
+    /// startup and from the 60s monitor loop. Multi-replica exports are
+    /// owned by reconcile_replica_targets; RWX PVs by the NFS liveness
+    /// reconciler (their block export belongs to the synthetic backing PV,
+    /// which this pass handles like any other single-replica PV).
+    async fn rehydrate_exports_from_ground_truth(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use k8s_openapi::api::storage::v1::VolumeAttachment;
+
+        // VA ground truth: PV name → consumer node, attached only.
+        let vas: Api<VolumeAttachment> = Api::all(self.driver.kube_client.clone());
+        let va_map: std::collections::HashMap<String, String> = vas
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .filter_map(|va| {
+                let attached = va.status.as_ref().map(|s| s.attached).unwrap_or(false);
+                let pv = va.spec.source.persistent_volume_name.clone()?;
+                attached.then(|| (pv, va.spec.node_name))
+            })
+            .collect();
+        if va_map.is_empty() {
+            return Ok(());
+        }
+
+        // One snapshot of live subsystems for all satisfied-checks.
+        let subsystems: std::collections::HashMap<String, serde_json::Value> = self
+            .disk_service
+            .call_spdk_rpc(&serde_json::json!({ "method": "nvmf_get_subsystems" }))
+            .await?
+            .get("result")
+            .and_then(|r| r.as_array())
+            .map(|subs| {
+                subs.iter()
+                    .filter_map(|s| {
+                        s.get("nqn")
+                            .and_then(|n| n.as_str())
+                            .map(|n| (n.to_string(), s.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let (local_ip, local_port) = Self::local_export_endpoint();
+        let own_host = crate::nvmeof_export::flint_host_nqn(&self.node_name);
+        let fencing = crate::nvmeof_export::fencing_enabled();
+        let mut node_ip: Option<String> = None; // lazy; only cross-node exports need it
+
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let mut rebuilt = 0usize;
+        for pv in pvs.list(&ListParams::default()).await?.items {
+            let Some(pv_name) = pv.metadata.name.clone() else { continue };
+            let Some(consumer) = va_map.get(&pv_name) else { continue };
+            let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
+            if csi.driver != "flint.csi.storage.io" {
+                continue;
+            }
+            // RWX PVs are NFS-mounted; their block export belongs to the
+            // synthetic backing PV's own PV/VA pair.
+            if crate::replica_sync::is_rwx_pv(&pv) {
+                continue;
+            }
+            let Some(attrs) = csi.volume_attributes.as_ref() else { continue };
+            // Replica volumes: export ownership lives with
+            // reconcile_replica_targets (alias NQNs, raid semantics).
+            let replica_count = attrs
+                .get("flint.csi.storage.io/replica-count")
+                .and_then(|c| c.parse::<u32>().ok())
+                .unwrap_or(1);
+            if replica_count > 1 {
+                continue;
+            }
+            let Some(storage_node) = attrs.get("flint.csi.storage.io/node-name") else { continue };
+            let Some(lvol_uuid) = attrs.get("flint.csi.storage.io/lvol-uuid") else { continue };
+            // SPDK object names derive from the volumeHandle (differs from
+            // the PV name for synthetic NFS backing PVs).
+            let nqn = crate::identity::volume_nqn(&csi.volume_handle);
+            let sub = subsystems.get(&nqn);
+
+            if storage_node == &self.node_name && consumer == &self.node_name {
+                // Loopback export consumed by the local kernel initiator.
+                if Self::export_satisfied(sub, None, &local_ip, fencing.then_some(&own_host)) {
+                    // Healthy — just make sure the loss-detector owns it
+                    // (covers agent-only restarts where seed already ran,
+                    // and backfills registry entries lost mid-flight).
+                    let mut reg = self.exported_targets.lock().await;
+                    if !reg.contains_key(&nqn) {
+                        if let Some(bdev) = sub
+                            .and_then(|s| s.get("namespaces"))
+                            .and_then(|n| n.as_array())
+                            .and_then(|nss| nss.first())
+                            .and_then(|ns| ns.get("bdev_name"))
+                            .and_then(|b| b.as_str())
+                        {
+                            reg.insert(
+                                nqn.clone(),
+                                TargetExport {
+                                    bdev_name: bdev.to_string(),
+                                    target_ip: local_ip.clone(),
+                                    target_port: local_port,
+                                },
+                            );
+                        }
+                    }
+                    continue;
+                }
+                // The lvol must be back before we can export it — disk
+                // auto-recovery reloads the lvstore at startup; converge on
+                // a later tick if it hasn't landed yet.
+                let bdev = match self.verify_local_lvol(lvol_uuid).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!(volume_id = %pv_name, error = %e,
+                              "[REHYDRATE] lvol not loaded yet — retrying next tick");
+                        continue;
+                    }
+                };
+                match self.ensure_export_for(&nqn, &bdev, &local_ip, local_port).await {
+                    Ok(()) => {
+                        warn!(nqn = %nqn, "[REHYDRATE] rebuilt loopback export from ground truth");
+                        rebuilt += 1;
+                    }
+                    Err(e) => warn!(nqn = %nqn, error = %e, "[REHYDRATE] loopback re-export failed"),
+                }
+            } else if storage_node == &self.node_name {
+                // Storage-side export for a cross-node consumer — mirror
+                // setup_nvmeof_target_on_node: listener on the node IP,
+                // fenced to the consumer. NOT registry-tracked (the
+                // loss-detector re-creates with kernel-facing loopback
+                // semantics, wrong here); this pass owns it, like replica
+                // exports.
+                if node_ip.is_none() {
+                    match self.driver.get_node_ip(&self.node_name).await {
+                        Ok(ip) => node_ip = Some(ip),
+                        Err(e) => {
+                            warn!(error = %e, "[REHYDRATE] node IP lookup failed");
+                            continue;
+                        }
+                    }
+                }
+                let ip = node_ip.as_deref().unwrap();
+                let consumer_host = crate::nvmeof_export::flint_host_nqn(consumer);
+                if Self::export_satisfied(sub, None, ip, fencing.then_some(&consumer_host)) {
+                    continue;
+                }
+                let bdev = match self.verify_local_lvol(lvol_uuid).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!(volume_id = %pv_name, error = %e,
+                              "[REHYDRATE] lvol not loaded yet — retrying next tick");
+                        continue;
+                    }
+                };
+                let allowed = vec![consumer_host];
+                let spec = crate::nvmeof_export::ExportSpec {
+                    nqn: &nqn,
+                    bdev_name: &bdev,
+                    bdev_aliases: &[],
+                    trtype: &self.driver.nvmeof_transport,
+                    traddr: ip,
+                    trsvcid: self.driver.nvmeof_target_port,
+                    allowed_hosts: fencing.then_some(allowed.as_slice()),
+                    ns_identity: None,
+                };
+                match crate::nvmeof_export::ensure_export(&self.disk_service, &spec).await {
+                    Ok(()) => {
+                        warn!(nqn = %nqn, consumer = %consumer,
+                              "[REHYDRATE] rebuilt storage-side export for cross-node consumer");
+                        rebuilt += 1;
+                    }
+                    Err(e) => {
+                        warn!(nqn = %nqn, error = %e, "[REHYDRATE] storage-side re-export failed")
+                    }
+                }
+            } else if consumer == &self.node_name {
+                // Staged here, stored remotely: rebuild the SPDK initiator
+                // chain (remote attach) + the loopback re-export the
+                // surviving kernel session is reconnect-looping toward.
+                // (A dead chain drops the nvme bdev, which drops the
+                // namespace, so satisfied-ness tracks chain liveness.)
+                if Self::export_satisfied(sub, None, &local_ip, fencing.then_some(&own_host)) {
+                    continue;
+                }
+                match self.rehydrate_remote_consumer_chain(&nqn, storage_node).await {
+                    Ok(()) => {
+                        warn!(nqn = %nqn, storage_node = %storage_node,
+                              "[REHYDRATE] rebuilt remote-consumer chain from ground truth");
+                        rebuilt += 1;
+                    }
+                    Err(e) => warn!(nqn = %nqn, storage_node = %storage_node, error = %e,
+                          "[REHYDRATE] remote consumer chain rebuild failed (will retry)"),
+                }
+            }
+        }
+        if rebuilt > 0 {
+            info!(rebuilt, "[REHYDRATE] exports rebuilt from ground truth (PVs + VolumeAttachments)");
+        }
+        Ok(())
+    }
+
+    /// Rebuild the consumer-side data chain for a volume staged on this
+    /// node but stored on `storage_node`: SPDK initiator re-attach to the
+    /// remote export, then the loopback re-export. The storage side is
+    /// rebuilt by that node's own rehydration; until it lands the attach
+    /// fails and we converge on a later tick.
+    async fn rehydrate_remote_consumer_chain(
+        &self,
+        nqn: &str,
+        storage_node: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let controller_name = crate::identity::initiator_controller_name(nqn);
+        let expected_bdev = format!("{}n1", controller_name);
+
+        let have_bdev = self
+            .disk_service
+            .call_spdk_rpc(&json!({
+                "method": "bdev_get_bdevs",
+                "params": { "name": expected_bdev }
+            }))
+            .await
+            .ok()
+            .and_then(|r| r.get("result").and_then(|v| v.as_array()).map(|a| !a.is_empty()))
+            .unwrap_or(false);
+        if !have_bdev {
+            // A controller without its bdev is dead weight from a previous
+            // life — replace it (mirrors connect_to_nvmeof_target).
+            let ctrlr_exists = self
+                .disk_service
+                .call_spdk_rpc(&json!({
+                    "method": "bdev_nvme_get_controllers",
+                    "params": { "name": controller_name }
+                }))
+                .await
+                .ok()
+                .and_then(|r| r.get("result").and_then(|v| v.as_array()).map(|a| !a.is_empty()))
+                .unwrap_or(false);
+            if ctrlr_exists {
+                let _ = self
+                    .disk_service
+                    .call_spdk_rpc(&json!({
+                        "method": "bdev_nvme_detach_controller",
+                        "params": { "name": controller_name }
+                    }))
+                    .await;
+            }
+            let remote_ip = self
+                .driver
+                .get_node_ip(storage_node)
+                .await
+                .map_err(|e| format!("node IP for {}: {}", storage_node, e))?;
+            self.disk_service
+                .call_spdk_rpc(&json!({
+                    "method": "bdev_nvme_attach_controller",
+                    "params": {
+                        "name": controller_name,
+                        "trtype": self.driver.nvmeof_transport.to_uppercase(),
+                        "traddr": remote_ip,
+                        "trsvcid": self.driver.nvmeof_target_port.to_string(),
+                        "subnqn": nqn,
+                        "adrfam": "IPv4",
+                        "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_name)
+                    }
+                }))
+                .await
+                .map_err(|e| format!("remote attach {}: {}", nqn, e))?;
+        }
+        let (ip, port) = Self::local_export_endpoint();
+        self.ensure_export_for(nqn, &expected_bdev, &ip, port).await
     }
 
     /// #1 fast loss-detector: if SPDK is missing any NQN this node believes
@@ -3409,4 +3830,66 @@ pub struct CreateMemoryDiskRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteMemoryDiskRequest {
     pub name: String,
+}
+
+#[cfg(test)]
+mod rehydrate_tests {
+    use super::NodeAgent;
+    use serde_json::json;
+
+    fn sub(ns_bdev: Option<&str>, traddr: Option<&str>, hosts: &[&str], any_host: bool) -> serde_json::Value {
+        json!({
+            "nqn": "nqn.2024-11.com.flint:volume:pvc-x",
+            "namespaces": ns_bdev.map(|b| vec![json!({"nsid": 1, "bdev_name": b, "uuid": "u"})]).unwrap_or_default(),
+            "listen_addresses": traddr.map(|a| vec![json!({"trtype": "TCP", "traddr": a, "trsvcid": "4420"})]).unwrap_or_default(),
+            "hosts": hosts.iter().map(|h| json!({"nqn": h})).collect::<Vec<_>>(),
+            "allow_any_host": any_host,
+        })
+    }
+
+    #[test]
+    fn absent_subsystem_is_not_satisfied() {
+        assert!(!NodeAgent::export_satisfied(None, None, "127.0.0.1", None));
+    }
+
+    #[test]
+    fn complete_export_is_satisfied() {
+        let s = sub(Some("lvol1"), Some("127.0.0.1"), &["hostA"], false);
+        assert!(NodeAgent::export_satisfied(Some(&s), None, "127.0.0.1", Some("hostA")));
+        assert!(NodeAgent::export_satisfied(Some(&s), Some("lvol1"), "127.0.0.1", Some("hostA")));
+    }
+
+    #[test]
+    fn missing_namespace_or_listener_fails() {
+        let no_ns = sub(None, Some("127.0.0.1"), &["hostA"], false);
+        assert!(!NodeAgent::export_satisfied(Some(&no_ns), None, "127.0.0.1", Some("hostA")));
+        let no_listener = sub(Some("lvol1"), None, &["hostA"], false);
+        assert!(!NodeAgent::export_satisfied(Some(&no_listener), None, "127.0.0.1", Some("hostA")));
+    }
+
+    #[test]
+    fn wrong_listener_addr_fails() {
+        // A loopback-only export does NOT satisfy a cross-node consumer
+        // that needs the node-IP listener (and vice versa).
+        let s = sub(Some("lvol1"), Some("127.0.0.1"), &["hostA"], false);
+        assert!(!NodeAgent::export_satisfied(Some(&s), None, "172.31.3.30", Some("hostA")));
+    }
+
+    #[test]
+    fn wrong_fence_fails_but_any_host_passes() {
+        // Fence still pointing at the previous consumer must trigger a
+        // converge (the F8 cross-node move case).
+        let s = sub(Some("lvol1"), Some("127.0.0.1"), &["hostOld"], false);
+        assert!(!NodeAgent::export_satisfied(Some(&s), None, "127.0.0.1", Some("hostNew")));
+        let open = sub(Some("lvol1"), Some("127.0.0.1"), &[], true);
+        assert!(NodeAgent::export_satisfied(Some(&open), None, "127.0.0.1", Some("hostNew")));
+    }
+
+    #[test]
+    fn wrong_bdev_fails() {
+        // The namespace exists but points at a stale bdev (lvol was
+        // re-created) — not satisfied, ensure_export must converge it.
+        let s = sub(Some("stale"), Some("127.0.0.1"), &["hostA"], false);
+        assert!(!NodeAgent::export_satisfied(Some(&s), Some("lvol1"), "127.0.0.1", Some("hostA")));
+    }
 }
