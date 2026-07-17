@@ -2404,9 +2404,16 @@ impl NodeAgent {
 
         let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
         let mut rebuilt = 0usize;
+        // ublk reaper bookkeeping: which live disks SHOULD exist on this
+        // node (desired), and which bdev names are attributable to flint
+        // single-replica volumes at all (lvol uuid → pv). A disk that is
+        // attributable but not desired is a leak — e.g. the local disk a
+        // stale VA made us rebuild after the consumer moved away — and
+        // the fast detector would otherwise resurrect it forever.
+        let mut desired_ublk: std::collections::HashSet<String> = Default::default();
+        let mut attributable_lvols: std::collections::HashSet<String> = Default::default();
         for pv in pvs.list(&ListParams::default()).await?.items {
             let Some(pv_name) = pv.metadata.name.clone() else { continue };
-            let Some(consumer) = va_map.get(&pv_name) else { continue };
             let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
             if csi.driver != "flint.csi.storage.io" {
                 continue;
@@ -2428,6 +2435,10 @@ impl NodeAgent {
             }
             let Some(storage_node) = attrs.get("flint.csi.storage.io/node-name") else { continue };
             let Some(lvol_uuid) = attrs.get("flint.csi.storage.io/lvol-uuid") else { continue };
+            if is_ublk {
+                attributable_lvols.insert(lvol_uuid.clone());
+            }
+            let Some(consumer) = va_map.get(&pv_name) else { continue };
             // SPDK object names derive from the volumeHandle (differs from
             // the PV name for synthetic NFS backing PVs).
             let nqn = crate::identity::volume_nqn(&csi.volume_handle);
@@ -2440,6 +2451,7 @@ impl NodeAgent {
                     // Ids are agent-allocated (kernel bounds them to
                     // ublks_max), so match live disks by BACKING BDEV; the
                     // PV annotation is the id's persistent record.
+                    desired_ublk.insert(lvol_uuid.clone());
                     if let Some((id, bdev)) = ublk_disks
                         .as_ref()
                         .and_then(|l| l.iter().find(|(_, b)| b.as_str() == lvol_uuid.as_str()))
@@ -2572,6 +2584,7 @@ impl NodeAgent {
                     // AND the ublk disk is served.
                     let controller_name = crate::identity::initiator_controller_name(&nqn);
                     let expected_bdev = format!("{}n1", controller_name);
+                    desired_ublk.insert(expected_bdev.clone());
                     let served = ublk_disks
                         .as_ref()
                         .and_then(|l| l.iter().find(|(_, b)| b.as_str() == expected_bdev))
@@ -2615,6 +2628,34 @@ impl NodeAgent {
                     }
                     Err(e) => warn!(nqn = %nqn, storage_node = %storage_node, error = %e,
                           "[REHYDRATE] remote consumer chain rebuild failed (will retry)"),
+                }
+            }
+        }
+        if is_ublk {
+            if let Some(live) = &ublk_disks {
+                for (id, bdev) in live {
+                    if desired_ublk.contains(bdev) {
+                        continue;
+                    }
+                    // Only reap what we can attribute to a flint
+                    // single-replica volume: a local disk on a known lvol,
+                    // or a remote-chain disk (nvme_…_volume_…n1). Raid,
+                    // malloc, and unknown bdevs are not ours to stop.
+                    let attributable = attributable_lvols.contains(bdev)
+                        || (bdev.starts_with("nvme_nqn") && bdev.contains("_volume_"));
+                    if !attributable {
+                        continue;
+                    }
+                    warn!(ublk_id = id, bdev = %bdev,
+                        "[REHYDRATE] reaping stale ublk disk (volume no longer consumed on this node)");
+                    let _ = self
+                        .disk_service
+                        .call_spdk_rpc(&json!({
+                            "method": "ublk_stop_disk",
+                            "params": { "ublk_id": id }
+                        }))
+                        .await;
+                    self.expected_ublk.lock().await.remove(id);
                 }
             }
         }

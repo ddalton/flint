@@ -167,24 +167,31 @@ spec:
                             raise Exception(resp["error"])
                         return resp.get("result")
 
-                    try:
-                        print(f"[{time.strftime(\"%c\")}] preStop: Step 1 - Stopping all ublk devices...")
-                        # Get all ublk devices using ublk_get_disks RPC
-                        ublk_devices = spdk_rpc("ublk_get_disks") or []
-                        ublk_stopped = 0
-                        for ublk_dev in ublk_devices:
-                            ublk_id = ublk_dev.get("id")
-                            bdev_name = ublk_dev.get("bdev_name", "unknown")
-                            if ublk_id is not None:
-                                try:
-                                    spdk_rpc("ublk_stop_disk", {"ublk_id": ublk_id})
-                                    ublk_stopped += 1
-                                    print(f"  Stopped ublk device: {ublk_id} (bdev: {bdev_name})")
-                                except Exception as e:
-                                    print(f"  Warning: Failed to stop ublk {ublk_id}: {e}")
-                        print(f"[{time.strftime(\"%c\")}] preStop: Stopped {ublk_stopped} ublk devices")
-                        time.sleep(1)
+                    backend = "{{ .Values.blockDevice.backend | default "ublk" }}"
+                    if backend == "ublk":
+                        # ublk mode: ANY graceful SPDK exit (our explicit
+                        # stops, or SPDK fini on SIGTERM) STOP_DEVs every
+                        # disk — deleting the kernel gendisks that live
+                        # stage mounts sit on. A graceful DS roll thereby
+                        # killed every ublk-backed mount on the node
+                        # permanently (chaos drill 1u/1.9b; a fresh start
+                        # mints a NEW device the old mount cannot follow).
+                        # With UBLK_F_USER_RECOVERY (kernel 6.18+/SPDK
+                        # v26.05) the correct roll is an UNCLEAN kill: the
+                        # devices quiesce, mounts survive, and the next
+                        # agent recovers them in place (the ublk analog of
+                        # the kernel-initiator reconnect that makes
+                        # nvmeof-mode rolls survivable). Dirty blobstore
+                        # restarts are the F5-hardened, drill-1.9-proven
+                        # path.
+                        try:
+                            print(f"[{time.strftime(\"%c\")}] preStop: ublk backend - hard-killing SPDK so devices quiesce for user recovery")
+                            spdk_rpc("spdk_kill_instance", {"sig_name": "SIGKILL"})
+                        except Exception as e:
+                            print(f"[{time.strftime(\"%c\")}] preStop: kill failed (SPDK may already be down): {e}")
+                        raise SystemExit(0)
 
+                    try:
                         print(f"[{time.strftime(\"%c\")}] preStop: Step 2 - Deleting NVMe-oF subsystems...")
                         # Get all NVMe-oF subsystems
                         subsystems = spdk_rpc("nvmf_get_subsystems") or []
