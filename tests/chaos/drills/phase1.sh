@@ -41,8 +41,10 @@ wait_acks_fresh() { # [budget_s] — until the ledger is acking again
 }
 
 spdk_restarts() { # <node>
+  # spdk-tgt is a native-sidecar INIT container: it reports under
+  # initContainerStatuses, never containerStatuses.
   kubectl get pod -n "$DRIVER_NS" "$(csi_node_pod "$1")" \
-    -o jsonpath='{.status.containerStatuses[?(@.name=="spdk-tgt")].restartCount}' 2>/dev/null
+    -o jsonpath='{.status.initContainerStatuses[?(@.name=="spdk-tgt")].restartCount}' 2>/dev/null
 }
 
 CORDONED=""; TAINTED=""; DEAD_IID=""
@@ -152,7 +154,9 @@ case "$DRILL" in
   IID=$(instance_id_for_node "$PRE_NODE")
   [ -n "$IID" ] || fail "no instance id for $PRE_NODE"
   SPDK_PRE=$(spdk_restarts "$PRE_NODE")
-  ssm_run "$IID" "pkill -9 -x spdk_tgt || crictl ps --name spdk-tgt -q | xargs -r crictl stop -t 0" >/dev/null
+  # SPDK renames its main thread to reactor_0, so comm-matching (-x) never
+  # hits; match the cmdline (the hosts have no crictl, so no fallback).
+  ssm_run "$IID" "pkill -9 -f /usr/local/bin/spdk_tgt" >/dev/null
   note "spdk-tgt SIGKILL sent via SSM to $IID"
   for i in $(seq 1 24); do
     [ "$(spdk_restarts "$PRE_NODE")" != "$SPDK_PRE" ] && break; sleep 5
