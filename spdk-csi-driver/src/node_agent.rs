@@ -3099,12 +3099,49 @@ impl NodeAgent {
             match self.ensure_ublk_disk(*id, bdev, Some(&live)).await {
                 Ok(_) => {}
                 Err(e) => {
+                    // A registry entry can outlive its volume (teardown
+                    // racing a DS roll leaves the in-memory map stale) —
+                    // then the rebuild ENODEVs forever. Reap the entry
+                    // when its bdev is gone AND no live PV claims the id.
+                    if !self.bdev_exists(bdev).await
+                        && !self.ublk_id_claimed_by_any_pv(*id).await
+                    {
+                        self.expected_ublk.lock().await.remove(id);
+                        self.expected_remote.lock().await.remove(bdev);
+                        info!(ublk_id = id, bdev = %bdev,
+                            "[UBLK-DETECTOR] reaped stale registry entry (no live PV claims this id)");
+                        continue;
+                    }
                     warn!(ublk_id = id, bdev = %bdev, error = %e,
                         "[UBLK-DETECTOR] disk rebuild failed (will retry)")
                 }
             }
         }
         Ok(())
+    }
+
+    /// Does any live flint PV claim this ublk id? Checks the stage-time
+    /// annotation first, then the stable-hash fallback (mirrors
+    /// resolve_ublk_id). Errs on the side of "claimed" when the API is
+    /// unreachable — never reap on a blind tick.
+    async fn ublk_id_claimed_by_any_pv(&self, id: u32) -> bool {
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let list = match pvs.list(&Default::default()).await {
+            Ok(l) => l,
+            Err(_) => return true,
+        };
+        for pv in &list.items {
+            let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else {
+                continue;
+            };
+            if csi.driver != "flint.csi.storage.io" {
+                continue;
+            }
+            if self.resolve_ublk_id(pv, &csi.volume_handle) == id {
+                return true;
+            }
+        }
+        false
     }
 
     async fn monitor_raid_health(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -3544,15 +3581,19 @@ impl NodeAgent {
         volume_handle: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let pv_name = pv.metadata.name.as_deref().unwrap_or(volume_handle);
-        if pv
+        // ublk frontend: with UBLK_F_USER_RECOVERY (kernel 6.18+, SPDK
+        // v26.05) the kernel device SURVIVES spdk-tgt death quiesced and
+        // the mount lives — the raid chain beneath it is what needs
+        // rebuilding, then ublk_recover_disk re-binds in place. (The old
+        // blanket "restage required" refusal predates USER_RECOVERY and
+        // left r2 ublk volumes dead forever while the 10s detector
+        // retried against a raid bdev nobody was rebuilding — 2u/2.2a.)
+        let ublk_id = pv
             .metadata
             .annotations
             .as_ref()
-            .map(|a| a.contains_key("flint.io/ublk-id"))
-            .unwrap_or(false)
-        {
-            return Err("ublk frontend — the device node died with spdk-tgt; restage required".into());
-        }
+            .and_then(|a| a.get("flint.io/ublk-id"))
+            .and_then(|v| v.parse::<u32>().ok());
         if !Self::is_staged_here(volume_handle) {
             return Err(
                 "volume not staged on this node per kubelet (VA lingering mid-detach?) — \
@@ -3582,6 +3623,15 @@ impl NodeAgent {
                 }))
                 .await;
             return Err("attachment left this node mid-repair — raid torn back down".into());
+        }
+
+        if let Some(id) = ublk_id {
+            // ublk frontend: no export to rebuild — recover the quiesced
+            // kernel device onto the reassembled raid (start is the
+            // fallback inside ensure_ublk_disk for a truly fresh node).
+            let live = self.snapshot_ublk_disks().await;
+            self.ensure_ublk_disk(id, &raid_bdev, live.as_ref()).await?;
+            return Ok(());
         }
 
         // Re-export the loopback subsystem: same NQN/listener/serial and
