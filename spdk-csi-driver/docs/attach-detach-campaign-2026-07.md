@@ -174,6 +174,56 @@ Verify oracle: step 4 is backend-aware (088cec0) — ublk mode checks the
 PV's ublk disk is served on the pod's node and counts orphaned
 disks/initiator controllers; there are no kernel nvme sessions to check.
 
+### The 1.9b saga — five runs, four root causes (U4 chain)
+
+The csi-node pod-delete drill took five runs to pass; each failure
+peeled a distinct layer. Recorded in run order:
+
+- **Run 1 (ublk.2, original preStop): FAIL.** The preStop's explicit
+  `ublk_stop_disk` sweep deleted the kernel gendisks under live mounts
+  on every graceful DS roll — a fresh start mints a NEW device the old
+  mount cannot follow (unlike nvmeof mode, where the kernel initiator
+  reconnects to the re-created export). First U4 fix: skip the sweep,
+  hard-kill SPDK instead.
+- **Run 2 (hard-kill preStop): FAIL — one level deeper.** spdk-tgt
+  1.5.0 (pre-F5) lost the LVOL on the dirty restart (LVS reloads with
+  lvols:0). **F5 is a HARD ublk-mode dependency**: every roll is now a
+  dirty tgt restart by design. tgt upgraded to 1.6.0-f5fix.1.
+  Corollary found cleaning up: a store damaged by a pre-F5 dirty kill
+  is POISONED — even f5fix cannot load it (bs_recover replays, vbdev
+  reports store-not-found, the LVS registers briefly then unregisters
+  terminally). Re-init is the only remedy (was provisionally called
+  F10; downgraded — clean-lineage stores reload fine, ~4s).
+- **Run 4 (clean store): FAIL — the kill was fake.** The preStop's
+  `spdk_kill_instance SIGKILL` is a silent no-op: spdk_tgt is the
+  container's PID 1, and a pid-namespace init ignores even SIGKILL
+  from inside its own namespace (the RPC returns true; nothing dies —
+  verified live: tgt and device survived the "kill"). k8s's SIGTERM
+  then ran the graceful fini, STOP_DEVing every disk. systemd swept
+  the dead mounts (BindsTo device units) and the restarted postgres
+  re-initdb'd onto the node's ROOT DISK — the harness looked healthy
+  while measuring the wrong disk (caught by the write-probe; a
+  PGDATA-on-ublk df gate now runs before every drill). Drill 1.9's
+  pkill worked all along because SSM signals from the HOST namespace.
+- **Run 5 (entrypoint trap wrapper, chart aefaea7): PASS, 18s stall,
+  zero pod action.** ublk mode now runs spdk_tgt as a CHILD of a bash
+  PID 1 whose TERM trap SIGKILLs it — every pod stop is an unclean tgt
+  death by construction. Devices quiesce, f5fix replays the dirty
+  store, the new agent logs `recovered quiesced kernel device (mount
+  preserved)`, and the ledger resumes on the SAME mount. All 7 db
+  checks green.
+
+Residuals filed: U6 — a recovery-impossible quiesced device (bdev
+gone) is an unmount tarpit: teardown wedges on statfs, lazy-detach
+lets the workload write to the underlying root-fs dir, and namespace
+deletion hangs on the residue (documented unblock recipe: rm the
+non-mountpoint volume dirs via SSM + force-delete the pod). Driver
+follow-up: NodeUnpublish should clear post-detach residue under
+block-backed volumes itself. Also: coredump storage disabled fleet-wide
+(a single spdk-tgt crash dumped 1.1GB onto an 8G root and tainted the
+node with DiskPressure); kernel devices of dead malloc probes linger
+quiescent until reboot (harmless).
+
 ### Leg A — same-node (pure ublk)
 
 | # | Result | Notes |
