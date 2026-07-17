@@ -282,6 +282,26 @@ replay), which the drill's acked-write ledger oracle checks — fs-level
 `-fy` answers can only drop data postgres never fsynced or can rebuild;
 if that assumption is ever wrong the oracle fails the drill.
 
+**Escalation validated + durability forensics (2026-07-17):** ublk.7's
+first retry on the wedged volume logged the full designed sequence
+(preen code 4 → `-fy` code 1 → mount), pg-0 Ready in 45s — driver-side
+A/B complete. The data verdict on that volume, however, was REAL loss:
+4,298 acked writes gone from the heap (mid-range hole ~18785..23082),
+every one of them fsync-acked BEFORE the drill (up to 19 min earlier).
+Redo stopped at the end of segment 0xAB; 0xAC was one of the
+fsck-cleared deleted-inode files — postgres treats the first unreadable
+WAL segment as end-of-WAL and silently discards the rest. pg_xact SLRU
+damage ("could not access status of transaction" under new load) makes
+the damage logical and unrepairable → volume condemned per the reset
+rule. Read: U8 is a DURABILITY bug, not just availability — a fleet
+that never fscks accumulates ext4 metadata divergence across dirty
+recoveries until fsync-durable files (WAL!) are destroyed at the
+metadata layer. The per-drill "all acked present" PASSes were true at
+their T0s. Full forensics:
+`tests/chaos/artifacts/1u-1.12-1784321057/fsck-escalation-forensics.md`.
+The clean 1.12u verdict comes from a fresh volume with fsck-on-stage
+active from first mount.
+
 ### Verdict
 
 ublk mode passes the full phase-1 matrix on the final stack
