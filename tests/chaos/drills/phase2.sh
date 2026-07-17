@@ -68,10 +68,11 @@ pre_r2() {
   need_env
   harness_healthy
   PRE_NODE=$(pg_node); PRE_UID=$(pg_uid); PRE_RESTARTS=$(pg_restarts)
+  PRE_ORPHANS=$(orphan_data_paths | grep -c . || true)
   PV=$(pg_pv)
   RAID_HOST=$PRE_NODE
   REMOTE=$(replica_nodes "$PV" | grep -v "^$RAID_HOST$" | head -1)
-  export PRE_NODE PRE_UID PRE_RESTARTS PV RAID_HOST REMOTE
+  export PRE_NODE PRE_UID PRE_RESTARTS PRE_ORPHANS PV RAID_HOST REMOTE
   T0=$(epoch)
   step "T0=$T0 pg-0 on $RAID_HOST (pv ${PV:0:24}…, remote leg: ${REMOTE:-NONE-FOUND})"
   step "raid state pre: $(raid_summary "$RAID_HOST" | head -2)"

@@ -261,7 +261,11 @@ orphan_ublk_paths() {
     done < <(flint_ublk_disks "$n")
     while read -r pv; do
       [ -n "$pv" ] || continue
-      echo "$live" | grep -qx "$pv" || echo "$n ctrl $pv"
+      # r2+ initiator controllers carry a _<replica-idx> suffix the PV
+      # name doesn't have — strip it before the live match (2u/2.1 false
+      # "nvme-leak" counted the live RAID leg as an orphan).
+      base=${pv%_[0-9]}
+      echo "$live" | grep -qx "$base" || echo "$n ctrl $pv"
     done < <(flint_spdk_controllers "$n")
   done
 }
