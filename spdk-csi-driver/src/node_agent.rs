@@ -48,6 +48,14 @@ pub struct NodeAgent {
     /// missing one directly — covering single-replica volumes (DS/MDS
     /// state.db, plain RWO) that the replica-only periodic reconcile skips.
     exported_targets: Arc<tokio::sync::Mutex<std::collections::HashMap<String, TargetExport>>>,
+    /// ublk-backend analog of `exported_targets`: ublk disks this node
+    /// should be serving, keyed by ublk id → backing bdev name (recorded on
+    /// create, dropped on stop, backfilled by ground-truth rehydration).
+    /// The fast loss-detector diffs the keys against `ublk_get_disks` and
+    /// recovers/restarts any missing disk — recovery first, because with
+    /// UBLK_F_USER_RECOVERY the kernel device (and the mount on top of it)
+    /// survives an spdk-tgt death waiting for a new server.
+    expected_ublk: Arc<tokio::sync::Mutex<std::collections::HashMap<u32, String>>>,
 }
 
 /// #1: the params to reconstruct one NVMe-oF export after spdk-tgt drops it.
@@ -78,6 +86,7 @@ impl NodeAgent {
             data_path_warned: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             exported_targets: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            expected_ublk: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -104,6 +113,7 @@ impl NodeAgent {
             data_path_warned: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
             controller_reap_strikes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             exported_targets: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            expected_ublk: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -284,6 +294,7 @@ impl NodeAgent {
         // (hard stop/restart), so recovery is seconds not up to a monitor
         // tick. Separate from the 60s monitor so its cadence is independent.
         let loss_agent = Arc::new(self.clone());
+        let loss_is_ublk = Self::ublk_backend();
         let loss_task = tokio::spawn(async move {
             let mut loss_interval = interval(Duration::from_secs(10));
             loss_interval.tick().await; // first tick immediate; skip it
@@ -291,6 +302,11 @@ impl NodeAgent {
                 loss_interval.tick().await;
                 if let Err(e) = loss_agent.reconcile_exports_if_lost().await {
                     debug!(error = %e, "[MONITOR] Export loss-detector failed (non-fatal)");
+                }
+                if loss_is_ublk {
+                    if let Err(e) = loss_agent.reconcile_ublk_if_lost().await {
+                        debug!(error = %e, "[MONITOR] ublk loss-detector failed (non-fatal)");
+                    }
                 }
             }
         });
@@ -1101,23 +1117,42 @@ impl NodeAgent {
         let method = request["method"].as_str().unwrap_or("ublk_start_disk");
         let params = &request["params"];
 
-        // Check if ublk device already exists (idempotency for ROX/RWX)
-        if let Some(ublk_id) = params["ublk_id"].as_u64() {
-            let device_path = format!("/dev/ublkb{}", ublk_id);
-            if std::path::Path::new(&device_path).exists() {
-                debug!(device_path, "[HTTP_API] ublk device already exists (idempotent)");
-                let success_response = json!({
-                    "result": device_path
-                });
-                return Ok(warp::reply::with_status(warp::reply::json(&success_response), StatusCode::OK));
-            }
+        // SPDK-aware idempotency (was: device-node existence alone — which
+        // reported success on a quiesced orphan whose spdk-tgt had died).
+        // ensure_ublk_disk consults live SPDK state, recovers a surviving
+        // kernel device, or starts fresh — and registers the disk with the
+        // fast loss-detector.
+        if let (Some(ublk_id), Some(bdev_name)) =
+            (params["ublk_id"].as_u64(), params["bdev_name"].as_str())
+        {
+            let live = node_agent.snapshot_ublk_disks().await;
+            return match node_agent
+                .ensure_ublk_disk(ublk_id as u32, bdev_name, live.as_ref())
+                .await
+            {
+                Ok(_) => {
+                    let success_response = json!({
+                        "result": format!("/dev/ublkb{}", ublk_id)
+                    });
+                    Ok(warp::reply::with_status(warp::reply::json(&success_response), StatusCode::OK))
+                }
+                Err(e) => {
+                    error!(error = %e, "[HTTP_API] ublk device creation failed");
+                    let error_response = json!({
+                        "success": false,
+                        "error": e.to_string()
+                    });
+                    Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR))
+                }
+            };
         }
-        
+
+        // Params incomplete — legacy passthrough.
         let ublk_rpc = json!({
             "method": method,
             "params": params
         });
-        
+
         match node_agent.disk_service.call_spdk_rpc(&ublk_rpc).await {
             Ok(response) => {
                 debug!("[HTTP_API] ublk device created successfully");
@@ -1144,6 +1179,11 @@ impl NodeAgent {
         // Extract method and params from request
         let method = request["method"].as_str().unwrap_or("ublk_stop_disk");
         let params = &request["params"];
+
+        // Deliberate stop: the loss-detector must not resurrect it.
+        if let Some(ublk_id) = params["ublk_id"].as_u64() {
+            node_agent.expected_ublk.lock().await.remove(&(ublk_id as u32));
+        }
 
         let ublk_rpc = json!({
             "method": method,
@@ -1783,6 +1823,7 @@ impl NodeAgent {
             match result {
                 Ok(_) => {
                     debug!("[FORCE_UNSTAGE] ublk device stopped");
+                    node_agent.expected_ublk.lock().await.remove(&ublk_id);
                     operations_performed.push(format!("Stopped ublk device {}", ublk_id));
                 }
                 Err(e) => {
@@ -2014,6 +2055,177 @@ impl NodeAgent {
         (ip, port)
     }
 
+    /// Kernel-facing block exposure backend. MUST mirror
+    /// `create_block_device`'s dispatch rule: anything except "nvmeof"
+    /// selects ublk.
+    fn backend_is_ublk_value(val: Option<&str>) -> bool {
+        val != Some("nvmeof")
+    }
+
+    fn ublk_backend() -> bool {
+        Self::backend_is_ublk_value(std::env::var("BLOCK_DEVICE_BACKEND").ok().as_deref())
+    }
+
+    /// Parse an `ublk_get_disks` result array into ublk id → bdev name.
+    /// Accepts both the RPC's `id` field and the config-dump `ublk_id`
+    /// spelling.
+    fn parse_ublk_disks(result: Option<&serde_json::Value>) -> std::collections::HashMap<u32, String> {
+        result
+            .and_then(|r| r.as_array())
+            .map(|disks| {
+                disks
+                    .iter()
+                    .filter_map(|d| {
+                        let id = d
+                            .get("id")
+                            .or_else(|| d.get("ublk_id"))
+                            .and_then(|i| i.as_u64())? as u32;
+                        let bdev = d.get("bdev_name").and_then(|b| b.as_str())?;
+                        Some((id, bdev.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// One live snapshot of SPDK's ublk disks. `None` when the RPC itself
+    /// fails (no ublk support, or no ublk target yet) — callers treat that
+    /// as "state unknown", not "no disks".
+    async fn snapshot_ublk_disks(&self) -> Option<std::collections::HashMap<u32, String>> {
+        self.disk_service
+            .call_spdk_rpc(&json!({ "method": "ublk_get_disks" }))
+            .await
+            .ok()
+            .map(|resp| Self::parse_ublk_disks(resp.get("result")))
+    }
+
+    /// Idempotent `ublk_create_target` — required once per spdk-tgt
+    /// process before any disk can be started or recovered. Startup does
+    /// this too, but a tgt that restarted UNDER a live agent needs it
+    /// re-issued from the reconcile paths.
+    async fn ensure_ublk_target(&self) {
+        match self
+            .disk_service
+            .call_spdk_rpc(&json!({ "method": "ublk_create_target", "params": {} }))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("already exists") && !msg.contains("File exists") {
+                    debug!(error = %msg, "[UBLK] ublk_create_target failed (will retry on next pass)");
+                }
+            }
+        }
+    }
+
+    /// ublk id for a staged volume: the stage-time PV annotation is the
+    /// authority (`flint.io/ublk-id`, written by store_block_device_info);
+    /// the stable volume-id hash is the fallback for PVs staged before the
+    /// annotation existed or whose patch was lost.
+    fn resolve_ublk_id(&self, pv: &PersistentVolume, volume_handle: &str) -> u32 {
+        pv.metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("flint.io/ublk-id"))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or_else(|| {
+                self.driver
+                    .generate_ublk_id(crate::identity::storage_id_of_handle(volume_handle))
+            })
+    }
+
+    /// Converge one ublk disk toward "served by this spdk-tgt". Recovery
+    /// first: with UBLK_F_USER_RECOVERY (kernel 6.18+, SPDK v26.05) the
+    /// kernel device survives an spdk-tgt death in quiesced state — the
+    /// filesystem mounted on it lives — and `ublk_recover_disk` re-binds
+    /// it without a consumer bounce. A fresh `ublk_start_disk` is the
+    /// fallback when no kernel device exists. Registers the disk in
+    /// `expected_ublk` on success so the fast loss-detector owns it.
+    /// Returns true when a mutation (recover or start) happened.
+    async fn ensure_ublk_disk(
+        &self,
+        ublk_id: u32,
+        bdev_name: &str,
+        live: Option<&std::collections::HashMap<u32, String>>,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(live_bdev) = live.and_then(|l| l.get(&ublk_id)) {
+            if live_bdev == bdev_name {
+                // Already served — just make sure the detector owns it.
+                self.expected_ublk
+                    .lock()
+                    .await
+                    .insert(ublk_id, bdev_name.to_string());
+                return Ok(false);
+            }
+            // Same id serving a different bdev: a 20-bit hash collision or
+            // foreign disk. Never stomp it.
+            return Err(format!(
+                "ublk id {} already serves bdev {} (wanted {}) — refusing to replace",
+                ublk_id, live_bdev, bdev_name
+            )
+            .into());
+        }
+
+        self.ensure_ublk_target().await;
+
+        let device_exists = std::path::Path::new(&format!("/dev/ublkb{}", ublk_id)).exists();
+        if device_exists {
+            match self
+                .disk_service
+                .call_spdk_rpc(&json!({
+                    "method": "ublk_recover_disk",
+                    "params": { "bdev_name": bdev_name, "ublk_id": ublk_id }
+                }))
+                .await
+            {
+                Ok(_) => {
+                    warn!(ublk_id, bdev = %bdev_name,
+                        "[UBLK] recovered quiesced kernel device (mount preserved)");
+                    self.expected_ublk
+                        .lock()
+                        .await
+                        .insert(ublk_id, bdev_name.to_string());
+                    return Ok(true);
+                }
+                Err(e) => {
+                    // Not recoverable (old kernel without USER_RECOVERY, or
+                    // a stale node) — fall through to a fresh start, which
+                    // the kernel rejects while the old device lingers; the
+                    // error surfaces to the caller for the next tick.
+                    debug!(ublk_id, error = %e, "[UBLK] recover failed — trying fresh start");
+                }
+            }
+        }
+
+        let num_queues = std::env::var("UBLK_NUM_QUEUES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(4);
+        let queue_depth = std::env::var("UBLK_QUEUE_DEPTH")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(256);
+        self.disk_service
+            .call_spdk_rpc(&json!({
+                "method": "ublk_start_disk",
+                "params": {
+                    "bdev_name": bdev_name,
+                    "ublk_id": ublk_id,
+                    "num_queues": num_queues,
+                    "queue_depth": queue_depth
+                }
+            }))
+            .await
+            .map_err(|e| format!("ublk_start_disk {} ({}): {}", ublk_id, bdev_name, e))?;
+        warn!(ublk_id, bdev = %bdev_name, "[UBLK] started ublk disk");
+        self.expected_ublk
+            .lock()
+            .await
+            .insert(ublk_id, bdev_name.to_string());
+        Ok(true)
+    }
+
     /// Whether `sub` (an `nvmf_get_subsystems` entry) already serves the
     /// desired export: a namespace (optionally backed by `want_bdev`), a
     /// listener on `want_traddr`, and — when a host is required — that
@@ -2125,6 +2337,12 @@ impl NodeAgent {
         let own_host = crate::nvmeof_export::flint_host_nqn(&self.node_name);
         let fencing = crate::nvmeof_export::fencing_enabled();
         let mut node_ip: Option<String> = None; // lazy; only cross-node exports need it
+        // ublk backend: one live-disk snapshot for the satisfied-checks
+        // (analog of the subsystems snapshot above). None ⇒ the RPC failed
+        // (fresh tgt without a ublk target object) ⇒ state unknown, every
+        // disk goes through ensure_ublk_disk.
+        let is_ublk = Self::ublk_backend();
+        let ublk_disks = if is_ublk { self.snapshot_ublk_disks().await } else { None };
 
         let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
         let mut rebuilt = 0usize;
@@ -2158,6 +2376,36 @@ impl NodeAgent {
             let sub = subsystems.get(&nqn);
 
             if storage_node == &self.node_name && consumer == &self.node_name {
+                if is_ublk {
+                    // ublk backend: the kernel consumes /dev/ublkb<id> on
+                    // the lvol bdev directly — no loopback export exists.
+                    let ublk_id = self.resolve_ublk_id(&pv, &csi.volume_handle);
+                    if let Some(bdev) = ublk_disks.as_ref().and_then(|l| l.get(&ublk_id)) {
+                        // Serving — backfill detector ownership (covers
+                        // agent-only restarts, like the seed pass does for
+                        // loopback exports).
+                        self.expected_ublk.lock().await.insert(ublk_id, bdev.clone());
+                        continue;
+                    }
+                    let bdev = match self.verify_local_lvol(lvol_uuid).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!(volume_id = %pv_name, error = %e,
+                                  "[REHYDRATE] lvol not loaded yet — retrying next tick");
+                            continue;
+                        }
+                    };
+                    match self.ensure_ublk_disk(ublk_id, &bdev, ublk_disks.as_ref()).await {
+                        Ok(true) => {
+                            warn!(ublk_id, volume_id = %pv_name,
+                                  "[REHYDRATE] rebuilt local ublk disk from ground truth");
+                            rebuilt += 1;
+                        }
+                        Ok(false) => {}
+                        Err(e) => warn!(ublk_id, error = %e, "[REHYDRATE] ublk rebuild failed"),
+                    }
+                    continue;
+                }
                 // Loopback export consumed by the local kernel initiator.
                 if Self::export_satisfied(sub, None, &local_ip, fencing.then_some(&own_host)) {
                     // Healthy — just make sure the loss-detector owns it
@@ -2253,6 +2501,37 @@ impl NodeAgent {
                     }
                 }
             } else if consumer == &self.node_name {
+                if is_ublk {
+                    // Hybrid path: NVMe-oF between nodes (SPDK initiator),
+                    // ublk for the kernel-facing exposure. Chain-liveness =
+                    // the nvme bdev exists (a dead remote attach drops it)
+                    // AND the ublk disk is served.
+                    let controller_name = crate::identity::initiator_controller_name(&nqn);
+                    let expected_bdev = format!("{}n1", controller_name);
+                    let ublk_id = self.resolve_ublk_id(&pv, &csi.volume_handle);
+                    let disk_ok = ublk_disks
+                        .as_ref()
+                        .map_or(false, |l| l.get(&ublk_id) == Some(&expected_bdev));
+                    if disk_ok && self.bdev_exists(&expected_bdev).await {
+                        self.expected_ublk.lock().await.insert(ublk_id, expected_bdev);
+                        continue;
+                    }
+                    let outcome = match self.ensure_remote_attach(&nqn, storage_node).await {
+                        Ok(bdev) => self.ensure_ublk_disk(ublk_id, &bdev, ublk_disks.as_ref()).await,
+                        Err(e) => Err(e),
+                    };
+                    match outcome {
+                        Ok(true) => {
+                            warn!(nqn = %nqn, storage_node = %storage_node, ublk_id,
+                                  "[REHYDRATE] rebuilt remote-consumer ublk chain from ground truth");
+                            rebuilt += 1;
+                        }
+                        Ok(false) => {}
+                        Err(e) => warn!(nqn = %nqn, error = %e,
+                              "[REHYDRATE] remote ublk chain rebuild failed (will retry)"),
+                    }
+                    continue;
+                }
                 // Staged here, stored remotely: rebuild the SPDK initiator
                 // chain (remote attach) + the loopback re-export the
                 // surviving kernel session is reconnect-looping toward.
@@ -2288,19 +2567,35 @@ impl NodeAgent {
         nqn: &str,
         storage_node: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let controller_name = crate::identity::initiator_controller_name(nqn);
-        let expected_bdev = format!("{}n1", controller_name);
+        let expected_bdev = self.ensure_remote_attach(nqn, storage_node).await?;
+        let (ip, port) = Self::local_export_endpoint();
+        self.ensure_export_for(nqn, &expected_bdev, &ip, port).await
+    }
 
-        let have_bdev = self
-            .disk_service
+    async fn bdev_exists(&self, name: &str) -> bool {
+        self.disk_service
             .call_spdk_rpc(&json!({
                 "method": "bdev_get_bdevs",
-                "params": { "name": expected_bdev }
+                "params": { "name": name }
             }))
             .await
             .ok()
             .and_then(|r| r.get("result").and_then(|v| v.as_array()).map(|a| !a.is_empty()))
-            .unwrap_or(false);
+            .unwrap_or(false)
+    }
+
+    /// Ensure the SPDK-initiator attach to `storage_node`'s export for
+    /// `nqn` is alive; returns the namespace bdev name (`nvme_…n1`) both
+    /// backends layer their kernel exposure on.
+    async fn ensure_remote_attach(
+        &self,
+        nqn: &str,
+        storage_node: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let controller_name = crate::identity::initiator_controller_name(nqn);
+        let expected_bdev = format!("{}n1", controller_name);
+
+        let have_bdev = self.bdev_exists(&expected_bdev).await;
         if !have_bdev {
             // A controller without its bdev is dead weight from a previous
             // life — replace it (mirrors connect_to_nvmeof_target).
@@ -2344,8 +2639,7 @@ impl NodeAgent {
                 .await
                 .map_err(|e| format!("remote attach {}: {}", nqn, e))?;
         }
-        let (ip, port) = Self::local_export_endpoint();
-        self.ensure_export_for(nqn, &expected_bdev, &ip, port).await
+        Ok(expected_bdev)
     }
 
     /// #1 fast loss-detector: if SPDK is missing any NQN this node believes
@@ -2630,6 +2924,39 @@ impl NodeAgent {
     /// healthy → clear the annotation. volumeAttributes are immutable, so
     /// the mutable annotation is the channel (same pattern as
     /// `filesystem-initialized`).
+    /// ublk analog of `reconcile_exports_if_lost`: if SPDK is missing a
+    /// ublk disk this node believes it serves (spdk-tgt restarted), recover
+    /// or restart it IMMEDIATELY — the quiesced kernel device is holding
+    /// the mounted filesystem open waiting for a new server, and every
+    /// second in that state is application I/O stall.
+    async fn reconcile_ublk_if_lost(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let expected = self.expected_ublk.lock().await.clone();
+        if expected.is_empty() {
+            return Ok(());
+        }
+        let live = match self.snapshot_ublk_disks().await {
+            Some(l) => l,
+            None => {
+                // RPC failed — a fresh tgt has no ublk target object yet.
+                self.ensure_ublk_target().await;
+                std::collections::HashMap::new()
+            }
+        };
+        for (id, bdev) in &expected {
+            if live.contains_key(id) {
+                continue;
+            }
+            match self.ensure_ublk_disk(*id, bdev, Some(&live)).await {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(ublk_id = id, bdev = %bdev, error = %e,
+                        "[UBLK-DETECTOR] disk rebuild failed (will retry)")
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn monitor_raid_health(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let payload = json!({
             "method": "bdev_raid_get_bdevs",
@@ -3767,6 +4094,7 @@ impl Clone for NodeAgent {
             data_path_warned: self.data_path_warned.clone(),
             controller_reap_strikes: self.controller_reap_strikes.clone(),
             exported_targets: self.exported_targets.clone(),
+            expected_ublk: self.expected_ublk.clone(),
         }
     }
 }
@@ -3891,5 +4219,49 @@ mod rehydrate_tests {
         // re-created) — not satisfied, ensure_export must converge it.
         let s = sub(Some("stale"), Some("127.0.0.1"), &["hostA"], false);
         assert!(!NodeAgent::export_satisfied(Some(&s), Some("lvol1"), "127.0.0.1", Some("hostA")));
+    }
+
+    #[test]
+    fn backend_selector_mirrors_create_block_device() {
+        // create_block_device: "nvmeof" is the ONLY value selecting the
+        // loopback backend; unset/anything-else means ublk.
+        assert!(NodeAgent::backend_is_ublk_value(None));
+        assert!(NodeAgent::backend_is_ublk_value(Some("ublk")));
+        assert!(NodeAgent::backend_is_ublk_value(Some("garbage")));
+        assert!(!NodeAgent::backend_is_ublk_value(Some("nvmeof")));
+    }
+
+    #[test]
+    fn parse_ublk_disks_reads_rpc_shape() {
+        // Real `ublk_get_disks` items carry `id` + `bdev_name` (+ extras).
+        let r = json!([
+            {"ublk_device": "/dev/ublkb7", "id": 7, "queue_depth": 512, "num_queues": 4, "bdev_name": "lvolA"},
+            {"ublk_device": "/dev/ublkb9", "id": 9, "bdev_name": "nvme_x_n1"}
+        ]);
+        let m = NodeAgent::parse_ublk_disks(Some(&r));
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.get(&7).map(String::as_str), Some("lvolA"));
+        assert_eq!(m.get(&9).map(String::as_str), Some("nvme_x_n1"));
+    }
+
+    #[test]
+    fn parse_ublk_disks_accepts_config_dump_spelling_and_skips_partials() {
+        // Config-dump entries say `ublk_id`; entries missing an id or bdev
+        // must be skipped, not panic or map to junk.
+        let r = json!([
+            {"ublk_id": 3, "bdev_name": "b3"},
+            {"id": 4},
+            {"bdev_name": "orphan"}
+        ]);
+        let m = NodeAgent::parse_ublk_disks(Some(&r));
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get(&3).map(String::as_str), Some("b3"));
+    }
+
+    #[test]
+    fn parse_ublk_disks_tolerates_absent_or_non_array() {
+        assert!(NodeAgent::parse_ublk_disks(None).is_empty());
+        let not_array = json!({"unexpected": true});
+        assert!(NodeAgent::parse_ublk_disks(Some(&not_array)).is_empty());
     }
 }

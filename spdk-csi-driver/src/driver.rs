@@ -2590,14 +2590,17 @@ impl SpdkCsiDriver {
     /// unstage — a live raid's claims cannot be converged around later.
     /// Subsystem and controller cleanup are best-effort.
     pub async fn teardown_volume_spdk_state(&self, volume_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // 1. Loopback subsystem (idempotent; absent for never-staged volumes)
+        // 1. Loopback subsystem (idempotent; absent for never-staged volumes).
+        // Through the GUARDED endpoint, not a raw nvmf_delete_subsystem: this
+        // runs during NodeUnstage, where the F9 guard must decide whether the
+        // subsystem is still serving a cross-node consumer (a stale unstage
+        // after force-detach + re-attach would otherwise kill the live
+        // export — the raw RPC here bypassed the guard placed on the
+        // delete_nvmeof path).
         let loopback_nqn = crate::identity::volume_nqn(volume_id);
-        let delete_subsystem = json!({
-            "method": "nvmf_delete_subsystem",
-            "params": { "nqn": loopback_nqn }
-        });
-        match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &delete_subsystem).await {
-            Ok(_) => println!("✅ [DRIVER] Loopback subsystem deleted: {}", loopback_nqn),
+        let delete_body = json!({ "nqn": loopback_nqn });
+        match self.call_node_agent(&self.node_id, "/api/blockdev/delete_nvmeof", &delete_body).await {
+            Ok(_) => println!("✅ [DRIVER] Loopback subsystem cleanup done (guarded): {}", loopback_nqn),
             Err(e) => println!("ℹ️ [DRIVER] Loopback subsystem not deleted (may not exist): {}", e),
         }
 
