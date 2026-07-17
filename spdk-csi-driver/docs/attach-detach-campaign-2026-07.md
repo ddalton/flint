@@ -50,10 +50,28 @@ _Results table filled from `tests/chaos/results.csv` as drills complete._
 
 | # | Kill vector | Ready | Stall | Verdict | Notes |
 |---|---|---|---|---|---|
-| 1.1 | in-container postmaster SIGKILL | 22s | 22s | PASS | in-place restart, zero CSI calls, DB recovered |
-| 1.2 | graceful pod delete | 6s | 6s | PASS | same-node replace, clean shutdown |
-| 1.3 | force delete (`--grace-period=0 --force`) | — | — | **FAIL (P0)** | postgres unrecoverable: WAL redo segments missing; see Finding F1 |
-| 1.4–1.15 | — | | | NOT RUN | campaign paused after F1 |
+| 1.1 | in-container postmaster SIGKILL | 22s | 22s | PASS | runs; repro'd on runt — in-place restart, zero CSI calls |
+| 1.2 | graceful pod delete | 11s | 9s | PASS | runt, F5-fixed bits; clean shutdown |
+| 1.3 | force delete (`--grace-period=0 --force`) | 6s | 3s | CSI PASS / db N/A | DB corruption = expected F1 semantics (bar re-scoped to CSI hygiene); runt |
+| 1.4 | cordon + delete, cross-node | 27s | 24s | **INVALIDATED** | ran on 1.3's corrupted DB without reset — see "verify contamination" below; rerun required |
+| 1.5 | drain | 954s | 19s | **INVALIDATED** | PASS on paper, but same contaminated lineage; rerun required |
+| 1.6–1.15 | — | | | NOT RUN | resume on fresh cluster (runt deleted 2026-07-16) |
+
+### Verify contamination across drills (2026-07-13 batch — 1.4/1.5 verdicts invalidated)
+
+The 1.3→1.4→1.5 batch ran back-to-back with **no harness reset**: the
+inter-drill health gate (pg-0 Ready + ledger acking) passed even though 1.3's
+by-design two-postmaster overlap had corrupted the DB (amcheck FAIL). Both
+1.3's and 1.4's verifies reported the **identical** 93 missing acked seqs
+(2477…) — and 1.5's verify then found **all 20,471 acked writes present**,
+including those 93, on the same uninterrupted ledger lineage. Genuine storage
+loss cannot un-lose writes; delayed visibility of the doomed postmaster's
+flushed-but-orphaned commits (shared PGDATA, shutdown checkpoint racing the
+replacement's recovery) can. Conclusion: 1.4's "LOST ACKED WRITES" is 1.3
+residue, not a cross-node-migration bug — but the only honest verdict is a
+rerun. **Rule adopted: any drill whose expected outcome includes DB corruption
+(1.3, ☠ drills) is followed by a mandatory `deploy-harness.sh reset` before
+the next drill's T0.**
 
 ## Phase 2 — RWO, numReplicas=2 (RAID1)
 
@@ -382,6 +400,17 @@ instead of failing the store). Recorded as follow-up work.
   (a controller stuck `connecting` for a deleted PV, 1800s ctrl-loss-tmo).
   Cleaned before drills; flagged to reproduce deliberately in the churn drill
   (1.10) to determine whether flint leaks NVMe sessions on rapid volume delete.
+
+## Patch hygiene (2026-07-16)
+
+The F5 fix was developed on a throwaway `f5fix` branch in the local spdk
+checkout, then exported to the repo's patch files. Per project policy the
+patch files are the only artifact: applying `nvmf-hostlog` + `ublk-debug` +
+`blob-recovery-batched` + `lvol-flush-sync` onto pristine **v26.05**
+(d519b163c, the latest SPDK release; `Dockerfile.spdk` pins `git checkout
+v26.05`) was verified byte-identical to the branch on every touched file, and
+the branch was deleted. `spdk-tgt` is rebuilt from the committed Dockerfile +
+patches alone (tag `1.6.0-f5fix.1`) to prove the patch-only path end-to-end.
 
 ## Teardown
 
