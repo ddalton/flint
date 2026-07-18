@@ -792,6 +792,11 @@ const FATTR4_TIME_MODIFY: u32 = 53;
 const FATTR4_TIME_MODIFY_SET: u32 = 54;
 const FATTR4_MOUNTED_ON_FILEID: u32 = 55;
 const FATTR4_SUPPATTR_EXCLCREAT: u32 = 75;
+/// RFC 8881 §5.8.2.2 — how the server's CHANGE attribute behaves. We
+/// advertise NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR (0): change_counter
+/// guarantees strictly increasing values per mutation, which lets the
+/// kernel client ORDER attribute replies and discard stale ones (F14).
+const FATTR4_CHANGE_ATTR_TYPE: u32 = 79; // word 2, bit 15
 
 // pNFS attributes (RFC 8881 Section 5.12)
 // NOTE: Using Linux kernel attribute numbers (not RFC 8881 numbers!)
@@ -1166,7 +1171,11 @@ fn encode_attributes_from_snapshot(
                 let supported = SUPPORTED_ATTRS_BITMAP;
                 let word0 = (supported & 0xFFFFFFFF) as u32;
                 let mut word1 = (supported >> 32) as u32;
-                let mut word2 = 0u32;
+                // Word 2 always carries CHANGE_ATTR_TYPE (attr 79): without
+                // it the client cannot ORDER attr replies by the change
+                // value — an out-of-order GETATTR reply with a stale size
+                // is applied newest-received (F14's visible half).
+                let mut word2 = 1u32 << (FATTR4_CHANGE_ATTR_TYPE % 32);
 
                 // Only advertise pNFS attributes if pNFS is enabled
                 if pnfs_enabled {
@@ -1175,20 +1184,19 @@ fn encode_attributes_from_snapshot(
                     word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
                 }
 
-                // Encode as bitmap4 (3 words if pNFS enabled, 2 words otherwise)
-                if pnfs_enabled {
-                    attr_vals.put_u32(3); // array length
-                    attr_vals.put_u32(word0);  // word 0
-                    attr_vals.put_u32(word1);  // word 1 (may include attr 62)
-                    attr_vals.put_u32(word2);  // word 2 (may include attr 65)
-                    debug!("  SUPPORTED_ATTRS: 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}] (pNFS enabled)", word0, word1, word2);
-                    debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
-                } else {
-                    attr_vals.put_u32(2); // array length (no word2 needed)
-                    attr_vals.put_u32(word0);  // word 0
-                    attr_vals.put_u32(word1);  // word 1
-                    debug!("  SUPPORTED_ATTRS: 2 words [0x{:08x}, 0x{:08x}] (pNFS disabled)", word0, word1);
-                }
+                attr_vals.put_u32(3); // array length
+                attr_vals.put_u32(word0);
+                attr_vals.put_u32(word1);
+                attr_vals.put_u32(word2);
+                debug!("  SUPPORTED_ATTRS: 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}] (pnfs={})", word0, word1, word2, pnfs_enabled);
+                true
+            }
+            FATTR4_CHANGE_ATTR_TYPE => {
+                // NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR: the change_counter
+                // guarantees strictly increasing values per mutation, so
+                // the client may discard replies whose change is older.
+                attr_vals.put_u32(0);
+                debug!("  Attr {}: CHANGE_ATTR_TYPE=MONOTONIC_INCR", attr_id);
                 true
             }
             FATTR4_MAXREAD => {
@@ -1412,7 +1420,8 @@ fn encode_pseudo_root_attribute(
             let supported = SUPPORTED_ATTRS_BITMAP;
             let word0 = (supported & 0xFFFFFFFF) as u32;
             let mut word1 = (supported >> 32) as u32;
-            let mut word2 = 0u32;
+            // Attr 79 always advertised — see the file-attr arm (F14).
+            let mut word2 = 1u32 << (FATTR4_CHANGE_ATTR_TYPE % 32);
 
             // Only advertise pNFS attributes if pNFS is enabled
             if pnfs_enabled {
@@ -1421,20 +1430,18 @@ fn encode_pseudo_root_attribute(
                 word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
             }
 
-            // Encode as bitmap4 (3 words if pNFS enabled, 2 words otherwise)
-            if pnfs_enabled {
-                buf.put_u32(3); // array length: 3 words
-                buf.put_u32(word0);   // word 0 (attrs 0-31)
-                buf.put_u32(word1);   // word 1 (attrs 32-63, may include attr 62)
-                buf.put_u32(word2);   // word 2 (attrs 64-95, may include attr 65)
-                debug!("  SUPPORTED_ATTRS (pseudo-root): 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}] (pNFS enabled)", word0, word1, word2);
-                debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
-            } else {
-                buf.put_u32(2); // array length: 2 words (no word2 needed)
-                buf.put_u32(word0);   // word 0 (attrs 0-31)
-                buf.put_u32(word1);   // word 1 (attrs 32-63)
-                debug!("  SUPPORTED_ATTRS (pseudo-root): 2 words [0x{:08x}, 0x{:08x}] (pNFS disabled)", word0, word1);
-            }
+            buf.put_u32(3); // array length: 3 words
+            buf.put_u32(word0);   // word 0 (attrs 0-31)
+            buf.put_u32(word1);   // word 1 (attrs 32-63)
+            buf.put_u32(word2);   // word 2 (attrs 64-95)
+            debug!("  SUPPORTED_ATTRS (pseudo-root): 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}] (pnfs={})", word0, word1, word2, pnfs_enabled);
+            true
+        }
+        FATTR4_CHANGE_ATTR_TYPE => {
+            // The server-capabilities GETATTR arrives on the pseudo-root
+            // filehandle — this arm is what actually reaches the client's
+            // change_attr_type. MONOTONIC_INCR (change_counter, F14).
+            buf.put_u32(0);
             true
         }
         FATTR4_FS_LAYOUT_TYPES => {
@@ -1488,22 +1495,28 @@ fn encode_single_attribute(
             let supported = SUPPORTED_ATTRS_BITMAP;
             let word0 = (supported & 0xFFFFFFFF) as u32;
             let mut word1 = (supported >> 32) as u32;
-            let mut word2 = 0u32;
-            
+            // Attr 79 (CHANGE_ATTR_TYPE) always advertised — F14.
+            let mut word2 = 1u32 << (FATTR4_CHANGE_ATTR_TYPE % 32);
+
             // Add pNFS attributes (Linux kernel numbering)
             word1 |= 1 << (62 % 32);  // FS_LAYOUT_TYPES (attr 62, word 1, bit 30)
             word2 |= 1 << (65 % 32);  // LAYOUT_BLKSIZE (attr 65, word 2, bit 1)
-            
+
             // Encode as bitmap4 (3 words for attrs 0-95)
             buf.put_u32(3); // array length
             buf.put_u32(word0);  // word 0 (attrs 0-31)
             buf.put_u32(word1);  // word 1 (attrs 32-63, includes attr 62)
-            buf.put_u32(word2);  // word 2 (attrs 64-95, includes attr 65)
+            buf.put_u32(word2);  // word 2 (attrs 64-95, includes attrs 65+79)
             debug!("  SUPPORTED_ATTRS: 3 words [0x{:08x}, 0x{:08x}, 0x{:08x}]", word0, word1, word2);
-            debug!("    → pNFS: attr 62 (FS_LAYOUT_TYPES) in word 1, attr 65 (LAYOUT_BLKSIZE) in word 2");
             true
         }
-        
+
+        FATTR4_CHANGE_ATTR_TYPE => {
+            // NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR (change_counter, F14)
+            buf.put_u32(0);
+            true
+        }
+
         FATTR4_TYPE => {
             // File type: 1=regular, 2=directory, 3=block, 4=char, 5=symlink, 6=socket, 7=fifo
             let ftype = if metadata.is_dir() { 
