@@ -260,12 +260,18 @@ impl NodeAgent {
         let monitor_agent = Arc::new(self.clone());
         let monitor_task = tokio::spawn(async move {
             let mut monitor_interval = interval(Duration::from_secs(60));
+            // F11 store-loss strikes: lvs_name → consecutive missing ticks.
+            let mut store_strikes: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
             // First tick fires immediately; startup already reconciled.
             monitor_interval.tick().await;
             loop {
                 monitor_interval.tick().await;
                 if let Err(e) = monitor_agent.reconcile_replica_targets().await {
                     warn!(error = %e, "[MONITOR] Replica reconciliation failed (non-fatal)");
+                }
+                if let Err(e) = monitor_agent.check_store_health(&mut store_strikes).await {
+                    warn!(error = %e, "[MONITOR] Store health check failed (non-fatal)");
                 }
                 if let Err(e) = monitor_agent.rehydrate_exports_from_ground_truth().await {
                     warn!(error = %e, "[MONITOR] Export rehydration failed (non-fatal)");
@@ -2862,6 +2868,44 @@ impl NodeAgent {
         // controller (#2) reattaches to the same namespace.
         for nqn in &missing {
             if let Some(rec) = targets.get(nqn) {
+                // Parity with the ublk detector fast path: a REGISTERED
+                // export whose backing RAID bdev is missing is always a
+                // post-stage loss (entries only exist after a successful
+                // serve), so this tick may drive the full in-place repair
+                // directly — without it, ensure_export_for retries add_ns
+                // against a bdev that never comes back until the 60s
+                // 3-strike monitor finally repairs (~3min on nvmeof vs
+                // ~30s on ublk for the same kill).
+                if !self.bdev_exists(&rec.bdev_name).await {
+                    if let Some(volume_id) = crate::identity::parse_raid_name(&rec.bdev_name) {
+                        let pv_name = crate::identity::storage_id_of_handle(volume_id);
+                        let pvs: Api<PersistentVolume> =
+                            Api::all(self.driver.kube_client.clone());
+                        match pvs.get(&pv_name).await {
+                            Ok(pv) => {
+                                let handle = pv
+                                    .spec
+                                    .as_ref()
+                                    .and_then(|s| s.csi.as_ref())
+                                    .map(|c| c.volume_handle.clone())
+                                    .unwrap_or_else(|| volume_id.to_string());
+                                match self.repair_data_path(&pv, &handle).await {
+                                    Ok(()) => {
+                                        info!(nqn = %nqn, bdev = %rec.bdev_name,
+                                            "[NVME-RECOVERY #1] raid chain rebuilt in place (detector fast path)");
+                                        continue; // repair re-exported it
+                                    }
+                                    Err(e) => {
+                                        debug!(nqn = %nqn, bdev = %rec.bdev_name, error = %e,
+                                            "[NVME-RECOVERY #1] raid rebuild not ready (will retry)");
+                                        continue; // re-export cannot succeed without the bdev
+                                    }
+                                }
+                            }
+                            Err(_) => { /* PV gone or API blip — fall through to re-export */ }
+                        }
+                    }
+                }
                 if let Err(e) = self
                     .ensure_export_for(nqn, &rec.bdev_name, &rec.target_ip, rec.target_port)
                     .await
@@ -3202,6 +3246,187 @@ impl NodeAgent {
             }
         }
         false
+    }
+
+    /// F11 — store-loss detection + guarded self-heal. A blobstore that
+    /// fails to load after a dirty tgt restart (`blob_parse: Blobid
+    /// mismatch` class) presents as an UNINITIALIZED disk: the node
+    /// silently reports zero capacity while PVs still expect replica lvols
+    /// in the named store. Detection is ground truth (PVs whose replica
+    /// identities name this node's lvstores) vs live lvstores, confirmed
+    /// over 3 consecutive 60s ticks so a booting tgt / settling examine
+    /// never trips it; an RPC failure never counts (tgt-down ≠ store-lost).
+    ///
+    /// Self-heal: when FLINT_STORE_REINIT != "disabled" AND every volume
+    /// expecting the store is multi-replica (its data is rebuildable from
+    /// surviving legs — the r2/r3 value proposition), the store is
+    /// re-initialized in place over the corrupt remains (the live-validated
+    /// F11 remediation; lvs_name derives from node+PCI so the re-created
+    /// store gets the exact name the identities expect) and catch-up
+    /// full-builds the legs back. ANY single-replica expectation blocks
+    /// re-init — never destroy the only, possibly-recoverable copy.
+    async fn check_store_health(
+        &self,
+        strikes: &mut std::collections::HashMap<String, u32>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let node_uid = self.node_uid.read().await.clone();
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        // lvs_name → (PVs expecting it here, any single-replica expectation)
+        let mut expected: std::collections::HashMap<String, (Vec<String>, bool)> =
+            std::collections::HashMap::new();
+        for pv in pvs.list(&ListParams::default()).await?.items {
+            let Some(pv_name) = pv.metadata.name.clone() else { continue };
+            let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
+            if csi.driver != "flint.csi.storage.io" {
+                continue;
+            }
+            match crate::replica_sync::replicas_from_pv(&pv) {
+                Ok(Some(replicas)) => {
+                    for r in replicas.iter().filter(|r| {
+                        (!r.node_uid.is_empty() && r.node_uid == node_uid)
+                            || r.node_name == self.node_name
+                    }) {
+                        let e = expected.entry(r.lvs_name.clone()).or_default();
+                        e.0.push(pv_name.clone());
+                    }
+                }
+                _ => {
+                    let Some(attrs) = csi.volume_attributes.as_ref() else { continue };
+                    if attrs.get("flint.csi.storage.io/node-name").map(String::as_str)
+                        != Some(self.node_name.as_str())
+                    {
+                        continue;
+                    }
+                    if let Some(lvs) = attrs.get("flint.csi.storage.io/lvs-name") {
+                        let e = expected.entry(lvs.clone()).or_default();
+                        e.0.push(pv_name.clone());
+                        e.1 = true; // single replica: the only copy lives here
+                    }
+                }
+            }
+        }
+        if expected.is_empty() {
+            strikes.clear();
+            return Ok(());
+        }
+
+        let resp = self
+            .disk_service
+            .call_spdk_rpc(&json!({ "method": "bdev_lvol_get_lvstores" }))
+            .await?; // Err propagates: tgt unreachable is NOT store loss
+        let live: std::collections::HashSet<String> = resp
+            .get("result")
+            .and_then(|r| r.as_array())
+            .map(|stores| {
+                stores
+                    .iter()
+                    .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        strikes.retain(|lvs, _| expected.contains_key(lvs) && !live.contains(lvs));
+        for (lvs, (pv_names, has_single)) in &expected {
+            if live.contains(lvs) {
+                continue;
+            }
+            let n = strikes.entry(lvs.clone()).or_insert(0);
+            *n += 1;
+            if *n < 3 {
+                debug!(lvs = %lvs, strikes = *n, "[STORE-HEALTH] Expected lvstore missing (settling)");
+                continue;
+            }
+            error!(
+                lvs = %lvs,
+                pvs = ?pv_names,
+                "[STORE-HEALTH] F11: expected lvstore is missing — store lost or unloadable \
+                 (dirty-restart metadata corruption presents as an uninitialized disk)"
+            );
+            let reinit_enabled = std::env::var("FLINT_STORE_REINIT")
+                .map(|v| v != "disabled")
+                .unwrap_or(true);
+            if *has_single || !reinit_enabled {
+                for pv_name in pv_names {
+                    crate::replica_sync::emit_pv_event(
+                        &self.driver.kube_client,
+                        &self.node_name,
+                        pv_name,
+                        "Warning",
+                        "ReplicaStoreLost",
+                        &format!(
+                            "lvstore {} on {} is missing/unloadable; automatic re-init is {} — \
+                             manual remediation: bdev_lvol_create_lvstore over the disk (F11 recipe)",
+                            lvs,
+                            self.node_name,
+                            if *has_single { "blocked (single-replica volume expects its only copy here)" } else { "disabled" },
+                        ),
+                    )
+                    .await;
+                }
+                continue;
+            }
+            // Re-init target: the uninitialized disk whose derived lvs name
+            // matches. Ambiguity or a missing base bdev → events only.
+            let target = match self.disk_service.discover_local_disks_fast().await {
+                Ok(disks) => disks.into_iter().find(|d| {
+                    !d.blobstore_initialized
+                        && crate::identity::lvs_name(&self.node_name, &d.pci_address) == *lvs
+                }),
+                Err(e) => {
+                    warn!(lvs = %lvs, error = %e, "[STORE-HEALTH] Disk discovery failed — retry next tick");
+                    continue;
+                }
+            };
+            let Some(disk) = target else {
+                for pv_name in pv_names {
+                    crate::replica_sync::emit_pv_event(
+                        &self.driver.kube_client,
+                        &self.node_name,
+                        pv_name,
+                        "Warning",
+                        "ReplicaStoreLost",
+                        &format!(
+                            "lvstore {} on {} is missing and no matching uninitialized disk was \
+                             found — base device gone or renamed; manual intervention required",
+                            lvs, self.node_name
+                        ),
+                    )
+                    .await;
+                }
+                continue;
+            };
+            match self.disk_service.initialize_blobstore(&disk.pci_address).await {
+                Ok(created) => {
+                    warn!(
+                        lvs = %created,
+                        pci = %disk.pci_address,
+                        "[STORE-HEALTH] F11 self-heal: re-initialized lost store in place — \
+                         catch-up rebuilds the replica legs"
+                    );
+                    for pv_name in pv_names {
+                        crate::replica_sync::emit_pv_event(
+                            &self.driver.kube_client,
+                            &self.node_name,
+                            pv_name,
+                            "Warning",
+                            "ReplicaStoreReinitialized",
+                            &format!(
+                                "lvstore {} on {} was lost (dirty-restart corruption) and has been \
+                                 re-initialized empty; replica legs rebuild via catch-up",
+                                created, self.node_name
+                            ),
+                        )
+                        .await;
+                    }
+                    strikes.remove(lvs);
+                }
+                Err(e) => {
+                    error!(lvs = %lvs, pci = %disk.pci_address, error = %e,
+                        "[STORE-HEALTH] Store re-init failed — retry next tick");
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn monitor_raid_health(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
