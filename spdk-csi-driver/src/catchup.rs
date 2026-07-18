@@ -2227,14 +2227,17 @@ pub async fn run_catchup_for_volume(
 /// design item 4): a slow volume is simply skipped by later ticks until its
 /// task finishes, and cutover / hot-rejoin cannot land on it mid-copy.
 pub async fn run_catchup_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: CatchupConfig) {
+    let replace_cfg = crate::replica_replace::ReplaceConfig::from_env();
     info!(
         t_back_secs = cfg.t_back.as_secs(),
+        replace_enabled = replace_cfg.enabled,
+        replace_after_secs = replace_cfg.after.as_secs(),
         "[CATCHUP] Replica catch-up orchestrator started"
     );
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
-        if let Err(e) = orchestrator_tick(&driver, &cfg).await {
+        if let Err(e) = orchestrator_tick(&driver, &cfg, &replace_cfg).await {
             warn!(error = %e, "[CATCHUP] Orchestrator tick failed (non-fatal)");
         }
     }
@@ -2243,6 +2246,7 @@ pub async fn run_catchup_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: CatchupCo
 async fn orchestrator_tick(
     driver: &Arc<SpdkCsiDriver>,
     cfg: &CatchupConfig,
+    replace_cfg: &crate::replica_replace::ReplaceConfig,
 ) -> Result<(), RpcError> {
     use k8s_openapi::api::core::v1::PersistentVolume;
     use k8s_openapi::api::storage::v1::VolumeAttachment;
@@ -2301,10 +2305,29 @@ async fn orchestrator_tick(
         };
         let driver = driver.clone();
         let cfg = cfg.clone();
+        let replace_cfg = replace_cfg.clone();
         let consumer = consumers.get(&volume_id).cloned();
         tokio::spawn(async move {
             let _claim = claim; // released when this task ends, however it ends
             let store = KubeStore { client: driver.kube_client.clone() };
+            // U11 pre-pass: swap identities off permanently-lost nodes so
+            // this same tick's catch-up full-builds the replacement leg.
+            let replicas = match crate::replica_replace::maybe_replace_for_volume(
+                &driver,
+                &store,
+                &volume_id,
+                &replicas,
+                &replace_cfg,
+            )
+            .await
+            {
+                Ok(Some(swapped)) => swapped,
+                Ok(None) => replicas,
+                Err(e) => {
+                    warn!(volume_id, error = %e, "[REPLACE] Re-placement pass failed (non-fatal)");
+                    replicas
+                }
+            };
             if let Err(e) = run_catchup_for_volume(
                 driver.as_ref(),
                 &store,

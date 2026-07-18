@@ -152,6 +152,14 @@ replication:
   orchestrators:
     enabled: true
     epochIntervalSecs: 300   # test clusters run 30
+    # U11 replica re-placement: when a replica's node is permanently gone
+    # (Node object deleted, or NotReady for replicaReplaceAfterSecs), the
+    # controller re-places that leg on a healthy node with capacity and the
+    # catch-up full build restores redundancy — without it a volume that
+    # loses a node serves degraded forever. Per-volume opt-out: SC
+    # parameter autoRebuild: "false".
+    replicaReplaceEnabled: true
+    replicaReplaceAfterSecs: 600
 
 # Storage class configuration
 storageClass:
@@ -162,7 +170,7 @@ storageClass:
   allowVolumeExpansion: true
   parameters:
     numReplicas: "1"  # Single replica (default). "2"/"3" = RAID1 multi-replica HA (r2/r3 chaos-validated 2026-07: node loss serves from survivors; keep replication.orchestrators on)
-    autoRebuild: "true"
+    autoRebuild: "true"  # "false" opts this SC's volumes out of automatic replica re-placement after permanent node loss (U11); rebuild-on-return (catch-up) is unaffected
     thinProvision: "true"  # Thin provisioning (space allocated on write). Set to "false" for thick (full allocation up front; note: the first snapshot converts the head to thin and pins the full image — see docs/incremental-replica-rebuild.md §5)
     nfsEmptyDir: "false"  # Set to "true" for Kind/dev clusters (bypasses kernel block device requirement)
 

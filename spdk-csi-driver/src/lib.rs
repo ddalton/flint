@@ -13,6 +13,7 @@ pub mod nvme_recovery;  // Graceful recovery from spdk-tgt hard stop/restart (#1
 pub mod replica_sync;  // Persistent per-replica sync state on the PV (incremental-rebuild phase 1)
 pub mod epoch_scheduler;  // Common-epoch snapshot scheduler (incremental-rebuild phase 2)
 pub mod catchup;  // Replica catch-up orchestrator / warm standby + reassembly admission (incremental-rebuild phases 3/4)
+pub mod replica_replace;  // U11: replica re-placement after permanent node loss (pre-pass of the catch-up task)
 pub mod cutover;  // Reassembly cutover: RWX NFS-pod bounce + RWO policy knob (incremental-rebuild phase 4)
 pub mod driver;
 pub mod minimal_models;

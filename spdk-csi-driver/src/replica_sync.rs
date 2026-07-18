@@ -42,6 +42,14 @@ pub const SYNC_STATE_ANNOTATION: &str = "flint.csi.storage.io/replica-sync-state
 /// Immutable replica identity list, written by CreateVolume.
 pub const REPLICAS_ATTRIBUTE: &str = "flint.csi.storage.io/replicas";
 pub const REPLICA_COUNT_ATTRIBUTE: &str = "flint.csi.storage.io/replica-count";
+/// Mutable replica-identity override, written ONLY by the re-placement
+/// orchestrator (U11). PV spec.csi.volumeAttributes is API-immutable, so an
+/// identity swap after permanent node loss lives in metadata; every reader
+/// funnels through `raw_replicas_json`, which prefers this annotation.
+pub const REPLICAS_OVERRIDE_ANNOTATION: &str = "flint.csi.storage.io/replicas-override";
+/// autoRebuild StorageClass parameter, echoed into volumeAttributes by
+/// CreateVolume. "false" opts the volume out of replica re-placement.
+pub const AUTO_REBUILD_ATTRIBUTE: &str = "flint.csi.storage.io/auto-rebuild";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -806,7 +814,28 @@ pub fn is_rwx_pv(pv: &PersistentVolume) -> bool {
         .unwrap_or(false)
 }
 
-/// Extract the immutable replica identity list from a PV's volumeAttributes.
+/// The authoritative replica-identity JSON for this PV: the re-placement
+/// override annotation when present (identity swapped after permanent node
+/// loss, U11), else the immutable CreateVolume attribute.
+pub fn raw_replicas_json(pv: &PersistentVolume) -> Option<&String> {
+    if let Some(j) = pv
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(REPLICAS_OVERRIDE_ANNOTATION))
+    {
+        return Some(j);
+    }
+    pv.spec
+        .as_ref()?
+        .csi
+        .as_ref()?
+        .volume_attributes
+        .as_ref()?
+        .get(REPLICAS_ATTRIBUTE)
+}
+
+/// Extract the replica identity list from a PV (override-aware).
 /// Ok(None) for single-replica volumes (no sync record applies).
 pub fn replicas_from_pv(
     pv: &PersistentVolume,
@@ -830,9 +859,8 @@ pub fn replicas_from_pv(
         return Ok(None);
     }
 
-    let replicas_json = attrs
-        .get(REPLICAS_ATTRIBUTE)
-        .ok_or("Multi-replica volume missing replicas attribute")?;
+    let replicas_json =
+        raw_replicas_json(pv).ok_or("Multi-replica volume missing replicas attribute")?;
     let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)?;
     Ok(Some(replicas))
 }

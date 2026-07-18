@@ -48,8 +48,7 @@ spec:
             # hot rejoin). REQUIRED for multi-replica StorageClasses: with
             # them off, a leg that fails out mid-serve is never marked
             # stale, and the next raid reassembly re-admits it as an equal
-            # read source — silent rollback of acked writes (chaos F10:
-            # 1,077 fsync-acked writes lost on a node-kill + migration).
+            # read source — a silent-rollback hazard for acked writes.
             - name: FLINT_EPOCH_SCHEDULER
               value: "enabled"
             - name: FLINT_CATCHUP
@@ -58,6 +57,16 @@ spec:
               value: "enabled"
             - name: FLINT_EPOCH_INTERVAL_SECS
               value: {{ .Values.replication.orchestrators.epochIntervalSecs | default 300 | quote }}
+            # U11 replica re-placement: swaps a leg off a permanently-lost
+            # node (Node deleted, or NotReady past the threshold) onto a
+            # healthy one; the catch-up full build restores redundancy.
+            # Lives inside this block because it is useless without
+            # catch-up. Explicit string compare — Helm's `default` treats
+            # a user's `false` as unset.
+            - name: FLINT_REPLICA_REPLACE
+              value: {{ eq (.Values.replication.orchestrators.replicaReplaceEnabled | toString) "false" | ternary "disabled" "enabled" | quote }}
+            - name: FLINT_REPLICA_REPLACE_AFTER_SECS
+              value: {{ .Values.replication.orchestrators.replicaReplaceAfterSecs | default 600 | quote }}
             {{- end }}
             {{- if .Values.dashboard.enabled }}
             - name: ENABLE_DASHBOARD

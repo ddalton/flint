@@ -1264,6 +1264,16 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     result.replicas.len().to_string(),
                 );
 
+                // autoRebuild SC parameter → PV attribute: the per-volume
+                // gate for the replica re-placement orchestrator (U11).
+                // Absent means enabled; only "false" opts a volume out.
+                if let Some(auto_rebuild) = req.parameters.get("autoRebuild") {
+                    volume_context.insert(
+                        spdk_csi_driver::replica_sync::AUTO_REBUILD_ATTRIBUTE.to_string(),
+                        auto_rebuild.clone(),
+                    );
+                }
+
                 if result.replicas.len() == 1 {
                     // SINGLE REPLICA: Store simple metadata
                     let replica = &result.replicas[0];

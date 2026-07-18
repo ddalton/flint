@@ -1504,21 +1504,24 @@ impl SpdkCsiDriver {
             if let Some(spec) = &pv.spec {
                 if let Some(csi) = &spec.csi {
                     if csi.volume_handle == volume_id {
-                        // Found PV - check for replica annotations
-                        if let Some(attrs) = &csi.volume_attributes {
-                            // Gate on the replicas attribute itself, not the
-                            // count: a volume restored from a multi-replica
-                            // snapshot carries ONE replica entry but must
-                            // still stage through the raid path — its clone
-                            // holds the source raid's superblock, so the
-                            // filesystem sits at the raid data offset (§11;
-                            // live-cluster regression 2026-06-12). Legacy
-                            // single-replica volumes never have this field.
-                            if let Some(replicas_json) = attrs.get("flint.csi.storage.io/replicas") {
-                                let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)?;
-                                return Ok(Some(replicas));
-                            }
+                        // Gate on the replicas attribute itself, not the
+                        // count: a volume restored from a multi-replica
+                        // snapshot carries ONE replica entry but must
+                        // still stage through the raid path — its clone
+                        // holds the source raid's superblock, so the
+                        // filesystem sits at the raid data offset (§11;
+                        // live-cluster regression 2026-06-12). Legacy
+                        // single-replica volumes never have this field.
+                        // Override-aware (U11): a re-placed identity in the
+                        // annotation supersedes the immutable attribute.
+                        if let Some(replicas_json) =
+                            crate::replica_sync::raw_replicas_json(&pv)
+                        {
+                            let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)?;
+                            return Ok(Some(replicas));
+                        }
 
+                        if csi.volume_attributes.is_some() {
                             // No replicas field: legacy bare-lvol volume
                             return Ok(None);
                         }
@@ -1671,7 +1674,7 @@ impl SpdkCsiDriver {
     }
 
     /// Parse Kubernetes quantity string (e.g., "1Gi", "500Mi") to bytes
-    fn parse_quantity(quantity_str: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn parse_quantity(quantity_str: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let quantity_str = quantity_str.trim();
         
         // Simple parser for common cases
@@ -1928,6 +1931,19 @@ impl SpdkCsiDriver {
             );
             self.set_pv_annotation(&record_volume_id, "flint.io/degraded-direct", Some(current_node))
                 .await;
+            crate::replica_sync::emit_pv_event(
+                &self.kube_client,
+                current_node,
+                &record_volume_id,
+                "Warning",
+                "DegradedDirectServe",
+                &format!(
+                    "Serving the single surviving replica DIRECT on {} (1 of {} legs, no raid \
+                     layer); redundancy restores via replica re-placement + catch-up",
+                    current_node, total_replicas
+                ),
+            )
+            .await;
             direct
         } else {
             // Create RAID 1 bdev with available replicas
@@ -1938,6 +1954,19 @@ impl SpdkCsiDriver {
 
             if unavailable_count > 0 {
                 println!("⚠️ [DRIVER] RAID 1 bdev created in DEGRADED mode: {}", name);
+                crate::replica_sync::emit_pv_event(
+                    &self.kube_client,
+                    current_node,
+                    &record_volume_id,
+                    "Warning",
+                    "DegradedAssembly",
+                    &format!(
+                        "RAID1 assembled DEGRADED on {}: {} of {} legs ({} unavailable); \
+                         missing legs heal via catch-up or re-placement",
+                        current_node, available_count, total_replicas, unavailable_count
+                    ),
+                )
+                .await;
             } else {
                 println!("✅ [DRIVER] RAID 1 bdev created: {}", name);
             }
