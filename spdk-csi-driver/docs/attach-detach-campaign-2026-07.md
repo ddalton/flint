@@ -627,6 +627,53 @@ runw-aws-6 added via the validated manual clone recipe (~12min:
 SSM+IMDS userdata fetch, WG stripped, kernel swap, lvstore init
 verified).
 
+**F16 (P2 infra event, UNREPRODUCED — needs a dedicated drill):
+aws-4's blobstore refused to load after harness teardown + DS roll.**
+On the u11.5 rollout (zero PVs, zero attachments), aws-4's spdk-tgt
+re-examine failed: `blob_parse: Blobid (0x100000000) doesn't match
+what's in metadata (0x100000005)` → super blob unreadable → lvstore
+not found. aws-3/aws-6 re-examined cleanly through the identical roll.
+Timing: the mass lvol deletion of harness teardown completed minutes
+before the tgt SIGTERM — suspicion is a shutdown racing still-dirty
+blobstore metadata from the delete burst. Evidence captured
+(aws4-blobstore-corrupt-tgt.log, job tmp); disk re-initialized via the
+agent API (nothing was lost — the store was empty by then). Note the
+F11 detector correctly did NOT auto-reinit: zero volumes expected that
+store, so the auto-heal gate (all expecting volumes multi-replica)
+never opened. Backlog: a teardown-churn + immediate-kill drill against
+a populated store, and a look at whether spdk_tgt shutdown waits for
+blobstore md_sync.
+
+**F17 (P0, RWX-blocking, FIXED e60c2fb): path-hash filehandles rebind
+across rename-over — kernel client fileid-change livelock.** With F15
+fixed, initdb + CREATE DATABASE passed for the first time… and then
+every postgres connection took 25s+ (readiness probe's 1s exec timeout
+→ pg-0 never Ready → pg service endpointless → pg-init spun silently).
+Chain, each step measured: `pg_isready` via UNIX SOCKET 25s while NFS
+reads ran at 1.1GB/s → backends in D-state on the NFS mount → server
+idle ("Waiting for RPC") while the client wouldn't send → client stuck
+in a TEST_STATEID loop, same stateid answered "not found" every ~5s
+cycle → `dmesg`: **`NFS: server 10.104.18.34 error: fileid changed`**.
+Root cause: v1 handles are `hash(path)+path` — a filehandle named a
+NAME, not a file. Postgres rename-overs (`pg_internal.init` et al.)
+made an outstanding handle silently resolve to the NEW file at that
+path; same handle bytes, different fileid; the client's recovery can
+never converge because the aliasing is structural. Fix: v3 handles
+embed the mint-time inode ([3][inst][hash][ino][len][path], ino folded
+into the hash), lstat verification at mint-from-cache and resolve
+answers STALE for replaced/removed objects, and `note_fs_rename` also
+purges the clobbered destination subtree. v1 still accepted (legacy
+semantics) so pre-upgrade handles survive restarts;
+`parse_path_lenient` (DS striped pins) reads both layouts. Residuals:
+inode reuse at the same path is undetectable from userspace; v2
+long-path handles keep rename-transparent semantics by design; opens
+anchored via the stateid fd-cache keep serving the original inode
+(POSIX unlink-open semantics), path-resolved ops on dead generations
+go STALE — knfsd would serve the old inode for those too, a semantic
+gap we accept and document. Second lesson of the phase: F12→F15 were
+all *server tells the client a comforting lie* bugs; F17 is the same
+disease in the identity layer.
+
 _Drill results: TBD (this session)._
 
 ## Findings
