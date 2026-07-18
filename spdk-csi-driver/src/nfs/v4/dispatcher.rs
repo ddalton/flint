@@ -1573,7 +1573,20 @@ impl CompoundDispatcher {
                 use crate::nfs::v4::state::StateType;
                 let entry = self.state_mgr.stateids.get_state(&stateid);
                 match entry {
-                    None => OperationResult::FreeStateId(Nfs4Status::BadStateId),
+                    // Unknown stateid → Ok, not BadStateId. FREE_STATEID is
+                    // how the client DISPOSES of state after TEST_STATEID
+                    // said "not found" — refusing the free leaves the client
+                    // retesting the same dead stateid every recovery cycle,
+                    // forever (F20: the non-converging TEST_STATEID churn
+                    // behind the periodic RWX connect stalls). Freeing
+                    // already-forgotten state is idempotent success.
+                    None => OperationResult::FreeStateId(Nfs4Status::Ok),
+                    // Revoked state exists precisely so the client can learn
+                    // of the revocation and then free it — this must succeed.
+                    Some(e) if e.revoked => {
+                        self.state_mgr.stateids.close_open_state(&stateid.other);
+                        OperationResult::FreeStateId(Nfs4Status::Ok)
+                    }
                     Some(e) => match e.state_type {
                         StateType::Open | StateType::Lock => {
                             // RFC 8881 §18.38.3: open/lock stateids that are
