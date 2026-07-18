@@ -86,6 +86,26 @@ impl Auth {
         Ok(Self { flavor, body })
     }
 
+    /// The caller's unix (uid, gid) when this credential is AUTH_SYS.
+    /// None for AUTH_NONE / GSS / an undecodable body. Used by the file
+    /// operations to stamp ownership on created objects — without it every
+    /// file lands owned by the server process (root) and
+    /// ownership-sensitive workloads (postgres checks st_uid == geteuid)
+    /// refuse to run on an RWX volume.
+    pub fn unix_uid_gid(&self) -> Option<(u32, u32)> {
+        if self.flavor != AuthFlavor::Unix {
+            return None;
+        }
+        // authsys_parms = { stamp:u32, machinename:string<255>,
+        //                   uid:u32, gid:u32, gids:u32<16> }
+        let mut dec = XdrDecoder::new(self.body.clone());
+        let _stamp = dec.decode_u32().ok()?;
+        let _machinename = dec.decode_opaque().ok()?;
+        let uid = dec.decode_u32().ok()?;
+        let gid = dec.decode_u32().ok()?;
+        Some((uid, gid))
+    }
+
     /// Compute a principal identity from this credential.
     ///
     /// Used by EXCHANGE_ID's RFC 8881 §18.35.5 client-record state machine

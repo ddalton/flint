@@ -3364,10 +3364,14 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             
             // Build mount options
             // Note: NFSv4 uses standard port 2049, no need to specify if default
+            // sec=sys is load-bearing: without it the client negotiates
+            // AUTH_NULL (SECINFO lists it first), no uid reaches the server,
+            // and every file lands owned by root — ownership-sensitive
+            // workloads (postgres) refuse to start on the volume.
             let mount_opts = if readonly {
-                "vers=4.2,noresvport,ro".to_string()
+                "vers=4.2,noresvport,sec=sys,ro".to_string()
             } else {
-                "vers=4.2,noresvport".to_string()
+                "vers=4.2,noresvport,sec=sys".to_string()
             };
             
             // PRE-MOUNT CHECKS

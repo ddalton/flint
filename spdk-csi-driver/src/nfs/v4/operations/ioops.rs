@@ -473,6 +473,30 @@ impl IoOperationHandler {
                         }
                     }
 
+                    // Fresh create without an explicit createattrs owner:
+                    // stamp the caller's AUTH_SYS identity on the file —
+                    // without this every file lands owned by the server
+                    // process (root) and ownership-sensitive workloads
+                    // (postgres checks st_uid == geteuid) refuse to run.
+                    // Best effort: a chown failure must not fail the OPEN.
+                    if !existed {
+                        let (expl_uid, expl_gid) = createattrs
+                            .as_ref()
+                            .map(|w| (w.owner, w.owner_group))
+                            .unwrap_or((None, None));
+                        if let Some((uid, gid)) = ctx.unix_cred {
+                            let want_uid = if expl_uid.is_none() { Some(uid) } else { None };
+                            let want_gid = if expl_gid.is_none() { Some(gid) } else { None };
+                            if want_uid.is_some() || want_gid.is_some() {
+                                let p = file_path.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    std::os::unix::fs::chown(&p, want_uid, want_gid)
+                                })
+                                .await;
+                            }
+                        }
+                    }
+
                     // Generate filehandle for the new file
                     match self.fh_mgr.path_to_filehandle(&file_path) {
                         Ok(new_fh) => {

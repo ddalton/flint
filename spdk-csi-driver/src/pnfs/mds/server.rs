@@ -727,7 +727,12 @@ impl MetadataServer {
         // writer for CB_LAYOUTRECALL on DS death.
         let principal = call.cred.principal();
         let mut compound_resp = base_dispatcher
-            .dispatch_compound_with_back_channel(compound_req, principal, Some(back_channel))
+            .dispatch_compound_with_cred(
+                compound_req,
+                principal,
+                call.cred.unix_uid_gid(),
+                Some(back_channel),
+            )
             .await;
 
         // Post-process EXCHANGE_ID responses to set pNFS MDS flags

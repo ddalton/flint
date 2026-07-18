@@ -591,10 +591,13 @@ async fn handle_compound(
     // RPC-level principal for the EXCHANGE_ID §18.35.5 state machine.
     // Cheap to compute and an empty Vec for AUTH_NONE.
     let principal = call.cred.principal();
+    // AUTH_SYS (uid, gid) — file-creating ops stamp it onto the backing
+    // object so ownership round-trips (postgres-class workloads check it).
+    let unix_cred = call.cred.unix_uid_gid();
 
     // Dispatch to COMPOUND handler
     let compound_resp = dispatcher
-        .dispatch_compound_with_back_channel(compound_req, principal, Some(Arc::clone(&back_channel)))
+        .dispatch_compound_with_cred(compound_req, principal, unix_cred, Some(Arc::clone(&back_channel)))
         .await;
 
     debug!("COMPOUND result: status={:?}, {} results",

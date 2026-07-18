@@ -307,16 +307,29 @@ impl SetTime {
 }
 
 /// The client-settable attributes we support, decoded from a fattr4
-/// (RFC 8881 §5.6). OWNER / OWNER_GROUP / TIME_CREATE are consumed to
-/// keep the XDR cursor aligned but ignored: this server acts as a single
-/// principal (sec=none/sys with server-side I/O), so identity mapping is
-/// meaningless here.
+/// (RFC 8881 §5.6). OWNER / OWNER_GROUP carry numeric ids ("999" or
+/// "999@domain" — the kernel client sends numeric strings with
+/// idmapping off, the default under sec=sys) and are applied to the
+/// backing object via chown; GETATTR already reports the backing
+/// uid/gid, so ownership round-trips. TIME_CREATE is consumed to keep
+/// the XDR cursor aligned but ignored.
 #[derive(Debug, Default, Clone)]
 pub struct SettableAttrs {
     pub size: Option<u64>,
     pub mode: Option<u32>,
+    pub owner: Option<u32>,
+    pub owner_group: Option<u32>,
     pub atime: Option<SetTime>,
     pub mtime: Option<SetTime>,
+}
+
+/// Parse a fattr4_owner / fattr4_owner_group value: a numeric id,
+/// optionally with an "@domain" suffix. Non-numeric principals (no
+/// idmapping here) → NFS4ERR_BADOWNER per RFC 8881 §5.9.
+fn parse_owner4(bytes: &[u8]) -> Result<u32, Nfs4Status> {
+    let s = std::str::from_utf8(bytes).map_err(|_| Nfs4Status::BadOwner)?;
+    let num = s.split('@').next().unwrap_or("").trim_end_matches('\0');
+    num.parse::<u32>().map_err(|_| Nfs4Status::BadOwner)
 }
 
 /// Decode the settable subset of a fattr4 (bitmap words + packed attr
@@ -353,11 +366,11 @@ pub fn decode_settable_attrs(
         fn i64(&mut self) -> Result<i64, Nfs4Status> {
             Ok(i64::from_be_bytes(self.take(8)?.try_into().unwrap()))
         }
-        fn opaque(&mut self) -> Result<(), Nfs4Status> {
+        fn opaque(&mut self) -> Result<&'a [u8], Nfs4Status> {
             let len = self.u32()? as usize;
             let padded = len.checked_add(3).ok_or(Nfs4Status::BadXdr)? & !3;
-            self.take(padded)?;
-            Ok(())
+            let s = self.take(padded)?;
+            Ok(&s[..len])
         }
         fn settime(&mut self) -> Result<SetTime, Nfs4Status> {
             const SET_TO_CLIENT_TIME4: u32 = 1;
@@ -381,7 +394,8 @@ pub fn decode_settable_attrs(
             match attr {
                 FATTR4_SIZE => out.size = Some(cur.u64()?),
                 FATTR4_MODE => out.mode = Some(cur.u32()? & 0o7777),
-                FATTR4_OWNER | FATTR4_OWNER_GROUP => cur.opaque()?,
+                FATTR4_OWNER => out.owner = Some(parse_owner4(cur.opaque()?)?),
+                FATTR4_OWNER_GROUP => out.owner_group = Some(parse_owner4(cur.opaque()?)?),
                 FATTR4_TIME_ACCESS_SET => out.atime = Some(cur.settime()?),
                 FATTR4_TIME_MODIFY_SET => out.mtime = Some(cur.settime()?),
                 FATTR4_TIME_CREATE => {
@@ -419,6 +433,32 @@ pub fn apply_settable_attrs(
         Err(_) => return (applied, Some(Nfs4Status::NoEnt)),
     };
     let is_symlink = lmeta.file_type().is_symlink();
+
+    // Owner FIRST: chown clears setuid/setgid bits, so a compound that
+    // sets both owner and mode must not have its mode stomped.
+    if want.owner.is_some() || want.owner_group.is_some() {
+        #[cfg(unix)]
+        {
+            let res = if is_symlink {
+                std::os::unix::fs::lchown(path, want.owner, want.owner_group)
+            } else {
+                std::os::unix::fs::chown(path, want.owner, want.owner_group)
+            };
+            match res {
+                Ok(()) => {
+                    want.owner.map(|_| applied.push(FATTR4_OWNER));
+                    want.owner_group.map(|_| applied.push(FATTR4_OWNER_GROUP));
+                }
+                Err(e) => {
+                    warn!(
+                        "SETATTR: chown {:?}:{:?} on {:?} failed: {}",
+                        want.owner, want.owner_group, path, e
+                    );
+                    return (applied, Some(io_error_to_nfs4(&e)));
+                }
+            }
+        }
+    }
 
     if let Some(mode) = want.mode {
         if is_symlink {
@@ -3003,6 +3043,23 @@ impl FileOperationHandler {
 
         match create_result {
             Ok(_) => {
+                // Stamp the caller's AUTH_SYS identity on the new object
+                // (dirs/symlinks/stand-ins) — client-side permission checks
+                // compare mode bits against st_uid, so a root-owned 0700
+                // directory would lock its creator out. Best effort.
+                if let Some((uid, gid)) = ctx.unix_cred {
+                    let p = obj_path.clone();
+                    let is_symlink = op.objtype == Nfs4FileType::Symlink;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if is_symlink {
+                            std::os::unix::fs::lchown(&p, Some(uid), Some(gid))
+                        } else {
+                            std::os::unix::fs::chown(&p, Some(uid), Some(gid))
+                        }
+                    })
+                    .await;
+                }
+
                 // Generate filehandle for new object
                 match self.fh_mgr.get_or_create_handle(&obj_path) {
                     Ok(new_fh) => {
@@ -3648,17 +3705,49 @@ mod tests {
     }
 
     #[test]
-    fn settable_attrs_decode_owner_consumed_not_applied() {
+    fn settable_attrs_decode_owner_parsed_and_aligned() {
         // OWNER(36) precedes TIME_MODIFY_SET(54); its opaque bytes must be
-        // consumed (with XDR padding) or the time decodes garbage.
+        // consumed (with XDR padding) or the time decodes garbage — and
+        // the numeric id (with optional @domain suffix) lands in `owner`.
         let mask = [0u32, (1 << 4) | (1 << 22)];
         let vals = fattr_bytes(&[
-            &5u32.to_be_bytes(), b"1000\0\0\0\0"[..8].as_ref(), // owner "1000\0" + pad to 8
-            &0u32.to_be_bytes(),                                 // mtime: server time
+            &5u32.to_be_bytes(), b"1000@\0\0\0"[..8].as_ref(), // owner "1000@" + pad to 8
+            &0u32.to_be_bytes(),                                // mtime: server time
         ]);
         let attrs = decode_settable_attrs(&mask, &vals).unwrap();
+        assert_eq!(attrs.owner, Some(1000));
         assert_eq!(attrs.mtime, Some(SetTime::ServerTime));
         assert_eq!(attrs.mode, None);
+    }
+
+    #[test]
+    fn owner4_parse_forms() {
+        assert_eq!(parse_owner4(b"999"), Ok(999));
+        assert_eq!(parse_owner4(b"999@localdomain"), Ok(999));
+        assert_eq!(parse_owner4(b"0"), Ok(0));
+        assert_eq!(parse_owner4(b"postgres"), Err(Nfs4Status::BadOwner));
+        assert_eq!(parse_owner4(b""), Err(Nfs4Status::BadOwner));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn apply_settable_attrs_chown_to_self() {
+        // chown to the current euid/egid is permitted unprivileged — the
+        // apply path must report OWNER/OWNER_GROUP as applied.
+        use std::os::unix::fs::MetadataExt;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("f");
+        std::fs::write(&path, b"x").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let want = SettableAttrs {
+            owner: Some(meta.uid()),
+            owner_group: Some(meta.gid()),
+            ..Default::default()
+        };
+        let (applied, err) = apply_settable_attrs(&path, &want);
+        assert_eq!(err, None);
+        assert!(applied.contains(&FATTR4_OWNER));
+        assert!(applied.contains(&FATTR4_OWNER_GROUP));
     }
 
     #[test]
@@ -3691,6 +3780,8 @@ mod tests {
         let want = SettableAttrs {
             size: Some(5),
             mode: Some(0o640),
+            owner: None,
+            owner_group: None,
             atime: None,
             mtime: Some(SetTime::ClientTime { seconds: 1_000_000, nseconds: 0 }),
         };

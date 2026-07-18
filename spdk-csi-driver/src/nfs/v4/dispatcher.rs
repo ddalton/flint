@@ -191,6 +191,20 @@ impl CompoundDispatcher {
         self.dispatch_compound_with_back_channel(request, principal, None).await
     }
 
+    /// `dispatch_compound_with_back_channel` plus the caller's AUTH_SYS
+    /// (uid, gid) so file-creating ops can stamp ownership. The plain
+    /// entries pass None — identical to pre-cred behavior (files owned by
+    /// the server process).
+    pub async fn dispatch_compound_with_cred(
+        &self,
+        request: CompoundRequest,
+        principal: Vec<u8>,
+        unix_cred: Option<(u32, u32)>,
+        back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
+    ) -> CompoundResponse {
+        self.dispatch_compound_inner(request, principal, unix_cred, back_channel).await
+    }
+
     /// Same as `dispatch_compound` but threads the connection's writer
     /// into `CompoundContext::back_channel`. The `BIND_CONN_TO_SESSION`
     /// op pulls it out and registers it in the dispatcher's per-session
@@ -202,13 +216,14 @@ impl CompoundDispatcher {
         principal: Vec<u8>,
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
     ) -> CompoundResponse {
-        self.dispatch_compound_inner(request, principal, back_channel).await
+        self.dispatch_compound_inner(request, principal, None, back_channel).await
     }
 
     async fn dispatch_compound_inner(
         &self,
         request: CompoundRequest,
         principal: Vec<u8>,
+        unix_cred: Option<(u32, u32)>,
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
     ) -> CompoundResponse {
         debug!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
@@ -370,6 +385,7 @@ impl CompoundDispatcher {
 
         // Create context, seeding with the RPC-level principal.
         let mut context = CompoundContext::with_principal(request.minor_version, principal);
+        context.unix_cred = unix_cred;
         // Stash the connection's back-channel writer so the
         // BIND_CONN_TO_SESSION arm can register it later in the
         // dispatcher's per-session back-channel table.

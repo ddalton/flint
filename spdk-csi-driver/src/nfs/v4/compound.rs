@@ -693,6 +693,11 @@ pub struct CompoundContext {
     /// changes the outcome from "renew existing client" to "evict and
     /// replace" (or NFS4ERR_PERM, depending on flags).
     pub principal: Vec<u8>,
+    /// The caller's AUTH_SYS (uid, gid) for this COMPOUND, None under
+    /// AUTH_NONE/GSS. File-creating ops (OPEN, CREATE) stamp it onto the
+    /// backing object so ownership round-trips for permission-sensitive
+    /// workloads; GETATTR already reports the backing uid/gid.
+    pub unix_cred: Option<(u32, u32)>,
     /// "Current stateid" within this COMPOUND (RFC 8881 §16.2.3.1.2).
     /// Updated after every state-changing op (OPEN, LOCK, LOCKU,
     /// OPEN_DOWNGRADE). When a subsequent op carries the magic sentinel
@@ -734,6 +739,7 @@ impl CompoundContext {
             replay_reply: None,
             cache_slot: None,
             principal: Vec::new(),
+            unix_cred: None,
             current_stateid: None,
             back_channel: None,
         }
