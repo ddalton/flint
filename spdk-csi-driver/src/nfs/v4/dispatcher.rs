@@ -88,11 +88,14 @@ impl CompoundDispatcher {
         lock_mgr: Arc<LockManager>,
         pnfs_handler: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
     ) -> Self {
-        // Create operation handlers
+        // Create operation handlers. The io handler comes first so the
+        // file handler can share its open-fd view (F17b: GETATTR serves
+        // renamed-over-but-open files via fstat instead of STALE).
         let pnfs_enabled = pnfs_handler.is_some();
         let session_handler = SessionOperationHandler::new(state_mgr.clone());
-        let file_handler = FileOperationHandler::new(fh_mgr.clone(), pnfs_enabled);
         let io_handler = IoOperationHandler::new(state_mgr.clone(), fh_mgr.clone());
+        let file_handler = FileOperationHandler::new(fh_mgr.clone(), pnfs_enabled)
+            .with_open_files(io_handler.open_file_view());
         let perf_handler = PerfOperationHandler::new(state_mgr.clone(), fh_mgr.clone());
         let lock_handler = LockOperationHandler::new(state_mgr.clone(), lock_mgr.clone());
 

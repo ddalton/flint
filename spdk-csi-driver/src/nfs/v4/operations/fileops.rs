@@ -102,7 +102,14 @@ impl AttributeSnapshot {
         // Use symlink_metadata() instead of metadata() to get symlink's own attributes
         // This is equivalent to lstat() vs stat() - returns the symlink itself, not target
         let metadata = tokio::fs::symlink_metadata(path).await?;
-        
+        Self::from_metadata(metadata, path)
+    }
+
+    /// Create a snapshot from already-fetched metadata. Used by
+    /// `from_path` (lstat) and by the open-file fallback (fstat on a
+    /// cached fd — the file may be renamed-over/unlinked, alive only
+    /// through server-held opens; F17b).
+    pub fn from_metadata(metadata: std::fs::Metadata, path: &Path) -> std::io::Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -1918,12 +1925,26 @@ pub struct FileOperationHandler {
     fh_mgr: Arc<FileHandleManager>,
     /// Whether pNFS support is enabled (affects advertised attributes)
     pnfs_enabled: bool,
+    /// View over the io handler's open-fd cache (F17b): lets GETATTR
+    /// serve a renamed-over/removed file that is still open server-side
+    /// via fstat instead of STALE. None only in unit tests constructed
+    /// without an io handler.
+    open_files: Option<crate::nfs::v4::operations::ioops::OpenFileView>,
 }
 
 impl FileOperationHandler {
     /// Create a new file operation handler
     pub fn new(fh_mgr: Arc<FileHandleManager>, pnfs_enabled: bool) -> Self {
-        Self { fh_mgr, pnfs_enabled }
+        Self { fh_mgr, pnfs_enabled, open_files: None }
+    }
+
+    /// Attach the io handler's open-file view (dispatcher wiring).
+    pub fn with_open_files(
+        mut self,
+        view: crate::nfs::v4::operations::ioops::OpenFileView,
+    ) -> Self {
+        self.open_files = Some(view);
+        self
     }
 
     /// Borrow the underlying file-handle manager. The dispatcher uses
@@ -2524,10 +2545,43 @@ impl FileOperationHandler {
             return self.handle_pseudo_root_getattr(op).await;
         }
 
-        // Resolve path
+        // Resolve path. A stale resolve (renamed-over/removed object)
+        // still answers through a server-held open fd when one exists —
+        // POSIX unlink-open semantics (F17b). This is what stops the
+        // kernel client's fileid-staleness recovery cycling after every
+        // postgres rename-over: attributes keep coming from the ORIGINAL
+        // inode for as long as it is open, with the original fileid and
+        // a consistent change counter.
         let path = match self.fh_mgr.resolve_handle(current_fh) {
             Ok(p) => p,
             Err(e) => {
+                if let Some(view) = &self.open_files {
+                    if let Ok(embedded) = FileHandleManager::parse_path_lenient(current_fh) {
+                        if let Some(file) = view.file_for_path(&embedded) {
+                            debug!("GETATTR: {:?} replaced on disk; fstat via open fd", embedded);
+                            let snap = tokio::task::spawn_blocking(move || {
+                                file.metadata()
+                                    .and_then(|md| AttributeSnapshot::from_metadata(md, &embedded))
+                            })
+                            .await;
+                            if let Ok(Ok(snapshot)) = snap {
+                                let (attr_vals, supported_bitmap) =
+                                    encode_attributes_from_snapshot(
+                                        &op.attr_request,
+                                        &snapshot,
+                                        self.pnfs_enabled,
+                                    );
+                                return GetAttrRes {
+                                    status: Nfs4Status::Ok,
+                                    obj_attributes: Some(Fattr4 {
+                                        attrmask: supported_bitmap,
+                                        attr_vals,
+                                    }),
+                                };
+                            }
+                        }
+                    }
+                }
                 warn!("GETATTR: Failed to resolve handle: {}", e);
                 return GetAttrRes {
                     status: Nfs4Status::Stale,
@@ -2535,7 +2589,7 @@ impl FileOperationHandler {
                 };
             }
         };
-        
+
         debug!("📂 GETATTR for path: {:?}", path);
 
         // PHASE 1: Fetch attribute snapshot (SINGLE VFS CALL)

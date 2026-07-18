@@ -210,6 +210,31 @@ struct CachedFile {
     writable: bool,
 }
 
+/// Read-only view over the fd cache for handlers outside ioops
+/// (GETATTR lives in fileops). F17b: a renamed-over/removed file whose
+/// path no longer resolves is still fully alive through server-held
+/// opens — POSIX unlink-open semantics. This view lets fh-only ops
+/// (GETATTR carries no stateid) find such a file by its handle's
+/// embedded path and serve attributes via fstat instead of STALE,
+/// which is what keeps the kernel client from running a state-recovery
+/// cycle after every postgres rename-over.
+#[derive(Clone)]
+pub struct OpenFileView {
+    fd_cache: Arc<DashMap<[u8; 12], CachedFile>>,
+}
+
+impl OpenFileView {
+    /// An open fd whose OPEN-time path equals `path`, if any. Linear
+    /// scan — the cache holds one entry per live open stateid (small),
+    /// and this only runs on the already-rare stale-resolve path.
+    pub fn file_for_path(&self, path: &std::path::Path) -> Option<Arc<File>> {
+        self.fd_cache
+            .iter()
+            .find(|e| e.path == *path)
+            .map(|e| Arc::clone(&e.file))
+    }
+}
+
 /// Whether an fd may be cached under this stateid. Special stateids
 /// (`other` all-zeros / all-ones, RFC 8881 §8.2.3) are not unique to
 /// one open — caching under them would alias different files to the
@@ -250,12 +275,54 @@ impl IoOperationHandler {
             .unwrap()
             .as_secs();
         
-        Self { 
-            state_mgr, 
-            fh_mgr, 
+        Self {
+            state_mgr,
+            fh_mgr,
             write_verifier,
             fd_cache: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Shared read-only view over the fd cache (see [`OpenFileView`]).
+    pub fn open_file_view(&self) -> OpenFileView {
+        OpenFileView {
+            fd_cache: Arc::clone(&self.fd_cache),
+        }
+    }
+
+    /// Test-only: seed the fd cache as if an OPEN had cached this fd.
+    #[cfg(test)]
+    pub(crate) fn test_seed_fd(
+        &self,
+        other: [u8; 12],
+        file: Arc<File>,
+        path: PathBuf,
+        writable: bool,
+    ) {
+        self.fd_cache.insert(other, CachedFile { file, path, writable });
+    }
+
+    /// F17b fallback for READ/WRITE when the filehandle no longer
+    /// resolves (object renamed-over or removed): the handle's embedded
+    /// path names the ORIGINAL file, which is still alive if any open
+    /// fd targets it. Returns (embedded path, cached fd for this
+    /// stateid or any other open of the same path).
+    fn stale_open_fallback(
+        &self,
+        fh: &crate::nfs::v4::protocol::Nfs4FileHandle,
+        stateid_other: &[u8; 12],
+        want_writable: bool,
+    ) -> Option<(PathBuf, Arc<File>)> {
+        let embedded = FileHandleManager::parse_path_lenient(fh).ok()?;
+        if let Some(e) = self.fd_cache.get(stateid_other) {
+            if e.path == embedded && (!want_writable || e.writable) {
+                return Some((embedded, Arc::clone(&e.file)));
+            }
+        }
+        self.fd_cache
+            .iter()
+            .find(|e| e.path == embedded && (!want_writable || e.writable))
+            .map(|e| (embedded.clone(), Arc::clone(&e.file)))
     }
 
     /// Get client ID from compound context
@@ -869,17 +936,28 @@ impl IoOperationHandler {
             };
         }
 
-        // Resolve file path from filehandle
+        // Resolve file path from filehandle. A stale resolve (object
+        // renamed-over/removed) still serves through an open fd — the
+        // original file is alive under POSIX unlink-open semantics
+        // (F17b); only when no open exists is STALE the answer.
+        let mut stale_fd: Option<Arc<File>> = None;
         let path = match self.fh_mgr.resolve_handle(current_fh) {
             Ok(p) => p,
-            Err(e) => {
-                warn!("READ: Failed to resolve file handle: {}", e);
-                return ReadRes {
-                    status: Nfs4Status::Stale,
-                    eof: false,
-                    data: Bytes::new(),
-                };
-            }
+            Err(e) => match self.stale_open_fallback(current_fh, &op.stateid.other, false) {
+                Some((p, f)) => {
+                    debug!("READ: {:?} replaced on disk; serving via open fd", p);
+                    stale_fd = Some(f);
+                    p
+                }
+                None => {
+                    warn!("READ: Failed to resolve file handle: {}", e);
+                    return ReadRes {
+                        status: Nfs4Status::Stale,
+                        eof: false,
+                        data: Bytes::new(),
+                    };
+                }
+            },
         };
 
         // Get filename for logging before moving path
@@ -889,14 +967,16 @@ impl IoOperationHandler {
         // same file; otherwise open and cache. The path check guards
         // against a stateid presented with a different filehandle.
         let cacheable = cacheable_stateid(&op.stateid.other);
-        let cached = if cacheable {
-            self.fd_cache
-                .get(&op.stateid.other)
-                .filter(|e| e.path == path)
-                .map(|e| Arc::clone(&e.file))
-        } else {
-            None
-        };
+        let cached = stale_fd.or_else(|| {
+            if cacheable {
+                self.fd_cache
+                    .get(&op.stateid.other)
+                    .filter(|e| e.path == path)
+                    .map(|e| Arc::clone(&e.file))
+            } else {
+                None
+            }
+        });
 
         // Perform positioned read using blocking I/O
         // Uses positioned I/O (pread) for concurrent access without seek
@@ -1029,18 +1109,29 @@ impl IoOperationHandler {
             };
         }
 
-        // Resolve file path from filehandle
+        // Resolve file path from filehandle. Stale resolve → serve
+        // through an open fd when one exists (F17b, see handle_read) —
+        // writeback for a renamed-over file must land in the ORIGINAL
+        // inode, never fail the client's flush.
+        let mut stale_fd: Option<Arc<File>> = None;
         let path = match self.fh_mgr.resolve_handle(current_fh) {
             Ok(p) => p,
-            Err(e) => {
-                warn!("WRITE: Failed to resolve file handle: {}", e);
-                return WriteRes {
-                    status: Nfs4Status::Stale,
-                    count: 0,
-                    committed: UNSTABLE4,
-                    writeverf: 0,
-                };
-            }
+            Err(e) => match self.stale_open_fallback(current_fh, &op.stateid.other, true) {
+                Some((p, f)) => {
+                    debug!("WRITE: {:?} replaced on disk; writing via open fd", p);
+                    stale_fd = Some(f);
+                    p
+                }
+                None => {
+                    warn!("WRITE: Failed to resolve file handle: {}", e);
+                    return WriteRes {
+                        status: Nfs4Status::Stale,
+                        count: 0,
+                        committed: UNSTABLE4,
+                        writeverf: 0,
+                    };
+                }
+            },
         };
 
         // Get filename for logging before moving path
@@ -1051,14 +1142,16 @@ impl IoOperationHandler {
         // read-only fd, and a stateid presented with a different
         // filehandle must not reuse another file's fd.
         let cacheable = cacheable_stateid(&op.stateid.other);
-        let cached_entry = if cacheable {
-            self.fd_cache
-                .get(&op.stateid.other)
-                .filter(|e| e.writable && e.path == path)
-                .map(|e| Arc::clone(&e.file))
-        } else {
-            None
-        };
+        let cached_entry = stale_fd.or_else(|| {
+            if cacheable {
+                self.fd_cache
+                    .get(&op.stateid.other)
+                    .filter(|e| e.writable && e.path == path)
+                    .map(|e| Arc::clone(&e.file))
+            } else {
+                None
+            }
+        });
 
         let file_arc = if let Some(file) = cached_entry {
             // Found in cache - reuse existing FD!
@@ -1298,6 +1391,51 @@ mod tests {
     use crate::nfs::v4::filehandle::FileHandleManager;
     use crate::nfs::v4::state::StateType;
     use tempfile::TempDir;
+
+    /// F17b: a renamed-over file keeps serving through its open fd —
+    /// READ via the stale handle returns the ORIGINAL bytes, and the
+    /// open-file view finds the fd by embedded path. Once no open fd
+    /// exists, the stale handle answers Stale.
+    #[tokio::test]
+    async fn read_serves_renamed_over_file_via_open_fd() {
+        let (handler, fh_mgr, temp) = create_test_handler();
+        let target = temp.path().join("renamed.dat");
+        std::fs::write(&target, b"generation-1 payload").unwrap();
+        let fh = fh_mgr.path_to_filehandle(&target).unwrap();
+
+        // Server-side open (as OPEN would cache it) BEFORE the rename.
+        let file = Arc::new(std::fs::File::open(&target).unwrap());
+        let other = [7u8; 12];
+        handler.test_seed_fd(other, Arc::clone(&file), target.clone(), false);
+
+        // rename-over: path now names a different inode.
+        let tmp = temp.path().join("renamed.dat.tmp");
+        std::fs::write(&tmp, b"generation-2 REPLACED").unwrap();
+        std::fs::rename(&tmp, &target).unwrap();
+
+        // Resolve is stale, but the fallback finds the open fd.
+        assert!(fh_mgr.resolve_handle(&fh).is_err());
+        let (p, f) = handler
+            .stale_open_fallback(&fh, &other, false)
+            .expect("open fd must be found for the stale handle");
+        assert_eq!(p, target);
+        use std::os::unix::fs::FileExt;
+        let mut buf = [0u8; 12];
+        f.read_exact_at(&mut buf, 0).unwrap();
+        assert_eq!(&buf, b"generation-1", "must read the ORIGINAL file");
+
+        // Writable-only lookup must not return the read-only fd.
+        assert!(handler.stale_open_fallback(&fh, &other, true).is_none());
+
+        // View by path works for fh-only ops (GETATTR).
+        let view = handler.open_file_view();
+        assert!(view.file_for_path(&target).is_some());
+
+        // No open fd → honest STALE.
+        handler.fd_cache.remove(&other);
+        assert!(handler.stale_open_fallback(&fh, &other, false).is_none());
+        assert!(view.file_for_path(&target).is_none());
+    }
 
     fn create_test_handler() -> (IoOperationHandler, Arc<FileHandleManager>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
