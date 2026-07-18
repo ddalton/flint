@@ -20,6 +20,11 @@
 #        surviving replica, ZERO lost acked writes (run supervised)
 #   2.5  cross-node migration while degraded (run after 2.1)
 #   2.6  churn ×10 while degraded (run after 2.1/2.5)
+#   2.7  r3: kill BOTH remote legs simultaneously (needs r3 harness)
+#   2.8 ☠ U11: terminate + delete the REMOTE-leg node → live replica
+#        re-placement + full rebuild to in_sync (consumes a node)
+#   2.9  F11: destroy the remote leg's lvstore → detection (3×60s) +
+#        in-place re-init + catch-up rebuild to in_sync
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./lib.sh
@@ -291,6 +296,99 @@ case "$DRILL" in
   note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=60 \
     NOTES="r3 DOUBLE remote-leg kill; worst_ack_age=${WORST}s; raid=$(raid_summary "$RAID_HOST" | head -1)" verify
+  ;;
+
+2.8) # ☠ U11: REAL terminate of the REMOTE-leg node + Node delete → the
+     # controller re-places the leg on a healthy node and rebuilds
+     # redundancy LIVE (raid keeps serving degraded; pg never restarts).
+     # Consumes a node — run on a fleet with a spare storage node.
+  pre_r2
+  [ -n "$REMOTE" ] || fail "no remote leg found"
+  evict_load_from "$REMOTE"
+  IID=$(instance_id_for_node "$REMOTE")
+  [ -n "$IID" ] || fail "no instance id for $REMOTE"
+  OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+  [ -z "$OVR_PRE" ] || note "override already present pre-drill (prior replacement)"
+  aws ec2 terminate-instances --region "$AWS_REGION" --instance-ids "$IID" >/dev/null
+  note "TERMINATED $IID ($REMOTE) — remote leg permanently lost"
+  wait_node_notready "$REMOTE" 300
+  kubectl delete node "$REMOTE" >/dev/null 2>&1
+  T_NODEGONE=$(( $(epoch) - T0 ))
+  note "Node object deleted at ${T_NODEGONE}s — U11 trigger armed (catch-up tick 60s)"
+  T_SWAP=-1; NEW_NODE=""
+  for i in $(seq 1 60); do
+    OVR=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+    if [ -n "$OVR" ] && [ "$OVR" != "$OVR_PRE" ]; then
+      T_SWAP=$(( $(epoch) - T0 ))
+      NEW_NODE=$(echo "$OVR" | jq -r '.[].node_name' 2>/dev/null | grep -v "^$RAID_HOST$" | head -1)
+      break
+    fi
+    sleep 10
+  done
+  [ "$T_SWAP" -ge 0 ] || fail "replicas-override never appeared — U11 did not fire"
+  ok "identity swapped to ${NEW_NODE:-?} at ${T_SWAP}s"
+  T_SYNC=-1; ST=""
+  for i in $(seq 1 120); do
+    REC=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replica-sync-state}' 2>/dev/null)
+    ST=$(echo "$REC" | jq -r --arg n "$NEW_NODE" '.replicas[] | select(.node_name==$n) | .sync_state' 2>/dev/null | head -1)
+    [ "$ST" = "in_sync" ] && { T_SYNC=$(( $(epoch) - T0 )); break; }
+    sleep 10
+  done
+  if [ "$T_SYNC" -ge 0 ]; then
+    ok "replacement leg in_sync at ${T_SYNC}s — redundancy restored LIVE (no restage)"
+  else
+    note "replacement leg NOT in_sync after 20min (state: ${ST:-unknown}) — record + investigate"
+  fi
+  wait_acks_fresh 60 || note "acks not fresh at drill end"
+  note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=60 \
+    NOTES="U11 re-placement: node_gone=${T_NODEGONE}s swap=${T_SWAP}s in_sync=${T_SYNC}s new_node=${NEW_NODE:-?}" verify
+  note "fleet is one storage node down — replace via trove before node-consuming drills"
+  ;;
+
+2.9) # F11: destroy the REMOTE leg's lvstore in place → the node agent
+     # detects the lost store (3×60s strikes vs PV ground truth),
+     # re-inits it (FLINT_STORE_REINIT default-on; all expecting volumes
+     # multi-replica), and catch-up full-builds the leg back to in_sync.
+     # Node survives; no operator action; oracle rides through degraded.
+  pre_r2
+  [ -n "$REMOTE" ] || fail "no remote leg found"
+  evict_load_from "$REMOTE"
+  LVS=$(kubectl get pv "$PV" -o json 2>/dev/null \
+    | jq -r --arg n "$REMOTE" '(.metadata.annotations["flint.csi.storage.io/replicas-override"] // .spec.csi.volumeAttributes["flint.csi.storage.io/replicas"]) | fromjson | .[] | select(.node_name==$n) | .lvs_name' | head -1)
+  [ -n "$LVS" ] || fail "no lvs_name for remote leg on $REMOTE"
+  UUID_PRE=$(kubectl get pv "$PV" -o json 2>/dev/null \
+    | jq -r --arg n "$REMOTE" '(.metadata.annotations["flint.csi.storage.io/replicas-override"] // .spec.csi.volumeAttributes["flint.csi.storage.io/replicas"]) | fromjson | .[] | select(.node_name==$n) | .lvol_uuid' | head -1)
+  spdk_rpc "$REMOTE" bdev_lvol_delete_lvstore -l "$LVS" \
+    || fail "could not delete lvstore $LVS on $REMOTE (drill needs direct RPC access)"
+  note "lvstore $LVS on $REMOTE DESTROYED (F11 simulation: store gone, node alive)"
+  T_REINIT=-1
+  for i in $(seq 1 60); do  # detection needs 3 monitor ticks (~3-4min)
+    if spdk_rpc "$REMOTE" bdev_lvol_get_lvstores 2>/dev/null | grep -q "\"$LVS\""; then
+      T_REINIT=$(( $(epoch) - T0 )); break
+    fi
+    sleep 10
+  done
+  [ "$T_REINIT" -ge 0 ] || fail "store never re-initialized — F11 self-heal did not fire"
+  ok "store re-initialized in place at ${T_REINIT}s"
+  T_SYNC=-1; ST=""
+  for i in $(seq 1 90); do
+    REC=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replica-sync-state}' 2>/dev/null)
+    ST=$(echo "$REC" | jq -r --arg n "$REMOTE" '.replicas[] | select(.node_name==$n) | .sync_state' 2>/dev/null | head -1)
+    [ "$ST" = "in_sync" ] && { T_SYNC=$(( $(epoch) - T0 )); break; }
+    sleep 10
+  done
+  if [ "$T_SYNC" -ge 0 ]; then
+    ok "rebuilt leg in_sync at ${T_SYNC}s — store loss fully self-healed"
+  else
+    note "rebuilt leg NOT in_sync after 15min (state: ${ST:-unknown}) — record + investigate"
+  fi
+  EV=$(kubectl get events -n default --field-selector reason=ReplicaStoreReinitialized --no-headers 2>/dev/null | grep -c . || true)
+  [ "${EV:-0}" -ge 1 ] && ok "ReplicaStoreReinitialized event emitted" || note "no ReplicaStoreReinitialized event found"
+  wait_acks_fresh 60 || note "acks not fresh at drill end"
+  note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=60 \
+    NOTES="F11 self-heal: reinit=${T_REINIT}s in_sync=${T_SYNC}s lvs=$LVS old_uuid=${UUID_PRE:0:8}" verify
   ;;
 
 *) fail "unknown drill '$DRILL' (phase-1 regression subset: PHASE_LABEL=2 ./drills/phase1.sh <id>)" ;;
