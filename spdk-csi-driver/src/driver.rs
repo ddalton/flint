@@ -1860,15 +1860,21 @@ impl SpdkCsiDriver {
             }
         }
 
-        // Check if we have minimum replicas for RAID 1. The floor protects
-        // a multi-replica volume from assembling below quorum — but a
-        // volume whose identity holds a single replica (one restored from
-        // a multi-replica snapshot, §11) is complete at one base; SPDK
-        // raid1 accepts a single-base create.
+        // Degraded assembly floor. This was total.min(2), which vetoed
+        // staging after a PERMANENT node loss (2u/2.4: r2 + terminated
+        // node = "need minimum 2 replicas, only 1 available" forever —
+        // the exact outage replicas exist to survive) while a LIVE raid
+        // losing the same leg keeps serving 1/2. Staleness is policed
+        // explicitly above (Stale excluded when epoch history exists,
+        // standbys deferred, hot-rejoin markers excluded); a
+        // merely-UNAVAILABLE replica contributes no data, so refusing to
+        // serve without it protects nothing. Assemble with whatever
+        // in-sync legs attached; refuse only at zero. SPDK raid1 accepts
+        // a single-base create.
         let total_replicas = replicas.len();
         let available_count = base_bdevs.len();
         let unavailable_count = unavailable_replicas.len();
-        let min_required = total_replicas.min(2);
+        let min_required = 1;
 
         if available_count < min_required {
             // Cannot create RAID with fewer than 2 replicas
