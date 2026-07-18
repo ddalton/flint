@@ -437,6 +437,26 @@ migration onto a replica-less node (aws-5) assembled a FULLY-REMOTE
 raid1 (both legs SPDK-initiator) under ublk, ready 23s, stall 17s.
 **2.6 churn ×10 while serving: all cycles 6-16s**, no mount/VA leaks.
 
+**2.4 (☠ REAL node terminate) — PASS after two driver fixes.** The
+r2 headline drill EC2-terminated pg's node (which held pg + one
+replica). Two gaps wedged the replacement pod forever, both fixed live:
+(1) the degraded-assembly floor `total.min(2)` refused to stage with
+one available replica — while a LIVE raid losing the same leg keeps
+serving (ea948ed: floor is now 1; staleness is policed explicitly by
+the sync-record admission); (2) SPDK v26.05 raid1 refuses a
+single-base create (EINVAL, verified live), so a multi-replica volume
+down to ONE in-sync leg now serves that leg DIRECT — no raid layer, r1
+semantics, `flint.io/degraded-direct` PV annotation; the
+consumer-blindness monitor skips annotated PVs and the controller
+reaper protects direct-serve initiator bdevs like raid legs (819262c).
+Validation: pg-0 Ready on the survivor path, **heap probe MISSING=0 of
+2,924 acked writes** — everything acked before the terminate survived
+on the remaining replica. **U11 follow-up (feature work): replica
+RE-PLACEMENT** — nothing rebuilds redundancy onto a healthy node after
+permanent node loss; the volume stays r1-degraded until then (the dead
+spdkOperator "replacement rebuild" flow was for this and is off/dead;
+catch-up heals returning legs, not vanished nodes).
+
 Cluster note: runv-aws-5/6 added live mid-phase (manual clone of the
 trove worker bootstrap: run-instances + kubeadm join + kernel 6.18.29
 swap + lvstore init — no trove backend needed, ~12min for both).

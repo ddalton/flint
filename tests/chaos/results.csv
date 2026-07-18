@@ -79,3 +79,4 @@ date,phase,drill,t_ready_s,stall_s,restarts_delta,pre_node,post_node,va_ok,nvme_
 2026-07-18T00:44:29Z,2u,2.5,30,22,new:0,runv-aws-6,runv-aws-3,Y,Y,Y,FAIL,Y,FAIL,"cross-node migration while DEGRADED failed: db"
 2026-07-18T00:54:09Z,2u,2.3,190,1,0,runv-aws-1,runv-aws-1,Y,Y,Y,PASS,Y,PASS,"remote-leg node kill (sim): worst_ack_age=1s"
 2026-07-18T01:01:29Z,2u,2.5,18,16,new:0,runv-aws-1,runv-aws-3,Y,Y,Y,PASS,Y,PASS,"cross-node migration while DEGRADED"
+2026-07-18T01:05:49Z,2u,2.4,4200,-,0,runv-aws-3,runv-aws-6,Y,Y,Y,PASS,Y,PASS,"r2 NODE TERMINATE: survivor-leg DIRECT serve after degraded-floor+direct-serve fixes (ea948ed+819262c); heap probe MISSING=0/2924 acked; ready delayed by fix cycle — clean-run timing TBD; U11 follow-up: replica re-placement"
