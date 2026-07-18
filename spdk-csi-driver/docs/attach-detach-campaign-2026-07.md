@@ -674,6 +674,26 @@ gap we accept and document. Second lesson of the phase: F12→F15 were
 all *server tells the client a comforting lie* bugs; F17 is the same
 disease in the identity layer.
 
+**F18 (P1, found by drill 3.1's verify layer): dead client connection
+pins the NFS server into a CPU-burning spin.** After 3.1's clean
+cross-node migration, the server sat at ~60% CPU with 83% SYSTEM time
+while serving ~25 ops/s; live-client READ rtt averaged 1.75s (client
+mountstats), amcheck timed out, readiness flapped. Diagnosis chain:
+one socket in CLOSE_WAIT + exactly two of the original tokio workers
+pegged (epoll_pwait hot loop; replacement workers spawned around
+them). Cause: the dispatcher's back-channel registry holds a STRONG
+`Arc<BackChannelWriter>`; when the migrated-away client's connection
+closed, the read loop exited cleanly but the registry Arc kept the
+write half — and therefore the socket fd — alive forever: permanent
+CLOSE_WAIT whose HUP readiness the async driver re-polls in a tight
+loop. Fix: the connection guard now purges this connection's writer
+from the registry on every exit path (same fix applied to the MDS
+server loop, which shares the pattern). Bonus finds in the same pass:
+two per-RPC `info!` lines (the only thing hotter than the spin in the
+profile) demoted to debug. Lesson: every strong registry needs an
+owner responsible for removal — the Weak-based conn-binding table two
+fields down had it right, and its doc comment even warned about this.
+
 _Drill results: TBD (this session)._
 
 ## Findings

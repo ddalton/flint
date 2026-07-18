@@ -61,14 +61,25 @@ VA_OK=Y
 PV=$(pg_pv)
 kubectl get volumeattachments -o json > "$ART/vas.json" 2>/dev/null
 if [ -n "$PV" ] && [ "$T_READY" -ge 0 ]; then
-  VA_NODE=$(va_node_for_pv "$PV")
-  N_VA=$(va_for_pv "$PV" | grep -c . || true)
-  { [ "$N_VA" = "1" ] && [ "$VA_NODE" = "$POST_NODE" ]; } \
-    || { VA_OK=N; FAILED="$FAILED va"; note "VA wrong: count=$N_VA node=${VA_NODE:-none} (pod on $POST_NODE)"; }
+  if is_rwx; then
+    # RWX: one VA per CONSUMER node (pg + witness — NFS mounts through
+    # the flint-nfs service; the nfs pod's block stage is not VA-backed).
+    WANT_NODES=$( { echo "$POST_NODE";
+        kubectl get pod -n "$NS" -l app=witness -o jsonpath='{.items[*].spec.nodeName}' 2>/dev/null | tr ' ' '\n'
+      } | grep . | sort -u )
+    GOT_NODES=$(va_node_for_pv "$PV" | sort -u)
+    [ "$GOT_NODES" = "$WANT_NODES" ] \
+      || { VA_OK=N; FAILED="$FAILED va"; note "VA nodes [$(echo $GOT_NODES)] != consumers [$(echo $WANT_NODES)]"; }
+  else
+    VA_NODE=$(va_node_for_pv "$PV")
+    N_VA=$(va_for_pv "$PV" | grep -c . || true)
+    { [ "$N_VA" = "1" ] && [ "$VA_NODE" = "$POST_NODE" ]; } \
+      || { VA_OK=N; FAILED="$FAILED va"; note "VA wrong: count=$N_VA node=${VA_NODE:-none} (pod on $POST_NODE)"; }
+  fi
 fi
 STALE=$(stale_vas 120)
 [ -z "$STALE" ] || { VA_OK=N; FAILED="$FAILED stale-va"; note "stale VAs: $STALE"; }
-[ "$VA_OK" = "Y" ] && ok "VA consistent (1 VA on $POST_NODE, none stale)"
+[ "$VA_OK" = "Y" ] && ok "VA consistent ($(is_rwx && echo "consumer nodes covered" || echo "1 VA on $POST_NODE"), none stale)"
 
 # 4. Data-path sessions --------------------------------------------------------
 # Fail if the LIVE volume's data path is broken. Backend-aware: nvmeof mode
@@ -83,12 +94,25 @@ if [ "$(backend_mode)" = "ublk" ]; then
     { echo "== $n =="; flint_ublk_disks "$n"; flint_spdk_controllers "$n" | sed 's/^/ctrl /'; } >> "$ART/ublk.txt"
   done
   if [ -n "$PV" ] && [ "$T_READY" -ge 0 ]; then
-    UBLK_ID=$(pv_ublk_id "$PV")
-    if [ -n "$UBLK_ID" ] && flint_ublk_disks "$POST_NODE" | awk -v id="$UBLK_ID" -F'\t' '$1==id{f=1} END{exit !f}'; then
-      ok "pg ublk disk $UBLK_ID served on $POST_NODE"
+    if is_rwx; then
+      # RWX: the block volume is served on the flint-nfs pod's node.
+      NFS_NODE=$(rwx_nfs_node_for_pv "$PV")
+      UBLK_ID=$(rwx_ublk_id_for_pv "$PV")
+      if [ -n "$NFS_NODE" ] && [ -n "$UBLK_ID" ] \
+        && flint_ublk_disks "$NFS_NODE" | awk -v id="$UBLK_ID" -F'\t' '$1==id{f=1} END{exit !f}'; then
+        ok "rwx ublk disk $UBLK_ID served on nfs node $NFS_NODE"
+      else
+        NVME_OK=N; FAILED="$FAILED nvme"
+        note "rwx ublk disk id='${UBLK_ID:-?}' not served on nfs node '${NFS_NODE:-?}'"
+      fi
     else
-      NVME_OK=N; FAILED="$FAILED nvme"
-      note "pg ublk disk id='${UBLK_ID:-?}' not served on $POST_NODE"
+      UBLK_ID=$(pv_ublk_id "$PV")
+      if [ -n "$UBLK_ID" ] && flint_ublk_disks "$POST_NODE" | awk -v id="$UBLK_ID" -F'\t' '$1==id{f=1} END{exit !f}'; then
+        ok "pg ublk disk $UBLK_ID served on $POST_NODE"
+      else
+        NVME_OK=N; FAILED="$FAILED nvme"
+        note "pg ublk disk id='${UBLK_ID:-?}' not served on $POST_NODE"
+      fi
     fi
   fi
 else

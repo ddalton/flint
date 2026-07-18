@@ -318,21 +318,35 @@ async fn handle_tcp_connection(
 
     // When the loop exits — clean EOF or any error — release any
     // CB callers still awaiting a reply on this connection so they
-    // see `ConnectionClosed` rather than wait out the timeout. We
-    // can't rely on the writer's Drop because the dispatcher's
-    // back-channel registry holds another Arc, so the writer
-    // outlives this function. The guard runs cleanup on every
-    // return path (early Err, EOF return, panic).
+    // see `ConnectionClosed` rather than wait out the timeout, AND
+    // purge this connection's writer from the dispatcher's back-channel
+    // registry. The registry holds a STRONG Arc: leaving it in place
+    // after the peer disconnects pins the socket fd open (peer FIN →
+    // permanent CLOSE_WAIT) and its HUP readiness spins the async
+    // driver — measured as two runtime workers pegged in epoll_pwait
+    // at ~60% CPU / 83% sys after a single client migration (F18,
+    // drill 3.1). The guard runs cleanup on every return path (early
+    // Err, EOF return, panic).
     struct InflightGuard {
         bcw: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+        back_channels: Arc<dashmap::DashMap<
+            crate::nfs::v4::protocol::SessionId,
+            Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+        >>,
     }
     impl Drop for InflightGuard {
         fn drop(&mut self) {
             self.bcw.drop_all_inflight();
+            // Drop every registry entry that is THIS connection's writer —
+            // the last Arc going away closes the write half and closes the
+            // socket the kernel is holding in CLOSE_WAIT.
+            self.back_channels
+                .retain(|_, v| !Arc::ptr_eq(v, &self.bcw));
         }
     }
     let _inflight_guard = InflightGuard {
         bcw: Arc::clone(&bcw),
+        back_channels: dispatcher.back_channels(),
     };
 
     // Per-connection RPC pipelining (RFC 8881 §2.10.6): dispatches run
@@ -500,7 +514,9 @@ async fn dispatch_nfsv4(
         }
     };
 
-    info!(
+    // Per-RPC lines are debug: at INFO these two lines per RPC dominate
+    // the server's own CPU under load (containerd shim writes).
+    debug!(
         ">>> [NFS_RPC] Connection #{}, RPC #{}: xid={}, program={}, version={}, procedure={}",
         conn_id, rpc_num, call.xid, call.program, call.version, call.procedure
     );
@@ -541,7 +557,7 @@ async fn dispatch_nfsv4(
 
         procedure::COMPOUND => {
             // COMPOUND procedure - dispatch to NFSv4.2 handler
-            info!(">>> COMPOUND procedure");
+            debug!(">>> COMPOUND procedure");
             handle_compound(call, args, dispatcher, back_channel).await
         }
 

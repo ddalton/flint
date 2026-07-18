@@ -248,16 +248,53 @@ flint_spdk_controllers() { # <node>
     | jq -r '.result[]? | .name' 2>/dev/null | sed -n 's/.*com_flint_volume_//p'
 }
 
+# RWX topology: the block volume is staged on the flint-nfs pod's node (no
+# ublk-id PV annotation — that's written by the RWO NodeStage). The pod's own
+# /proc/mounts names its ublk device, which is the authoritative live id.
+is_rwx() { # does the harness PVC use ReadWriteMany?
+  kubectl get pvc -n "$NS" data-pg-0 -o jsonpath='{.spec.accessModes[0]}' 2>/dev/null \
+    | grep -q ReadWriteMany
+}
+rwx_nfs_pod_for_pv() { # <pv> — flint-nfs pod name ("" if none)
+  local h
+  h=$(kubectl get pv "$1" -o jsonpath='{.spec.csi.volumeHandle}' 2>/dev/null)
+  kubectl get pod -n "$DRIVER_NS" "flint-nfs-$h" -o jsonpath='{.metadata.name}' 2>/dev/null
+}
+rwx_nfs_node_for_pv() { # <pv>
+  local p; p=$(rwx_nfs_pod_for_pv "$1")
+  [ -n "$p" ] && kubectl get pod -n "$DRIVER_NS" "$p" -o jsonpath='{.spec.nodeName}' 2>/dev/null
+}
+rwx_ublk_id_for_pv() { # <pv> — ublk id backing the nfs pod's /mnt/volume
+  local p; p=$(rwx_nfs_pod_for_pv "$1")
+  [ -n "$p" ] || return 0
+  kubectl exec -n "$DRIVER_NS" "$p" -- sh -c \
+    'awk "\$2==\"/mnt/volume\"{print \$1}" /proc/mounts' 2>/dev/null \
+    | grep -oE 'ublkb[0-9]+' | grep -oE '[0-9]+' | head -1
+}
+# "node id" pairs that are live because an nfs pod serves that volume there.
+rwx_live_ublk_pairs() {
+  local pv node id
+  for pv in $(live_flint_pvs); do
+    node=$(rwx_nfs_node_for_pv "$pv"); [ -n "$node" ] || continue
+    id=$(rwx_ublk_id_for_pv "$pv"); [ -n "$id" ] || continue
+    echo "$node $id"
+  done
+}
+
 # Orphans in ublk mode: a served ublk disk whose id maps to no live PV, or an
 # SPDK initiator controller whose PV is gone. "node kind detail" lines.
 orphan_ublk_paths() {
-  local live live_ids n id bdev pv
+  local live live_ids rwx_pairs n id bdev pv
   live=$(live_flint_pvs)
   live_ids=$(for pv in $live; do pv_ublk_id "$pv"; done | grep . || true)
+  rwx_pairs=$(rwx_live_ublk_pairs)
   for n in $(worker_nodes); do
     while IFS=$'\t' read -r id bdev; do
       [ -n "$id" ] || continue
-      echo "$live_ids" | grep -qx "$id" || echo "$n ublk $id($bdev)"
+      echo "$live_ids" | grep -qx "$id" && continue
+      # RWX: the disk backing a live volume's nfs pod on THIS node is live.
+      echo "$rwx_pairs" | grep -qx "$n $id" && continue
+      echo "$n ublk $id($bdev)"
     done < <(flint_ublk_disks "$n")
     while read -r pv; do
       [ -n "$pv" ] || continue

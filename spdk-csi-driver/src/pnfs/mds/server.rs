@@ -499,17 +499,28 @@ impl MetadataServer {
         // Inflight cleanup on every exit path. Without this, awaiting
         // CB callers hang on `Timeout` instead of seeing
         // `ConnectionClosed`. The dispatcher's back-channel registry
-        // holds another Arc to the writer, so it outlives this
-        // function — explicit cleanup is load-bearing.
+        // holds another STRONG Arc to the writer — it must be purged
+        // here too, or the dead connection's socket stays pinned open
+        // (CLOSE_WAIT) and its HUP readiness spins the async driver
+        // (F18; observed on the RWX server, same registry pattern).
         struct InflightGuard {
             bcw: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+            back_channels: Arc<dashmap::DashMap<
+                crate::nfs::v4::protocol::SessionId,
+                Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+            >>,
         }
         impl Drop for InflightGuard {
             fn drop(&mut self) {
                 self.bcw.drop_all_inflight();
+                self.back_channels
+                    .retain(|_, v| !Arc::ptr_eq(v, &self.bcw));
             }
         }
-        let _inflight_guard = InflightGuard { bcw: Arc::clone(&bcw) };
+        let _inflight_guard = InflightGuard {
+            bcw: Arc::clone(&bcw),
+            back_channels: base_dispatcher.back_channels(),
+        };
 
         // Per-connection RPC pipelining (RFC 8881 §2.10.6): metadata
         // ops (GETATTR/LOOKUP/LAYOUTGET) no longer queue behind a slow
