@@ -3774,7 +3774,7 @@ impl NodeAgent {
             .disk_service
             .call_spdk_rpc(&json!({"method": "bdev_raid_get_bdevs", "params": {"category": "all"}}))
             .await?;
-        let raid_base_bdevs: std::collections::HashSet<String> = raids_resp["result"]
+        let mut raid_base_bdevs: std::collections::HashSet<String> = raids_resp["result"]
             .as_array()
             .cloned()
             .unwrap_or_default()
@@ -3787,6 +3787,13 @@ impl NodeAgent {
             })
             .filter_map(|b| b["name"].as_str().map(str::to_string))
             .collect();
+        // Degraded-direct chains serve a ublk disk straight off an initiator
+        // bdev with NO raid above it — protect those controllers exactly
+        // like raid legs, or a transient reconnect gets them reaped and the
+        // sole surviving leg torn down.
+        for bdev in self.expected_ublk.lock().await.values() {
+            raid_base_bdevs.insert(bdev.clone());
+        }
 
         let input = crate::controller_reap::ReapInput {
             controllers,
@@ -3876,6 +3883,20 @@ impl NodeAgent {
             // backing PV (handle nfs-server-…) carries the real raid
             // coverage on the NFS server's node.
             if crate::replica_sync::is_rwx_pv(&pv) {
+                continue;
+            }
+            // Single-survivor DIRECT serve (permanent node loss dropped the
+            // volume to one in-sync leg; SPDK raid1 refuses a single-base
+            // create): there is no raid BY DESIGN, so the raid-missing
+            // predicate is vacuous — striking would repair-churn forever.
+            // Cleared by the next >=2-leg assembly (replica re-placement).
+            if pv
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("flint.io/degraded-direct"))
+                .is_some()
+            {
                 continue;
             }
             let flagged_by_me = pv

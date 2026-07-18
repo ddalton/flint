@@ -1912,17 +1912,39 @@ impl SpdkCsiDriver {
             println!("⚠️ [DRIVER] bdev_wait_for_examine failed (continuing): {}", e);
         }
 
-        // Create RAID 1 bdev with available replicas
-        println!("🔧 [DRIVER] Creating RAID 1 bdev: {} with {} base bdevs",
-                 raid_name, base_bdevs.len());
-
-        let raid_bdev_name = self.ensure_raid1_bdev(&raid_name, base_bdevs).await?;
-
-        if unavailable_count > 0 {
-            println!("⚠️ [DRIVER] RAID 1 bdev created in DEGRADED mode: {}", raid_bdev_name);
+        // SPDK v26.05 raid1 refuses a single-base create (EINVAL, verified
+        // live) — so a multi-replica volume down to ONE in-sync leg after a
+        // permanent node loss (2u/2.4) is served DIRECT on that leg, no
+        // raid layer, exactly like an r1 volume. The PV is annotated so the
+        // consumer-blindness monitor doesn't strike-and-repair against the
+        // missing raid; the annotation clears on the next >=2-leg assembly
+        // (replica re-placement is the follow-up that restores redundancy).
+        let raid_bdev_name = if base_bdevs.len() == 1 && total_replicas > 1 {
+            let direct = base_bdevs.into_iter().next().unwrap();
+            println!(
+                "⚠️ [DRIVER] SINGLE-SURVIVOR DIRECT SERVE: {} on {} (no raid layer; \
+                 redundancy lost until a replacement replica is provisioned)",
+                direct, current_node
+            );
+            self.set_pv_annotation(&record_volume_id, "flint.io/degraded-direct", Some(current_node))
+                .await;
+            direct
         } else {
-            println!("✅ [DRIVER] RAID 1 bdev created: {}", raid_bdev_name);
-        }
+            // Create RAID 1 bdev with available replicas
+            println!("🔧 [DRIVER] Creating RAID 1 bdev: {} with {} base bdevs",
+                     raid_name, base_bdevs.len());
+
+            let name = self.ensure_raid1_bdev(&raid_name, base_bdevs).await?;
+
+            if unavailable_count > 0 {
+                println!("⚠️ [DRIVER] RAID 1 bdev created in DEGRADED mode: {}", name);
+            } else {
+                println!("✅ [DRIVER] RAID 1 bdev created: {}", name);
+            }
+            self.set_pv_annotation(&record_volume_id, "flint.io/degraded-direct", None)
+                .await;
+            name
+        };
 
         // Replicas deliberately left out in a healable state (standby or
         // stale-with-catch-up-pending) must not be re-marked stale or
@@ -2217,6 +2239,25 @@ impl SpdkCsiDriver {
                 }
             })
             .await
+    }
+
+    /// Best-effort PV annotation set/clear (merge patch; None removes).
+    /// Used for operational state markers like `flint.io/degraded-direct` —
+    /// a failed patch must never fail the data-path operation it decorates.
+    pub async fn set_pv_annotation(&self, pv_name: &str, key: &str, value: Option<&str>) {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::api::{Api, Patch, PatchParams};
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        let patch = serde_json::json!({ "metadata": { "annotations": { key: value } } });
+        if let Err(e) = pvs
+            .patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+        {
+            println!(
+                "⚠️ [DRIVER] PV annotation patch failed ({}={:?} on {}): {}",
+                key, value, pv_name, e
+            );
+        }
     }
 
     /// Wait for all in-flight bdev examine callbacks to finish. Examine is
