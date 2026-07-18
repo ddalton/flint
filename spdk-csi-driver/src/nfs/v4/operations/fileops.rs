@@ -121,7 +121,7 @@ impl AttributeSnapshot {
             let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             let ctime_secs = metadata.ctime() as u64;
             let ctime = SystemTime::UNIX_EPOCH + Duration::from_secs(ctime_secs);
-            
+
             Ok(Self {
                 ftype,
                 size: metadata.len(),
@@ -132,7 +132,16 @@ impl AttributeSnapshot {
                 atime,
                 mtime,
                 ctime,
-                change: ctime_secs, // NFSv4 change attr is typically ctime
+                // NANOSECOND composition is load-bearing (F13): the change
+                // attr is the client's cache-ordering key. Whole seconds
+                // made every write inside the same second carry the SAME
+                // change value, so an out-of-order GETATTR reply with a
+                // stale (shorter) size was accepted — postgres then read
+                // "unexpected data beyond EOF" mid-COPY. ctime (not mtime)
+                // so chmod/chown also invalidate.
+                change: ctime_secs
+                    .wrapping_mul(1_000_000_000)
+                    .wrapping_add(metadata.ctime_nsec() as u64),
                 mode: metadata.mode(),
                 numlinks: metadata.nlink() as u32,
                 owner: metadata.uid(),
@@ -1498,11 +1507,15 @@ fn encode_single_attribute(
         }
         
         FATTR4_CHANGE => {
-            // Change attribute - use modification time as change ID
+            // ctime at NANOSECOND composition — see the F13 note on the
+            // snapshot builder: second-granularity change values let a
+            // stale-size GETATTR reply win the client's cache race.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                let change_id = metadata.mtime() as u64;
+                let change_id = (metadata.ctime() as u64)
+                    .wrapping_mul(1_000_000_000)
+                    .wrapping_add(metadata.ctime_nsec() as u64);
                 buf.put_u64(change_id);
             }
             #[cfg(not(unix))]
