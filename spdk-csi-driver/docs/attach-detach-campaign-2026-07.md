@@ -969,3 +969,45 @@ consumer** with no finalizer hang, zero VAs left (a clean-detach datapoint in
 itself). Trove project 36 deleted; all 4 EC2 terminated; spot/EBS/EIP orphan
 sweep clean; kubeconfig removed. Campaign resumes on a fresh cluster at
 drill 1.3 (repro of F1).
+
+### Phase 2 nvmeof (loopback + kernel initiator), 2026-07-18 — runv, ublk.13 driver
+
+**r2 matrix ALL PASS** (orchestrators on, PHASE_LABEL=2): 2.1
+remote-leg csi kill — worst ack 14s, raid re-joins; 2.2a RAID-host tgt
+SIGKILL — repair_data_path 139s; 2.2b RAID-host pod delete — ~208s
+actual outage, self-healed (monitor path; the ublk detector fast-path
+has no nvmeof equivalent yet — candidate follow-up); 2.3 remote NODE
+kill — rode through, worst ack 0s; 2.5 migration 24s; 2.6 churn ×10
+(10-22s cycles). All db PASS. nvmeof recovery on RAID-host vectors is
+slower than ublk (139-208s vs 31-33s) but fully automatic.
+
+**2.4 (☠ REAL node terminate) PASS on r3**: terminated pg's node
+(aws-5, holding pg + one of three legs) — pg Ready 310s cross-node,
+db PASS, independent heap probe MISSING=0. Clean-run timing for the
+node-loss recovery: ~5min (NotReady detection + taint + reschedule +
+stage backoff), served from the surviving legs.
+
+**2.7 nvmeof: N/R** — first attempt aborted on an over-applied oracle
+relocation (fixed: csi-pod kills never harm pg-load), rerun aborted on
+replica discovery, and the 2.4 finale then consumed the third storage
+node. Mechanism coverage stands via ublk 2.7 (triple simultaneous leg
+bounce, 21s) + nvmeof 2.1 (same SPDK-initiator reconnect machinery).
+
+**F11 (OPEN, store-durability)**: aws-6's blobstore — created THIS
+NIGHT, f5fix-only lifetime — went terminally unloadable after the
+dirty-kill barrage (`blob_parse: Blobid (0x100000000) doesn't match
+metadata (0x100000001)` → super blob unopenable). f5fix does NOT fully
+protect store metadata under repeated dirty kills; remediation is
+`bdev_lvol_create_lvstore` straight over the corrupt store (no wipefs
+needed — improves on the F7-era recipe). The drills through those
+kills all PASSED: replicas absorbed the store loss, which is the
+r2/r3 value proposition working as designed. Fleet guidance: replicated
+SCs make single-store death a survivable node-class failure.
+
+**Phase-2 verdict:** r2/r3 chaos matrix green on BOTH backends after
+the fix wave (U9 ublk r2 repair, F8-amnesia seed, degraded-assembly
+floor, single-survivor direct serve, orchestrators default-on).
+Post-v1.16.0 commits — next release carries them. Open backlog: U11
+replica re-placement, F11 store-md hardening, nvmeof detector-tick
+repair parity, drill 1.14/2.4 AD-timer budget, nvmeof 2.7 on a
+restored 3-storage-node fleet.
