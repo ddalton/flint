@@ -34,7 +34,7 @@ up() {
   ok "pg-0 Ready on $(pg_node) (pv $(pg_pv))"
 
   emit_init_job | kubectl apply -f - >/dev/null
-  kubectl wait --for=condition=complete job/pg-init -n "$NS" --timeout=600s >/dev/null \
+  kubectl wait --for=condition=complete job/pg-init -n "$NS" --timeout=900s >/dev/null \
     || fail "pg-init job did not complete"
   ok "schema + pgbench -i -s ${SCALE:-200} done"
 
