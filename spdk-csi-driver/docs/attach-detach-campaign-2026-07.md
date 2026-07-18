@@ -404,25 +404,33 @@ dead). The 60s monitor healed it at ~3.4min; fix seeds r2 raid chains
 into the detector at rehydration → **PASS, actual outage 33s** (drill
 timing fixed to measure from old-pod-GONE, not delete-issued).
 
-**2.3 + 2.5 — F10, THE PHASE-2 P0: unsynced-rejoin data rollback.**
-Remote-leg NODE kill (2.3): the leg fails out of the raid, writes
-continue on the surviving leg (availability correct). But with the
-replication orchestrators env-gated OFF (v1.15 default), NOTHING
-records the divergence — no epochs ⇒ sync-record admission in
-create_raid_from_replicas runs in legacy attach-everything mode. The
-next raid teardown+reassembly (2.5 cross-node migration) re-admitted
-the stale leg as an equal read source: **1,077 fsync-acked writes
-(seqs ~2409-3485, acked exactly during the outage window) silently
-vanished** — amcheck clean, writability fine, pure stale-read rollback.
-This live-proves the tier2-operator-runbook warning ("FLINT_CATCHUP
-disabled on a multi-replica cluster is actively hazardous").
-**Remedy = enable the shipped orchestrator trio** (FLINT_EPOCH_SCHEDULER
-+ FLINT_CATCHUP + FLINT_HOT_REJOIN, epoch interval 30s on test
-clusters); production guidance for replicated SCs: orchestrators ON is
-the durability-correct configuration, and the chart needs first-class
-plumbing for it. Harness fixes from the same runs: evict_load_from
-(the ledger oracle died with the drilled node twice), 2.2b honest
-outage timing.
+**2.3 + 2.5 — "F10" RETRACTED: the observed loss was a harness
+artifact.** The initial run reported 1,077 acked writes missing after
+node-kill (2.3) + migration (2.5) with orchestrators off, first written
+up as an unsynced-rejoin rollback. Re-litigation with a fixed harness
+OVERTURNED it: verify-db piped `sort -n` output into `comm`, which
+requires LEXICOGRAPHIC order — the merge desynchronizes whenever the
+two lists aren't near-identical, and an oracle-pod replacement
+mid-drill (evict_load_from raced the terminating pod) made acked.log a
+mid-stream subset, fabricating sparse "missing" seqs. A direct heap
+probe disproved the loss on the volumes still alive; the original
+volume was destroyed before heap verification, so its number is
+untrustworthy. The HONEST reproducer (orchestrators OFF, fixed comm +
+relocation, independent python set-diff heap probe): 2.3 rode through
+the node kill (worst ack age 1s — kubelet death never severs the data
+plane; the tgt keeps serving and the leg never leaves the raid), 2.5
+migrated in 18s, **MISSING=0 of 2,192 acked writes**. No divergence
+vector was demonstrated in the phase-2u matrix: with ctrlr_loss_tmo=-1
+legs queue rather than fail out. The code-level observation stands
+(assembly without epoch history is attach-everything; the tier2
+runbook's own hazard warning) — the orchestrator trio also ran the
+same sequence green — but there is no live-proven loss, and the
+chart's replication.orchestrators block is justified by the runbook
+hazard, not by a demonstrated rollback. Harness fixes from this arc:
+lex-sort comm, evict_load_from wait-for-delete, PRE_ORPHANS baseline,
+r2-suffix orphan checker. The same comm artifact explains the r3-chain
+db FAILs (2.7/2.2a/2.5 on flint-r3): all flipped to PASS on re-verify
+(3x stable, all acked present).
 
 **2.5 storage verdict (orthogonal to F10): PASS** — cross-node
 migration onto a replica-less node (aws-5) assembled a FULLY-REMOTE
