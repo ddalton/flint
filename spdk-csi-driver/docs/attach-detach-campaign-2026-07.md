@@ -461,6 +461,80 @@ Cluster note: runv-aws-5/6 added live mid-phase (manual clone of the
 trove worker bootstrap: run-instances + kubeadm join + kernel 6.18.29
 swap + lvstore init — no trove backend needed, ~12min for both).
 
+## Backlog fix wave — 2026-07-18 (post-v1.17.0)
+
+The RWO-production backlog implemented in one wave (aafe958 + ffaca67 +
+drills 9d18d2c), validation on runw:
+
+**U11 — replica re-placement (`replica_replace.rs`).** A pre-pass of
+each per-volume catch-up task (same claim): a STALE, unmarked leg whose
+Node object is deleted — or NotReady past
+`FLINT_REPLICA_REPLACE_AFTER_SECS` (600) — gets its identity swapped to
+the max-free Ready node hosting no other leg. PV `volumeAttributes` are
+API-immutable, so the swapped list lives in a new
+`flint.csi.storage.io/replicas-override` annotation that every reader
+prefers (`raw_replicas_json` funnel; NodeStage re-reads the PV, so a
+restage picks up swaps with zero VA surgery). The swap writes override
++ sync record + node-label change in ONE rv-guarded metadata patch —
+`reconcile_membership` defaults unknown identities to in_sync, so the
+new uuid must enter STALE atomically with the identity. From there the
+EXISTING machinery rebuilds: §9-5 thin-aware full build
+(`revert_head_to_empty` recreates the placeholder head sized to the
+source) → standby → chase → hot-rejoin admits into the live degraded
+raid. Design consequence worth stating: when a node dies under a
+running consumer the raid object survives in degraded state, so
+redundancy restores LIVE with no pod disruption; only the
+restage-into-direct-serve path (2.4 shape) waits for the next stage —
+live direct→raid conversion is the remaining follow-up. Guards: needs
+an in_sync source + epoch history, one swap per volume/tick, RWX
+skipped (the synthetic backing PV mirrors identity attrs — swap
+choreography there is future work), placeholder lvol unwound on patch
+conflict. The dead `autoRebuild` SC parameter is now the per-volume
+opt-out (echoed to volumeAttributes at CreateVolume; "false" = no
+re-placement, catch-up-on-return unaffected).
+
+**nvmeof detector-tick repair parity.** `reconcile_exports_if_lost`
+(10s tick) now mirrors the ublk detector's fast path: a REGISTERED
+export whose backing RAID bdev is missing is always a post-stage loss,
+so the tick drives `repair_data_path` directly instead of retrying
+add_ns forever while the 60s 3-strike monitor ambles toward the same
+repair. This was the whole ublk-vs-nvmeof recovery gap on RAID-host
+kills (31-33s vs 139-208s in the phase-2 matrix).
+
+**F11 — store-loss detection + guarded self-heal**
+(`check_store_health`, 60s monitor). Ground truth (PV replica
+identities naming this node's lvstores, override-aware) vs live
+lvstores, 3 consecutive strikes; RPC failure never counts (tgt-down ≠
+store-lost). Self-heal (`FLINT_STORE_REINIT`, default on): when every
+expecting volume is multi-replica, re-init the store in place — the
+live-validated F11 remediation; `identity::lvs_name` derives from
+node+PCI so the re-created store carries the exact expected name, and
+the catch-up full build recreates the heads. ANY single-replica
+expectation blocks re-init (events only): never destroy the only,
+possibly-recoverable copy. Without the self-heal a live node with a
+dead store was permanently stuck — `catchup_stale` reads its failing
+lvol-list as "not returned yet" and U11 correctly refuses (node is
+Ready).
+
+**Degraded visibility.** Stage-time PV events `DegradedDirectServe` /
+`DegradedAssembly`; orchestrator events `ReplicaReplaced` /
+`ReplicaReplacementBlocked` / `ReplicaStoreLost` /
+`ReplicaStoreReinitialized`. The retracted-F10 wording in the chart's
+orchestrators comment was corrected in passing.
+
+New drills: **2.8** (☠ U11 live re-placement — terminate + delete the
+remote-leg node, assert override swap → in_sync with acks fresh
+throughout) and **2.9** (F11 — destroy the remote leg's lvstore via
+RPC, assert 3-strike detection → in-place re-init → in_sync).
+
+Cluster: **runw** (trove project 40) — 4× i4i.xlarge spot storage
+workers (kernel 6.18.29) + cordoned builder + on-demand CP. The trove
+disk-init gap reproduced AGAIN (zero lvstores after provision) —
+initialized via the agent's `/api/disks/initialize_blobstore` on the
+non-system NVMe and VERIFIED before any drill, per the standing gate.
+
+_Validation results: TBD (this session)._
+
 ## Phase 3 — RWX (NFS)
 
 _TBD._
