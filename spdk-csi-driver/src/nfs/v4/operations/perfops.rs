@@ -301,6 +301,16 @@ pub struct IoAdviseRes {
     pub hints: IoAdviseHints,
 }
 
+/// What a fallocate-backed op does to the range (platform-neutral so
+/// non-Linux dev builds compile; translated to FallocateFlags on Linux).
+#[derive(Debug, Clone, Copy)]
+enum AllocMode {
+    /// ALLOCATE: reserve blocks and extend size (posix_fallocate).
+    Allocate,
+    /// DEALLOCATE: punch a hole, keep size.
+    PunchHole,
+}
+
 /// Performance operation handler
 pub struct PerfOperationHandler {
     state_mgr: Arc<StateManager>,
@@ -690,10 +700,19 @@ impl PerfOperationHandler {
     ///
     /// Pre-allocate space without zeroing. Useful for thin-provisioned
     /// SPDK volumes to reserve space without actually writing.
+    /// F15: this handler MUST really allocate. It shipped as a fake-OK
+    /// stub, and the consequence was silent data corruption for any
+    /// application that trusts posix_fallocate: PG16's bulk relation
+    /// extend fallocates, the client extended its cached i_size on our
+    /// fake OK, the backing file stayed at its old size, and the next
+    /// server-refreshed size check collapsed the file back — postgres
+    /// died with "unexpected data beyond EOF" on every pgbench load
+    /// (phase-3 harness, runw). fallocate(mode=0) on the backing file is
+    /// exactly posix_fallocate semantics: allocate and extend size.
     pub async fn handle_allocate(
         &self,
         op: AllocateOp,
-        _ctx: &CompoundContext,
+        ctx: &CompoundContext,
     ) -> AllocateRes {
         debug!("ALLOCATE: offset={}, length={}", op.offset, op.length);
 
@@ -705,17 +724,88 @@ impl PerfOperationHandler {
             };
         }
 
-        // TODO: Integrate with SPDK backend
-        // SPDK implementation:
-        // 1. Calculate which pages/blocks are affected
-        // 2. Pre-allocate those blocks (spdk_blob_resize if needed)
-        // 3. Mark blocks as allocated but don't zero them
-        // 4. Update thin provisioning metadata
+        let status = self
+            .fallocate_current_fh(ctx, op.offset, op.length, AllocMode::Allocate)
+            .await;
+        AllocateRes { status }
+    }
 
-        debug!("ALLOCATE: Would pre-allocate {} bytes at offset {}", op.length, op.offset);
-
-        AllocateRes {
-            status: Nfs4Status::Ok,
+    /// Resolve the current filehandle and fallocate the backing file with
+    /// `flags`. Shared by ALLOCATE (empty flags = allocate + extend size)
+    /// and DEALLOCATE (PUNCH_HOLE|KEEP_SIZE). Bumps the change counter on
+    /// success — allocation changes observable state (size / content).
+    async fn fallocate_current_fh(
+        &self,
+        ctx: &CompoundContext,
+        offset: u64,
+        length: u64,
+        mode: AllocMode,
+    ) -> Nfs4Status {
+        let Some(fh) = &ctx.current_fh else {
+            return Nfs4Status::NoFileHandle;
+        };
+        let path = match self.fh_mgr.resolve_handle(fh) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("ALLOCATE/DEALLOCATE: unresolvable filehandle: {}", e);
+                return Nfs4Status::Stale;
+            }
+        };
+        if length == 0 {
+            // RFC 7862: zero-length range is INVAL.
+            return Nfs4Status::Inval;
+        }
+        let p = path.clone();
+        let res = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::fd::AsRawFd;
+                let flags = match mode {
+                    AllocMode::Allocate => nix::fcntl::FallocateFlags::empty(),
+                    AllocMode::PunchHole => {
+                        nix::fcntl::FallocateFlags::FALLOC_FL_PUNCH_HOLE
+                            | nix::fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE
+                    }
+                };
+                let file = std::fs::OpenOptions::new().write(true).open(&p)?;
+                nix::fcntl::fallocate(
+                    file.as_raw_fd(),
+                    flags,
+                    offset as nix::libc::off_t,
+                    length as nix::libc::off_t,
+                )
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                Ok(())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                // Non-Linux dev hosts: no fallocate — refuse honestly so
+                // the client falls back to writing (never a fake OK).
+                let _ = (&p, mode, offset, length);
+                Err(std::io::Error::from_raw_os_error(nix::libc::EOPNOTSUPP))
+            }
+        })
+        .await;
+        match res {
+            Ok(Ok(())) => {
+                crate::nfs::v4::change_counter::bump_path(&path);
+                Nfs4Status::Ok
+            }
+            Ok(Err(e)) => {
+                warn!("ALLOCATE/DEALLOCATE on {:?} failed: {}", path, e);
+                match e.raw_os_error() {
+                    Some(nix::libc::ENOSPC) => Nfs4Status::NoSpc,
+                    Some(nix::libc::EISDIR) => Nfs4Status::IsDir,
+                    Some(nix::libc::ENOENT) => Nfs4Status::NoEnt,
+                    Some(nix::libc::EACCES) => Nfs4Status::Access,
+                    Some(nix::libc::EOPNOTSUPP) => Nfs4Status::NotSupp,
+                    _ => Nfs4Status::Io,
+                }
+            }
+            Err(e) => {
+                warn!("ALLOCATE/DEALLOCATE task join error: {}", e);
+                Nfs4Status::Io
+            }
         }
     }
 
@@ -726,7 +816,7 @@ impl PerfOperationHandler {
     pub async fn handle_deallocate(
         &self,
         op: DeallocateOp,
-        _ctx: &CompoundContext,
+        ctx: &CompoundContext,
     ) -> DeallocateRes {
         debug!("DEALLOCATE: offset={}, length={}", op.offset, op.length);
 
@@ -738,21 +828,13 @@ impl PerfOperationHandler {
             };
         }
 
-        // TODO: Integrate with SPDK backend
-        // SPDK implementation:
-        // 1. Calculate affected blocks
-        // 2. Issue SPDK unmap for those blocks
-        // 3. Return space to thin provisioning pool
-        // 4. Update allocation metadata
-        //
-        // This is critical for space efficiency!
-
-        debug!("DEALLOCATE: Would unmap {} bytes at offset {} (space reclamation)",
-              op.length, op.offset);
-
-        DeallocateRes {
-            status: Nfs4Status::Ok,
-        }
+        // F15: a fake-OK here means an unpunched hole — the client
+        // believes the range now reads as zeros while the old data is
+        // still there. Punch a real hole in the backing file.
+        let status = self
+            .fallocate_current_fh(ctx, op.offset, op.length, AllocMode::PunchHole)
+            .await;
+        DeallocateRes { status }
     }
 
     /// Handle SEEK operation
@@ -762,7 +844,7 @@ impl PerfOperationHandler {
     pub async fn handle_seek(
         &self,
         op: SeekOp,
-        _ctx: &CompoundContext,
+        ctx: &CompoundContext,
     ) -> SeekRes {
         debug!("SEEK: offset={}, what={:?}", op.offset, op.what);
 
@@ -776,19 +858,62 @@ impl PerfOperationHandler {
             };
         }
 
-        // TODO: Integrate with SPDK backend
-        // SPDK implementation:
-        // 1. Query blob allocation map
-        // 2. Scan for next allocated (data) or unallocated (hole) region
-        // 3. Return offset without reading actual data
-        //
-        // This is efficient for sparse files!
-
-        // For now, return EOF (no more data/holes found)
-        SeekRes {
-            status: Nfs4Status::Ok,
-            eof: true,
-            offset: op.offset,
+        // F15 audit: the stub always answered "EOF at your offset",
+        // which corrupts sparse-aware readers (cp --sparse, tar) by
+        // truncating their view of the file. Real lseek on the backing
+        // file: SEEK_DATA/SEEK_HOLE map 1:1; ENXIO = past-EOF → eof
+        // with the file size per RFC 7862 §15.11.
+        let fail = |status| SeekRes { status, eof: false, offset: 0 };
+        let Some(fh) = &ctx.current_fh else {
+            return fail(Nfs4Status::NoFileHandle);
+        };
+        let path = match self.fh_mgr.resolve_handle(fh) {
+            Ok(p) => p,
+            Err(_) => return fail(Nfs4Status::Stale),
+        };
+        let what = op.what;
+        let start = op.offset;
+        let res = tokio::task::spawn_blocking(move || -> std::io::Result<(bool, u64)> {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::fd::AsRawFd;
+                let file = std::fs::File::open(&path)?;
+                let whence = match what {
+                    SeekType::Data => nix::unistd::Whence::SeekData,
+                    SeekType::Hole => nix::unistd::Whence::SeekHole,
+                };
+                match nix::unistd::lseek(file.as_raw_fd(), start as nix::libc::off_t, whence) {
+                    Ok(off) => Ok((false, off as u64)),
+                    Err(nix::errno::Errno::ENXIO) => {
+                        // Past EOF (or no further data): report eof at size.
+                        let size = file.metadata()?.len();
+                        Ok((true, size))
+                    }
+                    Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (&path, what, start);
+                Err(std::io::Error::from_raw_os_error(nix::libc::EOPNOTSUPP))
+            }
+        })
+        .await;
+        match res {
+            Ok(Ok((eof, offset))) => SeekRes { status: Nfs4Status::Ok, eof, offset },
+            Ok(Err(e)) => {
+                warn!("SEEK failed: {}", e);
+                fail(match e.raw_os_error() {
+                    Some(nix::libc::ENOENT) => Nfs4Status::NoEnt,
+                    Some(nix::libc::EISDIR) => Nfs4Status::IsDir,
+                    Some(nix::libc::EOPNOTSUPP) => Nfs4Status::NotSupp,
+                    _ => Nfs4Status::Io,
+                })
+            }
+            Err(e) => {
+                warn!("SEEK task join error: {}", e);
+                fail(Nfs4Status::Io)
+            }
         }
     }
 
@@ -816,21 +941,15 @@ impl PerfOperationHandler {
             };
         }
 
-        // TODO: Integrate with SPDK backend
-        // SPDK implementation:
-        // 1. Read data using positioned I/O
-        // 2. Scan for zero regions (SPDK can detect unallocated blocks)
-        // 3. Build segments:
-        //    - Data segments: use Bytes (zero-copy buffer)
-        //    - Hole segments: just offset + length (no data!)
-        // 4. Client reconstructs file by filling holes with zeros
-        //
-        // This can reduce network traffic by 90%+ for sparse files!
-
-        // For now, return empty (would read actual data in production)
+        // F15 audit: the stub answered Ok+eof+no-segments — a claim that
+        // EVERY file is empty. Any client that trusted it would read
+        // zero bytes from real data. Until a real sparse-aware
+        // implementation exists, refuse honestly: NOTSUPP makes the
+        // kernel client fall back to plain READ (observed live — READ
+        // is what the 4.2 client uses against this server).
         ReadPlusRes {
-            status: Nfs4Status::Ok,
-            eof: true,
+            status: Nfs4Status::NotSupp,
+            eof: false,
             segments: vec![],
         }
     }
@@ -958,88 +1077,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_allocate() {
+    async fn test_allocate_without_fh_refuses() {
+        // The F15 stub said Ok while allocating nothing. The contract now:
+        // no current filehandle → NoFileHandle, never a fake success.
         let (handler, _temp) = create_test_handler();
         let ctx = CompoundContext::new(0);
-
         let stateid = create_test_stateid(&handler, 1);
+        let op = AllocateOp { stateid, offset: 0, length: 1024 * 1024 };
+        let res = handler.handle_allocate(op, &ctx).await;
+        assert_eq!(res.status, Nfs4Status::NoFileHandle);
+    }
 
-        let op = AllocateOp {
-            stateid,
-            offset: 0,
-            length: 1024 * 1024,
-        };
-
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_allocate_really_extends() {
+        let (handler, temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let path = temp.path().join("source.txt");
+        ctx.current_fh = Some(handler.fh_mgr.get_or_create_handle(&path).unwrap());
+        let stateid = create_test_stateid(&handler, 1);
+        let op = AllocateOp { stateid, offset: 0, length: 1024 * 1024 };
         let res = handler.handle_allocate(op, &ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
+        // posix_fallocate semantics: the file size is now >= the range end.
+        assert!(std::fs::metadata(&path).unwrap().len() >= 1024 * 1024);
     }
 
     #[tokio::test]
-    async fn test_deallocate() {
+    async fn test_deallocate_without_fh_refuses() {
         let (handler, _temp) = create_test_handler();
         let ctx = CompoundContext::new(0);
-
         let stateid = create_test_stateid(&handler, 1);
+        let op = DeallocateOp { stateid, offset: 1024 * 1024, length: 512 * 1024 };
+        let res = handler.handle_deallocate(op, &ctx).await;
+        assert_eq!(res.status, Nfs4Status::NoFileHandle);
+    }
 
-        let op = DeallocateOp {
-            stateid,
-            offset: 1024 * 1024,
-            length: 512 * 1024,
-        };
-
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_deallocate_keeps_size() {
+        let (handler, temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let path = temp.path().join("source.txt");
+        let orig = std::fs::metadata(&path).unwrap().len();
+        ctx.current_fh = Some(handler.fh_mgr.get_or_create_handle(&path).unwrap());
+        let stateid = create_test_stateid(&handler, 1);
+        let op = DeallocateOp { stateid, offset: 0, length: 4096 };
         let res = handler.handle_deallocate(op, &ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), orig, "PUNCH_HOLE must keep size");
     }
 
     #[tokio::test]
-    async fn test_seek_data() {
+    async fn test_seek_without_fh_refuses() {
         let (handler, _temp) = create_test_handler();
         let ctx = CompoundContext::new(0);
-
         let stateid = create_test_stateid(&handler, 1);
-
-        let op = SeekOp {
-            stateid,
-            offset: 0,
-            what: SeekType::Data,
-        };
-
+        let op = SeekOp { stateid, offset: 0, what: SeekType::Data };
         let res = handler.handle_seek(op, &ctx).await;
+        assert_eq!(res.status, Nfs4Status::NoFileHandle);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_seek_data_and_hole_real() {
+        let (handler, temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let path = temp.path().join("source.txt");
+        let len = std::fs::metadata(&path).unwrap().len();
+        ctx.current_fh = Some(handler.fh_mgr.get_or_create_handle(&path).unwrap());
+        let res = handler
+            .handle_seek(
+                SeekOp { stateid: create_test_stateid(&handler, 1), offset: 0, what: SeekType::Data },
+                &ctx,
+            )
+            .await;
         assert_eq!(res.status, Nfs4Status::Ok);
+        assert_eq!(res.offset, 0, "data starts at 0 in a dense file");
+        let res = handler
+            .handle_seek(
+                SeekOp { stateid: create_test_stateid(&handler, 1), offset: 0, what: SeekType::Hole },
+                &ctx,
+            )
+            .await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        assert!(res.offset >= len, "implicit hole at EOF");
     }
 
     #[tokio::test]
-    async fn test_seek_hole() {
+    async fn test_read_plus_is_notsupp() {
+        // The stub claimed Ok+eof+no-segments — "every file is empty".
+        // Until a real sparse-aware implementation exists the honest
+        // answer is NOTSUPP (the kernel client falls back to READ).
         let (handler, _temp) = create_test_handler();
         let ctx = CompoundContext::new(0);
-
         let stateid = create_test_stateid(&handler, 1);
-
-        let op = SeekOp {
-            stateid,
-            offset: 0,
-            what: SeekType::Hole,
-        };
-
-        let res = handler.handle_seek(op, &ctx).await;
-        assert_eq!(res.status, Nfs4Status::Ok);
-    }
-
-    #[tokio::test]
-    async fn test_read_plus() {
-        let (handler, _temp) = create_test_handler();
-        let ctx = CompoundContext::new(0);
-
-        let stateid = create_test_stateid(&handler, 1);
-
-        let op = ReadPlusOp {
-            stateid,
-            offset: 0,
-            count: 4096,
-        };
-
+        let op = ReadPlusOp { stateid, offset: 0, count: 4096 };
         let res = handler.handle_read_plus(op, &ctx).await;
-        assert_eq!(res.status, Nfs4Status::Ok);
+        assert_eq!(res.status, Nfs4Status::NotSupp);
     }
 
     #[tokio::test]
