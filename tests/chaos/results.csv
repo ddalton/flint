@@ -87,3 +87,5 @@ date,phase,drill,t_ready_s,stall_s,restarts_delta,pre_node,post_node,va_ok,nvme_
 2026-07-18T02:36:14Z,2,2.5,24,21,new:0,runv-aws-6,runv-aws-5,Y,Y,Y,PASS,Y,PASS,"cross-node migration while DEGRADED"
 2026-07-18T02:37:32Z,2,2.6,166,20,new:0,runv-aws-5,runv-aws-6,Y,Y,Y,PASS,Y,PASS,"churn x10 degraded; tot_gm=1 vas=1"
 2026-07-18T02:56:01Z,2,2.4,310,303,new:0,runv-aws-5,runv-aws-6,Y,Y,Y,PASS,Y,PASS,"r2 NODE TERMINATE: notready=50s io_resume=310s served from surviving replica"
+2026-07-18T03:14:00Z,2,1.2,11,10,new:0,runv-aws-6,runv-aws-6,Y,Y,Y,PASS,Y,PASS,"clean shutdown"
+2026-07-18T03:15:00Z,2,2.2a,176,169,0,runv-aws-6,runv-aws-6,Y,Y,Y,PASS,Y,PASS,"RAID-host spdk-tgt kill; io_resume=174s; raid=raid_pvc-d53eba7c-1517-481d-af6d-cce4523a7772 state=online base=2/2"
