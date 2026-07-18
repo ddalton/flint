@@ -139,6 +139,19 @@ spdkOperator:
   healthCheckInterval: 30
   rebuildEnabled: true
 
+# Replication orchestrators (Tier-1/2: epoch scheduler + stale catch-up +
+# hot rejoin) on the controller. Turn ON whenever any StorageClass uses
+# numReplicas >= 2 — running replicated volumes without them is actively
+# hazardous (see docs/tier2-operator-runbook.md and chaos finding F10:
+# a failed-out leg is never marked stale, and the next reassembly
+# re-admits it as an equal read source = silent rollback of acked
+# writes). Default off only to keep single-replica deployments
+# byte-identical to previous releases.
+replication:
+  orchestrators:
+    enabled: false
+    epochIntervalSecs: 300   # test clusters run 30
+
 # Storage class configuration
 storageClass:
   create: true

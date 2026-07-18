@@ -43,6 +43,22 @@ spec:
               value: "{{ .Values.healthCheck.controllerPort | default 9809 }}"
             - name: NODE_AGENT_PORT
               value: "{{ .Values.healthCheck.nodeAgentPort | default 9081 }}"
+            {{- if .Values.replication.orchestrators.enabled }}
+            # Replication orchestrators (epoch scheduler + stale catch-up +
+            # hot rejoin). REQUIRED for multi-replica StorageClasses: with
+            # them off, a leg that fails out mid-serve is never marked
+            # stale, and the next raid reassembly re-admits it as an equal
+            # read source — silent rollback of acked writes (chaos F10:
+            # 1,077 fsync-acked writes lost on a node-kill + migration).
+            - name: FLINT_EPOCH_SCHEDULER
+              value: "enabled"
+            - name: FLINT_CATCHUP
+              value: "enabled"
+            - name: FLINT_HOT_REJOIN
+              value: "enabled"
+            - name: FLINT_EPOCH_INTERVAL_SECS
+              value: {{ .Values.replication.orchestrators.epochIntervalSecs | default 300 | quote }}
+            {{- end }}
             {{- if .Values.dashboard.enabled }}
             - name: ENABLE_DASHBOARD
               value: "true"
