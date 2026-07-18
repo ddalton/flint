@@ -78,6 +78,10 @@ pub struct NfsConfig {
     pub namespace: String,
     /// Resource requests and limits
     pub resources: NfsResources,
+    /// Per-op DEBUG logging in the NFS server (hex dumps included).
+    /// A data-path tax measured at multiples of the request latency
+    /// under bulk load — debugging only, never the default.
+    pub verbose: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -128,15 +132,22 @@ impl NfsConfig {
             namespace: env::var("NFS_NAMESPACE")
                 .unwrap_or_else(|_| "flint-system".to_string()),
             resources: NfsResources {
+                // The NFS pod IS the data path for its volume: a bulk
+                // loader drives WRITE+ALLOCATE+COMMIT through one pod.
+                // The old 500m/256Mi defaults throttled pgbench -i to
+                // ~15k tuples/s (drill evidence, 2026-07-18).
                 memory_request: env::var("NFS_MEMORY_REQUEST")
-                    .unwrap_or_else(|_| "128Mi".to_string()),
-                cpu_request: env::var("NFS_CPU_REQUEST")
-                    .unwrap_or_else(|_| "100m".to_string()),
-                memory_limit: env::var("NFS_MEMORY_LIMIT")
                     .unwrap_or_else(|_| "256Mi".to_string()),
-                cpu_limit: env::var("NFS_CPU_LIMIT")
+                cpu_request: env::var("NFS_CPU_REQUEST")
                     .unwrap_or_else(|_| "500m".to_string()),
+                memory_limit: env::var("NFS_MEMORY_LIMIT")
+                    .unwrap_or_else(|_| "1Gi".to_string()),
+                cpu_limit: env::var("NFS_CPU_LIMIT")
+                    .unwrap_or_else(|_| "2".to_string()),
             },
+            verbose: env::var("NFS_VERBOSE")
+                .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+                .unwrap_or(false),
         };
         
         eprintln!("✅ [NFS] NFS support ENABLED");
@@ -415,8 +426,12 @@ pub async fn create_nfs_server_pod(
                         volume_id.to_string(),
                         "--port".to_string(),
                         config.port.to_string(),
-                        "--verbose".to_string(),
                     ];
+                    // Per-op DEBUG logging only when asked for
+                    // (NFS_VERBOSE) — it multiplies data-path latency.
+                    if config.verbose {
+                        args.push("--verbose".to_string());
+                    }
                     // Add --read-only flag for ROX volumes
                     if read_only {
                         args.push("--read-only".to_string());

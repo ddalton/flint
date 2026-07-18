@@ -2981,6 +2981,21 @@ impl FileOperationHandler {
             return CreateRes { status, change_info: None, attrset: vec![] };
         }
 
+        // Decode createattrs BEFORE creating anything: a malformed or
+        // unsupported attr fails the op with no side effects (RFC 8881
+        // §18.4.3). Ignoring these was another fake-OK — initdb's
+        // mkdir(0700) came out 0755 and postgres refused the directory.
+        let want_attrs = match decode_settable_attrs(
+            &op.createattrs.attrmask,
+            &op.createattrs.attr_vals,
+        ) {
+            Ok(want) => want,
+            Err(status) => {
+                warn!("CREATE: bad createattrs → {:?}", status);
+                return CreateRes { status, change_info: None, attrset: vec![] };
+            }
+        };
+
         // Check current filehandle (parent directory)
         let parent_fh = match &ctx.current_fh {
             Some(fh) => fh,
@@ -3114,6 +3129,22 @@ impl FileOperationHandler {
                     .await;
                 }
 
+                // Apply the requested createattrs (mode, explicit owner —
+                // which then wins over the cred stamp above, times). The
+                // object exists at this point, so an application failure is
+                // logged and reflected in attrset rather than unwinding the
+                // create; symlink modes are meaningless on Linux and skipped.
+                let applied = if op.objtype == Nfs4FileType::Symlink {
+                    Vec::new()
+                } else {
+                    let (applied, apply_err) =
+                        apply_settable_attrs_offloaded(obj_path.clone(), want_attrs.clone()).await;
+                    if let Some(e) = apply_err {
+                        warn!("CREATE: createattrs on {:?} partially applied: {:?}", obj_path, e);
+                    }
+                    applied
+                };
+
                 // Generate filehandle for new object
                 match self.fh_mgr.get_or_create_handle(&obj_path) {
                     Ok(new_fh) => {
@@ -3127,7 +3158,7 @@ impl FileOperationHandler {
                                 before: 0,
                                 after: 1,
                             }),
-                            attrset: op.createattrs.attrmask,
+                            attrset: attr_numbers_to_bitmap(&applied),
                         }
                     }
                     Err(e) => {

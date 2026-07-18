@@ -105,13 +105,17 @@ spec:
               value: {{ .Values.nfs.namespace | default .Release.Namespace | quote }}
             {{- if .Values.nfs.resources }}
             - name: NFS_MEMORY_REQUEST
-              value: {{ .Values.nfs.resources.requests.memory | default "128Mi" | quote }}
+              value: {{ .Values.nfs.resources.requests.memory | default "256Mi" | quote }}
             - name: NFS_CPU_REQUEST
-              value: {{ .Values.nfs.resources.requests.cpu | default "100m" | quote }}
+              value: {{ .Values.nfs.resources.requests.cpu | default "500m" | quote }}
             - name: NFS_MEMORY_LIMIT
-              value: {{ .Values.nfs.resources.limits.memory | default "256Mi" | quote }}
+              value: {{ .Values.nfs.resources.limits.memory | default "1Gi" | quote }}
             - name: NFS_CPU_LIMIT
-              value: {{ .Values.nfs.resources.limits.cpu | default "500m" | quote }}
+              value: {{ .Values.nfs.resources.limits.cpu | default "2" | quote }}
+            {{- end }}
+            {{- if .Values.nfs.verbose }}
+            - name: NFS_VERBOSE
+              value: "true"
             {{- end }}
             {{- else }}
             # NFS support disabled - existing RWO-only behavior maintained

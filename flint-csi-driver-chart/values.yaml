@@ -264,14 +264,21 @@ nfs:
   port: 2049
   
   # Resource limits for NFS server pods
-  # These pods run on nodes with volume replicas for local access
+  # These pods run on nodes with volume replicas for local access.
+  # The NFS pod is the entire data path for its volume — undersized
+  # limits directly throttle client I/O (a 500m cap measured ~15k
+  # tuples/s on pgbench -i before being raised).
   resources:
     requests:
-      memory: "128Mi"
-      cpu: "100m"
-    limits:
       memory: "256Mi"
       cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "2"
+
+  # Per-op DEBUG logging (hex dumps) in the NFS server. Multiplies
+  # data-path latency — enable only while debugging protocol issues.
+  verbose: false
   
   # Namespace for NFS server pods (defaults to CSI driver namespace)
   namespace: ""  # Empty means use .Release.Namespace
