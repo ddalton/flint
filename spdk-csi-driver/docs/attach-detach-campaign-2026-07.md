@@ -694,6 +694,31 @@ profile) demoted to debug. Lesson: every strong registry needs an
 owner responsible for removal — the Weak-based conn-binding table two
 fields down had it right, and its doc comment even warned about this.
 
+**F17b/F19/F20 (P1 chain, each unmasked by the previous fix): the
+recovery-churn trilogy.** With F17's honest STALE answers, the
+remaining symptom was periodic multi-second connect stalls (db verdict
+isready/amcheck/write-probe failures) — a low-grade TEST_STATEID cycle
+that never converged. Three server defects stacked underneath:
+(1) **F17b (7a1144f)**: STALE for a renamed-over file the client still
+holds OPEN triggers a recovery cycle per rename (~1/s under postgres).
+knfsd semantics implemented instead: READ/WRITE fall back to the
+stateid's cached open fd, and GETATTR — fh-only — reaches the io
+handler's fd cache via a shared OpenFileView and answers by fstat with
+the ORIGINAL fileid; the file keeps serving until its last CLOSE, then
+STALE. (2) **F19 (2e71e1e)**: validate_for_read rejected the RFC 8881
+§8.2.2 seqid-0 "current stateid" form that validate() already
+accepted; the client retries seqid-0 READs in a tight BadStateId loop
+(~2k/s observed — wedged pg bring-up entirely once F17b removed the
+masking churn). (3) **F20 (92e1a67)**: FREE_STATEID — the disposal
+half of the recovery cycle — answered BadStateId for
+already-forgotten stateids and LocksHeld for revoked opens, so the
+client could never retire dead state and re-tested it every cycle,
+forever. Unknown → Ok, revoked → dropped+Ok, live opens keep
+LocksHeld (pynfs CSID9). Meta-lesson, now three-for-three in this
+phase: protocol edges that pynfs/simple workloads never exercise
+(rename-over-open, seqid-0 forms, recovery-path disposal) are exactly
+what a real database client leans on hardest.
+
 _Drill results: TBD (this session)._
 
 ## Findings
