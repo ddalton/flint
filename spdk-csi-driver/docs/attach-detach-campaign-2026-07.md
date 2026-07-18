@@ -572,6 +572,24 @@ exercised by an ownership-sensitive, write-intensive real application
 consumers that never noticed either. This is precisely what the
 pg-oracle harness exists to catch.
 
+**F14 (P1, found on the F13-fixed image, FIXED 003375a): ctime ties
+still lose the cache race — server now keeps a per-file monotonic
+change counter.** With ns-granularity change attrs the client
+invalidates properly — and the very next harness attempt showed the
+residual: postgres shut itself down with "lock file postmaster.pid
+contains wrong PID: 0" (a re-read of its own just-written lock file
+returned the CREATE-time size-0 view). ext4 stamps ctime from the
+coarse clock (~1 jiffy), so create+first-write — or two COPY extends —
+inside one tick carry IDENTICAL change values, and an out-of-order
+GETATTR reply is indistinguishable from fresh. Fix: `change_counter`
+module (userspace i_version): every mutating op bumps a per-(dev,ino)
+counter floored by post-mutation ctime ns (files AND affected parent
+dirs on create/remove/rename/link); GETATTR reports max(counter,
+floor). Across restarts it degrades to exactly knfsd-without-i_version.
+The F12→F13→F14 chain is one lesson three layers deep: RWX had never
+been exercised by a real database, and each fix peeled the next
+latency-of-truth defect into view.
+
 Fleet note: runw-aws-2 was SPOT-RECLAIMED mid-bring-up
 (`instance-terminated-no-capacity`, the campaign's third real reclaim)
 — no data impact (the RWX backing volume lived on aws-3); replacement
