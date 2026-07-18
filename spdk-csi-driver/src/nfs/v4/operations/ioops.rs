@@ -473,6 +473,16 @@ impl IoOperationHandler {
                         }
                     }
 
+                    // F14: a fresh create mutates the file (birth) and the
+                    // parent directory (new dirent) — both change attrs
+                    // must outrun colliding ctime ticks.
+                    if !existed {
+                        crate::nfs::v4::change_counter::bump_path(&file_path);
+                        if let Some(parent) = file_path.parent() {
+                            crate::nfs::v4::change_counter::bump_path(parent);
+                        }
+                    }
+
                     // Fresh create without an explicit createattrs owner:
                     // stamp the caller's AUTH_SYS identity on the file —
                     // without this every file lands owned by the server
@@ -1129,6 +1139,19 @@ impl IoOperationHandler {
                 file_arc.sync_data()?; // Sync data only
             }
             // UNSTABLE4: no sync, will be done on COMMIT
+
+            // F14: advance the file's monotonic change counter — the
+            // GETATTR appended to this WRITE compound must carry a value
+            // strictly newer than any pre-write GETATTR, even inside one
+            // filesystem clock tick.
+            if let Ok(md) = file_arc.metadata() {
+                use std::os::unix::fs::MetadataExt;
+                crate::nfs::v4::change_counter::bump(
+                    md.dev(),
+                    md.ino(),
+                    crate::nfs::v4::change_counter::ctime_ns(&md),
+                );
+            }
 
             Ok(bytes_written)
         }).await;

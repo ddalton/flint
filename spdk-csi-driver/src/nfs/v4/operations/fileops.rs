@@ -132,16 +132,21 @@ impl AttributeSnapshot {
                 atime,
                 mtime,
                 ctime,
-                // NANOSECOND composition is load-bearing (F13): the change
-                // attr is the client's cache-ordering key. Whole seconds
-                // made every write inside the same second carry the SAME
-                // change value, so an out-of-order GETATTR reply with a
-                // stale (shorter) size was accepted — postgres then read
-                // "unexpected data beyond EOF" mid-COPY. ctime (not mtime)
-                // so chmod/chown also invalidate.
-                change: ctime_secs
-                    .wrapping_mul(1_000_000_000)
-                    .wrapping_add(metadata.ctime_nsec() as u64),
+                // The change attr is the client's cache-ordering key.
+                // Whole seconds (F13) — and even raw ctime ns (F14: ext4's
+                // clock ticks at jiffy granularity, so create+write in one
+                // tick TIE) — let an out-of-order GETATTR reply carrying a
+                // stale/shorter size win the client's cache race: pgbench
+                // "unexpected data beyond EOF", postmaster.pid read back
+                // as 0. Report the server's per-file mutation counter
+                // floored by ctime ns (see change_counter.rs).
+                change: crate::nfs::v4::change_counter::current(
+                    metadata.dev(),
+                    metadata.ino(),
+                    ctime_secs
+                        .wrapping_mul(1_000_000_000)
+                        .wrapping_add(metadata.ctime_nsec() as u64),
+                ),
                 mode: metadata.mode(),
                 numlinks: metadata.nlink() as u32,
                 owner: metadata.uid(),
@@ -432,6 +437,20 @@ pub fn decode_settable_attrs(
 /// MODE is applied before SIZE on purpose: truncation needs a writable
 /// open, and a compound that sets both may be un-hiding a 0o000 file.
 pub fn apply_settable_attrs(
+    path: &Path,
+    want: &SettableAttrs,
+) -> (Vec<u32>, Option<Nfs4Status>) {
+    let out = apply_settable_attrs_inner(path, want);
+    // F14: any applied attr is a mutation the change attribute must
+    // reflect ahead of colliding ctime ticks (partial application on
+    // error included — something changed either way).
+    if !out.0.is_empty() {
+        crate::nfs::v4::change_counter::bump_path(path);
+    }
+    out
+}
+
+fn apply_settable_attrs_inner(
     path: &Path,
     want: &SettableAttrs,
 ) -> (Vec<u32>, Option<Nfs4Status>) {
@@ -1507,16 +1526,19 @@ fn encode_single_attribute(
         }
         
         FATTR4_CHANGE => {
-            // ctime at NANOSECOND composition — see the F13 note on the
-            // snapshot builder: second-granularity change values let a
-            // stale-size GETATTR reply win the client's cache race.
+            // Per-file mutation counter floored by ctime ns — see the
+            // F13/F14 note on the snapshot builder and change_counter.rs.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                let change_id = (metadata.ctime() as u64)
+                let floor = (metadata.ctime() as u64)
                     .wrapping_mul(1_000_000_000)
                     .wrapping_add(metadata.ctime_nsec() as u64);
-                buf.put_u64(change_id);
+                buf.put_u64(crate::nfs::v4::change_counter::current(
+                    metadata.dev(),
+                    metadata.ino(),
+                    floor,
+                ));
             }
             #[cfg(not(unix))]
             {
@@ -3056,6 +3078,12 @@ impl FileOperationHandler {
 
         match create_result {
             Ok(_) => {
+                // F14: new object + new parent dirent.
+                crate::nfs::v4::change_counter::bump_path(&obj_path);
+                if let Some(parent) = obj_path.parent() {
+                    crate::nfs::v4::change_counter::bump_path(parent);
+                }
+
                 // Stamp the caller's AUTH_SYS identity on the new object
                 // (dirs/symlinks/stand-ins) — client-side permission checks
                 // compare mode bits against st_uid, so a root-owned 0700
@@ -3170,6 +3198,8 @@ impl FileOperationHandler {
                 match result {
                     Ok(_) => {
                         self.fh_mgr.note_fs_remove(&target_path);
+                        // F14: removed dirent mutates the parent.
+                        crate::nfs::v4::change_counter::bump_path(&parent_path);
                         RemoveRes {
                             status: Nfs4Status::Ok,
                             change_info: Some(ChangeInfo {
@@ -3350,6 +3380,15 @@ impl FileOperationHandler {
                 // handles follow the file; stale v1 cache entries for
                 // the old subtree are dropped.
                 self.fh_mgr.note_fs_rename(&source_path, &dest_path);
+                // F14: both parents' dirents changed, and the moved
+                // object's own ctime bumped (rename updates it).
+                if let Some(p) = source_path.parent() {
+                    crate::nfs::v4::change_counter::bump_path(p);
+                }
+                if let Some(p) = dest_path.parent() {
+                    crate::nfs::v4::change_counter::bump_path(p);
+                }
+                crate::nfs::v4::change_counter::bump_path(&dest_path);
                 let cinfo = if is_self_rename {
                     // No actual change to the directory.
                     ChangeInfo { atomic: true, before: 1, after: 1 }
@@ -3446,6 +3485,12 @@ impl FileOperationHandler {
         match tokio::fs::hard_link(&file_path, &link_path).await {
             Ok(_) => {
                 debug!("LINK: Successfully created hard link {:?} -> {:?}", link_path, file_path);
+                // F14: the linked file's nlink/ctime changed and the
+                // target parent gained a dirent.
+                crate::nfs::v4::change_counter::bump_path(&file_path);
+                if let Some(p) = link_path.parent() {
+                    crate::nfs::v4::change_counter::bump_path(p);
+                }
                 LinkRes {
                     status: Nfs4Status::Ok,
                     change_info: Some(ChangeInfo {
