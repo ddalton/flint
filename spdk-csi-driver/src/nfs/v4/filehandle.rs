@@ -4,9 +4,9 @@
 // Unlike NFSv3, NFSv4 file handles should be persistent across server restarts.
 //
 // Our approach:
-// - Hash-based generation from path
+// - Hash-based generation from path + pinned inode (v3)
 // - Include server instance ID to detect stale handles
-// - Deterministic (same path = same handle)
+// - Deterministic (same path + same file generation = same handle)
 // - Secure (can't be guessed from path alone)
 //
 // Handle Format v1 (variable length, up to 128 bytes):
@@ -26,9 +26,31 @@
 //   id↔path table (persisted via the state backend when attached, so
 //   v2 handles survive restart like v1's embedded path does). RENAME
 //   re-keys the table — a v2 handle stays valid across renames.
-// v1 stays the format for paths that fit: it is stateless, and legacy
-// striped pins rely on the DS extracting the path from the MDS handle
-// (parse_path_lenient) — those paths are short by construction.
+//
+// Handle Format v3 (variable, v1 + inode) — the default since F17:
+// - Version (1 byte): 3
+// - Instance ID (8 bytes)
+// - Hash (32 bytes): SHA-256 of (path, instance, ino)
+// - Inode (8 bytes): st_ino of the object when the handle was minted
+// - Path length (2 bytes) + Path (variable)
+// A filehandle names a FILE, not a name. v1's path-only handles meant
+// rename-over (postgres: pg_internal.init et al.) silently rebound an
+// outstanding handle to the NEW file at that path — the kernel client
+// sees the fileid flip on a cached handle ("NFS: server X error:
+// fileid changed"), starts TEST_STATEID recovery that can never
+// converge, and wedges the mount (D-state pileup, 25s+ connects).
+// v3 pins the inode: resolution lstats the path and answers
+// NFS4ERR_STALE when the object was replaced or removed, which clients
+// recover from by re-walking the name. Residual: inode reuse at the
+// same path is undetectable from userspace (no i_generation); window
+// is negligible for real workloads.
+// v1 handles are still ACCEPTED (legacy semantics, no generation
+// check) so pre-upgrade clients resolve across a server restart; new
+// handles are minted v3 whenever the object can be lstat'd, v1 as a
+// last-resort fallback. Striped pNFS pins rely on the DS extracting
+// the path from the MDS handle (parse_path_lenient) — that parser
+// understands both layouts; mixed-version MDS/DS fleets during a roll
+// do not (deploy rolls the whole driver image atomically).
 
 use super::protocol::Nfs4FileHandle;
 use super::pseudo::{PseudoFilesystem, Export};
@@ -42,6 +64,18 @@ use tracing::{debug, warn, info};
 
 /// Fixed length of a v2 (id-based) filehandle.
 const FH_V2_LEN: usize = 1 + 8 + 8;
+
+/// Minimum length of a v3 handle: version(1) + instance(8) + hash(32)
+/// + ino(8) + path_len(2).
+const FH_V3_MIN: usize = 1 + 8 + 32 + 8 + 2;
+
+/// The current inode of `path`, by lstat (symlinks are objects too —
+/// the handle must pin the link itself, matching the lstat-based attr
+/// encoders). None when the object cannot be stat'd.
+fn current_ino(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).ok().map(|md| md.ino())
+}
 
 /// Random non-zero file id for the v2 table. Same construction as the
 /// placement layer's `allocate_file_id`.
@@ -204,11 +238,28 @@ impl FileHandleManager {
         // Normalize path (remove . and ..)
         let normalized = self.normalize_path(path)?;
 
-        // Check cache first
+        // Check cache first. A cached v3 handle pins an inode — if the
+        // object at this path was replaced since (rename-over, rm+create),
+        // the cached handle names the OLD file and must not be handed out
+        // for the new one; fall through and mint a fresh generation.
         {
             let cache = self.path_to_handle.read().unwrap();
             if let Some(fh) = cache.get(&normalized) {
-                return Ok(fh.clone());
+                match Self::embedded_ino(fh) {
+                    Some(ino) if current_ino(&normalized) != Some(ino) => {
+                        debug!("fh cache: {:?} changed generation, re-minting", normalized);
+                    }
+                    Some(_) => return Ok(fh.clone()),
+                    None => {
+                        // v1 minted before the object existed: upgrade to a
+                        // pinned v3 handle once it can be stat'd. v2 stays.
+                        if fh.data.first() == Some(&1) && current_ino(&normalized).is_some() {
+                            debug!("fh cache: upgrading v1 handle for {:?} to v3", normalized);
+                        } else {
+                            return Ok(fh.clone());
+                        }
+                    }
+                }
             }
         }
 
@@ -230,29 +281,56 @@ impl FileHandleManager {
     /// Resolve a file handle back to a path
     pub fn filehandle_to_path(&self, handle: &Nfs4FileHandle) -> Result<PathBuf, String> {
         // Check cache first
-        {
+        let cached = {
             let cache = self.handle_to_path.read().unwrap();
-            if let Some(path) = cache.get(&handle.data) {
-                return Ok(path.clone());
+            cache.get(&handle.data).cloned()
+        };
+
+        let (path, was_cached) = match cached {
+            Some(p) => (p, true),
+            None => (self.parse_handle(handle)?, false),
+        };
+
+        // v3: the handle names a file GENERATION, not a path. If the
+        // object at the path no longer carries the pinned inode (renamed
+        // over, removed, recreated), the handle is stale — the client
+        // re-walks the name and gets a fresh-generation handle. Callers
+        // uniformly map resolve errors to NFS4ERR_STALE.
+        if let Some(pinned) = Self::embedded_ino(handle) {
+            match current_ino(&path) {
+                Some(ino) if ino == pinned => {}
+                current => {
+                    debug!(
+                        "fh resolve: {:?} generation mismatch (pinned ino {}, current {:?}) — STALE",
+                        path, pinned, current
+                    );
+                    return Err("Stale file handle: object was replaced or removed".to_string());
+                }
             }
         }
 
-        // Parse and validate handle
-        let path = self.parse_handle(handle)?;
-
-        // Verify the path still exists and matches
-        // (In production, you might want to check file metadata too)
-
-        // Cache it
-        {
+        if !was_cached {
             let mut path_cache = self.path_to_handle.write().unwrap();
             let mut handle_cache = self.handle_to_path.write().unwrap();
-
-            path_cache.insert(path.clone(), handle.clone());
+            // path→handle must not regress to an older generation: only
+            // adopt this handle for the path if the path maps to nothing.
+            path_cache.entry(path.clone()).or_insert_with(|| handle.clone());
             handle_cache.insert(handle.data.clone(), path.clone());
         }
 
         Ok(path)
+    }
+
+    /// The inode pinned inside a v3 handle (bytes 41..49). None for
+    /// v1/v2/pseudo handles, which carry no generation.
+    fn embedded_ino(handle: &Nfs4FileHandle) -> Option<u64> {
+        if handle.data.first() == Some(&3) && handle.data.len() >= FH_V3_MIN {
+            let mut ino = [0u8; 8];
+            ino.copy_from_slice(&handle.data[41..49]);
+            Some(u64::from_be_bytes(ino))
+        } else {
+            None
+        }
     }
 
     /// Get the root file handle (PUTROOTFH)
@@ -323,6 +401,11 @@ impl FileHandleManager {
                     return Err(HandleError::Malformed("File handle too short".to_string()));
                 }
             }
+            3 => {
+                if handle.data.len() < FH_V3_MIN {
+                    return Err(HandleError::Malformed("v3 file handle too short".to_string()));
+                }
+            }
             2 => {
                 if handle.data.len() != FH_V2_LEN {
                     return Err(HandleError::Malformed(format!(
@@ -355,48 +438,51 @@ impl FileHandleManager {
         Ok(())
     }
 
-    /// Generate a file handle from a path
+    /// Generate a file handle from a path.
+    ///
+    /// Mints v3 (inode-pinned) whenever the object can be lstat'd; v1
+    /// only as a fallback for paths minted before their object exists
+    /// (legacy semantics: no generation check). Long paths still go v2.
     fn generate_handle(&self, path: &Path) -> Result<Nfs4FileHandle, String> {
         let path_str = path.to_str()
             .ok_or_else(|| "Invalid path".to_string())?;
-
-        // Compute SHA-256 hash of path
-        let mut hasher = Sha256::new();
-        hasher.update(path_str.as_bytes());
-        hasher.update(&self.instance_id.to_be_bytes()); // Include instance ID in hash
-        let hash = hasher.finalize();
-
-        // Build handle:
-        // - Version (1 byte)
-        // - Instance ID (8 bytes)
-        // - Hash (32 bytes)
-        // - Path length (2 bytes)
-        // - Path (variable)
-
         let path_bytes = path_str.as_bytes();
         let path_len = path_bytes.len() as u16;
 
-        let total_len = 1 + 8 + 32 + 2 + path_bytes.len();
+        let ino = current_ino(path);
+
+        let total_len = match ino {
+            Some(_) => FH_V3_MIN + path_bytes.len(),
+            None => 1 + 8 + 32 + 2 + path_bytes.len(),
+        };
         if total_len > Nfs4FileHandle::MAX_SIZE {
             // Too long to embed — mint an id-based v2 handle instead.
             return Ok(self.v2_handle_for(path));
         }
 
+        let mut hasher = Sha256::new();
+        hasher.update(path_str.as_bytes());
+        hasher.update(&self.instance_id.to_be_bytes()); // Include instance ID in hash
+        if let Some(ino) = ino {
+            hasher.update(&ino.to_be_bytes()); // v3: generation is part of the identity
+        }
+        let hash = hasher.finalize();
+
         let mut data = Vec::with_capacity(total_len);
-
-        // Version
-        data.push(1);
-
-        // Instance ID
-        data.extend_from_slice(&self.instance_id.to_be_bytes());
-
-        // Hash
-        data.extend_from_slice(&hash);
-
-        // Path length
+        match ino {
+            Some(ino) => {
+                data.push(3);
+                data.extend_from_slice(&self.instance_id.to_be_bytes());
+                data.extend_from_slice(&hash);
+                data.extend_from_slice(&ino.to_be_bytes());
+            }
+            None => {
+                data.push(1);
+                data.extend_from_slice(&self.instance_id.to_be_bytes());
+                data.extend_from_slice(&hash);
+            }
+        }
         data.extend_from_slice(&path_len.to_be_bytes());
-
-        // Path
         data.extend_from_slice(path_bytes);
 
         Ok(Nfs4FileHandle { data })
@@ -458,23 +544,27 @@ impl FileHandleManager {
     /// Do not use this for normal in-process FH resolution; use
     /// [`Self::filehandle_to_path`] which validates instance + hash.
     pub fn parse_path_lenient(handle: &Nfs4FileHandle) -> Result<PathBuf, String> {
-        // Layout: version(1) | instance_id(8) | hash(32) | path_len(2) | path(N)
+        // v1 layout: version(1) | instance_id(8) | hash(32) | path_len(2) | path(N)
+        // v3 layout: version(1) | instance_id(8) | hash(32) | ino(8) | path_len(2) | path(N)
         if handle.data.is_empty() {
             return Err("File handle is empty".to_string());
         }
-        if handle.data[0] != 1 {
-            return Err(format!("Unsupported file handle version: {}", handle.data[0]));
-        }
-        if handle.data.len() < 43 {
+        let len_off = match handle.data[0] {
+            1 => 41usize,
+            3 => 49usize,
+            v => return Err(format!("Unsupported file handle version: {}", v)),
+        };
+        if handle.data.len() < len_off + 2 {
             return Err("File handle too short".to_string());
         }
         let mut len_bytes = [0u8; 2];
-        len_bytes.copy_from_slice(&handle.data[41..43]);
+        len_bytes.copy_from_slice(&handle.data[len_off..len_off + 2]);
         let path_len = u16::from_be_bytes(len_bytes) as usize;
-        if handle.data.len() < 43 + path_len {
+        let path_off = len_off + 2;
+        if handle.data.len() < path_off + path_len {
             return Err("File handle truncated".to_string());
         }
-        let path_str = std::str::from_utf8(&handle.data[43..43 + path_len])
+        let path_str = std::str::from_utf8(&handle.data[path_off..path_off + path_len])
             .map_err(|_| "Invalid path encoding".to_string())?;
         Ok(PathBuf::from(path_str))
     }
@@ -500,27 +590,36 @@ impl FileHandleManager {
                 .ok_or_else(|| "Stale file handle: unknown v2 file id".to_string());
         }
 
-        if handle.data.len() < 43 {
+        // v1 and v3 share the layout up to the hash; v3 inserts the
+        // pinned inode between hash and path length.
+        let (len_off, is_v3) = match handle.data[0] {
+            3 => (49usize, true),
+            _ => (41usize, false),
+        };
+
+        if handle.data.len() < len_off + 2 {
             return Err("File handle too short".to_string());
         }
 
-        // Extract path length (at offset 41)
         let mut len_bytes = [0u8; 2];
-        len_bytes.copy_from_slice(&handle.data[41..43]);
+        len_bytes.copy_from_slice(&handle.data[len_off..len_off + 2]);
         let path_len = u16::from_be_bytes(len_bytes) as usize;
 
-        // Extract path (at offset 43)
-        if handle.data.len() < 43 + path_len {
+        let path_off = len_off + 2;
+        if handle.data.len() < path_off + path_len {
             return Err("File handle truncated".to_string());
         }
 
-        let path_str = std::str::from_utf8(&handle.data[43..43 + path_len])
+        let path_str = std::str::from_utf8(&handle.data[path_off..path_off + path_len])
             .map_err(|_| "Invalid path encoding".to_string())?;
 
-        // Verify hash
+        // Verify hash (v3 folds the pinned inode into the identity)
         let mut hasher = Sha256::new();
         hasher.update(path_str.as_bytes());
         hasher.update(&self.instance_id.to_be_bytes());
+        if is_v3 {
+            hasher.update(&handle.data[41..49]);
+        }
         let computed_hash = hasher.finalize();
 
         if computed_hash.as_slice() != &handle.data[9..41] {
@@ -537,13 +636,16 @@ impl FileHandleManager {
     /// the old subtree — v1 handles embed the path and legitimately go
     /// dead; serving them from cache would resolve to the dead path.
     pub fn note_fs_rename(&self, old_path: &Path, new_path: &Path) {
-        // v1 caches: drop old-subtree entries (both directions).
+        // v1/v3 caches: drop old-subtree entries (both directions), and
+        // the destination subtree too — rename-OVER clobbers the object
+        // that lived at new_path, so any cached handle for it is a dead
+        // generation (F17: it must never be handed out for the new file).
         {
             let mut p2h = self.path_to_handle.write().unwrap();
             let mut h2p = self.handle_to_path.write().unwrap();
             let dead: Vec<PathBuf> = p2h
                 .keys()
-                .filter(|p| p.starts_with(old_path))
+                .filter(|p| p.starts_with(old_path) || p.starts_with(new_path))
                 .cloned()
                 .collect();
             for p in dead {
@@ -847,9 +949,113 @@ mod tests {
         let short_path = temp_dir.join("short.txt");
         fs::write(&short_path, b"x").unwrap();
         let fh1 = manager.path_to_filehandle(&short_path).unwrap();
-        assert_eq!(fh1.data[0], 1, "short path keeps the v1 format");
+        assert_eq!(fh1.data[0], 3, "short existing path mints the inode-pinned v3 format");
 
         fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// F17: rename-over must not rebind an outstanding handle to the
+    /// new file at the same path. The old handle goes STALE (client
+    /// re-walks the name); a fresh lookup mints a different handle.
+    #[test]
+    fn rename_over_stales_old_handle_and_mints_new_generation() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+        let manager = FileHandleManager::new(temp_path.clone());
+
+        let target = temp_path.join("pg_internal.init");
+        fs::write(&target, b"generation 1").unwrap();
+        let fh_old = manager.path_to_filehandle(&target).unwrap();
+        assert_eq!(fh_old.data[0], 3);
+        assert!(manager.filehandle_to_path(&fh_old).is_ok());
+
+        // postgres-style rename-over: write temp, rename onto target.
+        let tmp = temp_path.join("pg_internal.init.1234");
+        fs::write(&tmp, b"generation 2").unwrap();
+        fs::rename(&tmp, &target).unwrap();
+        manager.note_fs_rename(&tmp, &target);
+
+        // Old handle names the replaced file: STALE, never the new file.
+        let err = manager.filehandle_to_path(&fh_old).unwrap_err();
+        assert!(err.contains("Stale"), "expected stale, got: {}", err);
+
+        // A fresh mint pins the new generation and resolves.
+        let fh_new = manager.path_to_filehandle(&target).unwrap();
+        assert_ne!(fh_new.data, fh_old.data, "new generation must get new handle bytes");
+        assert!(manager.filehandle_to_path(&fh_new).is_ok());
+    }
+
+    /// F17: the mint cache must not serve a dead generation even when
+    /// the rename was NOT reported via note_fs_rename (belt without the
+    /// suspenders — resolution stat-verifies).
+    #[test]
+    fn stale_mint_cache_is_detected_without_invalidation() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+        let manager = FileHandleManager::new(temp_path.clone());
+
+        let target = temp_path.join("data.file");
+        fs::write(&target, b"one").unwrap();
+        let fh_old = manager.path_to_filehandle(&target).unwrap();
+
+        let tmp = temp_path.join("data.file.tmp");
+        fs::write(&tmp, b"two").unwrap();
+        fs::rename(&tmp, &target).unwrap();
+        // No note_fs_rename on purpose.
+
+        let fh_new = manager.path_to_filehandle(&target).unwrap();
+        assert_ne!(fh_new.data, fh_old.data, "cached dead generation was handed out");
+        assert!(manager.filehandle_to_path(&fh_new).is_ok());
+        assert!(manager.filehandle_to_path(&fh_old).is_err());
+    }
+
+    /// F17: removed files answer STALE through outstanding handles.
+    #[test]
+    fn removed_file_stales_outstanding_handle() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+        let manager = FileHandleManager::new(temp_path.clone());
+
+        let target = temp_path.join("doomed.txt");
+        fs::write(&target, b"bye").unwrap();
+        let fh = manager.path_to_filehandle(&target).unwrap();
+        fs::remove_file(&target).unwrap();
+        // Even without note_fs_remove, resolution must not succeed.
+        assert!(manager.filehandle_to_path(&fh).is_err());
+    }
+
+    /// v3 handles survive a server "restart" (fresh manager, same
+    /// instance id): stateless parse + on-disk inode still match.
+    #[test]
+    fn v3_handle_survives_restart_same_instance() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+
+        let m1 = FileHandleManager::new_with_instance_id(temp_path.clone(), "volume".into(), 7);
+        let file = temp_path.join("stable.txt");
+        fs::write(&file, b"payload").unwrap();
+        let fh = m1.path_to_filehandle(&file).unwrap();
+        assert_eq!(fh.data[0], 3);
+
+        let m2 = FileHandleManager::new_with_instance_id(temp_path.clone(), "volume".into(), 7);
+        let resolved = m2.filehandle_to_path(&fh).unwrap();
+        assert_eq!(resolved.canonicalize().unwrap(), file.canonicalize().unwrap());
+    }
+
+    /// parse_path_lenient (DS striped-pin path) understands both v1
+    /// and v3 layouts.
+    #[test]
+    fn parse_path_lenient_understands_v3() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+        let manager = FileHandleManager::new(temp_path.clone());
+
+        let file = temp_path.join("striped.bin");
+        fs::write(&file, b"stripe").unwrap();
+        let fh = manager.path_to_filehandle(&file).unwrap();
+        assert_eq!(fh.data[0], 3);
+        let parsed = FileHandleManager::parse_path_lenient(&fh).unwrap();
+        assert_eq!(parsed.file_name(), file.file_name());
     }
 
     /// v2 handles survive RENAME — including a parent-directory rename
