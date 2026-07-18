@@ -573,9 +573,16 @@ impl StateIdManager {
             return Err("StateId revoked".to_string());
         }
 
+        // "Current stateid" form (RFC 8881 §8.2.2): seqid=0 with a known
+        // `other` means "most recent seqid" and MUST NOT be seqid-checked.
+        // `validate` had this arm; this fn missed it — the kernel client
+        // retries READ with seqid=0 in a tight loop when the answer is
+        // BadStateId (observed wedging pg bring-up on u11.9).
+        if stateid.seqid == 0 {
+            return Ok(());
+        }
+
         // Accept exact seqid, or seqid - 1 (a one-behind retransmit window).
-        // saturating_sub avoids underflow when `entry.seqid == 0`; in that
-        // case only an exact `seqid == 0` match is acceptable.
         let prev = entry.seqid.saturating_sub(1);
         if stateid.seqid == entry.seqid || stateid.seqid == prev {
             Ok(())
@@ -793,6 +800,22 @@ mod tests {
         assert_eq!(stateid2.seqid, 1);
 
         assert_eq!(mgr.active_count(), 2);
+    }
+
+    /// RFC 8881 §8.2.2 "current stateid" form: seqid=0 with a known
+    /// `other` must pass BOTH validators regardless of the entry's
+    /// current seqid (F19 — validate_for_read missed the arm; the
+    /// kernel client retried seqid-0 READs in a tight BadStateId loop).
+    #[test]
+    fn seqid_zero_is_current_for_read_and_write_paths() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let stateid = mgr.allocate(StateType::Open, 1, None);
+        let bumped = mgr.update_seqid(&stateid).unwrap(); // seqid → 2
+        assert_eq!(bumped.seqid, 2);
+
+        let current_form = StateId { seqid: 0, other: stateid.other };
+        assert!(mgr.validate(&current_form).is_ok());
+        assert!(mgr.validate_for_read(&current_form).is_ok());
     }
 
     #[test]
