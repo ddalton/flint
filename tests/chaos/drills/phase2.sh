@@ -93,6 +93,10 @@ evict_load_from() { # <node...> — the ledger oracle must survive the drill.
   note "ledger oracle on drill-target $ln — relocating (acked.log must survive)"
   for n in "$@"; do kubectl cordon "$n" >/dev/null 2>&1; done
   kubectl delete pod -n "$NS" "$lp" --wait=false
+  # The old pod stays phase=Running through graceful termination and
+  # load_pod happily returns it — wait for it to be GONE first, or the
+  # "relocation" reports the terminating pod on the doomed node.
+  kubectl wait --for=delete pod -n "$NS" "$lp" --timeout=120s >/dev/null 2>&1
   local i
   for i in $(seq 1 24); do
     lp=$(load_pod); [ -n "$lp" ] && break; sleep 5

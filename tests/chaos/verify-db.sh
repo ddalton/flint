@@ -29,10 +29,14 @@ $TMO 30 kubectl exec -n "$NS" $PG -c postgres -- pg_isready -q -U postgres \
 # 2. ledger reconciliation (acked ⊆ ledger)
 LP=$(load_pod)
 if [ -n "$LP" ]; then
+  # comm needs LEXICOGRAPHIC order — sort -n desynchronizes its merge the
+  # moment the two lists are not near-identical (an oracle-pod restart
+  # makes acked.log a mid-stream subset), fabricating sparse "missing"
+  # seqs that a direct heap probe disproves (phase-2u false FAILs).
   MISSING=$(comm -23 \
-    <($TMO 120 kubectl exec -n "$NS" "$LP" -- sh -c 'cut -d" " -f1 /acked/acked.log 2>/dev/null' | sort -n) \
+    <($TMO 120 kubectl exec -n "$NS" "$LP" -- sh -c 'cut -d" " -f1 /acked/acked.log 2>/dev/null' | sort) \
     <($TMO 120 kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -Atqc \
-        'SELECT seq FROM ledger ORDER BY seq' | sort -n))
+        'SELECT seq FROM ledger' | sort))
   if [ -z "$MISSING" ]; then
     ACKED=$(kubectl exec -n "$NS" "$LP" -- sh -c 'wc -l < /acked/acked.log 2>/dev/null' | tr -d ' ')
     ok "ledger: all ${ACKED:-0} acked writes present"
