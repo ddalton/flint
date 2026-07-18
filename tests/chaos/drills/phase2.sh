@@ -80,6 +80,28 @@ pre_r2() {
 
 verify() { ./verify-drill.sh "$PHASE_LABEL" "$DRILL" "$T0"; }
 
+evict_load_from() { # <node...> — the ledger oracle must survive the drill.
+  # 2u/2.3 blinded itself: pg-load sat on the remote-leg node, the node
+  # kill took acked.log (the loss ground truth) with it, and with every
+  # other node cordoned/anti-affine the oracle went Pending. Relocate it
+  # off the target nodes BEFORE the drill.
+  local lp ln n hit=""
+  lp=$(load_pod); [ -n "$lp" ] || return 0
+  ln=$(kubectl get pod -n "$NS" "$lp" -o jsonpath='{.spec.nodeName}' 2>/dev/null)
+  for n in "$@"; do [ "$ln" = "$n" ] && hit=1; done
+  [ -n "$hit" ] || return 0
+  note "ledger oracle on drill-target $ln — relocating (acked.log must survive)"
+  for n in "$@"; do kubectl cordon "$n" >/dev/null 2>&1; done
+  kubectl delete pod -n "$NS" "$lp" --wait=false
+  local i
+  for i in $(seq 1 24); do
+    lp=$(load_pod); [ -n "$lp" ] && break; sleep 5
+  done
+  for n in "$@"; do kubectl uncordon "$n" >/dev/null 2>&1; done
+  [ -n "$lp" ] || fail "load pod never came back after relocation"
+  ok "oracle relocated to $(kubectl get pod -n "$NS" "$lp" -o jsonpath='{.spec.nodeName}')"
+}
+
 CORDONED=""; TAINTED=""; DEAD_IID=""
 restore() {
   set +e
@@ -167,6 +189,7 @@ case "$DRILL" in
 2.3) # remote-leg NODE kill (kubelet stop + oos taint) → pod untouched
   pre_r2
   [ -n "$REMOTE" ] || fail "no remote replica node found for $PV"
+  evict_load_from "$REMOTE"
   IID=$(instance_id_for_node "$REMOTE")
   [ -n "$IID" ] || fail "no instance id for $REMOTE"
   kubelet_stop "$REMOTE"; DEAD_IID="$IID"
@@ -244,6 +267,7 @@ case "$DRILL" in
   REMOTES=$(replica_nodes "$PV" | grep -v "^$RAID_HOST$")
   N_REMOTES=$(echo "$REMOTES" | grep -c .)
   [ "$N_REMOTES" -ge 2 ] || fail "need >=2 remote legs (r3 harness) — found $N_REMOTES"
+  evict_load_from $REMOTES
   for r in $REMOTES; do
     CNP=$(csi_node_pod "$r")
     kubectl delete pod -n "$DRIVER_NS" "$CNP" --wait=false
