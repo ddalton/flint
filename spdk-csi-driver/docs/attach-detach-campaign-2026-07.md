@@ -581,14 +581,22 @@ contains wrong PID: 0" (a re-read of its own just-written lock file
 returned the CREATE-time size-0 view). ext4 stamps ctime from the
 coarse clock (~1 jiffy), so create+first-write — or two COPY extends —
 inside one tick carry IDENTICAL change values, and an out-of-order
-GETATTR reply is indistinguishable from fresh. Fix: `change_counter`
-module (userspace i_version): every mutating op bumps a per-(dev,ino)
-counter floored by post-mutation ctime ns (files AND affected parent
-dirs on create/remove/rename/link); GETATTR reports max(counter,
-floor). Across restarts it degrades to exactly knfsd-without-i_version.
-The F12→F13→F14 chain is one lesson three layers deep: RWX had never
-been exercised by a real database, and each fix peeled the next
-latency-of-truth defect into view.
+GETATTR reply is indistinguishable from fresh. Fix, in TWO halves — the counter alone did not stop it: (1)
+`change_counter` module (userspace i_version): every mutating op bumps
+a per-(dev,ino) counter floored by post-mutation ctime ns (files AND
+affected parent dirs on create/remove/rename/link); GETATTR reports
+max(counter, floor); across restarts it degrades to exactly
+knfsd-without-i_version. (2) `fattr4_change_attr_type` (attr 79) =
+MONOTONIC_INCR, advertised by all three GETATTR encoders with
+supported_attrs always 3 bitmap words — the kernel client only ORDERS
+attribute replies by change value when the server declares the type;
+undefined means any differing change is applied newest-received,
+stale size included, no matter how monotonic the values are. The
+capabilities GETATTR lands on the pseudo-root filehandle, so that
+encoder's arm is the one that reaches the client. The F12→F13→F14
+chain is one lesson three layers deep: RWX had never been exercised
+by a real database, and each fix peeled the next latency-of-truth
+defect into view.
 
 Fleet note: runw-aws-2 was SPOT-RECLAIMED mid-bring-up
 (`instance-terminated-no-capacity`, the campaign's third real reclaim)
