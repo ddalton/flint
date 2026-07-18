@@ -537,7 +537,49 @@ _Validation results: TBD (this session)._
 
 ## Phase 3 — RWX (NFS)
 
-_TBD._
+**F12 (P1, found at harness bring-up, FIXED 0940c44): no ownership
+round-trip over RWX.** The first-ever postgres-on-RWX deploy failed
+before any drill ran: initdb's bootstrap FATALs with "data directory
+has wrong ownership". Three stacked causes: the CSI NFS mount
+negotiated AUTH_NULL (no `sec=` option; SECINFO lists AUTH_NONE first)
+so no uid ever reached the server; files were created by the server
+process → owned by root; and SETATTR OWNER was decoded-but-ignored by
+design, so the image entrypoint's chown was a silent no-op — while
+GETATTR truthfully reported the backing uid (root), which is exactly
+what postgres checks. Every ownership-sensitive workload (databases,
+anything running non-root with a 0700 data dir) was structurally unable
+to run on flint RWX. Fix: mount `sec=sys`; thread AUTH_SYS (uid,gid)
+per-COMPOUND; stamp creator identity on OPEN-create/CREATE (client
+permission checks compare mode vs st_uid); honor numeric owner SETATTR
+via chown on the backing fs (non-numeric → BADOWNER; no idmapping).
+Validated by the harness itself: pg-0 Ready on the fixed image where
+it crashlooped before.
+
+**F13 (P1, found at harness init, FIXED ee60ba2): second-granularity
+change attribute corrupts rapid-write workloads.** With F12 fixed,
+initdb ran — and `pgbench -i -s 200` then died mid-COPY with
+postgres's "unexpected data beyond EOF in block 0" (its
+buggy-kernel/NFS-incoherence signature). The fattr4 CHANGE attribute
+was ctime in WHOLE SECONDS: every write inside the same second carried
+the same change value, and change is the kernel client's
+cache-ordering key — with ties, an out-of-order GETATTR reply carrying
+a stale (shorter) size was accepted into the inode cache, and postgres
+read past its own writes. Fix: both real-file encoders compose ctime
+sec·1e9+nsec (knfsd's no-i_version behavior; ctime so chmod/chown also
+invalidate). Together F12+F13 mean flint RWX had never actually been
+exercised by an ownership-sensitive, write-intensive real application
+— the cutover-chain and kuttl validations of June ran shell/fio-class
+consumers that never noticed either. This is precisely what the
+pg-oracle harness exists to catch.
+
+Fleet note: runw-aws-2 was SPOT-RECLAIMED mid-bring-up
+(`instance-terminated-no-capacity`, the campaign's third real reclaim)
+— no data impact (the RWX backing volume lived on aws-3); replacement
+runw-aws-6 added via the validated manual clone recipe (~12min:
+SSM+IMDS userdata fetch, WG stripped, kernel swap, lvstore init
+verified).
+
+_Drill results: TBD (this session)._
 
 ## Findings
 
