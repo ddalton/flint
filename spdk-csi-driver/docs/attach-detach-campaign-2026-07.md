@@ -377,7 +377,61 @@ bdevs clear only on reboot.
 
 ## Phase 2 — RWO, numReplicas=2 (RAID1)
 
-_TBD._
+### Phase 2u (ublk backend), 2026-07-17/18 — runv, v1.16.0 base + ublk.N fixes
+
+**2.1 PASS** (remote-leg csi-node delete): 20s worst ack age, raid back
+to online 2/2 via survivable reconnect — no degradation persists, no
+rebuild. (First run FAILed on a checker bug: r2 controller names carry
+a `_<idx>` suffix the live-PV match didn't strip.)
+
+**2.2a — U9, FIXED (df663af + a6ee2a7):** RAID-host spdk-tgt SIGKILL
+left the volume dead FOREVER: `repair_data_path` refused ublk volumes
+("restage required" — a pre-USER_RECOVERY assumption) while the 10s
+detector retried `ublk_recover_disk` against a raid bdev nobody was
+rebuilding. Fix v1: ublk-aware repair (reassemble raid via
+create_raid_from_replicas, then recover the quiesced kernel device in
+place — mount survives). Fix v2: registered raid chains repair on the
+10s detector tick (a registered-but-missing raid is always post-stage
+loss; no in-flight-NodeStage false positive), monitor stays as backstop.
+Result: **PASS, I/O resumed 31s** after SIGKILL, zero acked loss,
+restarts 0. Also: stale detector registry entries (teardown racing a DS
+roll) now reaped when no live PV claims the id.
+
+**2.2b — F8-amnesia on r2, FIXED (f3b0bba):** full csi-node POD delete
+on the RAID host = agent restart = empty in-memory registry → nothing
+recovered (old pod's tgt serves through graceful termination ~30s, then
+dead). The 60s monitor healed it at ~3.4min; fix seeds r2 raid chains
+into the detector at rehydration → **PASS, actual outage 33s** (drill
+timing fixed to measure from old-pod-GONE, not delete-issued).
+
+**2.3 + 2.5 — F10, THE PHASE-2 P0: unsynced-rejoin data rollback.**
+Remote-leg NODE kill (2.3): the leg fails out of the raid, writes
+continue on the surviving leg (availability correct). But with the
+replication orchestrators env-gated OFF (v1.15 default), NOTHING
+records the divergence — no epochs ⇒ sync-record admission in
+create_raid_from_replicas runs in legacy attach-everything mode. The
+next raid teardown+reassembly (2.5 cross-node migration) re-admitted
+the stale leg as an equal read source: **1,077 fsync-acked writes
+(seqs ~2409-3485, acked exactly during the outage window) silently
+vanished** — amcheck clean, writability fine, pure stale-read rollback.
+This live-proves the tier2-operator-runbook warning ("FLINT_CATCHUP
+disabled on a multi-replica cluster is actively hazardous").
+**Remedy = enable the shipped orchestrator trio** (FLINT_EPOCH_SCHEDULER
++ FLINT_CATCHUP + FLINT_HOT_REJOIN, epoch interval 30s on test
+clusters); production guidance for replicated SCs: orchestrators ON is
+the durability-correct configuration, and the chart needs first-class
+plumbing for it. Harness fixes from the same runs: evict_load_from
+(the ledger oracle died with the drilled node twice), 2.2b honest
+outage timing.
+
+**2.5 storage verdict (orthogonal to F10): PASS** — cross-node
+migration onto a replica-less node (aws-5) assembled a FULLY-REMOTE
+raid1 (both legs SPDK-initiator) under ublk, ready 23s, stall 17s.
+**2.6 churn ×10 while serving: all cycles 6-16s**, no mount/VA leaks.
+
+Cluster note: runv-aws-5/6 added live mid-phase (manual clone of the
+trove worker bootstrap: run-instances + kubeadm join + kernel 6.18.29
+swap + lvstore init — no trove backend needed, ~12min for both).
 
 ## Phase 3 — RWX (NFS)
 
