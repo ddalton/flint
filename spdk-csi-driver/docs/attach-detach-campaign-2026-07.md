@@ -598,6 +598,28 @@ chain is one lesson three layers deep: RWX had never been exercised
 by a real database, and each fix peeled the next latency-of-truth
 defect into view.
 
+**F15 (P0, THE phase-3 corruption root cause, FIXED f29ba62):
+NFSv4.2 ALLOCATE was a fake-OK stub.** F13/F14 were necessary but the
+corruption persisted; a standalone rig (privileged pod, own NFS
+mounts, pgbench -i, <90s per cycle) plus server-side per-op debug
+capture nailed it: PG16's bulk relation extend calls posix_fallocate
+→ the client sends ALLOCATE → `handle_allocate` returned Ok WITHOUT
+ALLOCATING ("TODO: Integrate with SPDK backend"). The client extends
+its cached i_size on the fake OK, postgres fills buffers it believes
+are backed, the file stays size 0 server-side (the op capture shows 8
+GETATTRs size=0 and NOT ONE WRITE reaching the failing relation), and
+the next server-refreshed size check collapses postgres's world —
+"unexpected data beyond EOF". Control: the identical workload against
+knfsd on the same kernel/client/mount-opts passes. The audit found
+FIVE fake-OK 4.2 stubs; fixed: ALLOCATE (real fallocate + change-attr
+bump), DEALLOCATE (real PUNCH_HOLE|KEEP_SIZE — the no-op left
+unpunched holes reading stale data), SEEK (real SEEK_DATA/SEEK_HOLE —
+the stub truncated sparse-aware readers), READ_PLUS (NOTSUPP instead
+of "every file is empty" — client falls back to READ), IO_ADVISE kept
+advisory-Ok. Lesson for the backlog: audit every op the dispatcher
+accepts for silent-success stubs — a protocol server that says OK
+must have DONE it.
+
 Fleet note: runw-aws-2 was SPOT-RECLAIMED mid-bring-up
 (`instance-terminated-no-capacity`, the campaign's third real reclaim)
 — no data impact (the RWX backing volume lived on aws-3); replacement
