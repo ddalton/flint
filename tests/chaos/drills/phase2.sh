@@ -271,7 +271,9 @@ case "$DRILL" in
   REMOTES=$(replica_nodes "$PV" | grep -v "^$RAID_HOST$")
   N_REMOTES=$(echo "$REMOTES" | grep -c .)
   [ "$N_REMOTES" -ge 2 ] || fail "need >=2 remote legs (r3 harness) — found $N_REMOTES"
-  evict_load_from $REMOTES
+  # No oracle relocation: 2.7 deletes csi-node PODS only — pg-load is not
+  # a storage consumer and survives; cordoning every remote on a tight
+  # fleet strands the oracle instead (nvmeof r3 run).
   for r in $REMOTES; do
     CNP=$(csi_node_pod "$r")
     kubectl delete pod -n "$DRIVER_NS" "$CNP" --wait=false
