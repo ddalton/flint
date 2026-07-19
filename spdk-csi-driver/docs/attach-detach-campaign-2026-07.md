@@ -969,6 +969,21 @@ renames under a p99 budget) that would fail on today's O(N) code —
 the mechanized guard for this class, per the F24 lint precedent.
 Design is incremental (steps 1–2 alone resolve the degradation) and
 preserves F17/F23/v2-persistence/STALE-vs-BADHANDLE invariants.
+**Literature review added (§11–§13 of that doc): the current
+path-based handle design is itself the problem.** Production userspace
+NFS servers (Linux knfsd, NFS-Ganesha FSAL_VFS) don't put paths in
+handles — they encode the kernel's inode+generation handle via
+`name_to_handle_at(2)`/`open_by_handle_at(2)`, which is rename-stable
+by construction (F23 free) and stales replaced files via the
+generation number (F17 free), deleting the entire cache/alias/scan
+machinery rather than optimizing it (F26 cannot occur). flint's export
+is ext4 (supports it) and the handle fits the 128B budget; the one
+gate is `CAP_DAC_READ_SEARCH` in the (already-privileged) NFS pod.
+Recommendation is now **two-tier**: ship the §5 path-based fix now to
+stop F26, then adopt the inode-handle architecture (§12) as the
+durable answer. Fallback if the cap is unavailable: per-directory
+generation counters + lock-free reads (Linux dcache RCU / SOSP'15),
+not point-eviction.
 
 ## Findings
 

@@ -5,6 +5,19 @@ Design analysis for the O(N)-scan-under-global-lock defect found in
 `attach-detach-campaign-2026-07.md`). Status: **proposal, not
 implemented.** No code changed by this document.
 
+> **Revised after external research (2026-07-19).** §5 below is a
+> sound *incremental* fix for the current path-based handle design and
+> resolves F26. But the literature review in **§11** found that the
+> current design is itself the root of the problem: production
+> userspace NFS servers (Linux knfsd, NFS-Ganesha's FSAL_VFS) do **not**
+> put paths in file handles at all — they encode the kernel's
+> inode+generation handle via `name_to_handle_at(2)` /
+> `open_by_handle_at(2)`, which is rename-stable *by construction* and
+> makes the whole cache-maintenance problem (F26) — and retroactively
+> F17 and F23 — disappear rather than merely run faster. The
+> recommendation is now **two-tier**: ship §5 as the immediate fix,
+> and adopt the inode-handle architecture (**§12**) as the target.
+
 ## 1. Problem recap
 
 `note_fs_rename` and `note_fs_remove` — invoked on the RENAME
@@ -288,3 +301,169 @@ Steps 1–2 alone resolve the measured degradation; 3 hardens the tails.
   dropped and v1 relies solely on the v3 upgrade — simpler, one fewer
   branch on the rename path. Needs a quick audit of v1 mint sites
   before committing to that.
+
+## 11. Literature review — is §5 the best approach?
+
+External research (papers + production NFS server implementations)
+says: **§5 is the right incremental fix, but not the best
+architecture.** Three findings, in decreasing order of impact.
+
+### 11.1 Production NFS servers don't put paths in handles at all
+
+Both mainstream Linux NFS servers encode an **inode number +
+generation number**, not a path:
+
+- **Linux knfsd**: "NFS filehandles don't contain paths; they normally
+  only contain roughly the inode number… identified by an inode number
+  and a generation number." Handle→object resolution is the kernel's
+  `exportfs`/reconnect path.
+- **NFS-Ganesha FSAL_VFS**: "uses the `name_to_handle_at` and
+  `open_by_handle_at` system calls" to translate name↔handle↔inode,
+  wrapping the opaque kernel handle in a ~5-byte header (export id +
+  fsid). Works on "any local filesystem" on Linux ≥ 2.6.39.
+
+The Linux syscalls `name_to_handle_at(2)` / `open_by_handle_at(2)` are
+**explicitly designed for userspace NFS servers** (per the man page).
+Properties directly relevant to flint's findings:
+
+- **Rename-stable by construction** — the handle is the inode, and
+  rename doesn't change the inode. This is F23 *for free*: no alias
+  table, no `note_fs_rename`, no chain-collapse.
+- **Generation number stales replacements** — a file deleted and
+  recreated at the same inode returns `ESTALE` from
+  `open_by_handle_at`. This is F17 *for free*: no SHA-256 identity
+  hash, no `embedded_ino` re-verification, no per-resolve `lstat`.
+- **Fixed, small handle** — the opaque handle is a few dozen bytes
+  (ext4 ~12–20); no v2 long-path id↔path table is ever needed. Fits
+  flint's `Nfs4FileHandle::MAX_SIZE = 128` with room to spare.
+
+Because the handle no longer contains or maps to a path, **there are
+no `path_to_handle` / `handle_to_path` caches to maintain, so
+`note_fs_rename`/`note_fs_remove` cease to exist and F26 cannot
+occur.** This is the "something better": it removes the problem class,
+where §5 only makes its cost O(1). See §12 for the flint-specific
+design.
+
+### 11.2 If forced to stay path-based: generation counters, not eviction
+
+If the inode-handle route is blocked (see §12 caveats), the
+state-of-the-art for a *path-keyed* cache under concurrent
+rename is **per-directory generation counters with lock-free reads**,
+not the point-eviction of §5.2:
+
+- Linux's own dcache (since 2.6.38, Nick Piggin's RCU rewrite) does
+  path lookups "without acquiring any lock… a seqlock on each dentry
+  detects concurrent modifications and triggers a fallback." Renames
+  bump a counter; readers validate and retry rather than lock.
+- Bhat/Porter, *"How to Get More Value From Your File System Directory
+  Cache"* (SOSP '15), generalizes this: a prefix cache invalidated at
+  the **subtree** granularity via directory generation counters, so a
+  rename invalidates a branch by bumping one counter instead of
+  scanning entries, and lock-free readers detect staleness by counter
+  comparison.
+
+This is strictly better than §5.2's point-eviction for the
+read-vs-rename race (no writer ever blocks a reader), but more complex
+to implement correctly. It's the right answer *only* if §12 is
+infeasible; given flint's backing store is a real local fs, §12 is
+preferred.
+
+### 11.3 If a bounded path cache is kept: W-TinyLFU over plain LRU
+
+Relevant only to §5.2 (a forward cache that survives Tier 1 but is
+deleted by Tier 2). Flint's workload mixes hot reuse (relation files
+re-opened constantly) with one-shot scans (WAL segments streamed
+once). Plain LRU is polluted by the scan; **W-TinyLFU** (Caffeine's
+policy; available in Rust via `moka`/`quick_cache`) adds a frequency
+admission filter that resists scan pollution, at ~8 bytes/entry
+(a 4-bit CountMinSketch) — "near-optimal hit rate, competitive with
+ARC and LIRS" (Einziger & Friedman, *TinyLFU*, and the Caffeine
+efficiency data). Net: if we keep a bounded path cache, prefer
+W-TinyLFU; but under §12 the cache is gone and this is moot.
+
+## 12. Target architecture — kernel inode handles (Tier 2)
+
+Adopt the knfsd/Ganesha model: flint's NFS-side file handle becomes a
+small framed wrapper around the kernel's opaque handle.
+
+**Mint** (replaces `generate_handle` + `v2_handle_for`): on the object
+path, call `name_to_handle_at(dirfd, name, &handle, &mnt_id, 0)`; wire
+handle = `[version:1][fsid/export:…][kernel_handle:…]`. No hash, no
+embedded path, no id table.
+
+**Resolve** (replaces `parse_handle` + `filehandle_to_path` + the
+alias follow): `open_by_handle_at(mount_fd, &handle, O_PATH|…)` →
+`ESTALE` maps to `NFS4ERR_STALE`; success yields an fd for the object,
+which flows straight into the existing `FdCache` for I/O. No path
+lookup, no lock, no inode re-verification (the kernel did it).
+
+**Deletions this enables:** `path_to_handle`, `handle_to_path`,
+`path_to_id`/`id_to_path` (v2), `rename_aliases` (F23),
+`note_fs_rename`, `note_fs_remove`, the SHA-256 identity scheme, and
+`follow_rename_alias`. Net **negative** diff — it removes far more than
+it adds, and retires F17/F23/F26 as a category.
+
+**What stays / must be designed:**
+
+- **Pseudo-fs / PUTROOTFH** (`pseudo_fs`) is unchanged — only
+  real-object handles move to kernel handles.
+- **Restart & instance_id semantics.** Kernel handles are naturally
+  stable across a server restart on the same filesystem — which is
+  what RWX persistence wants — but that inverts today's
+  `instance_id`-stamped "STALE everything on restart" behavior. The
+  grace-period / reclaim interaction (RECLAIM_COMPLETE, courtesy
+  release) must be re-checked so a surviving handle plays correctly
+  with the state that *is* rebuilt. This is the main design work.
+- **`mount_fd` lifetime.** `open_by_handle_at` needs an fd for the
+  filesystem (an O_PATH fd on the export root); hold one for the
+  server's life.
+
+**Caveats / dependencies (why this is Tier 2, not Tier 1):**
+
+- **Capability.** `open_by_handle_at` requires `CAP_DAC_READ_SEARCH`.
+  Ganesha explicitly flags this as "tricky inside a container." flint's
+  NFS pod already runs privileged (it stages block devices and mounts),
+  so the cap is almost certainly present — **but this must be verified**
+  and pinned in the pod securityContext before committing.
+- **Backing fs support.** Requires a local fs that implements
+  `export_operations`. flint's export is **ext4** on the ublk block
+  device (confirmed: `rwx_nfs.rs` references the "ext4 journal on the
+  backing raid"), which fully supports `name_to_handle_at`. A move to
+  a fs without it (e.g. plain tmpfs) would break this route.
+- **Scope.** Larger blast radius than §5 (touches mint/resolve and the
+  restart/reclaim path), so it wants its own drill cycle. Hence:
+  **ship §5 now to stop the bleeding; schedule §12 as the durable
+  fix.**
+
+**Recommended sequencing:** §5.1 + §5.2 immediately (fixes F26,
+low-risk); then evaluate §12 with a capability check and a focused
+prototype of mint/resolve against the ext4 export; if the cap is
+present (expected), §12 supersedes §5.3/§5.4 and deletes the alias/v2
+machinery entirely rather than optimizing it.
+
+## 13. Sources
+
+- Linux `name_to_handle_at(2)` / `open_by_handle_at(2)` man pages
+  (man7.org) — userspace NFS server handle API, `CAP_DAC_READ_SEARCH`,
+  ESTALE/generation semantics.
+- Chris Siebenmann, "The Linux kernel NFS server and reconnecting
+  client NFS filehandles" — knfsd handles = inode + generation, not
+  path.
+- NFS-Ganesha wiki, *VFS* and *Fsalsupport* — FSAL_VFS uses
+  `name_to_handle_at`/`open_by_handle_at`; ~5-byte header + fsid;
+  container-privilege caveat.
+- McKenney et al., "Scaling dcache with RCU" (Linux Journal) and the
+  Linux 2.6.38 RCU-walk dcache — lock-free path lookup, seqlock
+  fallback on rename.
+- Bhat & Porter, "How to Get More Value From Your File System Directory
+  Cache," SOSP '15 — subtree-granularity invalidation via directory
+  generation counters with lock-free reads.
+- Einziger & Friedman, "TinyLFU: A Highly Efficient Cache Admission
+  Policy" (arXiv:1512.00727); Caffeine *Efficiency* wiki
+  (ben-manes/caffeine) — W-TinyLFU hit-rate vs LRU/ARC/LIRS, 8 B/entry.
+- Einziger et al., "Limited Associativity Makes Concurrent Software
+  Caches a Breeze" (arXiv:2109.03021) — set-associative concurrent
+  caches as a simpler-to-parallelize alternative to fully-associative
+  LRU.
+- RFC 7530 §4 (NFSv4) — persistent vs volatile filehandles,
+  `FH4_VOL_RENAME`.
