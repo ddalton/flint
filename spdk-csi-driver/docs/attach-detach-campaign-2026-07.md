@@ -751,7 +751,182 @@ throughput collapse at bulk rates (hex-dump formatting), and a
 100ms-uniform op latency under verbose was the logging tax, not a
 code loop.
 
-_Drill results: TBD (this session)._
+**F23 (P1 — filehandles must follow the file across rename-AWAY).**
+With F22's kernel poisoning cured, a fresh-kernel bring-up still
+wedged: 7 postgres backends in `rpc_wait_bit_killable`, the client
+transport with NO TCP connection and no reconnect attempts (network
+verified healthy end-to-end), preceded by server ESTALE bursts ×4 on
+`pg_internal.init.<pid>` names. Postgres writes its relcache init
+file as write-temp-then-`rename(temp, final)`; the v3 inode-pinned
+handles (F17) correctly stale the REPLACED destination, but the
+handle held on the TEMP name also staled the moment the temp path was
+renamed away — even though its inode is alive and well at the new
+name. RFC 8881 filehandles name the FILE, not the path; a rename must
+not stale anything. The 6.18 client answers a burst of ESTALEs on
+dirty-page writeback by wedging its transport (it neither errors the
+pages nor reconnects — arguably a client bug, but one we must never
+trigger). Fix: `rename_aliases` table in the filehandle manager —
+`note_fs_rename` records old→new (ino-verified per hop, chains
+collapsed at insert, cap 8192 / 8 hops), and stale resolution follows
+the alias when the pinned ino matches at the destination. Unit-tested
+(rename_away_handle_follows_the_file) alongside the F17 stale
+semantics, which are unchanged for genuine replace/remove.
+
+**F24 (P0 — DashMap shard self-deadlock in F17c fd seeding freezes
+the whole NFS server).** The u11.15 bring-up (all prior fixes in)
+wedged differently: pg's shutdown checkpoint hung mid-bring-up,
+client xprt showed 11 outstanding RPCs / idle 373s / zero
+retransmits, the TCP connection ESTABLISHED with 2488 bytes unread in
+the server's rx_queue — and ALL server runtime threads parked in
+futex (gdb via SSM, frame-pointer builds paying off: worker 1 in
+`handle_open→DashMap::_insert`, worker 2 in
+`dispatch_operation→DashMap::_remove`). Root cause: `seed_open_fd`
+(F17c) scanned `fd_cache` for an existing fd of the same path as an
+`if let` scrutinee. Scrutinee temporaries live to the end of the
+block, so the DashMap `Iter` — holding the matched shard's READ guard
+— was still alive during the `insert` inside the block; when the new
+stateid hashed to that same shard the write acquisition queued behind
+our own read guard forever. One shard permanently locked; both tokio
+workers (2-worker runtime) soon blocked on it; epoll unattended;
+server frozen while the socket stays ESTABLISHED — so the client
+never reconnects, it just waits. Postgres makes the collision
+near-certain: every backend OPENs `pg_internal.init`, hammering the
+shared-path seeding branch (P≈1/shards per OPEN). Fix: bind the scan
+result through a standalone `let` (guard drops before insert);
+regression test seeds 512 stateids of one path under a watchdog,
+verified to deadlock on the old code. Audited every other
+`if let`-over-guard site in the v4 tree (READ/WRITE cache lookups,
+COMMIT path-scan, filehandle caches) — all already drop guards via
+`let` statements or explicit scopes before mutating. Recovery note:
+deleting the frozen pod un-wedges the client cleanly — the recreated
+server loads persisted state, the 11 queued RPCs complete, and
+postgres carries on (live proof of the persistence/recovery path
+under mid-workload server death).
+
+**F24 follow-through — the class, not the bug (u11.17).** The fd
+cache moved behind `FdCache` (fd_cache.rs): private maps, guard-free
+API (owned clones only), and a `by_path` index that turns every
+by-path consumer (OPEN seeding, COMMIT fsync reuse, F17b fallbacks)
+from an O(n) scan into a point lookup — the scan was both the guard
+holder AND a latent perf cliff under postgres's
+many-backends-open-one-file pattern. Mechanized discipline per the
+identity.rs precedent: a grep-lint test
+(`no_iter_guards_in_scrutinees`) fails the build on any if/while-let
+scrutinee iterating a map in the nfs/pnfs trees (it immediately
+caught two benign Vec sites in kerberos.rs — annotated), and
+clippy.toml denies holding any dashmap guard type across `.await`.
+Notably the DS-side fd cache (pnfs/ds/io.rs) had already dodged this
+exact trap with a hand-written comment — knowledge that never
+transferred to the NFS side, which is the case for mechanizing it.
+
+**Bring-up gates — two GREEN runs (2026-07-19), with a hygiene
+correction.** Two consecutive fully clean RWX bring-ups: pg-0 Ready,
+`pgbench -i -s 200` over NFS, witness up, ledger acking; quiescence
+textbook (xprt sends==recvs, zero outstanding, idle 2s, ZERO STALE
+lines — F23 confirmed live, no recovery-op churn). CORRECTION: these
+were first attributed to u11.16/u11.17, but both helm rolls had
+silently failed (wrong release name — `flint`, actual `flint-csi` —
+with helm's stderr piped into a grep; AND this session's images were
+pushed as `spdk-csi-driver:*` while the chart pulls `flint-driver:*`).
+Both green gates ran on **u11.15** — which has F22+F23 but NOT F24.
+So there is no bring-up A/B for F24: u11.15 clears bring-up when the
+shard dice roll right (the deadlock needs a same-shard hash between a
+seeded stateid and the matched entry, ~P(1/shards) per shared-path
+OPEN — the first u11.15 run hit it during initdb's shutdown
+checkpoint; the next two runs didn't). The F24 root cause needs no
+A/B — the gdb capture (both workers futex-parked in
+handle_open→_insert / dispatch→_remove with the shard-guard chain
+visible) is direct evidence. Hygiene rules adopted: never filter helm
+output in roll scripts, and every roll ends with a pod-image
+assertion before the gate counts. Residual observation (P3,
+release-gate item): 64× `CLOSE: Invalid stateid: StateId not found`
++1 WRITE across bring-up (~3/6717 client-visible) — suspected retried
+CLOSE missing a session reply-cache path; client already freed the
+state, no recovery churn; investigate with pynfs at release.
+
+**F25 (P2, teardown robustness — one wedged teardown, four defects).**
+Tearing down the harness while the u11.15 nfs server sat in the F24
+freeze exposed a chain of teardown-path weaknesses, each individually
+survivable, jointly a 40-minute tarpit:
+(1) **kubelet skips NodeUnstage after pod force-delete** — TWICE in
+one teardown (the pg pod's RWX mount, then the nfs pod's companion):
+`node.status.volumesInUse` never clears, the A/D controller never
+even initiates detach (no deletionTimestamp on the VA — this is NOT
+the 6-min force-detach case, which only fires for volumes absent from
+volumesInUse). Unstick: restart kubelet (phase-1 recipe, confirmed
+again).
+(2) **flint DeleteVolume is not idempotent-fast**: each attempt runs
+serial all-node disk scans (5 nodes incl. CP + cordoned builder)
+which alone exceed the csi-provisioner sidecar's 10s gRPC deadline —
+11+ DeadlineExceeded retries against a volume whose lvol was ALREADY
+gone. Fix direction: fast-path return when the lvol/infra are absent;
+bound or parallelize the scans; respect the gRPC context so
+abandoned work doesn't pile up.
+(3) **"Pod delete issued" that never landed**: the controller logged
+the nfs pod delete but the pod never got a deletionTimestamp (still
+`Error`, 55m old, 8 min later) — needed a manual force-delete.
+Suspect silent error swallowing in delete_nfs_server_pod.
+(4) **MNT_FORCE clears the mount, not the kernel client**: after the
+forced unmount succeeded, /proc/fs/nfsfs/servers still showed the
+nfs_client at USE=8 pinned to the (deleted) service ClusterIP —
+the F22 poisoning precondition with ZERO visible mounts. F22's
+"never lazy-unmount" rule is necessary but not sufficient: any
+forced unmount that aborts a frozen-server window can leave the
+pinned client. Reboot remains the only cure (aws-4 rebooted).
+Ops sequence that unstuck everything, in order: kubelet restart →
+controller bounce (reset provisioner backoff) → manual nfs pod
+force-delete → second kubelet restart → verify lvol/infra gone →
+manual PV delete → node reboot.
+
+### Drill 3.1 (graceful cross-node migration) — 3 attempts, all FAIL
+on the db write-probe ONLY; F26 opened
+
+Mechanics PASS every time (u11.17 attempt: Ready 32s, max ledger
+stall 27s, exactly one nfs pod with same uid throughout, witness
+clean, VAs consistent, data path clean, no orphaned mounts, no driver
+errors, ledger 13/13 acked present, pg_amcheck clean). The FAIL is
+the 2/7 writability probe: post-migration INSERTs time out.
+
+**F26 (P1, OPEN — post-migration NFS server degradation to
+~50–200ms/op).** Evidence chain on the u11.17 attempt:
+- Client transport HEALTHY: sends==recvs (zero outstanding), queue 0,
+  no retrans, no recovery-op churn (TEST/FREE_STATEID +0). OPENs do
+  complete — at ~2 per 12s. Not a wedge: a crawl.
+- Per-op latency uniform: WRITE 292ms / CLOSE 271ms / GETATTR 218ms
+  (rtt≈exec, so all server-side). tcpdump on the server node shows
+  request-in → reply-out gaps of 50–200ms, strictly serialized,
+  ~7–20 ops/s total across both clients (pg + witness).
+- Exonerated: backing device (dsync 0.3–0.8ms in-pod), SQLite state
+  db (148KB + 4MB WAL, no bloat), CPU throttling (11 periods),
+  Nagle (nodelay set on accept), F24-freeze (runtime healthy, epoll
+  driver live), network path (fresh server on same topology is fast).
+- Suspicious: pod cgroup shows 84% SYSTEM-time CPU; hot threads
+  caught in allocator page-alloc hooks; gdb stack samples show
+  crossbeam channel churn (tracing-appender queue) and a
+  per-compound `Vec::clone` inside `dispatch_compound_inner`.
+- DECISIVE split: deleting the nfs pod (state reloads from SQLite:
+  2 clients, 2 sessions, 208 stateids) with pg STILL cross-node →
+  0.3–0.6ms/op instantly. The degradation is ACCUMULATED IN-PROCESS
+  STATE, not topology; trigger window is around the old connection's
+  death at migration (F18-adjacent aftermath?).
+- Related suspect, upgraded from P3: `CLOSE: Invalid stateid:
+  StateId not found` runs at ~7% of CLOSEs continuously (41 per
+  2min even on the fresh, fast server) — hypothesis: pg's
+  rename-over re-mints the fh (F17), and the client's eventual
+  CLOSE presents state the server has re-keyed/dropped → possible
+  per-CLOSE leak feeding the degradation, or an independent
+  state-machine discrepancy. Needs code-level root-cause either way.
+Repro recipe: RWX harness up (fast) → drill 3.1 migration →
+writability probe times out; restart nfs pod → instantly fast.
+Next steps written down in the session plan: rerun 3.1 with a
+latency monitor armed at the migration moment, thread census +
+per-op timing on the degraded instance BEFORE restarting it, then
+code-audit the connection-death path (per-compound Vec::clone, the
+tracing-appender channel, dispatch serialization) and the CLOSE
+not-found key mismatch.
+
+Drills 3.1b–3.9: NOT RUN (session paused mid-investigation; cluster
+torn down — resume on a fresh cluster with the F26 repro recipe).
 
 ## Findings
 
