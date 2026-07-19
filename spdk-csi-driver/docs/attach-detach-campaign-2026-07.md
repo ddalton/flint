@@ -994,6 +994,74 @@ Fallback ONLY if the cap is ungrantable: per-directory generation
 counters + lock-free reads (Linux dcache RCU / SOSP'15), not
 point-eviction.
 
+**F27 (P2, BACKLOG — NFSv4 state persistence is a throughput
+ceiling).** Surfaced while root-causing F26 (exonerated as F26's cause
+but real on its own). The NFS server persists volatile state
+(clients, sessions, **stateids**) through a single
+`Arc<Mutex<Connection>>` SQLite handle (`state_backend/sqlite.rs`),
+and it does so **per operation on the hot path**: every OPEN persists
+a stateid, every CLOSE deletes one, via `spawn_blocking` that all
+contend for the one mutex; WAL commits add system-time I/O. On the
+fresh u11.17 pod the reload was **208 stateids** — i.e. the server had
+been synchronously writing a row per open through one lock under load.
+This serializes all state mutations across all connections and caps
+OPEN/CLOSE throughput independent of the data path; it will bite at
+higher client/open counts even after F26 is fixed.
+
+**How other userspace NFS servers avoid this — persist almost
+nothing, rebuild via grace+reclaim.** Both mainstream implementations
+persist only a *small per-client recovery record*, never per-stateid:
+
+- **Linux knfsd** (`nfsdcltrack`/`nfsdcld`): "the server must track a
+  small amount of **per-client** information on stable storage" — one
+  row per client (`nfs_client_id4` + boot epoch + `reclaim_complete`
+  timestamp), written on client create/confirm and RECLAIM_COMPLETE,
+  **not** on OPEN/CLOSE. (Notably it *also* uses SQLite — so SQLite
+  isn't the problem; the per-op, single-mutex usage is.)
+- **NFS-Ganesha**: pluggable recovery backends (`fs`, `fs_ng`,
+  `rados_kv`, `rados_ng`, `rados_cluster`) store **client** recovery
+  records only. Ephemeral state (opens/locks/delegations/layouts) is
+  *not* persisted — it is rebuilt by clients after a restart.
+
+The volatile per-stateid state is reconstructed by the **NFSv4
+grace-period + reclaim protocol**: on restart the server enters a
+grace period, bars new state, and clients re-establish their opens/
+locks via CLAIM_PREVIOUS + RECLAIM_COMPLETE. The server only needed
+the client list (and an epoch) to police reclaims safely. For HA /
+a server that moves nodes (flint's exact case), the recovery DB lives
+on shared, **epoch-tagged** storage (Ganesha's RADOS objects) so the
+failover instance enforces a coordinated grace period; `rados_ng`/
+`rados_cluster` additionally handle crash-*during*-grace (a hole in
+the simpler `rados_kv`).
+
+**Why flint diverges, and the fix options.** flint deliberately
+persists *full* stateid state and reloads it so a rescheduled NFS pod
+resumes exactly where the old one stopped and the client's in-flight
+RPCs just complete — **seamless failover with no grace-period stall**
+(observed live: "recreated server loads persisted state, 11 queued
+RPCs complete"). That intent is good; the *implementation* (synchronous
+per-op writes behind one mutex) is the ceiling. Options, keeping the
+seamless-failover goal:
+- (a) **Decouple persistence from the op critical path** —
+  write-behind / batched / group-commit with bounded lag, so OPEN/CLOSE
+  return without blocking on fsync; the reload still finds recent state.
+  (Recommended: preserves seamless failover, removes the hot-path
+  serialization.)
+- (b) **Shard the connection** (per-client or hash-sharded SQLite /
+  per-shard WAL) so mutations don't all serialize on one mutex.
+- (c) **Adopt the mainstream model** — persist only client-recovery
+  records + rely on grace/reclaim. Much lighter and battle-tested, but
+  reintroduces a bounded reclaim stall on reschedule (the very thing
+  the RWX seamless-cutover work aimed to avoid) — a genuine trade-off,
+  not a pure win.
+Recommendation: (a), optionally with (b), because flint has already
+chosen seamless failover; (c) only if a bounded grace period on
+reschedule becomes acceptable. SQLite itself stays (knfsd validates
+it); what changes is per-op-synchronous → batched/off-critical-path.
+Sources: `nfsdcltrack(8)`/`nfsdcld`; NFS-Ganesha
+`ganesha-rados-cluster-design(8)` + recovery-backend docs; RFC 8881
+§8.4.2 (grace/reclaim), §9 (locking recovery).
+
 ## Findings
 
 ### F1 — RECLASSIFIED 2026-07-13: concurrent postmasters, not a storage bug
