@@ -928,6 +928,48 @@ not-found key mismatch.
 Drills 3.1b–3.9: NOT RUN (session paused mid-investigation; cluster
 torn down — resume on a fresh cluster with the F26 repro recipe).
 
+**F26 root cause CONFIRMED by code audit (2026-07-19, static —
+cluster already torn down).** Not the dispatcher/SQLite/back-channel.
+`note_fs_rename` (filehandle.rs:687, called from RENAME
+fileops.rs:3486) and `note_fs_remove` (filehandle.rs:762, from REMOVE
+fileops.rs:3304) do a full `.keys()`/`.iter()` scan of the filehandle
+caches — O(N) iteration + O(N) `PathBuf` allocation — while holding
+**write** locks that every filehandle-resolving op (GETATTR/READ/
+WRITE/CLOSE/LOOKUP, both connections) takes as **read**. `path_to_
+handle` grows unboundedly (one entry per distinct path ever handled;
+in-memory only, never persisted, pruned only per-subtree), so each
+rename holds the global lock longer and allocates more as the run
+proceeds — postgres renames constantly. This explains every live
+observation: uniform cross-connection latency (single shared RwLock;
+writer blocks all readers), growth over runtime (N climbs), 84 %
+system time + page-alloc churn (the O(N) `.cloned().collect()`), and
+"fresh pod instantly fast" (the cache is not persisted — `attach_
+backend` reloads only the v2 id↔path table — so a restart resets
+N→0). The `Vec::clone` the gdb samples flagged in
+`dispatch_compound_inner` is a red herring: the bounded reply-cache
+measurement clone, constant per op. Key architectural finding:
+`path_to_handle`/`handle_to_path` are **pure performance caches** —
+v3 handles are deterministic (`SHA256(path‖instance‖ino)`), self-
+describing (path embedded, recovered by `parse_handle`), and self-
+verifying (inode re-checked at resolve) — so their eviction scans are
+defensive, not required for correctness. Only the v2 id↔path table
+(long paths) and `rename_aliases` (F23) are authoritative.
+
+**Re-architecture design → [`f26-filehandle-cache-redesign.md`](f26-filehandle-cache-redesign.md).**
+Recommends: (1) delete `handle_to_path` (v1/v3 self-describe;
+`parse_handle` needs no map) — removes a global lock from the hot
+read path; (2) make `path_to_handle` a bounded sharded cache with
+O(1) point-eviction instead of the subtree scan (this is the fix that
+kills F26); (3) back the v2 table with a `BTreeMap` for O(log M + k)
+subtree re-key; (4) reverse-index `rename_aliases` for O(1) chain-
+collapse. Net: hot read path takes no global lock for v1/v3;
+rename/remove drop from O(N)-under-lock to O(1)+O(log M); memory
+bounded. Includes a perf-regression test (50 k entries, time 1 k leaf
+renames under a p99 budget) that would fail on today's O(N) code —
+the mechanized guard for this class, per the F24 lint precedent.
+Design is incremental (steps 1–2 alone resolve the degradation) and
+preserves F17/F23/v2-persistence/STALE-vs-BADHANDLE invariants.
+
 ## Findings
 
 ### F1 — RECLASSIFIED 2026-07-13: concurrent postmasters, not a storage bug
