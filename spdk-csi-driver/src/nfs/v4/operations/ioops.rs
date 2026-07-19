@@ -319,12 +319,18 @@ impl IoOperationHandler {
         if self.fd_cache.contains_key(&stateid.other) {
             return;
         }
-        if let Some((file, writable)) = self
+        // The scan must be a standalone `let`: an `if let` scrutinee's
+        // temporaries live to the end of the block, so the DashMap Iter
+        // (parked holding the matched entry's shard read guard) would
+        // still be alive during the insert below — when the new stateid
+        // hashes to that same shard, the write acquisition waits on our
+        // own read guard forever and wedges the whole runtime.
+        let same_path_fd = self
             .fd_cache
             .iter()
             .find(|e| e.path == *path)
-            .map(|e| (Arc::clone(&e.file), e.writable))
-        {
+            .map(|e| (Arc::clone(&e.file), e.writable));
+        if let Some((file, writable)) = same_path_fd {
             self.fd_cache.insert(
                 stateid.other,
                 CachedFile { file, path: path.clone(), writable },
@@ -1504,6 +1510,48 @@ mod tests {
         handler.fd_cache.remove(&other);
         assert!(handler.stale_open_fallback(&fh, &other, false).is_none());
         assert!(view.file_for_path(&target).is_none());
+    }
+
+    /// Regression: seeding an fd for a path that already has a cached
+    /// fd must not deadlock when the new stateid hashes to the shard
+    /// the scan matched in. The buggy version held the DashMap Iter's
+    /// shard read guard across the insert (if-let scrutinee temporary
+    /// lifetime), self-deadlocking the runtime — postgres hits this
+    /// constantly (every backend OPENs pg_internal.init). 512 seeds of
+    /// one shared path make a same-shard collision near-certain; run
+    /// under a watchdog so the failure mode is a panic, not a hang.
+    #[test]
+    fn seed_open_fd_shared_path_does_not_deadlock() {
+        let (handler, _fh_mgr, temp) = create_test_handler();
+        let target = temp.path().join("shared.dat");
+        std::fs::write(&target, b"seed me").unwrap();
+
+        let file = Arc::new(std::fs::File::open(&target).unwrap());
+        handler.test_seed_fd([1u8; 12], file, target.clone(), false);
+
+        let handler = std::sync::Arc::new(handler);
+        let h = std::sync::Arc::clone(&handler);
+        let path = target.clone();
+        let worker = std::thread::spawn(move || {
+            for i in 0u16..512 {
+                let mut other = [0u8; 12];
+                other[..2].copy_from_slice(&i.to_le_bytes());
+                other[2] = 0x5e;
+                let sid = StateId { seqid: 1, other };
+                h.seed_open_fd(&sid, &path, false);
+            }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !worker.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "seed_open_fd deadlocked on a same-shard iter+insert"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        worker.join().unwrap();
+        // Every distinct stateid now maps to the shared fd.
+        assert_eq!(handler.fd_cache.len(), 513);
     }
 
     fn create_test_handler() -> (IoOperationHandler, Arc<FileHandleManager>, TempDir) {
