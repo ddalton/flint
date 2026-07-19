@@ -256,11 +256,13 @@ impl Keytab {
     /// Find a service key for the given principal
     pub fn find_key(&self, principal: &str) -> Option<&ServiceKey> {
         // Try exact match first
+        // guard-lint: allow — plain Vec iterator, no lock guard
         if let Some(key) = self.keys.iter().find(|k| k.principal == principal) {
             return Some(key);
         }
         
         // Try matching principal without realm
+        // guard-lint: allow — plain Vec iterator, no lock guard
         if let Some(key) = self.keys.iter().find(|k| {
             let full_principal = format!("{}@{}", k.principal, k.realm);
             full_principal == principal || k.principal == principal

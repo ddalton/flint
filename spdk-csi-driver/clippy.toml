@@ -1,0 +1,16 @@
+# Holding a DashMap guard across an .await parks the shard lock inside
+# a suspended future; if every worker then blocks acquiring that shard,
+# the runtime freezes with the socket still ESTABLISHED — the adjacent
+# failure mode to F24 (see src/nfs/v4/operations/fd_cache.rs). Clippy's
+# await_holding_invalid_type flags these at compile time when clippy
+# runs; the same-thread no-await variant is caught by the
+# no_iter_guards_in_scrutinees test in fd_cache.rs.
+await-holding-invalid-types = [
+    { path = "dashmap::mapref::one::Ref", reason = "DashMap shard read guard held across await — shard stays locked while the future is parked (F24-adjacent freeze)" },
+    { path = "dashmap::mapref::one::RefMut", reason = "DashMap shard write guard held across await — shard stays locked while the future is parked (F24-adjacent freeze)" },
+    { path = "dashmap::mapref::multiple::RefMulti", reason = "DashMap iter guard held across await — shard stays locked while the future is parked (F24-adjacent freeze)" },
+    { path = "dashmap::mapref::multiple::RefMutMulti", reason = "DashMap iter guard held across await — shard stays locked while the future is parked (F24-adjacent freeze)" },
+    { path = "dashmap::iter::Iter", reason = "DashMap iterator holds shard guards while alive — never across await (F24-adjacent freeze)" },
+    { path = "dashmap::iter::IterMut", reason = "DashMap iterator holds shard guards while alive — never across await (F24-adjacent freeze)" },
+    { path = "dashmap::mapref::entry::Entry", reason = "DashMap entry holds the shard write guard — never across await (F24-adjacent freeze)" },
+]

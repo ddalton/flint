@@ -19,6 +19,7 @@
 
 pub mod session;
 pub mod fileops;
+pub(crate) mod fd_cache;
 pub mod ioops;
 pub mod perfops;  // NFSv4.2 performance operations
 pub mod lockops;  // NFSv4 locking operations

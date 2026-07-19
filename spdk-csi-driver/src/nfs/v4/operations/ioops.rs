@@ -16,7 +16,7 @@ use crate::nfs::v4::state::StateManager;
 use crate::nfs::v4::operations::fileops::Fattr4;
 use crate::nfs::v4::filehandle::FileHandleManager;
 use bytes::Bytes;
-use dashmap::DashMap;
+use super::fd_cache::{CachedFile, FdCache};
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -191,25 +191,6 @@ pub struct CommitRes {
     pub writeverf: u64,
 }
 
-/// Cached open file entry.
-///
-/// `file` is an `Arc<File>` rather than `Arc<Mutex<File>>` because every
-/// operation we perform on it — `write_at`, `read_at`, `sync_all`,
-/// `sync_data` — takes `&File`, not `&mut File`. Positioned I/O
-/// (`pwrite(2)` / `pread(2)`) is explicitly safe to call concurrently
-/// from multiple threads on Linux and macOS, so the mutex was
-/// unnecessary serialization. Removing it lets multiple WRITEs to the
-/// same stateid (rare in practice but possible) actually parallelize
-/// down to the kernel.
-struct CachedFile {
-    file: Arc<File>,
-    path: PathBuf,
-    /// Whether the fd was opened with write access. READ populates
-    /// the cache too and falls back to a read-only open when the
-    /// file mode denies write; WRITE only reuses writable entries.
-    writable: bool,
-}
-
 /// Read-only view over the fd cache for handlers outside ioops
 /// (GETATTR lives in fileops). F17b: a renamed-over/removed file whose
 /// path no longer resolves is still fully alive through server-held
@@ -220,18 +201,14 @@ struct CachedFile {
 /// cycle after every postgres rename-over.
 #[derive(Clone)]
 pub struct OpenFileView {
-    fd_cache: Arc<DashMap<[u8; 12], CachedFile>>,
+    fd_cache: Arc<FdCache>,
 }
 
 impl OpenFileView {
-    /// An open fd whose OPEN-time path equals `path`, if any. Linear
-    /// scan — the cache holds one entry per live open stateid (small),
-    /// and this only runs on the already-rare stale-resolve path.
+    /// An open fd whose OPEN-time path equals `path`, if any. Point
+    /// lookup via the cache's path index (F24 retired the scans).
     pub fn file_for_path(&self, path: &std::path::Path) -> Option<Arc<File>> {
-        self.fd_cache
-            .iter()
-            .find(|e| e.path == *path)
-            .map(|e| Arc::clone(&e.file))
+        self.fd_cache.find_by_path(path, false).map(|e| e.file)
     }
 }
 
@@ -259,10 +236,9 @@ pub struct IoOperationHandler {
     state_mgr: Arc<StateManager>,
     fh_mgr: Arc<FileHandleManager>,
     write_verifier: u64,
-    /// File descriptor cache: stateid.other → open file
-    /// Keyed on the stable 12-byte `other` field (not seqid) so
-    /// entries survive seqid bumps from share-mask upgrades.
-    fd_cache: Arc<DashMap<[u8; 12], CachedFile>>,
+    /// File descriptor cache (guard-free API + path index; see
+    /// fd_cache.rs for the F24 discipline it enforces).
+    fd_cache: Arc<FdCache>,
 }
 
 impl IoOperationHandler {
@@ -279,7 +255,7 @@ impl IoOperationHandler {
             state_mgr,
             fh_mgr,
             write_verifier,
-            fd_cache: Arc::new(DashMap::new()),
+            fd_cache: Arc::new(FdCache::new()),
         }
     }
 
@@ -316,24 +292,20 @@ impl IoOperationHandler {
         if !cacheable_stateid(&stateid.other) {
             return;
         }
-        if self.fd_cache.contains_key(&stateid.other) {
+        if self.fd_cache.contains(&stateid.other) {
             return;
         }
-        // The scan must be a standalone `let`: an `if let` scrutinee's
-        // temporaries live to the end of the block, so the DashMap Iter
-        // (parked holding the matched entry's shard read guard) would
-        // still be alive during the insert below — when the new stateid
-        // hashes to that same shard, the write acquisition waits on our
-        // own read guard forever and wedges the whole runtime.
-        let same_path_fd = self
-            .fd_cache
-            .iter()
-            .find(|e| e.path == *path)
-            .map(|e| (Arc::clone(&e.file), e.writable));
-        if let Some((file, writable)) = same_path_fd {
+        // Point lookup via the path index; FdCache's API never hands
+        // out a guard, so the F24 iter-guard-across-insert deadlock is
+        // structurally impossible here.
+        if let Some(existing) = self.fd_cache.find_by_path(path, false) {
             self.fd_cache.insert(
                 stateid.other,
-                CachedFile { file, path: path.clone(), writable },
+                CachedFile {
+                    file: existing.file,
+                    path: path.clone(),
+                    writable: existing.writable,
+                },
             );
             return;
         }
@@ -368,13 +340,12 @@ impl IoOperationHandler {
         let embedded = FileHandleManager::parse_path_lenient(fh).ok()?;
         if let Some(e) = self.fd_cache.get(stateid_other) {
             if e.path == embedded && (!want_writable || e.writable) {
-                return Some((embedded, Arc::clone(&e.file)));
+                return Some((embedded, e.file));
             }
         }
         self.fd_cache
-            .iter()
-            .find(|e| e.path == embedded && (!want_writable || e.writable))
-            .map(|e| (embedded.clone(), Arc::clone(&e.file)))
+            .find_by_path(&embedded, want_writable)
+            .map(|e| (embedded, e.file))
     }
 
     /// Get client ID from compound context
@@ -958,7 +929,7 @@ impl IoOperationHandler {
         }
 
         // Remove file descriptor from cache (file closes on drop)
-        if let Some((_, cached)) = self.fd_cache.remove(&op.stateid.other) {
+        if let Some(cached) = self.fd_cache.remove(&op.stateid.other) {
             debug!("🗑️ FD CACHE CLOSE: Removed and closed FD for {:?} (path: {:?})", op.stateid, cached.path);
         } else {
             debug!("⚠️ CLOSE: No cached FD found for {:?} (was already closed or never cached)", op.stateid);
@@ -1408,9 +1379,7 @@ impl IoOperationHandler {
         // fsync-heavy workloads is measurable. Falls back to the
         // open-fresh path if no cached fd exists (e.g. the file was
         // committed by a different connection or the cache evicted).
-        let cached_fd = self.fd_cache.iter()
-            .find(|entry| entry.value().path == path)
-            .map(|entry| Arc::clone(&entry.value().file));
+        let cached_fd = self.fd_cache.find_by_path(&path, false).map(|e| e.file);
 
         let commit_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             if let Some(file_arc) = cached_fd {
