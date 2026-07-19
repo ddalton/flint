@@ -14,9 +14,15 @@ implemented.** No code changed by this document.
 > inode+generation handle via `name_to_handle_at(2)` /
 > `open_by_handle_at(2)`, which is rename-stable *by construction* and
 > makes the whole cache-maintenance problem (F26) — and retroactively
-> F17 and F23 — disappear rather than merely run faster. The
-> recommendation is now **two-tier**: ship §5 as the immediate fix,
-> and adopt the inode-handle architecture (**§12**) as the target.
+> F17 and F23 — disappear rather than merely run faster.
+>
+> **Decision (2026-07-19): go straight to the inode-handle
+> architecture (§12); do not build the §5 path-based fix.** §5 is
+> retained below as the F26 mechanism explanation and as the fallback
+> shape if the §12 capability spike fails. There is no production fire
+> forcing an interim patch, and §12 is a net-negative diff that retires
+> the design smell behind the entire F17/F23/F24/F26 family. See §12
+> "Recommended sequencing" for the capability-spike gate.
 
 ## 1. Problem recap
 
@@ -435,11 +441,32 @@ it adds, and retires F17/F23/F26 as a category.
   **ship §5 now to stop the bleeding; schedule §12 as the durable
   fix.**
 
-**Recommended sequencing:** §5.1 + §5.2 immediately (fixes F26,
-low-risk); then evaluate §12 with a capability check and a focused
-prototype of mint/resolve against the ext4 export; if the cap is
-present (expected), §12 supersedes §5.3/§5.4 and deletes the alias/v2
-machinery entirely rather than optimizing it.
+**Recommended sequencing (decided 2026-07-19): go straight to §12; do
+not build §5.** The §5 path-based fix is throwaway by construction —
+every structure it adds, §12 deletes — and there is no production fire
+to justify an interim patch (the cluster is torn down; nothing is
+paging). §12 is a *net-negative* diff that retires the design smell
+behind the whole F17/F23/F24/F26 family, and hands F17+F23 to the
+kernel's battle-tested generation/inode semantics. The plan:
+
+1. **Capability spike first (~1 h, gating).** In the real flint-nfs
+   pod securityContext, `name_to_handle_at` on `/mnt/volume` and
+   `open_by_handle_at` the result. This de-risks the only hard
+   dependency (Ganesha flags `open_by_handle_at` as "tricky inside a
+   container").
+   - **Green (expected):** proceed to step 2; §5 is never written.
+   - **Red (cap blocked by seccomp/SELinux/runtime and ungrantable):**
+     fall back to the path-based **generation-counter** design of
+     §11.2 (dcache-RCU / SOSP '15), *not* §5's point-eviction.
+2. **Implement §12 mint/resolve** against the ext4 export, wiring
+   `open_by_handle_at` fds into the existing `FdCache`.
+3. **Re-validate the restart/reclaim path** (the real design work —
+   kernel handles surviving restart inverts today's instance_id
+   "STALE-on-restart" behavior) with pynfs + a full phase-3 drill
+   re-run. This gate is already owed after the F17–F24 handle changes.
+
+§5 remains documented above only as the fallback shape and as the
+explanation of the F26 mechanism; it is not the plan of record.
 
 ## 13. Sources
 

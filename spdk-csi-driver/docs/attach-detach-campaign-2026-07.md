@@ -979,11 +979,20 @@ generation number (F17 free), deleting the entire cache/alias/scan
 machinery rather than optimizing it (F26 cannot occur). flint's export
 is ext4 (supports it) and the handle fits the 128B budget; the one
 gate is `CAP_DAC_READ_SEARCH` in the (already-privileged) NFS pod.
-Recommendation is now **two-tier**: ship the §5 path-based fix now to
-stop F26, then adopt the inode-handle architecture (§12) as the
-durable answer. Fallback if the cap is unavailable: per-directory
-generation counters + lock-free reads (Linux dcache RCU / SOSP'15),
-not point-eviction.
+**Decision (2026-07-19): go straight to the inode-handle architecture
+(§12); do not build the interim path-based fix.** It is a
+net-negative diff that retires the design smell behind the whole
+F17/F23/F24/F26 family, and there is no production fire forcing an
+interim patch (cluster torn down). Plan: (1) a ~1h capability spike —
+`name_to_handle_at`/`open_by_handle_at` inside the real flint-nfs pod
+securityContext (the sole hard dependency; Ganesha flags it as tricky
+in containers); (2) implement mint/resolve against the ext4 export,
+fds into the existing FdCache; (3) re-validate the restart/reclaim
+path (kernel handles survive restart — inverts today's
+instance_id STALE-on-restart) with pynfs + a phase-3 drill re-run.
+Fallback ONLY if the cap is ungrantable: per-directory generation
+counters + lock-free reads (Linux dcache RCU / SOSP'15), not
+point-eviction.
 
 ## Findings
 
