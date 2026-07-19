@@ -69,6 +69,14 @@ const FH_V2_LEN: usize = 1 + 8 + 8;
 /// + ino(8) + path_len(2).
 const FH_V3_MIN: usize = 1 + 8 + 32 + 8 + 2;
 
+/// F23: rename-alias table churn cap. pg_internal.init-style temp
+/// renames add one entry each; at the cap the table resets (affected
+/// stale handles then answer STALE — the pre-F23 behavior).
+const RENAME_ALIAS_CAP: usize = 8192;
+
+/// F23: longest alias chain resolution will follow (loop guard).
+const RENAME_ALIAS_MAX_HOPS: usize = 8;
+
 /// The current inode of `path`, by lstat (symlinks are objects too —
 /// the handle must pin the link itself, matching the lstat-based attr
 /// encoders). None when the object cannot be stat'd.
@@ -134,6 +142,20 @@ pub struct FileHandleManager {
     /// to embed. Mirrored to `backend` when one is attached.
     id_to_path: Arc<RwLock<HashMap<u64, PathBuf>>>,
     path_to_id: Arc<RwLock<HashMap<PathBuf, u64>>>,
+
+    /// F23: rename alias table (old path → new path). A filehandle
+    /// names a FILE; RENAME moves the file, it does not destroy it. A
+    /// v3 handle embeds its mint-time path, so after a rename-AWAY the
+    /// embedded path no longer exists — resolution follows this table
+    /// (ino-verified) to the file's new home instead of answering
+    /// STALE. Without it, postgres's write-temp-then-rename pattern
+    /// (pg_internal.init.<pid> → pg_internal.init) turns every client
+    /// dentry revalidation of the temp name into an ESTALE burst,
+    /// which the 6.18 kernel client answers with a wedged transport
+    /// (7 backends in rpc_wait_bit_killable, zero reconnects —
+    /// measured live). Entries are pruned on failed verification and
+    /// capped by RENAME_ALIAS_CAP.
+    rename_aliases: Arc<RwLock<HashMap<PathBuf, PathBuf>>>,
 
     /// Persistence for the v2 table. Attached after construction
     /// (`attach_backend`) because the two servers build their pieces
@@ -205,6 +227,7 @@ impl FileHandleManager {
             export_name,
             id_to_path: Arc::new(RwLock::new(HashMap::new())),
             path_to_id: Arc::new(RwLock::new(HashMap::new())),
+            rename_aliases: Arc::new(RwLock::new(HashMap::new())),
             backend: RwLock::new(None),
         }
     }
@@ -292,17 +315,26 @@ impl FileHandleManager {
         };
 
         // v3: the handle names a file GENERATION, not a path. If the
-        // object at the path no longer carries the pinned inode (renamed
-        // over, removed, recreated), the handle is stale — the client
-        // re-walks the name and gets a fresh-generation handle. Callers
-        // uniformly map resolve errors to NFS4ERR_STALE.
+        // object at the path no longer carries the pinned inode, the
+        // file may have been RENAMED AWAY (F23) — follow the alias
+        // table to its new home, ino-verified per hop. Only when no
+        // alias leads to the pinned inode is the handle stale (renamed
+        // over, removed, recreated). Callers uniformly map resolve
+        // errors to NFS4ERR_STALE.
         if let Some(pinned) = Self::embedded_ino(handle) {
             match current_ino(&path) {
                 Some(ino) if ino == pinned => {}
-                current => {
+                _ => {
+                    if let Some(moved) = self.follow_rename_alias(&path, pinned) {
+                        debug!(
+                            "fh resolve: {:?} moved to {:?} (ino {}) — following (F23)",
+                            path, moved, pinned
+                        );
+                        return Ok(moved);
+                    }
                     debug!(
-                        "fh resolve: {:?} generation mismatch (pinned ino {}, current {:?}) — STALE",
-                        path, pinned, current
+                        "fh resolve: {:?} generation mismatch (pinned ino {}) — STALE",
+                        path, pinned
                     );
                     return Err("Stale file handle: object was replaced or removed".to_string());
                 }
@@ -319,6 +351,23 @@ impl FileHandleManager {
         }
 
         Ok(path)
+    }
+
+    /// F23: follow the rename-alias chain from `path`, returning the
+    /// first hop whose current inode matches `pinned`. Each rename
+    /// records one hop; chains are collapsed at insert but bounded
+    /// here anyway (loop guard against pathological cycles).
+    fn follow_rename_alias(&self, path: &Path, pinned: u64) -> Option<PathBuf> {
+        let aliases = self.rename_aliases.read().unwrap();
+        let mut cur = path.to_path_buf();
+        for _ in 0..RENAME_ALIAS_MAX_HOPS {
+            let next = aliases.get(&cur)?.clone();
+            if current_ino(&next) == Some(pinned) {
+                return Some(next);
+            }
+            cur = next;
+        }
+        None
     }
 
     /// The inode pinned inside a v3 handle (bytes 41..49). None for
@@ -654,6 +703,31 @@ impl FileHandleManager {
                 }
             }
         }
+        // F23: the file MOVED — outstanding handles embedding the old
+        // path must keep resolving to it (ino-verified at resolve time).
+        {
+            let mut aliases = self.rename_aliases.write().unwrap();
+            if aliases.len() >= RENAME_ALIAS_CAP {
+                aliases.clear(); // churn cap: stale handles then answer
+                                 // STALE, the pre-F23 behavior — safe.
+            }
+            // Re-point any alias that led INTO old_path (chain collapse:
+            // A→B then B→C becomes A→C, so lookups stay one hop).
+            let re_point: Vec<PathBuf> = aliases
+                .iter()
+                .filter(|(_, v)| v.as_path() == old_path)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in re_point {
+                aliases.insert(k, new_path.to_path_buf());
+            }
+            aliases.insert(old_path.to_path_buf(), new_path.to_path_buf());
+            // NOTE: an existing alias KEYED by new_path (from an earlier
+            // rename-away of that name) is deliberately kept — resolution
+            // verifies the inode at every hop, so older-generation handles
+            // keep following their file while fresh handles match the new
+            // occupant directly and never consult the table.
+        }
         // v2 table: re-key old subtree → new prefix, persist each.
         let mut ids = self.path_to_id.write().unwrap();
         let mut rev = self.id_to_path.write().unwrap();
@@ -963,14 +1037,14 @@ mod tests {
         let temp_path = temp_dir.path().to_path_buf();
         let manager = FileHandleManager::new(temp_path.clone());
 
-        let target = temp_path.join("pg_internal.init");
+        let target = temp_path.join("pgi");
         fs::write(&target, b"generation 1").unwrap();
         let fh_old = manager.path_to_filehandle(&target).unwrap();
         assert_eq!(fh_old.data[0], 3);
         assert!(manager.filehandle_to_path(&fh_old).is_ok());
 
         // postgres-style rename-over: write temp, rename onto target.
-        let tmp = temp_path.join("pg_internal.init.1234");
+        let tmp = temp_path.join("pgi.1234");
         fs::write(&tmp, b"generation 2").unwrap();
         fs::rename(&tmp, &target).unwrap();
         manager.note_fs_rename(&tmp, &target);
@@ -1007,6 +1081,45 @@ mod tests {
         assert_ne!(fh_new.data, fh_old.data, "cached dead generation was handed out");
         assert!(manager.filehandle_to_path(&fh_new).is_ok());
         assert!(manager.filehandle_to_path(&fh_old).is_err());
+    }
+
+    /// F23: rename-AWAY moves the file — the outstanding handle follows
+    /// it (same inode, new home) instead of going stale. Rename-OVER of
+    /// the destination still stales the destination's old handle.
+    #[test]
+    fn rename_away_handle_follows_the_file() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+        let manager = FileHandleManager::new(temp_path.clone());
+
+        // postgres pattern: write temp, mint handle (client has it open
+        // or cached), rename temp over the target.
+        let tmp = temp_path.join("pgi.1234");
+        fs::write(&tmp, b"fresh relcache").unwrap();
+        let fh_tmp = manager.path_to_filehandle(&tmp).unwrap();
+        assert_eq!(fh_tmp.data[0], 3);
+
+        let target = temp_path.join("pgi");
+        fs::rename(&tmp, &target).unwrap();
+        manager.note_fs_rename(&tmp, &target);
+
+        // The temp-name handle resolves to the file's NEW home.
+        let resolved = manager.filehandle_to_path(&fh_tmp).unwrap();
+        assert_eq!(resolved, target, "handle must follow the renamed file");
+
+        // Chain: rename again; the old handle still follows (collapsed).
+        let target2 = temp_path.join("pgi.fin");
+        fs::rename(&target, &target2).unwrap();
+        manager.note_fs_rename(&target, &target2);
+        assert_eq!(manager.filehandle_to_path(&fh_tmp).unwrap(), target2);
+
+        // A NEW file at the temp name gets a fresh handle that resolves
+        // directly; the old temp handle keeps following its own file.
+        fs::write(&tmp, b"next generation").unwrap();
+        let fh_tmp2 = manager.path_to_filehandle(&tmp).unwrap();
+        assert_ne!(fh_tmp2.data, fh_tmp.data);
+        assert_eq!(manager.filehandle_to_path(&fh_tmp2).unwrap(), tmp);
+        assert_eq!(manager.filehandle_to_path(&fh_tmp).unwrap(), target2);
     }
 
     /// F17: removed files answer STALE through outstanding handles.
