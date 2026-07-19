@@ -31,6 +31,7 @@ COPY --chown=65532:65532 proto/ ./proto/
 # layers, so the runtime stage cannot COPY from them.
 RUN --mount=type=cache,target=/app/target,uid=65532,gid=65532 \
     --mount=type=cache,target=/usr/local/cargo/registry,uid=65532,gid=65532 \
+    RUSTFLAGS="-C force-frame-pointers=yes" \
     cargo build --release --bin csi-driver --bin flint-nfs-server \
     && cp target/release/csi-driver /tmp/csi-driver \
     && cp target/release/flint-nfs-server /tmp/flint-nfs-server
