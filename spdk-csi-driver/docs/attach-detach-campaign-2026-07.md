@@ -719,6 +719,38 @@ phase: protocol edges that pynfs/simple workloads never exercise
 (rename-over-open, seqid-0 forms, recovery-path disposal) are exactly
 what a real database client leans on hardest.
 
+**F22 (P0, THE bulk-load wedge root cause — client-side kernel
+poisoning by orphaned NFS mounts).** The signature that survived
+F17b/F19/F20: ~5-10min into sustained writes, live-mount I/O freezes
+in bursts (writes 1s+ rtt, ZERO retransmissions, server provably
+idle), dirty-throttling blocks all writers, a lease miss sweeps the
+client's state and CLAIM_PREVIOUS dead-ends it. Root cause chain,
+proven by kernel ftrace (nfs4 tracepoints) on the client node: (1)
+unhappy-path RWX teardowns leave the kubelet NFS mount behind; lazy
+unmount (the obvious cleanup!) detaches it but leaves the kernel
+nfs_client ALIVE, pinned by dirty pages (observed: use-count 7,
+invisible in /proc/mounts); (2) the flint-nfs Service is gone (or
+leaked endpoint-less) → the orphan's ClusterIP BLACKHOLES under
+Cilium (drop, no RST) — and the poisoned transport eventually stops
+emitting wire traffic entirely (tcpdump: zero packets) while
+CHECK_LEASE cycles ETIMEDOUT every ~10.7s forever; (3) those cycles
+run on the node's SHARED SUNRPC/nfs workqueues, freezing every live
+NFS mount on the node in sympathy — ftrace shows the healthy
+session's traffic (63/63 slots, µs completions) halting in lockstep
+~49s at a time. Remediations shipped: (a) NFS-RECONCILER inverse
+sweep — NFS infra (service/pod/companions) whose PV no longer exists
+is deleted every 30s tick (a leaked endpoint-less service is the
+blackhole half); (b) node-agent 60s sweeper force-unmounts
+(MNT_FORCE, NEVER lazy) csi-scoped NFS mounts whose server is no
+live flint-nfs Service. Once a node is poisoned only a reboot clears
+it (tombstone-service RSTs can't reach a transport that no longer
+dials). Also: binaries now built with frame pointers (host-level
+gdb/perf work in production), and the diagnosis burned two red
+herrings worth recording — verbose per-op logging is itself a
+throughput collapse at bulk rates (hex-dump formatting), and a
+100ms-uniform op latency under verbose was the logging tax, not a
+code loop.
+
 _Drill results: TBD (this session)._
 
 ## Findings

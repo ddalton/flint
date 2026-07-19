@@ -282,6 +282,9 @@ impl NodeAgent {
                 if let Err(e) = monitor_agent.orphan_sweep().await {
                     warn!(error = %e, "[MONITOR] Orphan sweep failed (non-fatal)");
                 }
+                if let Err(e) = monitor_agent.sweep_orphan_nfs_mounts().await {
+                    warn!(error = %e, "[MONITOR] Orphan NFS-mount sweep failed (non-fatal)");
+                }
                 if let Err(e) = monitor_agent.detect_lost_data_paths().await {
                     warn!(error = %e, "[MONITOR] Data-path detection failed (non-fatal)");
                 }
@@ -3634,6 +3637,87 @@ impl NodeAgent {
     /// Runs on the 60s monitor tick. `FLINT_ORPHAN_SWEEP=disabled` turns
     /// it off; `FLINT_ORPHAN_SWEEP_STRIKES` (default 3) is how many
     /// consecutive condemned cycles precede deletion.
+    /// F22: force-unmount NFS client mounts whose server Service no longer
+    /// exists. A flint RWX mount left behind by an unhappy teardown keeps a
+    /// kernel nfs_client alive against a ClusterIP that now blackholes
+    /// (endpoint-less service under Cilium = dropped, no RST). That orphan
+    /// client's eternal lease-check/timeout cycles run on the node's SHARED
+    /// SUNRPC workqueues and periodically freeze every LIVE NFS mount on
+    /// the node (phase-3 bulk-load wedge: live writes at 1s+ RTT with an
+    /// idle server, lease misses, CLAIM_PREVIOUS dead end). MNT_FORCE
+    /// aborts in-flight RPCs; lazy unmount is exactly the wrong tool — it
+    /// detaches the mount but leaves the poisoned client running forever
+    /// (measured: use-count-pinned superblock, zero wire traffic,
+    /// ETIMEDOUT every ~10s until reboot). Scope guard: only mountpoints
+    /// under kubelet's csi dirs (ours by construction), and only when the
+    /// Service listing SUCCEEDED (never unmount on an API blip).
+    async fn sweep_orphan_nfs_mounts(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if std::env::var("FLINT_NFS_ORPHAN_MOUNT_SWEEP")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("disabled"))
+        {
+            return Ok(());
+        }
+        let mounts = tokio::fs::read_to_string("/proc/mounts").await?;
+        let candidates: Vec<(String, String)> = mounts
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                let (src, mp, fstype) = (f.next()?, f.next()?, f.next()?);
+                if fstype != "nfs4" && fstype != "nfs" {
+                    return None;
+                }
+                if !mp.contains("kubernetes.io~csi/") {
+                    return None;
+                }
+                let ip = src.split(':').next()?.to_string();
+                Some((ip, mp.to_string()))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        use k8s_openapi::api::core::v1::Service;
+        let svcs: Api<Service> = Api::all(self.driver.kube_client.clone());
+        let lp = kube::api::ListParams::default().labels("app=flint-nfs-server");
+        let live: std::collections::HashSet<String> = svcs
+            .list(&lp)
+            .await? // API failure → propagate → skip pass, unmount nothing
+            .items
+            .iter()
+            .filter_map(|s| s.spec.as_ref()?.cluster_ip.clone())
+            .collect();
+
+        for (ip, mp) in candidates {
+            if live.contains(&ip) {
+                continue;
+            }
+            warn!(
+                "[MONITOR] F22: NFS mount {} points at {} which is no live flint-nfs Service — force-unmounting",
+                mp, ip
+            );
+            let out = tokio::process::Command::new("umount")
+                .arg("-f")
+                .arg(&mp)
+                .output()
+                .await?;
+            if out.status.success() {
+                info!("[MONITOR] F22: orphan NFS mount {} force-unmounted", mp);
+            } else {
+                // Busy is expected while a consumer still holds files: keep
+                // hitting it with MNT_FORCE each tick (each call aborts the
+                // in-flight RPCs, so the holder's syscalls fail out and the
+                // next attempt can succeed). NEVER fall back to lazy.
+                warn!(
+                    "[MONITOR] F22: force-unmount of {} failed ({}); retrying next tick",
+                    mp,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+        Ok(())
+    }
+
     async fn orphan_sweep(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if std::env::var("FLINT_ORPHAN_SWEEP").is_ok_and(|v| v.eq_ignore_ascii_case("disabled")) {
             return Ok(());

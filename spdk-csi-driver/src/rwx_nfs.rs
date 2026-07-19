@@ -1036,6 +1036,51 @@ pub async fn nfs_reconciler_pass(kube_client: &Client, source_node: &str) -> usi
             }
         }
     }
+
+    // F22 inverse sweep: NFS infrastructure whose VOLUME no longer exists.
+    // The normal DeleteVolume path removes service+pod+companions, but any
+    // unhappy path that skips it (controller crash mid-delete, operator
+    // finalizer surgery) leaks them. A leaked SERVICE is the dangerous
+    // half: its ClusterIP stays allocated with no endpoints, and any
+    // straggler client mount then BLACKHOLES (Cilium drops endpoint-less
+    // service traffic — no RST). The orphan client's 60s RPC timeout
+    // cycles stall the node's shared SUNRPC workqueues and freeze every
+    // LIVE NFS mount on that node in sympathy — the phase-3 bulk-load
+    // wedge. Sweeping the service turns the blackhole into fast RST
+    // failures at worst, and normally removes it before any client
+    // notices.
+    if let Some(config) = NfsConfig::from_env() {
+        let live_pvs: std::collections::HashSet<&str> = pvs
+            .items
+            .iter()
+            .filter_map(|p| p.metadata.name.as_deref())
+            .collect();
+        let services_api: Api<Service> = Api::namespaced(kube_client.clone(), &config.namespace);
+        let lp = ListParams::default().labels("flint.io/volume-id");
+        if let Ok(svcs) = services_api.list(&lp).await {
+            for svc in &svcs.items {
+                let Some(vol) = svc
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get("flint.io/volume-id"))
+                else {
+                    continue;
+                };
+                if live_pvs.contains(vol.as_str()) {
+                    continue;
+                }
+                eprintln!(
+                    "🧹 [NFS-RECONCILER] NFS infra for {} has no PV — sweeping leaked service/pod/companions",
+                    vol
+                );
+                if let Err(e) = delete_nfs_server_pod(kube_client.clone(), vol).await {
+                    eprintln!("⚠️  [NFS-RECONCILER] sweep of {} failed: {}", vol, e);
+                }
+            }
+        }
+    }
+
     recreated
 }
 
