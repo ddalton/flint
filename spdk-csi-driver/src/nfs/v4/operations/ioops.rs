@@ -302,6 +302,52 @@ impl IoOperationHandler {
         self.fd_cache.insert(other, CachedFile { file, path, writable });
     }
 
+    /// F17c: anchor the open — cache an fd under the open stateid AT
+    /// OPEN TIME, so the file keeps serving across rename-over even
+    /// before any READ/WRITE reaches it (knfsd's "an open holds the
+    /// file" invariant; postgres backends OPEN pg_internal.init and a
+    /// concurrent regeneration renames it over before the READ lands).
+    /// `allow_fresh_open=false` for stale-resolved CLAIM_FH re-opens:
+    /// those must only REUSE an fd of the original inode — fresh-opening
+    /// the path would alias the NEW file under the old handle.
+    /// Residual: fds of clients that die without CLOSE outlive the
+    /// state entries (lease sweep doesn't reach this cache yet).
+    fn seed_open_fd(&self, stateid: &StateId, path: &PathBuf, allow_fresh_open: bool) {
+        if !cacheable_stateid(&stateid.other) {
+            return;
+        }
+        if self.fd_cache.contains_key(&stateid.other) {
+            return;
+        }
+        if let Some((file, writable)) = self
+            .fd_cache
+            .iter()
+            .find(|e| e.path == *path)
+            .map(|e| (Arc::clone(&e.file), e.writable))
+        {
+            self.fd_cache.insert(
+                stateid.other,
+                CachedFile { file, path: path.clone(), writable },
+            );
+            return;
+        }
+        if !allow_fresh_open {
+            return;
+        }
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map(|f| (f, true))
+            .or_else(|_| std::fs::File::open(path).map(|f| (f, false)));
+        if let Ok((f, writable)) = opened {
+            self.fd_cache.insert(
+                stateid.other,
+                CachedFile { file: Arc::new(f), path: path.clone(), writable },
+            );
+        }
+    }
+
     /// F17b fallback for READ/WRITE when the filehandle no longer
     /// resolves (object renamed-over or removed): the handle's embedded
     /// path names the ORIGINAL file, which is still alive if any open
@@ -624,6 +670,9 @@ impl IoOperationHandler {
 
                             debug!("OPEN: stateid {:?} for client {}", stateid, client_id);
 
+                            // F17c: anchor the open with an fd immediately.
+                            self.seed_open_fd(&stateid, &file_path, true);
+
                             return OpenRes {
                                 status: Nfs4Status::Ok,
                                 stateid: Some(stateid),
@@ -693,21 +742,36 @@ impl IoOperationHandler {
         // DENIED payload fails pynfs's XDR decode. CFH-update
         // alongside courtesy release is a follow-up.
         let parent_fh_data = current_fh.data.clone();
-        let target_fh_data: Vec<u8> = match &op.claim {
-            OpenClaim::Null(name) => {
-                let parent_path = self.fh_mgr.resolve_handle(current_fh).ok();
-                if let Some(pp) = parent_path {
-                    let file_path = pp.join(name);
-                    self.fh_mgr
-                        .path_to_filehandle(&file_path)
-                        .map(|fh| fh.data)
-                        .unwrap_or_else(|_| parent_fh_data.clone())
-                } else {
-                    parent_fh_data.clone()
+        // Also carry the target's PATH (and whether the fh resolved
+        // live) so the open can be fd-anchored below (F17c). For a
+        // CLAIM_FH whose object was renamed-over, the embedded path is
+        // still parseable but must not be fresh-opened — only an
+        // existing fd of the original inode may be reused.
+        let (target_fh_data, target_path, target_live): (Vec<u8>, Option<PathBuf>, bool) =
+            match &op.claim {
+                OpenClaim::Null(name) => {
+                    let parent_path = self.fh_mgr.resolve_handle(current_fh).ok();
+                    if let Some(pp) = parent_path {
+                        let file_path = pp.join(name);
+                        let data = self
+                            .fh_mgr
+                            .path_to_filehandle(&file_path)
+                            .map(|fh| fh.data)
+                            .unwrap_or_else(|_| parent_fh_data.clone());
+                        (data, Some(file_path), true)
+                    } else {
+                        (parent_fh_data.clone(), None, false)
+                    }
                 }
-            }
-            OpenClaim::Fh => parent_fh_data.clone(),
-        };
+                OpenClaim::Fh => match self.fh_mgr.resolve_handle(current_fh) {
+                    Ok(p) => (parent_fh_data.clone(), Some(p), true),
+                    Err(_) => (
+                        parent_fh_data.clone(),
+                        FileHandleManager::parse_path_lenient(current_fh).ok(),
+                        false,
+                    ),
+                },
+            };
 
         // If opening for WRITE, recall any read delegations
         // share_access: 1 = READ, 2 = WRITE, 3 = BOTH
@@ -759,6 +823,11 @@ impl IoOperationHandler {
         );
 
         debug!("OPEN: stateid {:?} for client {}", stateid, client_id);
+
+        // F17c: anchor the open with an fd immediately.
+        if let Some(p) = &target_path {
+            self.seed_open_fd(&stateid, p, target_live);
+        }
 
         // Try to grant read delegation if appropriate
         let delegation = self.try_grant_read_delegation(

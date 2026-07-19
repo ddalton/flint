@@ -2582,7 +2582,13 @@ impl FileOperationHandler {
                         }
                     }
                 }
-                warn!("GETATTR: Failed to resolve handle: {}", e);
+                warn!(
+                    "GETATTR: Failed to resolve handle ({}): {}",
+                    FileHandleManager::parse_path_lenient(current_fh)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "<unparseable>".into()),
+                    e
+                );
                 return GetAttrRes {
                     status: Nfs4Status::Stale,
                     obj_attributes: None,
