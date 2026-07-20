@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-20T20:03:10Z)
+  ✓ pg_isready
+  ✓ ledger: all 980 acked writes present
+  · pg_amcheck CORRUPTION/ERROR (rc=1): E0720 13:23:08.876139    9115 v2.go:167] next reader: read tcp 10.19.14.16:50372->10.80.129.54:6443: read: operation timed out E0720 13:23:08.876761    9115 v2.go:150] next reader: read tcp 10.19.14.16:50372->10.80.129.54:6443: read: operation timed out error: error reading from error stream: next reader: read tcp 10.19.14.16:50372->10.80.129.54:6443: read: operation timed out 
+  ✓ postgres log clean
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( amcheck write-probe)

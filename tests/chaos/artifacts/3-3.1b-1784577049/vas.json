@@ -1,0 +1,109 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "ip-10-80-146-36.us-west-2.compute.internal"
+                },
+                "creationTimestamp": "2026-07-20T19:46:58Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-666963c1b548188273eade86318f171942d9fcda83f550a44b527e98c5058ce0",
+                "resourceVersion": "15514",
+                "uid": "ed01a68b-de43-4b3a-b2fd-dc99e2271489"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "ip-10-80-146-36.us-west-2.compute.internal",
+                "source": {
+                    "persistentVolumeName": "pvc-cb63d427-3974-44db-ab02-4629cff42e3b"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-cb63d427-3974-44db-ab02-4629cff42e3b",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.233.36.96",
+                    "nfs.flint.io/server-node": "ip-10-80-149-49.us-west-2.compute.internal",
+                    "volumeId": "pvc-cb63d427-3974-44db-ab02-4629cff42e3b",
+                    "volumeType": "nfs"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "ip-10-80-153-230.us-west-2.compute.internal"
+                },
+                "creationTimestamp": "2026-07-20T19:46:21Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-771188984971520f3f08663ce7712837bc022389f848dd7e0e1dbd267e4ef6f6",
+                "resourceVersion": "15293",
+                "uid": "3a477937-dc00-44a2-9727-a997c2f2e60b"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "ip-10-80-153-230.us-west-2.compute.internal",
+                "source": {
+                    "persistentVolumeName": "pvc-cb63d427-3974-44db-ab02-4629cff42e3b"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-cb63d427-3974-44db-ab02-4629cff42e3b",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.233.36.96",
+                    "nfs.flint.io/server-node": "ip-10-80-149-49.us-west-2.compute.internal",
+                    "volumeId": "pvc-cb63d427-3974-44db-ab02-4629cff42e3b",
+                    "volumeType": "nfs"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "ip-10-80-149-49.us-west-2.compute.internal"
+                },
+                "creationTimestamp": "2026-07-20T19:44:04Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-cb3f967c6c401b63a9f4a929b986e77063429adc831f4f32bd7a2253ecd769b1",
+                "resourceVersion": "14560",
+                "uid": "1cee4905-3d40-49d9-8f65-21d2eb4abf7e"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "ip-10-80-149-49.us-west-2.compute.internal",
+                "source": {
+                    "persistentVolumeName": "flint-nfs-pv-pvc-cb63d427-3974-44db-ab02-4629cff42e3b"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "bdevName": "7c165af5-4277-4e9a-80d4-42ea26711399",
+                    "lvsName": "lvs_ip-10-80-149-49.us-west-2.compute.internal_0000-00-1f-0",
+                    "volumeId": "nfs-server-pvc-cb63d427-3974-44db-ab02-4629cff42e3b",
+                    "volumeType": "local"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

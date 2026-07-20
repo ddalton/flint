@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-20T21:54:15Z)
+  ✓ pg_isready
+  ✓ ledger: all 392 acked writes present
+  ✓ pg_amcheck clean
+  · 1 corruption-pattern lines in postgres log
+  ✓ writability probe
+
+DB-VERDICT: FAIL ( pglog)

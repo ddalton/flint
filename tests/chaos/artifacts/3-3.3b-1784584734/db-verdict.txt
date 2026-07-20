@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-20T21:58:54Z)
+  ✓ pg_isready
+  ✓ ledger: all 912 acked writes present
+  · pg_amcheck TIMEOUT at 1200s (integrity NOT verified — not a corruption finding)
+  ✓ postgres log clean
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( amcheck-timeout write-probe)

@@ -1,0 +1,60 @@
+== ip-10-80-146-36.us-west-2.compute.internal ==
+nvme-subsys1 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol05b874b79178e0670
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2bcbdd-a6f1-06f9-fb66-b2d762eea434
+               iopolicy=numa
+\
+ +- nvme1 pcie 0000:00:04.0 live
+
+nvme-subsys0 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS64077947CB1A75955
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2bcbdd-a6f1-06f9-fb66-b2d762eea434
+               iopolicy=numa
+\
+ +- nvme0 pcie 0000:00:1f.0 live
+== ip-10-80-149-49.us-west-2.compute.internal ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS250EC93D4BBE6CFFF
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2bcbdd-a6f1-06f9-fb66-b2d762eea434
+               iopolicy=numa
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol0cdfda624cc2a7232
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2bcbdd-a6f1-06f9-fb66-b2d762eea434
+               iopolicy=numa
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== ip-10-80-151-108.us-west-2.compute.internal ==
+nvme-subsys3 - NQN=nqn.2024-11.com.flint:volume:pvc-2dba8bf0-aaed-448a-a30c-4d4b4889e4de
+               hostnqn=nqn.2024-11.com.flint:node:ip-10-80-151-108.us-west-2.compute.internal
+               iopolicy=numa
+\
+ +- nvme3 tcp traddr=127.0.0.1,trsvcid=4420,src_addr=127.0.0.1 live
+
+nvme-subsys2 - NQN=nqn.2024-11.com.flint:volume:pvc-ca414215-3370-4094-bed9-cf6fdcd95a09
+               hostnqn=nqn.2024-11.com.flint:node:ip-10-80-151-108.us-west-2.compute.internal
+               iopolicy=numa
+\
+ +- nvme2 tcp traddr=127.0.0.1,trsvcid=4420 connecting
+
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS642E19A44F3294650
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2bcbdd-a6f1-06f9-fb66-b2d762eea434
+               iopolicy=numa
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol07e6c056ea445e9fc
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2bcbdd-a6f1-06f9-fb66-b2d762eea434
+               iopolicy=numa
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== ip-10-80-153-230.us-west-2.compute.internal ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS645FF8601FDE4A0B4
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2bcbdd-a6f1-06f9-fb66-b2d762eea434
+               iopolicy=numa
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol0476b311a9a0ef240
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2bcbdd-a6f1-06f9-fb66-b2d762eea434
+               iopolicy=numa
+\
+ +- nvme0 pcie 0000:00:04.0 live
