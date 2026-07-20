@@ -18,9 +18,34 @@
 use super::super::protocol::StateId;
 use crate::state_backend::{StateBackend, StateIdRecord, StateTypeRecord, WriteOp};
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
+
+/// Outcome of a seqid-checked CLOSE (F31). The discrimination matters:
+/// `OldStateId` maps to NFS4ERR_OLD_STATEID, which the client treats as
+/// a benign ordering artifact (refresh and re-evaluate), while
+/// `NotFound` maps to NFS4ERR_BAD_STATEID, which detonates a full
+/// TEST_STATEID recovery round that stalls the whole session.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CloseOutcome {
+    /// State removed; CLOSE succeeded.
+    Closed,
+    /// The presented seqid is stale (a newer OPEN bumped it) or the
+    /// stateid was already closed moments ago — the CLOSE must not
+    /// destroy state, and the client should not run recovery.
+    OldStateId,
+    /// The stateid was administratively revoked.
+    Revoked,
+    /// Never issued (or long gone) — genuine BAD_STATEID.
+    NotFound,
+}
+
+/// How many recently-closed stateids to remember for replay/reorder
+/// discrimination. Sized to comfortably cover several RTTs of CLOSE
+/// traffic under churn; membership is checked only on the miss path.
+const CLOSED_TOMBSTONES: usize = 8192;
 
 /// Special stateid for anonymous/READ-only operations
 pub const ANONYMOUS_STATEID: StateId = StateId {
@@ -189,6 +214,13 @@ pub struct StateIdManager {
     /// stateids surviving restart is what prevents `BAD_STATEID` on
     /// the client's next WRITE after an MDS pod roll.
     backend: Arc<dyn StateBackend>,
+
+    /// F31: ring of recently-closed `other` values. A CLOSE (or any
+    /// stateful op) presenting one of these is a reorder/replay
+    /// artifact → OLD_STATEID, not BAD_STATEID. Bounded FIFO; touched
+    /// only on close and on the validation *miss* path, so it adds
+    /// nothing to the hot path.
+    closed_recently: Mutex<(VecDeque<[u8; 12]>, HashSet<[u8; 12]>)>,
 }
 
 /// Per-(client, owner, fh) open state. `share_access` /
@@ -218,7 +250,30 @@ impl StateIdManager {
             open_state_keys: DashMap::new(),
             opens_by_fh: DashMap::new(),
             backend,
+            closed_recently: Mutex::new((
+                VecDeque::with_capacity(CLOSED_TOMBSTONES),
+                HashSet::with_capacity(CLOSED_TOMBSTONES),
+            )),
         }
+    }
+
+    /// Record `other` as recently closed (bounded FIFO).
+    fn push_tombstone(&self, other: [u8; 12]) {
+        let mut guard = self.closed_recently.lock().unwrap();
+        let (ring, set) = &mut *guard;
+        if set.insert(other) {
+            ring.push_back(other);
+            if ring.len() > CLOSED_TOMBSTONES {
+                if let Some(evicted) = ring.pop_front() {
+                    set.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    /// Was `other` closed recently? (miss-path only)
+    fn recently_closed(&self, other: &[u8; 12]) -> bool {
+        self.closed_recently.lock().unwrap().1.contains(other)
     }
 
     /// Look up an existing open by (client, owner, fh). RFC 7530
@@ -294,61 +349,104 @@ impl StateIdManager {
         verifier: Option<u64>,
     ) -> StateId {
         let key = (client_id, owner.clone(), fh.clone());
-        // Guard: if a previous CLOSE revoked/removed the underlying state
-        // but left a stale open_states entry, clean it up so we fall
-        // through to fresh allocation.
-        if let Some(entry) = self.open_states.get(&key) {
-            let is_stale = self.states.get(&entry.stateid_other)
-                .map_or(true, |s| s.revoked);
-            if is_stale {
-                drop(entry);
-                self.open_states.remove(&key);
-            }
-        }
-        if let Some(mut entry) = self.open_states.get_mut(&key) {
-            let new_access = entry.share_access | share_access;
-            let new_deny = entry.share_deny | share_deny;
+        // F31: the whole decide-and-mutate sequence runs under the
+        // open_states ENTRY guard, so two concurrent OPENs for the same
+        // key cannot both take the fresh path (the double-allocation
+        // silently orphaned the loser's stateid — its CLOSE then came
+        // back BAD_STATEID and detonated client recovery). Nesting
+        // order open_states → {states, open_state_keys, opens_by_fh}
+        // is the same one every other path uses; nothing acquires
+        // open_states while holding any of those.
+        use dashmap::mapref::entry::Entry;
+        match self.open_states.entry(key.clone()) {
+            Entry::Occupied(mut occ) => {
+                // Stale entry (master gone/revoked — crash artifact):
+                // retire it IN PLACE, including its reverse-index entry —
+                // leaving that behind lets a late CLOSE of the dead
+                // stateid resolve to this key and tear down the fresh
+                // successor's entry.
+                let cur_other = occ.get().stateid_other;
+                let master_alive = self
+                    .states
+                    .get(&cur_other)
+                    .map_or(false, |s| !s.revoked);
+                if !master_alive {
+                    self.open_state_keys
+                        .remove_if(&cur_other, |_, k| *k == key);
+                    let stateid =
+                        self.allocate(StateType::Open, client_id, Some(fh.clone()));
+                    self.open_state_keys.insert(stateid.other, key.clone());
+                    occ.insert(OpenState {
+                        stateid_other: stateid.other,
+                        seqid: stateid.seqid,
+                        share_access,
+                        share_deny,
+                        verifier,
+                    });
+                    let mut owners =
+                        self.opens_by_fh.entry(fh).or_insert_with(Vec::new);
+                    if !owners.iter().any(|(c, o)| *c == client_id && *o == owner) {
+                        owners.push((client_id, owner));
+                    }
+                    return stateid;
+                }
 
-            if new_access == entry.share_access && new_deny == entry.share_deny {
-                return StateId {
-                    seqid: entry.seqid,
-                    other: entry.stateid_other,
+                // Live entry: bump the seqid on EVERY follow-on OPEN,
+                // even when the share-mask is unchanged. The bump is the
+                // protocol's only defense against a reordered in-flight
+                // CLOSE from the same open-owner (the Linux client keys
+                // owners by uid, so every process of a workload shares
+                // one): a stale CLOSE(seq=k) arriving after this OPEN
+                // advanced the state to k+1 must fail OLD_STATEID
+                // instead of destroying state the new opener holds.
+                // knfsd bumps on every OPEN for the same reason; I/O
+                // ops are immune because the client sends them with the
+                // seqid=0 "current stateid" form.
+                let e = occ.get_mut();
+                e.seqid = e.seqid.wrapping_add(1);
+                e.share_access |= share_access;
+                e.share_deny |= share_deny;
+                let stateid = StateId {
+                    seqid: e.seqid,
+                    other: e.stateid_other,
                 };
+                let snap = if let Some(mut master) = self.states.get_mut(&e.stateid_other)
+                {
+                    master.seqid = e.seqid;
+                    master.stateid.seqid = e.seqid;
+                    Some(master.clone())
+                } else {
+                    None
+                };
+                drop(occ);
+                // Persist the bump: a failover that reloads a stale
+                // seqid would reject the client's current stateid on
+                // every subsequent state-changing op.
+                if let Some(snap) = snap {
+                    self.persist(&snap);
+                }
+                stateid
             }
-
-            entry.seqid = entry.seqid.wrapping_add(1);
-            entry.share_access = new_access;
-            entry.share_deny = new_deny;
-            let stateid = StateId {
-                seqid: entry.seqid,
-                other: entry.stateid_other,
-            };
-            if let Some(mut master) = self.states.get_mut(&entry.stateid_other) {
-                master.seqid = entry.seqid;
-                master.stateid.seqid = entry.seqid;
+            Entry::Vacant(vac) => {
+                // Fresh allocation. Reuses the existing `allocate` path
+                // so the master `states` map and `client_states` index
+                // stay consistent with everything else.
+                let stateid = self.allocate(StateType::Open, client_id, Some(fh.clone()));
+                self.open_state_keys.insert(stateid.other, key.clone());
+                vac.insert(OpenState {
+                    stateid_other: stateid.other,
+                    seqid: stateid.seqid,
+                    share_access,
+                    share_deny,
+                    verifier,
+                });
+                let mut owners = self.opens_by_fh.entry(fh).or_insert_with(Vec::new);
+                if !owners.iter().any(|(c, o)| *c == client_id && *o == owner) {
+                    owners.push((client_id, owner));
+                }
+                stateid
             }
-            return stateid;
         }
-        // Fresh allocation. Reuses the existing `allocate` path so
-        // the master `states` map and `client_states` index stay
-        // consistent with everything else.
-        let stateid = self.allocate(StateType::Open, client_id, Some(fh.clone()));
-        self.open_state_keys.insert(stateid.other, key.clone());
-        self.open_states.insert(
-            key,
-            OpenState {
-                stateid_other: stateid.other,
-                seqid: stateid.seqid,
-                share_access,
-                share_deny,
-                verifier,
-            },
-        );
-        self.opens_by_fh
-            .entry(fh)
-            .or_insert_with(Vec::new)
-            .push((client_id, owner));
-        stateid
     }
 
     /// OPEN_DOWNGRADE (RFC 8881 §18.18): replace an open's share
@@ -654,32 +752,119 @@ impl StateIdManager {
         }
     }
 
-    /// CLOSE cleanup: fully remove the open stateid and all associated
-    /// bookkeeping (states, client_states, open_states, opens_by_fh).
-    /// Unlike `revoke()` which just flags the entry, this deallocates it
-    /// so a subsequent OPEN for the same (client, owner, fh) allocates
-    /// a fresh stateid.
+    /// Seqid-checked CLOSE (F31). Atomically verifies that the presented
+    /// stateid is the CURRENT one for its open (via `remove_if` under the
+    /// entry's shard lock — the same lock `record_open`'s merge path
+    /// holds while bumping) and only then tears the state down. A stale
+    /// seqid means a newer OPEN by the same owner advanced the state
+    /// after this CLOSE was sent: report `OldStateId` and destroy
+    /// nothing — the newer opener legitimately holds this stateid.
+    pub fn close_open(&self, stateid: &StateId) -> CloseOutcome {
+        let other = &stateid.other;
+        let Some(key) = self.open_state_keys.get(other).map(|e| e.value().clone()) else {
+            // No open record. Recently closed → benign replay/reorder.
+            if self.recently_closed(other) {
+                return CloseOutcome::OldStateId;
+            }
+            return match self.states.get(other) {
+                Some(e) if e.revoked => CloseOutcome::Revoked,
+                // Master exists with no open record (crash artifact or
+                // non-open stateid handed to CLOSE) — treat as unknown.
+                _ => CloseOutcome::NotFound,
+            };
+        };
+
+        // Pre-announce the tombstone BEFORE the removal: a concurrent
+        // duplicate/stale close that loses the race reads these maps in
+        // the instruction window between our remove_if and any
+        // post-removal bookkeeping — it must find the tombstone already
+        // in place or it misreports a benign reorder as BAD_STATEID.
+        // Harmless when we end up NOT removing (tombstones are only
+        // consulted on miss paths, where the stateid is genuinely gone).
+        self.push_tombstone(*other);
+
+        // Atomic check-and-remove: the predicate runs under the shard
+        // lock, so it cannot interleave with a concurrent merge bump or
+        // a fresh insert that re-used this key for a successor stateid.
+        let removed = self.open_states.remove_if(&key, |_, v| {
+            v.stateid_other == *other
+                && (stateid.seqid == 0 || stateid.seqid == v.seqid)
+        });
+
+        if removed.is_none() {
+            // Re-read to say why. All of these are race-tolerant
+            // best-effort reporting; nothing is mutated here.
+            if let Some(v) = self.open_states.get(&key) {
+                if v.stateid_other == *other {
+                    return CloseOutcome::OldStateId; // live, newer seqid
+                }
+                // Key re-used by a successor stateid; this one is done.
+                return if self.recently_closed(other) {
+                    CloseOutcome::OldStateId
+                } else {
+                    CloseOutcome::NotFound
+                };
+            }
+            return if self.recently_closed(other) {
+                CloseOutcome::OldStateId
+            } else {
+                CloseOutcome::NotFound
+            };
+        }
+
+        self.finish_close(other, &key);
+        CloseOutcome::Closed
+    }
+
+    /// Force-close: seqid-agnostic removal, used by FREE_STATEID on
+    /// revoked state and by tests. `remove_if` still guards against
+    /// tearing down a SUCCESSOR open that re-used the same key after
+    /// this stateid was already closed.
     pub fn close_open_state(&self, other: &[u8; 12]) {
+        self.push_tombstone(*other);
+        let key = self.open_state_keys.get(other).map(|e| e.value().clone());
+        if let Some(key) = key {
+            if self
+                .open_states
+                .remove_if(&key, |_, v| v.stateid_other == *other)
+                .is_some()
+            {
+                self.finish_close(other, &key);
+                return;
+            }
+            // Open entry gone or superseded — still retire the master
+            // record and the index entry for THIS stateid.
+            self.open_state_keys.remove_if(other, |_, k| *k == key);
+        }
+        self.remove_master(other);
+        self.push_tombstone(*other);
+    }
+
+    /// Shared teardown after the open_states entry for (`other`, `key`)
+    /// has been removed: tombstone FIRST (a concurrent duplicate close
+    /// that lost the `remove_if` race consults it immediately), then
+    /// reverse index, by-fh index, master record, persistence.
+    fn finish_close(&self, other: &[u8; 12], key: &(u64, Vec<u8>, Vec<u8>)) {
+        self.push_tombstone(*other);
+        self.open_state_keys.remove_if(other, |_, k| k == key);
+        let (client_id, ref owner, ref fh) = *key;
+        if let Some(mut owners) = self.opens_by_fh.get_mut(fh) {
+            owners.retain(|(cid, own)| *cid != client_id || own != owner);
+            if owners.is_empty() {
+                drop(owners);
+                self.opens_by_fh.remove(fh);
+            }
+        }
+        self.remove_master(other);
+    }
+
+    /// Remove the master `states` record + client index + persistence.
+    fn remove_master(&self, other: &[u8; 12]) {
         if let Some((_, entry)) = self.states.remove(other) {
             if let Some(mut state_list) = self.client_states.get_mut(&entry.client_id) {
                 state_list.retain(|o| o != other);
             }
             self.persist_delete(*other);
-        }
-
-        // F28: point lookup via the reverse index (was an O(N)
-        // full-map scan per CLOSE — the degradation seed).
-        let key = self.open_state_keys.remove(other).map(|(_, k)| k);
-        if let Some(key) = key {
-            let (_client_id, ref owner, ref fh) = key;
-            if let Some(mut owners) = self.opens_by_fh.get_mut(fh) {
-                owners.retain(|(cid, own)| *cid != key.0 || own != owner);
-                if owners.is_empty() {
-                    drop(owners);
-                    self.opens_by_fh.remove(fh);
-                }
-            }
-            self.open_states.remove(&key);
         }
     }
 
@@ -898,15 +1083,24 @@ mod tests {
         let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None);
         assert_eq!(s1.seqid, 1);
 
+        // F31: EVERY follow-on OPEN bumps the seqid, even with an
+        // unchanged share-mask. (This test previously asserted the
+        // opposite — that misreading of §18.16.4 removed the protocol's
+        // only defense against reordered same-owner CLOSEs and was the
+        // root of the ~7% CLOSE not-found residual / churn collapse.)
         let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None);
-        assert_eq!(s2.seqid, 1, "seqid must not bump when masks unchanged");
         assert_eq!(s2.other, s1.other);
+        assert_eq!(s2.seqid, 2, "every OPEN must advance the seqid (F31)");
 
-        assert!(mgr.validate(&s1).is_ok());
+        // seqid=0 "current stateid" form still validates; the stale
+        // exact seqid does not.
+        assert!(mgr.validate(&StateId { seqid: 0, other: s1.other }).is_ok());
+        assert!(mgr.validate(&s1).is_err());
+        assert!(mgr.validate(&s2).is_ok());
     }
 
     #[test]
-    fn test_multi_worker_same_owner_fh_no_seqid_advance() {
+    fn test_multi_worker_same_owner_fh_seqid_advances_monotonically() {
         let mgr = StateIdManager::new(crate::state_backend::memory_backend());
         let owner = b"linux-open-owner".to_vec();
         let fh = b"/bench/testfile".to_vec();
@@ -915,10 +1109,122 @@ mod tests {
             .map(|_| mgr.record_open(1, owner.clone(), fh.clone(), 2, 0, None))
             .collect();
 
-        for sid in &ids {
-            assert_eq!(sid.seqid, 1);
-            assert!(mgr.validate(sid).is_ok());
+        for (i, sid) in ids.iter().enumerate() {
+            assert_eq!(sid.other, ids[0].other, "same owner+fh → same other");
+            assert_eq!(sid.seqid, (i + 1) as u32, "seqid advances per OPEN");
         }
+        // Only the latest is exactly valid; older views are stale.
+        assert!(mgr.validate(&ids[3]).is_ok());
+        assert!(mgr.validate(&ids[0]).is_err());
+    }
+
+    /// F31 reproducer: the live failure signature. Backend A's CLOSE is
+    /// reordered after backend B's re-OPEN of the same (owner, file).
+    /// The stale CLOSE must be refused as OldStateId and must NOT
+    /// destroy the state B holds; B's own CLOSE then succeeds.
+    #[test]
+    fn f31_reordered_stale_close_must_not_destroy_reopened_state() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let owner = b"uid-999".to_vec();
+        let fh = b"/pgdata/base/16384/1259".to_vec();
+
+        // A opens (seq=1); B re-opens (same mask) → same other, seq=2.
+        let a = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        let b = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        assert_eq!(a.other, b.other);
+
+        // A's CLOSE arrives late, carrying the stale seq=1 view.
+        assert_eq!(mgr.close_open(&a), CloseOutcome::OldStateId);
+
+        // B's state survived: I/O (seqid=0 form) and exact seqid work.
+        assert!(mgr.validate(&StateId { seqid: 0, other: b.other }).is_ok());
+        assert!(mgr.validate(&b).is_ok());
+
+        // B's CLOSE (current seqid) succeeds; a replay of it is a
+        // tombstone hit (benign OldStateId), never BAD_STATEID.
+        assert_eq!(mgr.close_open(&b), CloseOutcome::Closed);
+        assert_eq!(mgr.close_open(&b), CloseOutcome::OldStateId);
+
+        // Garbage that was never issued IS BAD_STATEID.
+        let garbage = StateId { seqid: 1, other: [0xAB; 12] };
+        assert_eq!(mgr.close_open(&garbage), CloseOutcome::NotFound);
+    }
+
+    /// F31 companion: a late duplicate close of a DEAD stateid must not
+    /// tear down the successor open that re-used the same (owner, fh)
+    /// key. Exercises the stale-guard index cleanup + remove_if guard.
+    #[test]
+    fn f31_dead_stateid_close_must_not_kill_successor() {
+        let mgr = StateIdManager::new(crate::state_backend::memory_backend());
+        let owner = b"uid-999".to_vec();
+        let fh = b"/pgdata/pg_wal/0001".to_vec();
+
+        let s1 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        // Simulate the crash-artifact path: master revoked, open_states
+        // entry left behind — the next OPEN's stale-guard must clean
+        // BOTH the entry and its reverse-index record.
+        mgr.revoke(&s1).unwrap();
+        let s2 = mgr.record_open(1, owner.clone(), fh.clone(), 3, 0, None);
+        assert_ne!(s1.other, s2.other, "stale guard → fresh allocation");
+
+        // Late duplicate closes of the dead stateid: refused, harmless.
+        assert_ne!(mgr.close_open(&s1), CloseOutcome::Closed);
+        mgr.close_open_state(&s1.other); // force-close path, same guard
+
+        // The successor is untouched and closes cleanly.
+        assert!(mgr.validate(&s2).is_ok());
+        assert_eq!(mgr.close_open(&s2), CloseOutcome::Closed);
+    }
+
+    /// F31 stress: concurrent open/re-open/close churn on shared
+    /// (owner, fh) keys — the pgbench -C pattern. Invariant: a CLOSE of
+    /// a stateid the closer was just issued is NEVER NotFound (it is
+    /// Closed, or OldStateId when someone re-opened after us), and the
+    /// maps fully drain at the end (no leaked entries in any index).
+    #[test]
+    fn f31_concurrent_open_close_churn_never_not_found() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+        let mgr = std::sync::Arc::new(StateIdManager::new(
+            crate::state_backend::memory_backend(),
+        ));
+        let not_found = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for t in 0..8 {
+            let mgr = mgr.clone();
+            let not_found = not_found.clone();
+            handles.push(std::thread::spawn(move || {
+                let owner = b"uid-999".to_vec();
+                for i in 0..500 {
+                    let fh = format!("/pgdata/rel{}", (t + i) % 4).into_bytes();
+                    let sid = mgr.record_open(1, owner.clone(), fh, 3, 0, None);
+                    if mgr.close_open(&sid) == CloseOutcome::NotFound {
+                        not_found.fetch_add(1, AOrd::SeqCst);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            not_found.load(AOrd::SeqCst),
+            0,
+            "a just-issued stateid must never be BAD_STATEID at close (F31)"
+        );
+
+        // Drain any opens that lost their close to an OldStateId race.
+        let leftover: Vec<[u8; 12]> = mgr
+            .open_state_keys
+            .iter()
+            .map(|e| *e.key())
+            .collect();
+        for other in leftover {
+            mgr.close_open_state(&other);
+        }
+        assert!(mgr.open_states.is_empty(), "open_states must drain");
+        assert!(mgr.open_state_keys.is_empty(), "reverse index must drain");
+        assert!(mgr.opens_by_fh.is_empty(), "by-fh index must drain");
     }
 
     #[test]

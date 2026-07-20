@@ -941,40 +941,57 @@ impl IoOperationHandler {
     ) -> CloseRes {
         debug!("CLOSE: stateid={:?}", op.stateid);
 
-        // Validate stateid
-        if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
-            // F28: stateid identity in the warn — correlating failing
-            // CLOSEs against OPEN grants distinguishes lease-reap vs
-            // replay-miss vs fh-keying as the storm's seed.
-            warn!(
-                "CLOSE: Invalid stateid: {} (other={:02x?} seqid={})",
-                e, op.stateid.other, op.stateid.seqid
-            );
-            return CloseRes {
-                status: Nfs4Status::BadStateId,
-                stateid: None,
-            };
-        }
-
-        // Remove file descriptor from cache (file closes on drop)
-        if let Some(cached) = self.fd_cache.remove(&op.stateid.other) {
-            debug!("🗑️ FD CACHE CLOSE: Removed and closed FD for {:?} (path: {:?})", op.stateid, cached.path);
-        } else {
-            debug!("⚠️ CLOSE: No cached FD found for {:?} (was already closed or never cached)", op.stateid);
-        }
-
-        self.state_mgr.stateids.close_open_state(&op.stateid.other);
-        debug!("CLOSE: Removed open state for {:?}", op.stateid);
-
-        // Return final stateid (with seqid incremented)
-        let final_stateid = StateId {
-            seqid: op.stateid.seqid + 1,
-            other: op.stateid.other,
-        };
-
-        CloseRes {
-            status: Nfs4Status::Ok,
-            stateid: Some(final_stateid),
+        // F31: atomic seqid-checked close. The outcome discrimination is
+        // load-bearing: OLD_STATEID tells the client "your view is stale,
+        // refresh" (benign — it re-evaluates whether it still wants the
+        // close), while BAD_STATEID detonates a TEST_STATEID recovery
+        // round that stalls the whole session. A reordered CLOSE racing
+        // a same-owner re-OPEN must take the former path, and must not
+        // destroy the state the new opener holds.
+        use crate::nfs::v4::state::stateid::CloseOutcome;
+        match self.state_mgr.stateids.close_open(&op.stateid) {
+            CloseOutcome::Closed => {
+                // Remove file descriptor from cache (file closes on drop)
+                // — only now that the state is truly gone; a refused
+                // close must keep the fd anchored (F17c).
+                if let Some(cached) = self.fd_cache.remove(&op.stateid.other) {
+                    debug!(
+                        "🗑️ FD CACHE CLOSE: Removed and closed FD for {:?} (path: {:?})",
+                        op.stateid, cached.path
+                    );
+                }
+                debug!("CLOSE: Removed open state for {:?}", op.stateid);
+                CloseRes {
+                    status: Nfs4Status::Ok,
+                    stateid: Some(StateId {
+                        seqid: op.stateid.seqid + 1,
+                        other: op.stateid.other,
+                    }),
+                }
+            }
+            CloseOutcome::OldStateId => {
+                debug!(
+                    "CLOSE: stale seqid or recently-closed replay (other={:02x?} seqid={}) → OLD_STATEID",
+                    op.stateid.other, op.stateid.seqid
+                );
+                CloseRes {
+                    status: Nfs4Status::OldStateId,
+                    stateid: None,
+                }
+            }
+            outcome => {
+                // F28: stateid identity in the warn — correlating failing
+                // CLOSEs against OPEN grants distinguishes lease-reap vs
+                // replay-miss vs fh-keying as a storm's seed.
+                warn!(
+                    "CLOSE: Invalid stateid: {:?} (other={:02x?} seqid={})",
+                    outcome, op.stateid.other, op.stateid.seqid
+                );
+                CloseRes {
+                    status: Nfs4Status::BadStateId,
+                    stateid: None,
+                }
+            }
         }
     }
 

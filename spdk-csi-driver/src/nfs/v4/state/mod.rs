@@ -23,7 +23,7 @@ pub mod delegation;
 
 pub use client::ClientManager;
 pub use session::SessionManager;
-pub use stateid::{StateIdManager, StateType, StateEntry};
+pub use stateid::{CloseOutcome, StateIdManager, StateType, StateEntry};
 pub use lease::LeaseManager;
 pub use delegation::{DelegationManager, Delegation, DelegationType, DelegationStats};
 
