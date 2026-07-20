@@ -680,18 +680,36 @@ per-row-fsync mutex serialization in one structure.
   on the export; mint = `name_to_handle_at` post-create; resolve =
   HMAC verify → FdCache (re-keyed, 12.1e) → `open_by_handle_at` on
   miss; `mount_fd` = O_PATH fd on the export root held for server
-  life. **Pod securityContext (trap, found 2026-07-19):** add
-  `capabilities: add: [DAC_READ_SEARCH]` AND pin `runAsUser: 0`
-  explicitly. Cap-adds are only effective for root — Linux clears
-  effective/permitted on execve for non-root users (no ambient caps
-  from kubelet) — and the tree carries BOTH image variants:
-  Dockerfile.csi sets `USER 65532` while the prebuilt variant runs
-  root (runtime-root confirmed by F12's root-stamped creates). On
-  the non-root image the cap grant would silently not take effect →
-  every `open_by_handle_at` EPERM → all handles STALE. Belt-and-
-  suspenders: also `setcap cap_dac_read_search+ep` on the
-  flint-nfs-server binary in the image, so a future non-root
-  hardening can't break resolution.
+  life. **Pod securityContext (trap, found 2026-07-19):** a bare
+  `capabilities: add: [DAC_READ_SEARCH]` is only effective for a
+  ROOT container user — Linux clears effective/permitted on execve
+  for non-root (kubelet sets no ambient caps) — and the tree carries
+  BOTH image variants: Dockerfile.csi sets `USER 65532` while the
+  prebuilt variant runs root (runtime-root confirmed by F12's
+  root-stamped creates). Mismatched, the grant silently does nothing
+  → every `open_by_handle_at` EPERM → all handles STALE. Two
+  supported configurations — C3 must pick one EXPLICITLY:
+
+  1. **Root + minimal caps:** `runAsUser: 0`,
+     `capabilities: {drop: [ALL], add: [DAC_READ_SEARCH, CHOWN,
+     FOWNER, DAC_OVERRIDE, NET_BIND_SERVICE]}`.
+  2. **Non-root + file capabilities** (spiked GREEN 2026-07-19: uid
+     503 + `setcap cap_dac_read_search+ep` resolves; cap removed →
+     EPERM again): image sets `USER 65532` and setcaps the
+     flint-nfs-server binary with the same list; PodSpec
+     `runAsUser: 65532` and `capabilities: add:` the same list (adds
+     keep the caps in the BOUNDING set so the file caps can
+     activate). NET_BIND_SERVICE is required for port 2049 (<1024);
+     CHOWN/FOWNER/DAC_OVERRIDE for the F12 ownership semantics
+     (create-as-owner, SETATTR chown, serving other-uid files) —
+     audit the exact set in C3. `.flint-nfs/` (state.db, fh.key) is
+     server-created, so non-root ownership follows automatically.
+
+  Either way the pod stays unprivileged. Caveat: user-namespaced
+  pods (`hostUsers: false`) are UNSUPPORTED for v4 until their own
+  spike — `open_by_handle_at`'s capability check is historically
+  against the initial user namespace (kernels ≥6.9 relaxed it with
+  reachability conditions; not validated here).
 - **C4. Deletions:** `path_to_handle`, `handle_to_path`,
   `id_to_path`/`path_to_id`, `rename_aliases`, `note_fs_rename`,
   `note_fs_remove`, `follow_rename_alias`, the SHA-256 identity
