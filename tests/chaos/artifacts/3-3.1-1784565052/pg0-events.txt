@@ -1,0 +1,37 @@
+LAST SEEN   TYPE      REASON                   OBJECT     MESSAGE
+40m         Warning   Unhealthy                pod/pg-0   Readiness probe failed: command timed out: "pg_isready -U postgres" timed out after 1s
+40m         Normal    Killing                  pod/pg-0   Stopping container postgres
+40m         Normal    Killing                  pod/pg-0   Stopping container chaos
+39m         Warning   Unhealthy                pod/pg-0   Readiness probe failed: /var/run/postgresql:5432 - rejecting connections
+39m         Normal    Scheduled                pod/pg-0   Successfully assigned flint-chaos/pg-0 to runx-aws-4
+39m         Normal    SuccessfulAttachVolume   pod/pg-0   AttachVolume.Attach succeeded for volume "pvc-97b19357-cc1c-4ab0-9938-d0d23d1aeab6"
+39m         Normal    Started                  pod/pg-0   Started container chaos
+39m         Normal    Pulled                   pod/pg-0   Container image "postgres:16-bookworm" already present on machine
+39m         Normal    Created                  pod/pg-0   Created container: postgres
+39m         Normal    Pulled                   pod/pg-0   Container image "busybox:1.36" already present on machine
+39m         Normal    Created                  pod/pg-0   Created container: chaos
+39m         Normal    Started                  pod/pg-0   Started container postgres
+39m         Warning   Unhealthy                pod/pg-0   Readiness probe failed: /var/run/postgresql:5432 - no response
+24m         Warning   Unhealthy                pod/pg-0   Readiness probe failed: command timed out: "pg_isready -U postgres" timed out after 1s
+21m         Normal    Killing                  pod/pg-0   Stopping container postgres
+21m         Normal    Killing                  pod/pg-0   Stopping container chaos
+21m         Normal    Scheduled                pod/pg-0   Successfully assigned flint-chaos/pg-0 to runx-aws-1
+21m         Normal    Started                  pod/pg-0   Started container chaos
+21m         Normal    SuccessfulAttachVolume   pod/pg-0   AttachVolume.Attach succeeded for volume "pvc-97b19357-cc1c-4ab0-9938-d0d23d1aeab6"
+21m         Normal    Created                  pod/pg-0   Created container: postgres
+21m         Normal    Started                  pod/pg-0   Started container postgres
+21m         Normal    Pulled                   pod/pg-0   Container image "busybox:1.36" already present on machine
+21m         Normal    Created                  pod/pg-0   Created container: chaos
+21m         Normal    Pulled                   pod/pg-0   Container image "postgres:16-bookworm" already present on machine
+15m         Warning   Unhealthy                pod/pg-0   Readiness probe failed: /var/run/postgresql:5432 - no response
+12m         Normal    Killing                  pod/pg-0   Stopping container postgres
+12m         Normal    Killing                  pod/pg-0   Stopping container chaos
+12m         Normal    Scheduled                pod/pg-0   Successfully assigned flint-chaos/pg-0 to runx-aws-4
+12m         Normal    SuccessfulAttachVolume   pod/pg-0   AttachVolume.Attach succeeded for volume "pvc-97b19357-cc1c-4ab0-9938-d0d23d1aeab6"
+11m         Normal    Pulled                   pod/pg-0   Container image "postgres:16-bookworm" already present on machine
+11m         Normal    Created                  pod/pg-0   Created container: postgres
+11m         Normal    Started                  pod/pg-0   Started container postgres
+11m         Normal    Pulled                   pod/pg-0   Container image "busybox:1.36" already present on machine
+11m         Normal    Created                  pod/pg-0   Created container: chaos
+11m         Normal    Started                  pod/pg-0   Started container chaos
+114s        Warning   Unhealthy                pod/pg-0   Readiness probe failed: /var/run/postgresql:5432 - no response

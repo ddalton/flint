@@ -98,3 +98,7 @@ date,phase,drill,t_ready_s,stall_s,restarts_delta,pre_node,post_node,va_ok,nvme_
 2026-07-18T22:33:49Z,3,3.1,75,72,new:0,runw-aws-4,runw-aws-6,Y,Y,Y,FAIL,Y,FAIL,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y failed: db"
 2026-07-19T00:22:48Z,3,3.1,49,40,new:0,runw-aws-6,runw-aws-4,Y,Y,Y,FAIL,Y,FAIL,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y failed: db"
 2026-07-19T05:35:09Z,3,3.1,32,27,new:0,runw-aws-4,runw-aws-6,Y,Y,Y,FAIL,Y,FAIL,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y failed: db"
+2026-07-19T05:56:51Z,3,3.1,32,0,new:0,runw-aws-6,runw-aws-4,Y,N,Y,FAIL,Y,FAIL,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y failed: db nvme"
+2026-07-20T06:03:59Z,3,3.1,31,22,new:0,runx-aws-4,runx-aws-1,Y,Y,Y,FAIL,Y,FAIL,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y failed: db"
+2026-07-20T16:03:04Z,3,3.1,26,576,new:0,runx-aws-1,runx-aws-4,Y,Y,Y,FAIL,Y,FAIL,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y failed: db"
+2026-07-20T16:30:52Z,3,3.1,27,637,new:0,runx-aws-1,runx-aws-4,Y,Y,Y,PASS,Y,PASS,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y"

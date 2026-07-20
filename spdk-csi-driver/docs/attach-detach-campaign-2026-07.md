@@ -878,8 +878,10 @@ controller bounce (reset provisioner backoff) → manual nfs pod
 force-delete → second kubelet restart → verify lvol/infra gone →
 manual PV delete → node reboot.
 
-### Drill 3.1 (graceful cross-node migration) — 3 attempts, all FAIL
-on the db write-probe ONLY; F26 opened
+### Drill 3.1 (graceful cross-node migration) — 3 attempts FAIL on
+the db write-probe ONLY; F26 opened. **RESOLVED: attempt 6 on u12.3
+PASSED all 7 checks (2026-07-20 — see "Drill 3.1 PASS" analysis in
+the C6 section below)**
 
 Mechanics PASS every time (u11.17 attempt: Ready 32s, max ledger
 stall 27s, exactly one nfs pod with same uid throughout, witness
@@ -1266,6 +1268,52 @@ interval (24→15) has checkpoint/autovacuum signature, not a
 server-side ratchet. Related wart, backlog: EXCHANGE_ID trunking
 probe mints a duplicate clientid (RFC 8881 §18.35 casework) —
 harmless, unfixed.
+
+### Drill 3.1 PASS — the C6/F26 acceptance (2026-07-20 16:30Z, u12.3)
+
+Sixth 3.1 attempt overall, first FULL PASS (results.csv:
+ready=27s, all seven checks green). What each check proves:
+- **Writability probe PASS** — the original F26 symptom that failed
+  attempts 1–3 (u11.13→u11.17, post-migration 50–200ms/op crawl)
+  and attempt 4 (u12.0/u12.1, F28 CLOSE-storm collapse). The full
+  stack it validates: v4 kernel filehandles (F26, path maps empty),
+  non-root pod + file caps, F27 ordered coalescing writer, F28
+  reverse-index CLOSE, F31 stateid lifecycle.
+- **Ledger + amcheck PASS**: zero lost acked writes across the
+  cross-node migration; pg_amcheck --heapallindexed -j2 clean
+  within budget. Pre-drill standalone amcheck also clean —
+  corruption attribution unambiguous.
+- Exactly one NFS pod throughout, SAME uid (server untouched by a
+  client migration — the isolation invariant); witness on a third
+  node: 0 mismatches, writes fresh throughout; VAs cover exactly
+  the consumer nodes; ublk data path clean; no orphaned mounts; no
+  driver errors.
+- Post-migration client op profile (fresh mount, ~15 min window):
+  READ 18,641 + WRITE 106,142 with **ZERO errors**; 4,616 opens /
+  3,608 closes with 621 benign OLD_STATEID replies (~17% — the
+  natural reorder rate under churn, the designed answer);
+  TEST_STATEID=0, FREE_STATEID=0 — zero client recovery activity.
+  Server log total warns for the window: 4 (startup keytab note,
+  2 probes of a pre-roll ghost session, 1 DESTROY_SESSION cleanup).
+
+**The reported "stall=637s" is a harness artifact, dissected**: the
+pg-load pgbench timeline reads 776 TPS pre-drill → 0.2–0.9 TPS for
+exactly the ~11-minute verify-amcheck window → **993 TPS within
+seconds of amcheck completing**. pg_amcheck --heapallindexed -j2
+saturates postgres+NFS; pg_isready goes "no response" even at the
+new 5s budget; NotReady empties the headless DNS and the
+per-connection ledger writer starves. Max inter-ack gap OUTSIDE
+the amcheck window: **1 second**. Attempt 5 (16:03) failed ONLY on
+amcheck timing out at the old 600s single-stream budget — same
+artifact class; harness patched in 880f3f7 (amcheck -j2 + 1200s +
+timeout≠corruption discrimination; probe budget 5s). Harness
+backlog: exclude the verify window from the stall metric (or run
+the availability window before amcheck) so the drill stops
+measuring its own integrity scan.
+
+Phase-3 acceptance state: 3.1 DONE. 3.1b–3.9 deferred by user
+directive 2026-07-20 (runx torn down after this run); they need a
+fresh cluster.
 
 Related wart (same session): flint answers a trunking-probe
 EXCHANGE_ID (same co_ownerid+verifier, unconfirmed) by minting a
