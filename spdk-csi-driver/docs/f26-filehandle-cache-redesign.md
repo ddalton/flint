@@ -680,7 +680,18 @@ per-row-fsync mutex serialization in one structure.
   on the export; mint = `name_to_handle_at` post-create; resolve =
   HMAC verify → FdCache (re-keyed, 12.1e) → `open_by_handle_at` on
   miss; `mount_fd` = O_PATH fd on the export root held for server
-  life.
+  life. **Pod securityContext (trap, found 2026-07-19):** add
+  `capabilities: add: [DAC_READ_SEARCH]` AND pin `runAsUser: 0`
+  explicitly. Cap-adds are only effective for root — Linux clears
+  effective/permitted on execve for non-root users (no ambient caps
+  from kubelet) — and the tree carries BOTH image variants:
+  Dockerfile.csi sets `USER 65532` while the prebuilt variant runs
+  root (runtime-root confirmed by F12's root-stamped creates). On
+  the non-root image the cap grant would silently not take effect →
+  every `open_by_handle_at` EPERM → all handles STALE. Belt-and-
+  suspenders: also `setcap cap_dac_read_search+ep` on the
+  flint-nfs-server binary in the image, so a future non-root
+  hardening can't break resolution.
 - **C4. Deletions:** `path_to_handle`, `handle_to_path`,
   `id_to_path`/`path_to_id`, `rename_aliases`, `note_fs_rename`,
   `note_fs_remove`, `follow_rename_alias`, the SHA-256 identity
