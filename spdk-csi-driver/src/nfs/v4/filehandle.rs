@@ -1266,8 +1266,19 @@ mod f26_churn_bench {
         let root = std::env::temp_dir().join(format!("f26_bench_{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
 
-        let sizes = [1_000usize, 10_000, 50_000, 100_000];
+        // First run of this bench (2026-07-19, sizes to 100k, free-
+        // running churn, 2000 probes/round) had to be killed at 35 min:
+        // macOS pthread rwlocks prefer writers, so the free-running
+        // churn thread starved the resolve probes near-indefinitely at
+        // large N — the F26 mechanism working TOO well to finish.
+        // This version bounds the load: smaller sizes, 500 probes, and
+        // a duty-cycled churn thread (rename burst, then 1 ms gap) so
+        // readers always get a window. The contention signal survives:
+        // churn p50/p99 vs N is the curve; rename mean is the O(N)
+        // term measured directly.
+        let sizes = [1_000usize, 10_000, 50_000];
         let max_n = *sizes.iter().max().unwrap();
+        const PROBES: usize = 500;
 
         // One flat dir of real files — resolve stat-verifies the inode,
         // so the paths must exist.
@@ -1280,33 +1291,38 @@ mod f26_churn_bench {
         }
 
         eprintln!(
-            "{:>8}  {:>10} {:>10}  {:>10} {:>10}  {:>12}",
-            "N", "quiet p50", "quiet p99", "churn p50", "churn p99", "rename mean"
+            "{:>8}  {:>10} {:>10}  {:>10} {:>10} {:>10}  {:>12}",
+            "N", "quiet p50", "quiet p99", "churn p50", "churn p99", "churn max", "rename mean"
         );
 
         for &n in &sizes {
+            let phase_t = Instant::now();
             let mgr = Arc::new(FileHandleManager::new(root.clone()));
             // Populate the caches to size N (the F26 growth term).
             let mut sample = Vec::new();
             for (i, p) in paths[..n].iter().enumerate() {
                 let h = mgr.path_to_filehandle(p).unwrap();
-                if i % (n / 512).max(1) == 0 {
+                if i % (n / 128).max(1) == 0 {
                     sample.push(h);
                 }
             }
+            eprintln!("[N={}] minted in {:.1?}; probing quiet…", n, phase_t.elapsed());
 
             // Resolve latency with no churn.
-            let mut quiet = Vec::with_capacity(2000);
-            for h in sample.iter().cycle().take(2000) {
+            let quiet_t = Instant::now();
+            let mut quiet = Vec::with_capacity(PROBES);
+            for h in sample.iter().cycle().take(PROBES) {
                 let t = Instant::now();
                 mgr.filehandle_to_path(h).unwrap();
                 quiet.push(t.elapsed());
             }
+            eprintln!("[N={}] quiet done in {:.1?}; probing under churn…", n, quiet_t.elapsed());
 
-            // Churn thread: rename bookkeeping ping-pong on one path
-            // pair outside the sample set. note_fs_rename is pure map
-            // bookkeeping — the O(N) scan cost doesn't depend on the
-            // file actually moving on disk.
+            // Duty-cycled churn thread: bursts of rename bookkeeping on
+            // a path pair outside the sample set, with a 1 ms gap per
+            // burst so resolve probes are delayed, not starved.
+            // note_fs_rename is pure map bookkeeping — the O(N) scan
+            // cost doesn't depend on the file actually moving on disk.
             let stop = Arc::new(AtomicBool::new(false));
             let churn = {
                 let mgr = Arc::clone(&mgr);
@@ -1315,33 +1331,40 @@ mod f26_churn_bench {
                 let b = root.join("churn_b");
                 std::thread::spawn(move || {
                     let mut count = 0u64;
-                    let start = Instant::now();
+                    let mut busy = Duration::ZERO;
                     while !stop.load(Ordering::Relaxed) {
-                        mgr.note_fs_rename(&a, &b);
-                        mgr.note_fs_rename(&b, &a);
-                        count += 2;
+                        let t = Instant::now();
+                        for _ in 0..5 {
+                            mgr.note_fs_rename(&a, &b);
+                            mgr.note_fs_rename(&b, &a);
+                        }
+                        busy += t.elapsed();
+                        count += 10;
+                        std::thread::sleep(Duration::from_millis(1));
                     }
-                    (count, start.elapsed())
+                    (count, busy)
                 })
             };
 
-            let mut busy = Vec::with_capacity(2000);
-            for h in sample.iter().cycle().take(2000) {
+            let mut busy_probe = Vec::with_capacity(PROBES);
+            for h in sample.iter().cycle().take(PROBES) {
                 let t = Instant::now();
                 mgr.filehandle_to_path(h).unwrap();
-                busy.push(t.elapsed());
+                busy_probe.push(t.elapsed());
             }
             stop.store(true, Ordering::Relaxed);
-            let (renames, churn_wall) = churn.join().unwrap();
+            let (renames, rename_busy) = churn.join().unwrap();
 
+            let churn_max = *busy_probe.iter().max().unwrap();
             eprintln!(
-                "{:>8}  {:>10.1?} {:>10.1?}  {:>10.1?} {:>10.1?}  {:>12.1?}",
+                "{:>8}  {:>10.1?} {:>10.1?}  {:>10.1?} {:>10.1?} {:>10.1?}  {:>12.1?}",
                 n,
                 pctl(&mut quiet, 0.5),
                 pctl(&mut quiet, 0.99),
-                pctl(&mut busy, 0.5),
-                pctl(&mut busy, 0.99),
-                churn_wall / (renames.max(1) as u32),
+                pctl(&mut busy_probe, 0.5),
+                pctl(&mut busy_probe, 0.99),
+                churn_max,
+                rename_busy / (renames.max(1) as u32),
             );
         }
         fs::remove_dir_all(&root).unwrap();

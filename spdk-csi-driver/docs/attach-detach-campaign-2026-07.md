@@ -1109,6 +1109,15 @@ Sources: `nfsdcltrack(8)`/`nfsdcld`; NFS-Ganesha
 §8.4.2 (grace/reclaim), §9 (locking recovery); SQLite WAL docs
 (single-writer, group commit).
 
+**STATUS: IMPLEMENTED 2026-07-19 (commit 896e702), lab-validated.**
+Writer thread owns the connection; mutex + `spawn_persist` deleted;
+every mutation site converted to the ordered `enqueue_write`. Bench:
+20k awaited durable puts (synchronous=FULL, on-disk) in 159 ms =
+**125k ops/s** (gate ≥10k/s); 721/721 lib tests green with new
+ordering/coalescing, read-your-writes, and drop-flush regression
+tests. Bench numbers are macOS-fsync; re-confirm on Linux during the
+C6 gate, and live validation rides the phase-3 re-run.
+
 ## Findings
 
 ### F1 — RECLASSIFIED 2026-07-13: concurrent postmasters, not a storage bug

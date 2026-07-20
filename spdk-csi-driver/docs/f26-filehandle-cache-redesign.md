@@ -427,10 +427,13 @@ it adds, and retires F17/F23/F26 as a category.
 **Caveats / dependencies (why this is Tier 2, not Tier 1):**
 
 - **Capability.** `open_by_handle_at` requires `CAP_DAC_READ_SEARCH`.
-  Ganesha explicitly flags this as "tricky inside a container." flint's
-  NFS pod already runs privileged (it stages block devices and mounts),
-  so the cap is almost certainly present — **but this must be verified**
-  and pinned in the pod securityContext before committing.
+  Ganesha explicitly flags this as "tricky inside a container."
+  **Verified 2026-07-19 (spike A1): the assumption that the pod runs
+  privileged was WRONG** — the flint-nfs PodSpec (rwx_nfs.rs:404) has
+  no securityContext at all, so it gets the runtime's default cap set,
+  which does NOT include DAC_READ_SEARCH. The spike proved the minimal
+  grant suffices (see §12.4 A1 results); Phase C adds
+  `capabilities: add: [DAC_READ_SEARCH]` to the PodSpec (step C3).
 - **Backing fs support.** Requires a local fs that implements
   `export_operations`. flint's export is **ext4** on the ublk block
   device (confirmed: `rwx_nfs.rs` references the "ext4 journal on the
@@ -603,19 +606,67 @@ census (census-before-restart protocol in the campaign notes).
 
 **Phase A — gates (no cluster, ~½ day)**
 
-- **A1. Capability spike** (gating, unchanged): under the production
-  flint-nfs securityContext (lima/kind with the same securityContext
-  is sufficient), `name_to_handle_at` on the export +
-  `open_by_handle_at` the result. Green → proceed. Red (cap
-  ungrantable by seccomp/SELinux/runtime) → fall back to §11.2
-  generation counters, not §5.
+- **A1. Capability spike** (gating): under the production flint-nfs
+  securityContext, `name_to_handle_at` on the export +
+  `open_by_handle_at` the result. Red (cap ungrantable by
+  seccomp/SELinux/runtime) → fall back to §11.2 generation counters,
+  not §5.
+
+  **RESULT 2026-07-19: GREEN** (lima VM, kernel 6.8, ext4). Matrix:
+  unprivileged mint OK (ext4 handle = 8 B as §12.2 predicted);
+  resolve without the cap → EPERM; resolve with **only**
+  `cap_dac_read_search` (capsh) → OK, so the minimal grant suffices;
+  root with just that cap dropped → EPERM (the cap is exactly the
+  gate); resolve after rename → OK (F23 free); resolve after
+  delete+recreate-same-name → **ESTALE** (F17 generation check
+  works); fresh handle → OK. One correction surfaced: the flint-nfs
+  pod is NOT privileged (no securityContext in rwx_nfs.rs:404), so
+  C3 must add `capabilities: add: [DAC_READ_SEARCH]`. Spike source:
+  job tmp `f26spike.c`.
 - **A2. Churn microbench baseline** on current code (§12.3) — must
   reproduce the F26 curve; doubles as the regression harness for C6.
+  Harness committed: `f26_churn_bench` in filehandle.rs
+  (`cargo test --release f26_churn_baseline -- --ignored --nocapture`).
+
+  **RESULT 2026-07-19: CURVE REPRODUCED — the §12 go-gate is met.**
+  (macOS arm64, release, 500 probes/round, duty-cycled churn = 10
+  renames then a 1 ms gap so readers can't starve.)
+
+  | N cached paths | quiet p50 | quiet p99 | churn p50 | churn p99 | churn MAX | rename mean |
+  |---:|---:|---:|---:|---:|---:|---:|
+  | 1,000 | 1.7 µs | 2.5 µs | 1.7 µs | 2.2 µs | 2.9 ms | 326 µs |
+  | 10,000 | 1.8 µs | 4.1 µs | 1.9 µs | 6.6 µs | 13.9 ms | 3.5 ms |
+  | 50,000 | 1.8 µs | 5.1 µs | 1.9 µs | 5.7 µs | **144.1 ms** | **18.0 ms** |
+
+  Reading: **rename mean grows linearly with N** (326 µs → 3.5 ms →
+  18 ms for 1k→10k→50k) — the O(N) scan term measured directly. The
+  worst resolve stall under churn (churn MAX) tracks it: **144 ms at
+  N=50k, inside the live 50–200 ms/op band** from drill 3.1. Quiet
+  resolves stay flat ~1.8 µs at every N — the defect is lock
+  contention, not resolve cost, exactly as §12.3 argues. The p50/p99
+  columns stay low only because the harness duty-cycles the churn
+  (1 ms gaps); the live server has no such gap — postgres
+  renames/removes continuously — which is the uniform-slowness
+  regime. Empirically confirmed: the first bench attempt ran churn
+  free-running (no gaps) and macOS's writer-preferring rwlocks
+  starved the resolve probes so thoroughly the run had to be killed
+  at 35 minutes — the F26 mechanism demonstrated in its pure form.
+  Extrapolation: at a runtime-accumulated N of 150–300k (hours of
+  pgbench temp/WAL churn), per-rename cost is ~50–110 ms with every
+  fh-resolving op serialized behind it — the drill 3.1 symptom.
 
 **Phase B — F27 ordered coalescing writer** (independent of v4; land
 first — small blast radius; full design in the campaign doc F27
 entry). Fixes the live stateid put/delete ordering bug and the
 per-row-fsync mutex serialization in one structure.
+
+  **DONE 2026-07-19 (commit 896e702).** Writer thread owns the
+  connection; `Arc<Mutex<Connection>>` and `spawn_persist` deleted;
+  all mutation sites converted to ordered `enqueue_write`. Bench
+  (macOS, on-disk, synchronous=FULL): 20k awaited puts in 159 ms =
+  **125k ops/s** vs the old ~1-fsync-per-row ceiling; B2 gate was
+  ≥10k/s. 721/721 lib tests green, incl. new ordering/coalescing,
+  barrier read-your-writes, and drop-flush regression tests.
 
 **Phase C — kernel handles**
 
