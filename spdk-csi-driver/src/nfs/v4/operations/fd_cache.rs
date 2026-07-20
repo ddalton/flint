@@ -58,6 +58,20 @@ pub(crate) struct CachedFile {
     /// the cache too and falls back to a read-only open when the
     /// file mode denies write; WRITE only reuses writable entries.
     pub(crate) writable: bool,
+    /// Inode captured at insert (fstat on the open fd). Identity key
+    /// for v4 kernel handles, whose F17b/c stale-resolve fallbacks
+    /// can't extract a path (no path is embedded) — they look the
+    /// open file up by ino instead. 0 = unknown (never matches).
+    pub(crate) ino: u64,
+}
+
+impl CachedFile {
+    /// Capture the fd's inode for the ino index. On the open fd, so
+    /// it names the OPEN-time object even across later renames.
+    pub(crate) fn ino_of(file: &File) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata().map(|m| m.ino()).unwrap_or(0)
+    }
 }
 
 pub(crate) struct FdCache {
@@ -69,6 +83,9 @@ pub(crate) struct FdCache {
     /// the by-path consumers (OPEN fd seeding, COMMIT, stale-resolve
     /// fallbacks); never authoritative — see module docs.
     by_path: DashMap<PathBuf, Vec<[u8; 12]>>,
+    /// ino → stateids holding an fd for it. Same index discipline as
+    /// `by_path`; consumers are the v4-handle stale-resolve fallbacks.
+    by_ino: DashMap<u64, Vec<[u8; 12]>>,
 }
 
 impl FdCache {
@@ -76,6 +93,7 @@ impl FdCache {
         Self {
             by_stateid: DashMap::new(),
             by_path: DashMap::new(),
+            by_ino: DashMap::new(),
         }
     }
 
@@ -88,25 +106,60 @@ impl FdCache {
         self.by_stateid.get(other).map(|e| e.clone())
     }
 
-    /// Insert (or replace) the fd for a stateid, keeping the path
-    /// index in step.
+    /// Insert (or replace) the fd for a stateid, keeping the path and
+    /// ino indexes in step.
     pub(crate) fn insert(&self, other: [u8; 12], entry: CachedFile) {
         let path = entry.path.clone();
+        let ino = entry.ino;
         let prev = self.by_stateid.insert(other, entry);
         if let Some(prev) = prev {
-            if prev.path == path {
-                return; // already indexed under this path
+            if prev.path != path {
+                self.unindex(&prev.path, &other);
+                self.by_path.entry(path).or_default().push(other);
             }
-            self.unindex(&prev.path, &other);
+            if prev.ino != ino {
+                self.unindex_ino(prev.ino, &other);
+                if ino != 0 {
+                    self.by_ino.entry(ino).or_default().push(other);
+                }
+            }
+            return;
         }
         self.by_path.entry(path).or_default().push(other);
+        if ino != 0 {
+            self.by_ino.entry(ino).or_default().push(other);
+        }
     }
 
     /// Remove the fd for a stateid, returning it.
     pub(crate) fn remove(&self, other: &[u8; 12]) -> Option<CachedFile> {
         let removed = self.by_stateid.remove(other)?.1;
         self.unindex(&removed.path, other);
+        self.unindex_ino(removed.ino, other);
         Some(removed)
+    }
+
+    /// An entry whose OPEN-time inode equals `ino` (optionally
+    /// writable) — the v4-handle F17b/c fallback. Same stale-index
+    /// discipline as `find_by_path`: candidates re-checked against
+    /// the authoritative entry.
+    pub(crate) fn find_by_ino(&self, ino: u64, require_writable: bool) -> Option<CachedFile> {
+        if ino == 0 {
+            return None;
+        }
+        let candidates: Vec<[u8; 12]> = self
+            .by_ino
+            .get(&ino)
+            .map(|ids| ids.clone())
+            .unwrap_or_default();
+        for id in candidates {
+            if let Some(e) = self.get(&id) {
+                if e.ino == ino && (!require_writable || e.writable) {
+                    return Some(e);
+                }
+            }
+        }
+        None
     }
 
     /// An entry whose OPEN-time path equals `path` (optionally
@@ -151,6 +204,19 @@ impl FdCache {
             }
         }
     }
+
+    fn unindex_ino(&self, ino: u64, other: &[u8; 12]) {
+        use dashmap::mapref::entry::Entry;
+        if ino == 0 {
+            return;
+        }
+        if let Entry::Occupied(mut e) = self.by_ino.entry(ino) {
+            e.get_mut().retain(|id| id != other);
+            if e.get().is_empty() {
+                e.remove();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -162,10 +228,13 @@ mod tests {
         if !p.exists() {
             std::fs::write(&p, b"x").unwrap();
         }
+        let file = Arc::new(File::open(&p).unwrap());
+        let ino = CachedFile::ino_of(&file);
         CachedFile {
-            file: Arc::new(File::open(&p).unwrap()),
+            file,
             path: p,
             writable,
+            ino,
         }
     }
 

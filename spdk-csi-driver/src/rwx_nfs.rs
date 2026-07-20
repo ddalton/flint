@@ -29,6 +29,7 @@ use std::env;
 use kube::{Api, Client, api::{PostParams, DeleteParams}};
 use k8s_openapi::api::core::v1::{
     Pod, PodSpec, Container, EnvVar, VolumeMount, Volume,
+    SecurityContext, Capabilities,
     PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
     PersistentVolume, PersistentVolumeSpec, ObjectReference,
     CSIPersistentVolumeSource, ContainerPort,
@@ -453,12 +454,48 @@ pub async fn create_nfs_server_pod(
                 // server mints a boot-time id and rejects every handle held
                 // by clients across a pod bounce (permanent EBADHANDLE on
                 // live mounts — the cutover bounce becomes an outage).
-                env: Some(vec![EnvVar {
-                    name: "PNFS_INSTANCE_ID".to_string(),
-                    value: Some(stable_nfs_instance_id(volume_id).to_string()),
-                    ..Default::default()
-                }]),
+                env: Some(vec![
+                    EnvVar {
+                        name: "PNFS_INSTANCE_ID".to_string(),
+                        value: Some(stable_nfs_instance_id(volume_id).to_string()),
+                        ..Default::default()
+                    },
+                    // F26 §12: v4 kernel inode filehandles. The server
+                    // probes mint/resolve at startup and falls back to
+                    // path handles (with a loud warning) if the cap
+                    // grant below didn't take effect.
+                    EnvVar {
+                        name: "FLINT_FH_KERNEL".to_string(),
+                        value: Some("1".to_string()),
+                        ..Default::default()
+                    },
+                ]),
                 resources: Some(resources),
+                // Non-root NFS server (F26 §12 C3, decided 2026-07-19).
+                // The caps activate via FILE capabilities on the
+                // flint-nfs-server binary (setcap in the Dockerfile);
+                // the adds here keep them in the bounding set.
+                // DAC_READ_SEARCH: open_by_handle_at (v4 handles);
+                // NET_BIND_SERVICE: port 2049; CHOWN/FOWNER/
+                // DAC_OVERRIDE: F12 ownership semantics on other-uid
+                // files. allowPrivilegeEscalation is DELIBERATELY
+                // unset: no_new_privs would block file-cap activation
+                // on execve.
+                security_context: Some(SecurityContext {
+                    run_as_user: Some(65532),
+                    run_as_group: Some(65532),
+                    capabilities: Some(Capabilities {
+                        drop: Some(vec!["ALL".to_string()]),
+                        add: Some(vec![
+                            "DAC_READ_SEARCH".to_string(),
+                            "NET_BIND_SERVICE".to_string(),
+                            "CHOWN".to_string(),
+                            "FOWNER".to_string(),
+                            "DAC_OVERRIDE".to_string(),
+                        ]),
+                    }),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }],
             

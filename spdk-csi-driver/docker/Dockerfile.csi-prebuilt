@@ -17,4 +17,13 @@ FROM ${BASE}
 COPY csi-driver /usr/local/bin/
 COPY flint-nfs-server /usr/local/bin/
 
+# F26 §12 C3: file caps for the NON-ROOT NFS server pod (COPY does not
+# preserve xattrs, so this must run here). The one RUN below is the
+# only emulated step in this otherwise COPY-only build — it's a single
+# setcap, sub-second under qemu. Requires libcap2-bin in the BASE
+# image (present from flint-driver builds ≥ the F26 wave; older bases
+# fail this step → bump BASE).
+RUN setcap 'cap_dac_read_search,cap_net_bind_service,cap_chown,cap_fowner,cap_dac_override+ep' \
+    /usr/local/bin/flint-nfs-server
+
 ENTRYPOINT ["/usr/local/bin/csi-driver"]

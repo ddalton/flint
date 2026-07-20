@@ -210,6 +210,13 @@ impl OpenFileView {
     pub fn file_for_path(&self, path: &std::path::Path) -> Option<Arc<File>> {
         self.fd_cache.find_by_path(path, false).map(|e| e.file)
     }
+
+    /// An open fd whose OPEN-time inode equals `ino`, with its
+    /// OPEN-time path — the v4 kernel-handle variant of the fallback
+    /// (v4 handles embed an ino but no path).
+    pub fn entry_for_ino(&self, ino: u64) -> Option<(std::path::PathBuf, Arc<File>)> {
+        self.fd_cache.find_by_ino(ino, false).map(|e| (e.path, e.file))
+    }
 }
 
 /// Whether an fd may be cached under this stateid. Special stateids
@@ -275,7 +282,8 @@ impl IoOperationHandler {
         path: PathBuf,
         writable: bool,
     ) {
-        self.fd_cache.insert(other, CachedFile { file, path, writable });
+        let ino = CachedFile::ino_of(&file);
+        self.fd_cache.insert(other, CachedFile { file, path, writable, ino });
     }
 
     /// F17c: anchor the open — cache an fd under the open stateid AT
@@ -305,6 +313,7 @@ impl IoOperationHandler {
                     file: existing.file,
                     path: path.clone(),
                     writable: existing.writable,
+                    ino: existing.ino,
                 },
             );
             return;
@@ -319,9 +328,11 @@ impl IoOperationHandler {
             .map(|f| (f, true))
             .or_else(|_| std::fs::File::open(path).map(|f| (f, false)));
         if let Ok((f, writable)) = opened {
+            let file = Arc::new(f);
+            let ino = CachedFile::ino_of(&file);
             self.fd_cache.insert(
                 stateid.other,
-                CachedFile { file: Arc::new(f), path: path.clone(), writable },
+                CachedFile { file, path: path.clone(), writable, ino },
             );
         }
     }
@@ -337,15 +348,26 @@ impl IoOperationHandler {
         stateid_other: &[u8; 12],
         want_writable: bool,
     ) -> Option<(PathBuf, Arc<File>)> {
-        let embedded = FileHandleManager::parse_path_lenient(fh).ok()?;
+        // v1/v3 handles embed the original path; v4 kernel handles
+        // embed only the ino (no path exists to extract). Either key
+        // finds the anchored open file.
+        let embedded = FileHandleManager::parse_path_lenient(fh).ok();
+        let ino = FileHandleManager::object_ino(fh);
         if let Some(e) = self.fd_cache.get(stateid_other) {
-            if e.path == embedded && (!want_writable || e.writable) {
-                return Some((embedded, e.file));
+            let same_object = embedded.as_ref().is_some_and(|p| e.path == *p)
+                || ino.is_some_and(|i| i != 0 && e.ino == i);
+            if same_object && (!want_writable || e.writable) {
+                return Some((e.path, e.file));
             }
         }
-        self.fd_cache
-            .find_by_path(&embedded, want_writable)
-            .map(|e| (embedded, e.file))
+        if let Some(p) = embedded {
+            let hit = self.fd_cache.find_by_path(&p, want_writable);
+            if let Some(e) = hit {
+                return Some((p, e.file));
+            }
+        }
+        let hit = ino.and_then(|i| self.fd_cache.find_by_ino(i, want_writable));
+        hit.map(|e| (e.path, e.file))
     }
 
     /// Get client ID from compound context
@@ -1052,6 +1074,7 @@ impl IoOperationHandler {
                             file: Arc::clone(&file),
                             path: path.clone(),
                             writable,
+                            ino: CachedFile::ino_of(&file),
                         });
                     }
                     file
@@ -1246,6 +1269,7 @@ impl IoOperationHandler {
                     file: Arc::clone(&file_arc),
                     path: path.clone(),
                     writable: true,
+                    ino: CachedFile::ino_of(&file_arc),
                 });
                 debug!("WRITE: Cached new FD for {:?} (path: {:?})", op.stateid, path);
             }

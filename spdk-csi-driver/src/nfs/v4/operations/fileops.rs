@@ -2556,8 +2556,18 @@ impl FileOperationHandler {
             Ok(p) => p,
             Err(e) => {
                 if let Some(view) = &self.open_files {
-                    if let Ok(embedded) = FileHandleManager::parse_path_lenient(current_fh) {
-                        if let Some(file) = view.file_for_path(&embedded) {
+                    // v1/v3 handles carry the original path; v4 kernel
+                    // handles carry only the ino. Either identity finds
+                    // the OPEN-anchored file (F17b).
+                    let hit = FileHandleManager::parse_path_lenient(current_fh)
+                        .ok()
+                        .and_then(|p| view.file_for_path(&p).map(|f| (p, f)))
+                        .or_else(|| {
+                            FileHandleManager::object_ino(current_fh)
+                                .and_then(|i| view.entry_for_ino(i))
+                        });
+                    {
+                        if let Some((embedded, file)) = hit {
                             debug!("GETATTR: {:?} replaced on disk; fstat via open fd", embedded);
                             let snap = tokio::task::spawn_blocking(move || {
                                 file.metadata()

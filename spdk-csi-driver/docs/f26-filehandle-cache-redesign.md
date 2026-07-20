@@ -720,6 +720,48 @@ per-row-fsync mutex serialization in one structure.
   reload — the instance_id-inversion design work from "What stays");
   then phase-3 drills 3.1 → 3.9 on a fresh cluster.
 
+**Phase C status (2026-07-19, non-root configuration): CODE COMPLETE
+for the RWX scope; C6 pending.** Implementation refinements vs the
+sketch above, all deliberate:
+
+- **Scope realized as a mode, not a rewrite:** `fh_kernel.rs` + a
+  `kernel: Option<KernelFh>` backend in FileHandleManager, opt-in via
+  `FLINT_FH_KERNEL=1` (the flint-nfs PodSpec sets it; unit suites
+  don't, so path-semantics tests stay meaningful). Startup probe does
+  a real mint+resolve; failure falls back to path handles with a loud
+  warning (mis-deployed-cap safety net). pNFS MDS/DS deployments stay
+  on the legacy scheme until C1's own migration — `parse_path_lenient`
+  therefore remains for DS code, per the §12.1(a) scope rule.
+- **v4 wire format** `[4][instance:8][ino:8][hmac16][htype:4][klen:1]
+  [khandle]` (~46 B ext4). The embedded ino is flint's portable object
+  identity: the F17b/c unlink-open fallbacks (GETATTR fileops,
+  READ/WRITE ioops `stale_open_fallback`) now key the open-files view
+  by ino (`FdCache::find_by_ino`, new `by_ino` index) since v4 embeds
+  no path and the kernel answers ESTALE for nlink-0 inodes.
+- **Resolve returns a PATH** (open_by_handle_at O_PATH + /proc/self/fd
+  readlink), so the entire op layer is untouched; the FdCache re-key
+  became an *additional* ino index, not a rewrite.
+- **C4 deletions realized as emptiness:** in v4 mode the path maps are
+  never populated (mints bypass, legacy-resolve cache-inserts
+  suppressed), so `note_fs_rename`/`note_fs_remove` scans are O(0) —
+  the F26 term is gone without deleting code the pNFS deployment and
+  the dev platform still compile. Physical deletion follows the pNFS
+  migration.
+- **C5 realized as dual-read, no DB migration:** legacy v1/v2/v3
+  handles keep resolving (self-describing / id-table), so persisted
+  stateids referencing old-format fh bytes stay valid across the
+  upgrade; clients converge to v4 on their next lookups.
+- **Non-root shipped:** PodSpec runAsUser/Group 65532, drop ALL + add
+  [DAC_READ_SEARCH, NET_BIND_SERVICE, CHOWN, FOWNER, DAC_OVERRIDE],
+  allowPrivilegeEscalation deliberately unset (no_new_privs would
+  block file caps); Dockerfiles setcap the same list on
+  flint-nfs-server (libcap2-bin added to the runtime image).
+- **Validated:** 724/724 lib tests (macOS; incl. v4 codec/HMAC-tamper/
+  key-stability units); syscall semantics proven by the A1 + non-root
+  capsh spikes on ext4/6.8. **Pending C6:** Linux full suite + kernel
+  e2e test + FLINT_FH_KERNEL=1 churn bench (must be flat) on the
+  x86 builder, pynfs, restart/reclaim matrix, fresh-cluster phase-3.
+
 ## 13. Sources
 
 - Linux `name_to_handle_at(2)` / `open_by_handle_at(2)` man pages

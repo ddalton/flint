@@ -162,6 +162,14 @@ pub struct FileHandleManager {
     /// in different orders. Absent (tests, dev) = v2 handles don't
     /// survive restart — clients see NFS4ERR_STALE and re-walk.
     backend: RwLock<Option<Arc<dyn StateBackend>>>,
+    /// v4 kernel-handle backend (F26 §12). `Some` when
+    /// `FLINT_FH_KERNEL=1` and the startup probe passed. When active,
+    /// mint/resolve bypass every map above (they stay EMPTY, so
+    /// `note_fs_rename`/`note_fs_remove` scans are O(0) — the F26
+    /// mechanism has nothing to chew on); legacy v1/v2/v3 handles
+    /// keep resolving for upgrade continuity (persisted stateids
+    /// embed old-format fh bytes — no state-DB migration needed).
+    kernel: Option<Arc<crate::nfs::v4::fh_kernel::KernelFh>>,
 }
 
 impl FileHandleManager {
@@ -218,6 +226,32 @@ impl FileHandleManager {
             warn!("Failed to add export to pseudo-filesystem: {}", e);
         }
 
+        // F26 §12: kernel inode handles, opt-in via FLINT_FH_KERNEL=1
+        // (the flint-nfs PodSpec sets it; unset for unit suites so
+        // path-handle semantics tests stay meaningful). The probe does
+        // a real mint+resolve roundtrip — missing CAP_DAC_READ_SEARCH,
+        // seccomp, or a non-export_operations fs falls back LOUDLY to
+        // path handles instead of serving all-STALE.
+        let kernel = if std::env::var("FLINT_FH_KERNEL").map(|v| v == "1").unwrap_or(false) {
+            match crate::nfs::v4::fh_kernel::KernelFh::try_new(&export_path, instance_id) {
+                Ok(k) => {
+                    info!("🧬 v4 kernel filehandles ACTIVE (probe passed) — path maps retired");
+                    Some(Arc::new(k))
+                }
+                Err(e) => {
+                    warn!(
+                        "FLINT_FH_KERNEL=1 but kernel handles unavailable ({}); \
+                         falling back to path-based handles — check the pod's \
+                         DAC_READ_SEARCH grant",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             instance_id,
             path_to_handle: Arc::new(RwLock::new(HashMap::new())),
@@ -229,6 +263,7 @@ impl FileHandleManager {
             path_to_id: Arc::new(RwLock::new(HashMap::new())),
             rename_aliases: Arc::new(RwLock::new(HashMap::new())),
             backend: RwLock::new(None),
+            kernel,
         }
     }
 
@@ -260,6 +295,19 @@ impl FileHandleManager {
     pub fn path_to_filehandle(&self, path: &Path) -> Result<Nfs4FileHandle, String> {
         // Normalize path (remove . and ..)
         let normalized = self.normalize_path(path)?;
+
+        // v4 kernel handles (F26 §12): stateless mint, no cache, no
+        // maps. A not-yet-created object (pre-existence mint, §12.1c)
+        // falls back to the legacy v1 path handle — same shape the v3
+        // scheme used before an object existed.
+        if let Some(k) = &self.kernel {
+            use crate::nfs::v4::fh_kernel::MintError;
+            match k.mint(&normalized) {
+                Ok(fh) => return Ok(fh),
+                Err(MintError::NoEnt) => return self.generate_handle(&normalized),
+                Err(MintError::Other(e)) => return Err(e),
+            }
+        }
 
         // Check cache first. A cached v3 handle pins an inode — if the
         // object at this path was replaced since (rename-over, rm+create),
@@ -303,6 +351,26 @@ impl FileHandleManager {
 
     /// Resolve a file handle back to a path
     pub fn filehandle_to_path(&self, handle: &Nfs4FileHandle) -> Result<PathBuf, String> {
+        // v4 kernel handles: HMAC-verify + open_by_handle_at; the
+        // kernel checks inode+generation and the returned path tracks
+        // renames. ESTALE (incl. unlinked-but-open — the kernel can't
+        // reconnect a nlink-0 dentry) maps to the same stale error the
+        // callers' F17b/c open-file fallbacks already handle, now
+        // keyed by the handle's embedded ino (`object_ino`).
+        if handle.data.first() == Some(&crate::nfs::v4::fh_kernel::FH_V4_VERSION) {
+            use crate::nfs::v4::fh_kernel::ResolveError;
+            let k = self.kernel.as_ref().ok_or_else(|| {
+                "v4 handle presented but kernel-handle mode inactive".to_string()
+            })?;
+            return match k.resolve(&handle.data) {
+                Ok(p) => Ok(p),
+                Err(ResolveError::Stale) => {
+                    Err("Stale file handle: object was replaced or removed".to_string())
+                }
+                Err(ResolveError::Other(e)) => Err(e),
+            };
+        }
+
         // Check cache first
         let cached = {
             let cache = self.handle_to_path.read().unwrap();
@@ -341,7 +409,10 @@ impl FileHandleManager {
             }
         }
 
-        if !was_cached {
+        // In v4 kernel-handle mode the maps stay EMPTY by design (the
+        // F26 growth term): legacy handles still resolve statelessly
+        // above, but nothing repopulates the caches.
+        if !was_cached && self.kernel.is_none() {
             let mut path_cache = self.path_to_handle.write().unwrap();
             let mut handle_cache = self.handle_to_path.write().unwrap();
             // path→handle must not regress to an older generation: only
@@ -380,6 +451,14 @@ impl FileHandleManager {
         } else {
             None
         }
+    }
+
+    /// The object inode a handle names, for v3 (embedded+hashed) and
+    /// v4 (embedded, HMAC-covered) handles. This is the key the F17b/c
+    /// unlink-open fallbacks use against the open-files view — v4
+    /// handles carry no path, so ino is the portable identity.
+    pub fn object_ino(handle: &Nfs4FileHandle) -> Option<u64> {
+        Self::embedded_ino(handle).or_else(|| crate::nfs::v4::fh_kernel::v4_ino(&handle.data))
     }
 
     /// Get the root file handle (PUTROOTFH)
@@ -462,6 +541,11 @@ impl FileHandleManager {
                         FH_V2_LEN,
                         handle.data.len()
                     )));
+                }
+            }
+            4 => {
+                if handle.data.len() < crate::nfs::v4::fh_kernel::FH_V4_MIN {
+                    return Err(HandleError::Malformed("v4 file handle too short".to_string()));
                 }
             }
             v => {

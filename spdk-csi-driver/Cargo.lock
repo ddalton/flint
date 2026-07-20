@@ -2561,6 +2561,7 @@ dependencies = [
  "hmac",
  "k8s-openapi",
  "kube",
+ "libc",
  "nix",
  "pbkdf2",
  "prost",
