@@ -1118,6 +1118,89 @@ ordering/coalescing, read-your-writes, and drop-flush regression
 tests. Bench numbers are macOS-fsync; re-confirm on Linux during the
 C6 gate, and live validation rides the phase-3 re-run.
 
+### C6 live gates on runx (2026-07-19/20) — F28 found+fixed; F29/F30 opened during recovery
+
+The 3.1 re-run on u12.0 (v4 handles + F27 writer, non-root pod)
+failed on the write-probe again — but with a NEW signature, not
+F26's uniform crawl.
+
+**F28 (P1, FIXED d8c4502 in u12.2, live-validated 2026-07-20):
+O(live-opens) scan on every CLOSE melts the server under connection
+churn.** Signature on u12.1 (verbose instrumentation build): CLOSE
+rate 240/min vs OPEN 2/min, growing "CLOSE: Invalid stateid …
+StateId not found" storm, FREE_STATEID=0, server CPU idle with
+worker threads futex-parked, per-op latency 100ms–5s. Root cause by
+elimination (network/disk/fsync/CPU all exonerated via mountstats,
+wchan sampling, socket states, stateid-correlated logs):
+`close_open_state` located the map key with
+`open_states.iter().find()` — a full scan of live opens per CLOSE,
+under churn that allocated ~28.6k stateids in 13 min (sequential
+counters confirm). Once drain lagged allocation, CLOSE replies
+slipped past the client RTO; retransmitted CLOSEs re-executed as
+not-found (BAD_STATEID) and fed back into the churn. Also explains
+the historic ~7% CLOSE not-found residual seen in every prior 3.1
+attempt. Fix: `open_state_keys` reverse index (stateid `other[12]` →
+open key), populated at record_open, consumed at close — O(1) CLOSE.
+Live validation on u12.2: see soak numbers below.
+
+**F29 (P1, product gap, OPEN): a force-deleted NFS pod rescheduled
+onto the same node bind-mounts a dead staging mount.** Observed live
+2026-07-20 as a 4-step chain: (1) the u12.2 helm roll restarted the
+csi-node DS; aws-4's spdk-tgt restart at 07:05:00 orphaned
+/dev/ublkb0 (ublk has no user-recovery flag configured — queue I/O
+hangs forever instead of erroring), freezing the NFS server mid-I/O
+at 07:05:01.745 (threads D-state in folio_wait_bit; pod Running,
+0 restarts, log silent for 6.5h). (2) v1.15 graceful-recovery
+re-created the lvol's ublk under a NEW device id, but nothing
+remounts the staged filesystem — the staging mount still referenced
+the corpse. (3) Force-delete skips NodeUnstage; kubelet's
+volume-manager cache still says "staged", so the replacement pod on
+the same node skips NodeStage (where the v1.10 self-heal lives) and
+NodePublish blind bind-mounts the dead superblock. (4) The
+replacement "boots": the v4 probe passes from page cache, then the
+first real disk I/O (SQLite state-DB open touching the ext4 journal)
+parks in D (do_get_write_access) — wedged-at-init, silent, and
+SIGKILL-proof; the zombie's D-state siblings pin the old netns so
+the client's ESTABLISHED TCP never breaks either. Fix shape:
+NodePublish must verify the staging path is a live mountpoint on the
+current device epoch (statfs/liveness probe) and trigger re-stage
+instead of bind-mounting; evaluate UBLK user-recovery so orphaned
+queues error out rather than hang. Runbook rule (landmine addendum):
+NEVER bounce NFS consumers while a csi-node DS roll is in flight —
+consumers restart AFTER the roll settles.
+
+**F30 (P0-class product gap, OPEN): flint-nfs-server happily exports
+an empty directory as if it were the volume.** During F29 recovery,
+a lazy out-of-band umount of the dead staging mount (without a
+kubelet restart) left kubelet's cache saying "staged"; the next
+NodePublish bind-mounted the now-bare mountpoint directory on the
+node's 8GB root disk. The server booted on it without complaint:
+created a fresh `.flint-nfs/`, a NEW fh.key, an empty state.db — and
+served. Every client handle failed HMAC ("v4 filehandle
+authentication failed" storm); from the client the volume's data
+simply vanished. No refusal, no warning. Fix shape: stamp a
+volume-identity marker at first NodeStage (e.g.
+`.flint-nfs/volume-id` = volume uuid) and verify it at server
+startup and/or NodePublish; on mismatch or absence-where-expected,
+crash loudly instead of serving an empty export. (fh.key mtime was
+the forensic tell: junk key 13:55, real key 05:51.)
+
+Recovery recipe that worked (in order): `umount -l` the stale pod
+binds + globalmount → graceful pod delete → remove junk `.flint-nfs`
+from the bare dir → `systemctl restart kubelet` (resyncs the
+volume-manager cache — REQUIRED after any out-of-band umount) → pod
+recreate runs a real NodeStage → fresh ublk device mounts, original
+fh.key returns, old client handles validate again; pg-0 recovered
+without a bounce (postgres WAL crash-recovery, 20M-row table
+intact).
+
+Instrumentation lesson: the u12.1 `--verbose` NFS build multiplies
+data-path latency ~300× (client-side stat 358ms → 1ms after turning
+it off; pg_isready 1.6–2.2s → 31ms). ~40 DEBUG lines/RPC through the
+containerd stdout pipe (10MB log rotation every ~10s) backpressures
+the reply path. Verbose is for correctness forensics only; never
+measure latency or run gates with it on.
+
 ## Findings
 
 ### F1 — RECLASSIFIED 2026-07-13: concurrent postmasters, not a storage bug
