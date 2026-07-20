@@ -434,8 +434,9 @@ it adds, and retires F17/F23/F26 as a category.
 - **Backing fs support.** Requires a local fs that implements
   `export_operations`. flint's export is **ext4** on the ublk block
   device (confirmed: `rwx_nfs.rs` references the "ext4 journal on the
-  backing raid"), which fully supports `name_to_handle_at`. A move to
-  a fs without it (e.g. plain tmpfs) would break this route.
+  backing raid"), which fully supports `name_to_handle_at`. XFS is
+  equally first-class (§12.2). A move to a fs without
+  `export_operations` (e.g. plain tmpfs) would break this route.
 - **Scope.** Larger blast radius than §5 (touches mint/resolve and the
   restart/reclaim path), so it wants its own drill cycle. Hence:
   **ship §5 now to stop the bleeding; schedule §12 as the durable
@@ -447,26 +448,197 @@ every structure it adds, §12 deletes — and there is no production fire
 to justify an interim patch (the cluster is torn down; nothing is
 paging). §12 is a *net-negative* diff that retires the design smell
 behind the whole F17/F23/F24/F26 family, and hands F17+F23 to the
-kernel's battle-tested generation/inode semantics. The plan:
+kernel's battle-tested generation/inode semantics.
 
-1. **Capability spike first (~1 h, gating).** In the real flint-nfs
-   pod securityContext, `name_to_handle_at` on `/mnt/volume` and
-   `open_by_handle_at` the result. This de-risks the only hard
-   dependency (Ganesha flags `open_by_handle_at` as "tricky inside a
-   container").
-   - **Green (expected):** proceed to step 2; §5 is never written.
-   - **Red (cap blocked by seccomp/SELinux/runtime and ungrantable):**
-     fall back to the path-based **generation-counter** design of
-     §11.2 (dcache-RCU / SOSP '15), *not* §5's point-eviction.
-2. **Implement §12 mint/resolve** against the ext4 export, wiring
-   `open_by_handle_at` fds into the existing `FdCache`.
-3. **Re-validate the restart/reclaim path** (the real design work —
-   kernel handles surviving restart inverts today's instance_id
-   "STALE-on-restart" behavior) with pynfs + a full phase-3 drill
-   re-run. This gate is already owed after the F17–F24 handle changes.
+A pre-implementation design review (2026-07-19) found four gaps — one
+blocking (striped pNFS) — plus a performance prerequisite; they are
+**§12.1**. The backing-fs question (incl. XFS) is **§12.2**, the
+quantitative why-this-fixes-F26 argument and its proof gates are
+**§12.3**, and the full plan of record — superseding the earlier
+three-step sketch — is **§12.4**. The capability spike remains the
+first, gating step (red → fall back to §11.2 generation counters,
+*not* §5 point-eviction).
 
 §5 remains documented above only as the fallback shape and as the
 explanation of the F26 mechanism; it is not the plan of record.
+
+### 12.1 Design-review findings (2026-07-19) — gaps the plan must close
+
+Reviewed against the code before implementation. Four gaps (one
+blocking) and one performance prerequisite. None invalidates §12; all
+must be in the plan.
+
+**(a) BLOCKING — striped pNFS depends on paths embedded in MDS
+handles.** The DS rebases striped I/O by extracting the path from the
+MDS-minted handle via `parse_path_lenient` (filehandle.rs:595; callers
+pnfs/ds/io.rs:465, fileops.rs:2559/2587, ioops.rs:340/747,
+dispatcher.rs:2793; see the module comment at filehandle.rs:50-53).
+Kernel handles are opaque **and filesystem-local**: a handle minted on
+the MDS's fs cannot be resolved by `open_by_handle_at` on a DS's
+different fs, and it carries no path to rebase from. **Scope rule: v4
+kernel handles are for locally-served objects only.** Every DS-visible
+handle must be the logical v2 format (`filehandle_pnfs.rs` — file_id
+based, fs-independent). Before v4 ships, each `parse_path_lenient`
+caller is migrated to v2 handles handed out in the layout
+(`nfl_fh_list`), then `parse_path_lenient` is deleted with them. This
+is its own reviewed change with its own pynfs/striped-drill gate
+(step C1 in §12.4).
+
+**(b) Handle authentication — don't downgrade to guessable handles.**
+Today handles are self-verifying (SHA-256 over path+instance+ino,
+re-checked every resolve) and every resolve passes the
+export-containment check (filehandle.rs:817, fileops.rs:2384).
+`open_by_handle_at` resolves by raw ino+generation — small, enumerable
+values — and bypasses directory permissions entirely (that is *why* it
+needs CAP_DAC_READ_SEARCH). A forged handle reaches **any** inode on
+the backing fs, including `.flint-nfs/state.db`, which lives on the
+export (server_v4.rs:105). Remedy (cheap): the v4 wire format carries
+a truncated HMAC-SHA256 (16 B) over [export_id ‖ kernel_handle], keyed
+by a secret persisted at `<export>/.flint-nfs/fh.key` — created on
+first boot, travels with the volume so handles stay valid across
+failover (a per-boot key would re-introduce STALE-on-restart, the
+exact behavior §12 removes). Verify before `open_by_handle_at`:
+~100 ns, no syscall, restores today's unforgeability.
+
+**(c) Pre-existence mints.** `name_to_handle_at` requires the object
+to exist; today v1 handles are minted for not-yet-created objects
+(filehandle.rs:277-284) and upgraded to v3 on the next lookup. Plain
+OPEN4_CREATE is fine — creation happens before the handle is returned
+— but every other v1-mint site must be audited and redesigned
+(step C2).
+
+**(d) State-DB migration.** Persisted stateids embed wire-FH bytes
+(`StateIdRecord.filehandle`, state_backend/mod.rs:199). An unmanaged
+format cutover makes every persisted stateid unresolvable, so the
+*first failover after the upgrade* — the very event the persistence
+exists for — would BAD_STATEID every client. Migration is cheap
+because v3 handles embed the path: at first v4 boot, for each record
+holding an old-format fh, parse the path out of the v3 bytes,
+`name_to_handle_at` it, rewrite the record; drop records whose object
+is gone (client sees BAD_STATEID on next use — no worse than today's
+courtesy-release outcome). One-time, at load, before serving
+(step C5).
+
+**(e) FdCache re-keying (performance prerequisite).** The resolve path
+flows "straight into FdCache" only if FdCache stops being keyed by
+path (`find_by_path`: ioops.rs:211/301/347/1382). Re-key by handle
+bytes (or (ino, generation)) in the same change — otherwise every
+resolve pays a fresh `open_by_handle_at` plus fd churn. Folds into the
+already-planned FdCache refactor (F24 class retirement).
+
+### 12.2 Backing-fs support — ext4 today; XFS equally first-class
+
+The design treats the kernel handle as **opaque bytes** (never decode
+ino width or layout), which makes it fs-agnostic across every fs with
+`export_operations`:
+
+| fs | fid contents | fid size | notes |
+|---|---|---|---|
+| ext4 (current) | 32-bit ino + 32-bit gen | 8 B | native support |
+| XFS | 64-bit ino + 32-bit gen | 12 B | userspace handles predate the syscalls (`XFS_IOC_PATH_TO_HANDLE`); inode64 reuses ino numbers less aggressively than ext4 (generation still checked) |
+| btrfs | root + ino + gen | ~20 B | works; multi-subvolume fsid quirks — not used, out of scope |
+| tmpfs / overlayfs | — | — | no `export_operations` (overlay only with `nfs_export=on` + index) — unsupported |
+
+A future ext4→XFS switch of the export fs (e.g. for allocation
+behavior under parallel writers) requires **no handle change**. Total
+v4 wire size ≈ 1 (ver) + 4 (export_id) + 16 (HMAC) + 1 (len) + ≤12
+(fid) ≈ **34 B** — comfortably under the 128 B NFS4 limit and
+*smaller* than today's v3 (≥51 B + path), so PUTFH/layout traffic
+shrinks.
+
+### 12.3 Performance analysis — why this fixes F26, and how we prove it
+
+F26's measured shape (drill 3.1, u11.13→17): uniform 50–200 ms/op
+across connections, 84% system time, worsens with runtime, fresh pod
+instantly fast. Mechanism (§1): every RENAME/REMOVE takes **write**
+locks on `path_to_handle`/`handle_to_path` and does O(N) full-map
+scans plus O(N) PathBuf clones (`note_fs_rename` filehandle.rs:687,
+`note_fs_remove` :762) while every fh-resolving op takes the same
+locks as read; N grows without bound (nothing evicts). postgres
+renames/removes constantly (WAL recycling, temp files), so the
+write-lock storms serialize the whole server.
+
+Per-op cost, before → after:
+
+| op | today (v3 path handles) | after §12 (v4 kernel handles) |
+|---|---|---|
+| resolve | RwLock read + 2 map lookups + SHA-256 + `stat` re-verify (syscall) | HMAC verify (~100 ns) + FdCache hit; miss = 1× `open_by_handle_at` (≈ a stat) |
+| rename | O(N) scan + clone under **write** lock + O(A) alias re-point + O(M) v2 re-key | **zero** — no bookkeeping exists |
+| remove | O(N) scan under **write** lock | **zero** |
+| mint | SHA-256 + 2 map inserts under write lock | 1× `name_to_handle_at` |
+| memory | unbounded maps (the growth term) | none (kernel icache/dcache, self-bounded) |
+
+Two points make the argument tight:
+
+1. **The current fast path already pays a syscall per resolve** (the
+   ino re-verify stat). §12 swaps it for `open_by_handle_at`
+   (comparable, often cheaper — no path walk). Steady-state per-op
+   cost is a wash to slightly better, and the per-resolve SHA-256
+   disappears.
+2. The fix **deletes** the contended structures instead of tuning
+   them: the O(N)·write-lock term — the entire F26 mechanism — and
+   the unbounded-growth term (the fresh-pod-fast asymmetry) are gone
+   *by construction*. Nothing on the new path takes a process-wide
+   lock; scaling is per-core. knfsd runs this exact architecture at
+   millions of ops/s.
+
+**Honesty note + proof gates.** The F26 diagnosis is from code audit
+plus symptom fit (the cluster was torn down before a live `perf`
+profile existed). The plan therefore carries its own proof:
+
+- **Churn microbench (step A2, no cluster needed):** populate N
+  paths, run sustained rename/remove churn on one task while
+  measuring resolve p50/p99 on others. On **current** code it must
+  reproduce the F26 curve (latency grows with N and churn-minutes) —
+  that confirms the mechanism. On §12 code it must be **flat**.
+- **Cluster gates:** drill 3.1 write-probe PASS post-migration; no
+  system-time inflation over a multi-hour churn soak; then 3.1b–3.9.
+
+If the microbench on current code does NOT reproduce the curve, stop:
+the diagnosis is wrong and §12 (still worth doing for the
+F17/F23/F24 class retirement) is not the F26 fix — resume the live
+census (census-before-restart protocol in the campaign notes).
+
+### 12.4 Implementation plan (plan of record)
+
+**Phase A — gates (no cluster, ~½ day)**
+
+- **A1. Capability spike** (gating, unchanged): under the production
+  flint-nfs securityContext (lima/kind with the same securityContext
+  is sufficient), `name_to_handle_at` on the export +
+  `open_by_handle_at` the result. Green → proceed. Red (cap
+  ungrantable by seccomp/SELinux/runtime) → fall back to §11.2
+  generation counters, not §5.
+- **A2. Churn microbench baseline** on current code (§12.3) — must
+  reproduce the F26 curve; doubles as the regression harness for C6.
+
+**Phase B — F27 ordered coalescing writer** (independent of v4; land
+first — small blast radius; full design in the campaign doc F27
+entry). Fixes the live stateid put/delete ordering bug and the
+per-row-fsync mutex serialization in one structure.
+
+**Phase C — kernel handles**
+
+- **C1. pNFS scoping first** (12.1a): layouts hand out v2 DS handles;
+  migrate every `parse_path_lenient` caller; delete it. Gate: pynfs
+  pNFS blocks + striped-I/O drill.
+- **C2. v1 pre-existence-mint audit** (12.1c): enumerate mint sites;
+  confirm OPEN4_CREATE ordering; redesign any true pre-existence use.
+- **C3. v4 mint/resolve** (12.1b): wire format
+  `[ver=4][export_id][hmac16][len][kernel_handle]`; `fh.key` secret
+  on the export; mint = `name_to_handle_at` post-create; resolve =
+  HMAC verify → FdCache (re-keyed, 12.1e) → `open_by_handle_at` on
+  miss; `mount_fd` = O_PATH fd on the export root held for server
+  life.
+- **C4. Deletions:** `path_to_handle`, `handle_to_path`,
+  `id_to_path`/`path_to_id`, `rename_aliases`, `note_fs_rename`,
+  `note_fs_remove`, `follow_rename_alias`, the SHA-256 identity
+  scheme.
+- **C5. State-DB migration at load** (12.1d).
+- **C6. Gates:** full pynfs; microbench flat (§12.3); restart/reclaim
+  matrix (graceful roll, SIGKILL, cross-node failover with state
+  reload — the instance_id-inversion design work from "What stays");
+  then phase-3 drills 3.1 → 3.9 on a fresh cluster.
 
 ## 13. Sources
 

@@ -994,19 +994,36 @@ Fallback ONLY if the cap is ungrantable: per-directory generation
 counters + lock-free reads (Linux dcache RCU / SOSP'15), not
 point-eviction.
 
-**F27 (P2, BACKLOG — NFSv4 state persistence is a throughput
-ceiling).** Surfaced while root-causing F26 (exonerated as F26's cause
-but real on its own). The NFS server persists volatile state
-(clients, sessions, **stateids**) through a single
-`Arc<Mutex<Connection>>` SQLite handle (`state_backend/sqlite.rs`),
-and it does so **per operation on the hot path**: every OPEN persists
-a stateid, every CLOSE deletes one, via `spawn_blocking` that all
-contend for the one mutex; WAL commits add system-time I/O. On the
-fresh u11.17 pod the reload was **208 stateids** — i.e. the server had
-been synchronously writing a row per open through one lock under load.
-This serializes all state mutations across all connections and caps
-OPEN/CLOSE throughput independent of the data path; it will bite at
-higher client/open counts even after F26 is fixed.
+**F27 (P2, BACKLOG — NFSv4 state persistence: throughput ceiling +
+put/delete ordering bug).** Surfaced while root-causing F26
+(exonerated as F26's cause but real on its own); mechanism corrected
+by the 2026-07-19 design review. The NFS server persists volatile
+state (clients, sessions, **stateids**) through a single
+`Arc<Mutex<Connection>>` SQLite handle (`state_backend/sqlite.rs:87`).
+Persists are **not** synchronous on the op path — every OPEN/CLOSE
+fires a detached `spawn_persist` task (`state_backend/mod.rs:62`) and
+returns immediately. The real ceiling is three-fold: (i) all persist
+tasks serialize on the one connection mutex, and production opens
+`synchronous=FULL` (`server_v4.rs:118`) — one fsync per row, serially;
+(ii) each queued persist parks a `spawn_blocking` slot while waiting
+on that mutex, so a burst can exhaust tokio's blocking pool and starve
+unrelated blocking work (an indirect hot-path coupling); (iii) the
+backlog is unbounded, so under load persisted state lags memory
+arbitrarily far behind — the failover loss window silently widens. On
+the fresh u11.17 pod the reload was **208 stateids** — a row per open,
+one lock, one fsync at a time.
+
+**The same code has a live ordering bug (correctness, arguably P1,
+exists today).** Stateid put and delete are independent unordered
+tasks (`stateid.rs:445-460`); `put_stateid` is INSERT OR REPLACE and
+`delete_stateid` deletes by `other` (`sqlite.rs:550/602`). An
+OPEN→CLOSE in quick succession can execute delete-then-put: the late
+put **resurrects a closed stateid** in the DB, and after a failover
+`load_records` restores it — for a lock stateid that is a phantom
+persisted lock that can block another client's conflicting lock.
+Out-of-order puts likewise persist a stale seqid. Clients already
+solved exactly this with an ordered mpsc worker (`client.rs:412-421`);
+stateids never got the same treatment.
 
 **How other userspace NFS servers avoid this — persist almost
 nothing, rebuild via grace+reclaim.** Both mainstream implementations
@@ -1034,33 +1051,63 @@ failover instance enforces a coordinated grace period; `rados_ng`/
 `rados_cluster` additionally handle crash-*during*-grace (a hole in
 the simpler `rados_kv`).
 
-**Why flint diverges, and the fix options.** flint deliberately
-persists *full* stateid state and reloads it so a rescheduled NFS pod
-resumes exactly where the old one stopped and the client's in-flight
-RPCs just complete — **seamless failover with no grace-period stall**
-(observed live: "recreated server loads persisted state, 11 queued
-RPCs complete"). That intent is good; the *implementation* (synchronous
-per-op writes behind one mutex) is the ceiling. Options, keeping the
-seamless-failover goal:
-- (a) **Decouple persistence from the op critical path** —
-  write-behind / batched / group-commit with bounded lag, so OPEN/CLOSE
-  return without blocking on fsync; the reload still finds recent state.
-  (Recommended: preserves seamless failover, removes the hot-path
-  serialization.)
-- (b) **Shard the connection** (per-client or hash-sharded SQLite /
-  per-shard WAL) so mutations don't all serialize on one mutex.
-- (c) **Adopt the mainstream model** — persist only client-recovery
-  records + rely on grace/reclaim. Much lighter and battle-tested, but
-  reintroduces a bounded reclaim stall on reschedule (the very thing
-  the RWX seamless-cutover work aimed to avoid) — a genuine trade-off,
-  not a pure win.
-Recommendation: (a), optionally with (b), because flint has already
-chosen seamless failover; (c) only if a bounded grace period on
-reschedule becomes acceptable. SQLite itself stays (knfsd validates
-it); what changes is per-op-synchronous → batched/off-critical-path.
+**Why flint diverges, and the fix (design settled 2026-07-19).** flint
+deliberately persists *full* stateid state and reloads it so a
+rescheduled NFS pod resumes exactly where the old one stopped and the
+client's in-flight RPCs just complete — **seamless failover with no
+grace-period stall** (observed live: "recreated server loads persisted
+state, 11 queued RPCs complete"). That intent stays. The fix is one
+structure, not a menu:
+
+- **Single ordered coalescing writer.** One dedicated task owns the
+  SQLite connection (the `Arc<Mutex<_>>` is deleted), fed by an
+  ordered mpsc channel of typed ops (put/delete stateid, client,
+  session, lock…). Per-key coalescing while queued: put-then-delete
+  collapses to delete, put-then-put keeps the last — so the queue is
+  bounded by live-key count, not op rate. Group commit every ≤5 ms or
+  256 ops, whichever first; explicit flush on graceful shutdown. This
+  one design (1) fixes the ordering bug — channel order is apply
+  order; (2) removes the mutex and the spawn_blocking pressure; (3)
+  **bounds** the loss window — a ≤5 ms flush interval strictly beats
+  today's unbounded backlog, so seamless failover gets *stronger*, not
+  weaker; (4) amortizes fsync so `synchronous=FULL` durability holds
+  at ≥10k persisted ops/s — orders of magnitude above any OPEN/CLOSE
+  workload.
+- **Rejected: sharding the connection.** SQLite in WAL mode has a
+  single writer lock *per database file*; extra connections buy zero
+  write parallelism unless the DB splits into separate files —
+  complexity the coalescing writer makes unnecessary.
+- **Fallback: the mainstream model** (client-recovery records only +
+  grace/reclaim) remains available if a bounded reclaim stall on
+  reschedule ever becomes acceptable — lighter and battle-tested, but
+  it surrenders the seamless-failover property on purpose.
+
+**Is SQLite the right store at all? Yes — keep it.** The workload is
+tiny rows (hundreds live), point writes, full-scan-on-boot, one
+process; behind the coalescing writer the engine sees at most a few
+hundred group commits/s, which SQLite sustains at FULL with a huge
+margin. It is the most crash-tested embedded store available, and
+knfsd uses it for this exact job. Alternatives considered and
+rejected: LMDB/redb/sled (embedded KV — no gain at this size, younger
+crash pedigree, migration risk), RocksDB (background compaction and
+tuning burden for hundreds of rows), and a hand-rolled append-only
+log + snapshot (fastest on paper, but hand-rolled durable recovery is
+exactly the bug class that produced F5 — flint's own patched blob
+recovery durably emptying stores). The bottleneck was never the
+engine; it was one-row-per-fsync through one mutex. Revisit only if
+state ever needs multi-writer/multi-node access — that is an
+architecture change (Ganesha's epoch-tagged shared RADOS model), not
+an engine swap.
+
+Sequencing: the writer is independent of the F26 §12 handle work and
+can land first (small blast radius). Note the §12 FH-format cutover
+invalidates persisted stateid records (they embed wire-FH bytes,
+`state_backend/mod.rs:199`); the migration is specced in the F26 doc
+§12.1(d) and ships with §12, not with this fix.
 Sources: `nfsdcltrack(8)`/`nfsdcld`; NFS-Ganesha
 `ganesha-rados-cluster-design(8)` + recovery-backend docs; RFC 8881
-§8.4.2 (grace/reclaim), §9 (locking recovery).
+§8.4.2 (grace/reclaim), §9 (locking recovery); SQLite WAL docs
+(single-writer, group commit).
 
 ## Findings
 
