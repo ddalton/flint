@@ -48,13 +48,23 @@ else
   FAILED="$FAILED no-load-pod"
 fi
 
-# 3. physical integrity
+# 3. physical integrity. -j2 + 1200s budget: the dataset outgrew the
+# old 600s single-stream budget once soak/churn history piled up, and
+# a TIMEOUT is not a corruption verdict — report the two distinctly
+# (a timeout drill row still fails, but says why, and the amcheck
+# OUTPUT is preserved for the corruption case instead of >/dev/null).
 if [ "${QUICK:-0}" != "1" ]; then
-  if $TMO 600 kubectl exec -n "$NS" $PG -c postgres -- pg_amcheck -U postgres -d bench --heapallindexed >/dev/null 2>&1; then
+  AMCHECK_OUT=$(mktemp)
+  $TMO 1200 kubectl exec -n "$NS" $PG -c postgres -- pg_amcheck -U postgres -d bench --heapallindexed -j 2 >"$AMCHECK_OUT" 2>&1
+  AMCHECK_RC=$?
+  if [ "$AMCHECK_RC" -eq 0 ]; then
     ok "pg_amcheck clean"
+  elif [ "$AMCHECK_RC" -eq 124 ]; then
+    FAILED="$FAILED amcheck-timeout"; note "pg_amcheck TIMEOUT at 1200s (integrity NOT verified — not a corruption finding)"
   else
-    FAILED="$FAILED amcheck"; note "pg_amcheck FAILED (or 600s timeout)"
+    FAILED="$FAILED amcheck"; note "pg_amcheck CORRUPTION/ERROR (rc=$AMCHECK_RC): $(tail -3 "$AMCHECK_OUT" | tr '\n' ' ')"
   fi
+  rm -f "$AMCHECK_OUT"
 else
   note "amcheck skipped (QUICK=1)"
 fi

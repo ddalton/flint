@@ -72,6 +72,13 @@ spec:
           readinessProbe:
             exec: {command: ["pg_isready","-U","postgres"]}
             periodSeconds: 5
+            # 1s default budget flaps under heavy load (amcheck, -C
+            # churn): NotReady empties the headless service's DNS,
+            # starving every per-connection client (ledger oracle) —
+            # the harness then measures its own probe artifact as a
+            # "stall". 5s keeps readiness truthful to actual liveness.
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             requests: {cpu: "1", memory: 2Gi}
             limits: {cpu: "2", memory: 4Gi}
