@@ -26,7 +26,7 @@
 use crate::nfs::v4::protocol::*;
 use crate::nfs::v4::compound::CompoundContext;
 use crate::nfs::v4::state::{StateManager, StateType};
-use crate::state_backend::{spawn_persist, LockRecord, StateBackend};
+use crate::state_backend::{LockRecord, StateBackend, WriteOp};
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -260,10 +260,7 @@ impl LockManager {
         self.insert_in_memory(lock);
 
         if let Some(backend) = &self.backend {
-            let backend = Arc::clone(backend);
-            spawn_persist("lock.put", move || async move {
-                backend.put_lock(&record).await
-            });
+            backend.enqueue_write(WriteOp::PutLock(record));
         }
     }
 
@@ -327,10 +324,7 @@ impl LockManager {
 
         if lock.is_some() {
             if let Some(backend) = &self.backend {
-                let backend = Arc::clone(backend);
-                spawn_persist("lock.delete", move || async move {
-                    backend.delete_lock(&stateid_key).await
-                });
+                backend.enqueue_write(WriteOp::DeleteLock(stateid_key));
             }
         }
 

@@ -35,43 +35,17 @@ pub mod sqlite;
 pub use memory::MemoryBackend;
 pub use sqlite::SqliteBackend;
 
-use std::future::Future;
 use std::sync::Arc;
 
-/// Fire-and-forget persistence from a sync mutation site.
-///
-/// Phase B.3's bridge between the existing sync manager APIs (which
-/// the dispatcher calls in many places) and the async [`StateBackend`].
-/// The pattern is: do the in-memory DashMap edit synchronously as
-/// today (so callers see the new state immediately), then call this
-/// helper to push the resulting record to the backend on a background
-/// task.
-///
-/// **Acceptable lag bound:** ~1s in the steady state. RFC 8881
-/// §15.1.10.4 lets clients retry uncached operations, so a crash
-/// between in-memory mutation and persist completion loses at most
-/// the last op (which the client redoes). The clientid / sessionid /
-/// stateid / layout records that survived the previous successful
-/// persist are what matter for restart survival.
-///
-/// **No-runtime fallback:** if called from a thread that's not inside
-/// a tokio runtime (most `#[test]` sync tests), the persist is
-/// silently skipped. Production always runs under tokio so this only
-/// affects unit tests, where MemoryBackend's in-memory DashMap is
-/// authoritative anyway.
-pub fn spawn_persist<F, Fut>(label: &'static str, f: F)
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = StateBackendResult<()>> + Send + 'static,
-{
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            if let Err(e) = f().await {
-                tracing::error!(target: "state_persist", label, error=%e, "persist failed");
-            }
-        });
-    }
-}
+// NOTE (F27, 2026-07-19): `spawn_persist` — the old fire-and-forget
+// helper that pushed each mutation to the backend on its own spawned
+// tokio task — is GONE. Spawned tasks race each other, so an OPEN's
+// put and a fast-following CLOSE's delete could apply in reverse and
+// resurrect the deleted row in the durable DB (phantom stateids/locks
+// after a failover reload). Mutation sites now call
+// [`StateBackend::enqueue_write`], which captures the op in call
+// order; ordering is the backend's job (SQLite: one writer thread fed
+// by an ordered channel with group commit; memory: applied inline).
 
 /// Convenience: build a default in-memory backend wrapped in `Arc<dyn
 /// StateBackend>`. Used by tests and by production when the operator
@@ -87,7 +61,7 @@ use serde::{Deserialize, Serialize};
 /// distinct failure modes SQLite will produce in B.2 — `MemoryBackend`
 /// is infallible but uses the same shape so the boundary code doesn't
 /// need a second error path.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum StateBackendError {
     /// Underlying storage hiccup (SQLite I/O, disk-full, locked-db, …).
     /// Carries the source error message; the in-memory backend never
@@ -301,6 +275,87 @@ pub struct FhMappingRecord {
     pub path: String,
 }
 
+// ── Write ops ─────────────────────────────────────────────────────────
+
+/// One point-write against the backend, capturable at a sync mutation
+/// site via [`StateBackend::enqueue_write`]. Every variant targets a
+/// single row identified by [`WriteOp::key`]; two ops with the same
+/// key are ordered by call order and the later one wins, which is what
+/// lets the SQLite writer coalesce a put-then-delete burst to just the
+/// delete without changing the observable final state.
+#[derive(Debug, Clone)]
+pub enum WriteOp {
+    PutClient(ClientRecord),
+    DeleteClient(u64),
+    PutSession(SessionRecord),
+    DeleteSession([u8; 16]),
+    PutStateid(StateIdRecord),
+    DeleteStateid([u8; 12]),
+    PutLock(LockRecord),
+    DeleteLock([u8; 12]),
+    PutLayout(LayoutRecord),
+    DeleteLayout([u8; 16]),
+    PutPlacement(PlacementRecord),
+    DeletePlacement(String),
+    PutFhMapping(FhMappingRecord),
+    DeleteFhMapping(u64),
+}
+
+/// Coalescing identity of a [`WriteOp`]: (table, primary key). The
+/// SQLite writer keeps at most one queued op per key — the latest —
+/// so its queue is bounded by live-key count, not op rate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WriteOpKey {
+    Client(u64),
+    Session([u8; 16]),
+    Stateid([u8; 12]),
+    Lock([u8; 12]),
+    Layout([u8; 16]),
+    Placement(String),
+    FhMapping(u64),
+}
+
+impl WriteOp {
+    pub fn key(&self) -> WriteOpKey {
+        match self {
+            WriteOp::PutClient(c) => WriteOpKey::Client(c.client_id),
+            WriteOp::DeleteClient(id) => WriteOpKey::Client(*id),
+            WriteOp::PutSession(s) => WriteOpKey::Session(s.session_id),
+            WriteOp::DeleteSession(id) => WriteOpKey::Session(*id),
+            WriteOp::PutStateid(s) => WriteOpKey::Stateid(s.other),
+            WriteOp::DeleteStateid(o) => WriteOpKey::Stateid(*o),
+            WriteOp::PutLock(l) => WriteOpKey::Lock(l.other),
+            WriteOp::DeleteLock(o) => WriteOpKey::Lock(*o),
+            WriteOp::PutLayout(l) => WriteOpKey::Layout(l.stateid),
+            WriteOp::DeleteLayout(s) => WriteOpKey::Layout(*s),
+            WriteOp::PutPlacement(p) => WriteOpKey::Placement(p.file_key.clone()),
+            WriteOp::DeletePlacement(k) => WriteOpKey::Placement(k.clone()),
+            WriteOp::PutFhMapping(m) => WriteOpKey::FhMapping(m.file_id),
+            WriteOp::DeleteFhMapping(id) => WriteOpKey::FhMapping(*id),
+        }
+    }
+
+    /// Short tag for persist-failure log lines.
+    pub fn label(&self) -> &'static str {
+        match self {
+            WriteOp::PutClient(_) => "client.put",
+            WriteOp::DeleteClient(_) => "client.delete",
+            WriteOp::PutSession(_) => "session.put",
+            WriteOp::DeleteSession(_) => "session.delete",
+            WriteOp::PutStateid(_) => "stateid.put",
+            WriteOp::DeleteStateid(_) => "stateid.delete",
+            WriteOp::PutLock(_) => "lock.put",
+            WriteOp::DeleteLock(_) => "lock.delete",
+            WriteOp::PutLayout(_) => "layout.put",
+            WriteOp::DeleteLayout(_) => "layout.delete",
+            WriteOp::PutPlacement(_) => "placement.put",
+            WriteOp::DeletePlacement(_) => "placement.delete",
+            WriteOp::PutFhMapping(_) => "fh_mapping.put",
+            WriteOp::DeleteFhMapping(_) => "fh_mapping.delete",
+        }
+    }
+}
+
 // ── The trait ─────────────────────────────────────────────────────────
 
 /// Pluggable persistence for NFSv4 / pNFS server state.
@@ -322,6 +377,24 @@ pub struct FhMappingRecord {
 /// startup.
 #[async_trait]
 pub trait StateBackend: Send + Sync {
+    /// Ordered, fire-and-forget write from a sync mutation site.
+    ///
+    /// The op is captured in CALL order — the F27 ordering guarantee.
+    /// The old `spawn_persist` pattern spawned one tokio task per
+    /// mutation, and tasks race: an OPEN's put and a fast-following
+    /// CLOSE's delete could reach the DB in reverse order, and the
+    /// late put (INSERT OR REPLACE) resurrected the deleted row —
+    /// after a failover reload that is a phantom stateid, or worse a
+    /// phantom byte-range lock blocking another client. `enqueue_write`
+    /// is sync, so the capture happens at the mutation site itself.
+    ///
+    /// Durability is asynchronous (SQLite: group-committed by the
+    /// writer thread within a few ms; errors logged under the
+    /// `state_persist` target). Callers that must observe completion
+    /// use the async `put_*`/`delete_*` methods instead, which resolve
+    /// once the write is committed.
+    fn enqueue_write(&self, op: WriteOp);
+
     // Clients
     async fn put_client(&self, c: &ClientRecord) -> StateBackendResult<()>;
     async fn get_client(&self, client_id: u64) -> StateBackendResult<Option<ClientRecord>>;

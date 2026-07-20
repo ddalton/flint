@@ -13,7 +13,7 @@
 
 use super::{
     ClientRecord, FhMappingRecord, LayoutRecord, LockRecord, PlacementRecord, SessionRecord,
-    StateBackend, StateBackendResult, StateIdRecord,
+    StateBackend, StateBackendResult, StateIdRecord, WriteOp,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -46,6 +46,55 @@ impl MemoryBackend {
 
 #[async_trait]
 impl StateBackend for MemoryBackend {
+    /// Applied inline — DashMap ops are sync and infallible, so the
+    /// "queue" is the call itself. Call order = apply order trivially.
+    fn enqueue_write(&self, op: WriteOp) {
+        match op {
+            WriteOp::PutClient(c) => {
+                self.clients.insert(c.client_id, c);
+            }
+            WriteOp::DeleteClient(id) => {
+                self.clients.remove(&id);
+            }
+            WriteOp::PutSession(s) => {
+                self.sessions.insert(s.session_id, s);
+            }
+            WriteOp::DeleteSession(id) => {
+                self.sessions.remove(&id);
+            }
+            WriteOp::PutStateid(s) => {
+                self.stateids.insert(s.other, s);
+            }
+            WriteOp::DeleteStateid(o) => {
+                self.stateids.remove(&o);
+            }
+            WriteOp::PutLock(l) => {
+                self.locks.insert(l.other, l);
+            }
+            WriteOp::DeleteLock(o) => {
+                self.locks.remove(&o);
+            }
+            WriteOp::PutLayout(l) => {
+                self.layouts.insert(l.stateid, l);
+            }
+            WriteOp::DeleteLayout(s) => {
+                self.layouts.remove(&s);
+            }
+            WriteOp::PutPlacement(p) => {
+                self.placements.insert(p.file_key.clone(), p);
+            }
+            WriteOp::DeletePlacement(k) => {
+                self.placements.remove(&k);
+            }
+            WriteOp::PutFhMapping(m) => {
+                self.fh_mappings.insert(m.file_id, m);
+            }
+            WriteOp::DeleteFhMapping(id) => {
+                self.fh_mappings.remove(&id);
+            }
+        }
+    }
+
     async fn put_client(&self, c: &ClientRecord) -> StateBackendResult<()> {
         self.clients.insert(c.client_id, c.clone());
         Ok(())

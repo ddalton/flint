@@ -14,7 +14,7 @@
 // 4. Server tracks slot state for exactly-once semantics
 
 use super::super::protocol::SessionId;
-use crate::state_backend::{spawn_persist, SessionRecord, StateBackend};
+use crate::state_backend::{SessionRecord, StateBackend, WriteOp};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -304,12 +304,7 @@ impl SessionManager {
         // future operator. Fire-and-forget delete; same rationale as
         // every other persist call.
         for r in records {
-            let backend = Arc::clone(&self.backend);
-            let sid = r.session_id;
-            spawn_persist(
-                "session_load_drop",
-                move || async move { backend.delete_session(&sid).await },
-            );
+            self.backend.enqueue_write(WriteOp::DeleteSession(r.session_id));
         }
         info!(
             "SessionManager observed {} persisted sessions; bumped counter past max_id={}, dropped them so kernel re-CREATE_SESSIONs naturally on BADSESSION",
@@ -318,17 +313,11 @@ impl SessionManager {
     }
 
     fn persist(&self, s: &Session) {
-        let backend = Arc::clone(&self.backend);
-        let record = s.to_record();
-        spawn_persist("session", move || async move { backend.put_session(&record).await });
+        self.backend.enqueue_write(WriteOp::PutSession(s.to_record()));
     }
 
     fn persist_delete(&self, session_id: SessionId) {
-        let backend = Arc::clone(&self.backend);
-        spawn_persist(
-            "session_delete",
-            move || async move { backend.delete_session(&session_id.0).await },
-        );
+        self.backend.enqueue_write(WriteOp::DeleteSession(session_id.0));
     }
 
     /// Create a new session

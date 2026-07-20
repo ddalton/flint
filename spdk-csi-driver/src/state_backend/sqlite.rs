@@ -18,15 +18,35 @@
 //! - Forensics: a `.db` file is `sqlite3 state.db 'SELECT * FROM
 //!   clients'` away from inspection. Hard to beat for debugging.
 //!
-//! ## Concurrency model
+//! ## Concurrency model (F27 redesign, 2026-07-19)
 //!
-//! `rusqlite::Connection` is `Send` but `!Sync`, so we hold one
-//! behind `Arc<std::sync::Mutex>`. Each trait method does its work
-//! inside `tokio::task::spawn_blocking`: the mutex guard is acquired
-//! and released entirely on the blocking thread, never held across
-//! `.await`. Hot-path reads in B.3 will go through the in-memory
-//! manager caches; the trait only sees writes (and the once-per-
-//! startup `list_*` calls), so a single connection is plenty.
+//! One dedicated writer THREAD owns the `Connection`; everything else
+//! talks to it through an ordered channel. This replaced the original
+//! `Arc<Mutex<Connection>>` + per-op `spawn_blocking` scheme, which
+//! had three compounding problems under load: every row paid its own
+//! serialized fsync (`synchronous=FULL` in production), every queued
+//! persist parked a tokio blocking-pool thread while waiting on the
+//! mutex, and the spawned persist tasks raced each other so a
+//! put/delete pair for the same key could apply in reverse order and
+//! resurrect the deleted row (the F27 ordering bug).
+//!
+//! The writer applies requests in channel order with **per-key
+//! coalescing and group commit**: it drains whatever accumulated
+//! while the previous transaction was committing, keeps only the
+//! latest op per (table, key), applies the batch in one transaction,
+//! then acks. Sequential callers see one commit per op (same latency
+//! as before); concurrent bursts batch automatically, so throughput
+//! scales with commit rate × batch size instead of being fsync-bound
+//! per row. Reads and read-modify-write ops (`with_conn`) act as
+//! barriers: the pending batch is flushed first, so read-your-writes
+//! holds for every earlier call on this backend.
+//!
+//! Shutdown: dropping the backend closes the channel; the writer
+//! flushes the remaining batch and exits, and `Drop` joins it. Ops
+//! whose `enqueue_write` happened before the drop are therefore
+//! committed (bounded loss only on abrupt process kill, where the
+//! window is one in-flight batch — a few ms — strictly tighter than
+//! the old unbounded spawn backlog).
 //!
 //! ## Type mapping
 //!
@@ -46,12 +66,14 @@
 use super::{
     CachedCreateSessionResRecord, ClientRecord, FhMappingRecord, IoModeRecord, LayoutRecord,
     LayoutSegmentRecord, LockRecord, PlacementRecord, SessionRecord, StateBackend,
-    StateBackendError, StateBackendResult, StateIdRecord, StateTypeRecord,
+    StateBackendError, StateBackendResult, StateIdRecord, StateTypeRecord, WriteOp, WriteOpKey,
 };
 use async_trait::async_trait;
-use rusqlite::{params, Connection, OptionalExtension};
+use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
 
 /// Schema version persisted in the `schema_version` table. Bump when
 /// adding columns or tables; the open path runs supported migrations
@@ -83,9 +105,29 @@ use std::sync::{Arc, Mutex};
 ///        EXISTS.
 const SCHEMA_VERSION: i64 = 6;
 
-/// Single-file SQLite [`StateBackend`].
+/// One request to the writer thread.
+enum Req {
+    /// A coalescable point write. `None` ack = enqueue_write
+    /// (fire-and-forget, errors logged by the writer); `Some` ack =
+    /// an awaited trait method, resolved when the op's batch commits.
+    Write(WriteOp, Option<oneshot::Sender<StateBackendResult<()>>>),
+    /// Flush the pending batch, then run this closure on the
+    /// connection (reads, counter read-modify-writes). The closure
+    /// carries its own response channel.
+    Barrier(Box<dyn FnOnce(&mut Connection) + Send>),
+}
+
+/// Max ops per transaction — bounds transaction size under a burst;
+/// the writer flushes and keeps draining when a batch fills.
+const MAX_BATCH: usize = 1024;
+
+/// Single-file SQLite [`StateBackend`]. See the module docs for the
+/// writer-thread concurrency model.
 pub struct SqliteBackend {
-    conn: Arc<Mutex<Connection>>,
+    /// `Some` until Drop. Dropping the sender is the writer's
+    /// shutdown signal, so Drop takes it before joining.
+    tx: Option<Sender<Req>>,
+    writer: Option<std::thread::JoinHandle<()>>,
 }
 
 impl SqliteBackend {
@@ -101,7 +143,7 @@ impl SqliteBackend {
         let conn = Connection::open(path).map_err(|e| {
             StateBackendError::Storage(format!("open: {}", e))
         })?;
-        Self::init(conn)
+        Self::init(conn, false)
     }
 
     /// Like `open`, but with `synchronous=FULL`: every commit fsyncs the
@@ -112,17 +154,14 @@ impl SqliteBackend {
     /// which the raid is deleted and any commit still in the page cache
     /// is gone (observed live, 2026-06-12). NORMAL's "durable at the
     /// checkpoint" promise assumes the filesystem outlives the process;
-    /// here it may not. State mutations are rare (opens/sessions, not
-    /// I/O), so the per-commit fsync cost is irrelevant.
+    /// here it may not. Group commit amortizes the per-commit fsync
+    /// across every op in the batch, so FULL stays affordable under an
+    /// OPEN/CLOSE storm.
     pub fn open_durable<P: AsRef<Path>>(path: P) -> StateBackendResult<Self> {
-        let backend = Self::open(path)?;
-        backend
-            .conn
-            .lock()
-            .map_err(|_| StateBackendError::Storage("poisoned lock".into()))?
-            .execute_batch("PRAGMA synchronous=FULL;")
-            .map_err(|e| StateBackendError::Storage(format!("synchronous=FULL: {}", e)))?;
-        Ok(backend)
+        let conn = Connection::open(path).map_err(|e| {
+            StateBackendError::Storage(format!("open: {}", e))
+        })?;
+        Self::init(conn, true)
     }
 
     /// Open an in-memory DB. Useful for tests; the schema still gets
@@ -133,10 +172,10 @@ impl SqliteBackend {
         let conn = Connection::open_in_memory().map_err(|e| {
             StateBackendError::Storage(format!("open_in_memory: {}", e))
         })?;
-        Self::init(conn)
+        Self::init(conn, false)
     }
 
-    fn init(conn: Connection) -> StateBackendResult<Self> {
+    fn init(conn: Connection, durable: bool) -> StateBackendResult<Self> {
         // WAL + NORMAL is the standard durability/throughput point.
         // execute_batch instead of pragma_update so we get a single
         // round-trip for the small bundle.
@@ -273,31 +312,350 @@ impl SqliteBackend {
         )
         .map_err(|e| StateBackendError::Storage(format!("counter init: {}", e)))?;
 
+        if durable {
+            conn.execute_batch("PRAGMA synchronous=FULL;")
+                .map_err(|e| StateBackendError::Storage(format!("synchronous=FULL: {}", e)))?;
+        }
+
+        // Schema is settled — hand the connection to its writer thread.
+        let (tx, rx) = unbounded::<Req>();
+        let writer = std::thread::Builder::new()
+            .name("flint-state-writer".into())
+            .spawn(move || writer_loop(conn, rx))
+            .map_err(|e| StateBackendError::Storage(format!("writer thread: {}", e)))?;
+
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            tx: Some(tx),
+            writer: Some(writer),
         })
     }
 
-    /// Borrow the connection on a blocking thread. The closure runs
-    /// inside `spawn_blocking` so it never blocks the tokio runtime
-    /// thread; any rusqlite error is mapped to `Storage` for the
-    /// caller.
+    fn sender(&self) -> &Sender<Req> {
+        self.tx.as_ref().expect("sender present until Drop")
+    }
+
+    /// Awaited write: enqueue and resolve when the op's batch commits.
+    async fn write(&self, op: WriteOp) -> StateBackendResult<()> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sender()
+            .send(Req::Write(op, Some(ack_tx)))
+            .map_err(|_| StateBackendError::Storage("state writer thread gone".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| StateBackendError::Storage("state writer thread gone".into()))?
+    }
+
+    /// Run a closure on the connection, ordered AFTER everything
+    /// already enqueued (the writer flushes its pending batch first) —
+    /// so read-your-writes holds. Any rusqlite error maps to `Storage`.
     async fn with_conn<T, F>(&self, f: F) -> StateBackendResult<T>
     where
         T: Send + 'static,
         F: FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
     {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || {
-            let guard = conn
-                .lock()
-                .map_err(|_| rusqlite::Error::InvalidQuery /* poisoned */)?;
-            f(&guard)
-        })
-        .await
-        .map_err(|e| StateBackendError::Storage(format!("join: {}", e)))?
-        .map_err(|e| StateBackendError::Storage(format!("sqlite: {}", e)))
+        let (res_tx, res_rx) = oneshot::channel();
+        self.sender()
+            .send(Req::Barrier(Box::new(move |conn: &mut Connection| {
+                let _ = res_tx.send(f(conn));
+            })))
+            .map_err(|_| StateBackendError::Storage("state writer thread gone".into()))?;
+        res_rx
+            .await
+            .map_err(|_| StateBackendError::Storage("state writer thread gone".into()))?
+            .map_err(|e| StateBackendError::Storage(format!("sqlite: {}", e)))
     }
+
+    /// Barrier no-op: resolves once everything enqueued before it is
+    /// committed. For tests and graceful-shutdown call sites.
+    pub async fn flush(&self) -> StateBackendResult<()> {
+        self.with_conn(|_| Ok(())).await
+    }
+}
+
+impl Drop for SqliteBackend {
+    fn drop(&mut self) {
+        // Close the channel (shutdown signal), then wait for the
+        // writer's final flush so every op enqueued before this drop
+        // reaches the DB.
+        self.tx.take();
+        if let Some(h) = self.writer.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+// ── Writer thread ─────────────────────────────────────────────────────
+
+type PendingBatch = HashMap<WriteOpKey, (WriteOp, Vec<oneshot::Sender<StateBackendResult<()>>>)>;
+
+/// Owns the connection for the backend's lifetime. Adaptive group
+/// commit: whatever accumulates in the channel while a transaction is
+/// committing forms the next batch — a lone sequential caller gets
+/// one commit per op (no added latency), a concurrent burst batches
+/// automatically. Barriers flush first, preserving order.
+fn writer_loop(mut conn: Connection, rx: Receiver<Req>) {
+    let mut batch: PendingBatch = HashMap::new();
+    loop {
+        // Block for the next request; channel closed = shutdown.
+        let req = match rx.recv() {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+        absorb(req, &mut conn, &mut batch);
+        // Drain everything immediately available before committing.
+        loop {
+            if batch.len() >= MAX_BATCH {
+                flush(&mut conn, &mut batch);
+            }
+            match rx.try_recv() {
+                Ok(r) => absorb(r, &mut conn, &mut batch),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    flush(&mut conn, &mut batch);
+                    return;
+                }
+            }
+        }
+        flush(&mut conn, &mut batch);
+    }
+    flush(&mut conn, &mut batch);
+}
+
+fn absorb(req: Req, conn: &mut Connection, batch: &mut PendingBatch) {
+    match req {
+        Req::Write(op, ack) => {
+            let entry = batch.entry(op.key()).or_insert_with(|| (op.clone(), Vec::new()));
+            // Later op for the same key wins (put-then-delete ⇒ delete,
+            // put-then-put ⇒ last). Superseded acks stay attached: their
+            // effect is subsumed by this batch's commit.
+            entry.0 = op;
+            if let Some(a) = ack {
+                entry.1.push(a);
+            }
+        }
+        Req::Barrier(f) => {
+            flush(conn, batch);
+            f(conn);
+        }
+    }
+}
+
+fn flush(conn: &mut Connection, batch: &mut PendingBatch) {
+    if batch.is_empty() {
+        return;
+    }
+    let ops: Vec<(WriteOp, Vec<oneshot::Sender<StateBackendResult<()>>>)> =
+        batch.drain().map(|(_, v)| v).collect();
+
+    let res: rusqlite::Result<()> = (|| {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (op, _) in &ops {
+            apply_write_op(&tx, op)?;
+        }
+        tx.commit()
+    })();
+
+    match res {
+        Ok(()) => {
+            for (_, acks) in ops {
+                for a in acks {
+                    let _ = a.send(Ok(()));
+                }
+            }
+        }
+        Err(e) => {
+            // Batch failed as a unit (disk full, I/O error, …). Retry
+            // each op in its own autocommit transaction so per-op error
+            // semantics survive — one poisoned op shouldn't fail its
+            // batch-mates.
+            tracing::warn!(
+                target: "state_persist",
+                error = %e,
+                ops = ops.len(),
+                "group commit failed; retrying ops individually"
+            );
+            for (op, acks) in ops {
+                let r: StateBackendResult<()> = apply_write_op(&conn, &op)
+                    .map_err(|e2| StateBackendError::Storage(format!("sqlite: {}", e2)));
+                if let Err(ref err) = r {
+                    tracing::error!(
+                        target: "state_persist",
+                        label = op.label(),
+                        error = %err,
+                        "persist failed"
+                    );
+                }
+                for a in acks {
+                    let _ = a.send(r.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Apply one point write. Runs inside the group-commit transaction
+/// (or standalone autocommit on the retry path). `prepare_cached`
+/// keeps the statement compile cost off the steady state.
+fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
+    match op {
+        WriteOp::PutClient(c) => {
+            // INSERT OR REPLACE = upsert, matches MemoryBackend
+            // semantics. serde_json for the optional
+            // CachedCreateSessionResRecord — small struct, stable
+            // schema, easier to migrate than a sub-table.
+            let cs_json = match &c.cs_cached_res {
+                Some(v) => Some(
+                    serde_json::to_string(v)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                ),
+                None => None,
+            };
+            conn.prepare_cached(
+                "INSERT OR REPLACE INTO clients
+                 (client_id, owner, verifier, server_owner, server_scope,
+                  sequence_id, flags, principal, confirmed,
+                  last_cs_sequence, cs_cached_res, initial_cs_sequence,
+                  reclaim_complete)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )?
+            .execute(params![
+                u64_to_i64(c.client_id),
+                c.owner,
+                u64_to_i64(c.verifier),
+                c.server_owner,
+                c.server_scope,
+                c.sequence_id as i64,
+                c.flags as i64,
+                c.principal,
+                bool_to_i64(c.confirmed),
+                c.last_cs_sequence.map(|v| v as i64),
+                cs_json,
+                c.initial_cs_sequence as i64,
+                bool_to_i64(c.reclaim_complete),
+            ])?;
+        }
+        WriteOp::DeleteClient(id) => {
+            conn.prepare_cached("DELETE FROM clients WHERE client_id = ?1")?
+                .execute(params![u64_to_i64(*id)])?;
+        }
+        WriteOp::PutSession(s) => {
+            conn.prepare_cached(
+                "INSERT OR REPLACE INTO sessions
+                 (session_id, client_id, sequence, flags,
+                  fore_chan_maxrequestsize, fore_chan_maxresponsesize,
+                  fore_chan_maxresponsesize_cached, fore_chan_maxops,
+                  fore_chan_maxrequests, cb_program)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?
+            .execute(params![
+                s.session_id.to_vec(),
+                u64_to_i64(s.client_id),
+                s.sequence as i64,
+                s.flags as i64,
+                s.fore_chan_maxrequestsize as i64,
+                s.fore_chan_maxresponsesize as i64,
+                s.fore_chan_maxresponsesize_cached as i64,
+                s.fore_chan_maxops as i64,
+                s.fore_chan_maxrequests as i64,
+                s.cb_program as i64,
+            ])?;
+        }
+        WriteOp::DeleteSession(id) => {
+            conn.prepare_cached("DELETE FROM sessions WHERE session_id = ?1")?
+                .execute(params![id.to_vec()])?;
+        }
+        WriteOp::PutStateid(s) => {
+            conn.prepare_cached(
+                "INSERT OR REPLACE INTO stateids
+                 (other, seqid, state_type, client_id, filehandle, revoked)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?
+            .execute(params![
+                s.other.to_vec(),
+                s.seqid as i64,
+                state_type_to_i64(s.state_type),
+                u64_to_i64(s.client_id),
+                s.filehandle,
+                bool_to_i64(s.revoked),
+            ])?;
+        }
+        WriteOp::DeleteStateid(o) => {
+            conn.prepare_cached("DELETE FROM stateids WHERE other = ?1")?
+                .execute(params![o.to_vec()])?;
+        }
+        WriteOp::PutLock(l) => {
+            conn.prepare_cached(
+                "INSERT OR REPLACE INTO locks
+                 (other, seqid, client_id, owner, filehandle, lock_type, offset, length)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?
+            .execute(params![
+                l.other.to_vec(),
+                l.seqid as i64,
+                u64_to_i64(l.client_id),
+                l.owner,
+                l.filehandle,
+                l.lock_type as i64,
+                u64_to_i64(l.offset),
+                u64_to_i64(l.length),
+            ])?;
+        }
+        WriteOp::DeleteLock(o) => {
+            conn.prepare_cached("DELETE FROM locks WHERE other = ?1")?
+                .execute(params![o.to_vec()])?;
+        }
+        WriteOp::PutLayout(l) => {
+            let segments_json = serde_json::to_string(&l.segments)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            conn.prepare_cached(
+                "INSERT OR REPLACE INTO layouts
+                 (stateid, owner_client_id, owner_session_id, owner_fsid,
+                  filehandle, segments, iomode, return_on_close)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?
+            .execute(params![
+                l.stateid.to_vec(),
+                u64_to_i64(l.owner_client_id),
+                l.owner_session_id.to_vec(),
+                u64_to_i64(l.owner_fsid),
+                l.filehandle,
+                segments_json,
+                iomode_to_i64(l.iomode),
+                bool_to_i64(l.return_on_close),
+            ])?;
+        }
+        WriteOp::DeleteLayout(s) => {
+            conn.prepare_cached("DELETE FROM layouts WHERE stateid = ?1")?
+                .execute(params![s.to_vec()])?;
+        }
+        WriteOp::PutPlacement(p) => {
+            let device_ids_json = serde_json::to_string(&p.device_ids)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            conn.prepare_cached(
+                "INSERT OR REPLACE INTO file_placement (file_key, stripe_size, device_ids, file_id)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?
+            .execute(params![
+                p.file_key,
+                u64_to_i64(p.stripe_size),
+                device_ids_json,
+                u64_to_i64(p.file_id),
+            ])?;
+        }
+        WriteOp::DeletePlacement(k) => {
+            conn.prepare_cached("DELETE FROM file_placement WHERE file_key = ?1")?
+                .execute(params![k])?;
+        }
+        WriteOp::PutFhMapping(m) => {
+            conn.prepare_cached("INSERT OR REPLACE INTO fh_mappings (file_id, path) VALUES (?1, ?2)")?
+                .execute(params![u64_to_i64(m.file_id), m.path])?;
+        }
+        WriteOp::DeleteFhMapping(id) => {
+            conn.prepare_cached("DELETE FROM fh_mappings WHERE file_id = ?1")?
+                .execute(params![u64_to_i64(*id)])?;
+        }
+    }
+    Ok(())
 }
 
 // ── Type-mapping helpers ──────────────────────────────────────────────
@@ -382,45 +740,20 @@ fn blob_to_array<const N: usize>(blob: Vec<u8>, field: &str) -> StateBackendResu
 
 #[async_trait]
 impl StateBackend for SqliteBackend {
+    /// Fire-and-forget, ordered: the channel send happens at the call
+    /// site, so channel order = call order (the F27 guarantee). Errors
+    /// are logged by the writer under `state_persist`.
+    fn enqueue_write(&self, op: WriteOp) {
+        if self.sender().send(Req::Write(op, None)).is_err() {
+            tracing::error!(
+                target: "state_persist",
+                "enqueue_write dropped: state writer thread gone"
+            );
+        }
+    }
+
     async fn put_client(&self, c: &ClientRecord) -> StateBackendResult<()> {
-        let c = c.clone();
-        self.with_conn(move |conn| {
-            // INSERT OR REPLACE = upsert, matches MemoryBackend semantics.
-            // serde_json for the optional CachedCreateSessionResRecord —
-            // small struct, stable schema, easier to migrate than a sub-
-            // table with foreign keys.
-            let cs_json = match &c.cs_cached_res {
-                Some(v) => Some(serde_json::to_string(v).map_err(|e| {
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e))
-                })?),
-                None => None,
-            };
-            conn.execute(
-                "INSERT OR REPLACE INTO clients
-                 (client_id, owner, verifier, server_owner, server_scope,
-                  sequence_id, flags, principal, confirmed,
-                  last_cs_sequence, cs_cached_res, initial_cs_sequence,
-                  reclaim_complete)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
-                    u64_to_i64(c.client_id),
-                    c.owner,
-                    u64_to_i64(c.verifier),
-                    c.server_owner,
-                    c.server_scope,
-                    c.sequence_id as i64,
-                    c.flags as i64,
-                    c.principal,
-                    bool_to_i64(c.confirmed),
-                    c.last_cs_sequence.map(|v| v as i64),
-                    cs_json,
-                    c.initial_cs_sequence as i64,
-                    bool_to_i64(c.reclaim_complete),
-                ],
-            )?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::PutClient(c.clone())).await
     }
 
     async fn get_client(&self, client_id: u64) -> StateBackendResult<Option<ClientRecord>> {
@@ -462,40 +795,11 @@ impl StateBackend for SqliteBackend {
     }
 
     async fn delete_client(&self, client_id: u64) -> StateBackendResult<()> {
-        let id = u64_to_i64(client_id);
-        self.with_conn(move |conn| {
-            conn.execute("DELETE FROM clients WHERE client_id = ?1", params![id])?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::DeleteClient(client_id)).await
     }
 
     async fn put_session(&self, s: &SessionRecord) -> StateBackendResult<()> {
-        let s = s.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO sessions
-                 (session_id, client_id, sequence, flags,
-                  fore_chan_maxrequestsize, fore_chan_maxresponsesize,
-                  fore_chan_maxresponsesize_cached, fore_chan_maxops,
-                  fore_chan_maxrequests, cb_program)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    s.session_id.to_vec(),
-                    u64_to_i64(s.client_id),
-                    s.sequence as i64,
-                    s.flags as i64,
-                    s.fore_chan_maxrequestsize as i64,
-                    s.fore_chan_maxresponsesize as i64,
-                    s.fore_chan_maxresponsesize_cached as i64,
-                    s.fore_chan_maxops as i64,
-                    s.fore_chan_maxrequests as i64,
-                    s.cb_program as i64,
-                ],
-            )?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::PutSession(s.clone())).await
     }
 
     async fn get_session(
@@ -539,33 +843,11 @@ impl StateBackend for SqliteBackend {
     }
 
     async fn delete_session(&self, session_id: &[u8; 16]) -> StateBackendResult<()> {
-        let key = session_id.to_vec();
-        self.with_conn(move |conn| {
-            conn.execute("DELETE FROM sessions WHERE session_id = ?1", params![key])?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::DeleteSession(*session_id)).await
     }
 
     async fn put_stateid(&self, s: &StateIdRecord) -> StateBackendResult<()> {
-        let s = s.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO stateids
-                 (other, seqid, state_type, client_id, filehandle, revoked)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    s.other.to_vec(),
-                    s.seqid as i64,
-                    state_type_to_i64(s.state_type),
-                    u64_to_i64(s.client_id),
-                    s.filehandle,
-                    bool_to_i64(s.revoked),
-                ],
-            )?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::PutStateid(s.clone())).await
     }
 
     async fn get_stateid(&self, other: &[u8; 12]) -> StateBackendResult<Option<StateIdRecord>> {
@@ -600,35 +882,11 @@ impl StateBackend for SqliteBackend {
     }
 
     async fn delete_stateid(&self, other: &[u8; 12]) -> StateBackendResult<()> {
-        let key = other.to_vec();
-        self.with_conn(move |conn| {
-            conn.execute("DELETE FROM stateids WHERE other = ?1", params![key])?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::DeleteStateid(*other)).await
     }
 
     async fn put_lock(&self, l: &LockRecord) -> StateBackendResult<()> {
-        let l = l.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO locks
-                 (other, seqid, client_id, owner, filehandle, lock_type, offset, length)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    l.other.to_vec(),
-                    l.seqid as i64,
-                    u64_to_i64(l.client_id),
-                    l.owner,
-                    l.filehandle,
-                    l.lock_type as i64,
-                    u64_to_i64(l.offset),
-                    u64_to_i64(l.length),
-                ],
-            )?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::PutLock(l.clone())).await
     }
 
     async fn get_lock(&self, other: &[u8; 12]) -> StateBackendResult<Option<LockRecord>> {
@@ -663,39 +921,11 @@ impl StateBackend for SqliteBackend {
     }
 
     async fn delete_lock(&self, other: &[u8; 12]) -> StateBackendResult<()> {
-        let key = other.to_vec();
-        self.with_conn(move |conn| {
-            conn.execute("DELETE FROM locks WHERE other = ?1", params![key])?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::DeleteLock(*other)).await
     }
 
     async fn put_layout(&self, l: &LayoutRecord) -> StateBackendResult<()> {
-        let l = l.clone();
-        self.with_conn(move |conn| {
-            let segments_json = serde_json::to_string(&l.segments).map_err(|e| {
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
-            })?;
-            conn.execute(
-                "INSERT OR REPLACE INTO layouts
-                 (stateid, owner_client_id, owner_session_id, owner_fsid,
-                  filehandle, segments, iomode, return_on_close)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    l.stateid.to_vec(),
-                    u64_to_i64(l.owner_client_id),
-                    l.owner_session_id.to_vec(),
-                    u64_to_i64(l.owner_fsid),
-                    l.filehandle,
-                    segments_json,
-                    iomode_to_i64(l.iomode),
-                    bool_to_i64(l.return_on_close),
-                ],
-            )?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::PutLayout(l.clone())).await
     }
 
     async fn get_layout(&self, stateid: &[u8; 16]) -> StateBackendResult<Option<LayoutRecord>> {
@@ -732,24 +962,11 @@ impl StateBackend for SqliteBackend {
     }
 
     async fn delete_layout(&self, stateid: &[u8; 16]) -> StateBackendResult<()> {
-        let key = stateid.to_vec();
-        self.with_conn(move |conn| {
-            conn.execute("DELETE FROM layouts WHERE stateid = ?1", params![key])?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::DeleteLayout(*stateid)).await
     }
 
     async fn put_fh_mapping(&self, m: &FhMappingRecord) -> StateBackendResult<()> {
-        let m = m.clone();
-        self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO fh_mappings (file_id, path) VALUES (?1, ?2)",
-                params![u64_to_i64(m.file_id), m.path],
-            )?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::PutFhMapping(m.clone())).await
     }
 
     async fn list_fh_mappings(&self) -> StateBackendResult<Vec<FhMappingRecord>> {
@@ -767,30 +984,11 @@ impl StateBackend for SqliteBackend {
     }
 
     async fn delete_fh_mapping(&self, file_id: u64) -> StateBackendResult<()> {
-        self.with_conn(move |conn| {
-            conn.execute(
-                "DELETE FROM fh_mappings WHERE file_id = ?1",
-                params![u64_to_i64(file_id)],
-            )?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::DeleteFhMapping(file_id)).await
     }
 
     async fn put_placement(&self, p: &PlacementRecord) -> StateBackendResult<()> {
-        let p = p.clone();
-        self.with_conn(move |conn| {
-            let device_ids_json = serde_json::to_string(&p.device_ids).map_err(|e| {
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
-            })?;
-            conn.execute(
-                "INSERT OR REPLACE INTO file_placement (file_key, stripe_size, device_ids, file_id)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![p.file_key, u64_to_i64(p.stripe_size), device_ids_json, u64_to_i64(p.file_id)],
-            )?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::PutPlacement(p.clone())).await
     }
 
     async fn get_placement(&self, file_key: &str) -> StateBackendResult<Option<PlacementRecord>> {
@@ -824,12 +1022,7 @@ impl StateBackend for SqliteBackend {
     }
 
     async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()> {
-        let key = file_key.to_string();
-        self.with_conn(move |conn| {
-            conn.execute("DELETE FROM file_placement WHERE file_key = ?1", params![key])?;
-            Ok(())
-        })
-        .await
+        self.write(WriteOp::DeletePlacement(file_key.to_string())).await
     }
 
     async fn increment_instance_counter(&self) -> StateBackendResult<u64> {
@@ -1164,6 +1357,7 @@ mod tests {
         instance_counter_monotonic, put_overwrites, round_trip_all,
         server_id_stable_and_nonzero,
     };
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn sqlite_round_trip_all_records() {
@@ -1458,5 +1652,133 @@ mod tests {
         seen.sort();
         assert_eq!(seen, (1..=16).collect::<Vec<u64>>());
         assert_eq!(b.get_instance_counter().await.unwrap(), 16);
+    }
+
+    // ── F27 writer tests ─────────────────────────────────────────────
+
+    fn sid(i: u64, seqid: u32) -> StateIdRecord {
+        let mut other = [0u8; 12];
+        other[0..8].copy_from_slice(&i.to_be_bytes());
+        StateIdRecord {
+            other,
+            seqid,
+            state_type: StateTypeRecord::Open,
+            client_id: 7,
+            filehandle: Some(b"/fh".to_vec()),
+            revoked: false,
+        }
+    }
+
+    /// THE F27 ordering bug, as a regression test: put-then-delete for
+    /// a key must end DELETED, and put-then-put must keep the LAST
+    /// seqid — under a burst that exercises coalescing and group
+    /// commit. Under the old spawn-per-op scheme the equivalent
+    /// sequence raced and could resurrect the deleted row.
+    #[tokio::test]
+    async fn enqueue_write_order_and_coalescing() {
+        let b = SqliteBackend::open_in_memory().unwrap();
+        for i in 0..1000u64 {
+            b.enqueue_write(WriteOp::PutStateid(sid(i, 1)));
+            b.enqueue_write(WriteOp::PutStateid(sid(i, 2)));
+            if i % 2 == 1 {
+                b.enqueue_write(WriteOp::DeleteStateid(sid(i, 0).other));
+            }
+        }
+        b.flush().await.unwrap();
+        let all = b.list_stateids().await.unwrap();
+        assert_eq!(all.len(), 500, "odd keys deleted, even keys live");
+        for r in all {
+            assert_eq!(r.seqid, 2, "put-then-put keeps the LAST write");
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&r.other[0..8]);
+            assert_eq!(u64::from_be_bytes(buf) % 2, 0, "deleted key resurrected");
+        }
+    }
+
+    /// Read-your-writes across the barrier: an awaited get placed
+    /// after enqueue_writes must observe them (the barrier flushes the
+    /// pending batch first).
+    #[tokio::test]
+    async fn barrier_read_sees_enqueued_writes() {
+        let b = SqliteBackend::open_in_memory().unwrap();
+        b.enqueue_write(WriteOp::PutStateid(sid(1, 5)));
+        b.enqueue_write(WriteOp::PutStateid(sid(1, 6)));
+        let got = b.get_stateid(&sid(1, 0).other).await.unwrap().unwrap();
+        assert_eq!(got.seqid, 6);
+    }
+
+    /// Dropping the backend closes the channel; the writer's final
+    /// flush must commit every op enqueued before the drop — this is
+    /// the graceful-shutdown loss-window guarantee.
+    #[tokio::test]
+    async fn drop_flushes_pending_writes() {
+        let dir = std::env::temp_dir().join(format!("f27_drop_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.db");
+        {
+            let b = SqliteBackend::open(&path).unwrap();
+            for i in 0..100u64 {
+                b.enqueue_write(WriteOp::PutStateid(sid(i, 1)));
+            }
+            // No flush — Drop must do it.
+        }
+        let b2 = SqliteBackend::open(&path).unwrap();
+        assert_eq!(b2.list_stateids().await.unwrap().len(), 100);
+        drop(b2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Awaited writes racing a same-key enqueue stream still resolve,
+    /// and their acks reflect the committed batch (superseded ops ack
+    /// on the batch that subsumed them).
+    #[tokio::test]
+    async fn awaited_write_acks_under_coalescing() {
+        let b = Arc::new(SqliteBackend::open_in_memory().unwrap());
+        let mut tasks = Vec::new();
+        for i in 0..64u64 {
+            let b = Arc::clone(&b);
+            tasks.push(tokio::spawn(async move {
+                b.put_stateid(&sid(i, 1)).await.unwrap();
+                b.delete_stateid(&sid(i, 0).other).await.unwrap();
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(b.list_stateids().await.unwrap().len(), 0);
+    }
+
+    /// F27 throughput gate (informational; run with --ignored):
+    /// concurrent awaited put_stateid on a DURABLE (synchronous=FULL)
+    /// on-disk DB. Group commit must take this far beyond the old
+    /// one-fsync-per-row ceiling (~1k/s); the B2 plan gate is ≥10k/s.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn f27_writer_throughput_bench() {
+        let dir = std::env::temp_dir().join(format!("f27_bench_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let b = Arc::new(SqliteBackend::open_durable(dir.join("state.db")).unwrap());
+
+        let n: u64 = 20_000;
+        let start = std::time::Instant::now();
+        let mut tasks = Vec::new();
+        for i in 0..n {
+            let b = Arc::clone(&b);
+            tasks.push(tokio::spawn(async move {
+                b.put_stateid(&sid(i, 1)).await.unwrap();
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let elapsed = start.elapsed();
+        let ops_s = n as f64 / elapsed.as_secs_f64();
+        eprintln!(
+            "F27 writer: {} awaited durable puts in {:.2?} = {:.0} ops/s",
+            n, elapsed, ops_s
+        );
+        assert_eq!(b.list_stateids().await.unwrap().len() as u64, n);
+        drop(b);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

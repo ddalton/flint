@@ -54,7 +54,7 @@
 
 use super::protocol::Nfs4FileHandle;
 use super::pseudo::{PseudoFilesystem, Export};
-use crate::state_backend::{spawn_persist, FhMappingRecord, StateBackend};
+use crate::state_backend::{FhMappingRecord, StateBackend, WriteOp};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -559,13 +559,10 @@ impl FileHandleManager {
                     ids.insert(path.to_path_buf(), id);
                     rev.insert(id, path.to_path_buf());
                     if let Some(backend) = self.backend.read().unwrap().clone() {
-                        let record = FhMappingRecord {
+                        backend.enqueue_write(WriteOp::PutFhMapping(FhMappingRecord {
                             file_id: id,
                             path: path.to_string_lossy().into_owned(),
-                        };
-                        spawn_persist("fh_mapping", move || async move {
-                            backend.put_fh_mapping(&record).await
-                        });
+                        }));
                     }
                     debug!("Minted v2 filehandle id {:016x} for long path {:?}", id, path);
                     id
@@ -743,14 +740,11 @@ impl FileHandleManager {
             ids.remove(&old);
             ids.insert(new.clone(), id);
             rev.insert(id, new.clone());
-            if let Some(backend) = backend.clone() {
-                let record = FhMappingRecord {
+            if let Some(backend) = backend.as_ref() {
+                backend.enqueue_write(WriteOp::PutFhMapping(FhMappingRecord {
                     file_id: id,
                     path: new.to_string_lossy().into_owned(),
-                };
-                spawn_persist("fh_mapping_rename", move || async move {
-                    backend.put_fh_mapping(&record).await
-                });
+                }));
             }
         }
     }
@@ -785,10 +779,8 @@ impl FileHandleManager {
         for (p, id) in dead {
             ids.remove(&p);
             rev.remove(&id);
-            if let Some(backend) = backend.clone() {
-                spawn_persist("fh_mapping_delete", move || async move {
-                    backend.delete_fh_mapping(id).await
-                });
+            if let Some(backend) = backend.as_ref() {
+                backend.enqueue_write(WriteOp::DeleteFhMapping(id));
             }
         }
     }
@@ -1243,5 +1235,115 @@ mod tests {
         assert!(resolved.ends_with(long_path.file_name().unwrap()));
 
         fs::remove_dir_all(&temp_dir).unwrap();
+    }
+}
+
+/// F26 §12.4 step A2 — churn microbench baseline (docs/
+/// f26-filehandle-cache-redesign.md §12.3). Reproduces the F26
+/// mechanism without a cluster: resolve latency under rename churn
+/// must GROW with cache population N on the current path-map design
+/// (O(N) scans under the maps' write locks), and per-rename cost must
+/// grow ~linearly with N. After the §12 kernel-handle change both
+/// columns must be flat — this test is the C6 regression harness.
+///
+/// Run: cargo test --release f26_churn_baseline -- --ignored --nocapture
+#[cfg(test)]
+mod f26_churn_bench {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn pctl(v: &mut Vec<Duration>, p: f64) -> Duration {
+        v.sort();
+        v[((v.len() as f64 - 1.0) * p) as usize]
+    }
+
+    #[test]
+    #[ignore]
+    fn f26_churn_baseline() {
+        let root = std::env::temp_dir().join(format!("f26_bench_{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+
+        let sizes = [1_000usize, 10_000, 50_000, 100_000];
+        let max_n = *sizes.iter().max().unwrap();
+
+        // One flat dir of real files — resolve stat-verifies the inode,
+        // so the paths must exist.
+        eprintln!("creating {} files under {:?}…", max_n, root);
+        let mut paths = Vec::with_capacity(max_n);
+        for i in 0..max_n {
+            let p = root.join(format!("f{:06}", i));
+            fs::File::create(&p).unwrap();
+            paths.push(p);
+        }
+
+        eprintln!(
+            "{:>8}  {:>10} {:>10}  {:>10} {:>10}  {:>12}",
+            "N", "quiet p50", "quiet p99", "churn p50", "churn p99", "rename mean"
+        );
+
+        for &n in &sizes {
+            let mgr = Arc::new(FileHandleManager::new(root.clone()));
+            // Populate the caches to size N (the F26 growth term).
+            let mut sample = Vec::new();
+            for (i, p) in paths[..n].iter().enumerate() {
+                let h = mgr.path_to_filehandle(p).unwrap();
+                if i % (n / 512).max(1) == 0 {
+                    sample.push(h);
+                }
+            }
+
+            // Resolve latency with no churn.
+            let mut quiet = Vec::with_capacity(2000);
+            for h in sample.iter().cycle().take(2000) {
+                let t = Instant::now();
+                mgr.filehandle_to_path(h).unwrap();
+                quiet.push(t.elapsed());
+            }
+
+            // Churn thread: rename bookkeeping ping-pong on one path
+            // pair outside the sample set. note_fs_rename is pure map
+            // bookkeeping — the O(N) scan cost doesn't depend on the
+            // file actually moving on disk.
+            let stop = Arc::new(AtomicBool::new(false));
+            let churn = {
+                let mgr = Arc::clone(&mgr);
+                let stop = Arc::clone(&stop);
+                let a = root.join("churn_a");
+                let b = root.join("churn_b");
+                std::thread::spawn(move || {
+                    let mut count = 0u64;
+                    let start = Instant::now();
+                    while !stop.load(Ordering::Relaxed) {
+                        mgr.note_fs_rename(&a, &b);
+                        mgr.note_fs_rename(&b, &a);
+                        count += 2;
+                    }
+                    (count, start.elapsed())
+                })
+            };
+
+            let mut busy = Vec::with_capacity(2000);
+            for h in sample.iter().cycle().take(2000) {
+                let t = Instant::now();
+                mgr.filehandle_to_path(h).unwrap();
+                busy.push(t.elapsed());
+            }
+            stop.store(true, Ordering::Relaxed);
+            let (renames, churn_wall) = churn.join().unwrap();
+
+            eprintln!(
+                "{:>8}  {:>10.1?} {:>10.1?}  {:>10.1?} {:>10.1?}  {:>12.1?}",
+                n,
+                pctl(&mut quiet, 0.5),
+                pctl(&mut quiet, 0.99),
+                pctl(&mut busy, 0.5),
+                pctl(&mut busy, 0.99),
+                churn_wall / (renames.max(1) as u32),
+            );
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 }

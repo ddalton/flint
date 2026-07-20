@@ -16,7 +16,7 @@
 // 4. Client closes → server revokes stateid
 
 use super::super::protocol::StateId;
-use crate::state_backend::{spawn_persist, StateBackend, StateIdRecord, StateTypeRecord};
+use crate::state_backend::{StateBackend, StateIdRecord, StateTypeRecord, WriteOp};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -442,21 +442,15 @@ impl StateIdManager {
         );
     }
 
+    /// Ordered capture at the mutation site (F27): an OPEN's put and a
+    /// fast-following CLOSE's delete reach the backend in call order,
+    /// so the delete can never be overwritten by a late put.
     fn persist(&self, e: &StateEntry) {
-        let backend = Arc::clone(&self.backend);
-        let record = e.to_record();
-        spawn_persist(
-            "stateid",
-            move || async move { backend.put_stateid(&record).await },
-        );
+        self.backend.enqueue_write(WriteOp::PutStateid(e.to_record()));
     }
 
     fn persist_delete(&self, other: [u8; 12]) {
-        let backend = Arc::clone(&self.backend);
-        spawn_persist(
-            "stateid_delete",
-            move || async move { backend.delete_stateid(&other).await },
-        );
+        self.backend.enqueue_write(WriteOp::DeleteStateid(other));
     }
 
     /// Allocate a new stateid

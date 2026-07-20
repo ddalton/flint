@@ -11,7 +11,7 @@
 use crate::pnfs::mds::device::{DeviceInfo, DeviceRegistry, DeviceStatus};
 use crate::pnfs::config::LayoutPolicy as ConfigLayoutPolicy;
 use crate::state_backend::{
-    spawn_persist, IoModeRecord, LayoutRecord, LayoutSegmentRecord, PlacementRecord, StateBackend,
+    IoModeRecord, LayoutRecord, LayoutSegmentRecord, PlacementRecord, StateBackend, WriteOp,
 };
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -501,12 +501,8 @@ impl LayoutManager {
         if let Some(p) = &removed {
             self.truncate_dirty.remove(&truncate_gate_key(p, file_key));
         }
-        let backend = Arc::clone(&self.backend);
-        let key = file_key.to_string();
-        spawn_persist(
-            "placement_delete",
-            move || async move { backend.delete_placement(&key).await },
-        );
+        self.backend
+            .enqueue_write(WriteOp::DeletePlacement(file_key.to_string()));
         removed
     }
 
@@ -603,13 +599,12 @@ impl LayoutManager {
         // the gate is keyed by the placement's file identity, which
         // the rename preserves.
 
-        let backend = Arc::clone(&self.backend);
-        let record = placement.to_record(new_key);
-        let old = old_key.to_string();
-        spawn_persist("placement_rename", move || async move {
-            backend.put_placement(&record).await?;
-            backend.delete_placement(&old).await
-        });
+        // Two ordered enqueues; the writer's group commit typically
+        // lands both in one transaction (old row gone ⇔ new row live).
+        self.backend
+            .enqueue_write(WriteOp::PutPlacement(placement.to_record(new_key)));
+        self.backend
+            .enqueue_write(WriteOp::DeletePlacement(old_key.to_string()));
         info!(
             "Placement re-keyed for rename: '{}' → '{}' (file_id {:016x})",
             old_key, new_key, placement.file_id
@@ -758,12 +753,8 @@ impl LayoutManager {
             .entry(composite_device_id(&placement.device_ids))
             .or_insert_with(|| placement.device_ids.clone());
 
-        let backend = Arc::clone(&self.backend);
-        let record = placement.to_record(file_key);
-        spawn_persist(
-            "placement",
-            move || async move { backend.put_placement(&record).await },
-        );
+        self.backend
+            .enqueue_write(WriteOp::PutPlacement(placement.to_record(file_key)));
 
         info!(
             "📌 Pinned placement for '{}': {} DSes {:?}, stripe_size={}",
@@ -776,20 +767,11 @@ impl LayoutManager {
     }
 
     fn persist(&self, l: &LayoutState) {
-        let backend = Arc::clone(&self.backend);
-        let record = l.to_record();
-        spawn_persist(
-            "layout",
-            move || async move { backend.put_layout(&record).await },
-        );
+        self.backend.enqueue_write(WriteOp::PutLayout(l.to_record()));
     }
 
     fn persist_delete(&self, stateid: LayoutStateId) {
-        let backend = Arc::clone(&self.backend);
-        spawn_persist(
-            "layout_delete",
-            move || async move { backend.delete_layout(&stateid).await },
-        );
+        self.backend.enqueue_write(WriteOp::DeleteLayout(stateid));
     }
 
     /// Generate a new layout for a file.
