@@ -1252,10 +1252,20 @@ process shares one) pinned FOUR cooperating defects:
 Tests: 3 new (deterministic reorder, successor-kill, 8-thread
 stress: 570→15→0 lost stateids), 2 rewritten. 727/727 green.
 Also explains the historic ~7% CLOSE not-found residual in every
-prior 3.1 attempt. Ships as u12.3; A/B re-soak against the 0.086
-TPS baseline is the acceptance. Related wart, folded into the same
-pass's backlog: EXCHANGE_ID trunking probe mints a duplicate
-clientid (RFC 8881 §18.35 casework) — harmless, unfixed.
+prior 3.1 attempt.
+**LIVE-VALIDATED on u12.3 (2026-07-20 A/B, identical 20-min
+pgbench -C soak): 21.27 TPS vs 0.086 = 247× (25,524 tx vs 108);
+latency avg 297ms vs 78s; connection time 71ms vs 10.9s; zero
+failed transactions both sides; ZERO TEST_STATEID recovery rounds
+(was 175); ZERO server warns (was ~30/min); ~30k client opens/min
+sustained flat for 20 min with stat probes 12–39ms.** Client-side
+CLOSE "errors" (~14% of closes) are now benign OLD_STATEID replies
+for reordered closes — the designed knfsd-style answer; the client
+absorbs them with no recovery activity. Mild TPS drift in the last
+interval (24→15) has checkpoint/autovacuum signature, not a
+server-side ratchet. Related wart, backlog: EXCHANGE_ID trunking
+probe mints a duplicate clientid (RFC 8881 §18.35 casework) —
+harmless, unfixed.
 
 Related wart (same session): flint answers a trunking-probe
 EXCHANGE_ID (same co_ownerid+verifier, unconfirmed) by minting a
