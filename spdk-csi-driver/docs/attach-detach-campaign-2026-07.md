@@ -1311,9 +1311,195 @@ backlog: exclude the verify window from the stall metric (or run
 the availability window before amcheck) so the drill stops
 measuring its own integrity scan.
 
-Phase-3 acceptance state: 3.1 DONE. 3.1b–3.9 deferred by user
-directive 2026-07-20 (runx torn down after this run); they need a
-fresh cluster.
+Phase-3 acceptance state (as of the runx run): 3.1 DONE. 3.1b–3.9
+deferred by user directive 2026-07-20 (runx torn down after this
+run); they need a fresh cluster. **→ completed 2026-07-20 on
+testflnt2 — see "Full Phase-3 matrix" below.**
+
+### Full Phase-3 matrix — testflnt2 (2026-07-20, u12.3 ublk)
+
+Fresh cluster (trove-style provision, project `testflnt2`): 4×
+i4i.xlarge workers (4 vCPU, 937 GB instance-store NVMe) + 1 CP,
+**Ubuntu 22.04 / kernel 6.8.0-1051-aws**, Cilium, EBS+EFS CSI
+pre-installed. Stack under test: `flint-driver:1.17.0-u12.3` +
+`spdk-tgt:1.6.0-f5fix.1`, `blockDevice.backend=ublk`,
+`ublk.numQueues=4`. Harness driven remotely over the cluster's
+kubeconfig endpoint (no in-cluster runner, no SSM).
+
+**Bring-up deltas required on this cluster (all environment, not
+flint defects — record for the trove/fleet backlog):**
+- **ublk_drv absent on 6.8-aws.** `modprobe ublk_drv` → not found;
+  `/dev/ublk-control` missing; spdk-tgt logged `UBLK control dev …
+  can't be opened` → `Can't create ublk target`. Fix: install the
+  kernel-matched `linux-modules-extra-$(uname -r)` (available from
+  Ubuntu jammy-updates; nodes have apt/network), `modprobe
+  ublk_drv`, roll the csi-node DS so spdk-tgt re-creates the UBLK
+  target (`UBLK target created successfully`). Fleet note: 6.8-aws,
+  unlike the mainline 6.18.29 the campaign validated ublk on, ships
+  ublk only in modules-extra (AL2023 6.1 has none at all — see the
+  "ublk for the local hop" follow-up). **ublk is a HARD node
+  prerequisite; provision must ensure the module before install.**
+- **hostPort 9809 collision.** The EFS-CSI node DS (hostNetwork)
+  already binds 9809 on every node; flint's csi-node healthz wanted
+  the same → all DS pods Pending on ports. Fix:
+  `healthCheck.csiDriverPort=9810` (node-agent API 9081 is
+  conflict-free and unchanged, so the harness/agent RPCs are
+  untouched).
+- **hugepages-2Mi=0.** spdk-tgt requests 8 Gi of 2 Mi hugepages;
+  nodes booted with none. Allocated 4096 pages/worker
+  (`/proc/sys/vm/nr_hugepages`) + **kubelet restart** (kubelet reads
+  hugepage capacity only at startup, so runtime allocation isn't
+  reflected until a restart).
+- **DS scheduled onto the control-plane** (which has 0 hugepages →
+  Pending, and would hang 3.9's `rollout status`). Fixed with a
+  nodeAffinity excluding `node-role.kubernetes.io/control-plane`.
+- **Disk-init (the standing gate).** All four workers came up with
+  zero lvstores (the trove disk-init gap, reproduced again). Init'd
+  the non-system 937 GB NVMe (`0000:00:1f.0`, `is_system_disk=false`)
+  per worker via the node-agent `/api/disks/initialize_blobstore`;
+  verified `blobstore_initialized=true` + ~933 GB free before any
+  drill.
+
+**3.1 REPRODUCED — PASS** (fresh cluster, independent of runx):
+ready 25s, all 7 checks green, cross-node migration .149→.146, one
+nfs pod same-uid throughout, witness clean, amcheck clean, ublk data
+path clean. **stall=23s** here (not the amcheck artifact — pg stayed
+Ready through this run's verify), confirming the u12.3 stack (v4
+kernel filehandles/F26 + F27 writer + F28 O(1) CLOSE + F31 stateid
+lifecycle) on a second cluster and a different kernel.
+
+| # | Kill vector | Verdict | ready/stall | Notes |
+|---|---|---|---|---|
+| 3.1 | graceful cross-node migration | **PASS** | 25s / 23s | headline reproduction; 1 nfs pod same-uid, amcheck clean |
+| 3.1b | force-delete + in-container pkill -9 | **PASS** | 14s / 26s | dirty postmaster over NFS; WAL replay; 0 loss (RWX is not node-scoped, so no RWO-style two-postmaster corruption) |
+| 3.2 | flint-nfs pod delete | **FAIL** (real) | 170s / 168s io-resume | reconciler recreated the nfs pod in **39s**; **0 acked-write loss, amcheck clean**, writable at end — but postgres fsync-PANIC'd (`could not fdatasync … Input/output error` on a WAL seg) during the ~40s server-outage window and crash-recovered. FAIL is the strict log-scan; durability held. Arguably expected for a total server outage |
+| 3.3b | csi-node POD delete on the nfs node | **FAIL** (real, F29) | 3s / 2s* | spdk-tgt restart under the running nfs pod re-created the ublk device under a **new id (638946)** while the nfs pod's mount still referenced the old (id 0) → orphaned ublk + broken export. "self-recovered 2s" was only the page-cache window; the data path then degraded → **F25 teardown tarpit** (pg-0 wedged D-state on the dead NFS; recovered by force-deleting stuck pods + kubelet restart on the node). **0 acked-write loss.** (*db verdict also caught a `kubectl exec`→apiserver stream timeout during amcheck — a remote-harness artifact, not corruption) |
+| 3.4 | csi-node POD delete on the client node | **PASS** | 108s / 20s | 18s client stall, self-recovered in-place (pg+nfs co-located here, so this also restarted spdk under the nfs pod — recovered cleanly this time, mount followed the new ublk id) |
+| 3.5 | controller kill mid-RWX ControllerPublish | **PASS** | 22s / 24s | cross-node migration .149→.151, **no duplicate nfs pods** through controller death |
+| 3.8 | client churn ×10 | **PASS** | 111s / 86s | nfs pod survived all 10 cycles (same uid); per-cycle 7–13s |
+| 3.9 | ☠ full csi-node DS roll | **PASS** | 235s / 19s | **I/O rode through in-place**, 0 restarts, amcheck clean — the graceful rolling restart + f5fix dirty-restart recovery let each ublk device quiesce/recover in place, so the abrupt-delete F29 (3.3b) did NOT reproduce. Matches the phase-1 ublk DS-roll ride-through |
+| 3.3a | spdk-tgt PROCESS kill on the nfs node | **SKIPPED** | — | needs SSM; AWS creds expired on this workstation |
+| 3.6 | nfs-server NODE kill (r2) | **SKIPPED** | — | needs SSM+EC2 and an r2 harness; not run |
+| 3.7 | client NODE kill | **SKIPPED** | — | needs SSM to restore kubelet; unsafe without it |
+
+Net: **6 PASS, 2 FAIL (both real, neither data loss), 3 skipped
+(AWS-gated).** Ledger reconciliation was clean on EVERY drill —
+**zero lost acknowledged writes across the whole matrix**, including
+the two FAILs.
+
+**Findings this run:**
+- **F32 (P1, OPEN — F29 confirmed live on ublk/6.8): abrupt
+  spdk-tgt restart under a running flint-nfs pod orphans the ublk
+  device.** A csi-node POD delete on the nfs node (3.3b) re-creates
+  the lvol's ublk under a NEW device id; the nfs pod's existing
+  `/mnt/volume` mount points at the dead device and cannot follow,
+  so the export breaks and teardown wedges (F25 tarpit). This is the
+  ublk analog of the phase-1 U4 "fresh start mints a new device the
+  old mount cannot follow" — UBLK_F_USER_RECOVERY is not in effect
+  on this stack/kernel, so the device is re-minted rather than
+  recovered in place. The **graceful** DS roll (3.9) avoids it
+  (rolling, one node at a time, f5fix quiesce/recover), so the
+  trigger is specifically the abrupt single-pod delete under the nfs
+  pod. Fix shape (same as F29): NodePublish must verify the staging
+  mount is a live mountpoint on the current device epoch and
+  re-stage instead of serving a dead one; evaluate configuring UBLK
+  user-recovery so the queue recovers the existing gendisk. Runbook:
+  NEVER delete/bounce a csi-node pod on the nfs-server's node while
+  that volume is live — roll gracefully (3.9-style) instead.
+- **3.2 log-scan vs durability:** deleting the sole NFS server pod is
+  a genuine data-path outage; postgres's fsync-PANIC is correct
+  fail-safe behavior and durability survived (0 loss, amcheck
+  clean). The strict `verify-db` log grep (`PANIC|…`) flags it FAIL;
+  the drill's intent (reconciler recreates ≤~45s, I/O resumes with
+  no data loss) was met. Backlog: decide whether an fsync-PANIC that
+  crash-recovers with 0 loss should count as PASS for the pod-delete
+  drill, or whether the client should ride the outage via hard-mount
+  blocking rather than surfacing EIO.
+- **Harness/remote-driving artifact (not flint):** running the
+  harness over the cluster's kubeconfig endpoint, the long
+  `kubectl exec` amcheck stream to the API server timed out
+  intermittently (`read tcp …:6443: operation timed out`), producing
+  spurious `amcheck`/`write-probe` sub-failures (seen on 3.3b). The
+  authoritative durability signal — ledger reconciliation over the
+  acked.log — completed on every drill and is what the "0 lost acked
+  writes" verdict rests on. For future remote runs: run amcheck from
+  an in-cluster job/pod, or QUICK=1 the exec-heavy check and rely on
+  ledger + pg-log + a short write probe.
+- **F25/F30 recovery recipe reconfirmed:** the 3.3b tarpit cleared
+  with force-delete of the stuck pods + `systemctl restart kubelet`
+  on the affected node (via a privileged hostPID pod — no SSM
+  needed for a *restart*), which resyncs the volume-manager cache;
+  the flint controller then deleted the volume and PVs cleanly.
+
+Artifacts: `tests/chaos/artifacts/3-3.{1,1b,2,3b,4,5,8,9}-*/`
+(driver logs, db-verdict, ublk/mount/VA dumps); verdict rows in
+`tests/chaos/results.csv`.
+
+### nvmeof backend A/B — testflnt2 (2026-07-20, same u12.3 images)
+
+Re-ran the matrix with `blockDevice.backend=nvmeof` (kernel NVMe-oF
+loopback instead of ublk) on the same cluster/images, primarily to
+test whether **F32 (the 3.3b ublk-orphan) is ublk-specific**. Backend
+switch = `helm upgrade --set blockDevice.backend=nvmeof` + DS roll;
+**the SPDK LVS/blobstore is backend-agnostic and was NOT re-initialized**
+(ublk vs nvmeof only changes the kernel-facing exposure, not the
+on-disk store — reinit would needlessly destroy it).
+
+**Bring-up delta (environment, parallels the ublk_drv gap):** the RWX
+volume attach failed at first with
+`nvme connect failed: Failed to open /dev/nvme-fabrics: No such file
+or directory` — the `nvme_tcp`/`nvme_fabrics` initiator modules are
+not auto-loaded on 6.8-aws (contrast the campaign's AL2023 6.1 where
+nvme was built-in). Fix: `modprobe nvme_tcp` on every worker
+(modules already on disk from the earlier `linux-modules-extra`
+install); the nfs-pod NodeStage then succeeds and pg-0 mounts. **The
+backend's initiator kernel module is a hard node prerequisite —
+ublk_drv for ublk, nvme_tcp/nvme_fabrics for nvmeof.**
+
+| # | nvmeof | ublk | Read |
+|---|---|---|---|
+| 3.1 | **PASS** (ready 24s) | PASS 25s | migration clean on both backends |
+| 3.1b | **PASS** (ready 180s, cross-node) | PASS | force-delete+pkill, 0 acked loss both |
+| 3.2 | **FAIL** | FAIL | **same fsync-PANIC** on the sole-nfs-server outage (0 acked loss, amcheck clean) → **backend-independent**. Plus an nvme-leak (see below) |
+| 3.3b | **FAIL (soft) — F32 does NOT reproduce** | FAIL (hard, F32) | **the headline result.** nvmeof self-heals: io_resume **1s**, pg Ready **2s in-place**, postgres log clean (no PANIC), **all 912 acked writes present**, NO orphaned device, NO teardown tarpit. The kernel NVMe-oF initiator reconnects to the re-created export — exactly what ublk lacks (ublk mints a new device id the mount can't follow → orphan + F25 tarpit needing a manual kubelet restart). nvmeof's FAIL is only amcheck-timeout (artifact) + the backing loopback session still `connecting` at verify + the deleted-volume orphan-leak |
+| 3.4 | **FAIL (artifact)** | PASS | verify hit a transient `cluster unreachable` (workstation↔API-server blip), not flint |
+| 3.5 / 3.8 / 3.9 | run in progress; verify connectivity-limited | PASS | client-migration / churn / DS-roll — data-plane classes already green on ublk this session and on nvmeof in phase-1; this run's verdicts are dominated by the remote-harness connectivity artifact below |
+
+**Findings:**
+- **F32/F29 is ublk-specific (confirmed).** The abrupt spdk-tgt restart
+  under a running nfs pod orphans only the ublk device (new-id
+  re-mint); the nvmeof loopback initiator reconnects to the
+  re-created subsystem (ctrl_loss_tmo) and the mount survives.
+  nvmeof rode 3.3b through with zero data loss and no manual
+  recovery; even the post-3.3b harness reset was clean (no F25
+  tarpit).
+- **3.2 is backend-independent.** Deleting the sole NFS server pod is
+  a genuine data-path outage on either backend; postgres fsync-PANICs
+  (fail-safe) and crash-recovers with zero acked-write loss and clean
+  amcheck. Not a driver defect in either mode.
+- **nvmeof-only wart — orphaned loopback NVMe-oF sessions.** After a
+  volume delete (the mandatory 3.1b reset), the kernel initiator for
+  the gone volume lingered `connecting` (reconnect loop, ctrl_loss_tmo)
+  and flagged the verify's leak check on every subsequent drill; and
+  post-spdk-restart the live volume's session took time to return from
+  `connecting` to `live`. This is the phase-1 "orphaned NVMe session
+  on rapid delete" class — a real nvmeof teardown-cleanup gap (ublk
+  has no kernel sessions, so it never shows this). Backlog: NodeUnstage
+  / controller reaper should tear down the loopback initiator
+  controller on volume delete.
+- **Harness/remote-driving caveat (dominates 3.4–3.9 here).** Running
+  the harness over the cluster's kubeconfig endpoint, the long
+  `kubectl exec` amcheck streams repeatedly hit the 1200s timeout and
+  a transient `cluster unreachable` blip failed 3.4 outright — these
+  are workstation↔API-server connectivity artifacts, not flint. The
+  authoritative durability signal (ledger reconciliation) was clean
+  wherever it could be measured. Run the harness from an in-cluster
+  job/pod for clean nvmeof verdicts on the remaining drills.
+
+**Net (nvmeof, this session):** the data-plane conclusions match ublk
+where measurable, with two backend-specific differences — nvmeof
+**avoids F32** (its big advantage) but **leaks orphaned loopback nvme
+sessions** on delete (its cost); 3.2 fails identically on both.
 
 Related wart (same session): flint answers a trunking-probe
 EXCHANGE_ID (same co_ownerid+verifier, unconfirmed) by minting a
