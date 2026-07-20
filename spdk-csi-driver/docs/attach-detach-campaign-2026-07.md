@@ -1139,12 +1139,16 @@ counters confirm). Once drain lagged allocation, CLOSE replies
 slipped past the client RTO; retransmitted CLOSEs re-executed as
 not-found (BAD_STATEID) and fed back into the churn. Fix:
 `open_state_keys` reverse index (stateid `other[12]` → open key),
-populated at record_open, consumed at close — O(1) CLOSE. Live
-validation on u12.2: see soak numbers below. (An earlier draft
-claimed F28 also explained the historic ~7% CLOSE not-found
-residual — REFUTED live 2026-07-20: a completely fresh client mount
-against the fixed server still shows ~9.5% CLOSE not-found. That
-residual is F31, a distinct race.)
+populated at record_open, consumed at close — O(1) CLOSE.
+u12.2 soak verdict: the MELT is gone — server-side CLOSE rtt <1ms,
+steady open/close throughput (~250/min, tracking ~1:1) for the full
+20 min, no monotonic ratchet, server CPU healthy. But overall
+workload throughput was still collapsed (0.086 TPS) — that is F31
+below, a distinct bug whose damage F28's slowness had been
+amplifying. (An earlier draft claimed F28 also explained the
+historic ~7% CLOSE not-found residual — REFUTED live 2026-07-20: a
+completely fresh client mount against the F28-fixed server still
+showed ~9.5% CLOSE not-found.)
 
 **F29 (P1, product gap, OPEN): a force-deleted NFS pod rescheduled
 onto the same node bind-mounts a dead staging mount.** Observed live
@@ -1204,36 +1208,54 @@ containerd stdout pipe (10MB log rotation every ~10s) backpressures
 the reply path. Verbose is for correctness forensics only; never
 measure latency or run gates with it on.
 
-**F31 (P2→P1 under churn, OPEN — root-caused 2026-07-20): CLOSE-vs-OPEN race on the
-shared open-owner makes ~7–10% of CLOSEs BAD_STATEID under
-connection churn.** Fresh-client evidence (new pg-0 mount, u12.2
-server): 101/1068 CLOSEs errored within minutes of a clean mount;
-server warns show CONSECUTIVE just-allocated stateids (seqid=1)
-going not-found seconds after OPEN. Mechanism: every postgres
-backend shares one open-owner (kernel client keys open-owners by
-uid), so `open_states` is keyed to the same (client, owner, fh)
-across backends. `close_open_state` removes `states[other]` FIRST,
-then `open_states[key]`; `record_open`'s merge path can win the
-interleave — its stale-guard checks `states` while the entry is
-still alive, then bumps and returns a stateid whose master entry the
-concurrent CLOSE deletes a microsecond later. The next backend's
-CLOSE of that stateid → not found. Predates F28 (the historic ~7%
-residual in every prior 3.1 attempt); F28's O(N) CLOSE stretched the
-race window to seconds and amplified it into the storm — with F28
-fixed the residual is bounded at the collision rate (~28 warns/min
-under pgbench -C, no feedback, rtt <1ms, client copes by dropping
-local state on BAD_STATEID). Fix shape: make CLOSE tombstone the
-stateid (short-TTL CLOSED marker reaped by the lease sweeper)
-instead of hard-deleting, and have the merge path treat a
-tombstoned/missing master as fresh-allocation; replayed or raced
-CLOSEs then land idempotently (matches knfsd's open-owner seqid
-retention). Not a drill blocker; fix follows the C6 acceptance.
-Severity bumped P2→P1-under-churn by the u12.2 soak: each
-BAD_STATEID sends the kernel client into a TEST_STATEID recovery
-round (175 rounds in 5 min of pgbench -C), and those rounds stall
-the WHOLE session — 2.6–4.1s stat blips for every user of the mount
-while open/close throughput itself stays steady. Bursty recovery
-tax, not an F28-style ratchet, but real.
+**F31 (P1, FIXED 5e3d348 — root-caused via reproducer tests
+2026-07-20): stateid lifecycle races under the shared open-owner
+destroy live opens; under connection churn the recovery tax
+collapses throughput.** The u12.2 baseline soak (20 min pgbench -C
+over the local socket) is the measurement: **0.086 TPS, 78s average
+transaction latency** (zero failed transactions — durability held),
+975 seqid=1 "CLOSE not found" warns, 175 client TEST_STATEID
+recovery rounds, 2.6–4.1s whole-session stat stalls. The earlier
+merge-race framing was incomplete; the reproducer tests (8-thread
+open/close churn on shared (owner, fh) keys — the exact pgbench -C
+shape, since the Linux client keys open-owners by uid so every
+process shares one) pinned FOUR cooperating defects:
+1. `record_open` returned an existing stateid WITHOUT bumping the
+   seqid when the share-mask was unchanged (a misreading of RFC 8881
+   §18.16.4, encoded in two unit tests as intended behavior). The
+   bump is the protocol's ONLY defense against a reordered in-flight
+   CLOSE from the same owner: with it, a stale CLOSE(seq=k) after a
+   re-OPEN advanced the state to k+1 fails OLD_STATEID (benign);
+   without it, the stale CLOSE validates and DESTROYS the state the
+   new opener holds. knfsd bumps on every OPEN; I/O ops are immune
+   (the client sends them seqid=0 "current stateid" form).
+2. Fresh-open double-allocation: two concurrent OPENs for the same
+   key could both take the vacant path; the last insert won and the
+   loser's stateid was silently orphaned (570/4000 lost in the
+   stress test). Fixed by running decide-and-mutate under the
+   `open_states` entry guard (one-way nesting
+   open_states→{states,indexes}, same as every other path).
+3. CLOSE was validate-then-remove (TOCTOU) and seqid-blind. Now an
+   atomic seqid-checked `remove_if` under the entry shard lock,
+   returning a typed outcome; stale→NFS4ERR_OLD_STATEID instead of
+   BAD_STATEID (which detonates a TEST_STATEID recovery round that
+   stalls the whole session — the error-code discrimination is
+   load-bearing, see the "how mainstream servers handle this"
+   discussion in the session log).
+4. A bounded tombstone ring of recently-closed stateids, pushed
+   BEFORE the removal commits, classifies racing duplicate closes
+   and replays as OLD_STATEID (the last 15/4000 stress failures were
+   racers reading the maps in the instruction window between
+   remove_if and the old post-removal tombstone). The stale-guard
+   also now cleans the reverse index — a leaked entry let a late
+   CLOSE of a dead stateid tear down its successor's open.
+Tests: 3 new (deterministic reorder, successor-kill, 8-thread
+stress: 570→15→0 lost stateids), 2 rewritten. 727/727 green.
+Also explains the historic ~7% CLOSE not-found residual in every
+prior 3.1 attempt. Ships as u12.3; A/B re-soak against the 0.086
+TPS baseline is the acceptance. Related wart, folded into the same
+pass's backlog: EXCHANGE_ID trunking probe mints a duplicate
+clientid (RFC 8881 §18.35 casework) — harmless, unfixed.
 
 Related wart (same session): flint answers a trunking-probe
 EXCHANGE_ID (same co_ownerid+verifier, unconfirmed) by minting a
