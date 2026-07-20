@@ -1204,7 +1204,7 @@ containerd stdout pipe (10MB log rotation every ~10s) backpressures
 the reply path. Verbose is for correctness forensics only; never
 measure latency or run gates with it on.
 
-**F31 (P2, OPEN — root-caused 2026-07-20): CLOSE-vs-OPEN race on the
+**F31 (P2→P1 under churn, OPEN — root-caused 2026-07-20): CLOSE-vs-OPEN race on the
 shared open-owner makes ~7–10% of CLOSEs BAD_STATEID under
 connection churn.** Fresh-client evidence (new pg-0 mount, u12.2
 server): 101/1068 CLOSEs errored within minutes of a clean mount;
@@ -1228,6 +1228,12 @@ instead of hard-deleting, and have the merge path treat a
 tombstoned/missing master as fresh-allocation; replayed or raced
 CLOSEs then land idempotently (matches knfsd's open-owner seqid
 retention). Not a drill blocker; fix follows the C6 acceptance.
+Severity bumped P2→P1-under-churn by the u12.2 soak: each
+BAD_STATEID sends the kernel client into a TEST_STATEID recovery
+round (175 rounds in 5 min of pgbench -C), and those rounds stall
+the WHOLE session — 2.6–4.1s stat blips for every user of the mount
+while open/close throughput itself stays steady. Bursty recovery
+tax, not an F28-style ratchet, but real.
 
 Related wart (same session): flint answers a trunking-probe
 EXCHANGE_ID (same co_ownerid+verifier, unconfirmed) by minting a
