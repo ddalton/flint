@@ -943,7 +943,13 @@ impl IoOperationHandler {
 
         // Validate stateid
         if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
-            warn!("CLOSE: Invalid stateid: {}", e);
+            // F28: stateid identity in the warn — correlating failing
+            // CLOSEs against OPEN grants distinguishes lease-reap vs
+            // replay-miss vs fh-keying as the storm's seed.
+            warn!(
+                "CLOSE: Invalid stateid: {} (other={:02x?} seqid={})",
+                e, op.stateid.other, op.stateid.seqid
+            );
             return CloseRes {
                 status: Nfs4Status::BadStateId,
                 stateid: None,

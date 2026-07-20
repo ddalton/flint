@@ -171,6 +171,13 @@ pub struct StateIdManager {
     /// persisting open-owner records would require schema bump +
     /// boundary plumbing that's heavier than the win.
     open_states: DashMap<(u64, Vec<u8>, Vec<u8>), OpenState>,
+    /// F28: reverse index stateid.other → open_states key, so CLOSE is
+    /// a point lookup. The old `iter().find()` full-map scan per CLOSE
+    /// was O(live opens) on the hot path — under connection churn the
+    /// map outgrew the drain rate, CLOSE replies slipped past the
+    /// client RTO, retransmits re-executed as not-found, and the retry
+    /// feedback starved the session (F26's bug class, stateid layer).
+    open_state_keys: DashMap<[u8; 12], (u64, Vec<u8>, Vec<u8>)>,
 
     /// Index from filehandle bytes → list of `(client_id, owner)`
     /// pairs that have an open on it. Used by share-deny conflict
@@ -208,6 +215,7 @@ impl StateIdManager {
             states: DashMap::new(),
             client_states: DashMap::new(),
             open_states: DashMap::new(),
+            open_state_keys: DashMap::new(),
             opens_by_fh: DashMap::new(),
             backend,
         }
@@ -325,6 +333,7 @@ impl StateIdManager {
         // the master `states` map and `client_states` index stay
         // consistent with everything else.
         let stateid = self.allocate(StateType::Open, client_id, Some(fh.clone()));
+        self.open_state_keys.insert(stateid.other, key.clone());
         self.open_states.insert(
             key,
             OpenState {
@@ -658,9 +667,9 @@ impl StateIdManager {
             self.persist_delete(*other);
         }
 
-        let key = self.open_states.iter()
-            .find(|e| &e.value().stateid_other == other)
-            .map(|e| e.key().clone());
+        // F28: point lookup via the reverse index (was an O(N)
+        // full-map scan per CLOSE — the degradation seed).
+        let key = self.open_state_keys.remove(other).map(|(_, k)| k);
         if let Some(key) = key {
             let (_client_id, ref owner, ref fh) = key;
             if let Some(mut owners) = self.opens_by_fh.get_mut(fh) {
