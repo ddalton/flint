@@ -1,0 +1,26 @@
+# F26 §12 C6 code gates — builds the lib test binary and ships it in a
+# minimal runner. Executed on the x86 builder via dind:
+#   docker run --cap-add DAC_READ_SEARCH -e FLINT_FH_KERNEL=1 \
+#     -e TMPDIR=/scratch -v /var/lib/docker/c6scratch:/scratch c6gates \
+#     /test-bin [filter] [--ignored --nocapture]
+# The scratch bind must be ext4 (dind's data-root NVMe): overlayfs has
+# no export_operations, so name_to_handle_at fails on the writable layer.
+FROM rust:1.92-alpine AS builder
+RUN apk add --no-cache protobuf-dev musl-dev build-base
+WORKDIR /src
+COPY . .
+# Cache-mounted target lives outside the image; copy the test binary out.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo test --lib --release --no-run && \
+    mkdir -p /out && \
+    cp $(ls -t target/release/deps/spdk_csi_driver-* | grep -v '\.d$' | head -1) /out/test-bin
+
+FROM alpine:3.21
+COPY --from=builder /out/test-bin /test-bin
+# The grep-lint tests (identity, fd_cache guard-lint) walk
+# CARGO_MANIFEST_DIR (= /src at compile time) at RUNTIME — ship the
+# source tree so they lint the real code instead of failing on a
+# missing dir.
+COPY --from=builder /src/src /src/src
+ENTRYPOINT ["/test-bin"]

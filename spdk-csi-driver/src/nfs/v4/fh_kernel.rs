@@ -174,6 +174,7 @@ pub fn load_or_create_key(export_root: &Path) -> Result<[u8; 32], String> {
 
 /// Why a mint failed — pre-existence mints (`NoEnt`) fall back to the
 /// legacy v1 path handle at the call site.
+#[derive(Debug)]
 pub enum MintError {
     NoEnt,
     Other(String),
@@ -181,6 +182,7 @@ pub enum MintError {
 
 /// Why a resolve failed — `Stale` maps to NFS4ERR_STALE; the F17b/c
 /// call-site fallbacks then try the ino-keyed open-files view.
+#[derive(Debug)]
 pub enum ResolveError {
     Stale,
     Other(String),
@@ -233,8 +235,11 @@ mod imp {
         pub fn try_new(export_root: &Path, instance_id: u64) -> Result<Self, String> {
             let key = load_or_create_key(export_root)?;
             let c = cpath(export_root)?;
+            // O_RDONLY, NOT O_PATH: open_by_handle_at's mount_fd lookup
+            // rejects O_PATH descriptors (EBADF — hit live on 6.1; the
+            // resolved object fd below may still be O_PATH).
             let fd = unsafe {
-                libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC | libc::O_DIRECTORY)
+                libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY)
             };
             if fd < 0 {
                 return Err(format!(
