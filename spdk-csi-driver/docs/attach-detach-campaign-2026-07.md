@@ -2445,3 +2445,28 @@ Collateral data damage + repair: pg_xact/0000 lost its unfsynced tail
 file to the needed page boundary (truncate -s) — redo re-derives the
 commit bits from WAL; zero acked loss expected (U8-class pg_xact
 finding, now with the exact repair recipe).
+
+### F36 UPGRADED TO P0: real acked-write loss + lineage fork (post-recovery audit)
+
+Post-recovery ledger audit: **752 of 3161 acked writes missing** — all
+acked 17:18-17:19Z (PRE-incident, healthy harness, leg-0 serving).
+Mechanism: the crashloop recovery reassembled from the STALE leg-1
+lineage a second time (leg-0 still claim-blocked on aws-1), so the
+recovered DB is leg-1's past; post-recovery writes then forked onto
+that stale lineage. Neither leg now holds the full history —
+split-brain materialized end-to-end from one node-kill drill:
+- leg-0 (aws-1): true pre-incident state incl. the 752 seqs;
+  claim-frozen; preserved as lvol snapshot
+  `f36-forensic-leg0-1784656900` (uuid e1d81ef2) + epoch snapshots
+  103-105.
+- leg-1 lineage (current serving fs): missing 25351-26103, owns
+  everything after.
+
+This is the campaign's FIRST real durability failure, and it is
+entirely F36's two missing guards (stale-leg assembly without the
+volume claim; stale-head delete without a consumer check) plus a third
+now visible: **degraded assembly must prefer / require the in_sync
+leg, and must be able to BREAK a dead node's stale claim safely**
+(leg-0 was the right choice both times and was skipped both times for
+the same mechanical reason). Verdict rows for 3.6 runs 1-2 stand;
+run-2 db verdict now reads: REAL LOSS 752 acked (F36), not artifact.
