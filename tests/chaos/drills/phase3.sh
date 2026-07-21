@@ -51,11 +51,37 @@ witness_verdict() { # <t0> — mismatches since t0 + freshness of its shared-fil
   # minutes on exactly this line when the witness's server was an
   # orphaned instance — F33). A timed-out read = witness NOT fresh.
   last=$(timeout 15 kubectl exec -n "$NS" "$wp" -- sh -c 'tail -1 /mnt/witness.log' 2>/dev/null | awk '{print $2}')
-  local age=$(( $(epoch) - ${last:-0} ))
+  if [ -z "$last" ]; then
+    # Empty read = the exec timed out on a hung mount (or empty log).
+    # Say THAT — computing an age from 0 prints a raw epoch and reads
+    # like a bizarre-but-ignorable number (runz 3.6 postmortem).
+    note "WITNESS: UNRESPONSIVE (mount read timed out — flows likely hung; mismatches=$mism)"
+    return 1
+  fi
+  local age=$(( $(epoch) - last ))
   if [ "${mism:-0}" -eq 0 ] && [ "$age" -lt 15 ]; then
     ok "witness clean (0 mismatches, last write ${age}s ago)"; return 0
   fi
   note "WITNESS: mismatches=$mism last-write-age=${age}s"; return 1
+}
+
+wait_witness_fresh() { # [budget_s] — seconds until the witness writes fresh again, else -1.
+  # THE F33 acceptance metric: a hung witness must recover once the
+  # orphan's sockets die (fence F33b) — bounded so a dead witness can
+  # never wedge the drill (the original 87-minute 3.6 hang).
+  local budget=${1:-300} t0=$(epoch) wp last age
+  while [ $(( $(epoch) - t0 )) -lt "$budget" ]; do
+    wp=$(witness_pod)
+    if [ -n "$wp" ]; then
+      last=$(timeout 15 kubectl exec -n "$NS" "$wp" -- sh -c 'tail -1 /mnt/witness.log' 2>/dev/null | awk '{print $2}')
+      if [ -n "$last" ]; then
+        age=$(( $(epoch) - last ))
+        [ "$age" -lt 15 ] && { echo $(( $(epoch) - T0 )); return 0; }
+      fi
+    fi
+    sleep 10
+  done
+  echo -1; return 1
 }
 
 spdk_restarts() { # <node> — spdk-tgt is a native-sidecar INIT container
@@ -252,10 +278,17 @@ case "$DRILL" in
     sleep 5
   done
   [ "$T_REC" -ge 0 ] && ok "nfs pod resurrected on $(nfs_node) at ${T_REC}s" || note "nfs pod NOT resurrected in 360s"
+  # F33 acceptance: the witness must resume WITHOUT manual unsticking,
+  # within ~fence-deadline + reconnect. Measured before the ack wait so
+  # the metric is the witness's own recovery, not the harness's.
+  T_WITNESS=$(wait_witness_fresh 300)
+  [ "$T_WITNESS" -ge 0 ] && ok "witness recovered at ${T_WITNESS}s (F33 acceptance)" \
+    || note "witness NOT recovered in 300s — F33 fence did not release clients"
   wait_acks_fresh 420 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
   witness_verdict "$T0"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
-    NOTES="nfs NODE kill (r2): resurrect=${T_REC}s on $(nfs_node), io_resume=${T_RESUME}s" verify
+    NOTES="nfs NODE kill (r2): resurrect=${T_REC}s on $(nfs_node), witness_recovery=${T_WITNESS}s, io_resume=${T_RESUME}s" verify
+  [ "$T_WITNESS" -ge 0 ] || fail "3.6 FAIL: witness never recovered (F33/F33b)"
   untaint_oos "$NFS_NODE"; TAINTED=""
   kubelet_start_ssm "$IID"; DEAD_IID=""
   wait_node_ready "$NFS_NODE" 300 && ok "nfs node restored" || note "node not Ready — check kubelet"

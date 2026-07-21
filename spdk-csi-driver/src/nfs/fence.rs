@@ -15,6 +15,15 @@
 //! client TCP connection (RST), and the kernel NFS clients re-resolve
 //! through the Service to the resurrected instance.
 //!
+//! F33b (runz drill 3.6, 2026-07-21): exit alone is NOT enough. The
+//! fence fired on time, but `exit_group` could not complete — worker
+//! threads sat in D-state on the fenced ublk raid, and a process cannot
+//! die while a thread is uninterruptible. The corpse held its sockets
+//! for 40+ minutes and clients hung exactly as before. So the monitor
+//! now `shutdown(2)`s EVERY socket fd BEFORE exiting: socket shutdown
+//! never touches the dead filesystem, the FINs always escape, and
+//! clients fail over even if the exit itself wedges forever.
+//!
 //! Mechanics: the probe (write + fsync of `<export>/.flint-nfs/fence.hb`)
 //! runs on its own thread because a fenced store BLOCKS the syscall in
 //! D-state — the prober cannot observe its own hang. A separate monitor
@@ -99,10 +108,84 @@ pub fn heartbeat_probe(export_root: &PathBuf) -> impl FnMut() -> std::io::Result
     }
 }
 
+/// Every open socket fd of this process. Linux reads /proc/self/fd
+/// (complete, any fd number); elsewhere (dev/test on macOS) probes fds
+/// 3..1024 with SO_TYPE — good enough for tests, never used in prod.
+#[cfg(target_os = "linux")]
+pub fn socket_fds() -> Vec<i32> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/proc/self/fd") {
+        for e in rd.flatten() {
+            let Ok(fd) = e.file_name().to_string_lossy().parse::<i32>() else {
+                continue;
+            };
+            if fd <= 2 {
+                continue;
+            }
+            if let Ok(t) = std::fs::read_link(format!("/proc/self/fd/{fd}")) {
+                if t.to_string_lossy().starts_with("socket:") {
+                    out.push(fd);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn socket_fds() -> Vec<i32> {
+    let mut out = Vec::new();
+    for fd in 3..1024 {
+        let mut ty: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let r = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                &mut ty as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if r == 0 {
+            out.push(fd);
+        }
+    }
+    out
+}
+
+/// F33b: shutdown(SHUT_RDWR) each fd — FINs reach the clients without
+/// touching the (dead) filesystem. Returns how many shutdowns took.
+pub fn shutdown_fds(fds: &[i32]) -> usize {
+    fds.iter()
+        .filter(|&&fd| unsafe { libc::shutdown(fd, libc::SHUT_RDWR) } == 0)
+        .count()
+}
+
+/// Production fence action: FIN every socket, then exit. The shutdown
+/// happens HERE and not in the caller's closure so no future caller can
+/// reintroduce F33b by forgetting it. Tests never use this (they inject
+/// channel-send closures) — a test-process global socket sweep would
+/// break every concurrently-running socket test.
+pub fn fence_exit(exit_code: i32) -> impl FnOnce(u64) + Send + 'static {
+    move |stale_secs| {
+        let closed = shutdown_fds(&socket_fds());
+        error!(
+            stale_secs,
+            sockets_shutdown = closed,
+            exit_code,
+            "[FENCE] all sockets shut down — clients fail over now even \
+             if exit wedges behind D-state threads (F33b); exiting"
+        );
+        std::process::exit(exit_code);
+    }
+}
+
 /// Spawn the prober + monitor threads. Generic over the probe and the
 /// fence action so tests can inject both; production passes
 /// [`heartbeat_probe`] and a process-exit closure. The monitor calls
-/// `on_fence` at most once.
+/// `on_fence` at most once — after shutting down every socket (F33b),
+/// so clients fail over even when the exit itself can never finish.
 pub fn spawn_with_probe(
     mut probe: impl FnMut() -> std::io::Result<()> + Send + 'static,
     deadline: Duration,
@@ -150,8 +233,7 @@ pub fn spawn_with_probe(
                     error!(
                         stale_secs,
                         "[FENCE] backing store unresponsive past deadline — \
-                         exiting so clients RST and fail over to the \
-                         resurrected server (F33)"
+                         fencing (F33)"
                     );
                     on_fence(stale_secs);
                     return;
@@ -252,5 +334,39 @@ mod tests {
         // parse rule is exercised via decide + the documented contract:
         // 0 disables. Pin the default here instead.
         assert_eq!(DEFAULT_DEADLINE_SECS, 90);
+    }
+
+    /// F33b: socket census sees sockets and not regular files.
+    #[test]
+    fn socket_fds_sees_sockets_not_files() {
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let f = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let fds = socket_fds();
+        assert!(fds.contains(&listener.as_raw_fd()), "listener missing from census");
+        assert!(!fds.contains(&f.as_raw_fd()), "regular file misclassified as socket");
+    }
+
+    /// F33b: shutting a connection's fd down delivers EOF to the peer —
+    /// the exact signal a hung NFS client needs to abandon the orphan.
+    /// Targeted fds only; never sweep the whole test process.
+    #[test]
+    fn shutdown_fds_delivers_peer_eof() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+
+        assert_eq!(shutdown_fds(&[server_side.as_raw_fd()]), 1);
+
+        let mut client = client;
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 8];
+        let n = client.read(&mut buf).expect("peer read after shutdown");
+        assert_eq!(n, 0, "peer must see EOF (FIN), got {n} bytes");
     }
 }

@@ -174,7 +174,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             spdk_csi_driver::nfs::fence::heartbeat_probe(&args.export_path),
             deadline,
             interval,
-            |_stale| std::process::exit(58),
+            // fence_exit FINs every socket before exiting — the exit can
+            // wedge forever behind D-state threads on the fenced store
+            // (F33b, runz 3.6), but the FINs always reach the clients.
+            spdk_csi_driver::nfs::fence::fence_exit(58),
         );
     } else {
         info!("F33 self-fencing DISABLED (FLINT_FENCE_DEADLINE_SECS=0)");

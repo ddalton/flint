@@ -23,12 +23,20 @@ step "db verdict (since $(rfc3339 "$T0"))"
 TMO=$(command -v timeout || command -v gtimeout)
 
 # 1. up
+PG_UP=1
 $TMO 30 kubectl exec -n "$NS" $PG -c postgres -- pg_isready -q -U postgres \
-  && ok "pg_isready" || { FAILED="$FAILED isready"; note "pg_isready FAILED (or 30s timeout)"; }
+  && ok "pg_isready" \
+  || { PG_UP=0; FAILED="$FAILED isready"; note "pg_isready FAILED (or 30s timeout)"; }
 
 # 2. ledger reconciliation (acked ⊆ ledger)
 LP=$(load_pod)
-if [ -n "$LP" ]; then
+if [ "$PG_UP" != "1" ]; then
+  # An unreachable postgres returns an EMPTY seq list, which comm reads
+  # as "every acked write is missing" — a fabricated total-loss verdict
+  # (runz 3.6: '666 lost' against a hung pg-0). Loss is UNKNOWN here,
+  # not total; isready already failed the drill.
+  note "ledger check SKIPPED (pg unreachable — loss unknown, not counted)"
+elif [ -n "$LP" ]; then
   # comm needs LEXICOGRAPHIC order — sort -n desynchronizes its merge the
   # moment the two lists are not near-identical (an oracle-pod restart
   # makes acked.log a mid-stream subset), fabricating sparse "missing"
