@@ -2470,3 +2470,32 @@ leg, and must be able to BREAK a dead node's stale claim safely**
 (leg-0 was the right choice both times and was skipped both times for
 the same mechanical reason). Verdict rows for 3.6 runs 1-2 stand;
 run-2 db verdict now reads: REAL LOSS 752 acked (F36), not artifact.
+
+### Drill 3.6 run 3 (u12.8, full guard stack): the F33 acceptance LANDS; residual = F36c
+
+**witness_recovery=94s** (vs NEVER in runs 1-2 and 93min on runy2) —
+resurrect 93s, pg-0 Ready 95s with 0 restarts, no manual intervention
+anywhere. F33 detection + F33b socket-FIN + F35 + both F36 guards all
+executed live (the run also incidentally validated the whole self-heal
+chain when a spot reclaim + a botched ghost-cleanup force-delete
+landed mid-roll: fence eprintln line captured, 6 sockets FIN'd, exit
+wedged harmlessly in D-state, guard-2 freed leg-0 after the node
+reboot).
+
+Residual (drill FAIL components, honestly): **6 acked writes lost**
+(consecutive tail 44026-44031) + heap/index tears (amcheck rc=2, page
+checksums) — the resurrect assembled from leg-0 before catch-up had
+fully equalized it with leg-1's freshest writes. This is **F36c**, the
+deliberately-deferred third guard: assembly-side in_sync requirement.
+Design tension to resolve before implementing: phase-2's
+single-survivor direct serve (drill 2.4's zero-loss headline) WANTS
+serve-anything under node loss; F36c wants freshest-or-refuse. The
+answer is likely "serve the most-current REACHABLE leg; refuse only
+when a fresher leg is known to exist and reachable" + surface
+acked-tail-risk as a VolumeCondition. 752 lost (run 2, no guards) →
+6 lost (run 3, guards a+b) — the residual is now bounded to the
+catch-up delta at kill time. nvme-leak component was transient
+(connecting-to-dead-node during the drill window; live again after
+node restore). Harness reset required post-run (torn pages make the
+bench DB an invalid oracle; forensic snapshot e1d81ef2 released with
+it — attribution + logs preserved in artifacts/3-3.6-1784663315/).

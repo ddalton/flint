@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-21T19:48:35Z)
+  ✓ pg_isready
+  · LOST ACKED WRITES: 44026 44027 44028 44029 44030 (6 total)
+  · pg_amcheck CORRUPTION/ERROR (rc=2):     ERROR:  heap tuple (40671,50) from table "pgbench_accounts" lacks matching index tuple within index "pgbench_accounts_pkey"     HINT:  Retrying verification using the function bt_index_parent_check() might provide a more specific error. command terminated with exit code 2 
+  ✓ postgres log clean
+  ✓ writability probe
+
+DB-VERDICT: FAIL ( ledger amcheck)
