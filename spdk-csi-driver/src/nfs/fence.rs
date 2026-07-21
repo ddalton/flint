@@ -170,6 +170,14 @@ pub fn shutdown_fds(fds: &[i32]) -> usize {
 pub fn fence_exit(exit_code: i32) -> impl FnOnce(u64) + Send + 'static {
     move |stale_secs| {
         let closed = shutdown_fds(&socket_fds());
+        // Unbuffered stderr FIRST: process::exit skips the non-blocking
+        // tracing appender's flush, and this line vanished on runz 3.6
+        // run 2 — exactly when it was the evidence that mattered.
+        eprintln!(
+            "[FENCE] F33/F33b: backing store stale {stale_secs}s — \
+             {closed} sockets shut down (clients fail over now); \
+             exiting {exit_code}"
+        );
         error!(
             stale_secs,
             sockets_shutdown = closed,

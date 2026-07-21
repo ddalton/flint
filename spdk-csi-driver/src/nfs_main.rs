@@ -120,7 +120,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::AdoptLegacy) => {
             info!("F30: legacy volume adopted — identity marker stamped for {}", args.volume_id);
         }
+        // Refusals print to UNBUFFERED stderr as well: process::exit
+        // skips the non-blocking appender's flush, and on runz 3.6 run 2
+        // the refusal REASON was lost — only "exit 57" survived, turning
+        // a one-line diagnosis into an hour of forensics.
         Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::RefuseMismatch { found }) => {
+            eprintln!(
+                "F30 REFUSAL (exit 57): export carries volume-id {:?} but configured for {:?} at {:?}",
+                found, args.volume_id, args.export_path
+            );
             error!(
                 "F30 REFUSAL: export carries volume-id {:?} but this server is configured \
                  for {:?} — the wrong volume is mounted at {:?}; refusing to serve",
@@ -129,6 +137,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(57);
         }
         Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::RefuseEmpty) => {
+            eprintln!(
+                "F30 REFUSAL (exit 57): export {:?} has neither identity marker nor flint state — empty/foreign dir, not volume {}",
+                args.export_path, args.volume_id
+            );
             error!(
                 "F30 REFUSAL: export {:?} has neither an identity marker nor flint state — \
                  this is an EMPTY/foreign directory, not volume {} (blind export is how the \
@@ -138,6 +150,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(57);
         }
         Err(e) => {
+            eprintln!(
+                "F30 REFUSAL (exit 57): identity marker check FAILED on {:?}: {} (I/O error usually means the backing store died under the export)",
+                args.export_path, e
+            );
             error!("F30: identity marker check failed on {:?}: {}", args.export_path, e);
             std::process::exit(57);
         }
