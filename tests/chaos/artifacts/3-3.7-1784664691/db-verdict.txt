@@ -1,0 +1,19 @@
+
+▶ db verdict (since 2026-07-21T20:11:31Z)
+command terminated with exit code 1
+  · pg_isready FAILED (or 30s timeout)
+  · ledger check SKIPPED (pg unreachable — loss unknown, not counted)
+  · pg_amcheck CORRUPTION/ERROR (rc=1): pg_amcheck: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  the database system is starting up command terminated with exit code 1 
+  ✓ postgres log clean
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( isready amcheck write-probe)
+
+CORRECTION (post-recovery honest verdict, 2026-07-21T20:17Z): pg-0
+ready+acking at ~222s (cross-node WAL replay); isready OK; LEDGER
+CLEAN all 463 acked present (ZERO loss); pg_amcheck CLEAN. The row's
+FAIL components were harness-timing artifacts: 60s READY_TIMEOUT vs
+~222s real cross-node recovery; verify raced pg startup ("database
+system is starting up"); nvme "leak" = connecting-controller during
+the killed node's down-window (live again post-restore). 3.7
+substance: PASS.

@@ -80,13 +80,21 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
           resources:
-            requests: {cpu: "1", memory: 2Gi}
+            # ephemeral-storage REQUEST is eviction armor, not capacity:
+            # kubelet ranks eviction victims by usage-minus-request, and a
+            # request:0 pod using 24Ki ranks FIRST. Three separate
+            # image-pull unpack spikes on 8GB roots evicted pg-0/the nfs
+            # server at 24Ki usage each (runz 2026-07-21) — the oracle
+            # must never be the node's sacrificial pod.
+            requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 200Mi}
             limits: {cpu: "2", memory: 4Gi}
           volumeMounts:
             - {name: data, mountPath: /var/lib/postgresql/data}
         - name: chaos
           image: busybox:1.36
           command: ["sleep","infinity"]
+          resources:
+            requests: {ephemeral-storage: 50Mi}
   volumeClaimTemplates:
     - metadata: {name: data}
       spec:
