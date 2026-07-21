@@ -129,6 +129,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // F33: backing-store self-fencing. When this node is isolated (or
+    // the backing leg is fenced by a resurrect elsewhere), this process
+    // used to stay alive with wedged I/O while clients hung on their
+    // established TCP flows — process exit is what lets them RST and
+    // fail over. Deadline is generous (default 90s; env
+    // FLINT_FENCE_DEADLINE_SECS, 0 disables) so a slow-but-live store
+    // under load never trips it.
+    if let Some(deadline) = spdk_csi_driver::nfs::fence::deadline_from_env() {
+        let interval = std::cmp::min(deadline / 6, std::time::Duration::from_secs(10));
+        spdk_csi_driver::nfs::fence::spawn_with_probe(
+            spdk_csi_driver::nfs::fence::heartbeat_probe(&args.export_path),
+            deadline,
+            interval,
+            |_stale| std::process::exit(58),
+        );
+    } else {
+        info!("F33 self-fencing DISABLED (FLINT_FENCE_DEADLINE_SECS=0)");
+    }
+
     info!("");
     info!("📊 Configuration:");
     info!("   • Export Path: {:?}", args.export_path);

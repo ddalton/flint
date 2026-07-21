@@ -39,10 +39,17 @@ up() {
   ok "schema + pgbench -i -s ${SCALE:-200} done"
 
   if [ "${WITNESS:-0}" = "1" ]; then
-    emit_witness | kubectl apply -f - >/dev/null
-    kubectl wait --for=condition=Available deploy/witness -n "$NS" --timeout=180s >/dev/null \
-      || fail "witness never became Available"
-    ok "witness up on $(kubectl get pod -n "$NS" -l app=witness -o jsonpath='{.items[0].spec.nodeName}')"
+    if [ "$MODE" = "RWX" ]; then
+      emit_witness | kubectl apply -f - >/dev/null
+      kubectl wait --for=condition=Available deploy/witness -n "$NS" --timeout=180s >/dev/null \
+        || fail "witness never became Available"
+      ok "witness up on $(kubectl get pod -n "$NS" -l app=witness -o jsonpath='{.items[0].spec.nodeName}')"
+    else
+      # The witness mounts the SHARED volume — impossible on RWO (it
+      # would wedge Pending or steal the single attach). The RWO ledger
+      # lives with pg-load; witness is silently meaningless here.
+      note "WITNESS=1 ignored for MODE=$MODE (witness needs the RWX shared mount)"
+    fi
   fi
 
   # Ledger must be acking before any drill starts.

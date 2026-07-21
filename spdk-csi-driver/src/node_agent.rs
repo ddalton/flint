@@ -1702,16 +1702,18 @@ impl NodeAgent {
     }
 
     /// All kernel NVMe-oF (fabrics/tcp) initiator sessions on this node:
-    /// `(subsysnqn, state)` from `/sys/class/nvme/nvmeX/`. Local PCIe
-    /// controllers (transport `pcie`) are excluded — only fabrics
-    /// sessions can orphan (their subsystem can vanish server-side).
-    fn list_kernel_initiator_sessions() -> Vec<(String, String)> {
+    /// `(controller, subsysnqn, state)` from `/sys/class/nvme/nvmeX/`.
+    /// Local PCIe controllers (transport `pcie`) are excluded — only
+    /// fabrics sessions can orphan (their subsystem can vanish
+    /// server-side).
+    fn list_kernel_initiator_sessions() -> Vec<(String, String, String)> {
         let mut out = Vec::new();
         let Ok(entries) = std::fs::read_dir("/sys/class/nvme") else {
             return out;
         };
         for entry in entries.flatten() {
             let p = entry.path();
+            let ctrl = entry.file_name().to_string_lossy().to_string();
             let read = |f: &str| {
                 std::fs::read_to_string(p.join(f))
                     .map(|s| s.trim().to_string())
@@ -1723,10 +1725,51 @@ impl NodeAgent {
                 continue;
             };
             if transport == "tcp" {
-                out.push((nqn, state));
+                out.push((ctrl, nqn, state));
             }
         }
         out
+    }
+
+    /// Stale DUPLICATE controllers: non-`live` controllers whose NQN is
+    /// ALSO served by a live sibling. Found on runy2 nvmeof 3.3b
+    /// (2026-07-21): after an abrupt spdk-tgt restart the kernel
+    /// initiator reconnects on a fresh controller while the pre-restart
+    /// controller lingers in `connecting` forever — flagging every
+    /// subsequent leak check. The live sibling is what makes the
+    /// disconnect safe: I/O rides it, the stale one carries nothing. A
+    /// LONE non-live controller is never touched here — that is either
+    /// a normal reconnect window (PV alive) or an orphan
+    /// ([`Self::orphan_initiator_sessions`] owns that case, PV-gated).
+    fn stale_duplicate_controllers(sessions: &[(String, String, String)]) -> Vec<String> {
+        use std::collections::HashSet;
+        let live_nqns: HashSet<&str> = sessions
+            .iter()
+            .filter(|(_, _, state)| state == "live")
+            .map(|(_, nqn, _)| nqn.as_str())
+            .collect();
+        sessions
+            .iter()
+            .filter(|(_, nqn, state)| state != "live" && live_nqns.contains(nqn.as_str()))
+            .map(|(ctrl, _, _)| ctrl.clone())
+            .collect()
+    }
+
+    /// Disconnect ONE controller by device (`nvme disconnect -d`). The
+    /// NQN form disconnects every controller for the subsystem — wrong
+    /// for stale-duplicate reaping, where a live sibling must survive.
+    async fn kernel_nvme_disconnect_device(
+        ctrl: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let output = tokio::process::Command::new("nvme")
+            .args(&["disconnect", "-d", &format!("/dev/{}", ctrl)])
+            .output()
+            .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("nvme disconnect -d {} failed: {}", ctrl, stderr).into());
+        }
+        Ok(())
     }
 
     /// Which kernel initiator sessions are orphans to disconnect. A
@@ -1748,12 +1791,12 @@ impl NodeAgent {
     /// (ctrl_loss_tmo=-1 loopback), tripping every subsequent drill's
     /// leak check.
     fn orphan_initiator_sessions(
-        sessions: &[(String, String)],
+        sessions: &[(String, String, String)],
         pv_exists: impl Fn(&str) -> bool,
     ) -> Vec<String> {
         sessions
             .iter()
-            .filter_map(|(nqn, state)| {
+            .filter_map(|(_, nqn, state)| {
                 if state == "live" {
                     return None;
                 }
@@ -1776,6 +1819,16 @@ impl NodeAgent {
         let sessions = Self::list_kernel_initiator_sessions();
         if sessions.is_empty() {
             return Ok(());
+        }
+        // Stale duplicates first: purely local decision (a live sibling
+        // proves the volume is fine), no API call needed.
+        for ctrl in Self::stale_duplicate_controllers(&sessions) {
+            warn!(ctrl = %ctrl,
+                "[INITIATOR-REAPER] disconnecting stale duplicate controller (live sibling serves the subsystem)");
+            if let Err(e) = Self::kernel_nvme_disconnect_device(&ctrl).await {
+                warn!(ctrl = %ctrl, error = %e,
+                    "[INITIATOR-REAPER] duplicate disconnect failed (next tick retries)");
+            }
         }
         let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
         let names: std::collections::HashSet<String> = pvs
@@ -2348,6 +2401,7 @@ impl NodeAgent {
         self.ensure_ublk_target().await;
 
         let device_exists = std::path::Path::new(&format!("/dev/ublkb{}", ublk_id)).exists();
+        let mut recover_err: Option<String> = None;
         if device_exists {
             match self
                 .disk_service
@@ -2370,8 +2424,11 @@ impl NodeAgent {
                     // Not recoverable (old kernel without USER_RECOVERY, or
                     // a stale node) — fall through to a fresh start, which
                     // the kernel rejects while the old device lingers; the
-                    // error surfaces to the caller for the next tick.
+                    // error surfaces to the caller for the next tick. The
+                    // recover error rides along in the start error so the
+                    // DEAD-device classifier can see both.
                     debug!(ublk_id, error = %e, "[UBLK] recover failed — trying fresh start");
+                    recover_err = Some(e.to_string());
                 }
             }
         }
@@ -2402,7 +2459,13 @@ impl NodeAgent {
                 }
             }))
             .await
-            .map_err(|e| format!("ublk_start_disk {} ({}): {}", ublk_id, bdev_name, e))?;
+            .map_err(|e| match &recover_err {
+                Some(rec) => format!(
+                    "ublk_start_disk {} ({}): {} [recover: {}]",
+                    ublk_id, bdev_name, e, rec
+                ),
+                None => format!("ublk_start_disk {} ({}): {}", ublk_id, bdev_name, e),
+            })?;
         warn!(ublk_id, bdev = %bdev_name, "[UBLK] started ublk disk");
         self.expected_ublk
             .lock()
@@ -2433,6 +2496,20 @@ impl NodeAgent {
                 && !reserved.contains_key(id)
                 && !std::path::Path::new(&format!("/dev/ublkb{}", id)).exists()
         })
+    }
+
+    /// DEAD-device classifier (found live on runy2, 2026-07-21): a
+    /// kernel ublk device whose daemon was SIGKILLed under a wedged
+    /// containerd lands DEAD rather than quiesced — `ublk_recover_disk`
+    /// answers ENODEV (nothing to recover) and `ublk_start_disk` on the
+    /// same id ALSO answers ENODEV (the corpse still occupies the id).
+    /// Without a UBLK_CMD_DEL_DEV escape hatch (backlog, F29-family)
+    /// this can never converge; classify it so the detector escalates
+    /// with the runbook action instead of a warn-and-retry forever.
+    /// Matches the combined error shape ensure_ublk_disk produces:
+    /// "ublk_start_disk …: … No such device [recover: … No such device]".
+    fn is_dead_ublk_device_error(err: &str) -> bool {
+        err.contains("[recover: ") && err.matches("No such device").count() >= 2
     }
 
     /// Which ublk id should a delete request stop? A caller-supplied
@@ -3413,8 +3490,19 @@ impl NodeAgent {
                             "[UBLK-DETECTOR] reaped stale registry entry (no live PV claims this id)");
                         continue;
                     }
-                    warn!(ublk_id = id, bdev = %bdev, error = %e,
-                        "[UBLK-DETECTOR] disk rebuild failed (will retry)")
+                    if Self::is_dead_ublk_device_error(&e.to_string()) {
+                        error!(ublk_id = id, bdev = %bdev, error = %e,
+                            "[UBLK-DETECTOR] DEAD ublk device: recover AND \
+                             start both ENODEV — the kernel device corpse \
+                             occupies the id and cannot be reclaimed (no \
+                             DEL_DEV escape yet). RUNBOOK: reboot the node \
+                             (instance-store survives a reboot) or delete \
+                             the device via ublk ctrl DEL_DEV; the \
+                             detector then re-creates it.");
+                    } else {
+                        warn!(ublk_id = id, bdev = %bdev, error = %e,
+                            "[UBLK-DETECTOR] disk rebuild failed (will retry)");
+                    }
                 }
             }
         }
@@ -5113,8 +5201,11 @@ mod rehydrate_tests {
 
     // -- orphan_initiator_sessions: the nvmeof `connecting` leak -----------
 
-    fn sess(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(n, s)| (n.to_string(), s.to_string())).collect()
+    fn sess(triples: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+        triples
+            .iter()
+            .map(|(c, n, s)| (c.to_string(), n.to_string(), s.to_string()))
+            .collect()
     }
 
     /// Reproduction of the phase-3 leak (artifact: `pvc-ca414215…` stuck
@@ -5124,7 +5215,7 @@ mod rehydrate_tests {
     #[test]
     fn leak_shape_connecting_and_pv_gone_is_reaped() {
         let nqn = crate::identity::volume_nqn("pvc-ca414215-3370-4094-bed9-cf6fdcd95a09");
-        let s = sess(&[(nqn.as_str(), "connecting")]);
+        let s = sess(&[("nvme1", nqn.as_str(), "connecting")]);
         let reaped = NodeAgent::orphan_initiator_sessions(&s, |_| false);
         assert_eq!(reaped, vec![nqn]);
     }
@@ -5135,7 +5226,7 @@ mod rehydrate_tests {
     #[test]
     fn live_session_is_left_alone_even_without_pv() {
         let nqn = crate::identity::volume_nqn("pvc-x");
-        let s = sess(&[(nqn.as_str(), "live")]);
+        let s = sess(&[("nvme1", nqn.as_str(), "live")]);
         assert!(NodeAgent::orphan_initiator_sessions(&s, |_| false).is_empty());
     }
 
@@ -5144,7 +5235,7 @@ mod rehydrate_tests {
     #[test]
     fn reconnect_window_with_live_pv_is_not_a_leak() {
         let nqn = crate::identity::volume_nqn("pvc-x");
-        let s = sess(&[(nqn.as_str(), "connecting")]);
+        let s = sess(&[("nvme1", nqn.as_str(), "connecting")]);
         assert!(NodeAgent::orphan_initiator_sessions(&s, |_| true).is_empty());
     }
 
@@ -5153,8 +5244,8 @@ mod rehydrate_tests {
     #[test]
     fn foreign_nqns_are_never_reaped() {
         let s = sess(&[
-            ("nqn.2019-08.org.qemu:whatever", "connecting"),
-            ("nqn.2024-11.com.flint:hotrejoin:pvc-x", "connecting"),
+            ("nvme1", "nqn.2019-08.org.qemu:whatever", "connecting"),
+            ("nvme2", "nqn.2024-11.com.flint:hotrejoin:pvc-x", "connecting"),
         ]);
         assert!(NodeAgent::orphan_initiator_sessions(&s, |_| false).is_empty());
     }
@@ -5167,12 +5258,82 @@ mod rehydrate_tests {
     fn backing_handle_sessions_judge_the_synthetic_pv() {
         let handle = crate::identity::backing_handle("pvc-e13acd1b");
         let nqn = crate::identity::volume_nqn(&handle);
-        let s = sess(&[(nqn.as_str(), "connecting")]);
+        let s = sess(&[("nvme1", nqn.as_str(), "connecting")]);
         // PV set contains ONLY the synthetic name: session must survive.
         let alive = NodeAgent::orphan_initiator_sessions(&s, |pv| pv == "flint-nfs-pv-pvc-e13acd1b");
         assert!(alive.is_empty(), "live backing volume's session must not be reaped");
         // Synthetic PV gone → reap.
         let reaped = NodeAgent::orphan_initiator_sessions(&s, |_| false);
         assert_eq!(reaped, vec![nqn]);
+    }
+
+    // -- stale_duplicate_controllers: the nvmeof 3.3b post-restart wart ----
+
+    /// Reproduction of the runy2 nvmeof 3.3b shape: after the tgt
+    /// restart the initiator reconnected on a fresh controller while the
+    /// old one lingered `connecting` for the SAME subsystem. The stale
+    /// duplicate must be disconnected; the live sibling must survive.
+    #[test]
+    fn stale_duplicate_next_to_live_sibling_is_reaped() {
+        let nqn = crate::identity::volume_nqn("pvc-2e26b8cd-c749-45ff-9ebf-700660c0a9fe");
+        let s = sess(&[
+            ("nvme2", nqn.as_str(), "connecting"),
+            ("nvme3", nqn.as_str(), "live"),
+        ]);
+        assert_eq!(NodeAgent::stale_duplicate_controllers(&s), vec!["nvme2".to_string()]);
+    }
+
+    /// A LONE non-live controller is never a duplicate — that's either a
+    /// normal reconnect window or the orphan pass's PV-gated business.
+    /// Duplicate reaping without a live sibling would cut the only path.
+    #[test]
+    fn lone_connecting_controller_is_not_a_duplicate() {
+        let nqn = crate::identity::volume_nqn("pvc-x");
+        let s = sess(&[("nvme2", nqn.as_str(), "connecting")]);
+        assert!(NodeAgent::stale_duplicate_controllers(&s).is_empty());
+    }
+
+    /// Two live controllers (multipath) are healthy — nothing to reap;
+    /// and a non-live controller for a DIFFERENT subsystem is untouched
+    /// by another volume's live sibling.
+    #[test]
+    fn live_pairs_and_cross_subsystem_states_are_untouched() {
+        let a = crate::identity::volume_nqn("pvc-a");
+        let b = crate::identity::volume_nqn("pvc-b");
+        let s = sess(&[
+            ("nvme1", a.as_str(), "live"),
+            ("nvme2", a.as_str(), "live"),
+            ("nvme3", b.as_str(), "connecting"),
+        ]);
+        assert!(NodeAgent::stale_duplicate_controllers(&s).is_empty());
+    }
+
+    // -- is_dead_ublk_device_error: the runy2 DEAD-device edge -------------
+
+    /// The live incident shape: recover AND start both ENODEV — must
+    /// classify as a dead device so the detector escalates with the
+    /// runbook instead of warn-looping forever.
+    #[test]
+    fn dead_ublk_device_error_is_classified() {
+        let e = "ublk_start_disk 2 (ba42e504-f66d-43d3-b113-a27ef811dce8): \
+                 SPDK RPC call 'ublk_start_disk' failed: SPDK RPC error: \
+                 Code=-19 Msg=No such device [recover: SPDK RPC call \
+                 'ublk_recover_disk' failed: SPDK RPC error: Code=-19 \
+                 Msg=No such device]";
+        assert!(NodeAgent::is_dead_ublk_device_error(e));
+    }
+
+    /// A fresh-start ENODEV alone (no recover attempt — device node
+    /// absent) is the ordinary lvol-not-loaded-yet race, NOT a dead
+    /// device; same for a recover-tail with a non-ENODEV start error.
+    #[test]
+    fn single_enodev_or_mixed_errors_are_not_dead_device() {
+        assert!(!NodeAgent::is_dead_ublk_device_error(
+            "ublk_start_disk 2 (b): SPDK RPC error: Code=-19 Msg=No such device"
+        ));
+        assert!(!NodeAgent::is_dead_ublk_device_error(
+            "ublk_start_disk 2 (b): Code=-17 Msg=File exists [recover: \
+             Code=-19 Msg=No such device]"
+        ));
     }
 }

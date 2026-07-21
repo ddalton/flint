@@ -34,7 +34,7 @@ wait_acks_fresh() { # [budget_s] — until the ledger acks something NEWER than 
   #  which let 1.9b record a bogus io_resume while I/O was actually dead)
   local budget=${1:-180} last now i
   for i in $(seq 1 $(( budget / 5 ))); do
-    last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+    last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
     now=$(epoch)
     [ -n "$last" ] && [ "$last" -gt "${T0:-0}" ] && [ $(( now - last )) -lt 5 ] && return 0
     sleep 5

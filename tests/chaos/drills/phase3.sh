@@ -46,7 +46,11 @@ witness_verdict() { # <t0> — mismatches since t0 + freshness of its shared-fil
   wp=$(witness_pod)
   [ -n "$wp" ] || { note "WITNESS MISSING"; return 1; }
   mism=$(kubectl logs -n "$NS" "$wp" --since-time="$(rfc3339 "$1")" 2>/dev/null | grep -c WITNESS-MISMATCH || true)
-  last=$(kubectl exec -n "$NS" "$wp" -- sh -c 'tail -1 /mnt/witness.log' 2>/dev/null | awk '{print $2}')
+  # timeout is load-bearing: `tail` on a dead NFS mount blocks in
+  # D-state and an un-wrapped exec hangs the whole drill (3.6 hung 87
+  # minutes on exactly this line when the witness's server was an
+  # orphaned instance — F33). A timed-out read = witness NOT fresh.
+  last=$(timeout 15 kubectl exec -n "$NS" "$wp" -- sh -c 'tail -1 /mnt/witness.log' 2>/dev/null | awk '{print $2}')
   local age=$(( $(epoch) - ${last:-0} ))
   if [ "${mism:-0}" -eq 0 ] && [ "$age" -lt 15 ]; then
     ok "witness clean (0 mismatches, last write ${age}s ago)"; return 0
@@ -62,7 +66,7 @@ spdk_restarts() { # <node> — spdk-tgt is a native-sidecar INIT container
 wait_acks_fresh() { # [budget_s] — ledger acks something NEWER than T0
   local budget=${1:-180} last now i
   for i in $(seq 1 $(( budget / 5 ))); do
-    last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+    last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
     now=$(epoch)
     [ -n "$last" ] && [ "$last" -gt "${T0:-0}" ] && [ $(( now - last )) -lt 5 ] && return 0
     sleep 5
@@ -142,7 +146,11 @@ case "$DRILL" in
   ESTALE=$(kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null | grep -ci "stale file" || true)
   [ "${ESTALE:-0}" -eq 0 ] && ok "no ESTALE on client" || note "ESTALE lines: $ESTALE"
   witness_verdict "$T0"
-  EXPECT_RESCHEDULE=none READY_TIMEOUT=120 \
+  # READY_TIMEOUT 300: the client's TCP reconnect to the recreated
+  # server rides the dead-backend black-hole tail (~180-220s observed
+  # on runy2 u12.4 with a CLEAN db verdict) — 120s flagged known-good
+  # runs as attribution failures.
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=300 \
     NOTES="nfs pod delete: recreate=${T_REC}s io_resume=${T_RESUME}s estale=$ESTALE" verify
   ;;
 
@@ -193,7 +201,7 @@ case "$DRILL" in
   note "csi-node POD on client node $PRE_NODE deleted"
   WORST=0
   for i in $(seq 1 18); do
-    last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+    last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
     age=$(( $(epoch) - ${last:-0} ))
     [ "$age" -gt "$WORST" ] && WORST=$age
     sleep 5
@@ -255,6 +263,12 @@ case "$DRILL" in
 
 3.7) # client node kill — STS replace + NFS remount elsewhere
   pre_rwx
+  # disk-follows-pod places the backing volume — and therefore the nfs
+  # server — on the CLIENT's node, so this drill usually kills BOTH
+  # roles and inherits the server-kill (F33) class on top of the client
+  # replacement. Surface the co-location so the verdict reads right.
+  COLOC=N
+  [ "$NFS_NODE" = "$PRE_NODE" ] && { COLOC=Y; note "nfs server CO-LOCATED on client node — this is also a server-node kill (F33 exposure)"; }
   IID=$(instance_id_for_node "$PRE_NODE")
   [ -n "$IID" ] || fail "no instance id for $PRE_NODE"
   kubelet_stop "$PRE_NODE"; DEAD_IID="$IID"
@@ -262,7 +276,7 @@ case "$DRILL" in
   taint_oos "$PRE_NODE"; TAINTED="$PRE_NODE"
   wait_pod_replaced "$NS" $PG "$PRE_UID" 400 || fail "replacement never Ready"
   witness_verdict "$T0"
-  EXPECT_RESCHEDULE=cross READY_TIMEOUT=60 NOTES="client node kill + taint (RWX remount)" verify
+  EXPECT_RESCHEDULE=cross READY_TIMEOUT=60 NOTES="client node kill + taint (RWX remount); nfs_colocated=$COLOC" verify
   untaint_oos "$PRE_NODE"; TAINTED=""
   kubelet_start_ssm "$IID"; DEAD_IID=""
   wait_node_ready "$PRE_NODE" 300 && ok "client node restored" || note "node not Ready — check kubelet"

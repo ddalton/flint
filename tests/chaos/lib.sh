@@ -54,7 +54,7 @@ harness_healthy() {
     || fail "pg-0 not Ready — deploy/reset the harness first"
   [ -n "$(load_pod)" ] || fail "pg-load not Running"
   local last now
-  last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+  last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
   now=$(epoch)
   [ -n "$last" ] && [ $(( now - last )) -lt 30 ] || fail "ledger not acking (last ack ${last:-none}, now $now) — is the load running?"
   ok "harness healthy (pg-0 Ready, ledger acking)"

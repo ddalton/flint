@@ -61,7 +61,7 @@ spdk_restarts() { # <node> — spdk-tgt is a native-sidecar INIT container
 wait_acks_fresh() { # [budget_s] — until the ledger acks something NEWER than T0
   local budget=${1:-180} last now i
   for i in $(seq 1 $(( budget / 5 ))); do
-    last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+    last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
     now=$(epoch)
     [ -n "$last" ] && [ "$last" -gt "${T0:-0}" ] && [ $(( now - last )) -lt 5 ] && return 0
     sleep 5
@@ -131,7 +131,7 @@ case "$DRILL" in
   # I/O must never stop: poll for 90s, assert continuous acking
   WORST=0
   for i in $(seq 1 18); do
-    last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+    last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
     age=$(( $(epoch) - ${last:-0} ))
     [ "$age" -gt "$WORST" ] && WORST=$age
     sleep 5
@@ -207,7 +207,7 @@ case "$DRILL" in
   note "remote node $REMOTE dead+tainted; watching I/O for 120s"
   WORST=0
   for i in $(seq 1 24); do
-    last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+    last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
     age=$(( $(epoch) - ${last:-0} ))
     [ "$age" -gt "$WORST" ] && WORST=$age
     sleep 5
@@ -286,7 +286,7 @@ case "$DRILL" in
   done
   WORST=0
   for i in $(seq 1 24); do
-    last=$(kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+    last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
     age=$(( $(epoch) - ${last:-0} ))
     [ "$age" -gt "$WORST" ] && WORST=$age
     sleep 5
