@@ -1501,6 +1501,103 @@ where measurable, with two backend-specific differences — nvmeof
 **avoids F32** (its big advantage) but **leaks orphaned loopback nvme
 sessions** on delete (its cost); 3.2 fails identically on both.
 
+### Root-cause addendum — 2026-07-20, code+artifact forensics (no cluster)
+
+Post-hoc analysis of the two FAILs and the nvmeof leak, from the
+committed artifacts and the source tree alone.
+
+**F32 root cause CONFIRMED: a backing-PV annotation identity bug —
+not a ublk kernel limitation.**
+- `store_block_device_info` patches the PV **named by the CSI volume
+  handle**. RWX backing volumes have handle `nfs-server-<id>` but PV
+  name `flint-nfs-pv-<id>`, so the patch 404s on every stage and is
+  swallowed as "Non-fatal" (hard evidence:
+  `tests/chaos/artifacts/3-3.2-1784577349/driver-logs.txt:2414`,
+  `persistentvolumes "nfs-server-pvc-e13acd1b-…" not found`). The
+  `flint.io/ublk-id` annotation therefore NEVER persists for RWX
+  backing volumes. (User RWO PVs are unaffected: PV name ==
+  volumeHandle — which is why phases 1–2 never saw this.)
+- On the abrupt csi-node restart (3.3b), rehydration's
+  `resolve_ublk_id` falls back to the 20-bit volume-id hash → 638946,
+  which ≠ the agent-allocated serving id 0 (`ublk.txt`: same lvol
+  `0ed42595…`, id 0 pre-kill vs 638946 post). `/dev/ublkb638946`
+  doesn't exist, so `ensure_ublk_disk` skips its recovery-first arm
+  (`ublk_recover_disk`) and fresh-starts under the wrong id
+  (driver-logs: `[REHYDRATE] rebuilt local ublk disk from ground
+  truth ublk_id=638946`) — while the nfs pod's mount stays pinned to
+  the dead `/dev/ublkb0`. Orphan + broken export + F25 tarpit.
+- **The 3.4/3.9 PASSes rode on accidental id alignment, not on a
+  working design.** The post-3.3b reset created the replacement
+  volume's disk AT its hash id (461552 — hash-shaped, not
+  smallest-free; visible in the 3.4/3.5/3.8/3.9 ublk dumps). 3.4's
+  abrupt csi-node kill then re-resolved the SAME hash id, found
+  `/dev/ublkb461552`, and `ublk_recover_disk` preserved the mount.
+  Two corollaries: (a) ublk user-recovery on 6.8-aws +
+  spdk-tgt 1.6.0-f5fix.1 is demonstrably functional — the ONLY
+  defect is id resolution; (b) a fresh-cluster RWX DS roll (3.9)
+  with an agent-allocated id would re-mint just like 3.3b, so 3.9's
+  green here does not clear the class.
+- Same-bug corollary, latent leak: NodeUnstage's
+  `get_block_device_info` 404s identically and falls back to
+  "legacy ublk cleanup" of the HASH id — a no-op against the real
+  disk. Any genuine cross-node move of an RWX backing volume leaks
+  the source node's ublk disk (holding the lvol open). No drill this
+  run unstaged a non-aligned backing volume, so it hasn't been
+  observed yet.
+- Fix shape: an identity helper mapping backing handle → backing PV
+  name (`flint-nfs-pv-<storage_id>`), used by both store and get;
+  unstage + rehydrate should resolve by live/kernel bdev match
+  first, annotation second, and never fall through to the bare hash.
+  F29's NodePublish staging-liveness check stays as defense-in-depth.
+
+**3.2 (fsync-PANIC) RECLASSIFIED: not "expected outage behavior" — a
+real zero-grace-resume gap.** The consumer mount is hard
+(`vers=4.2,noresvport,sec=sys`): a pure server outage can only
+block, never EIO. An EIO from fdatasync requires a definitive
+server ERROR on writeback — and `estale=1` on BOTH backends says the
+recreated server answered at least one pre-restart filehandle/state
+with a STALE-class error during the client's dirty-page recovery;
+the kernel flags the mapping (AS_EIO) and postgres correctly PANICs.
+Crash recovery then re-opens everything fresh and succeeds — which
+is exactly why durability held while the drill's actual design
+intent (transparent zero-grace resume) did not. Verdict stays FAIL.
+- Cleared suspects (code review): the EXCHANGE_ID §18.35 table is
+  correct for reloaded CONFIRMED records (case 1 returns the
+  persisted clientid; client records preload before the listener
+  accepts); the sqlite persistence writer flushes its queue tail on
+  Drop, so a graceful SIGTERM does not lose enqueued state; the
+  deliberate BADSESSION→EXCHANGE_ID→CREATE_SESSION restart flow is
+  sound per its design comment.
+- Live suspects (each code-confirmed, one server-log capture needed
+  to pick): (1) **pseudo-fs `instance_id` is `SystemTime::now()` at
+  boot** (`pseudo.rs:102`) and is baked into pseudo/root handles —
+  every restart invalidates the client's cached mount-root handle;
+  the real-fs KernelFh layer uses `stable_nfs_instance_id(volume_id)`
+  and the pseudo layer was simply never converted. Unambiguously
+  wrong; fix-first regardless of attribution. (2) handles resolvable
+  only via the in-memory open-files view (F17b/c fallback:
+  unlinked / renamed-over inodes) are unrecoverable across ANY
+  restart — fundamental (knfsd shares it) — and pg WAL recycling is
+  rename-heavy. (3) an in-flight-compound state tail at SIGTERM
+  (processed-but-unreplied ops) replaying against reloaded state.
+- Harness gap blocking final attribution: phase-3 verify captures
+  csi driver-logs but NOT the flint-nfs pod log (the runx 3.1
+  harness captured `nfs-server-final.log`). One 3.2 rerun with
+  server-log capture — or an integration test restarting the server
+  under a live kernel-client mount — pins the exact op.
+
+**nvmeof orphan-session leak root cause (code-confirmed):** the only
+initiator disconnects live in NodeUnstage
+(`disconnect_from_nvmeof_target`) and NodeStage's stale-controller
+reuse guard (nvme_recovery #3). A volume deleted while its consumer
+was force-deleted (the mandatory 3.1b reset flow) never runs
+NodeUnstage, and no controller/reaper path disconnects node-side
+initiators for gone volumes — the kernel then reconnect-loops
+`connecting` forever (artifact: `pvc-ca414215…` still `connecting`
+two drills later). Fix shape: an orphan reaper that diffs node
+initiator sessions against live PVs — the exact analog of the ublk
+loss-detector's diff — disconnecting sessions whose volume is gone.
+
 Related wart (same session): flint answers a trunking-probe
 EXCHANGE_ID (same co_ownerid+verifier, unconfirmed) by minting a
 SECOND clientid instead of returning the existing record (RFC 8881
