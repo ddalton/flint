@@ -1,0 +1,41 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runv-aws-2"
+                },
+                "creationTimestamp": "2026-07-17T17:46:35Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-53c87525c2a433104c77653809169f0a233152053fd8775d576d2e63f5cca79a",
+                "resourceVersion": "40370",
+                "uid": "a4f22780-f3ae-4976-8673-065bfa99c01c"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runv-aws-2",
+                "source": {
+                    "persistentVolumeName": "pvc-4844b785-a8c0-4cf0-91e4-a2e2dd2dd64e"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "bdevName": "97ad3dce-5f2a-4959-92e4-4fe2ea0f140a",
+                    "lvsName": "lvs_runv-aws-2_0000-00-1f-0",
+                    "volumeId": "pvc-4844b785-a8c0-4cf0-91e4-a2e2dd2dd64e",
+                    "volumeType": "local"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

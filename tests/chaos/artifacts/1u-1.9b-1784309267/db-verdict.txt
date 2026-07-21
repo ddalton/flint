@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-17T17:27:47Z)
+  ✓ pg_isready
+  ✓ ledger: all 10378 acked writes present
+  · pg_amcheck FAILED (or 600s timeout)
+  · 21 corruption-pattern lines in postgres log
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( amcheck pglog write-probe)

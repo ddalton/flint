@@ -1,0 +1,3 @@
+/sys/class/nvme/nvme0 live 0000:00:04.0 nqn:2008-08.com.amazon.aws:ebs:vol0d532cf4878dd7582
+/sys/class/nvme/nvme1 live 0000:00:1f.0 nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS29C92E7CB66686457
+/sys/class/nvme/nvme2 connecting traddr=127.0.0.1,trsvcid=4420 nqn.2024-11.com.flint:volume:pvc-03612f5b-6559-46a2-a1e2-0e123c0484ad

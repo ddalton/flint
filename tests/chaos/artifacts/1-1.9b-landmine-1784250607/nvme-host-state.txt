@@ -1,0 +1,27 @@
+live
+live
+connecting
+nvme0
+nvme1
+nvme2
+[ 4067.299942] nvme nvme2: Failed reconnect attempt 251
+[ 4067.300609] nvme nvme2: Reconnecting in 5 seconds...
+[ 4072.339570] nvme nvme2: failed to connect socket: -111
+[ 4072.340188] nvme nvme2: Failed reconnect attempt 252
+[ 4072.340838] nvme nvme2: Reconnecting in 5 seconds...
+[ 4077.389766] nvme nvme2: failed to connect socket: -111
+[ 4077.390393] nvme nvme2: Failed reconnect attempt 253
+[ 4077.391036] nvme nvme2: Reconnecting in 5 seconds...
+[ 4082.429923] nvme nvme2: failed to connect socket: -111
+[ 4082.430537] nvme nvme2: Failed reconnect attempt 254
+[ 4082.431183] nvme nvme2: Reconnecting in 5 seconds...
+[ 4087.460129] nvme nvme2: failed to connect socket: -111
+[ 4087.460721] nvme nvme2: Failed reconnect attempt 255
+[ 4087.461385] nvme nvme2: Reconnecting in 5 seconds...
+[ 4092.500332] nvme nvme2: failed to connect socket: -111
+[ 4092.500947] nvme nvme2: Failed reconnect attempt 256
+[ 4092.501616] nvme nvme2: Reconnecting in 5 seconds...
+[ 4097.550493] nvme nvme2: failed to connect socket: -111
+[ 4097.551084] nvme nvme2: Failed reconnect attempt 257
+[ 4097.551748] nvme nvme2: Reconnecting in 5 seconds...
+

@@ -1,0 +1,40 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runv-aws-3"
+                },
+                "creationTimestamp": "2026-07-18T00:44:49Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-380686c1f8efa54bf6642e469fc4c382b10cb88c5aa774ac509a5be03f3b2f49",
+                "resourceVersion": "136823",
+                "uid": "90945537-484f-44c7-8fe5-1826c7f0ce00"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runv-aws-3",
+                "source": {
+                    "persistentVolumeName": "pvc-d9d4ea7b-3555-4b71-9068-a564c5a37ea3"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "replicas": "[{\"node_name\":\"runv-aws-1\",\"node_uid\":\"c6299eb8-6508-43ed-a1f1-e54fecdfa2a9\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"e33aa6f6-8ed2-4cf9-a7cf-e10abb084860\",\"lvol_name\":\"vol_pvc-d9d4ea7b-3555-4b71-9068-a564c5a37ea3_replica_0\",\"lvs_name\":\"lvs_runv-aws-1_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"},{\"node_name\":\"runv-aws-3\",\"node_uid\":\"ebcf5f4d-2a7e-4640-81f9-8f9ebaedc718\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"737df435-63ea-41cc-ab1a-6053cd1e141a\",\"lvol_name\":\"vol_pvc-d9d4ea7b-3555-4b71-9068-a564c5a37ea3_replica_1\",\"lvs_name\":\"lvs_runv-aws-3_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"},{\"node_name\":\"runv-aws-5\",\"node_uid\":\"80527333-fa83-40b6-925a-91ee517fe650\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"511815ea-bf5d-4e96-bad0-8440e3f45b91\",\"lvol_name\":\"vol_pvc-d9d4ea7b-3555-4b71-9068-a564c5a37ea3_replica_2\",\"lvs_name\":\"lvs_runv-aws-5_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"}]",
+                    "volumeId": "pvc-d9d4ea7b-3555-4b71-9068-a564c5a37ea3",
+                    "volumeType": "multi-replica"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

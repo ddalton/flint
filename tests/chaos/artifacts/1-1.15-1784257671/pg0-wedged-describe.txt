@@ -1,0 +1,103 @@
+Name:         pg-0
+Namespace:    flint-chaos
+Priority:     0
+Node:         runu-aws-2/172.31.3.30
+Start Time:   Thu, 16 Jul 2026 20:15:15 -0700
+Labels:       app=pg
+              apps.kubernetes.io/pod-index=0
+              controller-revision-hash=pg-7d544d457d
+              statefulset.kubernetes.io/pod-name=pg-0
+Annotations:  <none>
+Status:       Running
+IP:           10.244.4.133
+IPs:
+  IP:           10.244.4.133
+Controlled By:  StatefulSet/pg
+Containers:
+  postgres:
+    Container ID:  containerd://5e615fee560ff2440d71d7262fc19e91f8e8796037a40144de87c779a29874a6
+    Image:         postgres:16-bookworm
+    Image ID:      docker.io/library/postgres@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55
+    Port:          5432/TCP
+    Host Port:     0/TCP
+    Args:
+      -c
+      shared_buffers=1GB
+      -c
+      max_wal_size=2GB
+      -c
+      checkpoint_timeout=30s
+      -c
+      synchronous_commit=on
+      -c
+      full_page_writes=on
+      -c
+      log_checkpoints=on
+    State:          Running
+      Started:      Thu, 16 Jul 2026 20:15:16 -0700
+    Ready:          False
+    Restart Count:  0
+    Limits:
+      cpu:     2
+      memory:  4Gi
+    Requests:
+      cpu:      1
+      memory:   2Gi
+    Readiness:  exec [pg_isready -U postgres] delay=0s timeout=1s period=5s #success=1 #failure=3
+    Environment:
+      PGDATA:                /var/lib/postgresql/data/pgdata
+      POSTGRES_INITDB_ARGS:  --data-checksums
+      POSTGRES_DB:           bench
+      POSTGRES_PASSWORD:     <set to the key 'password' in secret 'pg-secret'>  Optional: false
+    Mounts:
+      /var/lib/postgresql/data from data (rw)
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-lw9tk (ro)
+  chaos:
+    Container ID:  containerd://2e69d0a9693724558dc02a66082ee266ceffacd5aed9f057a897b356f0112464
+    Image:         busybox:1.36
+    Image ID:      docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+    Port:          <none>
+    Host Port:     <none>
+    Command:
+      sleep
+      infinity
+    State:          Running
+      Started:      Thu, 16 Jul 2026 20:15:16 -0700
+    Ready:          True
+    Restart Count:  0
+    Environment:    <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-lw9tk (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True 
+  Initialized                 True 
+  Ready                       False 
+  ContainersReady             False 
+  PodScheduled                True 
+Volumes:
+  data:
+    Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+    ClaimName:  data-pg-0
+    ReadOnly:   false
+  kube-api-access-lw9tk:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    ConfigMapOptional:       <nil>
+    DownwardAPI:             true
+QoS Class:                   Burstable
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason     Age                 From               Message
+  ----     ------     ----                ----               -------
+  Normal   Scheduled  13m                 default-scheduler  Successfully assigned flint-chaos/pg-0 to runu-aws-2
+  Normal   Pulled     13m                 kubelet            Container image "postgres:16-bookworm" already present on machine
+  Normal   Created    13m                 kubelet            Created container: postgres
+  Normal   Started    13m                 kubelet            Started container postgres
+  Normal   Pulled     13m                 kubelet            Container image "busybox:1.36" already present on machine
+  Normal   Created    13m                 kubelet            Created container: chaos
+  Normal   Started    13m                 kubelet            Started container chaos
+  Warning  Unhealthy  3m (x126 over 13m)  kubelet            Readiness probe failed: /var/run/postgresql:5432 - no response

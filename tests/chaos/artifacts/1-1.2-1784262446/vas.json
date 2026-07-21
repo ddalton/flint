@@ -1,0 +1,41 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runu-aws-2"
+                },
+                "creationTimestamp": "2026-07-17T04:25:04Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-117889738078b65d4fb96a10bdc8e12be6d62857a4dc786286930f55f32e5316",
+                "resourceVersion": "96874",
+                "uid": "585bcb30-2a47-45f6-b95e-d67a71140e71"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runu-aws-2",
+                "source": {
+                    "persistentVolumeName": "pvc-8638f035-9a0f-400b-81ef-357c72aee770"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "bdevName": "75da5bc4-fa69-4c2b-a3ab-1af052513e65",
+                    "lvsName": "lvs_runu-aws-2_0000-00-1f-0",
+                    "volumeId": "pvc-8638f035-9a0f-400b-81ef-357c72aee770",
+                    "volumeType": "local"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

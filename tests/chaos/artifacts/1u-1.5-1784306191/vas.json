@@ -1,0 +1,44 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runv-aws-4"
+                },
+                "creationTimestamp": "2026-07-17T16:36:44Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-17523e8ed0d5c6ec55bfd9ba1d8fd637c82e4320be2f561bd6592579415b2ffd",
+                "resourceVersion": "23456",
+                "uid": "36eedd6b-84f3-43e2-b0fe-99799b7a4686"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runv-aws-4",
+                "source": {
+                    "persistentVolumeName": "pvc-15b296af-347d-43e7-8eed-0650de4d6c18"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nqn": "nqn.2024-11.com.flint:volume:pvc-15b296af-347d-43e7-8eed-0650de4d6c18",
+                    "storageNode": "runv-aws-2",
+                    "targetIp": "172.31.12.85",
+                    "targetPort": "4420",
+                    "transport": "tcp",
+                    "volumeId": "pvc-15b296af-347d-43e7-8eed-0650de4d6c18",
+                    "volumeType": "remote"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

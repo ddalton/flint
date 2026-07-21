@@ -1,0 +1,22 @@
+F33 evidence — 3.6 nfs-node kill (kubelet-stop), 2026-07-21 runy2 u12.4
+- T0 ~03:26Z: kubelet stopped on runy2-aws-1 (old nfs node); taint applied.
+- 03:30:58Z: resurrected server on aws-2 accepts EXCHANGE_ID+CREATE_SESSION
+  from client 6 (pg-0), RECLAIM_COMPLETE, grace exit.
+- 03:32:26Z: server reaps clients 2 and 4 ("Removing expired lease",
+  37 stateids) — those clients NEVER reconnected.
+- 04:59Z (t+93min): OLD flint-nfs-server STILL RUNNING on aws-1
+  (pid 15811, started 03:24, 7:46 CPU, state S) — kubelet-stop does not
+  kill pod processes and the server does not self-fence.
+- aws-2 ss: ESTABLISHED 10.244.1.32:50966 -> 10.244.4.47:2049 (the OLD
+  pod IP on aws-1) 90min after backend replacement — stuck flow.
+- aws-1 ss: ESTABLISHED 10.244.4.248:36722 -> 10.244.4.47:2049 (a LOCAL
+  client still attached to the old instance).
+- Witness mount dead: kubectl exec "tail -1 /mnt/witness.log" blocked
+  1h27m (drill hung on it — harness gap: no timeout wrap).
+- pg-load pgbench: 0.0 tps for the entire window (dead persistent SQL
+  connections — known wart).
+- pg-0 itself HEALTHY on the new server (checkpoints sync in ms).
+Verdict: FAIL (real) — client failover after node-level server loss is
+nondeterministic; old instance keeps serving-or-hanging established
+flows indefinitely. Fix shape: server self-fencing (exit on backing
+fence/cluster eviction) so old flows RST; plus harness timeout wrap.

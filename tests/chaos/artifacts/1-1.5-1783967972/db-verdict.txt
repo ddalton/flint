@@ -1,0 +1,11 @@
+
+▶ db verdict (since 2026-07-13T18:39:32Z)
+  ✓ pg_isready
+error: error sending request: Post "https://10.42.37.2:6443/api/v1/namespaces/flint-chaos/pods/pg-0/exec?command=psql&command=-U&command=postgres&command=-d&command=bench&command=-Atqc&command=SELECT+seq+FROM+ledger+ORDER+BY+seq&container=postgres&stderr=true&stdout=true": read tcp 10.42.37.1:56093->10.42.37.2:6443: read: connection reset by peer
+error: error sending request: Post "https://10.42.37.2:6443/api/v1/namespaces/flint-chaos/pods/pg-load-86587cfc87-rsr62/exec?command=sh&command=-c&command=cut+-d%22+%22+-f1+%2Facked%2Facked.log+2%3E%2Fdev%2Fnull&container=load&stderr=true&stdout=true": read tcp 10.42.37.1:56092->10.42.37.2:6443: read: connection reset by peer
+  ✓ ledger: all 20471 acked writes present
+  ✓ pg_amcheck clean
+  ✓ postgres log clean
+  ✓ writability probe
+
+DB-VERDICT: PASS

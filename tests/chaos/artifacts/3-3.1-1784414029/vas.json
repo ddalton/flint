@@ -1,0 +1,109 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runw-aws-3"
+                },
+                "creationTimestamp": "2026-07-18T22:32:19Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-854bbc8ecb56d8b6208d0ec6fc6dc0143c6d19ee1a86f032d5c183cd869ea66a",
+                "resourceVersion": "99871",
+                "uid": "96b6d316-fbd3-4d75-836b-de5f3723ace2"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runw-aws-3",
+                "source": {
+                    "persistentVolumeName": "pvc-708d934c-bc9c-4a9e-af56-ef7035a72523"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-708d934c-bc9c-4a9e-af56-ef7035a72523",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.105.161.207",
+                    "nfs.flint.io/server-node": "runw-aws-4",
+                    "volumeId": "pvc-708d934c-bc9c-4a9e-af56-ef7035a72523",
+                    "volumeType": "nfs"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runw-aws-4"
+                },
+                "creationTimestamp": "2026-07-18T22:18:55Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-b3aca84caaf8b316fac4c926a28adc6501300ca4d67a92b85e27b5501ffcd630",
+                "resourceVersion": "96978",
+                "uid": "ae6304fe-57ba-4fca-b4c0-01197935f12c"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runw-aws-4",
+                "source": {
+                    "persistentVolumeName": "flint-nfs-pv-pvc-708d934c-bc9c-4a9e-af56-ef7035a72523"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "bdevName": "017ccc18-06fc-490f-a4be-6ba5e9a8c388",
+                    "lvsName": "lvs_runw-aws-4_0000-00-1f-0",
+                    "volumeId": "nfs-server-pvc-708d934c-bc9c-4a9e-af56-ef7035a72523",
+                    "volumeType": "local"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runw-aws-6"
+                },
+                "creationTimestamp": "2026-07-18T22:33:53Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-e7d52e76097a5b37587ab39c5a699d969d83432ab37ff6ce6e2f0f3f42e16eb0",
+                "resourceVersion": "100238",
+                "uid": "aad339b0-3788-4611-b415-67dd8cd15fe8"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runw-aws-6",
+                "source": {
+                    "persistentVolumeName": "pvc-708d934c-bc9c-4a9e-af56-ef7035a72523"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-708d934c-bc9c-4a9e-af56-ef7035a72523",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.105.161.207",
+                    "nfs.flint.io/server-node": "runw-aws-4",
+                    "volumeId": "pvc-708d934c-bc9c-4a9e-af56-ef7035a72523",
+                    "volumeType": "nfs"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

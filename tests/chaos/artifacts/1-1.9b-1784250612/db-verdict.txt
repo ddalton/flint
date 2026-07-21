@@ -1,0 +1,4 @@
+
+▶ db verdict (since 2026-07-17T01:10:12Z)
+  ✓ pg_isready
+  ✓ ledger: all 2029 acked writes present

@@ -1,0 +1,8 @@
+
+▶ db verdict (since 2026-07-18T00:00:22Z)
+  ✓ pg_isready
+  ✓ pg_amcheck clean
+  ✓ postgres log clean
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( no-load-pod write-probe)

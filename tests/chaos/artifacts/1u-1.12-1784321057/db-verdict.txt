@@ -1,0 +1,11 @@
+
+▶ db verdict (since 2026-07-17T20:44:17Z)
+error: unable to upgrade connection: container not found ("postgres")
+  · pg_isready FAILED (or 30s timeout)
+error: unable to upgrade connection: container not found ("postgres")
+  · LOST ACKED WRITES: 1 2 3 4 5 (16733 total)
+  · pg_amcheck FAILED (or 600s timeout)
+  ✓ postgres log clean
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( isready ledger amcheck write-probe)

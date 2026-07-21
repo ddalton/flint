@@ -1,0 +1,109 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runy2-aws-4"
+                },
+                "creationTimestamp": "2026-07-21T06:29:05Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-0b6cfa2dec30758415ba826976d7b0d339b323127d08c06190625995aadcce3b",
+                "resourceVersion": "64701",
+                "uid": "a3c31cb7-233d-44b6-93ae-98bf54a70cf4"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runy2-aws-4",
+                "source": {
+                    "persistentVolumeName": "flint-nfs-pv-pvc-9f09c5d7-35bb-45fd-ab5f-3d2360dacfe4"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "bdevName": "fd018646-6e0f-4b5a-8b07-893944596d77",
+                    "lvsName": "lvs_runy2-aws-4_0000-00-1f-0",
+                    "volumeId": "nfs-server-pvc-9f09c5d7-35bb-45fd-ab5f-3d2360dacfe4",
+                    "volumeType": "local"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runy2-aws-2"
+                },
+                "creationTimestamp": "2026-07-21T06:33:10Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-a5f99ca6567901b024c632ab01e860270c4ccb82450e078c25844fd01e933593",
+                "resourceVersion": "65637",
+                "uid": "8f404fde-7e91-41f6-afaf-cc8411195d12"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runy2-aws-2",
+                "source": {
+                    "persistentVolumeName": "pvc-9f09c5d7-35bb-45fd-ab5f-3d2360dacfe4"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-9f09c5d7-35bb-45fd-ab5f-3d2360dacfe4",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.102.184.204",
+                    "nfs.flint.io/server-node": "runy2-aws-4",
+                    "volumeId": "pvc-9f09c5d7-35bb-45fd-ab5f-3d2360dacfe4",
+                    "volumeType": "nfs"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runy2-aws-1"
+                },
+                "creationTimestamp": "2026-07-21T06:28:49Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-ab775542c12d1592d11fdb5d5600c358ac9a08a576ee38b7b166e669054c85fd",
+                "resourceVersion": "64751",
+                "uid": "4ac933e0-fdc3-40cc-929e-143f442936c0"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runy2-aws-1",
+                "source": {
+                    "persistentVolumeName": "pvc-9f09c5d7-35bb-45fd-ab5f-3d2360dacfe4"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-9f09c5d7-35bb-45fd-ab5f-3d2360dacfe4",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.102.184.204",
+                    "nfs.flint.io/server-node": "runy2-aws-4",
+                    "volumeId": "pvc-9f09c5d7-35bb-45fd-ab5f-3d2360dacfe4",
+                    "volumeType": "nfs"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

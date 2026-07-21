@@ -1,0 +1,2 @@
+NAME                                                                   ATTACHER               PV                                         NODE         ATTACHED   AGE
+csi-3a8ad59ee165e9f3a813ed16b9587f9c7a11b34e9ce8ef975b9cbe8ae9917854   flint.csi.storage.io   pvc-c42e5719-c4fa-453e-8514-8569bfddd5a4   runu-aws-3   true       25m

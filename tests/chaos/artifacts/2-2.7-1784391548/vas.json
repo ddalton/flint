@@ -1,0 +1,40 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runw-aws-3"
+                },
+                "creationTimestamp": "2026-07-18T16:18:03Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-38198f8c15c350ef4ee694e72dcbb531fb559484ac5b885af682b4759ba78537",
+                "resourceVersion": "15401",
+                "uid": "5930dc23-fe63-481a-85b1-a51f7756fdb5"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runw-aws-3",
+                "source": {
+                    "persistentVolumeName": "pvc-d816a372-3ef1-4d06-b995-1844476ddc43"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "replicas": "[{\"node_name\":\"runw-aws-2\",\"node_uid\":\"68b747fe-6b24-4325-a21d-9cfefd925e44\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"396fcfc3-d16c-4c9d-b45d-94b1a7748248\",\"lvol_name\":\"vol_pvc-d816a372-3ef1-4d06-b995-1844476ddc43_replica_0\",\"lvs_name\":\"lvs_runw-aws-2_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"},{\"node_name\":\"runw-aws-3\",\"node_uid\":\"1da7ada8-d435-4770-a252-d9c8cb7cf9c6\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"32f6695c-9980-49c3-90f1-885d2c30075a\",\"lvol_name\":\"vol_pvc-d816a372-3ef1-4d06-b995-1844476ddc43_replica_1\",\"lvs_name\":\"lvs_runw-aws-3_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"},{\"node_name\":\"runw-aws-4\",\"node_uid\":\"8fe2e32e-20e9-48f8-8ca0-b8fd5e24ba72\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"f12fff80-95dc-4d47-bb7e-44a396b2cad7\",\"lvol_name\":\"vol_pvc-d816a372-3ef1-4d06-b995-1844476ddc43_replica_2\",\"lvs_name\":\"lvs_runw-aws-4_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"}]",
+                    "volumeId": "pvc-d816a372-3ef1-4d06-b995-1844476ddc43",
+                    "volumeType": "multi-replica"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

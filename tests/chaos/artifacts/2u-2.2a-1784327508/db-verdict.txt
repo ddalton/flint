@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-17T22:31:48Z)
+  ✓ pg_isready
+  · LOST ACKED WRITES: 1 2 3 4 5 (2055 total)
+  · pg_amcheck FAILED (or 600s timeout)
+  ✓ postgres log clean
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( ledger amcheck write-probe)

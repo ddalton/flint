@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-18T00:43:07Z)
+  ✓ pg_isready
+  · LOST ACKED WRITES: 278 279 280 287 291 (675 total)
+  ✓ pg_amcheck clean
+  ✓ postgres log clean
+  ✓ writability probe
+
+DB-VERDICT: FAIL ( ledger)

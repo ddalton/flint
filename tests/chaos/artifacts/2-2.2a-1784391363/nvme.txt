@@ -1,0 +1,54 @@
+== runw-aws-2 ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS65FDB2A13BB08AB13
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec23bea1-2c4e-9557-762e-70c8576339c0
+               iopolicy=numa
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol0061f2a229d5a6676
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec23bea1-2c4e-9557-762e-70c8576339c0
+               iopolicy=numa
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== runw-aws-3 ==
+nvme-subsys2 - NQN=nqn.2024-11.com.flint:volume:pvc-6369ecbc-bb74-4fc8-bf30-b17dd0f86725
+               hostnqn=nqn.2024-11.com.flint:node:runw-aws-3
+               iopolicy=numa
+\
+ +- nvme2 tcp traddr=127.0.0.1,trsvcid=4420,src_addr=127.0.0.1 live
+
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS33C8852C1C987974E
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec23bea1-2c4e-9557-762e-70c8576339c0
+               iopolicy=numa
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol0a3f408c1f5fce012
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec23bea1-2c4e-9557-762e-70c8576339c0
+               iopolicy=numa
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== runw-aws-4 ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS656EB467B100A1E0D
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec23bea1-2c4e-9557-762e-70c8576339c0
+               iopolicy=numa
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol002daf98157a9b9bc
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec23bea1-2c4e-9557-762e-70c8576339c0
+               iopolicy=numa
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== runw-aws-5 ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS2978827EA3B172AC4
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec23bea1-2c4e-9557-762e-70c8576339c0
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol07ac3b16760416ff8
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec23bea1-2c4e-9557-762e-70c8576339c0
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live

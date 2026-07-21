@@ -1,0 +1,41 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runt-aws-1"
+                },
+                "creationTimestamp": "2026-07-13T17:54:13Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-1a17c93a8ff550850de1552bdb562a375fa419626bb48d20f14c5d22937ea55b",
+                "resourceVersion": "56963",
+                "uid": "2bece994-05c8-415a-a9d2-3755c7fd2d88"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runt-aws-1",
+                "source": {
+                    "persistentVolumeName": "pvc-9795333a-e182-4249-b27c-91ffe372cd16"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "bdevName": "c7966531-a4be-4e8f-8c25-dce9700a76fc",
+                    "lvsName": "lvs_runt-aws-1_0000-00-1f-0",
+                    "volumeId": "pvc-9795333a-e182-4249-b27c-91ffe372cd16",
+                    "volumeType": "local"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}
