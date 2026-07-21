@@ -1598,6 +1598,38 @@ two drills later). Fix shape: an orphan reaper that diffs node
 initiator sessions against live PVs — the exact analog of the ublk
 loss-detector's diff — disconnecting sessions whose volume is gone.
 
+**Fix status (b0427ca, same day, unit-tested 727→741 — needs one
+cluster session to live-validate):**
+- **F32 FIXED:** `identity::pv_name_of_handle` (+`backing_pv_name`/
+  `backing_pvc_name`) is now THE handle→PV-name resolver;
+  `store/get_block_device_info`, rwx_nfs, and cutover route through
+  it. The rehydrate walk **backfills** the `flint.io/ublk-id`
+  annotation with the actual serving id (startup + every monitor
+  tick), healing volumes staged before the fix. NodeUnstage's
+  annotation-less fallback now stops the disk **by backing bdev**
+  (the agent resolves the serving id from live SPDK state and
+  refuses to guess when nothing serves it) — closing the latent
+  cross-node unstage leak; the hash id survives only as a loud last
+  resort for pre-attrs PVs. Regression tests pin the name mapping,
+  the delete-id resolution matrix (bdev beats stale hash;
+  no-serving→no-stop), and the mint shapes against rwx_nfs.
+- **3.2 fix-first LANDED:** `PseudoFilesystem` now takes the
+  manager's stable per-volume instance id (was `SystemTime::now()`
+  per boot); root handle bytes and create_time are restart-invariant
+  and old-incarnation root handles remain recognized (tested both
+  ways). Final attribution of the fsync-PANIC still needs one 3.2
+  rerun with the new server-log capture.
+- **nvmeof leak FIXED:** `reap_orphan_initiator_sessions` on the 60s
+  monitor tick — fabrics-only sysfs scan, `classify_subsystem_nqn`
+  ownership, PV existence via `pv_name_of_handle` (backing-handle
+  NQNs judged by the synthetic PV), non-`live` state gate so
+  deletion-in-flight and spdk-restart reconnect windows are never
+  touched, kernel `nvme disconnect` per orphan. Decision matrix
+  unit-tested including the exact `pvc-ca414215` leak shape.
+- **Harness gap CLOSED:** verify-drill now captures the flint-nfs
+  pod log (and `--previous` when present) into
+  `nfs-server{,-previous}.log` per drill.
+
 Related wart (same session): flint answers a trunking-probe
 EXCHANGE_ID (same co_ownerid+verifier, unconfirmed) by minting a
 SECOND clientid instead of returning the existing record (RFC 8881
