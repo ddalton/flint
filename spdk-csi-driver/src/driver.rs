@@ -1138,6 +1138,32 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
+    /// Stop whatever ublk disk serves `bdev_name` (unstage fallback for
+    /// volumes whose PV annotation is missing — F32-class stages from
+    /// before the fix). The agent resolves the serving id from live SPDK
+    /// state; the legacy volume-id hash is never a valid delete key (ids
+    /// are agent-allocated, kernel-bounded to ublks_max).
+    pub async fn delete_ublk_device_by_bdev(&self, bdev_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🗑️ [MINIMAL_UBLK] Deleting ublk device by backing bdev: {}", bdev_name);
+
+        let delete_params = json!({
+            "method": "ublk_stop_disk",
+            "params": {
+                "bdev_name": bdev_name
+            }
+        });
+
+        match self.call_node_agent(&self.node_id, "/api/ublk/delete", &delete_params).await {
+            Ok(_) => println!("✅ [MINIMAL_UBLK] Stopped ublk disk serving bdev: {}", bdev_name),
+            Err(e) => {
+                println!("⚠️ [MINIMAL_UBLK] Failed to stop disk by bdev (may not exist): {}", e);
+                // Don't fail - cleanup is best effort
+            }
+        }
+
+        Ok(())
+    }
+
     /// Create NVMe-oF block device (internal implementation)
     async fn create_nvmeof_block_device(&self, bdev_name: &str, volume_id: &str) -> Result<BlockDeviceInfo, Box<dyn std::error::Error + Send + Sync>> {
         println!("🔧 [NVMEOF_BLOCK] Creating NVMe-oF block device for bdev: {}", bdev_name);
@@ -1256,7 +1282,13 @@ impl SpdkCsiDriver {
         }
         let patch = json!({ "metadata": { "annotations": annotations } });
 
-        pvs.patch(volume_id, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+        // F32: resolve the PV NAME from the handle. Backing volumes
+        // (`nfs-server-…`) live on a PV named `flint-nfs-pv-…`; patching
+        // by the raw handle 404'd, the error was swallowed as non-fatal,
+        // and rehydration later re-minted the ublk device under the hash
+        // fallback id — orphaning the nfs pod's mount (drill 3.3b).
+        let pv_name = crate::identity::pv_name_of_handle(volume_id);
+        pvs.patch(&pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
 
         Ok(())
     }
@@ -1266,7 +1298,9 @@ impl SpdkCsiDriver {
         use k8s_openapi::api::core::v1::PersistentVolume;
 
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
-        let pv = pvs.get(volume_id).await?;
+        // Same F32 name resolution as store_block_device_info: backing
+        // handles must read the synthetic PV, not a PV named by the handle.
+        let pv = pvs.get(&crate::identity::pv_name_of_handle(volume_id)).await?;
 
         let annotations = pv.metadata.annotations.as_ref()
             .ok_or("No annotations found on PV")?;

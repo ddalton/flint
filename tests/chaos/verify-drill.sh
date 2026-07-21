@@ -156,6 +156,19 @@ LOG_OK=Y
     p=$(csi_node_pod "$n"); [ -n "$p" ] && kubectl logs -n "$DRIVER_NS" "$p" -c flint-csi-driver --since-time="$SINCE" 2>/dev/null
   done
 } > "$ART/driver-logs.txt"
+# RWX: the flint-nfs SERVER log is the authoritative record of restart
+# behavior (fh.key load, state-DB restore counts, EXCHANGE_ID/session
+# decisions, per-op error replies). Its absence blocked the 3.2 fsync-
+# PANIC attribution (testflnt2, 2026-07-20) — capture is best-effort but
+# FULL history (no --since): the startup lines are the evidence. A
+# deleted+recreated pod loses its predecessor's logs, so --previous only
+# helps for same-pod container restarts; both are taken when present.
+NFS_POD_CUR=$(rwx_nfs_pod_for_pv "$PV")
+if [ -n "$NFS_POD_CUR" ]; then
+  kubectl logs -n "$DRIVER_NS" "$NFS_POD_CUR" > "$ART/nfs-server.log" 2>/dev/null || true
+  kubectl logs -n "$DRIVER_NS" "$NFS_POD_CUR" --previous > "$ART/nfs-server-previous.log" 2>/dev/null \
+    || rm -f "$ART/nfs-server-previous.log"
+fi
 # Errors mentioning our volume in the final 60s = unresolved at drill end.
 VOLID=$(kubectl get pv "$PV" -o jsonpath='{.spec.csi.volumeHandle}' 2>/dev/null || echo "$PV")
 CUTOFF=$(( $(epoch) - 60 ))

@@ -455,7 +455,7 @@ pub async fn execute_cutover(
             let replacement = sanitized_for_recreate(pod);
             ops.delete_pod(&nfs.namespace, &nfs.name).await?;
 
-            let pv_name = format!("flint-nfs-pv-{}", view.volume_id);
+            let pv_name = crate::identity::backing_pv_name(&view.volume_id);
             if !ops
                 .await_detached(&nfs.namespace, &nfs.name, &pv_name, cfg.detach_timeout)
                 .await

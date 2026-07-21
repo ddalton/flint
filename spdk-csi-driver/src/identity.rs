@@ -68,6 +68,35 @@ pub fn storage_id_of_handle(handle: &str) -> &str {
     handle.strip_prefix(NFS_BACKING_PREFIX).unwrap_or(handle)
 }
 
+/// NAME of the synthetic backing PV behind an RWX volume's NFS server pod
+/// (minted in rwx_nfs.rs alongside [`backing_pvc_name`]). Note the
+/// asymmetry: the backing PV's *name* is `flint-nfs-pv-<storage_id>` but
+/// its *volumeHandle* is `nfs-server-<storage_id>` — unlike user PVs,
+/// where name == handle. Resolving a backing PV by its handle 404s.
+pub fn backing_pv_name(storage_id: &str) -> String {
+    format!("flint-nfs-pv-{}", storage_id)
+}
+
+/// PVC counterpart of [`backing_pv_name`] (namespaced, same asymmetry).
+pub fn backing_pvc_name(storage_id: &str) -> String {
+    format!("flint-nfs-pvc-{}", storage_id)
+}
+
+/// The Kubernetes PV name for ANY volumeHandle: user handles pass through
+/// (PV name == volumeHandle), backing handles map to the synthetic PV's
+/// name. THE resolver for PV get/patch by handle. F32 root cause: the
+/// block-device annotation writer patched the PV *named by the raw
+/// handle*, which does not exist for backing volumes (`nfs-server-…` vs
+/// `flint-nfs-pv-…`), so `flint.io/ublk-id` never persisted and abrupt
+/// csi-node restarts re-minted the ublk device under the hash-fallback id
+/// while the nfs pod's mount stayed pinned to the dead device.
+pub fn pv_name_of_handle(handle: &str) -> String {
+    match parse_backing_handle(handle) {
+        Some(storage_id) => backing_pv_name(storage_id),
+        None => handle.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Role + VolumeRef
 // ---------------------------------------------------------------------------
@@ -737,6 +766,37 @@ mod tests {
     #[test]
     fn storage_id_strips_a_single_prefix() {
         assert_eq!(storage_id_of_handle("nfs-server-nfs-server-pvc-x"), "nfs-server-pvc-x");
+    }
+
+    /// F32 regression: the PV name for a BACKING handle is the synthetic
+    /// PV's name, never the handle itself. The old code patched
+    /// `persistentvolumes/<handle>` — a 404 for backing volumes — so the
+    /// `flint.io/ublk-id` annotation silently never persisted and
+    /// rehydration fell back to the hash id, re-minting the ublk device
+    /// out from under the nfs pod's mount (drill 3.3b, testflnt2).
+    #[test]
+    fn f32_pv_name_of_backing_handle_is_the_synthetic_pv() {
+        let backing = backing_handle(VOL);
+        assert_eq!(pv_name_of_handle(&backing), format!("flint-nfs-pv-{}", VOL));
+        assert_ne!(
+            pv_name_of_handle(&backing),
+            backing,
+            "resolving a backing PV by its raw handle is the F32 404"
+        );
+        // User handles: PV name == volumeHandle, pass through untouched.
+        assert_eq!(pv_name_of_handle(VOL), VOL);
+    }
+
+    /// The helper pair must agree with the literal names rwx_nfs mints
+    /// (create_nfs_server_pod). If either side changes shape, staged
+    /// backing volumes lose their annotations again.
+    #[test]
+    fn backing_pv_pvc_names_match_rwx_mint_shapes() {
+        assert_eq!(backing_pv_name(VOL), format!("flint-nfs-pv-{}", VOL));
+        assert_eq!(backing_pvc_name(VOL), format!("flint-nfs-pvc-{}", VOL));
+        // Round trip: handle → PV name → storage id embedded intact.
+        let pv = pv_name_of_handle(&backing_handle(VOL));
+        assert_eq!(pv.strip_prefix("flint-nfs-pv-"), Some(VOL));
     }
 
     // -- lvol_owner: strict inverse of every lvol-name constructor ----------

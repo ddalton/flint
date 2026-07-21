@@ -291,6 +291,9 @@ impl NodeAgent {
                 if let Err(e) = monitor_agent.reap_dead_controllers().await {
                     warn!(error = %e, "[MONITOR] Dead-controller reap failed (non-fatal)");
                 }
+                if let Err(e) = monitor_agent.reap_orphan_initiator_sessions().await {
+                    warn!(error = %e, "[MONITOR] Initiator-session reap failed (non-fatal)");
+                }
             }
         });
 
@@ -1224,9 +1227,45 @@ impl NodeAgent {
         let method = request["method"].as_str().unwrap_or("ublk_stop_disk");
         let params = &request["params"];
 
+        let requested_id = params["ublk_id"].as_u64().map(|v| v as u32);
+        let bdev_name = params["bdev_name"].as_str();
+
+        // F32 hardening: when the caller names the backing bdev (unstage's
+        // annotation-less fallback), resolve the ACTUAL serving id from
+        // live SPDK state — the caller's id (legacy volume-id hash) never
+        // matches the agent-allocated one, so stopping it was a silent
+        // no-op that leaked the real disk.
+        if bdev_name.is_some() {
+            let live = node_agent.snapshot_ublk_disks().await;
+            let Some(id) = Self::resolve_ublk_delete_id(requested_id, bdev_name, live.as_ref())
+            else {
+                info!(bdev = bdev_name.unwrap_or(""),
+                    "[HTTP_API] ublk delete: no disk serves this bdev — nothing to stop");
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&json!({ "success": true, "result": "no disk serves bdev" })),
+                    StatusCode::OK,
+                ));
+            };
+            // Deliberate stop: the loss-detector must not resurrect it.
+            node_agent.expected_ublk.lock().await.remove(&id);
+            let rpc = json!({ "method": "ublk_stop_disk", "params": { "ublk_id": id } });
+            return match node_agent.disk_service.call_spdk_rpc(&rpc).await {
+                Ok(response) => {
+                    info!(ublk_id = id, bdev = bdev_name.unwrap_or(""),
+                        "[HTTP_API] ublk disk stopped (resolved by bdev)");
+                    Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+                }
+                Err(e) => {
+                    warn!(error = %e, "[HTTP_API] ublk delete by bdev failed (may not exist)");
+                    let success_response = json!({ "success": true, "warning": e.to_string() });
+                    Ok(warp::reply::with_status(warp::reply::json(&success_response), StatusCode::OK))
+                }
+            };
+        }
+
         // Deliberate stop: the loss-detector must not resurrect it.
-        if let Some(ublk_id) = params["ublk_id"].as_u64() {
-            node_agent.expected_ublk.lock().await.remove(&(ublk_id as u32));
+        if let Some(ublk_id) = requested_id {
+            node_agent.expected_ublk.lock().await.remove(&ublk_id);
         }
 
         let ublk_rpc = json!({
@@ -1660,6 +1699,101 @@ impl NodeAgent {
             }
         }
         None
+    }
+
+    /// All kernel NVMe-oF (fabrics/tcp) initiator sessions on this node:
+    /// `(subsysnqn, state)` from `/sys/class/nvme/nvmeX/`. Local PCIe
+    /// controllers (transport `pcie`) are excluded — only fabrics
+    /// sessions can orphan (their subsystem can vanish server-side).
+    fn list_kernel_initiator_sessions() -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/sys/class/nvme") else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let read = |f: &str| {
+                std::fs::read_to_string(p.join(f))
+                    .map(|s| s.trim().to_string())
+                    .ok()
+            };
+            let (Some(transport), Some(nqn), Some(state)) =
+                (read("transport"), read("subsysnqn"), read("state"))
+            else {
+                continue;
+            };
+            if transport == "tcp" {
+                out.push((nqn, state));
+            }
+        }
+        out
+    }
+
+    /// Which kernel initiator sessions are orphans to disconnect. A
+    /// session is reaped only when ALL of:
+    ///  (a) its NQN parses as a flint volume export (foreign/PCIe/
+    ///      hotrejoin NQNs never match);
+    ///  (b) no PV backs it any more — resolved via `pv_name_of_handle`,
+    ///      so a backing-handle NQN (`…:volume:nfs-server-<id>`) checks
+    ///      the synthetic `flint-nfs-pv-<id>` PV;
+    ///  (c) the controller is NOT `live` — a live session for a
+    ///      just-deleted PV is deletion-in-flight (NodeUnstage owns it);
+    ///      once the subsystem drops, the state degrades to `connecting`
+    ///      and the next tick reaps it.
+    ///
+    /// Root cause this closes (phase-3 nvmeof A/B, 2026-07-20): a volume
+    /// deleted after its consumer was force-deleted never runs
+    /// NodeUnstage — the only path that disconnected kernel initiators —
+    /// so the session reconnect-looped `connecting` forever
+    /// (ctrl_loss_tmo=-1 loopback), tripping every subsequent drill's
+    /// leak check.
+    fn orphan_initiator_sessions(
+        sessions: &[(String, String)],
+        pv_exists: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        sessions
+            .iter()
+            .filter_map(|(nqn, state)| {
+                if state == "live" {
+                    return None;
+                }
+                let owner = crate::identity::classify_subsystem_nqn(nqn)?;
+                let pv_name = crate::identity::pv_name_of_handle(&owner);
+                (!pv_exists(&pv_name)).then(|| nqn.clone())
+            })
+            .collect()
+    }
+
+    /// One pass of the kernel-initiator orphan reaper — the nvmeof
+    /// backend's analog of the ublk loss-detector's diff, in reverse:
+    /// instead of re-creating disks that SHOULD exist, disconnect
+    /// sessions that shouldn't. Runs from the 60s monitor loop; sysfs is
+    /// scanned first so ticks with no fabrics sessions never touch the
+    /// API server.
+    async fn reap_orphan_initiator_sessions(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let sessions = Self::list_kernel_initiator_sessions();
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let names: std::collections::HashSet<String> = pvs
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .filter_map(|pv| pv.metadata.name)
+            .collect();
+        for nqn in Self::orphan_initiator_sessions(&sessions, |name| names.contains(name)) {
+            warn!(nqn = %nqn,
+                "[INITIATOR-REAPER] disconnecting orphaned kernel nvme session (volume gone)");
+            if let Err(e) = Self::kernel_nvme_disconnect(&nqn).await {
+                warn!(nqn = %nqn, error = %e,
+                    "[INITIATOR-REAPER] disconnect failed (next tick retries)");
+            }
+        }
+        Ok(())
     }
 
     /// Helper: Extract NVMe controller name from device path
@@ -2301,6 +2435,60 @@ impl NodeAgent {
         })
     }
 
+    /// Which ublk id should a delete request stop? A caller-supplied
+    /// `bdev_name` beats the caller-supplied id: ids are agent-allocated
+    /// (kernel-bounded to ublks_max), so an id a caller derived from an
+    /// annotation — or worse, the legacy volume-id hash (F32) — may not
+    /// be the serving id. With a live snapshot the bdev match is
+    /// authoritative: `Some(id)` when a disk serves the bdev, `None` when
+    /// nothing does (nothing to stop — never fall back to stopping an id
+    /// that may belong to an unrelated volume). Without a snapshot (RPC
+    /// failed), fall back to the requested id, best effort.
+    fn resolve_ublk_delete_id(
+        requested_id: Option<u32>,
+        bdev_name: Option<&str>,
+        live: Option<&std::collections::HashMap<u32, String>>,
+    ) -> Option<u32> {
+        match (bdev_name, live) {
+            (Some(bdev), Some(l)) => {
+                l.iter().find(|(_, b)| b.as_str() == bdev).map(|(id, _)| *id)
+            }
+            (Some(_), None) => requested_id,
+            (None, _) => requested_id,
+        }
+    }
+
+    /// Backfill the PV's `flint.io/ublk-id` annotation with the ACTUAL
+    /// serving id. Volumes staged before the F32 fix (or whose stage-time
+    /// patch was lost) have no annotation, so an abrupt restart re-minted
+    /// the device under the hash fallback instead of recovering the real
+    /// id in place. Runs from the rehydrate walk (startup + every monitor
+    /// tick); no-op when the annotation already matches. Fire-and-forget:
+    /// a failed patch retries on the next pass.
+    async fn persist_ublk_annotation(&self, pv: &PersistentVolume, handle: &str, ublk_id: u32) {
+        let want = ublk_id.to_string();
+        let current = pv
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("flint.io/ublk-id"))
+            .map(String::as_str);
+        if current == Some(want.as_str()) {
+            return;
+        }
+        let info = crate::driver::BlockDeviceInfo {
+            device_path: format!("/dev/ublkb{}", ublk_id),
+            backend_type: crate::driver::BlockDeviceBackend::Ublk,
+            cleanup_data: crate::driver::CleanupData::Ublk { ublk_id },
+        };
+        match self.driver.store_block_device_info(handle, &info).await {
+            Ok(()) => info!(ublk_id, volume = %handle,
+                "[REHYDRATE] backfilled ublk-id annotation (was {:?})", current),
+            Err(e) => debug!(ublk_id, volume = %handle, error = %e,
+                "[REHYDRATE] ublk-id annotation backfill failed (next pass retries)"),
+        }
+    }
+
     /// Whether `sub` (an `nvmf_get_subsystems` entry) already serves the
     /// desired export: a namespace (optionally backed by `want_bdev`), a
     /// listener on `want_traddr`, and — when a host is required — that
@@ -2463,6 +2651,7 @@ impl NodeAgent {
                             .and_then(|l| l.iter().find(|(_, b)| b.as_str() == raid_bdev.as_str()))
                         {
                             self.expected_ublk.lock().await.insert(*id, bdev.clone());
+                            self.persist_ublk_annotation(&pv, &csi.volume_handle, *id).await;
                         } else {
                             let ublk_id = self.resolve_ublk_id(&pv, &csi.volume_handle);
                             warn!(ublk_id, volume_id = %pv_name,
@@ -2498,8 +2687,11 @@ impl NodeAgent {
                     {
                         // Serving — backfill detector ownership (covers
                         // agent-only restarts, like the seed pass does for
-                        // loopback exports).
+                        // loopback exports) and the id annotation (heals
+                        // pre-F32-fix stages so a later abrupt restart
+                        // recovers this id instead of re-minting).
                         self.expected_ublk.lock().await.insert(*id, bdev.clone());
+                        self.persist_ublk_annotation(&pv, &csi.volume_handle, *id).await;
                         continue;
                     }
                     let ublk_id = self.resolve_ublk_id(&pv, &csi.volume_handle);
@@ -2519,12 +2711,14 @@ impl NodeAgent {
                         }
                     };
                     match self.ensure_ublk_disk(ublk_id, &bdev, ublk_disks.as_ref()).await {
-                        Ok(true) => {
-                            warn!(ublk_id, volume_id = %pv_name,
-                                  "[REHYDRATE] rebuilt local ublk disk from ground truth");
-                            rebuilt += 1;
+                        Ok(mutated) => {
+                            if mutated {
+                                warn!(ublk_id, volume_id = %pv_name,
+                                      "[REHYDRATE] rebuilt local ublk disk from ground truth");
+                                rebuilt += 1;
+                            }
+                            self.persist_ublk_annotation(&pv, &csi.volume_handle, ublk_id).await;
                         }
-                        Ok(false) => {}
                         Err(e) => warn!(ublk_id, error = %e, "[REHYDRATE] ublk rebuild failed"),
                     }
                     continue;
@@ -4854,5 +5048,131 @@ mod rehydrate_tests {
         assert!(NodeAgent::parse_ublk_disks(None).is_empty());
         let not_array = json!({"unexpected": true});
         assert!(NodeAgent::parse_ublk_disks(Some(&not_array)).is_empty());
+    }
+
+    // -- resolve_ublk_delete_id: the F32 unstage-leak fix ------------------
+
+    fn live(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
+        pairs.iter().map(|(id, b)| (*id, b.to_string())).collect()
+    }
+
+    /// F32 reproduction: the drill-3.3b shape. The disk serves at the
+    /// agent-allocated id 0; the caller's id is the 20-bit volume-id hash
+    /// (638946). The old code stopped the hash id — a silent no-op that
+    /// leaked the real disk. The bdev match must win.
+    #[test]
+    fn f32_bdev_match_beats_the_stale_hash_id() {
+        let l = live(&[(0, "0ed42595-c545-403b-819d-fafc78252a26")]);
+        assert_eq!(
+            NodeAgent::resolve_ublk_delete_id(
+                Some(638946),
+                Some("0ed42595-c545-403b-819d-fafc78252a26"),
+                Some(&l)
+            ),
+            Some(0),
+            "must stop the SERVING id, not the caller's hash id"
+        );
+    }
+
+    /// When nothing serves the bdev, there is nothing to stop — the
+    /// caller's id must NOT be used as a fallback (it may belong to an
+    /// unrelated volume's disk; a hash collision away from a wrong kill).
+    #[test]
+    fn no_serving_disk_means_nothing_to_stop() {
+        let l = live(&[(1, "some-other-lvol")]);
+        assert_eq!(
+            NodeAgent::resolve_ublk_delete_id(Some(638946), Some("gone-lvol"), Some(&l)),
+            None
+        );
+        // Empty snapshot: same answer.
+        let empty = live(&[]);
+        assert_eq!(
+            NodeAgent::resolve_ublk_delete_id(Some(7), Some("gone-lvol"), Some(&empty)),
+            None
+        );
+    }
+
+    /// Snapshot unavailable (RPC failed / fresh tgt): best-effort fall
+    /// back to the requested id — refusing entirely would leak on the
+    /// only path where we genuinely cannot know better.
+    #[test]
+    fn snapshot_unavailable_falls_back_to_requested_id() {
+        assert_eq!(
+            NodeAgent::resolve_ublk_delete_id(Some(4), Some("lvolX"), None),
+            Some(4)
+        );
+    }
+
+    /// Legacy id-only requests are untouched by the hardening.
+    #[test]
+    fn id_only_requests_pass_through() {
+        let l = live(&[(2, "lvolY")]);
+        assert_eq!(NodeAgent::resolve_ublk_delete_id(Some(2), None, Some(&l)), Some(2));
+        assert_eq!(NodeAgent::resolve_ublk_delete_id(None, None, Some(&l)), None);
+    }
+
+    // -- orphan_initiator_sessions: the nvmeof `connecting` leak -----------
+
+    fn sess(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(n, s)| (n.to_string(), s.to_string())).collect()
+    }
+
+    /// Reproduction of the phase-3 leak (artifact: `pvc-ca414215…` stuck
+    /// `connecting` two drills after its volume was deleted): a fabrics
+    /// session whose PV is gone and whose controller is reconnect-looping
+    /// must be reaped.
+    #[test]
+    fn leak_shape_connecting_and_pv_gone_is_reaped() {
+        let nqn = crate::identity::volume_nqn("pvc-ca414215-3370-4094-bed9-cf6fdcd95a09");
+        let s = sess(&[(nqn.as_str(), "connecting")]);
+        let reaped = NodeAgent::orphan_initiator_sessions(&s, |_| false);
+        assert_eq!(reaped, vec![nqn]);
+    }
+
+    /// A live session is NEVER reaped, even when the PV lookup says gone —
+    /// deletion-in-flight belongs to NodeUnstage; the reaper only takes
+    /// over once the subsystem drops and the state degrades.
+    #[test]
+    fn live_session_is_left_alone_even_without_pv() {
+        let nqn = crate::identity::volume_nqn("pvc-x");
+        let s = sess(&[(nqn.as_str(), "live")]);
+        assert!(NodeAgent::orphan_initiator_sessions(&s, |_| false).is_empty());
+    }
+
+    /// A `connecting` session whose PV still exists is a normal reconnect
+    /// window (spdk-tgt restart) — not a leak.
+    #[test]
+    fn reconnect_window_with_live_pv_is_not_a_leak() {
+        let nqn = crate::identity::volume_nqn("pvc-x");
+        let s = sess(&[(nqn.as_str(), "connecting")]);
+        assert!(NodeAgent::orphan_initiator_sessions(&s, |_| true).is_empty());
+    }
+
+    /// Foreign NQNs (non-flint) are never candidates, whatever their
+    /// state — the reaper must not touch sessions it does not own.
+    #[test]
+    fn foreign_nqns_are_never_reaped() {
+        let s = sess(&[
+            ("nqn.2019-08.org.qemu:whatever", "connecting"),
+            ("nqn.2024-11.com.flint:hotrejoin:pvc-x", "connecting"),
+        ]);
+        assert!(NodeAgent::orphan_initiator_sessions(&s, |_| false).is_empty());
+    }
+
+    /// Backing-handle NQNs (`…:volume:nfs-server-<id>` — the RWX local
+    /// hop) must be judged by the SYNTHETIC PV's name, not the handle:
+    /// judging by handle would 404 on every live backing volume and reap
+    /// its session (the F32 identity bug all over again).
+    #[test]
+    fn backing_handle_sessions_judge_the_synthetic_pv() {
+        let handle = crate::identity::backing_handle("pvc-e13acd1b");
+        let nqn = crate::identity::volume_nqn(&handle);
+        let s = sess(&[(nqn.as_str(), "connecting")]);
+        // PV set contains ONLY the synthetic name: session must survive.
+        let alive = NodeAgent::orphan_initiator_sessions(&s, |pv| pv == "flint-nfs-pv-pvc-e13acd1b");
+        assert!(alive.is_empty(), "live backing volume's session must not be reaped");
+        // Synthetic PV gone → reap.
+        let reaped = NodeAgent::orphan_initiator_sessions(&s, |_| false);
+        assert_eq!(reaped, vec![nqn]);
     }
 }

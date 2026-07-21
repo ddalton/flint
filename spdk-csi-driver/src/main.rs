@@ -3159,12 +3159,31 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             }
             Err(e) => {
                 println!("⚠️ [NODE] Failed to retrieve block device info from PV: {}", e);
-                println!("⚠️ [NODE] Falling back to legacy ublk cleanup...");
-                // Fallback to legacy ublk cleanup for backward compatibility
-                let ublk_id = self.driver.generate_ublk_id(&actual_volume_id);
-                match self.driver.delete_ublk_device(ublk_id).await {
-                    Ok(_) => println!("✅ [NODE] Legacy ublk device deleted"),
-                    Err(e) => println!("⚠️ [NODE] Legacy cleanup failed: {}", e),
+                // F32 hardening: the old fallback stopped the volume-id
+                // HASH id, which never matches the agent-allocated serving
+                // id — a silent no-op that leaks the real disk (and every
+                // backing volume took this path while the annotation
+                // patch 404'd). Resolve the serving disk by its backing
+                // bdev (lvol uuid from PV attributes) instead; the agent
+                // matches live SPDK state and refuses to guess.
+                match self.driver.get_volume_info(&volume_id).await {
+                    Ok(info) => {
+                        println!("🔧 [NODE] Fallback: stopping ublk disk by bdev {}", info.lvol_uuid);
+                        match self.driver.delete_ublk_device_by_bdev(&info.lvol_uuid).await {
+                            Ok(_) => println!("✅ [NODE] Fallback ublk cleanup by bdev done"),
+                            Err(e) => println!("⚠️ [NODE] Fallback ublk cleanup by bdev failed: {}", e),
+                        }
+                    }
+                    Err(e2) => {
+                        // Last resort (pre-attrs PVs only): the legacy hash
+                        // id — kept for backward compatibility, loudly.
+                        println!("⚠️ [NODE] No lvol uuid either ({}); legacy hash-id cleanup", e2);
+                        let ublk_id = self.driver.generate_ublk_id(&actual_volume_id);
+                        match self.driver.delete_ublk_device(ublk_id).await {
+                            Ok(_) => println!("✅ [NODE] Legacy ublk device deleted"),
+                            Err(e) => println!("⚠️ [NODE] Legacy cleanup failed: {}", e),
+                        }
+                    }
                 }
             }
         }

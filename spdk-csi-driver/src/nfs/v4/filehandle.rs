@@ -217,8 +217,11 @@ impl FileHandleManager {
         info!("   Export path: {:?}", export_path);
         info!("   Export name: {}", export_name);
         
-        // Create pseudo-filesystem (RFC 7530 Section 7)
-        let pseudo_fs = Arc::new(PseudoFilesystem::new());
+        // Create pseudo-filesystem (RFC 7530 Section 7). Shares the
+        // manager's stable instance id so the pseudo root — like every
+        // real-fs handle — is identical across server restarts (3.2:
+        // the old boot-time stamp flapped root identity per restart).
+        let pseudo_fs = Arc::new(PseudoFilesystem::new(instance_id));
         
         // Register the export in pseudo-filesystem
         let export = Export::new(1, export_name.clone(), export_path.clone());

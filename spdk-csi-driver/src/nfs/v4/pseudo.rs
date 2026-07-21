@@ -97,15 +97,24 @@ pub struct PseudoFilesystem {
 }
 
 impl PseudoFilesystem {
-    /// Create a new pseudo-filesystem
-    pub fn new() -> Self {
-        let instance_id = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        
-        let root_create_time = instance_id;
-        
+    /// Create a new pseudo-filesystem.
+    ///
+    /// `instance_id` MUST be the server's stable per-volume id — the same
+    /// one `FileHandleManager` embeds in real-fs handles
+    /// (`stable_nfs_instance_id` / `PNFS_INSTANCE_ID`). The old
+    /// constructor stamped `SystemTime::now()` at every boot, so the
+    /// pseudo root's identity (handle bytes, create/change attrs) flapped
+    /// on every server restart: reconnecting clients had their cached
+    /// mount-root attrs invalidated for no reason, and stale-handle
+    /// triage (drill 3.2) had one more instance-varying surface to rule
+    /// out. With the stable id, a replacement server presents an
+    /// identical pseudo root.
+    pub fn new(instance_id: u64) -> Self {
+        // Synthetic-but-sane creation time DERIVED from the stable id
+        // (the id is a 64-bit hash, not epoch seconds): stable across
+        // restarts, plausible as a date.
+        let root_create_time = 1_700_000_000 + (instance_id % 31_536_000);
+
         info!("🌳 Pseudo-filesystem created (instance_id={})", instance_id);
         info!("   RFC 7530 Section 7: Unified namespace for NFSv4 exports");
         
@@ -261,10 +270,58 @@ pub struct PseudoRootAttrs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    /// Stands in for `stable_nfs_instance_id(volume_id)` — an arbitrary
+    /// 64-bit hash, NOT epoch seconds.
+    const TEST_INSTANCE: u64 = 0xDEAD_BEEF_CAFE_F00D;
+
+    /// 3.2 hardening: the pseudo root must be IDENTICAL across server
+    /// restarts when constructed with the same stable instance id — same
+    /// handle bytes, same synthetic attrs (create_time included). The old
+    /// boot-time stamp made every restart mint a "different" root, so
+    /// reconnecting clients invalidated their cached mount-root for no
+    /// reason.
+    #[test]
+    fn restart_with_same_instance_id_preserves_root_identity() {
+        let a = PseudoFilesystem::new(TEST_INSTANCE);
+        let b = PseudoFilesystem::new(TEST_INSTANCE);
+        assert_eq!(
+            a.get_pseudo_root_handle().data,
+            b.get_pseudo_root_handle().data,
+            "root handle bytes must survive a server restart"
+        );
+        let (aa, ba) = (a.get_pseudo_root_attrs(), b.get_pseudo_root_attrs());
+        assert_eq!(aa.create_time, ba.create_time, "root create_time must not flap per boot");
+        assert_eq!(aa.instance_id, ba.instance_id);
+        assert_eq!(aa.fileid, ba.fileid);
+        assert_eq!(aa.fsid, ba.fsid);
+    }
+
+    /// A client's cached root handle from the PREVIOUS server incarnation
+    /// must still be recognized after a restart — mount-root continuity
+    /// is what lets reconnecting clients resume without a remount.
+    /// (Pinned: is_pseudo_root validates the marker, not the embedded
+    /// id — a strict id compare here would brick every reconnect.)
+    #[test]
+    fn old_incarnation_root_handle_still_recognized() {
+        let old = PseudoFilesystem::new(1111);
+        let newer = PseudoFilesystem::new(2222);
+        assert!(newer.is_pseudo_root(&old.get_pseudo_root_handle()));
+    }
+
+    /// The derived create_time must be plausible epoch seconds for any
+    /// hash-shaped instance id (the raw id is NOT a timestamp).
+    #[test]
+    fn derived_create_time_is_sane_epoch_seconds() {
+        for id in [0u64, 1, TEST_INSTANCE, u64::MAX] {
+            let t = PseudoFilesystem::new(id).get_pseudo_root_attrs().create_time;
+            assert!((1_700_000_000..1_731_536_000).contains(&t), "id {id} → time {t}");
+        }
+    }
+
     #[test]
     fn test_pseudo_root_handle() {
-        let pseudo_fs = PseudoFilesystem::new();
+        let pseudo_fs = PseudoFilesystem::new(TEST_INSTANCE);
         let handle = pseudo_fs.get_pseudo_root_handle();
         
         assert!(pseudo_fs.is_pseudo_root(&handle));
@@ -273,7 +330,7 @@ mod tests {
     
     #[test]
     fn test_add_export() {
-        let pseudo_fs = PseudoFilesystem::new();
+        let pseudo_fs = PseudoFilesystem::new(TEST_INSTANCE);
         let export = Export::new(1, "volume".to_string(), PathBuf::from("/data"));
         
         pseudo_fs.add_export(export).unwrap();
@@ -285,7 +342,7 @@ mod tests {
     
     #[test]
     fn test_list_exports() {
-        let pseudo_fs = PseudoFilesystem::new();
+        let pseudo_fs = PseudoFilesystem::new(TEST_INSTANCE);
         pseudo_fs.add_export(Export::new(1, "vol1".to_string(), PathBuf::from("/data1"))).unwrap();
         pseudo_fs.add_export(Export::new(2, "vol2".to_string(), PathBuf::from("/data2"))).unwrap();
         
@@ -297,7 +354,7 @@ mod tests {
     
     #[test]
     fn test_pseudo_root_attrs() {
-        let pseudo_fs = PseudoFilesystem::new();
+        let pseudo_fs = PseudoFilesystem::new(TEST_INSTANCE);
         pseudo_fs.add_export(Export::new(1, "volume".to_string(), PathBuf::from("/data"))).unwrap();
         
         let attrs = pseudo_fs.get_pseudo_root_attrs();
@@ -309,7 +366,7 @@ mod tests {
     
     #[test]
     fn test_pnfs_support() {
-        let pseudo_fs = PseudoFilesystem::new();
+        let pseudo_fs = PseudoFilesystem::new(TEST_INSTANCE);
         
         assert!(pseudo_fs.supports_pnfs());
         

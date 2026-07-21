@@ -224,9 +224,9 @@ pub async fn create_nfs_server_pod(
     };
     
     let pod_name = format!("flint-nfs-{}", volume_id);
-    let pvc_name = format!("flint-nfs-pvc-{}", volume_id);
-    let pv_name = format!("flint-nfs-pv-{}", volume_id);
-    
+    let pvc_name = crate::identity::backing_pvc_name(volume_id);
+    let pv_name = crate::identity::backing_pv_name(volume_id);
+
     // Synthetic volumeHandle to avoid conflict with user PV
     let nfs_volume_handle = crate::identity::backing_handle(volume_id);
     
@@ -773,8 +773,8 @@ pub async fn delete_nfs_server_pod(
     
     let pod_name = format!("flint-nfs-{}", volume_id);
     let service_name = format!("flint-nfs-{}", volume_id);
-    let pvc_name = format!("flint-nfs-pvc-{}", volume_id);
-    let pv_name = format!("flint-nfs-pv-{}", volume_id);
+    let pvc_name = crate::identity::backing_pvc_name(volume_id);
+    let pv_name = crate::identity::backing_pv_name(volume_id);
     
     eprintln!("🗑️  [NFS] Deleting NFS infrastructure for volume: {}", volume_id);
     
