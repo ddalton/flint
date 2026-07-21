@@ -2967,8 +2967,30 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     }
                 }
 
+        // F30: stamp the identity marker onto freshly staged NFS BACKING
+        // volumes (never user filesystems — no `.flint-nfs/` droppings
+        // there). The server refuses to start without it, which is what
+        // turns the silent empty-dir export into a loud failure.
+        if spdk_csi_driver::identity::parse_backing_handle(&volume_id).is_some() {
+            let storage_id =
+                spdk_csi_driver::identity::storage_id_of_handle(&volume_id).to_string();
+            match spdk_csi_driver::nfs::volume_marker::stamp(
+                std::path::Path::new(&staging_target_path),
+                &storage_id,
+            ) {
+                Ok(()) => println!("✅ [NODE] F30 identity marker stamped ({})", storage_id),
+                Err(e) => {
+                    println!("❌ [NODE] F30 marker conflict/failure on staging: {}", e);
+                    return Err(tonic::Status::failed_precondition(format!(
+                        "volume-identity marker: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
         println!("✅ [NODE] Volume {} staged successfully", volume_id);
-        
+
         let response = tonic::Response::new(spdk_csi_driver::csi::NodeStageVolumeResponse {});
         println!("🔵 [GRPC] NodeStageVolume returning success response");
         Ok(response)
@@ -3682,13 +3704,54 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         } else {
             // Filesystem volume - bind mount from staging path
             println!("📋 [NODE] Filesystem volume - bind mounting staging path to target");
-            
-            // Verify staging path exists and is mounted
-            if !std::path::Path::new(&staging_target_path).exists() {
-                println!("❌ [NODE] Staging path {} does not exist", staging_target_path);
-                return Err(tonic::Status::internal(format!("Staging path {} not found", staging_target_path)));
+
+            // F29: NEVER blind-bind the staging path. The kubelet
+            // volume-manager cache can say "staged" after a force-delete
+            // skipped NodeUnstage — the old code then bind-mounted a dead
+            // superblock (reads from page cache, writes parked in jbd2)
+            // or, worse, the EMPTY directory under a vanished mount (the
+            // F30 fresh-fh.key export). Probe first, bounded (the probe
+            // itself can hang on a dead device).
+            match spdk_csi_driver::mount_util::probe_staging_liveness(
+                &staging_target_path,
+                readonly,
+                10,
+            )
+            .await
+            {
+                spdk_csi_driver::mount_util::StagingLiveness::Live => {}
+                spdk_csi_driver::mount_util::StagingLiveness::NotMounted => {
+                    println!(
+                        "❌ [NODE] F29 refusal: staging path {} is NOT a mountpoint — \
+                         kubelet cache is stale (skipped NodeUnstage / reboot); \
+                         refusing to bind-mount the bare directory",
+                        staging_target_path
+                    );
+                    return Err(tonic::Status::failed_precondition(format!(
+                        "staging path {} is not mounted — restage required (F29)",
+                        staging_target_path
+                    )));
+                }
+                spdk_csi_driver::mount_util::StagingLiveness::Dead(why) => {
+                    println!(
+                        "❌ [NODE] F29 refusal: staging mount {} is DEAD ({}) — \
+                         lazy-unmounting it so recovery can restage instead of \
+                         serving a dead superblock",
+                        staging_target_path, why
+                    );
+                    let _ = spdk_csi_driver::mount_util::bounded_umount(
+                        &staging_target_path,
+                        true,
+                        10,
+                    )
+                    .await;
+                    return Err(tonic::Status::failed_precondition(format!(
+                        "staging mount {} dead ({}) — unmounted for restage (F29)",
+                        staging_target_path, why
+                    )));
+                }
             }
-            
+
             let mut mount_cmd = std::process::Command::new("mount");
             if readonly {
                 mount_cmd.args(["--bind", "-o", "ro", &staging_target_path, &target_path]);

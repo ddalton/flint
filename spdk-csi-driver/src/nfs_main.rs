@@ -111,6 +111,38 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // NFSv4.2 uses direct filesystem access via file handle manager
     // No separate filesystem backend needed
 
+    // F30: the export must PROVE it is the configured volume before one
+    // byte is served. The incident: a bare mountpoint dir got exported
+    // and the server silently minted fresh identity over emptiness.
+    match spdk_csi_driver::nfs::volume_marker::verify_and_adopt(&args.export_path, &args.volume_id)
+    {
+        Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::Serve) => {}
+        Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::AdoptLegacy) => {
+            info!("F30: legacy volume adopted — identity marker stamped for {}", args.volume_id);
+        }
+        Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::RefuseMismatch { found }) => {
+            error!(
+                "F30 REFUSAL: export carries volume-id {:?} but this server is configured \
+                 for {:?} — the wrong volume is mounted at {:?}; refusing to serve",
+                found, args.volume_id, args.export_path
+            );
+            std::process::exit(57);
+        }
+        Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::RefuseEmpty) => {
+            error!(
+                "F30 REFUSAL: export {:?} has neither an identity marker nor flint state — \
+                 this is an EMPTY/foreign directory, not volume {} (blind export is how the \
+                 fresh-fh.key incident happened); refusing to serve",
+                args.export_path, args.volume_id
+            );
+            std::process::exit(57);
+        }
+        Err(e) => {
+            error!("F30: identity marker check failed on {:?}: {}", args.export_path, e);
+            std::process::exit(57);
+        }
+    }
+
     // Create NFS server configuration
     let config = NfsConfig {
         bind_addr: args.bind_addr.clone(),

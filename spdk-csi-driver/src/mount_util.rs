@@ -112,6 +112,105 @@ pub fn mountpoint_probe_says_unmount(exit_code: Option<i32>) -> bool {
     !matches!(exit_code, Some(1))
 }
 
+/// F29: liveness verdict on a staging path before NodePublish
+/// bind-mounts it into a pod.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagingLiveness {
+    Live,
+    /// Not a mountpoint: kubelet's volume-manager cache says "staged"
+    /// but the mount is gone (force-delete skipped NodeUnstage, node
+    /// reboot, out-of-band umount). A blind bind-mount would export the
+    /// EMPTY directory underneath — the F30 catastrophic shape (server
+    /// minted a fresh fh.key over an empty root-disk dir, silently).
+    NotMounted,
+    /// Mountpoint present but I/O does not complete within the deadline
+    /// (dead ublk/nvmeof device: D-state) or errors. The F29 chain
+    /// published exactly such a mount: reads served from page cache
+    /// while every durable write parked in jbd2.
+    Dead(String),
+}
+
+/// A mountpoint boundary is where st_dev changes between a path and its
+/// parent (the one fact `mountpoint(1)` checks too — pinned pure so the
+/// rule can't drift).
+pub fn devs_say_mountpoint(path_dev: u64, parent_dev: u64) -> bool {
+    path_dev != parent_dev
+}
+
+/// The blocking probe body. EVERYTHING that can touch the (possibly
+/// dead) filesystem lives in here so the caller's deadline bounds it —
+/// even `stat` on a dead mount can join the D-state party.
+///  1. mountpoint check via st_dev(path) vs st_dev(parent);
+///  2. rw staging: create+write+fsync+unlink a probe file — fsync
+///     defeats the page cache (F29's tell: the v4 probe passed from
+///     cache while the device was dead);
+///  3. ro staging: readdir (best effort — no write path exists).
+fn probe_staging_blocking(path: &str, readonly: bool) -> StagingLiveness {
+    use std::os::unix::fs::MetadataExt;
+    let p = std::path::Path::new(path);
+    let parent = match p.parent() {
+        Some(par) => par,
+        None => return StagingLiveness::Dead("staging path has no parent".into()),
+    };
+    let (md, pmd) = match (std::fs::metadata(p), std::fs::metadata(parent)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => {
+            return StagingLiveness::Dead(format!("stat failed: {}", e))
+        }
+    };
+    if !devs_say_mountpoint(md.dev(), pmd.dev()) {
+        return StagingLiveness::NotMounted;
+    }
+    if readonly {
+        return match std::fs::read_dir(p) {
+            Ok(_) => StagingLiveness::Live,
+            Err(e) => StagingLiveness::Dead(format!("readdir failed: {}", e)),
+        };
+    }
+    let probe = p.join(format!(".flint-staging-probe-{}", std::process::id()));
+    let res = (|| -> std::io::Result<()> {
+        let f = std::fs::File::create(&probe)?;
+        use std::io::Write;
+        let mut f2 = f;
+        f2.write_all(b"probe")?;
+        f2.sync_all()
+    })();
+    let _ = std::fs::remove_file(&probe);
+    match res {
+        Ok(()) => StagingLiveness::Live,
+        Err(e) => StagingLiveness::Dead(format!("write+fsync probe failed: {}", e)),
+    }
+}
+
+/// Deadline wrapper (separated for testability — tests inject a hanging
+/// probe). Timeout ⇒ `Dead`: an unresponsive staging mount must never
+/// be bind-mounted into a pod.
+pub async fn bounded_staging_probe(
+    probe: impl FnOnce() -> StagingLiveness + Send + 'static,
+    deadline_secs: u64,
+) -> StagingLiveness {
+    let join = tokio::task::spawn_blocking(probe);
+    match tokio::time::timeout(Duration::from_secs(deadline_secs), join).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(join_err)) => StagingLiveness::Dead(format!("probe task join: {}", join_err)),
+        Err(_) => StagingLiveness::Dead(format!(
+            "probe unresponsive past {}s (device likely dead / D-state)",
+            deadline_secs
+        )),
+    }
+}
+
+/// F29 entry point for NodePublish: is this staging path safe to
+/// bind-mount into a pod right now?
+pub async fn probe_staging_liveness(
+    path: &str,
+    readonly: bool,
+    deadline_secs: u64,
+) -> StagingLiveness {
+    let owned = path.to_string();
+    bounded_staging_probe(move || probe_staging_blocking(&owned, readonly), deadline_secs).await
+}
+
 /// Is this findmnt FSTYPE an NFS client mount? Audit finding L3: a
 /// shared (RWX/ROX) volume publishes as an NFS mount on the consumer —
 /// there is no node-side block device, so NodeExpand must be a clean
@@ -169,5 +268,53 @@ mod tests {
         let start = std::time::Instant::now();
         assert!(!bounded_umount("/definitely/not/a/mountpoint", false, 5).await);
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    // -- F29 staging-liveness probe ----------------------------------------
+
+    #[test]
+    fn mountpoint_rule_is_dev_inequality() {
+        assert!(devs_say_mountpoint(2, 3));
+        assert!(!devs_say_mountpoint(7, 7));
+    }
+
+    /// The F29 kubelet-cache lie: staging DIRECTORY exists but nothing is
+    /// mounted on it — same st_dev as its parent — must read NotMounted,
+    /// never Live (a blind bind-mount here is the F30 empty-dir export).
+    #[tokio::test]
+    async fn plain_directory_is_not_mounted() {
+        let dir = std::env::temp_dir().join(format!("f29-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let v = probe_staging_liveness(dir.to_str().unwrap(), false, 5).await;
+        assert_eq!(v, StagingLiveness::NotMounted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A probe that HANGS (D-state on a dead device) must come back Dead
+    /// at the deadline — the exact F29 publish that must be refused.
+    /// The hang outlives the deadline by seconds, not hours: tokio's
+    /// runtime drop JOINS outstanding spawn_blocking threads, so a long
+    /// sleep here hangs the whole test binary at teardown.
+    #[tokio::test]
+    async fn hanging_probe_is_dead_at_deadline() {
+        let start = std::time::Instant::now();
+        let v = bounded_staging_probe(
+            || {
+                std::thread::sleep(Duration::from_secs(4));
+                StagingLiveness::Live
+            },
+            1,
+        )
+        .await;
+        assert!(matches!(v, StagingLiveness::Dead(_)), "hang must classify Dead, got {v:?}");
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    /// A missing path is Dead (stat error), not NotMounted — the caller
+    /// message must distinguish "nothing mounted" from "path broken".
+    #[tokio::test]
+    async fn missing_path_is_dead() {
+        let v = probe_staging_liveness("/definitely/not/here/f29", false, 5).await;
+        assert!(matches!(v, StagingLiveness::Dead(_)));
     }
 }

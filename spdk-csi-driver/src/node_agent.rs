@@ -2503,9 +2503,11 @@ impl NodeAgent {
     /// containerd lands DEAD rather than quiesced — `ublk_recover_disk`
     /// answers ENODEV (nothing to recover) and `ublk_start_disk` on the
     /// same id ALSO answers ENODEV (the corpse still occupies the id).
-    /// Without a UBLK_CMD_DEL_DEV escape hatch (backlog, F29-family)
-    /// this can never converge; classify it so the detector escalates
-    /// with the runbook action instead of a warn-and-retry forever.
+    /// SPDK's RPC surface can never converge from here; classification
+    /// hands the id to the `ublk_ctrl::del_dev` escape hatch (uring_cmd
+    /// UBLK_U_CMD_DEL_DEV on /dev/ublk-control), which frees it for a
+    /// fresh start next tick. The classification must stay precise:
+    /// DEL_DEV on a live device would rip a mounted filesystem apart.
     /// Matches the combined error shape ensure_ublk_disk produces:
     /// "ublk_start_disk …: … No such device [recover: … No such device]".
     fn is_dead_ublk_device_error(err: &str) -> bool {
@@ -3491,14 +3493,57 @@ impl NodeAgent {
                         continue;
                     }
                     if Self::is_dead_ublk_device_error(&e.to_string()) {
-                        error!(ublk_id = id, bdev = %bdev, error = %e,
-                            "[UBLK-DETECTOR] DEAD ublk device: recover AND \
-                             start both ENODEV — the kernel device corpse \
-                             occupies the id and cannot be reclaimed (no \
-                             DEL_DEV escape yet). RUNBOOK: reboot the node \
-                             (instance-store survives a reboot) or delete \
-                             the device via ublk ctrl DEL_DEV; the \
-                             detector then re-creates it.");
+                        if crate::ublk_ctrl::escape_enabled() {
+                            let dev_id = *id;
+                            // Blocking uring_cmd; the kernel can stall the
+                            // teardown, so bound it — a leaked waiter thread
+                            // beats a wedged detector loop.
+                            let del = tokio::time::timeout(
+                                std::time::Duration::from_secs(10),
+                                tokio::task::spawn_blocking(move || {
+                                    crate::ublk_ctrl::del_dev(dev_id)
+                                }),
+                            )
+                            .await;
+                            match del {
+                                Ok(Ok(Ok(()))) => {
+                                    warn!(ublk_id = id, bdev = %bdev,
+                                        "[UBLK-DETECTOR] DEAD ublk device: DEL_DEV \
+                                         escape hatch reclaimed the id — fresh \
+                                         start on the next tick");
+                                    continue;
+                                }
+                                Ok(Ok(Err(del_err))) => {
+                                    error!(ublk_id = id, bdev = %bdev, error = %e,
+                                        del_dev_error = %del_err,
+                                        "[UBLK-DETECTOR] DEAD ublk device and \
+                                         DEL_DEV failed. RUNBOOK: reboot the node \
+                                         (instance-store survives a reboot).");
+                                }
+                                Ok(Err(join_err)) => {
+                                    error!(ublk_id = id, bdev = %bdev, error = %e,
+                                        del_dev_error = %join_err,
+                                        "[UBLK-DETECTOR] DEAD ublk device and the \
+                                         DEL_DEV task died. RUNBOOK: reboot the \
+                                         node (instance-store survives a reboot).");
+                                }
+                                Err(_) => {
+                                    error!(ublk_id = id, bdev = %bdev, error = %e,
+                                        "[UBLK-DETECTOR] DEAD ublk device: DEL_DEV \
+                                         timed out after 10s (kernel holding the \
+                                         teardown). RUNBOOK: reboot the node \
+                                         (instance-store survives a reboot).");
+                                }
+                            }
+                        } else {
+                            error!(ublk_id = id, bdev = %bdev, error = %e,
+                                "[UBLK-DETECTOR] DEAD ublk device: recover AND \
+                                 start both ENODEV — DEL_DEV escape disabled \
+                                 (FLINT_UBLK_DEL_DEV=0). RUNBOOK: reboot the \
+                                 node (instance-store survives a reboot) or \
+                                 delete the device via ublk ctrl DEL_DEV; the \
+                                 detector then re-creates it.");
+                        }
                     } else {
                         warn!(ublk_id = id, bdev = %bdev, error = %e,
                             "[UBLK-DETECTOR] disk rebuild failed (will retry)");

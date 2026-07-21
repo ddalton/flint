@@ -20,6 +20,7 @@ pub mod minimal_models;
 pub mod minimal_disk_service;
 pub mod node_agent;
 pub mod mount_util;  // Bounded unmount (D-state hang containment, 2026-06-12)
+pub mod ublk_ctrl;  // UBLK_U_CMD_DEL_DEV escape hatch (DEAD-device reclaim, runy2 2026-07-21)
 pub mod orphan_sweep;  // §10-14 node-local reaping of lvols/exports keyed by absent PVs
 pub mod controller_reap;  // Dead NVMe-oF controller reaping (Tier-2 7b-0 spike finding)
 pub mod hot_rejoin;  // Tier-2 7b-1/7b-2: hot rejoin into a live raid (skip_rebuild window + localization + trigger loop)
