@@ -1636,6 +1636,100 @@ SECOND clientid instead of returning the existing record (RFC 8881
 §18.35 casuistry). Harmless today — the client confirms one and the
 other ages out — but worth folding into the F31 fix pass.
 
+### runy2 live-validation of the fix wave — 2026-07-20/21 (u12.4)
+
+Cluster runy2 (trove project 43, DELETED 2026-07-21 with verified
+zero residue): spot-only INCLUDING the CP (5× i4i.xlarge us-west-1 +
+cordoned c5d spot builder), workers kernel-swapped to mainline
+6.18.29, blobstores initialized+verified before any drill. Stack:
+`flint-driver:1.17.0-u12.4` (= b0427ca fix wave) + `spdk-tgt:1.6.0`.
+
+**Every fix in the wave validated live:**
+- **F32 DEAD.** Stage-time `flint.io/ublk-id` annotation present on
+  the backing PV from the first attach (never existed pre-fix; zero
+  store errors). 3.3b: abrupt csi-node kill → rehydrate resolved id
+  0 from the annotation → `ublk_recover_disk` → "recovered quiesced
+  kernel device (mount preserved)", ready 6s, no orphan, no tarpit.
+  3.9 DS roll rode through on the same path with a fresh-staged id —
+  no hash-alignment luck involved. 1.9b (RWO regression) recovered
+  the HYBRID chain (remote nvme bdev + ublk) in 24s.
+- **3.2 defect GONE, both backends.** ublk: estale=0, no
+  fsync-PANIC, 804/804 acked, server log (new capture) shows the
+  clean zero-grace resume — clients re-CREATE_SESSION on persisted
+  clientids, 41 stateids reloaded, zero STALE replies. nvmeof:
+  estale=0, no PANIC, 642/642, io_resume 96s. Residual flags were
+  harness budgets (fixed below) plus an UNATTRIBUTED observation:
+  pg-0 was recreated cross-node mid-outage on both u12.4 3.2 runs
+  (not seen on u12.3/testflnt2; db clean both times; k8s 1.34.9 is
+  the lead suspect — next session).
+- **nvmeof leak CLOSED at the source.** The 3.1b→reset leak flow
+  left ZERO `connecting` sessions on any node — the F32 identity fix
+  also repaired NodeUnstage's disconnect (the same 404 ate the
+  nvmeof cleanup annotations), so no orphan ever forms; the reaper
+  is the tested backstop.
+
+**Full matrix:** ublk 3.1/3.1b/3.3a/3.3b/3.4/3.5/3.8/3.9 PASS (3.3a
+first-ever run — SSM available this time), 3.2 db-clean;
+3.6/3.7 FAIL → **F33**; nvmeof 3.1b PASS, 3.2 db-clean, 3.3b
+self-heal 1s + amcheck-timeout artifact + stale-duplicate wart.
+Zero lost acked writes across every drill, both backends.
+
+**F33 (P1, NEW — found by 3.6, reproduced by 3.7): no NFS-server
+self-fencing.** kubelet-stop node kill leaves the server process
+ALIVE on the isolated node (observed 93 minutes, actively burning
+CPU) while the reconciler resurrects a replacement on a surviving
+replica node. Client failover is a race: pg-0 escaped because its
+TCP broke; the witness's established flow stayed anchored to the
+orphan and hung the entire time — and released INSTANTLY when the
+orphan died (kubelet restore), proving process death is the cure.
+3.7 reproduced it from the client side: disk-follows-pod co-locates
+the server with the consumer, so a client-node kill is also a
+server-node kill. Data: ZERO loss both times — the r2 fence
+protected the authoritative leg (db verdicts clean, 2495/2495).
+Collateral: the double kubelet-stop/orphan-reap cycles wedged
+containerd (zombie reactor, StopContainer DeadlineExceeded) —
+runtime restart + pod force-delete needed.
+**FIXED (7a80e3a): backing-store self-fencing watchdog** in the
+server (`nfs/fence.rs`): heartbeat write+fsync on a prober thread,
+wall-clock staleness monitor (catches D-state hangs, EIO loops,
+device death uniformly), process exit past the deadline (default
+90s; `FLINT_FENCE_DEADLINE_SECS`, 0 disables). Unit-tested incl.
+the hanging-probe reproduction and a healthy-probe
+never-false-positive guard. Needs one cluster session to
+live-validate (rerun 3.6: witness should recover ≤ ~deadline+RTT).
+
+**ublk DEAD-device edge (F29-family, found via 1.9b forensics):** a
+device whose daemon is SIGKILLed under a wedged containerd lands
+DEAD (not quiesced): `ublk_recover_disk` → ENODEV AND
+`ublk_start_disk` on the id → ENODEV (the corpse occupies it) —
+unreclaimable without UBLK_CMD_DEL_DEV, which the agent lacks; node
+reboot required (instance-store survives reboot). FIXED-partially
+(7a80e3a): the state is now classified and escalated with the
+runbook instead of warn-looping (tests pin the live error shape);
+the DEL_DEV escape hatch (io_uring ctrl cmd) stays backlog.
+
+**nvmeof stale-duplicate controllers (3.3b wart):** post-tgt-restart
+the initiator reconnects on a fresh controller while the old one
+lingers `connecting` for the SAME subsystem forever. FIXED
+(7a80e3a): the reaper disconnects non-live controllers that have a
+LIVE sibling (per-device `nvme disconnect -d` — the NQN form would
+cut the live path); lone non-live controllers stay untouched.
+Unit-tested incl. the multipath and cross-subsystem no-touch cases.
+
+**Harness fixes (7a80e3a):** all ledger/witness exec reads
+timeout-wrapped (an unwrapped `tail` on a dead NFS mount hung 3.6
+for 87 minutes); 3.2 READY_TIMEOUT 120→300 (the reconnect tail is
+~180-220s in known-good runs); 3.7 surfaces `nfs_colocated=`;
+WITNESS=1 ignored with a note on RWO (the witness needs the shared
+mount — waiting on it failed every RWO deploy).
+
+Cluster ops notes (recorded in the runy2 memory): trove
+`controlPlaneNodeType:"aws_spot"` must be explicit or the CP silently
+launches on-demand; AL2023 has NO ublk_drv on any kernel stream —
+mainline 6.18.29 deb swap required, and the mainline debs ship a
+plain `data.tar` (not .zst); teardown verified zero
+instances/EBS/spot via tag filter `trove/runy2/*`.
+
 ## Findings
 
 ### F1 — RECLASSIFIED 2026-07-13: concurrent postmasters, not a storage bug
