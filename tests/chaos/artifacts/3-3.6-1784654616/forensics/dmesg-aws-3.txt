@@ -1,0 +1,31 @@
+[Tue Jul 21 14:57:06 2026] Command line: BOOT_IMAGE=(hd0,gpt1)/boot/vmlinuz-6.18.29-061829-generic root=UUID=cbe7b597-9098-45d8-8a49-1c8a5896b922 ro console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet
+[Tue Jul 21 14:57:06 2026] Kernel command line: BOOT_IMAGE=(hd0,gpt1)/boot/vmlinuz-6.18.29-061829-generic root=UUID=cbe7b597-9098-45d8-8a49-1c8a5896b922 ro console=tty0 console=ttyS0,115200n8 nvme_core.io_timeout=4294967295 rd.emergency=poweroff rd.shell=0 selinux=1 security=selinux quiet
+[Tue Jul 21 14:57:06 2026] nvme nvme0: pci function 0000:00:04.0
+[Tue Jul 21 14:57:06 2026] nvme nvme1: pci function 0000:00:1f.0
+[Tue Jul 21 14:57:06 2026] nvme nvme0: 2/0/0 default/read/poll queues
+[Tue Jul 21 14:57:06 2026]  nvme0n1: p1 p127 p128
+[Tue Jul 21 14:57:06 2026] nvme nvme1: 4/0/0 default/read/poll queues
+[Tue Jul 21 14:57:07 2026] XFS (nvme0n1p1): Mounting V5 Filesystem cbe7b597-9098-45d8-8a49-1c8a5896b922
+[Tue Jul 21 14:57:07 2026] XFS (nvme0n1p1): Ending clean mount
+[Tue Jul 21 14:57:08 2026] nvme nvme0: using unchecked data buffer
+[Tue Jul 21 17:25:05 2026] EXT4-fs (ublkb0): mounted filesystem 0532fe56-fb84-42c0-aae7-151760a86db4 r/w with ordered data mode. Quota mode: none.
+[Tue Jul 21 17:25:48 2026] I/O error, dev ublkb0, sector 0 op 0x1:(WRITE) flags 0x3000 phys_seg 1 prio class 2
+[Tue Jul 21 17:25:48 2026] Buffer I/O error on dev ublkb0, logical block 0, lost async page write
+[Tue Jul 21 17:25:48 2026] I/O error, dev ublkb0, sector 16 op 0x1:(WRITE) flags 0x3000 phys_seg 1 prio class 2
+[Tue Jul 21 17:25:48 2026] Buffer I/O error on dev ublkb0, logical block 2, lost async page write
+[Tue Jul 21 17:25:48 2026] I/O error, dev ublkb0, sector 8388864 op 0x1:(WRITE) flags 0x3000 phys_seg 1 prio class 2
+[Tue Jul 21 17:25:48 2026] Buffer I/O error on dev ublkb0, logical block 1048608, lost async page write
+[Tue Jul 21 17:25:48 2026] I/O error, dev ublkb0, sector 25165832 op 0x1:(WRITE) flags 0x3000 phys_seg 1 prio class 2
+[Tue Jul 21 17:25:48 2026] Buffer I/O error on dev ublkb0, logical block 3145729, lost async page write
+[Tue Jul 21 17:25:48 2026] I/O error, dev ublkb0, sector 0 op 0x1:(WRITE) flags 0x800 phys_seg 0 prio class 2
+[Tue Jul 21 17:25:48 2026] EXT4-fs (ublkb0): shut down requested (2)
+[Tue Jul 21 17:25:48 2026] Aborting journal on device ublkb0-8.
+[Tue Jul 21 17:25:48 2026] I/O error, dev ublkb0, sector 21241888 op 0x1:(WRITE) flags 0x9800 phys_seg 1 prio class 2
+[Tue Jul 21 17:25:48 2026] I/O error, dev ublkb0, sector 21241888 op 0x1:(WRITE) flags 0x9800 phys_seg 1 prio class 2
+[Tue Jul 21 17:25:48 2026] Buffer I/O error on dev ublkb0, logical block 2655236, lost sync page write
+[Tue Jul 21 17:25:48 2026] JBD2: I/O error when updating journal superblock for ublkb0-8.
+[Tue Jul 21 17:38:12 2026] EXT4-fs warning (device ublkb0): htree_dirblock_to_tree:1051: inode #2: lblock 0: comm ls: error -5 reading directory block
+[Tue Jul 21 17:38:12 2026] EXT4-fs warning (device ublkb0): htree_dirblock_to_tree:1051: inode #262145: lblock 0: comm ls: error -5 reading directory block
+[Tue Jul 21 17:45:25 2026] EXT4-fs (ublkb0): unmounting filesystem 0532fe56-fb84-42c0-aae7-151760a86db4.
+[Tue Jul 21 17:45:25 2026] block nvme1n1: No UUID available providing old NGUID
+

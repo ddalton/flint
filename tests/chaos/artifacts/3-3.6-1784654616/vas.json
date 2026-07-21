@@ -1,0 +1,108 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runz-aws-3"
+                },
+                "creationTimestamp": "2026-07-21T17:24:54Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-ec2774f2cb73555283594e5d8548b930bc7ce81447e49e4a70c52794ab470401",
+                "resourceVersion": "36969",
+                "uid": "5f82c8be-942f-4d72-bbdd-a68300afda01"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runz-aws-3",
+                "source": {
+                    "persistentVolumeName": "flint-nfs-pv-pvc-390cdc22-97e7-4722-9a74-aa097f0baf96"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "replicas": "[{\"node_name\":\"runz-aws-1\",\"node_uid\":\"864c117b-1992-4535-8174-73fcc87c60b5\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"7f8c6ef1-34df-437b-9556-bb75640a6eae\",\"lvol_name\":\"vol_pvc-390cdc22-97e7-4722-9a74-aa097f0baf96_replica_0\",\"lvs_name\":\"lvs_runz-aws-1_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"},{\"node_name\":\"runz-aws-2\",\"node_uid\":\"3f45aa30-6c3d-4c54-8389-aeb799a2dbcd\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"b3844ff8-3fd6-454e-bb3d-494d845f1df9\",\"lvol_name\":\"vol_pvc-390cdc22-97e7-4722-9a74-aa097f0baf96_replica_1\",\"lvs_name\":\"lvs_runz-aws-2_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"}]",
+                    "volumeId": "nfs-server-pvc-390cdc22-97e7-4722-9a74-aa097f0baf96",
+                    "volumeType": "multi-replica"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runz-aws-2"
+                },
+                "creationTimestamp": "2026-07-21T17:27:02Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-ef5caf0b166b55482b10a03101969d9faf74947f284b49d62a98a714af841803",
+                "resourceVersion": "37532",
+                "uid": "6eade324-b617-4470-9311-96a13f9d2607"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runz-aws-2",
+                "source": {
+                    "persistentVolumeName": "pvc-390cdc22-97e7-4722-9a74-aa097f0baf96"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-390cdc22-97e7-4722-9a74-aa097f0baf96",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.101.31.181",
+                    "nfs.flint.io/server-node": "runz-aws-3",
+                    "volumeId": "pvc-390cdc22-97e7-4722-9a74-aa097f0baf96",
+                    "volumeType": "nfs"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runz-aws-3"
+                },
+                "creationTimestamp": "2026-07-21T15:42:19Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-f43205dde3e504517609f8caa1f174cd7f1190257a0372ac67cc229b1419bee1",
+                "resourceVersion": "14034",
+                "uid": "9c37903e-61ba-4048-981c-1cf84533ba98"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runz-aws-3",
+                "source": {
+                    "persistentVolumeName": "pvc-390cdc22-97e7-4722-9a74-aa097f0baf96"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-390cdc22-97e7-4722-9a74-aa097f0baf96",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.101.31.181",
+                    "nfs.flint.io/server-node": "runz-aws-1",
+                    "volumeId": "pvc-390cdc22-97e7-4722-9a74-aa097f0baf96",
+                    "volumeType": "nfs"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

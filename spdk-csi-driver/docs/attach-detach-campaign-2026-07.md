@@ -2410,3 +2410,38 @@ isready gate — no fabricated loss number), plus one orphaned initiator
 session on aws-3 (the fenced-out controller, connecting forever —
 cleaned by re-assembly). Zero acked-write loss confirmed after
 recovery, run 2 included.
+
+### F36 attribution COMPLETE (dmesg + tgt cross-timeline)
+
+Kernel log (forensics/dmesg-aws-3.txt): 17:25:48 mass WRITE I/O errors
+on ublkb0 → `EXT4-fs: shut down requested (2)` → journal abort — 24s
+after aws-2's tgt logged `Snapshotting blob` + `Lvol f3fe782b deleted`
+(17:25:24). The ACL theory is DEAD (exactly one add_host(aws-3) + one
+remove_host(aws-1) in the whole window; the 2s denial loop was aws-1's
+fenced initiator). The real chain:
+
+1. Resurrect stage on aws-3: leg-0 (aws-1, in_sync) blocked by the old
+   raid's exclusive_write claim → degraded assembly served from
+   **leg-1, which replica-sync still recorded as STALE**.
+2. aws-2's reconciler correctly skipped the stale leg ("not in_sync —
+   export owned by the catch-up orchestrator", skip_count=1).
+3. The catch-up orchestrator did its normal stale-head
+   snapshot+delete — **deleting the lvol under the live export**.
+   Target-side rejection completes I/O with error (U7's loss_tmo=-1
+   protects connection loss, NOT invalid-namespace status) → ext4
+   shutdown → F30 refusal loop.
+
+F36 = two missing guards, one on each side of the volume_claims
+contract: (a) degraded assembly from a not-in-sync leg must TAKE the
+per-volume claim (or be refused — serving a stale leg silently is its
+own data-integrity question); (b) the catch-up orchestrator must check
+for live consumers (claim + nvmf controllers) before deleting a head.
+Fix next session; the claim plumbing (volume_claims) already exists.
+
+Collateral data damage + repair: pg_xact/0000 lost its unfsynced tail
+(81920 bytes, needed 98304) when the ext4 died mid-write — WAL
+(fsynced) survived, so redo FATALed on a short SLRU read
+("could not access status of transaction"). Repair: zero-extend the
+file to the needed page boundary (truncate -s) — redo re-derives the
+commit bits from WAL; zero acked loss expected (U8-class pg_xact
+finding, now with the exact repair recipe).
