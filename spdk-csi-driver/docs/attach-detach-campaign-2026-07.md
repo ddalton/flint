@@ -2499,3 +2499,27 @@ catch-up delta at kill time. nvme-leak component was transient
 node restore). Harness reset required post-run (torn pages make the
 bench DB an invalid oracle; forensic snapshot e1d81ef2 released with
 it — attribution + logs preserved in artifacts/3-3.6-1784663315/).
+
+### Drill 3.2 (u12.8) + operational findings
+
+3.2 substance PASS: server recreated 29s (reconciler), **zero ESTALE**
+(the original 3.2 defect class confirmed dead), witness clean, **db
+PASS** (ledger + amcheck fully clean), pg-0 Ready 134s / stall 129s
+(reconnect tail). Recorded FAIL components were environment:
+attribution=rescheduled was ANOTHER ephemeral eviction (see below);
+nvme-leak was **F37 (P2, NEW)**: the 29s same-node recreate races
+NodeUnstage — old ublk id 0 + leg controller linger next to the new id
+1 on the SAME raid bdev (unmounted leak, not split-brain; reapers
+protect it because the PV exists), and the ublk-id annotation went
+stale (0) until the rehydrate backfill self-corrected it to 1 within a
+tick. Manual clean: ublk_stop_disk on the non-serving id. Fix shape:
+unstage-vs-restage ordering (stage should reap same-bdev strangers).
+
+Eviction epidemic root-caused: THREE pg-0/server evictions today all
+showed victim usage=24Ki — the pods were sacrificial (request:0 ranks
+first), the node pressure came from containerd image-pull UNPACK
+spikes (~2x image size transient) on 8GB roots (F3). ephemeral-storage
+requests (43f2ad6) armor the ranking but also tighten allocatable (the
+threshold message grew 851MB→1.27GB) — the real trigger-kill is
+PRE-PULLING all in-use images on every worker (done; 2.0-3.6GB steady
+headroom). F3 (bigger roots) remains the structural fix.
