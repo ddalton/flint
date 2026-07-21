@@ -2550,3 +2550,29 @@ in-flight-roll force delete).
 
 ### 2.2a r2 spot-check (u12.8): PASS — ready=16s, stall=10s, db clean
 (beats the phase-2 31s baseline).
+
+## Post-campaign backlog (v1.18.0 cut, 2026-07-21)
+
+v1.18.0 = the runz-validated wave (F29/F30/F32-fix/F33/F33b/F35/F36ab/
+DEL_DEV), multi-arch amd64+arm64. Shipped to main + release commit
+e1b1288. Backlog worked after the cut (unvalidated → v1.19.0 material):
+
+- **F34 (FIXED, 84c3c8c)**: bounded NFS consumer mount — see commit.
+- **DEL_DEV EPERM variant (FIXED, 84c3c8c)**: classifier widened.
+- **F36c (DESIGNED, docs/f36c-assembly-freshness-gate.md)**: the
+  epoch-freshness assembly gate; deferred — durability path, needs
+  drill 3.6c. The remaining P1.
+- **F37 (SPEC, P2, self-correcting)**: the ~29s same-node ublk recreate
+  races NodeUnstage — a stale ublk id lingers on the SAME raid bdev as
+  the new id (unmounted leak; reapers clear it because the PV exists;
+  annotation self-heals via rehydrate backfill). Actionable fix =
+  ensure_ublk_disk reaps any OTHER live id serving the same bdev before
+  serving its own. SAFETY CAVEAT (why it's not a drive-by fix): the
+  stranger must be confirmed UNMOUNTED first — stopping a still-mounted
+  stranger EIOs a live consumer. Needs a drill that force-deletes a
+  same-node RWX consumer mid-unstage and asserts the reap only fires on
+  the detached device. Until then the reaper's PV-gated pass owns it.
+- **F3 (trove/infra)**: 8GB worker roots + image-pull unpack spikes =
+  eviction roulette. Mitigations landed in the harness (ephemeral
+  requests + fleet pre-pull); structural fix = bigger roots at
+  provision time.
