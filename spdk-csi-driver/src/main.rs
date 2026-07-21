@@ -3456,31 +3456,39 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             eprintln!("   Command: mount -t nfs -o {} {} {}", mount_opts, nfs_source, target_path);
             eprintln!("   Start time: {:?}", std::time::SystemTime::now());
             
-            // Execute mount command (nfs-common package provides mount.nfs4 helper)
-            let mount_output = std::process::Command::new("mount")
-                .args(&["-t", "nfs", "-o", &mount_opts, &nfs_source, &target_path])
-                .output()
-                .map_err(|e| {
-                    eprintln!("❌ [NFS_MOUNT] Failed to execute mount command: {}", e);
-                    tonic::Status::internal(format!("Failed to execute mount: {}", e))
-                })?;
-            
+            // F34: bounded. A blind `.output()` here against a black-holed
+            // dead-server ClusterIP blocks a tokio worker for 15-30 min;
+            // enough concurrent NodePublishes in that state wedge the whole
+            // node plugin (gRPC listener alive, driver unresponsive). The
+            // deadline returns a RETRYABLE Unavailable so the CO re-drives
+            // the publish once the server/route recovers.
+            let mount_argv = vec![
+                "-t".to_string(), "nfs".to_string(),
+                "-o".to_string(), mount_opts.clone(),
+                nfs_source.clone(), target_path.clone(),
+            ];
+            let outcome = spdk_csi_driver::mount_util::bounded_mount(mount_argv, 60).await;
             let mount_duration = mount_start.elapsed();
             eprintln!("⏱️  [NFS_MOUNT] Mount command completed in {:?}", mount_duration);
-            
-            if !mount_output.status.success() {
-                let stderr = String::from_utf8_lossy(&mount_output.stderr);
-                let stdout = String::from_utf8_lossy(&mount_output.stdout);
-                eprintln!("❌ [NFS_MOUNT] Mount FAILED after {:?}", mount_duration);
-                eprintln!("   Exit code: {}", mount_output.status.code().unwrap_or(-1));
-                if !stdout.is_empty() {
-                    eprintln!("   STDOUT: {}", stdout.trim());
+
+            match outcome {
+                spdk_csi_driver::mount_util::MountOutcome::Ok => {}
+                spdk_csi_driver::mount_util::MountOutcome::TimedOut => {
+                    eprintln!(
+                        "❌ [NFS_MOUNT] Mount of {} timed out after {:?} — dead server \
+                         black-hole; returning Unavailable for CO retry (F34)",
+                        nfs_source, mount_duration
+                    );
+                    return Err(tonic::Status::unavailable(format!(
+                        "NFS mount of {} timed out (server unreachable) — retryable (F34)",
+                        nfs_source
+                    )));
                 }
-                if !stderr.is_empty() {
-                    eprintln!("   STDERR: {}", stderr.trim());
+                spdk_csi_driver::mount_util::MountOutcome::Failed(stderr) => {
+                    eprintln!("❌ [NFS_MOUNT] Mount FAILED after {:?}: {}", mount_duration, stderr);
+                    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    return Err(tonic::Status::internal(format!("NFS mount failed: {}", stderr)));
                 }
-                eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                return Err(tonic::Status::internal(format!("NFS mount failed: {}", stderr)));
             }
             
             // POST-MOUNT VERIFICATION

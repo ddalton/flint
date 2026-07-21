@@ -2510,8 +2510,23 @@ impl NodeAgent {
     /// DEL_DEV on a live device would rip a mounted filesystem apart.
     /// Matches the combined error shape ensure_ublk_disk produces:
     /// "ublk_start_disk …: … No such device [recover: … No such device]".
+    /// Two shapes are "dead", both needing the DEL_DEV escape:
+    ///   1. recover AND start both ENODEV (No such device ×2) — the
+    ///      original runy2 corpse.
+    ///   2. recover answers EPERM ("Operation not permitted") while start
+    ///      ENODEVs — the variant seen on runz after an in-flight-roll
+    ///      force delete: the kernel device is in a state that rejects
+    ///      re-attach outright. Either way SPDK can never converge and
+    ///      the id must be reclaimed.
     fn is_dead_ublk_device_error(err: &str) -> bool {
-        err.contains("[recover: ") && err.matches("No such device").count() >= 2
+        if !err.contains("[recover: ") {
+            return false;
+        }
+        let double_enodev = err.matches("No such device").count() >= 2;
+        let eperm_recover = err.contains("[recover: ")
+            && err.contains("Operation not permitted")
+            && err.contains("No such device");
+        double_enodev || eperm_recover
     }
 
     /// Which ublk id should a delete request stop? A caller-supplied
@@ -5383,6 +5398,25 @@ mod rehydrate_tests {
         assert!(!NodeAgent::is_dead_ublk_device_error(
             "ublk_start_disk 2 (b): Code=-17 Msg=File exists [recover: \
              Code=-19 Msg=No such device]"
+        ));
+    }
+
+    /// F-residual (runz 2026-07-21): the EPERM-recover variant — recover
+    /// answers "Operation not permitted" while start ENODEVs. Same dead
+    /// device, must still route to the DEL_DEV escape.
+    #[test]
+    fn eperm_recover_variant_is_dead_device() {
+        let e = "ublk_start_disk 0 (raid_nfs-server-x): SPDK RPC call \
+                 'ublk_start_disk' failed: SPDK RPC error: Code=-19 \
+                 Msg=No such device [recover: SPDK RPC call \
+                 'ublk_recover_disk' failed: SPDK RPC error: Code=-1 \
+                 Msg=Operation not permitted]";
+        assert!(NodeAgent::is_dead_ublk_device_error(e));
+        // But EPERM WITHOUT a start-ENODEV (e.g. a transient permission
+        // blip on an otherwise-fine device) is not classified dead.
+        assert!(!NodeAgent::is_dead_ublk_device_error(
+            "ublk_start_disk 0 (b): Code=-17 Msg=File exists [recover: \
+             Code=-1 Msg=Operation not permitted]"
         ));
     }
 }
