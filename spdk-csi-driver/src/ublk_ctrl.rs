@@ -161,6 +161,35 @@ mod tests {
         assert!(c[6..].iter().all(|b| *b == 0));
     }
 
+    /// LIVE gate (ignored): UBLK_U_CMD_DEL_DEV against a REAL kernel
+    /// device — the io_uring submission path never runs under plain
+    /// `cargo test`. Run via the c6gates image on a storage node:
+    ///   FLINT_TEST_UBLK_DEL_ID=<scratch-id> /test-bin \
+    ///     ublk_ctrl::tests::del_dev_live --ignored --nocapture
+    /// The scratch device must be created first (malloc bdev +
+    /// ublk_start_disk) and must NOT be a serving volume.
+    #[test]
+    #[ignore]
+    fn del_dev_live() {
+        let id: u32 = std::env::var("FLINT_TEST_UBLK_DEL_ID")
+            .expect("set FLINT_TEST_UBLK_DEL_ID to the scratch ublk id")
+            .parse()
+            .expect("numeric ublk id");
+        let dev = format!("/dev/ublkb{id}");
+        assert!(
+            std::path::Path::new(&dev).exists(),
+            "{dev} must exist before DEL_DEV"
+        );
+        del_dev(id).expect("UBLK_U_CMD_DEL_DEV uring_cmd failed");
+        for _ in 0..50 {
+            if !std::path::Path::new(&dev).exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("{dev} still present 5s after DEL_DEV returned Ok");
+    }
+
     #[test]
     fn escape_gate_defaults_on_opts_out() {
         assert!(escape_enabled_from(None));
