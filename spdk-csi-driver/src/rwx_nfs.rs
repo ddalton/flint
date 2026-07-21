@@ -613,6 +613,24 @@ pub enum NfsPodLiveness {
     Absent,
     Terminating,
     Present,
+    /// Terminal phase (Failed/Succeeded) — an EVICTED server pod sits in
+    /// Failed forever (nothing restarts it), and treating it as Present
+    /// parks every publish in wait-for-ready for good (F35, runz
+    /// 2026-07-21: ephemeral-storage eviction → 10+ min outage until a
+    /// human deleted the corpse). Dead pods must be deleted + recreated.
+    Dead,
+}
+
+/// Pure classification rule (pinned by tests): deletionTimestamp wins,
+/// then terminal phases, else Present.
+pub fn classify_liveness(terminating: bool, phase: Option<&str>) -> NfsPodLiveness {
+    if terminating {
+        return NfsPodLiveness::Terminating;
+    }
+    match phase {
+        Some("Failed") | Some("Succeeded") => NfsPodLiveness::Dead,
+        _ => NfsPodLiveness::Present,
+    }
 }
 
 pub async fn nfs_pod_liveness(
@@ -629,19 +647,35 @@ pub async fn nfs_pod_liveness(
     let pods_api: Api<Pod> = Api::namespaced(kube_client, &config.namespace);
 
     match pods_api.get(&pod_name).await {
-        Ok(pod) => {
-            if pod.metadata.deletion_timestamp.is_some() {
-                Ok(NfsPodLiveness::Terminating)
-            } else {
-                Ok(NfsPodLiveness::Present)
-            }
-        }
+        Ok(pod) => Ok(classify_liveness(
+            pod.metadata.deletion_timestamp.is_some(),
+            pod.status.as_ref().and_then(|s| s.phase.as_deref()),
+        )),
         Err(e) if e.to_string().contains("NotFound") => Ok(NfsPodLiveness::Absent),
         Err(e) => {
             eprintln!("⚠️  [NFS] Error checking pod existence: {}", e);
             Err(Status::internal(format!("Failed to check NFS pod: {}", e)))
         }
     }
+}
+
+/// F35: delete a terminal (evicted/failed) server pod so the
+/// deterministic name frees up for recreation. Bounded; returns true
+/// when the corpse is gone.
+pub async fn delete_dead_nfs_pod(kube_client: Client, volume_id: &str) -> bool {
+    let config = match NfsConfig::from_env() {
+        Some(c) => c,
+        None => return true,
+    };
+    let pod_name = format!("flint-nfs-{}", volume_id);
+    let pods_api: Api<Pod> = Api::namespaced(kube_client.clone(), &config.namespace);
+    if let Err(e) = pods_api.delete(&pod_name, &Default::default()).await {
+        if !e.to_string().contains("NotFound") {
+            eprintln!("⚠️  [NFS] Failed to delete dead server pod {}: {}", pod_name, e);
+            return false;
+        }
+    }
+    wait_for_nfs_pod_gone(kube_client, volume_id, 30).await
 }
 
 /// Bounded wait for a Terminating NFS server pod to fully exit so the
@@ -706,6 +740,18 @@ pub async fn wait_for_nfs_pod_ready(
                     eprintln!("⏳ [NFS] Pod {} is Terminating — not treating as ready (attempt {})", pod_name, attempt);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     continue;
+                }
+                // F35: a terminal pod NEVER becomes ready — spinning the
+                // full budget here just delays the CO retry that will
+                // take the Dead → delete → recreate path.
+                if matches!(
+                    pod.status.as_ref().and_then(|s| s.phase.as_deref()),
+                    Some("Failed") | Some("Succeeded")
+                ) {
+                    return Err(Status::failed_precondition(format!(
+                        "NFS server pod {} is terminal (evicted?) — retry recreates it (F35)",
+                        pod_name
+                    )));
                 }
                 if let Some(status) = &pod.status {
                     // Check if pod is running and has IP
@@ -923,6 +969,11 @@ pub fn nfs_reconcile_decision(
             NfsReconcileAction::Skip("server pod terminating — recreate once it has exited")
         }
         NfsPodLiveness::Absent => NfsReconcileAction::Recreate,
+        // F35 (runz 2026-07-21): an EVICTED server pod sits in phase
+        // Failed forever on a perfectly healthy node — nothing restarts
+        // it and every publish waits on the corpse. The reconciler is
+        // the actor that heals it without waiting for a new publish.
+        NfsPodLiveness::Dead => NfsReconcileAction::Recreate,
     }
 }
 
@@ -996,9 +1047,20 @@ pub async fn nfs_reconciler_pass(kube_client: &Client, source_node: &str) -> usi
             NfsReconcileAction::Skip(_) => {}
             NfsReconcileAction::Recreate => {
                 println!(
-                    "🩺 [NFS-RECONCILER] Server pod for {} is ABSENT with {} client attachment(s) — recreating",
-                    name, n_attached
+                    "🩺 [NFS-RECONCILER] Server pod for {} is {:?} with {} client attachment(s) — recreating",
+                    name, liveness, n_attached
                 );
+                // F35: a Dead (evicted) corpse still owns the pod name —
+                // delete it first or the create 409s forever.
+                if liveness == NfsPodLiveness::Dead
+                    && !delete_dead_nfs_pod(kube_client.clone(), name).await
+                {
+                    eprintln!(
+                        "⚠️  [NFS-RECONCILER] {}: dead server pod not gone after 30s — next pass retries",
+                        name
+                    );
+                    continue;
+                }
                 let ctx: HashMap<String, String> = attrs
                     .map(|a| a.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .unwrap_or_default();
@@ -1162,6 +1224,11 @@ mod tests {
         // The one Recreate cell.
         assert_eq!(nfs_reconcile_decision(false, false, 2, Absent), Recreate);
         assert_eq!(nfs_reconcile_decision(false, false, 1, Absent), Recreate);
+        // F35: an evicted (Dead) server with live clients is recreated,
+        // same as Absent — never waited on.
+        assert_eq!(nfs_reconcile_decision(false, false, 2, Dead), Recreate);
+        assert!(matches!(nfs_reconcile_decision(false, false, 0, Dead), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(true, false, 2, Dead), Skip(_)));
         // Liveness gates.
         assert!(matches!(nfs_reconcile_decision(false, false, 2, Present), Skip(_)));
         assert!(matches!(nfs_reconcile_decision(false, false, 2, Terminating), Skip(_)));
@@ -1191,5 +1258,19 @@ mod tests {
         assert_eq!(a1, a2);
         assert_ne!(a1, b);
         assert_ne!(a1, 0);
+    }
+
+    /// F35: liveness classification is pinned — an evicted (Failed) pod
+    /// is Dead (delete + recreate), never Present (wait-forever).
+    #[test]
+    fn liveness_classification_is_pinned() {
+        use super::NfsPodLiveness::*;
+        assert_eq!(super::classify_liveness(true, Some("Running")), Terminating);
+        assert_eq!(super::classify_liveness(true, Some("Failed")), Terminating);
+        assert_eq!(super::classify_liveness(false, Some("Running")), Present);
+        assert_eq!(super::classify_liveness(false, Some("Pending")), Present);
+        assert_eq!(super::classify_liveness(false, Some("Failed")), Dead);
+        assert_eq!(super::classify_liveness(false, Some("Succeeded")), Dead);
+        assert_eq!(super::classify_liveness(false, None), Present);
     }
 }

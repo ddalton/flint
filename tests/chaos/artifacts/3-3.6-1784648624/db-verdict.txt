@@ -1,0 +1,16 @@
+
+▶ db verdict (since 2026-07-21T15:43:44Z)
+command terminated with exit code 2
+  · pg_isready FAILED (or 30s timeout)
+  · LOST ACKED WRITES: 1 10 100 1000 1001 (666 total)
+  · pg_amcheck TIMEOUT at 1200s (integrity NOT verified — not a corruption finding)
+  ✓ postgres log clean
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( isready ledger amcheck-timeout write-probe)
+
+CORRECTION (post-recovery, 2026-07-21T17:10Z): ledger re-verified against
+the recovered DB — ALL 817 acked writes present, ZERO loss. The "666
+lost" above was the comm-vs-unreachable-pg artifact (verify-db now gates
+on isready). Drill verdict remains FAIL on ready/isready (F33b orphan
+held clients hung), but durability held end-to-end.

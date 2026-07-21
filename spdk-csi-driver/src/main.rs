@@ -1727,6 +1727,16 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             ).await? {
                 spdk_csi_driver::rwx_nfs::NfsPodLiveness::Present => true,
                 spdk_csi_driver::rwx_nfs::NfsPodLiveness::Absent => false,
+                spdk_csi_driver::rwx_nfs::NfsPodLiveness::Dead => {
+                    println!("💀 [RWX] NFS server pod is TERMINAL (evicted/failed) — deleting the corpse and recreating (F35)");
+                    if !spdk_csi_driver::rwx_nfs::delete_dead_nfs_pod(
+                        self.driver.kube_client.clone(),
+                        &volume_id,
+                    ).await {
+                        println!("⚠️ [RWX] dead NFS server pod not gone after 30s — letting the CO retry");
+                    }
+                    false
+                }
                 spdk_csi_driver::rwx_nfs::NfsPodLiveness::Terminating => {
                     println!("⏳ [RWX] Existing NFS server pod is Terminating — waiting for it to exit before recreating");
                     if !spdk_csi_driver::rwx_nfs::wait_for_nfs_pod_gone(

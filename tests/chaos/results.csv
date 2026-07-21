@@ -130,3 +130,4 @@ date,phase,drill,t_ready_s,stall_s,restarts_delta,pre_node,post_node,va_ok,nvme_
 2026-07-21T06:33:39Z,3,3.1b,33,33,new:0,runy2-aws-1,runy2-aws-1,Y,Y,Y,PASS,Y,PASS,"RWX force delete + pkill (dirty postmaster over NFS); WAL replay expected"
 2026-07-21T06:42:11Z,3,3.2,97,337,new:0,runy2-aws-1,runy2-aws-3,Y,Y,Y,PASS,Y,FAIL,"nfs pod delete: recreate=30s io_resume=96s estale=0 failed: attribution"
 2026-07-21T06:50:04Z,3,3.3b,1,4,0,runy2-aws-3,runy2-aws-3,Y,N,Y,FAIL,Y,FAIL,"nfs-node csi-node POD delete: SELF-RECOVERED io_resume=1s failed: db nvme"
+2026-07-21T15:43:44Z,3,3.6,-1,1,0,runz-aws-2,runz-aws-2,Y,Y,Y,FAIL,Y,FAIL,"nfs NODE kill (r2): resurrect=69s on runz-aws-2, io_resume=-1s failed: ready db"
