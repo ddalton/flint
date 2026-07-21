@@ -2356,3 +2356,57 @@ listener-death → process-exit coupling.
   (servers/create + commit) AFTER initial provisioning; this build of
   trove tags instances `trove:*` (not `trove/<name>/*`) — teardown
   audits must filter accordingly.
+
+### Drill 3.6 run 2 (u12.7): FAIL — F36 opened; F30 pays for itself live
+
+Run shape: server on aws-1 → kubelet-stop + OOS taint → resurrect on
+aws-3 at 94s. Fence fired at 93s stale (detection ✓ again). The stale
+witness flow DIED this run and the orphan zombied within minutes (vs
+run 1's 40-min D-state corpse) — consistent with F33b's socket FINs
+working — but the witness still never recovered, because the
+resurrected server itself went down:
+
+**F36 (P1, OPEN): the resurrect's own fencing can kill the new
+assembly.** Forensic timeline (full logs in
+artifacts/3-3.6-1784654616/forensics/):
+- 17:24:41 OOS force-detach → ControllerUnpublish(backing vol, aws-1)
+  — which itself FAILED early on an F32-family metadata lookup
+  ("volume metadata not found in PV"), a separate wart.
+- 17:25:04 stage on aws-3: leg-0 export ensure on aws-1 FAILED —
+  `bdev ... already claimed: type exclusive_write by module raid` (the
+  old node's raid was never unstaged; kubelet down; loopback claims
+  are invisible to nvmf fence-out, which only fences REMOTE
+  consumers). Assembly proceeded on leg-1 (aws-2) alone:
+  add_host(aws-3) + remove_host(aws-1) ✓, attach with
+  ctrlr_loss_timeout=-1 ✓, ublk0 up, ext4 mounted, data present.
+- 17:25:49 the leg-1 qpair dropped; subsequent reconnects were DENIED
+  (`nvmf_qpair_access_allowed: does not allow host` loop on aws-2) —
+  the ACL/fence state ended up excluding the LIVE consumer. With
+  reconnects denied, EIO reached ext4 → journal abort → fs shutdown →
+  /dev/ublkb0 later gone (clean SPDK stop on bdev loss).
+- Server restarted → **F30 refused the dead export (exit 57) — the
+  loud-refusal design working exactly as intended** (pre-F30 this
+  identical state silently served garbage on runx). CrashLoop → no
+  ready endpoint → witness/pg-0 had nothing to fail over TO.
+- No DEL_DEV activity anywhere (escape-hatch gating held). The agent
+  never detached the controller (reaper innocent).
+
+Open attribution residual: whether remove_host raced add_host on the
+same subsystem or a second fence pass removed the new consumer —
+narrows inside the resurrect's export-ensure sequencing
+(nvmeof_export). Fix direction: fence-out must be ordered/idempotent
+against the incoming consumer's ACL (never remove a host that a
+concurrent ensure just admitted), and a denied-reconnect loop on a
+live consumer must surface as a health event, not silent EIO.
+
+**Also fixed from this run: exit-path observability** (4bf8d74) — the
+F30 refusal reason and fence_exit's sockets_shutdown line were LOST
+because process::exit skips the non-blocking appender flush; critical
+exits now eprintln! first. The one-line diagnosis this enables was
+worth an hour of SSM forensics today.
+
+db verdict run 2: honest FAIL (isready; ledger SKIPPED by the new
+isready gate — no fabricated loss number), plus one orphaned initiator
+session on aws-3 (the fenced-out controller, connecting forever —
+cleaned by re-assembly). Zero acked-write loss confirmed after
+recovery, run 2 included.
