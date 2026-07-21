@@ -2523,3 +2523,30 @@ requests (43f2ad6) armor the ranking but also tighten allocatable (the
 threshold message grew 851MB→1.27GB) — the real trigger-kill is
 PRE-PULLING all in-use images on every worker (done; 2.0-3.6GB steady
 headroom). F3 (bigger roots) remains the structural fix.
+
+### F29 incident replay (u12.8, k8s 1.34.9): vector closed upstream
+
+Replayed the runx shape both ways on a live RWX volume: out-of-band
+`umount -l` of the backing globalmount + (a) graceful server delete,
+(b) FORCE delete (the original incident used force-delete to skip
+NodeUnstage). Both healed: kubelet 1.34's volume reconstruction ran a
+**fresh NodeStage before NodePublish** (agent log: Stage CALLED →
+Publish CALLED), the F29 probe saw a live staging, and the server came
+up with the correct F30 marker + real data. The 1.33-era
+skip-restage-after-force-delete vector no longer exists on 1.34; F29's
+NotMounted/Dead refusal arms remain as unit-tested defense-in-depth
+(the mid-life store-death shape — run 2 — bypasses publish entirely:
+the fs died under an already-published mount, where the fence/F30/F35
+chain owns recovery instead).
+
+### DEL_DEV live gate (386027a): PASS on real 6.18 kernel
+
+c6gates test pod (privileged, hostPath /dev) on w5: del_dev_live
+deleted scratch /dev/ublkb42 via UBLK_U_CMD_DEL_DEV io_uring SQE128
+uring_cmd in <100ms. The escape hatch's submission path is proven
+end-to-end; residual = the EPERM-recover classifier variant (dead
+device answering EPERM instead of double-ENODEV — seen once after an
+in-flight-roll force delete).
+
+### 2.2a r2 spot-check (u12.8): PASS — ready=16s, stall=10s, db clean
+(beats the phase-2 31s baseline).
