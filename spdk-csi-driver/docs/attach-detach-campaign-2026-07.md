@@ -2276,3 +2276,83 @@ Post-v1.16.0 commits — next release carries them. Open backlog: U11
 replica re-placement, F11 store-md hardening, nvmeof detector-tick
 repair parity, drill 1.14/2.4 AD-timer budget, nvmeof 2.7 on a
 restored 3-storage-node fleet.
+
+## Phase 3 continuation (runz, 2026-07-21) — F33 acceptance run
+
+Cluster runz (trove 44): spot-only incl CP, k8s **1.34.9**, workers on
+mainline 6.18.29, **kube-apiserver audit log enabled on the CP**
+(RequestResponse for pods/eviction/binding in flint-chaos) — armed
+specifically to attribute the pg-0 cross-node recreation seen twice on
+u12.4. Stack u12.5 = 9c0ce9b (F29 staging-liveness, F30 volume-identity
+marker, ublk DEL_DEV escape hatch) over spdk-tgt 1.6.0.
+
+### Drill 3.6 (first run, u12.5): FAIL — and the most productive drill of the campaign
+
+Timeline: kubelet-stop on the server node → resurrect on the surviving
+replica node at **69s** → fence armed at boot (90s/10s) fired at
+**~87s after the resurrect fenced the store** ("backing store
+unresponsive past deadline") — **F33 detection validated**.
+
+**F33b (P1, FIXED 29b3071): the fence's exit never completed.** Worker
+threads sat in D-state on the fenced ublk raid; `exit_group` cannot
+reap uninterruptible threads. The corpse held its TCP sockets 40+ min
+(finally became a zombie only after kubelet restore let the I/O error
+out) — no FIN/RST ever reached the clients, so witness AND pg-0 hung
+exactly as pre-F33. Fix: `fence::fence_exit` — `shutdown(SHUT_RDWR)`
+every socket fd (from a /proc/self/fd census) BEFORE exiting; socket
+shutdown cannot block on the dead filesystem, so clients get EOF and
+re-resolve through the per-volume Service even if the exit wedges
+forever. Verified by unit tests (peer-EOF delivery); live acceptance =
+3.6 rerun on u12.6 (witness_recovery metric now recorded by the
+harness).
+
+**pg-0 cross-node recreation ATTRIBUTED (the u12.4 3.2 mystery).**
+Caught live mid-hang by the audit log: kubelet evicted pg-0 —
+`phase=Failed, reason=Evicted, "node was low on resource:
+ephemeral-storage"` (6.8MB free on the 8GB root, filled by the
+error-flooding stalled workload) — then the **StatefulSet controller
+deletes Failed pods and recreates them** (audit: statefulset-controller
+DELETE + CREATE in the same second; scheduler bound the replacement
+cross-node). Not a k8s-1.34 bug: standard Failed-pod replacement. It
+reads as "unattributed" post-hoc because events expire (1h TTL) and
+the eviction reason lives in the deleted pod object. Root fix is the
+F3 trove backlog (8GB worker roots); the audit-log recipe is the
+diagnostic tool of record.
+
+**Contaminated db verdict**: "666 lost acked writes" was the ledger
+comm running against an unreachable postgres (empty seq list → comm
+counts every acked write missing). Harness now skips the comm when
+pg_isready fails (loss = UNKNOWN, drill already failed on isready).
+Witness check similarly reported a vacuous "mismatches=0
+last-write-age=<raw epoch>" on a timed-out mount read — now reports
+UNRESPONSIVE, and 3.6 gained `wait_witness_fresh` (witness_recovery=Ns
+is THE F33 acceptance metric; drill FAILs if it never recovers).
+
+**F34 (P2, OPEN, driver)**: after the drill's kubelet restore, the
+csi-node driver's gRPC UDS listener on that node was dead while the
+container stayed Running/ready (socket file present, no listener —
+kubelet mount retries got EOF then connection-refused; pg-0's
+replacement blocked ~10 min). No driver restarts recorded → the accept
+loop died silently inside a live process, and liveness never caught
+it. Unstick: delete the csi-node pod (safe — node hosted no active
+flint volumes). Needs: liveness that actually dials csi.sock +
+listener-death → process-exit coupling.
+
+### Ops recipes added (runz)
+
+- **Hung-client unstick without waiting out TCP timeouts**: the kernel
+  NFS client's socket lives in the netns where mount(2) ran — NOT the
+  workload pod's netns (conntrack showed the flows under the host
+  netns with the csi-node pod's source IP on this Cilium cluster).
+  Recipe: sweep every distinct netns via /proc/*/ns/net, `ss -tn
+  '( dport = :2049 )'` in each, `ss -K` the stale flows; the client
+  reconnects through the Service to the live backend instantly.
+- **Audit-log deletion-actor extraction**: RequestResponse policy on
+  pods in the chaos ns; the DELETE event's responseObject carries the
+  final pod status (phase/reason/eviction message) — the smoking gun
+  survives pod deletion, unlike events.
+- Trove wart: create-commit FLATTENS heterogeneous server rows to the
+  cluster default instance type — add the c5d builder via scale-out
+  (servers/create + commit) AFTER initial provisioning; this build of
+  trove tags instances `trove:*` (not `trove/<name>/*`) — teardown
+  audits must filter accordingly.
