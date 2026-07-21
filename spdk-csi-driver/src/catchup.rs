@@ -950,6 +950,70 @@ pub(crate) async fn list_lvol_names(
         .unwrap_or_default())
 }
 
+/// F36 guard (runz 3.6, 2026-07-21, P0): is the stale head being SERVED
+/// right now? The §5/§9-5 safety argument ("a stale replica's unique
+/// data is only its unacked tail") collapses the moment a degraded
+/// assembly serves the stale leg — deleting the head then rips the
+/// namespace out from under a live consumer (752 acked writes forked).
+/// Detection is name-agnostic on purpose: find any subsystem on the
+/// replica's node whose NAMESPACE is backed by this head (by uuid or
+/// alias — immune to the PV-name/handle naming family), and report its
+/// live controllers. Callers DEFER the rebuild while a consumer exists.
+pub(crate) async fn head_live_consumer(
+    rpc: &dyn CatchupRpc,
+    node: &str,
+    head_ids: &[&str],
+) -> Result<Option<String>, RpcError> {
+    let subs = rpc
+        .spdk_rpc(node, &json!({ "method": "nvmf_get_subsystems" }))
+        .await?;
+    let empty = vec![];
+    for s in subs.get("result").and_then(|r| r.as_array()).unwrap_or(&empty) {
+        let nqn = s.get("nqn").and_then(|n| n.as_str()).unwrap_or("");
+        let backs_head = s
+            .get("namespaces")
+            .and_then(|n| n.as_array())
+            .map(|nss| {
+                nss.iter().any(|ns| {
+                    ["uuid", "bdev_name", "name"].iter().any(|k| {
+                        ns.get(*k)
+                            .and_then(|v| v.as_str())
+                            .map(|v| head_ids.contains(&v))
+                            .unwrap_or(false)
+                    })
+                })
+            })
+            .unwrap_or(false);
+        if !backs_head {
+            continue;
+        }
+        let ctrls = rpc
+            .spdk_rpc(
+                node,
+                &json!({ "method": "nvmf_subsystem_get_controllers", "params": { "nqn": nqn } }),
+            )
+            .await?;
+        let hosts: Vec<String> = ctrls
+            .get("result")
+            .and_then(|r| r.as_array())
+            .map(|cs| {
+                cs.iter()
+                    .filter_map(|c| c.get("hostnqn").and_then(|h| h.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !hosts.is_empty() {
+            return Ok(Some(format!(
+                "subsystem {} exports this head to {} live controller(s): {}",
+                nqn,
+                hosts.len(),
+                hosts.join(", ")
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// §5 step 0: revert the head to the replica's own `base_alias` snapshot —
 /// delete the head and re-create it as a clone, keeping the lvol name (the
 /// stable alias makes this idempotent: a crash between delete and clone, or
@@ -1524,6 +1588,47 @@ async fn catchup_stale(
         }
     };
 
+    // F36 guard: NEVER rebuild a head a live consumer is reading. Both
+    // arms below destroy it (revert deletes the lvol; resume copies over
+    // it). A consumer on a stale head means a degraded assembly chose it
+    // — the deliberate resolution is migration/fencing, not a background
+    // delete. Defer with a loud event; the tick retries after.
+    let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
+    let live_head_uuid = rec.live_lvol_uuid().to_string();
+    let head_ids = [
+        live_head_uuid.as_str(),
+        rec.lvol_uuid.as_str(),
+        head_alias.as_str(),
+        identity.lvol_name.as_str(),
+    ];
+    match head_live_consumer(rpc, &identity.node_name, &head_ids).await {
+        Ok(Some(consumer)) => {
+            warn!(volume_id, node = %identity.node_name, %consumer,
+                "[CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36)");
+            store
+                .emit(
+                    volume_id,
+                    "Warning",
+                    "ReplicaHeadInUse",
+                    &format!(
+                        "Catch-up of stale replica {} on {} deferred: {} — rebuilding \
+                         would delete the head under a live consumer (F36)",
+                        rec.lvol_uuid, identity.node_name, consumer
+                    ),
+                )
+                .await;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // Fail CLOSED: unknown consumer state must not authorize a
+            // head delete.
+            warn!(volume_id, node = %identity.node_name, error = %e,
+                "[CATCHUP] cannot verify head consumers — rebuild deferred (F36 fail-closed)");
+            return Ok(());
+        }
+    }
+
     // Pin BEFORE the revert: from here the session's foundation must not be
     // retired (§5 retention pinning; survives orchestrator restarts). A
     // full build replays from the source's chain root, so it pins the
@@ -1537,7 +1642,6 @@ async fn catchup_stale(
     };
     store.pin_retention(volume_id, &pinned).await?;
 
-    let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
     let resume_marker = base.as_deref().unwrap_or(FULL_BUILD_BASE);
     let live_uuid = if rec.reverted_to.as_deref() == Some(resume_marker) {
         // Resume: the head is still write-virgin for this exact base (it
@@ -4429,5 +4533,80 @@ mod tests {
         let reasons: Vec<String> =
             store.events.lock().unwrap().iter().map(|(r, _)| r.clone()).collect();
         assert!(reasons.contains(&"ReplicaCatchupFailed".to_string()));
+    }
+
+    // -- F36 guard: head_live_consumer ---------------------------------
+
+    struct SubsMock {
+        subs: Value,
+        controllers: std::collections::HashMap<String, Value>,
+    }
+
+    #[async_trait]
+    impl CatchupRpc for SubsMock {
+        async fn spdk_rpc(&self, _node: &str, payload: &Value) -> Result<Value, RpcError> {
+            match payload["method"].as_str().unwrap_or("") {
+                "nvmf_get_subsystems" => Ok(json!({ "result": self.subs })),
+                "nvmf_subsystem_get_controllers" => {
+                    let nqn = payload["params"]["nqn"].as_str().unwrap_or("");
+                    Ok(json!({ "result": self.controllers.get(nqn).cloned().unwrap_or(json!([])) }))
+                }
+                m => panic!("unexpected rpc {m}"),
+            }
+        }
+        async fn export_replica(
+            &self,
+            _node: &str,
+            _bdev_name: &str,
+            _export_volume_id: &str,
+            _consumer_node: &str,
+        ) -> Result<NvmeofConnectionInfo, RpcError> {
+            unreachable!("guard never exports")
+        }
+    }
+
+    /// The F36 shape: the stale head's namespace has a live controller —
+    /// the guard must name the consumer so the rebuild defers.
+    #[tokio::test]
+    async fn f36_live_consumer_detected_by_ns_identity() {
+        let rpc = SubsMock {
+            subs: json!([{
+                "nqn": "nqn.2024-11.com.flint:volume:vol1_1",
+                "namespaces": [{ "uuid": "head-uuid-live", "bdev_name": "lvs0/lvol-b", "name": "lvs0/lvol-b" }]
+            }]),
+            controllers: [(
+                "nqn.2024-11.com.flint:volume:vol1_1".to_string(),
+                json!([{ "hostnqn": "nqn.2024-11.com.flint:node:aws-3" }]),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        // match by uuid
+        let hit = head_live_consumer(&rpc, "node-b", &["head-uuid-live"]).await.unwrap();
+        assert!(hit.as_deref().unwrap_or("").contains("aws-3"), "got {hit:?}");
+        // match by alias
+        let hit = head_live_consumer(&rpc, "node-b", &["lvs0/lvol-b"]).await.unwrap();
+        assert!(hit.is_some());
+    }
+
+    /// An exported-but-unconsumed head (no controllers) is rebuildable;
+    /// unrelated subsystems never block.
+    #[tokio::test]
+    async fn f36_no_controllers_or_unrelated_subsystem_is_free() {
+        let rpc = SubsMock {
+            subs: json!([
+                { "nqn": "nqn.x:volume:vol1_1",
+                  "namespaces": [{ "uuid": "head-uuid-live", "bdev_name": "lvs0/lvol-b" }] },
+                { "nqn": "nqn.x:volume:OTHER_0",
+                  "namespaces": [{ "uuid": "other-uuid", "bdev_name": "lvs0/other" }] }
+            ]),
+            controllers: [(
+                "nqn.x:volume:OTHER_0".to_string(),
+                json!([{ "hostnqn": "nqn.x:node:somewhere" }]),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert!(head_live_consumer(&rpc, "node-b", &["head-uuid-live"]).await.unwrap().is_none());
     }
 }

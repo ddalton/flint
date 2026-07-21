@@ -3329,6 +3329,23 @@ impl NodeAgent {
             // trample that fence every cycle. And after a catch-up revert
             // the live head has a new uuid (`active_lvol_uuid`); the
             // identity uuid addresses nothing.
+            // §3 hygiene MUST precede the sync-state skip (F36, runz 3.6):
+            // after a node kill the local leg is typically stale-marked,
+            // and the old ordering made this hygiene unreachable — the
+            // dead raid's exclusive_write claim then blocked the leg's
+            // re-export forever, forcing the resurrect onto the OTHER
+            // (stale) leg. A raid for this volume on a node that is not
+            // the volume's consumer is a phantom regardless of the local
+            // leg's sync state; its claim serves nobody.
+            let attached_node = self.get_attached_node(&volume_id).await;
+            if attached_node.as_deref() != Some(self.node_name.as_str()) {
+                if let Err(e) = self.delete_phantom_raid_local(&spdk_id).await {
+                    error!(volume_id, error = %e, "[RECONCILE] Failed to delete phantom raid");
+                    error_count += 1;
+                    continue;
+                }
+            }
+
             let sync_rec = pv
                 .metadata
                 .annotations
@@ -3364,21 +3381,8 @@ impl NodeAgent {
                 }
             }
 
-            // §3 hygiene (phase 0 fix): after a reboot the replica lvol
-            // re-registers carrying a raid superblock and examine
-            // auto-assembles a phantom raid that claims it exclusive_write —
-            // the export below would fail -32602 forever. A raid for this
-            // volume on a node that is NOT the volume's current consumer is
-            // by definition such a phantom; delete it (clearing superblocks
-            // when SPDK supports it) before exporting.
-            let attached_node = self.get_attached_node(&volume_id).await;
-            if attached_node.as_deref() != Some(self.node_name.as_str()) {
-                if let Err(e) = self.delete_phantom_raid_local(&spdk_id).await {
-                    error!(volume_id, error = %e, "[RECONCILE] Failed to delete phantom raid");
-                    error_count += 1;
-                    continue;
-                }
-            }
+            // (§3 phantom-raid hygiene runs ABOVE, before the sync-state
+            // skip — see the F36 note there.)
 
             // Setup NVMe-oF target for this replica (idempotent)
             match self.setup_nvmeof_target_for_replica(&spdk_id, replica_index, local_replica, &live_uuid, attached_node.as_deref()).await {
