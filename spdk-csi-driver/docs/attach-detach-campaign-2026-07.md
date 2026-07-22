@@ -2742,11 +2742,15 @@ next tick retries.
 
 ### runaa teardown (2026-07-22, user-directed cost stop)
 
-Remaining for the release gate, to run on the next cluster: **3.6d**
-(permanent/terminate variant — rc3 makes it honest), **2.4 re-run**
-(RWO r2, gate enabled), **AckedTailResolved live observation**, the
-**F38 layered fix + 3.6e**, and **F39** (heal-path claim starvation:
-skip visibility, claim watchdog, target-side claim clear — see the
-3.6c rc3 heal-tail analysis above; ships with the F38 wave). Driver
-image for resume: `dilipdalton/flint-driver:1.19.0-rc3`
-(43c1b24 / 71d7330).
+Remaining for the release gate — ORDER IS LOAD-BEARING (user-set,
+2026-07-22): **first implement the F38 layered fix + F39** (heal-path
+claim starvation: skip visibility, claim watchdog, target-side claim
+clear — see the 3.6c rc3 heal-tail analysis above), cut **rc4**, THEN
+run the drill set against rc4 on the next cluster: **3.6d**
+(permanent/terminate variant), **2.4 re-run** (RWO r2, gate enabled —
+must validate the FIXED build, not rc3: 2.4 ends in exactly the
+direct-serve + heal state F38/F39 poison), **3.6e** (F38 acceptance),
+**F39 wedge drill**, and the **AckedTailResolved live observation**
+(needs F39 fixed for the heal to complete). Driver image lineage:
+`dilipdalton/flint-driver:1.19.0-rc3` (43c1b24 / 71d7330) → rc4 after
+the F38/F39 wave.
