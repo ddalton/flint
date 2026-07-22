@@ -1922,7 +1922,14 @@ impl SpdkCsiDriver {
 
             if missing.is_empty() {
                 // Full writer set attached (or gate inert on this volume):
-                // clear markers left by a previous incident.
+                // clear the transient defer marker. The RISK marker is NOT
+                // cleared on this evidence — a ServeWithRisk assembly stamps
+                // the survivor as the sole writer, so "all writers attached"
+                // is true one tick after the loss was flagged (rc1's ~90s
+                // amnesia, found live on runaa 3.6c). It clears only when
+                // every flagged leg rejoined the writer set or left the
+                // membership; the clear is evented as AckedTailResolved so
+                // the loss history survives the annotation.
                 let annos = self
                     .get_pv_annotations(&record_volume_id)
                     .await
@@ -1930,8 +1937,27 @@ impl SpdkCsiDriver {
                 if annos.contains_key(F36C_DEFER_KEY) {
                     self.set_pv_annotation(&record_volume_id, F36C_DEFER_KEY, None).await;
                 }
-                if annos.contains_key(F36C_RISK_KEY) && !writer_uuids.is_empty() {
-                    self.set_pv_annotation(&record_volume_id, F36C_RISK_KEY, None).await;
+                if let Some(marker) = annos.get(F36C_RISK_KEY) {
+                    let member_uuids: Vec<String> =
+                        replicas.iter().map(|r| r.lvol_uuid.clone()).collect();
+                    if gate::risk_marker_resolved(marker, &writer_uuids, &member_uuids) {
+                        self.set_pv_annotation(&record_volume_id, F36C_RISK_KEY, None).await;
+                        crate::replica_sync::emit_pv_event(
+                            &self.kube_client,
+                            current_node,
+                            &record_volume_id,
+                            "Warning",
+                            "AckedTailResolved",
+                            &format!(
+                                "F36c: acked-tail-risk marker resolved on {} — the flagged \
+                                 leg(s) rejoined the serving lineage or were replaced; any \
+                                 divergent tail is now a recorded loss, not a live fork \
+                                 (marker was: {})",
+                                current_node, marker
+                            ),
+                        )
+                        .await;
+                    }
                 }
             } else {
                 let now = crate::replica_sync::now_rfc3339();

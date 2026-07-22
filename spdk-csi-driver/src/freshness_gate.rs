@@ -141,6 +141,54 @@ pub fn is_claim_blocked(reason: &str) -> bool {
         || r.contains("cannot be opened")
         || r.contains("operation not permitted")
         || r.contains("resource busy")
+        // The live shape from runaa drill 3.6c (2026-07-22): exporting a
+        // lvol that a foreign (zombie) raid still claims fails
+        // nvmf_subsystem_add_ns with SPDK -32602 "Invalid parameters" —
+        // the word "claim" never appears. Scoped to the add-ns RPC so
+        // ordinary bad-parameter bugs don't read as claims.
+        || (r.contains("nvmf_subsystem_add_ns")
+            && (r.contains("-32602") || r.contains("invalid parameters")))
+}
+
+// ── Acked-tail-risk marker lifecycle (F36c-r1, runaa 3.6c finding) ───────
+//
+// rc1 cleared the marker as soon as the CURRENT writer set fully attached —
+// but a ServeWithRisk assembly stamps the survivor as the sole writer, so
+// the very next tick read "all writers attached" and erased the risk ~90s
+// after raising it. The marker must outlive the amnesia: it clears only
+// when every flagged leg has either rejoined the writer set (the fork is
+// resolved in favor of the serving lineage — the tail is now a recorded
+// loss, surfaced via the AckedTailResolved event, not a live risk) or left
+// the membership entirely (replaced).
+
+/// Marker value format: "<since_rfc3339>|<uuid1>,<uuid2>".
+pub fn parse_risk_marker(v: &str) -> Option<(String, Vec<String>)> {
+    let (since, uuids) = v.split_once('|')?;
+    let flagged: Vec<String> = uuids
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if flagged.is_empty() {
+        return None;
+    }
+    Some((since.to_string(), flagged))
+}
+
+/// True when every flagged leg is either back in the writer set or gone
+/// from the authoritative membership. An unparseable marker reads as
+/// resolved (clearable garbage — the events carry the history).
+pub fn risk_marker_resolved(
+    marker: &str,
+    writer_uuids: &[String],
+    member_uuids: &[String],
+) -> bool {
+    match parse_risk_marker(marker) {
+        None => true,
+        Some((_, flagged)) => flagged.iter().all(|u| {
+            writer_uuids.iter().any(|w| w == u) || !member_uuids.iter().any(|m| m == u)
+        }),
+    }
 }
 
 /// One-line operator-facing description of the missing writers.
@@ -296,6 +344,36 @@ mod tests {
         assert!(is_claim_blocked("Device or resource busy"));
         assert!(!is_claim_blocked("NVMe-oF connection failed: timeout"));
         assert!(!is_claim_blocked("Local lvol not found: no bdev"));
+        // The live runaa-3.6c shape: zombie-raid claim manifests as add-ns
+        // -32602, no "claim" anywhere in the message.
+        assert!(is_claim_blocked(
+            "NVMe-oF connection failed: Failed to add namespace 611b to nqn.x: Node agent \
+             HTTP call failed: {\"error\":\"SPDK RPC call 'nvmf_subsystem_add_ns' failed: \
+             SPDK RPC error: Code=-32602 Msg=Invalid parameters\"}"
+        ));
+        // -32602 from any OTHER rpc must NOT read as a claim.
+        assert!(!is_claim_blocked(
+            "SPDK RPC call 'bdev_lvol_create' failed: Code=-32602 Msg=Invalid parameters"
+        ));
+    }
+
+    #[test]
+    fn risk_marker_lifecycle() {
+        let w = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let marker = "2026-07-22T03:03:31Z|uuid-fresh";
+        // The rc1 amnesia shape: survivor-only writer set, flagged leg
+        // still a stale member — must NOT resolve.
+        assert!(!risk_marker_resolved(marker, &w(&["uuid-surv"]), &w(&["uuid-surv", "uuid-fresh"])));
+        // Flagged leg rejoined the writer set → resolved.
+        assert!(risk_marker_resolved(marker, &w(&["uuid-surv", "uuid-fresh"]), &w(&["uuid-surv", "uuid-fresh"])));
+        // Flagged leg replaced (gone from membership) → resolved.
+        assert!(risk_marker_resolved(marker, &w(&["uuid-surv"]), &w(&["uuid-surv", "uuid-new"])));
+        // Garbage marker → clearable.
+        assert!(risk_marker_resolved("garbage", &w(&[]), &w(&[])));
+        let (since, flagged) = parse_risk_marker("t1|a,b").unwrap();
+        assert_eq!(since, "t1");
+        assert_eq!(flagged, w(&["a", "b"]));
+        assert!(parse_risk_marker("t1|").is_none());
     }
 
     #[test]
