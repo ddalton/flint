@@ -2559,19 +2559,37 @@ e1b1288. Backlog worked after the cut (unvalidated → v1.19.0 material):
 
 - **F34 (FIXED, 84c3c8c)**: bounded NFS consumer mount — see commit.
 - **DEL_DEV EPERM variant (FIXED, 84c3c8c)**: classifier widened.
-- **F36c (DESIGNED, docs/f36c-assembly-freshness-gate.md)**: the
-  epoch-freshness assembly gate; deferred — durability path, needs
-  drill 3.6c. The remaining P1.
-- **F37 (SPEC, P2, self-correcting)**: the ~29s same-node ublk recreate
-  races NodeUnstage — a stale ublk id lingers on the SAME raid bdev as
-  the new id (unmounted leak; reapers clear it because the PV exists;
-  annotation self-heals via rehydrate backfill). Actionable fix =
-  ensure_ublk_disk reaps any OTHER live id serving the same bdev before
-  serving its own. SAFETY CAVEAT (why it's not a drive-by fix): the
-  stranger must be confirmed UNMOUNTED first — stopping a still-mounted
-  stranger EIOs a live consumer. Needs a drill that force-deletes a
-  same-node RWX consumer mid-unstage and asserts the reap only fires on
-  the detached device. Until then the reaper's PV-gated pass owns it.
+- **F36c (DESIGNED rev 2, docs/f36c-assembly-freshness-gate.md)**: the
+  last-writer-set assembly gate (rev 1's epoch rank ties in the run-3
+  scenario — both legs read the same `last_epoch`; the post-cut tail
+  is recorded nowhere); deferred — durability path, needs drill 3.6c.
+  The remaining P1.
+- **F37 (SPEC, P2)**: the ~29s same-node ublk recreate races
+  NodeUnstage — a stale ublk id lingers on the SAME raid bdev as the
+  new id (unmounted leak; only the ublk-id ANNOTATION self-heals, via
+  rehydrate backfill). NO reaper owns the device — earlier "reapers
+  clear it / PV-gated pass owns it" wording was wrong: the rehydrate
+  reap loop skips any live id whose bdev is in the desired set (both
+  ids serve the desired raid bdev), and raid bdevs are
+  non-attributable to it anyway. The leak persists until a manual
+  ublk_stop_disk (what the drill needed), and repeated same-node
+  recreates burn toward ublks_max (64/node). Actionable fix =
+  ensure_ublk_disk reaps any OTHER live id serving the same bdev
+  before serving its own. SAFETY CAVEAT (why it's not a drive-by
+  fix): the stranger must be confirmed OPENER-FREE, not merely absent
+  from /proc/mounts — a lazy `umount -l` (the F29 replay's own move)
+  leaves an invisible mounted fs still holding the device, and
+  stopping it EIOs a live consumer. Probe = O_EXCL open of
+  /dev/ublkb<id> (EBUSY while any fs/holder has it) +
+  /sys/block/ublkbN/holders. The reap also races the very NodeUnstage
+  that leaked the id: both stop paths must tolerate ENODEV (stranger
+  already stopped by the other side) and serialize through the
+  expected_ublk registry — alloc_ublk_id keys off lingering /dev
+  nodes, so a reap mid-alloc changes its view. Needs a drill that
+  force-deletes a same-node RWX consumer mid-unstage and asserts the
+  reap fires ONLY on the opener-free device — including the
+  lazy-unmount negative case (mounted-invisible stranger NOT reaped,
+  no consumer EIO).
 - **F3 (trove/infra)**: 8GB worker roots + image-pull unpack spikes =
   eviction roulette. Mitigations landed in the harness (ephemeral
   requests + fleet pre-pull); structural fix = bigger roots at
