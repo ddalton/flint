@@ -2694,3 +2694,32 @@ post-recovery: **PASS, all 385 acked writes present, amcheck clean**
 (the recorded ready/db FAIL components were WAL-recovery + probe
 timeouts under amcheck load, no space/pressure involved). Witness 0
 mismatches.
+
+### 3.6c rc3 re-run: PASS — rc2/rc3 fixes validated live; heal-tail observation
+
+Gate: 9 defers, StaleReplicaAdmitted=0, resurrect 529s, witness 543s,
+pg-0 rescheduled 760s (server/client CO-LOCATED this run — the
+attribution "FAIL" is that topology, not a defect). db: ledger PASS at
+drill time (973/973), clean re-verify PASS (1104/1104 + amcheck).
+**rc2 fix live**: flint.io/acked-tail-risk persisted across assembly
+ticks and named the stranded leg exactly. **rc3 fix live**:
+degraded-direct landed on the BACKING PV; ONE single-survivor assembly
+total vs rc1's one-per-90s livelock.
+
+Heal-tail (teardown cut it short, recorded honestly): the stale leg
+parked at `stale` with retention pin epoch-3 and **zero catch-up
+activity logged in 30 min** — catch-up appears not to trigger for a
+direct-serve RWX volume's stale leg (no raid to hot-rejoin, no
+restage without rejoin-bounce which is default-off, and no visible
+chase). OPEN (v1.19 gate): direct-serve reintegration path — likely
+the same F38 fix-d surface; investigate the catch-up trigger for
+raid-less serving entities. AckedTailResolved lifecycle therefore
+NOT yet observed live (unit-tested only).
+
+### runaa teardown (2026-07-22, user-directed cost stop)
+
+Remaining for the release gate, to run on the next cluster: **3.6d**
+(permanent/terminate variant — rc3 makes it honest), **2.4 re-run**
+(RWO r2, gate enabled), **AckedTailResolved live observation**, and
+the F38 layered fix + 3.6e. Driver image for resume:
+`dilipdalton/flint-driver:1.19.0-rc3` (43c1b24 / 71d7330).
