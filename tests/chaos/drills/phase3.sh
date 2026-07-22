@@ -15,9 +15,20 @@
 #   3.5   controller kill mid-ControllerPublish of a fresh RWX attach —
 #         no duplicate nfs pods
 #   3.6   nfs-server NODE kill on an r2 volume (needs SC=flint-r2 harness)
+#   3.6c  F36c gate TRANSIENT: degrade one leg (writer set shrinks), then
+#         kill the server node while the FRESH leg's claims strand there —
+#         the resurrect must DEFER (not serve the trailing leg); zero loss
+#         once the fresh leg rejoins. Needs SC=flint-r2 + v1.19+ driver.
+#   3.6d ☠ F36c gate PERMANENT: same setup but TERMINATE the server node
+#         (fresh local leg dies with it) — must serve the trailing leg
+#         within the defer bound + raise flint.io/acked-tail-risk.
+#         EXPECTED-BOUNDED-LOSS drill: db verdict shows the trailed tail.
 #   3.7   client node kill (kubelet stop + taint)
 #   3.8   client churn ×10 — nfs pod must survive untouched (same UID)
 #   3.9 ☠ full csi-node DS roll (documented-limit drill, run last)
+#   3.10  F37: force-delete the nfs pod ×3 (same-node recreate races
+#         NodeUnstage) — assert ONE ublk id per bdev after each cycle,
+#         acks stay fresh (no EIO), reap lines attributed in agent logs.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./lib.sh
@@ -98,6 +109,65 @@ wait_acks_fresh() { # [budget_s] — ledger acks something NEWER than T0
     sleep 5
   done
   return 1
+}
+
+# ---- F36c / F37 observability helpers -----------------------------------
+SYNC_ANNO='flint\.csi\.storage\.io/replica-sync-state'
+sync_record()      { kubectl get pv "$PV" -o jsonpath="{.metadata.annotations.$SYNC_ANNO}" 2>/dev/null; }
+writer_uuids()     { sync_record | jq -r '.writer_set.lvol_uuids[]?' 2>/dev/null; }
+leg_state()        { sync_record | jq -r --arg u "$1" '.replicas[]? | select(.lvol_uuid==$u) | .sync_state' 2>/dev/null; }
+pv_replicas_json() { kubectl get pv "$PV" -o jsonpath='{.spec.csi.volumeAttributes.replicas}' 2>/dev/null; }
+risk_annotation()  { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/acked-tail-risk}' 2>/dev/null; }
+
+driver_log_hits() { # <t0> <pattern> — hits across every csi-node driver log
+  local t total=0 n p c; t=$(rfc3339 "$1")
+  for n in $(worker_nodes); do
+    p=$(csi_node_pod "$n"); [ -n "$p" ] || continue
+    c=$(kubectl logs -n "$DRIVER_NS" "$p" -c flint-csi-driver --since-time="$t" 2>/dev/null | grep -c "$2" || true)
+    total=$(( total + c ))
+  done
+  echo "$total"
+}
+
+pv_events_since() { # <t0> <reason> — count of PV events since t0
+  kubectl get events -n default --field-selector reason="$2" -o json 2>/dev/null \
+    | jq -r --arg t "$(rfc3339 "$1")" --arg pv "$PV" \
+      '[.items[] | select((.lastTimestamp // .eventTime // "1970") >= $t)
+                 | select(.involvedObject.name == $pv or ((.message // "") | contains($pv)))] | length'
+}
+
+last_ack_line() { timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null'; }
+
+degrade_remote_leg() { # picks the leg NOT on $NFS_NODE, kills its spdk-tgt,
+  # and waits for the record to mark it stale + drop it from the writer set.
+  # Exports DEG_NODE DEG_UUID FRESH_UUID GATE_ARMED.
+  local repl; repl=$(pv_replicas_json)
+  DEG_NODE=$(echo "$repl" | jq -r '.[].node_name' | grep -v "^$NFS_NODE$" | head -1)
+  [ -n "$DEG_NODE" ] || fail "no remote leg to degrade (both legs on $NFS_NODE?)"
+  DEG_UUID=$(echo "$repl" | jq -r --arg n "$DEG_NODE" '.[] | select(.node_name==$n) | .lvol_uuid' | head -1)
+  FRESH_UUID=$(echo "$repl" | jq -r --arg n "$DEG_NODE" '.[] | select(.node_name!=$n) | .lvol_uuid' | head -1)
+  local iid; iid=$(instance_id_for_node "$DEG_NODE")
+  [ -n "$iid" ] || fail "no instance id for $DEG_NODE"
+  ssm_run "$iid" "pkill -9 -f /usr/local/bin/spdk_tgt" >/dev/null
+  note "spdk-tgt killed on $DEG_NODE (leg ${DEG_UUID:0:8}…) — raid degrades, writes continue on the fresh leg"
+  GATE_ARMED=0
+  local i st ws
+  for i in $(seq 1 36); do
+    st=$(leg_state "$DEG_UUID"); ws=$(writer_uuids | tr '\n' ' ')
+    if [ "$st" != "in_sync" ] && [ -n "$ws" ] && ! echo "$ws" | grep -q "$DEG_UUID"; then
+      GATE_ARMED=1; break
+    fi
+    sleep 5
+  done
+  if [ "$GATE_ARMED" = 1 ]; then
+    ok "writer set shrunk to the fresh leg (deg leg state=$(leg_state "$DEG_UUID"))"
+  else
+    note "writer set never shrank — record: $(sync_record | jq -c '{ws: .writer_set, states: [.replicas[]? | {u: .lvol_uuid[0:8], s: .sync_state}]}' 2>/dev/null)"
+  fi
+  # Let the fresh leg accumulate a post-shrink acked tail — the delta the
+  # gate exists to protect.
+  sleep 20
+  export DEG_NODE DEG_UUID FRESH_UUID GATE_ARMED
 }
 
 pre_rwx() {
@@ -294,6 +364,104 @@ case "$DRILL" in
   wait_node_ready "$NFS_NODE" 300 && ok "nfs node restored" || note "node not Ready — check kubelet"
   ;;
 
+3.6c) # F36c gate TRANSIENT — the run-3 shape, deterministic: shrink the
+      # writer set to the fresh leg, then kill the server node so the fresh
+      # leg's claims strand there. The resurrect must DEFER on the missing
+      # writer (never serve the trailing leg) until guard-b clears the
+      # claim / the node returns; the db verdict must be ZERO loss.
+  pre_rwx
+  kubectl get pv "$PV" -o jsonpath='{.spec.storageClassName}' | grep -q "flint-r2" \
+    || fail "3.6c needs SC=flint-r2 — reset the harness"
+  [ -n "$(writer_uuids)" ] || fail "no writer_set on the sync record — driver predates F36c (need v1.19+)"
+  degrade_remote_leg
+  ACK_AT_KILL=$(last_ack_line)
+  note "acked tail at kill: $ACK_AT_KILL"
+  IID=$(instance_id_for_node "$NFS_NODE")
+  [ -n "$IID" ] || fail "no instance id for $NFS_NODE"
+  kubelet_stop "$NFS_NODE"; DEAD_IID="$IID"
+  wait_node_notready "$NFS_NODE" 180 || fail "server node never NotReady"
+  taint_oos "$NFS_NODE"; TAINTED="$NFS_NODE"
+  # Resurrect budget = 3.6's 360s + the gate's defer bound (180s).
+  T_REC=-1
+  for i in $(seq 1 108); do
+    U=$(nfs_pod_uid); N=$(nfs_node)
+    if [ -n "$U" ] && [ "$U" != "$NFS_UID" ] && [ -n "$N" ] && [ "$N" != "$NFS_NODE" ]; then
+      PH=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.status.phase}' 2>/dev/null)
+      [ "$PH" = "Running" ] && { T_REC=$(( $(epoch) - T0 )); break; }
+    fi
+    sleep 5
+  done
+  [ "$T_REC" -ge 0 ] && ok "nfs pod resurrected on $(nfs_node) at ${T_REC}s" || note "nfs pod NOT resurrected in 540s"
+  T_WITNESS=$(wait_witness_fresh 420)
+  [ "$T_WITNESS" -ge 0 ] && ok "witness recovered at ${T_WITNESS}s" || note "witness NOT recovered in 420s"
+  wait_acks_fresh 420 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
+  # Gate observability: defers seen, and the trailing leg never admitted.
+  DEFERS=$(driver_log_hits "$T0" "F36C DEFER")
+  DEFER_EV=$(pv_events_since "$T0" AssemblyDeferred)
+  STALE_ADMIT=$(pv_events_since "$T0" StaleReplicaAdmitted)
+  RISK=$(risk_annotation)
+  [ "$STALE_ADMIT" = "0" ] && ok "trailing leg never force-admitted (StaleReplicaAdmitted=0)" \
+    || note "GATE BYPASSED? StaleReplicaAdmitted events: $STALE_ADMIT"
+  [ "${DEFERS:-0}" -gt 0 ] || [ "${DEFER_EV:-0}" -gt 0 ] \
+    && note "gate deferred assembly (log_hits=$DEFERS events=$DEFER_EV)" \
+    || note "no defer observed — fresh leg attached first try (gate pass-through; weaker but valid)"
+  [ -z "$RISK" ] && ok "no acked-tail-risk raised (transient branch held)" \
+    || note "UNEXPECTED acked-tail-risk on transient drill: $RISK"
+  witness_verdict "$T0"
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
+    NOTES="F36c TRANSIENT: gate_armed=$GATE_ARMED defers=$DEFERS/$DEFER_EV stale_admit=$STALE_ADMIT resurrect=${T_REC}s witness=${T_WITNESS}s io_resume=${T_RESUME}s risk=${RISK:-none}" verify
+  [ "$STALE_ADMIT" = "0" ] || fail "3.6c FAIL: trailing leg was admitted while the writer leg was transiently unavailable"
+  untaint_oos "$NFS_NODE"; TAINTED=""
+  kubelet_start_ssm "$IID"; DEAD_IID=""
+  wait_node_ready "$NFS_NODE" 300 && ok "server node restored" || note "node not Ready — check kubelet"
+  ;;
+
+3.6d) # ☠ F36c gate PERMANENT — terminate the server node so the fresh
+      # (co-located) leg dies with it. The gate must NOT hang: serve the
+      # trailing leg within the defer bound and surface
+      # flint.io/acked-tail-risk + AckedTailRisk. EXPECTED-BOUNDED-LOSS:
+      # the db verdict SHOWS the post-shrink tail; the assertion is that
+      # the loss is surfaced and bounded, not that it is zero.
+  pre_rwx
+  kubectl get pv "$PV" -o jsonpath='{.spec.storageClassName}' | grep -q "flint-r2" \
+    || fail "3.6d needs SC=flint-r2 — reset the harness"
+  [ -n "$(writer_uuids)" ] || fail "no writer_set on the sync record — driver predates F36c (need v1.19+)"
+  degrade_remote_leg
+  ACK_AT_KILL=$(last_ack_line)
+  note "acked tail at kill (upper bound of the expected loss): $ACK_AT_KILL"
+  IID=$(instance_id_for_node "$NFS_NODE")
+  [ -n "$IID" ] || fail "no instance id for $NFS_NODE"
+  aws ec2 terminate-instances --region "$AWS_REGION" --instance-ids "$IID" >/dev/null
+  note "TERMINATED $IID ($NFS_NODE) — fresh local leg is GONE; trailing leg must be served WITH the risk surfaced"
+  wait_node_notready "$NFS_NODE" 300
+  taint_oos "$NFS_NODE"; TAINTED="$NFS_NODE"
+  T_REC=-1
+  for i in $(seq 1 144); do
+    U=$(nfs_pod_uid); N=$(nfs_node)
+    if [ -n "$U" ] && [ "$U" != "$NFS_UID" ] && [ -n "$N" ] && [ "$N" != "$NFS_NODE" ]; then
+      PH=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.status.phase}' 2>/dev/null)
+      [ "$PH" = "Running" ] && { T_REC=$(( $(epoch) - T0 )); break; }
+    fi
+    sleep 5
+  done
+  [ "$T_REC" -ge 0 ] && ok "nfs pod resurrected on $(nfs_node) at ${T_REC}s (bound: defer 180s + reschedule)" \
+    || note "nfs pod NOT resurrected in 720s — gate hung on a permanent loss? (2.4 REGRESSION)"
+  T_WITNESS=$(wait_witness_fresh 420)
+  wait_acks_fresh 420 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
+  RISK=$(risk_annotation)
+  RISK_EV=$(pv_events_since "$T0" AckedTailRisk)
+  [ -n "$RISK" ] && ok "acked-tail-risk surfaced: $RISK" || note "MISSING flint.io/acked-tail-risk annotation"
+  [ "${RISK_EV:-0}" -gt 0 ] && ok "AckedTailRisk event raised" || note "MISSING AckedTailRisk event"
+  witness_verdict "$T0"
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
+    NOTES="F36c PERMANENT (EXPECTED-BOUNDED-LOSS): gate_armed=$GATE_ARMED resurrect=${T_REC}s witness=${T_WITNESS}s io_resume=${T_RESUME}s risk_anno=$([ -n "$RISK" ] && echo Y || echo N) risk_ev=$RISK_EV ack_at_kill='$ACK_AT_KILL'" verify
+  [ "$T_REC" -ge 0 ] || fail "3.6d FAIL: no resurrect — the gate manufactured an outage on permanent loss"
+  [ -n "$RISK" ] || fail "3.6d FAIL: loss not surfaced (no acked-tail-risk annotation)"
+  untaint_oos "$NFS_NODE"; TAINTED=""
+  kubectl delete node "$NFS_NODE" >/dev/null 2>&1
+  note "NEXT: node terminated — cluster is a worker down; volume single-leg until re-placement"
+  ;;
+
 3.7) # client node kill — STS replace + NFS remount elsewhere
   pre_rwx
   # disk-follows-pod places the backing volume — and therefore the nfs
@@ -351,6 +519,46 @@ case "$DRILL" in
     fi
     READY_TIMEOUT=120 NOTES="RWX DS roll landmine; recovery=nfs recreate(+client bounce)" verify
   fi
+  ;;
+
+3.10) # F37 — same-node recreate races NodeUnstage: force-delete the nfs
+      # pod ×3. After each cycle exactly ONE ublk id may serve any bdev on
+      # the server node (the stage-side reap owns the dup), acks must stay
+      # fresh (no EIO from reaping a live device), witness clean.
+  pre_rwx
+  DUPS_MAX=0; REAPS_TOTAL=0
+  for i in $(seq 1 3); do
+    C0=$(epoch); CUR_NODE=$(nfs_node); CUR_UID=$(nfs_pod_uid)
+    kubectl delete pod -n "$DRIVER_NS" "$(nfs_pod)" --grace-period=0 --force --wait=false 2>/dev/null
+    note "cycle $i: nfs pod force-deleted (grace 0) on $CUR_NODE"
+    # reconciler recreate (disk-follows-pod → same node = the F37 window)
+    for j in $(seq 1 36); do
+      U=$(nfs_pod_uid)
+      [ -n "$U" ] && [ "$U" != "$CUR_UID" ] \
+        && [ "$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ] \
+        && break
+      sleep 5
+    done
+    NEW_NODE=$(nfs_node)
+    [ "$NEW_NODE" = "$CUR_NODE" ] || note "cycle $i: recreate landed CROSS-node ($NEW_NODE) — F37 window not exercised this cycle"
+    # settle window: the stranger may take a tick to reap
+    DUPS=-1
+    for j in $(seq 1 12); do
+      DUPS=$(flint_ublk_disks "$NEW_NODE" | awk -F'\t' '{print $2}' | sort | uniq -d | grep -c . || true)
+      [ "${DUPS:-1}" -eq 0 ] && break
+      sleep 5
+    done
+    [ "$DUPS" -eq 0 ] && ok "cycle $i: no duplicate ublk ids on $NEW_NODE ($(( $(epoch) - C0 ))s)" \
+      || note "cycle $i: DUPLICATE ublk ids persist on $NEW_NODE: $(flint_ublk_disks "$NEW_NODE" | tr '\n' ' ')"
+    [ "${DUPS:-0}" -gt "$DUPS_MAX" ] && DUPS_MAX=$DUPS
+    wait_acks_fresh 180 || note "cycle $i: acks not fresh in 180s"
+  done
+  REAPS_TOTAL=$(driver_log_hits "$T0" "F37: reaping same-bdev stranger")
+  REFUSALS=$(driver_log_hits "$T0" "F37: ublk id .* still holds")
+  note "F37 reap lines since T0: $REAPS_TOTAL; busy-refusals: $REFUSALS"
+  witness_verdict "$T0"
+  NOTES="F37 force-delete x3: dups_max=$DUPS_MAX reaps=$REAPS_TOTAL refusals=$REFUSALS" verify
+  [ "$DUPS_MAX" -eq 0 ] || fail "3.10 FAIL: duplicate ublk id persisted past the settle window"
   ;;
 
 *) fail "unknown drill '$DRILL'" ;;
