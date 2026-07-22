@@ -2706,20 +2706,47 @@ ticks and named the stranded leg exactly. **rc3 fix live**:
 degraded-direct landed on the BACKING PV; ONE single-survivor assembly
 total vs rc1's one-per-90s livelock.
 
-Heal-tail (teardown cut it short, recorded honestly): the stale leg
-parked at `stale` with retention pin epoch-3 and **zero catch-up
-activity logged in 30 min** — catch-up appears not to trigger for a
-direct-serve RWX volume's stale leg (no raid to hot-rejoin, no
-restage without rejoin-bounce which is default-off, and no visible
-chase). OPEN (v1.19 gate): direct-serve reintegration path — likely
-the same F38 fix-d surface; investigate the catch-up trigger for
-raid-less serving entities. AckedTailResolved lifecycle therefore
-NOT yet observed live (unit-tested only).
+Heal-tail (teardown cut it short; analysis CORRECTED post-teardown
+from code): the stale leg parked at `stale` with retention pin
+epoch-3 and zero catch-up activity logged in 30 min. The initial
+"catch-up doesn't trigger for direct-serve" framing was WRONG about
+the trigger: the orchestrator (controller process, 60s tick,
+catchup.rs orchestrator_tick) selects by PV, not by raid — direct
+serve does not hide the volume. The evidence fits **F39** instead:
+the pin proves a cycle DID start; that cycle then blocked in long
+I/O against the aws-1 side (zombie-raid claims proven present there
++ ctrl_loss_tmo=1800s ≈ the whole observed window), and its RAII
+per-volume claim made every subsequent tick skip via the SILENT
+`else { continue }` at try_claim — no log, no age metric. What
+direct-serve legitimately breaks is only the back half: nothing to
+hot-rejoin into, so reintegration needs a restage and rejoin-bounce
+is default-off. AckedTailResolved lifecycle therefore NOT yet
+observed live (unit-tested only).
+
+**F39 (P1, NEW, next wave): silent claim-starvation of the heal
+path.** Three gaps, all independent of serve mode: (a) OP_CATCHUP
+claim skips are invisible — starved heal is indistinguishable from
+healthy idle; log + surface claim age on skip; (b) claims have no
+deadline/watchdog — one cycle wedged inside the 1800s reconnect
+budget starves the volume's heal for the full budget; bound the
+cycle or watchdog the claim holder; (c) the copy path has no
+claim-clear for the TARGET leg's node — guard-b's phantom-raid
+hygiene is assembly-side and local-only, so a zombie raid on the
+stale leg's node blocks revert/re-export indefinitely (the same
+blind spot F36c hit on the fresh leg, now on the heal side).
+Fix shape belongs with the F38 layered wave (same
+monitors-vs-reality surface); drill: wedge a catch-up cycle
+deliberately (kill the target node mid-copy), assert the skip is
+logged with claim age, the cycle is reaped at its bound, and the
+next tick retries.
 
 ### runaa teardown (2026-07-22, user-directed cost stop)
 
 Remaining for the release gate, to run on the next cluster: **3.6d**
 (permanent/terminate variant — rc3 makes it honest), **2.4 re-run**
-(RWO r2, gate enabled), **AckedTailResolved live observation**, and
-the F38 layered fix + 3.6e. Driver image for resume:
-`dilipdalton/flint-driver:1.19.0-rc3` (43c1b24 / 71d7330).
+(RWO r2, gate enabled), **AckedTailResolved live observation**, the
+**F38 layered fix + 3.6e**, and **F39** (heal-path claim starvation:
+skip visibility, claim watchdog, target-side claim clear — see the
+3.6c rc3 heal-tail analysis above; ships with the F38 wave). Driver
+image for resume: `dilipdalton/flint-driver:1.19.0-rc3`
+(43c1b24 / 71d7330).
