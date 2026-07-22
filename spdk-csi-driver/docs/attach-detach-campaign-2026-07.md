@@ -2602,3 +2602,95 @@ e1b1288. Backlog worked after the cut (unvalidated → v1.19.0 material):
   eviction roulette. Mitigations landed in the harness (ephemeral
   requests + fleet pre-pull); structural fix = bigger roots at
   provision time.
+
+## v1.19.0-rc1 validation day (runaa, 2026-07-22)
+
+Cluster: **runaa** (trove project 45) — 6× i4i.xlarge spot workers +
+on-demand CP + cordoned c5d.4xlarge spot builder (DS-excluded via
+`flint.io/builder` nodeAffinity — the chart's top-level affinity value;
+cordon alone does not stop a DaemonSet and the tgt crashloops on a
+node whose NVMe belongs to Docker, wedging the roll). Driver
+`dilipdalton/flint-driver:1.19.0-rc1` (a33246c) rolled over the trove
+1.17.0 install; FLINT_F36C_GATE=enabled verified in-pod. The trove
+disk-init gap reproduced AGAIN — `/api/disks/initialize_blobstore` on
+`0000:00:1f.0` per worker (the GET /api/disks route hangs; use the
+POST RPC-style routes). Harness: SC=flint-r2 MODE=RWX WITNESS=1,
+fleet pre-pull done.
+
+**Writer-set first-light:** the very first NodeStage assembly stamped
+`writer_set` = both legs on the sync record (since=02:44:07Z), legs
+aws-1 (server-local, disk-follows-pod) + aws-2.
+
+### Drill 3.6c (F36c TRANSIENT) — GATE PASS; db verdict pending recovery
+
+Degrade phase finding: spdk-tgt kill on the remote leg did NOT shrink
+the writer set — v1.15 survivable-reconnect healed the leg before the
+staleness detector fired (1 tgt restart, leg back in_sync). The set
+correctly kept both legs; the drill proceeded on the both-writers arm.
+
+Server-node kill (kubelet stop + OOS taint, old tgt keeps the claims —
+the adversarial variant): **the gate deferred assembly 9 times**
+(driver logs + AssemblyDeferred events) while the fresh leg was
+claim-blocked on the dead node, **StaleReplicaAdmitted=0** (the
+pre-F36c forced-stale path never fired), no acked-tail-risk raised
+(transient branch held), resurrect on aws-2 at 561s, witness recovered
+575s, max ledger stall 38s. The 561s (vs 3.6's 94s) is the variant's
+cost: the claim only clears once fencing/reboot catches up — and it
+exposed an operational corollary: **an outage stretched past the NFSv4
+lease horizon leaves clients with unreclaimable handles** (pg-0 ESTALE
+loop on `global/1262`; witness on another node healed fine at 575s).
+Recovery = client bounce (fresh mount + WAL replay) — same recipe as
+the DS-roll landmine. Recorded FAIL components ready+db are this
+recovery, NOT loss: the db check was SKIPPED-unreachable at drill end;
+definitive ledger+amcheck verdict re-run post-bounce (below).
+
+### 3.6c definitive db verdict: PASS — the F36c transient bar LANDS
+
+Post-recovery ledger + amcheck (pg bounced for a fresh mount after the
+lease-horizon ESTALE): **all 1423 acked writes present, amcheck clean,
+writable** — ZERO acked-write loss through a server-node kill with a
+mid-rebuild trailing leg and a claim-stranded fresh leg. Run-3 on runz
+lost 6 writes on this shape; rc1's gate loses none. The recorded
+FAIL row (ready+db) is the recovery mechanics, superseded by this
+verdict.
+
+rc1 residuals found by the drill, FIXED in rc2 (74c6a1c): risk-marker
+amnesia (ServeWithRisk stamps the survivor as sole writer; the next
+tick's "all writers attached" cleared the annotation ~90s after raising
+it — now clears only on flagged-leg rejoin/replacement + evented as
+AckedTailResolved) and the claim classifier missing the live shape
+(zombie-raid claim = nvmf_subsystem_add_ns SPDK -32602 "Invalid
+parameters", no "claim" in the message).
+
+### F38 (P1, NEW): re-entry export-drop livelock + its real enabler
+
+The 3.6c aftermath surfaced a destructive loop: consumer-blindness
+monitor (60s tick, 3-strike) → repair_data_path →
+create_raid_from_replicas → drop_stale_local_exports severs the
+volume's OWN live consumer export (direct-serve broke the "exports the
+raid bdev, never the lvol" assumption written at the drop site), fs
+EIOs under the export, F30 refusal crashloops, repeat. Recovery = nfs
+pod recreate (fresh stage), ~30s. Design doc:
+docs/f38-reentry-export-drop.md. THE ENABLER (F32-class, one line,
+FIXED rc3 71d7330): the degraded-direct exemption was written to the
+USER PV while the monitor reads the BACKING PV for RWX — so every RWX
+direct serve entered the loop within 3 ticks, outage or not. The full
+layered fix (re-entry idempotence, self-chain drop exemption via local
+hostnqn qpairs, F30-crashloop → pod-recreate escalation, 3.6e drill)
+is specced for the next wave. Operational corollary recorded: a
+transient-branch defer that stretches an outage past the NFSv4 lease
+horizon leaves clients with unreclaimable handles — bounce the
+consumer (documented recipe; F38's fix-d automates it).
+
+### Drill 3.10 (F37): PASS — dup-free under 3× same-node recreate race
+
+Force-delete of the nfs server pod ×3, every recreate landing on the
+SAME node (the F37 window): **dups_max=0** (26s/22s/38s settle), F37
+reap lines 0 / busy-refusals 0 — the unstage won every race on
+k8s 1.34 + rc2, so the stage-side reap validated as "defect class
+absent under provocation" while the reap trigger itself stayed cold
+live (unit-suite coverage only — honest status). Definitive db verdict
+post-recovery: **PASS, all 385 acked writes present, amcheck clean**
+(the recorded ready/db FAIL components were WAL-recovery + probe
+timeouts under amcheck load, no space/pressure involved). Witness 0
+mismatches.

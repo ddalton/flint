@@ -116,7 +116,7 @@ SYNC_ANNO='flint\.csi\.storage\.io/replica-sync-state'
 sync_record()      { kubectl get pv "$PV" -o jsonpath="{.metadata.annotations.$SYNC_ANNO}" 2>/dev/null; }
 writer_uuids()     { sync_record | jq -r '.writer_set.lvol_uuids[]?' 2>/dev/null; }
 leg_state()        { sync_record | jq -r --arg u "$1" '.replicas[]? | select(.lvol_uuid==$u) | .sync_state' 2>/dev/null; }
-pv_replicas_json() { kubectl get pv "$PV" -o jsonpath='{.spec.csi.volumeAttributes.replicas}' 2>/dev/null; }
+pv_replicas_json() { kubectl get pv "$PV" -o json 2>/dev/null | jq -r '.spec.csi.volumeAttributes["flint.csi.storage.io/replicas"] // empty'; }
 risk_annotation()  { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/acked-tail-risk}' 2>/dev/null; }
 
 driver_log_hits() { # <t0> <pattern> — hits across every csi-node driver log
