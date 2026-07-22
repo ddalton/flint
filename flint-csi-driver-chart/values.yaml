@@ -62,12 +62,17 @@ priorityClassName: ""
 # CSI Driver configuration
 driver:
   name: "flint.csi.storage.io"
-  
+
   # Ephemeral volume support (CSI inline volumes)
   # When enabled, Pods can declare Flint volumes directly in their spec without creating PVCs
   # Ephemeral volumes are automatically created on Pod start and deleted on Pod termination
   # Requires Kubernetes v1.25+ (or v1.21-v1.24 with CSIInlineVolume feature gate)
   enableEphemeral: true
+
+  # F36c last-writer-set degraded-assembly gate (docs/f36c-assembly-freshness-gate.md).
+  # "disabled" restores pre-F36c serve-anything assembly. Tuning knobs are
+  # env-only: FLINT_F36C_DEFER_SECS (180), FLINT_F36C_NODE_GONE_SECS (360).
+  f36cGate: "enabled"
   
   # CSI Sanity testing support
   # Exposes controller gRPC socket via TCP for csi-sanity test suite

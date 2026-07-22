@@ -1,8 +1,15 @@
 # F36c — degraded-assembly freshness gate (design)
 
-**Status:** designed, not implemented (deferred from the v1.18.0 wave —
-it touches the most durability-critical path and needs its own drill).
-**Rev 2 (2026-07-21):** the freshness trigger is now the **last-writer
+**Status: IMPLEMENTED 2026-07-21 (rev 2), UNVALIDATED** — v1.19.0
+material; needs drills 3.6c AND a 2.4 re-run on a live cluster before
+release. Code: `replica_sync.rs` (`WriterSet` + mutator maintenance),
+`freshness_gate.rs` (pure decision logic, unit-tested),
+`driver.rs::create_raid_from_replicas` (gate wiring, gate-before-
+forced-stale, record-before-writes), chart `FLINT_F36C_GATE` env
+(default enabled; `disabled` is the kill switch). The acked-tail
+surface is a PV annotation `flint.io/acked-tail-risk` + Warning event
+`AckedTailRisk`; the defer bound persists as `flint.io/f36c-defer`.
+**Rev 2 (2026-07-21):** the freshness trigger is the **last-writer
 set**, not epoch rank — review showed rev 1's epoch rank ties in the
 exact run-3 scenario and would never fire (see "Why epoch rank alone
 cannot fire" below).
@@ -130,15 +137,16 @@ the just-admitted chaser.
    `create_raid_from_replicas` — forced stale admission is legal
    only in the permanent branch, otherwise a Stale leg rides in
    underneath the gate while it defers.
-6. **Prereqs to verify at implementation:** node-plugin RBAC for
-   get/list Nodes (permanent-branch check; today the agent reads
-   PVs/VolumeAttachments), and that the fast detector's leg-drop
-   path can reach the record writer (it already writes sync-state
-   transitions).
+6. **Prereqs (verified at implementation):** node-plugin RBAC already
+   grants get/list/watch on Nodes (chart `rbac.yaml`, flint-csi-node
+   ClusterRole) — no chart RBAC change needed. Leg-drop writer-set
+   shrink rides the existing `mark_stale` path (every exclusion /
+   detector strike already writes the record), so no new write path
+   was added.
 7. **Never** silently serve a trailing leg while a writer-set leg is
    transiently unavailable — that is the exact 6-write loss.
 
-## Acceptance
+## Acceptance (validation set: 3.6 repeat + 3.6c + 2.4 re-run)
 
 A repeat of 3.6 run 3 (server-node kill with a catch-up delta between
 legs) must show **witness_recovery ≤ deadline+RTT AND zero acked-write
@@ -153,7 +161,25 @@ leg. Assert:
 - (b) zero acked-write loss once the fresher leg rejoins;
 - (c) permanent variant (terminate the node instead): the trailing
   leg IS served within the deadline, with the
-  `flint.io/acked-tail-risk` VolumeCondition raised naming the gap.
+  `flint.io/acked-tail-risk` annotation set and the `AckedTailRisk`
+  event raised naming the gap.
+
+**Drill 2.4 re-run is part of the F36c validation set** — the gate
+sits directly on the path that delivers 2.4's headline (permanent
+node loss → serve the lone survivor, zero manufactured outage), so
+2.4 must be re-validated with the gate ENABLED. Assert:
+- (d) survivor served on the FIRST assembly tick (NodeGone branches
+  straight to serve-with-risk — no defer round-trip, no added
+  latency vs the phase-2 baseline: 2.2a's 16s bar);
+- (e) `flint.io/acked-tail-risk` is raised (the survivor may trail
+  by the catch-up delta at kill time — 2.4 accepts that bounded
+  risk, F36c makes it visible);
+- (f) the marker CLEARS on the next full-writer-set assembly after
+  replica re-placement + catch-up restores redundancy.
+The unit layer already pins the branch
+(`node_gone_serves_immediately_the_24_shape`); the drill validates
+the k8s-evidence half (Node object gone → NodeGone classification)
+live.
 
 ## Scope note
 

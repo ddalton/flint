@@ -143,6 +143,25 @@ pub struct EpochEntry {
     pub recorded_at: String,
 }
 
+/// Legs of the LAST serving assembly (F36c,
+/// docs/f36c-assembly-freshness-gate.md). For a synchronous raid1 every
+/// acknowledged write lives on every member of the serving assembly, so
+/// this set — not `last_epoch`, whose cut cadence cannot see the post-cut
+/// tail — is what separates "holds every acked write" from "in_sync but
+/// possibly trailing" at assembly time. Stamped wholesale by the
+/// assembling node BEFORE the new membership can take a write; shrunk
+/// only by `mark_stale` (a stale leg is out of the serving set by
+/// definition); grown by `mark_in_sync` (live-grow admission). A
+/// too-LARGE set only defers an assembly longer than needed; a too-SMALL
+/// set is the F36c loss vector, which is why removal has exactly one
+/// path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WriterSet {
+    pub lvol_uuids: Vec<String>,
+    /// RFC3339 time the membership last changed.
+    pub since: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VolumeSyncRecord {
     /// The volume's current common epoch name (phase 2 owns this).
@@ -165,6 +184,10 @@ pub struct VolumeSyncRecord {
     /// confirms absence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deleted_snapshots: Vec<String>,
+    /// F36c: membership of the last serving assembly. None until the first
+    /// post-F36c assembly stamps it — the freshness gate is inert then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_set: Option<WriterSet>,
     pub replicas: Vec<ReplicaSyncRecord>,
 }
 
@@ -178,6 +201,9 @@ impl VolumeSyncRecord {
             epochs: Vec::new(),
             retention_pin: None,
             deleted_snapshots: Vec::new(),
+            // No serving assembly exists yet; the first NodeStage assembly
+            // stamps the writer set (F36c gate is inert until then).
+            writer_set: None,
             replicas: replicas
                 .iter()
                 .map(|r| ReplicaSyncRecord {
@@ -231,8 +257,19 @@ impl VolumeSyncRecord {
                     })
             })
             .collect();
-        let changed = rebuilt != self.replicas;
+        let mut changed = rebuilt != self.replicas;
         self.replicas = rebuilt;
+        // F36c: prune writer-set members that left the authoritative
+        // identity list (replica replacement) — they can never attach again,
+        // so waiting on them would hold the gate open forever.
+        if let Some(ws) = &mut self.writer_set {
+            let before = ws.lvol_uuids.len();
+            ws.lvol_uuids
+                .retain(|u| replicas.iter().any(|r| r.lvol_uuid == *u));
+            if ws.lvol_uuids.len() != before {
+                changed = true;
+            }
+        }
         changed
     }
 
@@ -240,11 +277,40 @@ impl VolumeSyncRecord {
         self.replicas.iter().find(|r| r.lvol_uuid == lvol_uuid)
     }
 
+    /// F36c: stamp the serving-assembly membership wholesale (sorted,
+    /// deduplicated). `since` is preserved when the membership is unchanged
+    /// — it records when this membership began serving. Returns true if
+    /// anything changed.
+    pub fn set_writer_set(&mut self, lvol_uuids: &[String], now_rfc3339: &str) -> bool {
+        let mut uuids: Vec<String> = lvol_uuids.to_vec();
+        uuids.sort();
+        uuids.dedup();
+        match &self.writer_set {
+            Some(ws) if ws.lvol_uuids == uuids => false,
+            _ => {
+                self.writer_set = Some(WriterSet {
+                    lvol_uuids: uuids,
+                    since: now_rfc3339.to_string(),
+                });
+                true
+            }
+        }
+    }
+
+    /// F36c: the recorded serving-assembly membership. Empty when never
+    /// stamped — the freshness gate is inert then.
+    pub fn writer_uuids(&self) -> &[String] {
+        self.writer_set
+            .as_ref()
+            .map(|w| w.lvol_uuids.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Transition a replica to stale. Idempotent: an already-stale replica
     /// keeps its original timestamp/reason (they mark when divergence began).
     /// Returns true only on a real transition.
     pub fn mark_stale(&mut self, lvol_uuid: &str, reason: &str, now_rfc3339: &str) -> bool {
-        match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+        let transitioned = match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
             Some(rec) if rec.sync_state != SyncState::Stale => {
                 rec.sync_state = SyncState::Stale;
                 rec.since = Some(now_rfc3339.to_string());
@@ -252,7 +318,20 @@ impl VolumeSyncRecord {
                 true
             }
             _ => false,
+        };
+        // F36c: a stale leg is out of the serving set by definition — writes
+        // stopped reaching it. This is the ONLY writer-set removal path
+        // besides the wholesale assembly stamp (a too-small set is the F36c
+        // loss vector). Return value stays transition-only; update_sync_record
+        // persists via whole-record comparison.
+        if let Some(ws) = &mut self.writer_set {
+            let before = ws.lvol_uuids.len();
+            ws.lvol_uuids.retain(|u| u != lvol_uuid);
+            if ws.lvol_uuids.len() != before {
+                ws.since = now_rfc3339.to_string();
+            }
         }
+        transitioned
     }
 
     /// Transition a replica to standby: caught up through `last_epoch` and
@@ -327,6 +406,19 @@ impl VolumeSyncRecord {
             }
             None => return false,
         };
+        // F36c: an admitted leg joins the serving assembly and starts taking
+        // raid writes — grow the writer set. Too-large is the safe direction
+        // (it only defers a later assembly longer); the next wholesale
+        // assembly stamp trues it up. No writer_set yet = gate inert, leave
+        // it that way until an assembly stamps membership.
+        if let Some(ws) = &mut self.writer_set {
+            if !ws.lvol_uuids.iter().any(|u| u == lvol_uuid) {
+                ws.lvol_uuids.push(lvol_uuid.to_string());
+                ws.lvol_uuids.sort();
+                ws.since = now_rfc3339.to_string();
+                changed = true;
+            }
+        }
         // §10-14: the retention pin is held until ADMISSION, not copy
         // completion — retiring a standby chain's base just makes the
         // node-side epoch GC grind against the chain (the campaign's
@@ -1017,6 +1109,84 @@ mod tests {
             replica("node-b", "uuid-b"),
             replica("node-c", "uuid-c"),
         ])
+    }
+
+    // ── F36c writer set ──────────────────────────────────────────────────
+
+    #[test]
+    fn writer_set_starts_absent_and_stamps_wholesale() {
+        let mut r = three_replica_record();
+        assert!(r.writer_set.is_none());
+        assert!(r.writer_uuids().is_empty());
+        assert!(r.set_writer_set(
+            &["uuid-b".to_string(), "uuid-a".to_string(), "uuid-b".to_string()],
+            "t1"
+        ));
+        assert_eq!(r.writer_uuids(), &["uuid-a".to_string(), "uuid-b".to_string()]);
+        // Same membership again: no change, `since` keeps the original stamp.
+        assert!(!r.set_writer_set(&["uuid-a".to_string(), "uuid-b".to_string()], "t2"));
+        assert_eq!(r.writer_set.as_ref().unwrap().since, "t1");
+        // New membership re-stamps.
+        assert!(r.set_writer_set(&["uuid-a".to_string()], "t3"));
+        assert_eq!(r.writer_set.as_ref().unwrap().since, "t3");
+    }
+
+    #[test]
+    fn mark_stale_is_the_only_writer_set_removal_path() {
+        let mut r = three_replica_record();
+        r.set_writer_set(&["uuid-a".to_string(), "uuid-b".to_string()], "t1");
+        // Stale leg leaves the serving set; return value stays
+        // transition-only.
+        assert!(r.mark_stale("uuid-b", "leg failed", "t2"));
+        assert_eq!(r.writer_uuids(), &["uuid-a".to_string()]);
+        // Idempotent re-mark: no transition, set unchanged.
+        assert!(!r.mark_stale("uuid-b", "leg failed again", "t3"));
+        assert_eq!(r.writer_uuids(), &["uuid-a".to_string()]);
+    }
+
+    #[test]
+    fn mark_in_sync_grows_the_writer_set_but_never_creates_it() {
+        let mut r = three_replica_record();
+        // No writer set stamped yet: admission must NOT invent one (the
+        // gate stays inert until an assembly stamps membership).
+        r.mark_stale("uuid-b", "leg failed", "t1");
+        assert!(r.mark_in_sync("uuid-b", &epoch_name("vol1", 3), "admitted", "t2"));
+        assert!(r.writer_set.is_none());
+        // With a stamped set, live-grow admission joins it.
+        r.set_writer_set(&["uuid-a".to_string()], "t3");
+        r.mark_stale("uuid-c", "leg failed", "t4");
+        assert!(r.mark_in_sync("uuid-c", &epoch_name("vol1", 4), "admitted", "t5"));
+        assert_eq!(
+            r.writer_uuids(),
+            &["uuid-a".to_string(), "uuid-c".to_string()]
+        );
+    }
+
+    #[test]
+    fn reconcile_membership_prunes_replaced_writers() {
+        let mut r = three_replica_record();
+        r.set_writer_set(&["uuid-a".to_string(), "uuid-b".to_string()], "t1");
+        // Replica replacement: uuid-b leaves the authoritative list.
+        let changed = r.reconcile_membership(&[
+            replica("node-a", "uuid-a"),
+            replica("node-d", "uuid-d"),
+            replica("node-c", "uuid-c"),
+        ]);
+        assert!(changed);
+        assert_eq!(r.writer_uuids(), &["uuid-a".to_string()]);
+    }
+
+    #[test]
+    fn writer_set_survives_annotation_roundtrip_and_old_records_parse() {
+        let mut r = three_replica_record();
+        r.set_writer_set(&["uuid-a".to_string()], "t1");
+        let parsed = VolumeSyncRecord::from_annotation(&r.to_annotation()).unwrap();
+        assert_eq!(parsed, r);
+        // A pre-F36c record (no writer_set key) still parses, gate inert.
+        let old = three_replica_record().to_annotation();
+        assert!(!old.contains("writer_set"));
+        let parsed = VolumeSyncRecord::from_annotation(&old).unwrap();
+        assert!(parsed.writer_set.is_none());
     }
 
     fn pv_with(handle: &str, access_modes: &[&str]) -> PersistentVolume {

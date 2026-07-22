@@ -20,6 +20,15 @@ use kube::Api;
 use kube::api::ListParams;
 use k8s_openapi::api::core::v1::PersistentVolume;
 
+/// F37 opener probe verdict for a same-bdev ublk stranger (see
+/// `ublk_opener_state`). Unknown is handled like Busy: never reap blind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum UblkOpenerState {
+    Free,
+    Busy,
+    Unknown,
+}
+
 /// Minimal State Node Agent - Uses direct SPDK queries instead of CRDs
 pub struct NodeAgent {
     pub node_name: String,
@@ -2374,12 +2383,128 @@ impl NodeAgent {
     /// fallback when no kernel device exists. Registers the disk in
     /// `expected_ublk` on success so the fast loss-detector owns it.
     /// Returns true when a mutation (recover or start) happened.
+    /// F37: ids OTHER than `ublk_id` currently serving `bdev_name`. A
+    /// same-node fast recreate racing the previous consumer's NodeUnstage
+    /// leaves the old ublk id parked on the very bdev the new stage is
+    /// about to serve (drill 3.2, 2026-07-21). One bdev never legitimately
+    /// backs two ublk devices, so a same-bdev stranger is always residue —
+    /// and NO reaper owns it (the rehydrate pass skips ids whose bdev is
+    /// desired, and raid bdevs are non-attributable there). Sorted for a
+    /// deterministic reap order.
+    fn ublk_same_bdev_strangers(
+        ublk_id: u32,
+        bdev_name: &str,
+        live: &std::collections::HashMap<u32, String>,
+    ) -> Vec<u32> {
+        let mut strangers: Vec<u32> = live
+            .iter()
+            .filter(|(id, bdev)| **id != ublk_id && bdev.as_str() == bdev_name)
+            .map(|(id, _)| *id)
+            .collect();
+        strangers.sort_unstable();
+        strangers
+    }
+
+    /// F37 safety probe: a stranger may be stopped ONLY when nothing holds
+    /// it open. Absence from /proc/mounts is NOT sufficient — a lazy
+    /// `umount -l` (the F29 replay's own move) leaves an invisible mounted
+    /// fs holding the device, and ublk_stop_disk under it EIOs the live
+    /// consumer. O_EXCL open is the same probe mkfs uses: the kernel
+    /// refuses (EBUSY) while any filesystem or exclusive holder has the
+    /// device; /sys holders covers dm stacking on top.
+    fn ublk_opener_state(ublk_id: u32) -> UblkOpenerState {
+        let dev = format!("/dev/ublkb{}", ublk_id);
+        if !std::path::Path::new(&dev).exists() {
+            // No kernel node: nothing can hold it open. SPDK-side state
+            // still wants the stop, so this reads as free, not absent.
+            return UblkOpenerState::Free;
+        }
+        if let Ok(mut holders) =
+            std::fs::read_dir(format!("/sys/block/ublkb{}/holders", ublk_id))
+        {
+            if holders.next().is_some() {
+                return UblkOpenerState::Busy;
+            }
+        }
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_EXCL)
+            .open(&dev)
+        {
+            Ok(_) => UblkOpenerState::Free,
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => UblkOpenerState::Busy,
+            Err(e) => {
+                warn!(ublk_id, error = %e,
+                    "[UBLK] F37: opener probe inconclusive — treating as busy (never reap blind)");
+                UblkOpenerState::Unknown
+            }
+        }
+    }
+
     async fn ensure_ublk_disk(
         &self,
         ublk_id: u32,
         bdev_name: &str,
         live: Option<&std::collections::HashMap<u32, String>>,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        // ── F37: same-bdev stranger reap ─────────────────────────────────
+        // Runs on every ensure (fresh stage, rehydrate, detector) so the
+        // residue clears no matter which path finds it first. Racing the
+        // in-flight NodeUnstage's own stop is expected — both sides
+        // tolerate "No such device". A stranger that still has openers
+        // means the unstage's umount has not landed (or a lazy-unmounted
+        // consumer lives on): never stop it — refuse the fresh start and
+        // let the next tick retry, or, if our own id already serves, log
+        // for the runbook and leave both alone.
+        if let Some(l) = live {
+            for sid in Self::ublk_same_bdev_strangers(ublk_id, bdev_name, l) {
+                match Self::ublk_opener_state(sid) {
+                    UblkOpenerState::Free => {
+                        warn!(ublk_id, stranger = sid, bdev = %bdev_name,
+                            "[UBLK] F37: reaping same-bdev stranger id (unmounted dup from a raced unstage)");
+                        match self
+                            .disk_service
+                            .call_spdk_rpc(&json!({
+                                "method": "ublk_stop_disk",
+                                "params": { "ublk_id": sid }
+                            }))
+                            .await
+                        {
+                            Ok(_) => {}
+                            Err(e) if e.to_string().contains("No such device") => {
+                                debug!(stranger = sid,
+                                    "[UBLK] F37: stranger already gone (unstage won the race)");
+                            }
+                            Err(e) => {
+                                // No worse than the pre-F37 leak: keep the
+                                // stage available, keep the dup loudly
+                                // visible.
+                                warn!(stranger = sid, bdev = %bdev_name, error = %e,
+                                    "[UBLK] F37: stranger reap failed — duplicate id persists (manual: ublk_stop_disk)");
+                            }
+                        }
+                        self.expected_ublk.lock().await.remove(&sid);
+                    }
+                    UblkOpenerState::Busy | UblkOpenerState::Unknown => {
+                        let own_live = l.get(&ublk_id).map(|b| b == bdev_name).unwrap_or(false);
+                        if own_live {
+                            warn!(ublk_id, stranger = sid, bdev = %bdev_name,
+                                "[UBLK] F37: same-bdev stranger still has openers while our id serves — \
+                                 NOT reaping (split consumer; manual: ublk_stop_disk on the non-serving id)");
+                        } else {
+                            return Err(format!(
+                                "F37: ublk id {} still holds {} with open consumers (unstage in \
+                                 flight?) — refusing to start duplicate id {}; retrying next tick",
+                                sid, bdev_name, ublk_id
+                            )
+                            .into());
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(live_bdev) = live.and_then(|l| l.get(&ublk_id)) {
             if live_bdev == bdev_name {
                 // Already served — just make sure the detector owns it.
@@ -5095,6 +5220,51 @@ pub struct CreateMemoryDiskRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteMemoryDiskRequest {
     pub name: String,
+}
+
+#[cfg(test)]
+mod f37_tests {
+    use super::NodeAgent;
+    use std::collections::HashMap;
+
+    fn live(entries: &[(u32, &str)]) -> HashMap<u32, String> {
+        entries.iter().map(|(id, b)| (*id, b.to_string())).collect()
+    }
+
+    #[test]
+    fn stranger_on_same_bdev_is_found() {
+        // The drill 3.2 shape: old id 0 lingers on the raid bdev the new
+        // id 1 serves.
+        let l = live(&[(0, "raid_pvc_x"), (1, "raid_pvc_x")]);
+        assert_eq!(NodeAgent::ublk_same_bdev_strangers(1, "raid_pvc_x", &l), vec![0]);
+    }
+
+    #[test]
+    fn own_id_is_never_a_stranger() {
+        let l = live(&[(1, "raid_pvc_x")]);
+        assert!(NodeAgent::ublk_same_bdev_strangers(1, "raid_pvc_x", &l).is_empty());
+    }
+
+    #[test]
+    fn other_bdevs_are_not_ours_to_touch() {
+        let l = live(&[(0, "raid_pvc_OTHER"), (2, "lvol_y")]);
+        assert!(NodeAgent::ublk_same_bdev_strangers(1, "raid_pvc_x", &l).is_empty());
+    }
+
+    #[test]
+    fn multiple_strangers_reap_in_deterministic_order() {
+        let l = live(&[(7, "raid_pvc_x"), (3, "raid_pvc_x"), (1, "raid_pvc_x")]);
+        assert_eq!(
+            NodeAgent::ublk_same_bdev_strangers(1, "raid_pvc_x", &l),
+            vec![3, 7]
+        );
+    }
+
+    #[test]
+    fn empty_live_map_is_a_no_op() {
+        let l = live(&[]);
+        assert!(NodeAgent::ublk_same_bdev_strangers(1, "raid_pvc_x", &l).is_empty());
+    }
 }
 
 #[cfg(test)]

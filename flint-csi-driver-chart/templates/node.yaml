@@ -308,6 +308,13 @@ spec:
               value: "{{ .Values.blockDevice.ublk.queueDepth | default 256 }}"
             - name: NODE_AGENT_PORT
               value: "{{ .Values.healthCheck.nodeAgentPort | default 9081 }}"
+            # F36c last-writer-set assembly gate
+            # (docs/f36c-assembly-freshness-gate.md). "disabled" restores
+            # pre-F36c serve-anything degraded assembly; the defer bound is
+            # FLINT_F36C_DEFER_SECS (180) and the permanent-loss horizon is
+            # FLINT_F36C_NODE_GONE_SECS (360), both env-overridable.
+            - name: FLINT_F36C_GATE
+              value: "{{ .Values.driver.f36cGate | default "enabled" }}"
           securityContext:
             privileged: true
             capabilities:

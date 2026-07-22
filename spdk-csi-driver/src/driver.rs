@@ -1860,6 +1860,170 @@ impl SpdkCsiDriver {
             }
         }
 
+        // ── F36c: last-writer-set freshness gate ────────────────────────
+        // (docs/f36c-assembly-freshness-gate.md). For a synchronous raid1,
+        // every acked write lives on every leg of the LAST serving assembly
+        // — so assembling without one of those legs while it is only
+        // TRANSIENTLY unavailable serves a trailing lineage: the 6-write
+        // tail lost in drill 3.6 run 3. A PERMANENTLY lost writer must
+        // never manufacture an outage (drill 2.4): serve the survivor and
+        // surface the bounded risk. Ordering is load-bearing: the gate runs
+        // BEFORE the forced-stale fallback below, which is only legal once
+        // the gate has ruled the missing writers gone (or the defer
+        // deadline passed).
+        let gate_cfg = crate::freshness_gate::GateConfig::from_env();
+        const F36C_DEFER_KEY: &str = "flint.io/f36c-defer";
+        const F36C_RISK_KEY: &str = "flint.io/acked-tail-risk";
+        if gate_cfg.enabled {
+            use crate::freshness_gate::{self as gate, GateDecision, LegAvailability, MissingWriter};
+
+            // Recorded writers + claim-block corroboration: a leg whose
+            // attach failed claim-shaped WAS in the previous assembly
+            // whatever the record says — the record write may have lost the
+            // race with the node death that stranded the claim.
+            let mut writer_uuids: Vec<String> = record
+                .as_ref()
+                .map(|r| r.writer_uuids().to_vec())
+                .unwrap_or_default();
+            for (r, reason) in &unavailable_replicas {
+                if gate::is_claim_blocked(reason) && !writer_uuids.contains(&r.lvol_uuid) {
+                    writer_uuids.push(r.lvol_uuid.clone());
+                }
+            }
+
+            let attached_now: Vec<&str> = attached_in_sync
+                .iter()
+                .map(|s| s.as_str())
+                .chain(admitted_standbys.iter().map(|a| a.lvol_uuid.as_str()))
+                .collect();
+            let mut missing: Vec<MissingWriter> = Vec::new();
+            for uuid in writer_uuids.iter().filter(|u| !attached_now.contains(&u.as_str())) {
+                // Only legs still in the authoritative membership can be
+                // probed or waited for; reconcile_membership prunes the
+                // record on its next write.
+                let Some(rep) = replicas.iter().find(|r| r.lvol_uuid == *uuid) else {
+                    continue;
+                };
+                let availability = match unavailable_replicas
+                    .iter()
+                    .find(|(r, _)| r.lvol_uuid == *uuid)
+                {
+                    Some((_, reason)) if gate::is_claim_blocked(reason) => {
+                        LegAvailability::ClaimBlocked
+                    }
+                    _ => self.node_availability(&rep.node_name).await,
+                };
+                missing.push(MissingWriter {
+                    lvol_uuid: uuid.clone(),
+                    node_name: rep.node_name.clone(),
+                    availability,
+                });
+            }
+
+            if missing.is_empty() {
+                // Full writer set attached (or gate inert on this volume):
+                // clear markers left by a previous incident.
+                let annos = self
+                    .get_pv_annotations(&record_volume_id)
+                    .await
+                    .unwrap_or_default();
+                if annos.contains_key(F36C_DEFER_KEY) {
+                    self.set_pv_annotation(&record_volume_id, F36C_DEFER_KEY, None).await;
+                }
+                if annos.contains_key(F36C_RISK_KEY) && !writer_uuids.is_empty() {
+                    self.set_pv_annotation(&record_volume_id, F36C_RISK_KEY, None).await;
+                }
+            } else {
+                let now = crate::replica_sync::now_rfc3339();
+                let mut missing_uuids: Vec<String> =
+                    missing.iter().map(|m| m.lvol_uuid.clone()).collect();
+                missing_uuids.sort();
+                let annos = self
+                    .get_pv_annotations(&record_volume_id)
+                    .await
+                    .unwrap_or_default();
+                // Wall-clock defer bound, persisted so kubelet's retry
+                // cadence can't stretch it; re-armed when the missing set
+                // changes (partial progress is new evidence).
+                let deadline_passed = match annos
+                    .get(F36C_DEFER_KEY)
+                    .and_then(|v| gate::parse_defer_marker(v))
+                {
+                    Some((deadline, prev)) if prev == missing_uuids => {
+                        gate::deadline_passed(&deadline, &now)
+                    }
+                    _ => {
+                        let deadline = gate::deadline_from(&now, gate_cfg.defer_secs);
+                        self.set_pv_annotation(
+                            &record_volume_id,
+                            F36C_DEFER_KEY,
+                            Some(&gate::encode_defer_marker(&deadline, &missing_uuids)),
+                        )
+                        .await;
+                        false
+                    }
+                };
+                let detail = gate::describe_missing(&missing);
+                match gate::evaluate(&missing, deadline_passed, &gate_cfg) {
+                    GateDecision::Proceed => {}
+                    GateDecision::Defer => {
+                        println!(
+                            "⏳ [DRIVER] F36C DEFER: writer-set leg(s) transiently unavailable — \
+                             refusing to assemble from a possibly-trailing leg: {}",
+                            detail
+                        );
+                        crate::replica_sync::emit_pv_event(
+                            &self.kube_client,
+                            current_node,
+                            &record_volume_id,
+                            "Warning",
+                            "AssemblyDeferred",
+                            &format!(
+                                "F36c: deferring degraded assembly on {} — last-writer leg(s) \
+                                 transiently unavailable ({}); bound {}s, then serve-with-risk",
+                                current_node, detail, gate_cfg.defer_secs
+                            ),
+                        )
+                        .await;
+                        return Err(format!(
+                            "F36c freshness gate: last-writer leg(s) transiently unavailable ({}); \
+                             deferring assembly so the freshest leg can rejoin (bound {}s)",
+                            detail, gate_cfg.defer_secs
+                        )
+                        .into());
+                    }
+                    GateDecision::ServeWithRisk => {
+                        println!(
+                            "⚠️ [DRIVER] F36C SERVE-WITH-RISK: writer-set leg(s) permanently \
+                             unavailable (or defer bound expired) — serving reachable legs: {}",
+                            detail
+                        );
+                        self.set_pv_annotation(
+                            &record_volume_id,
+                            F36C_RISK_KEY,
+                            Some(&format!("{}|{}", now, missing_uuids.join(","))),
+                        )
+                        .await;
+                        self.set_pv_annotation(&record_volume_id, F36C_DEFER_KEY, None).await;
+                        crate::replica_sync::emit_pv_event(
+                            &self.kube_client,
+                            current_node,
+                            &record_volume_id,
+                            "Warning",
+                            "AckedTailRisk",
+                            &format!(
+                                "F36c: serving without last-writer leg(s) {} on {} — writes acked \
+                                 after the last common point may be missing until the leg(s) \
+                                 return or are replaced",
+                                detail, current_node
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+
         // Last-resort fallback: if exclusions left us below the 2-base
         // minimum, admit stale replicas rather than brick the volume —
         // exactly the pre-phase-4 behavior, still surfaced loudly via the
@@ -1942,6 +2106,30 @@ impl SpdkCsiDriver {
             println!("   Note: Unavailable replicas will be re-added when nodes recover");
         }
 
+        // Replicas deliberately left out in a healable state (standby or
+        // stale-with-catch-up-pending) must not be re-marked stale or
+        // counted as silently-admitted by the bookkeeping below.
+        let skipped: Vec<String> = deferred_standbys
+            .iter()
+            .map(|r| r.lvol_uuid.clone())
+            .filter(|u| !admitted_standbys.iter().any(|a| a.lvol_uuid == *u))
+            .chain(
+                excluded_stale
+                    .iter()
+                    .map(|(_, r)| r.lvol_uuid.clone())
+                    .filter(|u| !forced_stale.contains(u)),
+            )
+            .collect();
+
+        // F36c record-before-writes: persist the new serving membership
+        // (writer set + exclusion staleness) BEFORE the assembly can take a
+        // write. A crash between this write and raid-online leaves a record
+        // that is at worst conservative — a too-early stale mark or a
+        // too-large writer set only defers a later assembly, never loses an
+        // acked write.
+        self.record_assembly_sync_state(volume_id, replicas, &unavailable_replicas, &skipped)
+            .await;
+
         // The attaches above registered new bdevs; any that carry an old raid
         // superblock will spawn a phantom raid from the asynchronous examine
         // hook. Settle examine before looking at raid state (§3 discipline).
@@ -2008,23 +2196,6 @@ impl SpdkCsiDriver {
                 .await;
             name
         };
-
-        // Replicas deliberately left out in a healable state (standby or
-        // stale-with-catch-up-pending) must not be re-marked stale or
-        // counted as silently-admitted by the bookkeeping below.
-        let skipped: Vec<String> = deferred_standbys
-            .iter()
-            .map(|r| r.lvol_uuid.clone())
-            .filter(|u| !admitted_standbys.iter().any(|a| a.lvol_uuid == *u))
-            .chain(
-                excluded_stale
-                    .iter()
-                    .map(|(_, r)| r.lvol_uuid.clone())
-                    .filter(|u| !forced_stale.contains(u)),
-            )
-            .collect();
-        self.record_assembly_sync_state(volume_id, replicas, &unavailable_replicas, &skipped)
-            .await;
 
         Ok(raid_bdev_name)
     }
@@ -2102,15 +2273,17 @@ impl SpdkCsiDriver {
     }
 
     /// Persist the membership outcome of a raid assembly on the PV
-    /// (incremental-rebuild phase 1, §9-1). A replica excluded from the
-    /// assembly stops receiving writes the moment the degraded raid goes
-    /// online — that is the in_sync → stale transition. A stale replica
-    /// that was force-admitted (phase-4 below-minimum fallback) is surfaced
-    /// as a StaleReplicaAdmitted event. `skipped` are replicas deliberately
-    /// left out in a healable state (deferred standbys, excluded stale):
-    /// they are neither re-marked stale (a standby must keep chasing) nor
-    /// counted as admitted. Best effort: the node agent's health monitor
-    /// converges the record.
+    /// (incremental-rebuild phase 1, §9-1). Called BEFORE the assembly is
+    /// created (F36c record-before-writes): a replica excluded here stops
+    /// receiving writes the moment the degraded raid goes online — that is
+    /// the in_sync → stale transition — and the included legs become the
+    /// volume's writer set, stamped before they can take a write. A stale
+    /// replica that was force-admitted (phase-4 below-minimum fallback) is
+    /// surfaced as a StaleReplicaAdmitted event. `skipped` are replicas
+    /// deliberately left out in a healable state (deferred standbys,
+    /// excluded stale): they are neither re-marked stale (a standby must
+    /// keep chasing) nor counted as admitted. Best effort: the node agent's
+    /// health monitor converges the record.
     async fn record_assembly_sync_state(
         &self,
         volume_id: &str,
@@ -2159,6 +2332,11 @@ impl SpdkCsiDriver {
                     newly_stale.push(uuid.clone());
                 }
             }
+            // F36c: `included` is exactly the membership of the assembly
+            // about to be created (in-sync attachers, stage-admitted
+            // standbys, forced-stale admissions) — stamp it as the writer
+            // set before it can take a write.
+            record.set_writer_set(&included, &now);
         })
         .await;
 
@@ -2320,6 +2498,58 @@ impl SpdkCsiDriver {
                 "⚠️ [DRIVER] PV annotation patch failed ({}={:?} on {}): {}",
                 key, value, pv_name, e
             );
+        }
+    }
+
+    /// Read a PV's annotations. Best effort: None on API error or missing
+    /// PV — callers treat that as "no markers".
+    pub async fn get_pv_annotations(
+        &self,
+        pv_name: &str,
+    ) -> Option<std::collections::BTreeMap<String, String>> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        pvs.get_opt(pv_name)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|pv| pv.metadata.annotations)
+    }
+
+    /// F36c permanent-vs-transient evidence for a missing writer's node.
+    /// An API blip reads as NodeReady (transient): deferring while blind is
+    /// the bounded-safe direction — the defer deadline caps it. F33 caveat
+    /// (Ready node, dead tgt) is likewise absorbed by the deadline, not by
+    /// trusting Ready as proof of anything beyond "not permanently gone".
+    async fn node_availability(&self, node_name: &str) -> crate::freshness_gate::LegAvailability {
+        use crate::freshness_gate::LegAvailability;
+        let nodes: Api<k8sNode> = Api::all(self.kube_client.clone());
+        match nodes.get_opt(node_name).await {
+            Err(_) => LegAvailability::NodeReady,
+            Ok(None) => LegAvailability::NodeGone,
+            Ok(Some(node)) => {
+                let ready = node
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.conditions.as_ref())
+                    .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"));
+                match ready {
+                    Some(c) if c.status == "True" => LegAvailability::NodeReady,
+                    Some(c) => {
+                        let not_ready_secs = c
+                            .last_transition_time
+                            .as_ref()
+                            .map(|t| {
+                                (chrono::Utc::now().timestamp() - t.0.as_second()).max(0) as u64
+                            })
+                            .unwrap_or(0);
+                        LegAvailability::NodeNotReady { not_ready_secs }
+                    }
+                    // No Ready condition at all (node just registered):
+                    // treat as freshly NotReady — transient, deadline-bounded.
+                    None => LegAvailability::NodeNotReady { not_ready_secs: 0 },
+                }
+            }
         }
     }
 
