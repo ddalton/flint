@@ -496,7 +496,7 @@ async fn scheduler_tick(driver: &Arc<SpdkCsiDriver>, cfg: &EpochConfig) -> Resul
         // the window (Tier-2 7b-2 / design item 4). Defer one tick. The
         // chase and cutover claims do NOT defer cuts — their machinery
         // consumes the epoch stream and stalling it starves them.
-        if crate::volume_claims::global().holder(&volume_id)
+        if crate::volume_claims::global().holder(&volume_id).map(|(op, _)| op)
             == Some(crate::volume_claims::OP_HOT_REJOIN)
         {
             debug!(volume_id, "[EPOCH] Hot rejoin in progress — deferring this volume's cut");

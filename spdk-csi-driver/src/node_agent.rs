@@ -2117,6 +2117,24 @@ impl NodeAgent {
 
         debug!(volume_id, ublk_id, force, "[HTTP_API] Force unstage request");
 
+        // Contract R2: force-unstage is controller-driven (DeleteVolume
+        // defensive cleanup), never reached from a locked CSI path —
+        // serialize it against stage/unstage/repair on this volume.
+        let _volume_guard = match crate::node_volume_locks::acquire(
+            crate::identity::storage_id_of_handle(volume_id),
+        )
+        .await
+        {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(volume_id, error = %e, "[FORCE_UNSTAGE] volume lock busy — retry later");
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&json!({ "success": false, "error": e })),
+                    StatusCode::CONFLICT,
+                ));
+            }
+        };
+
         let mut was_staged = false;
         let mut operations_performed = Vec::new();
 
@@ -4644,6 +4662,15 @@ impl NodeAgent {
         pv: &PersistentVolume,
         volume_handle: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Contract R2: the repair is a probe→mutate window over the same
+        // chain NodeStage/NodeUnstage mutate — serialize with them. A busy
+        // lock means a stage/unstage is mid-flight; skip this tick (the
+        // detector re-strikes).
+        let _volume_guard = crate::node_volume_locks::acquire(
+            crate::identity::storage_id_of_handle(volume_handle),
+        )
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
         let pv_name = pv.metadata.name.as_deref().unwrap_or(volume_handle);
         // ublk frontend: with UBLK_F_USER_RECOVERY (kernel 6.18+, SPDK
         // v26.05) the kernel device SURVIVES spdk-tgt death quiesced and
@@ -5144,6 +5171,23 @@ impl NodeAgent {
         &self,
         volume_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Contract R1: capture the chain generation at decision time (the
+        // caller just read the VA); re-checked immediately before the
+        // destructive commit below. A bump in between means an attach was
+        // granted mid-decision — the raid is about to stop being a phantom.
+        let gen_at_decision = match crate::replica_sync::read_chain_generation(
+            &self.driver.kube_client,
+            volume_id,
+        )
+        .await
+        {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(volume_id, error = %e,
+                    "[RECONCILE] chain-gen read failed — skipping phantom hygiene this tick (fail closed)");
+                return Ok(());
+            }
+        };
         let raid_name = crate::identity::raid_name(volume_id);
         let list = json!({ "method": "bdev_raid_get_bdevs", "params": { "category": "all" } });
         let response = self.disk_service.call_spdk_rpc(&list).await?;
@@ -5207,6 +5251,22 @@ impl NodeAgent {
             warn!(volume_id, reason = %reason,
                 "[RECONCILE] guarded_destroy blocked phantom-raid delete");
             return Ok(());
+        }
+
+        // Contract R1 pre-commit re-check: refuse when the generation moved.
+        match crate::replica_sync::read_chain_generation(&self.driver.kube_client, volume_id).await
+        {
+            Ok(g) if g == gen_at_decision => {}
+            Ok(g) => {
+                warn!(volume_id, ?gen_at_decision, current = ?g,
+                    "[RECONCILE] chain-gen changed mid-decision — attach granted; phantom delete refused this tick");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(volume_id, error = %e,
+                    "[RECONCILE] chain-gen re-read failed — phantom delete refused this tick (fail closed)");
+                return Ok(());
+            }
         }
 
         let mut params = json!({ "name": raid_name });

@@ -1985,10 +1985,18 @@ impl SpdkCsiDriver {
                 let mut missing_uuids: Vec<String> =
                     missing.iter().map(|m| m.lvol_uuid.clone()).collect();
                 missing_uuids.sort();
-                let annos = self
-                    .get_pv_annotations(&record_volume_id)
-                    .await
-                    .unwrap_or_default();
+                // Fail CLOSED on marker-state fetch error (C5): an API
+                // blip must not read as "no marker" — that re-arms the
+                // defer deadline and silently stretches the loss bound.
+                let annos = match self.get_pv_annotations_checked(&record_volume_id).await {
+                    Ok(a) => a.unwrap_or_default(),
+                    Err(e) => {
+                        return Err(format!(
+                            "F36c: defer-marker state unreadable ({e}) — deferring assembly                              rather than re-arming the deadline blind"
+                        )
+                        .into());
+                    }
+                };
                 // Wall-clock defer bound, persisted so kubelet's retry
                 // cadence can't stretch it; re-armed when the missing set
                 // changes (partial progress is new evidence).
@@ -2573,13 +2581,24 @@ impl SpdkCsiDriver {
         &self,
         pv_name: &str,
     ) -> Option<std::collections::BTreeMap<String, String>> {
+        self.get_pv_annotations_checked(pv_name).await.ok().flatten()
+    }
+
+    /// Error-surfacing variant: Err = the API call FAILED and nothing may be
+    /// concluded about marker state (C5 residual: the F36c gate's
+    /// unwrap_or_default read let an API blip read as "no defer marker" and
+    /// silently re-arm the loss deadline).
+    pub async fn get_pv_annotations_checked(
+        &self,
+        pv_name: &str,
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, String> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
-        pvs.get_opt(pv_name)
+        Ok(pvs
+            .get_opt(pv_name)
             .await
-            .ok()
-            .flatten()
-            .and_then(|pv| pv.metadata.annotations)
+            .map_err(|e| format!("PV {} annotations fetch failed: {e}", pv_name))?
+            .and_then(|pv| pv.metadata.annotations))
     }
 
     /// F36c permanent-vs-transient evidence for a missing writer's node.

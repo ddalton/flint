@@ -1094,6 +1094,100 @@ pub async fn emit_pv_event(
     }
 }
 
+/// ── Chain generation (contract R1, wave-2 item 9) ──────────────────────
+/// A monotonic per-volume authority counter in its OWN annotation key —
+/// deliberately separate from the sync record, whose unparseable-rebuild
+/// path silently resets to initial (a corrupt record write must not reset
+/// the generation). Bumped BEFORE any authority change (ControllerPublish
+/// attach grant); multi-step destructive flows capture it at decision time
+/// and re-check before commit — a bump in between means the authority
+/// changed under them and the destruction is refused (C3's TOCTOU closure:
+/// correctness rests on this CAS token, clocks only affect availability).
+pub const CHAIN_GEN_ANNOTATION: &str = "flint.io/chain-gen";
+
+/// Pure bump rule: absent → 1; parseable → +1; corrupt → refuse (fail
+/// closed — a corrupted authority counter is manual-intervention territory,
+/// never silently re-minted).
+pub fn next_chain_generation(current: Option<&str>) -> Result<u64, String> {
+    match current {
+        None => Ok(1),
+        Some(s) => s
+            .trim()
+            .parse::<u64>()
+            .map(|g| g.saturating_add(1))
+            .map_err(|_| format!("chain-gen annotation is corrupt ({s:?}) — refusing to re-mint")),
+    }
+}
+
+pub async fn read_chain_generation(
+    client: &kube::Client,
+    volume_id: &str,
+) -> Result<Option<u64>, String> {
+    use k8s_openapi::api::core::v1::PersistentVolume;
+    let pvs: kube::Api<PersistentVolume> = kube::Api::all(client.clone());
+    let pv = pvs
+        .get(record_pv_name(volume_id))
+        .await
+        .map_err(|e| format!("chain-gen read: PV get failed: {e}"))?;
+    match pv
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(CHAIN_GEN_ANNOTATION))
+    {
+        None => Ok(None),
+        Some(s) => s
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| format!("chain-gen annotation is corrupt ({s:?})")),
+    }
+}
+
+/// Bump with resourceVersion CAS + bounded backoff (C5: 3 bare attempts is
+/// thin for a write that gates attach grants — this one backs off).
+pub async fn bump_chain_generation(
+    client: &kube::Client,
+    volume_id: &str,
+) -> Result<u64, String> {
+    use k8s_openapi::api::core::v1::PersistentVolume;
+    use kube::api::{Patch, PatchParams};
+    let pvs: kube::Api<PersistentVolume> = kube::Api::all(client.clone());
+    let pv_name = record_pv_name(volume_id);
+    for attempt in 0..5u32 {
+        let pv = pvs
+            .get(pv_name)
+            .await
+            .map_err(|e| format!("chain-gen bump: PV get failed: {e}"))?;
+        let current = pv
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(CHAIN_GEN_ANNOTATION))
+            .map(|s| s.as_str());
+        let next = next_chain_generation(current)?;
+        let rv = pv.metadata.resource_version.clone();
+        let patch = serde_json::json!({
+            "metadata": {
+                "resourceVersion": rv,
+                "annotations": { CHAIN_GEN_ANNOTATION: next.to_string() }
+            }
+        });
+        match pvs
+            .patch(pv_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+        {
+            Ok(_) => return Ok(next),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                continue;
+            }
+            Err(e) => return Err(format!("chain-gen bump: patch failed: {e}")),
+        }
+    }
+    Err("chain-gen bump: CAS contention exhausted 5 attempts".to_string())
+}
+
 pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

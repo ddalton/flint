@@ -2432,6 +2432,12 @@ async fn hot_rejoin_tick(
             let Some(claim) = crate::volume_claims::global()
                 .try_claim(&volume_id, crate::volume_claims::OP_HOT_REJOIN)
             else {
+                // F39: starvation must be visible — log holder + age.
+                crate::volume_claims::log_claim_skip(
+                    &volume_id,
+                    crate::volume_claims::OP_HOT_REJOIN,
+                    crate::volume_claims::global(),
+                );
                 continue;
             };
             let driver = driver.clone();
@@ -2473,7 +2479,11 @@ async fn hot_rejoin_tick(
                 let Some(claim) = crate::volume_claims::global()
                     .try_claim(&volume_id, crate::volume_claims::OP_HOT_REJOIN)
                 else {
-                    tracing::debug!(volume_id, "[HOT_REJOIN] Volume claimed by another operation — deferring");
+                    crate::volume_claims::log_claim_skip(
+                        &volume_id,
+                        crate::volume_claims::OP_HOT_REJOIN,
+                        crate::volume_claims::global(),
+                    );
                     continue;
                 };
                 let consumer = view

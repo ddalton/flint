@@ -55,6 +55,11 @@ spec:
               value: "enabled"
             - name: FLINT_HOT_REJOIN
               value: "enabled"
+            # Contract R4: the cutover bounce is the escalation ladder's
+            # terminal rung — default ON since wave 2 (it was default-off
+            # and starved through F38). Set cutover.enabled=false to opt out.
+            - name: FLINT_CUTOVER
+              value: {{ if eq (toString (.Values.replication.cutover).enabled | default "true") "false" }}"disabled"{{ else }}"enabled"{{ end }}
             - name: FLINT_EPOCH_INTERVAL_SECS
               value: {{ .Values.replication.orchestrators.epochIntervalSecs | default 300 | quote }}
             # U11 replica re-placement: swaps a leg off a permanently-lost

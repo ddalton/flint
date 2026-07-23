@@ -165,7 +165,10 @@ pub fn raid_collapse_verdict(
 
 #[derive(Debug, Clone)]
 pub struct CutoverConfig {
-    /// FLINT_CUTOVER=enabled — default off.
+    /// FLINT_CUTOVER — DEFAULT ON since wave 2 (contract R4): the bounce
+    /// is the escalation ladder's terminal rung, and shipping it default-off
+    /// while the repair loops that starve it ran default-on was exactly the
+    /// F38(c) starvation. Disable with FLINT_CUTOVER=disabled.
     pub enabled: bool,
     /// Minimum wall clock between bounce attempts for one volume, and the
     /// window after which an unverified bounce is declared ineffective.
@@ -191,7 +194,7 @@ pub struct CutoverConfig {
 impl Default for CutoverConfig {
     fn default() -> Self {
         CutoverConfig {
-            enabled: false,
+            enabled: true,
             cooldown: Duration::from_secs(900),
             max_lag: 1,
             detach_timeout: Duration::from_secs(120),
@@ -207,9 +210,9 @@ impl CutoverConfig {
         CutoverConfig {
             enabled: std::env::var("FLINT_CUTOVER")
                 .map(|v| {
-                    v.eq_ignore_ascii_case("enabled")
-                        || v.eq_ignore_ascii_case("true")
-                        || v == "1"
+                    !(v.eq_ignore_ascii_case("disabled")
+                        || v.eq_ignore_ascii_case("false")
+                        || v == "0")
                 })
                 .unwrap_or(d.enabled),
             cooldown: std::env::var("FLINT_CUTOVER_COOLDOWN_SECS")
@@ -975,7 +978,14 @@ async fn cutover_tick(
                 let Some(_claim) = crate::volume_claims::global()
                     .try_claim(&volume_id, crate::volume_claims::OP_CUTOVER)
                 else {
-                    debug!(volume_id, "[CUTOVER] Volume claimed by another operation — deferring bounce");
+                    // F39: a wedged catch-up claim silently starved the
+                    // BOUNCE — the terminal escalation — for the whole
+                    // incident. Never below info again.
+                    crate::volume_claims::log_claim_skip(
+                        &volume_id,
+                        crate::volume_claims::OP_CUTOVER,
+                        crate::volume_claims::global(),
+                    );
                     continue;
                 };
                 let standbys: Vec<String> = view

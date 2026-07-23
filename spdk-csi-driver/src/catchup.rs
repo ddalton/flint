@@ -1244,14 +1244,33 @@ async fn ensure_dst_attached(
         let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
         let name = raid.get("name").and_then(|n| n.as_str()).unwrap_or("");
         if state == "online" {
-            // ONLINE examine re-added the stale replica to the live raid —
-            // a blind full rebuild is running. Do not fight it.
-            return Err(format!(
-                "catch-up destination {} was admitted to ONLINE raid {} on {} — aborting \
-                 (stock SPDK is blind-rebuilding it; see doc §3)",
-                expected, name, src_node
-            )
-            .into());
+            // ONLINE examine re-added the stale replica to a raid. Pre-F39
+            // this was a permanent abort-and-retry livelock: the blind
+            // rebuild held the leg and every cycle burned the preamble into
+            // the same wall. Now: attempt the delete THROUGH the guarded
+            // boundary, which probes for live frontends — a live consumer
+            // raid (ublk/export with controllers) refuses the delete and we
+            // abort as before (never fight a serving raid); a zombie blind
+            // rebuild with no frontend is torn down so the cycle converges.
+            let delete = json!({ "method": "bdev_raid_delete", "params": { "name": name } });
+            match rpc.spdk_rpc(src_node, &delete).await {
+                Ok(_) => {
+                    tracing::warn!(
+                        volume_id, raid = %name, node = %src_node,
+                        "[CATCHUP] tore down zombie ONLINE raid that had blind-admitted the catch-up destination (F39); continuing the cycle"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "catch-up destination {} was admitted to ONLINE raid {} on {} — aborting \
+                         (guarded teardown declined: {}; if it is a live consumer raid this is \
+                         correct — see doc §3)",
+                        expected, name, src_node, e
+                    )
+                    .into());
+                }
+            }
         }
         // CONFIGURING phantom claiming the destination: release the claim.
         // No clear_sb here — the phantom's bases can include this node's
@@ -1308,6 +1327,24 @@ pub(crate) async fn shallow_copy(
         .and_then(|o| o.as_u64())
         .ok_or_else(|| format!("shallow copy of {} returned no operation_id", src_lvol))?;
 
+    // F39: the background paths pass deadline=None, and pre-fix this loop
+    // polled a copy stuck "in progress" FOREVER while holding the volume
+    // claim — starving catch-up, hot-rejoin, and the cutover bounce. A
+    // wall-clock cap would kill legitimate multi-hour bulk copies, so the
+    // bound is PROGRESS: copied_clusters must move within the stall budget
+    // or the copy is declared wedged and the cycle errors — through the
+    // normal error path, so every existing cleanup (claim release, record
+    // state, controller detach) runs exactly as for any failed copy.
+    let stall_budget = Duration::from_secs(
+        std::env::var("FLINT_COPY_STALL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&s| s > 0)
+            .unwrap_or(600),
+    );
+    let mut last_copied: Option<u64> = None;
+    let mut last_progress = Instant::now();
+
     loop {
         let check = json!({
             "method": "bdev_lvol_check_shallow_copy",
@@ -1323,6 +1360,21 @@ pub(crate) async fn shallow_copy(
                         "final-delta budget exceeded while copying {} (copy abandoned mid-flight; \
                          the chase re-copy converges it)",
                         src_lvol
+                    )
+                    .into());
+                }
+                let copied = result.get("copied_clusters").and_then(|c| c.as_u64());
+                if copied != last_copied {
+                    last_copied = copied;
+                    last_progress = Instant::now();
+                } else if last_progress.elapsed() >= stall_budget {
+                    return Err(format!(
+                        "shallow copy of {} stalled: no cluster progress for {}s \
+                         (copied_clusters stuck at {:?}) — declaring the copy wedged (F39); \
+                         the cycle's failure path cleans up and the next cycle re-copies",
+                        src_lvol,
+                        stall_budget.as_secs(),
+                        last_copied
                     )
                     .into());
                 }
@@ -1750,11 +1802,24 @@ async fn catchup_stale(
     )
     .await?;
 
-    let newest = copy_chain_and_align(
+    let newest = match copy_chain_and_align(
         rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, base.as_deref(),
         cfg.poll_interval, None,
     )
-    .await?;
+    .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            // C6: a failed (or stalled — F39) copy leaves an enabled copy
+            // controller whose connection head_live_consumer counts as a
+            // live consumer, wedging the replica stale forever
+            // (ReplicaHeadInUse every tick). Always sever the copy path on
+            // failure; the next cycle's ensure_dst_attached re-attaches.
+            let controller = dst_bdev.strip_suffix("n1").unwrap_or(&dst_bdev).to_string();
+            detach_controller(rpc, &src.node_name, &controller).await;
+            return Err(e);
+        }
+    };
 
     store
         .record_standby(volume_id, &rec.lvol_uuid, &newest)
@@ -1850,11 +1915,20 @@ async fn chase_standby(
         rpc, volume_id, index, identity, &head_alias, &live_uuid, &src.node_name, raid_name,
     )
     .await?;
-    let newest = copy_chain_and_align(
+    let newest = match copy_chain_and_align(
         rpc, volume_id, record, src, identity, &head_alias, &dst_bdev, Some(base),
         cfg.poll_interval, None,
     )
-    .await?;
+    .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            // C6: sever the copy path on failure/stall (see catchup_stale).
+            let controller = dst_bdev.strip_suffix("n1").unwrap_or(&dst_bdev).to_string();
+            detach_controller(rpc, &src.node_name, &controller).await;
+            return Err(e);
+        }
+    };
     store.record_standby(volume_id, &rec.lvol_uuid, &newest).await?;
     info!(volume_id, node = %identity.node_name, through = %newest, "[CATCHUP] Standby chased to latest epoch");
     Ok(())
@@ -2152,11 +2226,23 @@ async fn admit_one_standby(
         rpc, volume_id, index, identity, &head_alias, &live_uuid, &src.node_name, raid_name,
     )
     .await?;
-    let newest = copy_chain_and_align(
+    let newest = match copy_chain_and_align(
         rpc, volume_id, &record, src, identity, &head_alias, &dst_bdev, Some(&base),
         cfg.poll_interval, Some(deadline),
     )
-    .await?;
+    .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            // C6: the deadline-abandon path previously left the copy
+            // controller attached ("the chase re-copy converges") — but an
+            // enabled controller wedges the F36 guard (ReplicaHeadInUse).
+            // Sever it; the chase's ensure_dst_attached re-attaches.
+            let controller = dst_bdev.strip_suffix("n1").unwrap_or(&dst_bdev).to_string();
+            detach_controller(rpc, &src.node_name, &controller).await;
+            return Err(e);
+        }
+    };
 
     // Admission order is load-bearing (module note): record in_sync —
     // clearing the write-virgin marker — BEFORE the head joins the raid.
@@ -2405,12 +2491,27 @@ async fn orchestrator_tick(
         let Some(claim) = crate::volume_claims::global()
             .try_claim(&volume_id, crate::volume_claims::OP_CATCHUP)
         else {
-            continue; // a previous cycle, a cutover, or a hot rejoin holds it
+            // F39: starvation must be visible — log holder + age.
+            crate::volume_claims::log_claim_skip(
+                &volume_id,
+                crate::volume_claims::OP_CATCHUP,
+                crate::volume_claims::global(),
+            );
+            continue;
         };
         let driver = driver.clone();
         let cfg = cfg.clone();
         let replace_cfg = replace_cfg.clone();
         let consumer = consumers.get(&volume_id).cloned();
+        // F39 boundedness: this task carries NO wall-clock watchdog by
+        // design. Every await inside is individually bounded (SPDK RPC
+        // deadlines, kube client timeouts, HTTP client timeouts) and the one
+        // unbounded LOOP — the shallow-copy poll — is progress-bounded
+        // (FLINT_COPY_STALL_SECS): a wedge surfaces as a normal in-task
+        // error, so every Err-branch cleanup (copy-controller detach,
+        // placeholder unwind, back-off writes) runs and the claim releases.
+        // A wall-clock cap would kill legitimate multi-hour bulk copies
+        // that ARE making progress — exactly the wrong trade.
         tokio::spawn(async move {
             let _claim = claim; // released when this task ends, however it ends
             let store = KubeStore { client: driver.kube_client.clone() };
@@ -3230,11 +3331,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_dst_attached_aborts_when_online_raid_claims_dst() {
+    async fn ensure_dst_attached_tears_down_zombie_online_raid_and_converges() {
+        // F39: a zombie ONLINE raid blind-admitting the destination used to
+        // abort every cycle forever. The guarded teardown (boundary refuses
+        // live consumer raids; the FakeRpc delete succeeds = zombie) now
+        // clears it and the cycle proceeds.
         let rpc = FakeRpc::new("uuid-b-v2");
         let expected = expected_remote_base_bdev("vol1", 1);
-        // The consumer raid on the source node re-added the attached bdev
-        // (ONLINE examine, §3) — a blind rebuild is running.
+        rpc.raids.lock().unwrap().insert(
+            "node-a".to_string(),
+            vec![json!({ "name": "raid_vol1", "state": "online",
+                         "base_bdevs_list": [{ "name": expected }] })],
+        );
+        let dst = replica("node-b", "uuid-b");
+        let bdev = ensure_dst_attached(
+            &rpc, "vol1", 1, &dst, "lvs0/lvol-uuid-b", "uuid-b-v2", "node-a", "raid_vol1",
+        )
+        .await
+        .expect("zombie torn down, cycle converges");
+        assert_eq!(bdev, expected);
+        let deletes: Vec<_> = rpc
+            .calls_of("bdev_raid_delete")
+            .into_iter()
+            .filter(|(node, _)| node == "node-a")
+            .collect();
+        assert_eq!(deletes.len(), 1, "exactly one zombie teardown");
+    }
+
+    #[tokio::test]
+    async fn ensure_dst_attached_aborts_when_zombie_teardown_is_refused() {
+        // The guarded boundary refuses the delete (live consumer raid — the
+        // do-not-fight case): abort as before, retried next tick.
+        let mut rpc = FakeRpc::new("uuid-b-v2");
+        rpc.fail.insert(
+            ("node-a".to_string(), "bdev_raid_delete".to_string()),
+            "guarded_destroy: raid is served by ublk disk 3 — deleting it hot-removes the block device under a mounted filesystem (D2)".to_string(),
+        );
+        let expected = expected_remote_base_bdev("vol1", 1);
         rpc.raids.lock().unwrap().insert(
             "node-a".to_string(),
             vec![json!({ "name": "raid_vol1", "state": "online",
@@ -3247,6 +3380,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("ONLINE raid"), "got: {}", err);
+        assert!(err.to_string().contains("guarded teardown declined"), "got: {}", err);
     }
 
     #[tokio::test]

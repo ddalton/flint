@@ -1661,6 +1661,32 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             ));
         }
 
+        // Contract R1: generation-before-authority. Publishing IS the attach
+        // grant — bump the chain generation FIRST, so any destructive flow
+        // that captured the prior generation (phantom hygiene, guarded
+        // unstage) fails its pre-commit re-check instead of destroying a
+        // chain the new consumer is about to build on. Best-effort on a
+        // MISSING PV (statically provisioned edge), gating on API errors —
+        // an ungranted retry beats an unfenced grant.
+        match spdk_csi_driver::replica_sync::bump_chain_generation(
+            &self.driver.kube_client,
+            &actual_volume_id,
+        )
+        .await
+        {
+            Ok(gen) => {
+                println!("🔢 [CONTROLLER] chain-gen bumped to {} before attach grant", gen);
+            }
+            Err(e) if e.contains("PV get failed") && e.contains("NotFound") => {
+                println!("ℹ️ [CONTROLLER] chain-gen skipped (no PV object): {}", e);
+            }
+            Err(e) => {
+                return Err(tonic::Status::unavailable(format!(
+                    "chain-gen bump failed before attach grant (retryable): {e}"
+                )));
+            }
+        }
+
         // Check if this is a ROX (ReadOnlyMany) or RWX (ReadWriteMany) volume
         let is_rox = req.volume_capability.as_ref()
             .and_then(|cap| cap.access_mode.as_ref())
@@ -2277,6 +2303,18 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let publish_context = req.publish_context.clone();
         let volume_context = req.volume_context.clone();
         
+        // Contract R2: serialize stage against unstage and the background
+        // repair on this volume (probe→mutate window). Kill switch
+        // FLINT_VOLUME_LOCK; bounded acquire surfaces as a retryable error
+        // well inside kubelet's CSI deadline. NESTING RULE: HTTP handlers
+        // the staging path reaches (via call_node_agent to self) must never
+        // acquire — see node_volume_locks.rs.
+        let _volume_guard = spdk_csi_driver::node_volume_locks::acquire(
+            spdk_csi_driver::identity::storage_id_of_handle(&volume_id),
+        )
+        .await
+        .map_err(tonic::Status::aborted)?;
+
         // Handle synthetic volumeHandle for NFS PVs
         // NFS PV uses "nfs-server-{original_volume_id}" to avoid conflicts.
         // Storage id derived from the HANDLE (identity Phase 1, audit L5);
@@ -3031,6 +3069,13 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let volume_id = req.volume_id.clone();
         let staging_target_path = req.staging_target_path.clone();
         
+        // Contract R2: same serialization as NodeStageVolume.
+        let _volume_guard = spdk_csi_driver::node_volume_locks::acquire(
+            spdk_csi_driver::identity::storage_id_of_handle(&volume_id),
+        )
+        .await
+        .map_err(tonic::Status::aborted)?;
+
         // Handle synthetic volumeHandle for NFS PVs (same rule as
         // NodeStageVolume; context-free RPC, so the handle is the source).
         let actual_volume_id =
