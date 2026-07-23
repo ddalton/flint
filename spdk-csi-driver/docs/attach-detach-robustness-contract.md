@@ -257,6 +257,20 @@ genuine staleness as the visible EPERM retry.
 
 ### Wave 2 — v1.20.0: generation, locks, homing, escalation, compensation
 
+**STATUS: IMPLEMENTED 2026-07-22 (all items; 818 lib tests green). Both
+waves + the F39 completion ship in ONE image per the 2026-07-22 decision;
+live validation covers everything together.** Notes: the copy watchdog is
+PROGRESS-based (FLINT_COPY_STALL_SECS), not wall-clock — in-task errors
+make every existing Err-branch cleanup serve as structured cancellation,
+so no hard aborts exist to compensate; generation TOCTOU re-checks are
+wired into phantom hygiene (capture at decision, re-check pre-commit);
+the volume lock carries the FLINT_VOLUME_LOCK kill switch and the
+documented NESTING RULE (self-HTTP handlers never acquire); degraded-
+direct now homes solely on the user-PV record (rc3 dual-write retired,
+legacy-copy hygiene at clear); the data-path-lost flag embeds its episode
+clock ("node|since") so controller restarts cannot re-starve the bounce;
+FLINT_CUTOVER is default-ON (opt-out), chart-wired.
+
 | # | Change | Effort | Closes |
 |---|--------|--------|--------|
 | 9 | `flint.io/chain-gen` as separate CAS-co-written key; bump-before-attach; chokepoint re-reads before commit; r1 early-return lifted; CAS backoff | M | cross-node TOCTOU; corrupt-record generation reset |

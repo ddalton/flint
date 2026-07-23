@@ -2199,18 +2199,12 @@ impl SpdkCsiDriver {
         // consumer-blindness monitor doesn't strike-and-repair against the
         // missing raid; the annotation clears on the next >=2-leg assembly
         // (replica re-placement is the follow-up that restores redundancy).
-        // The consumer-blindness monitor reads the degraded-direct exemption
-        // from the PV it examines: the BACKING PV for RWX (it skips RWX user
-        // PVs via is_rwx_pv), the user PV for RWO. rc1/rc2 wrote it only to
-        // the user PV, so an RWX single-survivor direct serve entered the
-        // monitor's destructive repair loop within 3 strikes — the F38
-        // enabler found live on runaa (docs/f38-reentry-export-drop.md).
-        // Write where the monitor reads; keep the user-PV copy for
-        // operators/dashboards.
-        let monitor_pv = match crate::identity::parse_backing_handle(volume_id) {
-            Some(storage_id) => crate::identity::backing_pv_name(storage_id),
-            None => record_volume_id.clone(),
-        };
+        // Annotation homing (C5, wave 2): the degraded-direct exemption is
+        // written ONCE, on the volume's record-home PV (the user PV). The
+        // monitor resolves the same home via storage_id_of_handle from
+        // whichever PV object it examines — setter/reader asymmetry (the
+        // F32 class; the F38 enabler; the rc3 dual-write) is structurally
+        // gone because there is only one location to disagree about.
         let raid_bdev_name = if base_bdevs.len() == 1 && total_replicas > 1 {
             let direct = base_bdevs.into_iter().next().unwrap();
             println!(
@@ -2220,10 +2214,6 @@ impl SpdkCsiDriver {
             );
             self.set_pv_annotation(&record_volume_id, "flint.io/degraded-direct", Some(current_node))
                 .await;
-            if monitor_pv != record_volume_id {
-                self.set_pv_annotation(&monitor_pv, "flint.io/degraded-direct", Some(current_node))
-                    .await;
-            }
             crate::replica_sync::emit_pv_event(
                 &self.kube_client,
                 current_node,
@@ -2265,8 +2255,12 @@ impl SpdkCsiDriver {
             }
             self.set_pv_annotation(&record_volume_id, "flint.io/degraded-direct", None)
                 .await;
-            if monitor_pv != record_volume_id {
-                self.set_pv_annotation(&monitor_pv, "flint.io/degraded-direct", None).await;
+            // Mid-upgrade hygiene: clear any rc3-era copy on the backing PV
+            // so the monitor's transition fallback can't keep exempting a
+            // volume that regained its raid.
+            if let Some(storage_id) = crate::identity::parse_backing_handle(volume_id) {
+                let legacy = crate::identity::backing_pv_name(storage_id);
+                self.set_pv_annotation(&legacy, "flint.io/degraded-direct", None).await;
             }
             name
         };

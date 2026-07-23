@@ -92,6 +92,13 @@ pub struct SweepInput {
     /// Names of every PV currently in the cluster (from a successful
     /// full list — the caller must skip the sweep on a list error).
     pub existing_pvs: HashSet<String>,
+    /// Per-volume KNOWN replica lvol uuids: identity uuids ∪ the sync
+    /// record's live/active/reverted uuids. Feeds the stranded-placeholder
+    /// rule (C6): a `vol_<vol>_replica_<i>`-shaped lvol whose PV EXISTS but
+    /// whose uuid is unknown to that PV is an abort-stranded replacement
+    /// placeholder — PV-absence authority can never condemn it. Volumes
+    /// absent from this map are exempt (no record evidence → never guess).
+    pub pv_known_replica_uuids: std::collections::HashMap<String, HashSet<String>>,
 }
 
 /// What to delete this cycle, in order: subsystems first (their
@@ -132,6 +139,29 @@ pub fn plan_sweep(
                 condemned_aliases.push(lvol.alias());
             }
             Some(Owner::Ephemeral) => eph_lvols.push(lvol),
+            Some(Owner::Pv(id)) => {
+                // Stranded-placeholder rule (C6, wave 2): the PV exists, the
+                // name is replica-shaped, but no record (identity, active
+                // head, revert) knows this uuid — a replacement placeholder
+                // whose adopting PV patch never landed. Three strikes like
+                // every uncertain condemnation; operation-scoped shapes
+                // (_hr scratch heads, _hrpad pads) are lease-owned, exempt.
+                let replica_shaped = lvol.name.contains("_replica_")
+                    && !crate::guarded_destroy::is_operation_scoped(&lvol.name);
+                if replica_shaped {
+                    if let Some(known) = input.pv_known_replica_uuids.get(&id) {
+                        if !known.contains(&lvol.uuid) {
+                            // The shared strike layer below provides the
+                            // 3-cycle discipline (same as every uncertain
+                            // condemnation) and auto-resets when the uuid
+                            // becomes known or the lvol disappears.
+                            condemned_lvols.insert(lvol.name.as_str());
+                            condemned_lvols.insert(lvol.uuid.as_str());
+                            condemned_aliases.push(lvol.alias());
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -234,7 +264,7 @@ mod tests {
             .iter()
             .flat_map(|l| [l.name.clone(), l.uuid.clone(), l.alias()])
             .collect();
-        SweepInput { lvols, subsystems, ublk_bdevs, all_bdevs, existing_pvs: pvs(existing) }
+        SweepInput { lvols, subsystems, ublk_bdevs, all_bdevs, existing_pvs: pvs(existing), pv_known_replica_uuids: Default::default() }
     }
 
     // --- classification -------------------------------------------------
@@ -413,7 +443,7 @@ mod tests {
         // (the §3/§10-8 zombie-consumer case) — raid teardown is
         // NodeUnstage's job, and yanking the export from under a live
         // mount is exactly the D-state hang bug #4 fixed. Survive.
-        let mk = |raid_present: bool| SweepInput {
+        let mk = |raid_present: bool| SweepInput { pv_known_replica_uuids: Default::default(),
             lvols: vec![],
             subsystems: vec![SubsystemEntry {
                 nqn: "nqn.2024-11.com.flint:volume:pvc-dead".into(),
@@ -508,4 +538,60 @@ mod tests {
             vec!["lvs0/vol_pvc-young"]
         );
     }
+    #[test]
+    fn stranded_placeholder_condemned_by_strikes_only_when_uuid_unknown() {
+        // C6/wave-2: a replica-shaped lvol whose PV EXISTS but whose uuid no
+        // record knows = abort-stranded replacement placeholder.
+        let lvol = LvolEntry {
+            name: "vol_pvc-x_replica_1".into(),
+            uuid: "uuid-stranded".into(),
+            lvs: "lvs0".into(),
+        };
+        let known: std::collections::HashMap<String, HashSet<String>> = [(
+            "pvc-x".to_string(),
+            ["uuid-legit".to_string()].into_iter().collect::<HashSet<_>>(),
+        )]
+        .into_iter()
+        .collect();
+        let input = SweepInput {
+            lvols: vec![lvol.clone()],
+            subsystems: vec![],
+            ublk_bdevs: Some(vec![]),
+            all_bdevs: Default::default(),
+            existing_pvs: pvs(&["pvc-x"]),
+            pv_known_replica_uuids: known.clone(),
+        };
+        let mut strikes = HashMap::new();
+        // Strikes 1 and 2: watched, not condemned.
+        assert!(plan_sweep(&input, &mut strikes, 3).delete_lvol_aliases.is_empty());
+        assert!(plan_sweep(&input, &mut strikes, 3).delete_lvol_aliases.is_empty());
+        // Strike 3: condemned.
+        let plan = plan_sweep(&input, &mut strikes, 3);
+        assert_eq!(plan.delete_lvol_aliases, vec!["lvs0/vol_pvc-x_replica_1".to_string()]);
+
+        // A KNOWN uuid (identity, active head, or revert) is never touched —
+        // and clears any accumulated strikes.
+        let mut legit = input.clone();
+        legit.lvols[0].uuid = "uuid-legit".into();
+        let plan = plan_sweep(&legit, &mut strikes, 3);
+        assert!(plan.delete_lvol_aliases.is_empty());
+        assert!(!strikes.contains_key("lvol:lvs0/vol_pvc-x_replica_1"));
+
+        // No record evidence for the volume → exempt (never guess).
+        let mut no_evidence = input.clone();
+        no_evidence.pv_known_replica_uuids = Default::default();
+        let mut s2 = HashMap::new();
+        for _ in 0..4 {
+            assert!(plan_sweep(&no_evidence, &mut s2, 3).delete_lvol_aliases.is_empty());
+        }
+
+        // Operation-scoped scratch heads are lease-owned — exempt.
+        let mut hr = input.clone();
+        hr.lvols[0].name = "vol_pvc-x_replica_1_hr".into();
+        let mut s3 = HashMap::new();
+        for _ in 0..4 {
+            assert!(plan_sweep(&hr, &mut s3, 3).delete_lvol_aliases.is_empty());
+        }
+    }
+
 }

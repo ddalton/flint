@@ -799,12 +799,13 @@ async fn cutover_tick(
             continue;
         };
 
-        let own_flag = pv
+        let flag_value = pv
             .metadata
             .annotations
             .as_ref()
-            .map(|a| a.contains_key(DATA_PATH_LOST_ANNOTATION))
-            .unwrap_or(false);
+            .and_then(|a| a.get(DATA_PATH_LOST_ANNOTATION))
+            .cloned();
+        let own_flag = flag_value.is_some();
         let is_rwx = replica_sync::is_rwx_pv(&pv);
         if is_rwx && own_flag {
             // Pre-fix agents flagged RWX PVs (the workload-attachment false
@@ -949,9 +950,25 @@ async fn cutover_tick(
 
         // Debounce the data-path flag: 90s of continuous presence before
         // the planner sees it (a transient repair failure clears itself).
+        // R4 episode: prefer the wall-clock `since` embedded in the flag
+        // ("node|since") — it survives controller restarts, so a restart
+        // mid-episode can no longer reset the clock and re-starve the
+        // bounce. Old-format flags (bare node) fall back to in-memory.
         let data_path_lost = if data_path_flagged {
-            let first = data_path_seen.entry(volume_id.clone()).or_insert_with(Instant::now);
-            first.elapsed() >= Duration::from_secs(90)
+            let embedded_since = flag_value
+                .as_deref()
+                .and_then(|v| v.split_once('|'))
+                .and_then(|(_, ts)| chrono::DateTime::parse_from_rfc3339(ts).ok());
+            match embedded_since {
+                Some(since) => {
+                    (chrono::Utc::now().timestamp() - since.timestamp()) >= 90
+                }
+                None => {
+                    let first =
+                        data_path_seen.entry(volume_id.clone()).or_insert_with(Instant::now);
+                    first.elapsed() >= Duration::from_secs(90)
+                }
+            }
         } else {
             data_path_seen.remove(&volume_id);
             false

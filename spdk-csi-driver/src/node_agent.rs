@@ -4395,13 +4395,38 @@ impl NodeAgent {
         // PV absence is the only condemnation authority, and only a
         // successful full list proves it — any error skips the cycle.
         let pvs_api: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
-        let existing_pvs: std::collections::HashSet<String> = pvs_api
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .filter_map(|pv| pv.metadata.name)
-            .collect();
+        let pv_items = pvs_api.list(&ListParams::default()).await?.items;
+        let existing_pvs: std::collections::HashSet<String> =
+            pv_items.iter().filter_map(|pv| pv.metadata.name.clone()).collect();
+        // Stranded-placeholder rule input: per-volume KNOWN replica uuids —
+        // identity list ∪ sync-record live/active/reverted uuids. A volume
+        // with no readable replica info is left out (exempt: never guess).
+        let mut pv_known_replica_uuids: std::collections::HashMap<
+            String,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
+        for pv in &pv_items {
+            let Some(name) = pv.metadata.name.clone() else { continue };
+            let Ok(Some(replicas)) = crate::replica_sync::replicas_from_pv(pv) else { continue };
+            let mut known: std::collections::HashSet<String> =
+                replicas.iter().map(|r| r.lvol_uuid.clone()).collect();
+            if let Some(rec) = pv
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(crate::replica_sync::SYNC_STATE_ANNOTATION))
+                .and_then(|s| crate::replica_sync::VolumeSyncRecord::from_annotation(s).ok())
+            {
+                for r in &rec.replicas {
+                    known.insert(r.lvol_uuid.clone());
+                    known.insert(r.live_lvol_uuid().to_string());
+                    if let Some(rv) = &r.reverted_to {
+                        known.insert(rv.clone());
+                    }
+                }
+            }
+            pv_known_replica_uuids.insert(name, known);
+        }
 
         let mut lvols = Vec::new();
         let lvstores = self
@@ -4495,6 +4520,7 @@ impl NodeAgent {
             ublk_bdevs,
             all_bdevs,
             existing_pvs,
+            pv_known_replica_uuids,
         };
         let plan = {
             let mut strikes = self.orphan_strikes.lock().await;
@@ -4913,7 +4939,25 @@ impl NodeAgent {
         let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
         let mut strikes = self.data_path_strikes.lock().await;
         let mut still_missing: std::collections::HashSet<String> = Default::default();
-        for pv in pvs.list(&ListParams::default()).await?.items {
+        let pv_items = pvs.list(&ListParams::default()).await?.items;
+        // Annotation homing (C5): the degraded-direct exemption lives on the
+        // volume's RECORD-HOME PV (the user PV — one canonical location,
+        // identity-resolved). The set is built from the same list this loop
+        // walks, so consulting the home costs zero extra API calls. The
+        // examined-PV fallback below tolerates mid-upgrade clusters whose
+        // markers were written by the rc3 dual-write.
+        let degraded_direct_homes: std::collections::HashSet<String> = pv_items
+            .iter()
+            .filter(|p| {
+                p.metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("flint.io/degraded-direct"))
+                    .is_some()
+            })
+            .filter_map(|p| p.metadata.name.clone())
+            .collect();
+        for pv in pv_items {
             let Some(pv_name) = pv.metadata.name.clone() else { continue };
             let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
             if csi.driver != "flint.csi.storage.io" {
@@ -4937,12 +4981,10 @@ impl NodeAgent {
             // create): there is no raid BY DESIGN, so the raid-missing
             // predicate is vacuous — striking would repair-churn forever.
             // Cleared by the next >=2-leg assembly (replica re-placement).
-            if pv
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|a| a.get("flint.io/degraded-direct"))
-                .is_some()
+            let record_home =
+                crate::identity::storage_id_of_handle(csi.volume_handle.as_str()).to_string();
+            if degraded_direct_homes.contains(&record_home)
+                || degraded_direct_homes.contains(&pv_name)
             {
                 continue;
             }
@@ -4951,7 +4993,7 @@ impl NodeAgent {
                 .annotations
                 .as_ref()
                 .and_then(|a| a.get(DATA_PATH_LOST_ANNOTATION))
-                .map(|v| v == &self.node_name)
+                .map(|v| v.split('|').next() == Some(self.node_name.as_str()))
                 .unwrap_or(false);
             let attached = attached_here.contains(&pv_name);
             let raid_present = raids.contains(&crate::identity::raid_name(&csi.volume_handle));
@@ -5075,8 +5117,14 @@ impl NodeAgent {
             match data_path_verdict(attached, raid_present, flagged_by_me, strikes_with_this, 3) {
                 DataPathAction::Flag => {
                     use kube::api::{Patch, PatchParams};
+                    // R4 episode: value = "node|since" — the escalation
+                    // clock survives agent AND controller restarts (the old
+                    // in-memory debounce reset on every restart, restarting
+                    // the starvation). Written once per episode: the Flag
+                    // verdict only fires while not yet flagged_by_me.
                     let patch = serde_json::json!({
-                        "metadata": { "annotations": { DATA_PATH_LOST_ANNOTATION: self.node_name } }
+                        "metadata": { "annotations": { DATA_PATH_LOST_ANNOTATION:
+                            format!("{}|{}", self.node_name, crate::replica_sync::now_rfc3339()) } }
                     });
                     if let Err(e) =
                         pvs.patch(&pv_name, &PatchParams::default(), &Patch::Merge(&patch)).await
