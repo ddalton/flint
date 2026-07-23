@@ -30,3 +30,4 @@ tests/system/config/*.kubeconfig
 tests/system/kuttl-test-*
 tests/system/*.log
 .claude/
+spdk-csi-driver/docker/prebuilt/
