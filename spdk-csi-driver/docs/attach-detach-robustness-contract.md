@@ -157,6 +157,22 @@ unadopted replica_replace placeholders (+ a new reaper rule:
 — PV-absence authority can never condemn these); the watchdog writes the
 hot-rejoin back-off/inline-deny entries itself (hot_rejoin.rs:2515-2532).
 
+**R5 applies to the DATA PLANE too (F42, found live on runac 2026-07-22):**
+the raid-leg fabric attach carried `ctrlr_loss_timeout_sec: -1` with no
+fast-io-fail — an unbounded await *inside the I/O path*. A terminated
+storage node then stalls every consumer write forever while the raid
+reports online N/N (no I/O error ever surfaces), which blinds the ENTIRE
+heal chain: monitor_raid_health sees healthy, record_stale_replicas never
+marks the leg, replace never fires, and the consumer wedges in D-state
+(unkillable → kubelet volumesInUse pin). Fix: `LegTransportPolicy`
+(nvme_recovery.rs) — keep `ctrlr_loss -1` (B3: the bdev identity must
+survive target bounces) but stamp `fast_io_fail_timeout_sec` (default 20s,
+`FLINT_SPDK_FAST_IO_FAIL_SECS`, 0 disables) on every fabric attach: queued
+I/O fails after the bound while reconnect continues → the leg faults out
+of the raid → the survivor serves → the existing monitor/replace chain
+does the rest. The split matters: identity survival and I/O bounding are
+different concerns; `-1` alone conflates them.
+
 ---
 
 ## Lean on upstream — use and feed, do not reimplement (C8)

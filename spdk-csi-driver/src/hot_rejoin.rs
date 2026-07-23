@@ -197,6 +197,15 @@ pub fn ef_bdev_on_dst(volume_id: &str) -> String {
     format!("{}n1", ef_controller_name(volume_id))
 }
 
+/// Stamp the shared transport bounds (B3 survivable reconnect + F42
+/// fast-io-fail) onto an attach RPC built here. Every hot-rejoin attach is
+/// either copy plumbing (a dead peer must fail the copy, not hang it — the
+/// stall detector then compensates) or a future serving leg (a dead node
+/// must fault out of the raid, not stall it).
+fn bound_attach_transport(attach: &mut serde_json::Value) {
+    crate::nvme_recovery::LegTransportPolicy::from_env().apply(&mut attach["params"]);
+}
+
 /// The esnap-clone head's lvol name on the rejoin target. Distinct from the
 /// replica lvol name — the old head stays behind as the backfill landing
 /// pad until localization disposes of it.
@@ -705,13 +714,14 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
     // Pre-connect the rejoin target to the (still namespace-less) E_f
     // export — the in-window add_ns surfaces as an AER namespace hot-add.
     let ef_ctrl = ef_controller_name(vol);
-    let attach = json!({
+    let mut attach = json!({
         "method": "bdev_nvme_attach_controller",
         "params": {
             "name": ef_ctrl, "trtype": "TCP", "traddr": src_ip, "trsvcid": "4420",
             "subnqn": nqn_ef, "adrfam": "IPv4", "hostnqn": flint_host_nqn(dst_node)
         }
     });
+    bound_attach_transport(&mut attach);
     match rpc.spdk_rpc(dst_node, &attach).await {
         Ok(_) => {}
         Err(e) if is_already_exists(&e.to_string()) => {}
@@ -736,7 +746,7 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
         // Controller may exist but serve nothing usable (dead reconnect
         // loop after the replica's spdk-tgt restart) — replace it.
         detach_controller(rpc, topo.consumer, &ctrl).await;
-        let attach = json!({
+        let mut attach = json!({
             "method": "bdev_nvme_attach_controller",
             "params": {
                 "name": ctrl, "trtype": conn.transport.to_uppercase(),
@@ -744,6 +754,7 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
                 "subnqn": conn.nqn, "adrfam": "IPv4", "hostnqn": flint_host_nqn(topo.consumer)
             }
         });
+        bound_attach_transport(&mut attach);
         rpc.spdk_rpc(topo.consumer, &attach)
             .await
             .map_err(|e| format!("consumer pre-connect of {}: {}", conn.nqn, e))?;
@@ -1101,7 +1112,7 @@ async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<
         == Some(live_uuid);
     if !consumer_ok {
         detach_controller(rpc, topo.consumer, &ctrl).await;
-        let attach = json!({
+        let mut attach = json!({
             "method": "bdev_nvme_attach_controller",
             "params": {
                 "name": ctrl, "trtype": conn.transport.to_uppercase(),
@@ -1109,6 +1120,7 @@ async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<
                 "subnqn": conn.nqn, "adrfam": "IPv4", "hostnqn": flint_host_nqn(topo.consumer)
             }
         });
+        bound_attach_transport(&mut attach);
         rpc.spdk_rpc(topo.consumer, &attach)
             .await
             .map_err(|e| format!("consumer pre-connect of {}: {}", conn.nqn, e))?;
@@ -1134,7 +1146,7 @@ async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<
         == Some(live_uuid);
     if !src_ok {
         detach_controller(rpc, src_node, &ctrl).await;
-        let attach = json!({
+        let mut attach = json!({
             "method": "bdev_nvme_attach_controller",
             "params": {
                 "name": ctrl, "trtype": conn.transport.to_uppercase(),
@@ -1142,6 +1154,7 @@ async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<
                 "subnqn": conn.nqn, "adrfam": "IPv4", "hostnqn": flint_host_nqn(src_node)
             }
         });
+        bound_attach_transport(&mut attach);
         rpc.spdk_rpc(src_node, &attach)
             .await
             .map_err(|e| format!("copy-source attach of {}: {}", conn.nqn, e))?;
@@ -2028,7 +2041,7 @@ async fn localize(
                 }
             }
             if get_bdev(rpc, &src.node_name, &pad_bdev).await?.is_none() {
-                let attach = json!({
+                let mut attach = json!({
                     "method": "bdev_nvme_attach_controller",
                     "params": {
                         "name": pad_ctrl, "trtype": conn.transport.to_uppercase(),
@@ -2037,6 +2050,7 @@ async fn localize(
                         "hostnqn": flint_host_nqn(&src.node_name)
                     }
                 });
+                bound_attach_transport(&mut attach);
                 rpc.spdk_rpc(&src.node_name, &attach)
                     .await
                     .map_err(|e| format!("pad attach on {}: {}", src.node_name, e))?;

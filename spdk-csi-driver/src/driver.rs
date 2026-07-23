@@ -2875,7 +2875,7 @@ impl SpdkCsiDriver {
             }
         }
 
-        let attach_params = json!({
+        let mut attach_params = json!({
             "method": "bdev_nvme_attach_controller",
             "params": {
                 "name": controller_name,
@@ -2887,18 +2887,18 @@ impl SpdkCsiDriver {
                 // Stable per-node identity so the target's host fencing can
                 // admit exactly this consumer (doc §3). Default initiator
                 // NQNs are random, which makes host filtering impossible.
-                "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_id),
-                // Survivable reconnect (chaos drill 1u/B3): without these,
-                // a storage-node outage of ~a minute makes the initiator
-                // DROP the bdev, which cascades into the ublk disk being
-                // stopped and the consumer mount destroyed — the SPDK-
-                // initiator mirror of the kernel-side ctrl-loss-tmo that
-                // v1.15.0 graceful-recovery #2 added to the loopback path.
-                // -1 = retry forever; I/O queues until the target returns.
-                "ctrlr_loss_timeout_sec": -1,
-                "reconnect_delay_sec": 2
+                "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_id)
             }
         });
+        // Survivable reconnect + bounded I/O (B3 + F42): ctrlr-loss -1 keeps
+        // the bdev identity alive across a target outage (dropping it
+        // cascades into the ublk/raid chain teardown — drill 1u/B3), while
+        // fast_io_fail bounds the I/O queue so a leg on a DEAD node faults
+        // out of its raid instead of stalling every consumer write forever
+        // (F42 — the raid reported online 2/2 while postgres sat in D-state;
+        // the kernel-side mirror is nvme_recovery's ReconnectPolicy).
+        crate::nvme_recovery::LegTransportPolicy::from_env()
+            .apply(&mut attach_params["params"]);
 
         println!("📡 [DRIVER] Calling bdev_nvme_attach_controller...");
         match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &attach_params).await {

@@ -3381,24 +3381,24 @@ impl NodeAgent {
                 .get_node_ip(storage_node)
                 .await
                 .map_err(|e| format!("node IP for {}: {}", storage_node, e))?;
+            // Survivable reconnect + bounded I/O — see the policy doc on
+            // LegTransportPolicy (B3: never drop the bdev; F42: fail queued
+            // I/O after a bound so a dead leg faults instead of stalling).
+            let mut attach = json!({
+                "method": "bdev_nvme_attach_controller",
+                "params": {
+                    "name": controller_name,
+                    "trtype": self.driver.nvmeof_transport.to_uppercase(),
+                    "traddr": remote_ip,
+                    "trsvcid": self.driver.nvmeof_target_port.to_string(),
+                    "subnqn": nqn,
+                    "adrfam": "IPv4",
+                    "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_name)
+                }
+            });
+            crate::nvme_recovery::LegTransportPolicy::from_env().apply(&mut attach["params"]);
             self.disk_service
-                .call_spdk_rpc(&json!({
-                    "method": "bdev_nvme_attach_controller",
-                    "params": {
-                        "name": controller_name,
-                        "trtype": self.driver.nvmeof_transport.to_uppercase(),
-                        "traddr": remote_ip,
-                        "trsvcid": self.driver.nvmeof_target_port.to_string(),
-                        "subnqn": nqn,
-                        "adrfam": "IPv4",
-                        "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.node_name),
-                        // Survivable reconnect — see connect_to_nvmeof_target
-                        // (chaos drill 1u/B3: default attach drops the bdev
-                        // during a storage outage, destroying the ublk chain).
-                        "ctrlr_loss_timeout_sec": -1,
-                        "reconnect_delay_sec": 2
-                    }
-                }))
+                .call_spdk_rpc(&attach)
                 .await
                 .map_err(|e| format!("remote attach {}: {}", nqn, e))?;
         }

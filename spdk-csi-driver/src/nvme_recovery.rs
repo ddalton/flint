@@ -80,6 +80,77 @@ impl ReconnectPolicy {
     }
 }
 
+/// F42 (runac 2026-07-22): SPDK-initiator transport bounds for every fabric
+/// attach whose bdev can serve I/O (raid legs, remote volumes, rejoin/copy
+/// plumbing). Two concerns the old hardcoded `ctrlr_loss_timeout_sec: -1`
+/// conflated:
+///
+/// * **identity survival** — the controller must keep reconnecting across a
+///   target bounce (chaos drill 1u/B3: dropping the bdev cascades into the
+///   ublk chain / raid teardown). `ctrlr_loss_timeout_sec: -1` stays.
+/// * **bounded I/O** — queued I/O must FAIL after a bound so a dead leg
+///   faults out of its raid and the survivor keeps serving. Without it, a
+///   terminated storage node stalls every consumer write indefinitely and
+///   the whole heal chain (monitor_raid_health → record_stale_replicas →
+///   replace → catch-up) stays blind: the raid never sees an error, so it
+///   reports online 2/2 forever (F42 — found live on runac; the data-plane
+///   R5 violation). `fast_io_fail_timeout_sec` is exactly this split: legal
+///   alongside infinite ctrlr-loss, fails queued I/O while reconnect
+///   continues, never drops the bdev.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegTransportPolicy {
+    /// -1 = reconnect forever (keep the bdev identity alive; B3).
+    pub ctrlr_loss_timeout_sec: i64,
+    pub reconnect_delay_sec: u64,
+    /// Seconds until queued I/O starts failing while reconnect continues;
+    /// 0 disables (pre-F42 behavior: I/O queues unboundedly).
+    pub fast_io_fail_timeout_sec: u64,
+}
+
+impl Default for LegTransportPolicy {
+    fn default() -> Self {
+        // 20s: long enough to ride a target restart + export reconcile
+        // (the #1 fast loss-detector re-exports within seconds), short
+        // enough that a raid leg on a dead node faults before consumers
+        // hit kernel-level hung-task territory.
+        Self { ctrlr_loss_timeout_sec: -1, reconnect_delay_sec: 2, fast_io_fail_timeout_sec: 20 }
+    }
+}
+
+impl LegTransportPolicy {
+    /// Reads `FLINT_SPDK_FAST_IO_FAIL_SECS` (seconds; `0` disables the
+    /// bound). Values below `reconnect_delay_sec` (except 0) are invalid
+    /// per SPDK and fall back to the default. ctrlr-loss and delay are
+    /// deliberate constants: -1 is load-bearing for B3, and every legal
+    /// fast-io-fail works against it.
+    pub fn from_env() -> Self {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// Env-lookup seam so the parsing is unit-testable without touching the
+    /// process environment.
+    pub fn from_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
+        let d = Self::default();
+        let fast_io_fail_timeout_sec = get("FLINT_SPDK_FAST_IO_FAIL_SECS")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&v| v == 0 || v >= d.reconnect_delay_sec)
+            .unwrap_or(d.fast_io_fail_timeout_sec);
+        Self { fast_io_fail_timeout_sec, ..d }
+    }
+
+    /// Stamp the transport bounds onto a `bdev_nvme_attach_controller`
+    /// `params` object (leaves every other field alone; omits
+    /// fast_io_fail when disabled).
+    pub fn apply(&self, attach_params: &mut serde_json::Value) {
+        attach_params["ctrlr_loss_timeout_sec"] = serde_json::json!(self.ctrlr_loss_timeout_sec);
+        attach_params["reconnect_delay_sec"] = serde_json::json!(self.reconnect_delay_sec);
+        if self.fast_io_fail_timeout_sec > 0 {
+            attach_params["fast_io_fail_timeout_sec"] =
+                serde_json::json!(self.fast_io_fail_timeout_sec);
+        }
+    }
+}
+
 /// #3: a kernel NVMe controller (`/sys/class/nvme/nvmeX/state`) is safe to
 /// REUSE for a mount only when it is `live`. Every other state —
 /// `connecting`, `resetting`, `deleting`, `new`, `dead` — is stale for
@@ -151,6 +222,54 @@ mod tests {
         // Non-numeric also falls back.
         let p2 = ReconnectPolicy::from_lookup(|_| Some("abc".to_string()));
         assert_eq!(p2, ReconnectPolicy::default());
+    }
+
+    #[test]
+    fn leg_transport_defaults_bound_io_but_never_the_identity() {
+        let p = LegTransportPolicy::default();
+        assert_eq!(p.ctrlr_loss_timeout_sec, -1, "B3: identity must survive forever");
+        assert_eq!(p.reconnect_delay_sec, 2);
+        assert_eq!(p.fast_io_fail_timeout_sec, 20, "F42: I/O must be bounded by default");
+    }
+
+    #[test]
+    fn leg_transport_apply_stamps_params_without_clobbering() {
+        let mut params = serde_json::json!({
+            "name": "nvme_x", "subnqn": "nqn.y", "trtype": "TCP"
+        });
+        LegTransportPolicy::default().apply(&mut params);
+        assert_eq!(params["ctrlr_loss_timeout_sec"], -1);
+        assert_eq!(params["reconnect_delay_sec"], 2);
+        assert_eq!(params["fast_io_fail_timeout_sec"], 20);
+        assert_eq!(params["name"], "nvme_x", "existing fields untouched");
+        // Disabled bound → the param must be ABSENT (pre-F42 behavior),
+        // not zero: SPDK rejects fast_io_fail < reconnect_delay.
+        let mut params = serde_json::json!({ "name": "nvme_x" });
+        let off = LegTransportPolicy { fast_io_fail_timeout_sec: 0, ..Default::default() };
+        off.apply(&mut params);
+        assert!(params.get("fast_io_fail_timeout_sec").is_none());
+        assert_eq!(params["ctrlr_loss_timeout_sec"], -1);
+    }
+
+    #[test]
+    fn leg_transport_env_override_and_validation() {
+        // Operator tunes the bound.
+        let p = LegTransportPolicy::from_lookup(|k| {
+            (k == "FLINT_SPDK_FAST_IO_FAIL_SECS").then(|| "45".to_string())
+        });
+        assert_eq!(p.fast_io_fail_timeout_sec, 45);
+        // 0 = explicit opt-out (unbounded queueing).
+        let p = LegTransportPolicy::from_lookup(|k| {
+            (k == "FLINT_SPDK_FAST_IO_FAIL_SECS").then(|| "0".to_string())
+        });
+        assert_eq!(p.fast_io_fail_timeout_sec, 0);
+        // Below reconnect_delay (SPDK-invalid) and garbage → default.
+        for bad in ["1", "abc", "-3"] {
+            let p = LegTransportPolicy::from_lookup(|k| {
+                (k == "FLINT_SPDK_FAST_IO_FAIL_SECS").then(|| bad.to_string())
+            });
+            assert_eq!(p, LegTransportPolicy::default(), "{bad:?} must fall back");
+        }
     }
 
     #[test]
