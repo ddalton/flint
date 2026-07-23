@@ -269,6 +269,32 @@ impl NodeAgent {
         let monitor_agent = Arc::new(self.clone());
         let monitor_task = tokio::spawn(async move {
             let mut monitor_interval = interval(Duration::from_secs(60));
+            // Contract R5: each sub-pass runs under its own budget so one
+            // wedged pass (a hung bdev_wait_for_examine, a stuck repair)
+            // skips THIS tick instead of stalling the other eight passes and
+            // every future tick — the 60s tier used to be a single stall
+            // point. Default is generous (detect_lost_data_paths drives a
+            // legitimate ~3min inline nvmeof repair); bounded beats tight.
+            let pass_budget = Duration::from_secs(
+                std::env::var("FLINT_MONITOR_PASS_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|&s| s > 0)
+                    .unwrap_or(300),
+            );
+            macro_rules! bounded_pass {
+                ($name:literal, $fut:expr) => {
+                    match tokio::time::timeout(pass_budget, $fut).await {
+                        Err(_) => warn!(
+                            pass = $name,
+                            budget_secs = pass_budget.as_secs(),
+                            "[MONITOR] Sub-pass exceeded its budget — skipped this tick, next tick retries"
+                        ),
+                        Ok(Err(e)) => warn!(error = %e, pass = $name, "[MONITOR] Sub-pass failed (non-fatal)"),
+                        Ok(Ok(())) => {}
+                    }
+                };
+            }
             // F11 store-loss strikes: lvs_name → consecutive missing ticks.
             let mut store_strikes: std::collections::HashMap<String, u32> =
                 std::collections::HashMap::new();
@@ -276,33 +302,15 @@ impl NodeAgent {
             monitor_interval.tick().await;
             loop {
                 monitor_interval.tick().await;
-                if let Err(e) = monitor_agent.reconcile_replica_targets().await {
-                    warn!(error = %e, "[MONITOR] Replica reconciliation failed (non-fatal)");
-                }
-                if let Err(e) = monitor_agent.check_store_health(&mut store_strikes).await {
-                    warn!(error = %e, "[MONITOR] Store health check failed (non-fatal)");
-                }
-                if let Err(e) = monitor_agent.rehydrate_exports_from_ground_truth().await {
-                    warn!(error = %e, "[MONITOR] Export rehydration failed (non-fatal)");
-                }
-                if let Err(e) = monitor_agent.monitor_raid_health().await {
-                    warn!(error = %e, "[MONITOR] Raid health check failed (non-fatal)");
-                }
-                if let Err(e) = monitor_agent.orphan_sweep().await {
-                    warn!(error = %e, "[MONITOR] Orphan sweep failed (non-fatal)");
-                }
-                if let Err(e) = monitor_agent.sweep_orphan_nfs_mounts().await {
-                    warn!(error = %e, "[MONITOR] Orphan NFS-mount sweep failed (non-fatal)");
-                }
-                if let Err(e) = monitor_agent.detect_lost_data_paths().await {
-                    warn!(error = %e, "[MONITOR] Data-path detection failed (non-fatal)");
-                }
-                if let Err(e) = monitor_agent.reap_dead_controllers().await {
-                    warn!(error = %e, "[MONITOR] Dead-controller reap failed (non-fatal)");
-                }
-                if let Err(e) = monitor_agent.reap_orphan_initiator_sessions().await {
-                    warn!(error = %e, "[MONITOR] Initiator-session reap failed (non-fatal)");
-                }
+                bounded_pass!("reconcile_replica_targets", monitor_agent.reconcile_replica_targets());
+                bounded_pass!("check_store_health", monitor_agent.check_store_health(&mut store_strikes));
+                bounded_pass!("rehydrate_exports", monitor_agent.rehydrate_exports_from_ground_truth());
+                bounded_pass!("monitor_raid_health", monitor_agent.monitor_raid_health());
+                bounded_pass!("orphan_sweep", monitor_agent.orphan_sweep());
+                bounded_pass!("sweep_orphan_nfs_mounts", monitor_agent.sweep_orphan_nfs_mounts());
+                bounded_pass!("detect_lost_data_paths", monitor_agent.detect_lost_data_paths());
+                bounded_pass!("reap_dead_controllers", monitor_agent.reap_dead_controllers());
+                bounded_pass!("reap_orphan_initiator_sessions", monitor_agent.reap_orphan_initiator_sessions());
             }
         });
 
@@ -326,15 +334,36 @@ impl NodeAgent {
         let loss_is_ublk = Self::ublk_backend();
         let loss_task = tokio::spawn(async move {
             let mut loss_interval = interval(Duration::from_secs(10));
+            // Contract R5: detector bodies are budgeted like the 60s passes —
+            // the fast paths can drive a full in-place repair (~3min on
+            // nvmeof), so the budget accommodates that while still bounding a
+            // genuine wedge. A timed-out detector body skips to the next tick.
+            let detector_budget = Duration::from_secs(
+                std::env::var("FLINT_DETECTOR_PASS_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|&s| s > 0)
+                    .unwrap_or(300),
+            );
             loss_interval.tick().await; // first tick immediate; skip it
             loop {
                 loss_interval.tick().await;
-                if let Err(e) = loss_agent.reconcile_exports_if_lost().await {
-                    debug!(error = %e, "[MONITOR] Export loss-detector failed (non-fatal)");
+                match tokio::time::timeout(detector_budget, loss_agent.reconcile_exports_if_lost()).await {
+                    Err(_) => warn!(
+                        budget_secs = detector_budget.as_secs(),
+                        "[MONITOR] Export loss-detector exceeded its budget — skipped this tick"
+                    ),
+                    Ok(Err(e)) => debug!(error = %e, "[MONITOR] Export loss-detector failed (non-fatal)"),
+                    Ok(Ok(())) => {}
                 }
                 if loss_is_ublk {
-                    if let Err(e) = loss_agent.reconcile_ublk_if_lost().await {
-                        debug!(error = %e, "[MONITOR] ublk loss-detector failed (non-fatal)");
+                    match tokio::time::timeout(detector_budget, loss_agent.reconcile_ublk_if_lost()).await {
+                        Err(_) => warn!(
+                            budget_secs = detector_budget.as_secs(),
+                            "[MONITOR] ublk loss-detector exceeded its budget — skipped this tick"
+                        ),
+                        Ok(Err(e)) => debug!(error = %e, "[MONITOR] ublk loss-detector failed (non-fatal)"),
+                        Ok(Ok(())) => {}
                     }
                 }
             }
@@ -1081,6 +1110,72 @@ impl NodeAgent {
         let method = rpc_request["method"].as_str().unwrap_or("unknown");
         debug!(method, "[HTTP_API] Handling SPDK RPC request");
 
+        // ── Contract R3: the destruction boundary ────────────────────────
+        // Destructive methods arriving over the wire (controller planners,
+        // the dashboard, drop_stale_local_exports posting to its own node)
+        // are guarded HERE, where the RPC executes. The live probes run
+        // against this node's SPDK; a refusal is a 409 whose text matches
+        // no benign classifier, so callers surface it instead of shrugging
+        // it off as already-gone.
+        if crate::guarded_destroy::GUARDED_METHODS.contains(&method) {
+            let params = rpc_request.get("params").cloned().unwrap_or_else(|| json!({}));
+            let verdict = if method == crate::guarded_destroy::RPC_UBLK_STOP_DISK {
+                // Kernel opener probe (F37): only runnable node-locally —
+                // which is here, where the stop executes.
+                params
+                    .get("ublk_id")
+                    .and_then(|v| v.as_u64())
+                    .map(|id| Self::guard_ublk_stop(id as u32))
+            } else {
+                // VolumeAttachment ground truth for volume-class subsystem
+                // deletes (C3: zero live controllers ≠ no consumer). The
+                // handle→PV-name mapping goes through identity.rs — the
+                // RWX backing handle is not a PV name (F32 class).
+                let va = if method == crate::guarded_destroy::RPC_NVMF_DELETE_SUBSYSTEM {
+                    match params
+                        .get("nqn")
+                        .and_then(|n| n.as_str())
+                        .and_then(crate::identity::classify_subsystem_nqn)
+                    {
+                        Some(owner) => {
+                            let pv_name = crate::identity::pv_name_of_handle(&owner);
+                            match node_agent.get_attached_node_checked(&pv_name).await {
+                                Ok(owner_node) => Some((owner_node, false)),
+                                Err(_) => Some((None, true)),
+                            }
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let agent = node_agent.clone();
+                let probe = move |req: serde_json::Value| {
+                    let agent = agent.clone();
+                    async move { agent.disk_service.call_spdk_rpc(&req).await }
+                };
+                let ctx = crate::guarded_destroy::BoundaryContext {
+                    own_host_nqn: &crate::nvmeof_export::flint_host_nqn(&node_agent.node_name),
+                    self_node: &node_agent.node_name,
+                    va,
+                };
+                crate::guarded_destroy::boundary_verdict(&probe, method, &params, &ctx).await
+            };
+            match verdict {
+                Some(crate::guarded_destroy::Verdict::Refuse(reason))
+                | Some(crate::guarded_destroy::Verdict::Defer(reason)) => {
+                    warn!(method, reason = %reason,
+                        "[HTTP_API] guarded_destroy blocked a destructive RPC");
+                    let error_response = json!({ "success": false, "error": reason });
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&error_response),
+                        StatusCode::CONFLICT,
+                    ));
+                }
+                _ => {} // Allow / AllowIdempotentNoop / out of scope
+            }
+        }
+
         // Proxy the RPC request directly to SPDK
         match node_agent.disk_service.call_spdk_rpc(&rpc_request).await {
             Ok(response) => {
@@ -1233,7 +1328,7 @@ impl NodeAgent {
         debug!("[HTTP_API] Handling ublk device deletion");
 
         // Extract method and params from request
-        let method = request["method"].as_str().unwrap_or("ublk_stop_disk");
+        let method = request["method"].as_str().unwrap_or(crate::guarded_destroy::RPC_UBLK_STOP_DISK);
         let params = &request["params"];
 
         let requested_id = params["ublk_id"].as_u64().map(|v| v as u32);
@@ -1255,9 +1350,20 @@ impl NodeAgent {
                     StatusCode::OK,
                 ));
             };
+            // Contract R3: opener probe before the stop — and before
+            // deregistering the loss-detector (a refused stop must stay
+            // protected by the detector).
+            if let Some(reason) = Self::guard_ublk_stop(id).blocked() {
+                warn!(ublk_id = id, reason = %reason,
+                    "[HTTP_API] guarded_destroy blocked ublk stop (by bdev)");
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&json!({ "success": false, "error": reason })),
+                    StatusCode::CONFLICT,
+                ));
+            }
             // Deliberate stop: the loss-detector must not resurrect it.
             node_agent.expected_ublk.lock().await.remove(&id);
-            let rpc = json!({ "method": "ublk_stop_disk", "params": { "ublk_id": id } });
+            let rpc = json!({ "method": crate::guarded_destroy::RPC_UBLK_STOP_DISK, "params": { "ublk_id": id } });
             return match node_agent.disk_service.call_spdk_rpc(&rpc).await {
                 Ok(response) => {
                     info!(ublk_id = id, bdev = bdev_name.unwrap_or(""),
@@ -1272,8 +1378,19 @@ impl NodeAgent {
             };
         }
 
-        // Deliberate stop: the loss-detector must not resurrect it.
+        // Contract R3: opener probe before the stop, before deregistering.
         if let Some(ublk_id) = requested_id {
+            if method == crate::guarded_destroy::RPC_UBLK_STOP_DISK {
+                if let Some(reason) = Self::guard_ublk_stop(ublk_id).blocked() {
+                    warn!(ublk_id, reason = %reason,
+                        "[HTTP_API] guarded_destroy blocked ublk stop (by id)");
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&json!({ "success": false, "error": reason })),
+                        StatusCode::CONFLICT,
+                    ));
+                }
+            }
+            // Deliberate stop: the loss-detector must not resurrect it.
             node_agent.expected_ublk.lock().await.remove(&ublk_id);
         }
 
@@ -1480,11 +1597,34 @@ impl NodeAgent {
             }
         } // Err ⇒ subsystem likely gone; the delete below is a no-op either way.
         // (b) VolumeAttachment ground truth: volume attached to another node?
+        // C4 fail-open fix: a VA lookup ERROR fails closed (skip the delete
+        // this attempt; kubelet retries unstage) — it must not read as
+        // "unattached" and authorize the delete.
         if foreign_reason.is_none() {
             if let Some(owner) = crate::identity::classify_subsystem_nqn(nqn) {
-                if let Some(attached) = node_agent.get_attached_node(&owner).await {
-                    if attached != node_agent.node_name {
+                match node_agent
+                    .get_attached_node_checked(&crate::identity::pv_name_of_handle(&owner))
+                    .await
+                {
+                    Ok(Some(attached)) if attached != node_agent.node_name => {
                         foreign_reason = Some(format!("VolumeAttachment owned by {}", attached));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(nqn = %nqn, error = %e,
+                            "[HTTP_API] F9 guard: VolumeAttachment lookup failed — failing closed, skipping delete this attempt");
+                        let error_response = json!({
+                            "success": false,
+                            "error": format!(
+                                "guarded_destroy: VolumeAttachment lookup errored ({}) — cannot \
+                                 rule out a foreign consumer; retry",
+                                e
+                            ),
+                        });
+                        return Ok(warp::reply::with_status(
+                            warp::reply::json(&error_response),
+                            StatusCode::CONFLICT,
+                        ));
                     }
                 }
             }
@@ -1509,7 +1649,7 @@ impl NodeAgent {
 
         // 2. Remove SPDK target
         let delete_params = json!({
-            "method": "nvmf_delete_subsystem",
+            "method": crate::guarded_destroy::RPC_NVMF_DELETE_SUBSYSTEM,
             "params": {
                 "nqn": nqn
             }
@@ -2052,9 +2192,23 @@ impl NodeAgent {
             debug!(device_path, "[FORCE_UNSTAGE] Found ublk device");
             was_staged = true;
 
+            // Contract R3: even the force path never stops a device with
+            // live openers — that is destroy-while-consumed, the incident
+            // class itself. A refused stop leaves the disk for the
+            // ghost-mount sweep to unmount first; the retry then passes.
+            if let Some(reason) = Self::guard_ublk_stop(ublk_id).blocked() {
+                warn!(ublk_id, reason = %reason,
+                    "[FORCE_UNSTAGE] guarded_destroy blocked the ublk stop");
+                let error_response = json!({ "success": false, "error": reason });
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&error_response),
+                    StatusCode::CONFLICT,
+                ));
+            }
+
             // Stop the ublk device via SPDK
             let result = node_agent.disk_service.call_spdk_rpc(&json!({
-                "method": "ublk_stop_disk",
+                "method": crate::guarded_destroy::RPC_UBLK_STOP_DISK,
                 "params": {
                     "ublk_id": ublk_id
                 }
@@ -2086,7 +2240,7 @@ impl NodeAgent {
         
         // Try to disconnect (best effort - may not be connected)
         let result = node_agent.disk_service.call_spdk_rpc(&json!({
-            "method": "bdev_nvme_detach_controller",
+            "method": crate::guarded_destroy::RPC_BDEV_NVME_DETACH_CONTROLLER,
             "params": {
                 "name": nqn
             }
@@ -2466,7 +2620,7 @@ impl NodeAgent {
                         match self
                             .disk_service
                             .call_spdk_rpc(&json!({
-                                "method": "ublk_stop_disk",
+                                "method": crate::guarded_destroy::RPC_UBLK_STOP_DISK,
                                 "params": { "ublk_id": sid }
                             }))
                             .await
@@ -3116,12 +3270,20 @@ impl NodeAgent {
                     if !attributable {
                         continue;
                     }
+                    // Contract R3: opener probe before the reap — a stale-
+                    // LOOKING disk with a live holder (lazy unmount, slow
+                    // teardown) must not be stopped under its consumer.
+                    if let Some(reason) = Self::guard_ublk_stop(*id).blocked() {
+                        warn!(ublk_id = id, bdev = %bdev, reason = %reason,
+                            "[REHYDRATE] guarded_destroy blocked stale-ublk reap — leaving disk and detector registration");
+                        continue;
+                    }
                     warn!(ublk_id = id, bdev = %bdev,
                         "[REHYDRATE] reaping stale ublk disk (volume no longer consumed on this node)");
                     let _ = self
                         .disk_service
                         .call_spdk_rpc(&json!({
-                            "method": "ublk_stop_disk",
+                            "method": crate::guarded_destroy::RPC_UBLK_STOP_DISK,
                             "params": { "ublk_id": id }
                         }))
                         .await;
@@ -3191,7 +3353,7 @@ impl NodeAgent {
                 let _ = self
                     .disk_service
                     .call_spdk_rpc(&json!({
-                        "method": "bdev_nvme_detach_controller",
+                        "method": crate::guarded_destroy::RPC_BDEV_NVME_DETACH_CONTROLLER,
                         "params": { "name": controller_name }
                     }))
                     .await;
@@ -3477,8 +3639,21 @@ impl NodeAgent {
             // (stale) leg. A raid for this volume on a node that is not
             // the volume's consumer is a phantom regardless of the local
             // leg's sync state; its claim serves nobody.
-            let attached_node = self.get_attached_node(&volume_id).await;
-            if attached_node.as_deref() != Some(self.node_name.as_str()) {
+            // C4 fail-open fix: a VA lookup ERROR must not read as "not
+            // attached here" — that fired the phantom delete on every k8s
+            // API blip. On error: skip the destructive hygiene this tick
+            // (fail closed); the export fence below stays default-closed
+            // with attached_node = None, which is the safe direction.
+            let (attached_node, va_errored) = match self.get_attached_node_checked(&volume_id).await
+            {
+                Ok(owner) => (owner, false),
+                Err(e) => {
+                    warn!(volume_id, error = %e,
+                        "[RECONCILE] VolumeAttachment lookup failed — skipping phantom-raid hygiene this tick (fail closed)");
+                    (None, true)
+                }
+            };
+            if !va_errored && attached_node.as_deref() != Some(self.node_name.as_str()) {
                 if let Err(e) = self.delete_phantom_raid_local(&spdk_id).await {
                     error!(volume_id, error = %e, "[RECONCILE] Failed to delete phantom raid");
                     error_count += 1;
@@ -4322,11 +4497,45 @@ impl NodeAgent {
             "[ORPHAN_SWEEP] reaping orphans of absent PVs"
         );
 
+        // Contract R3: the sweep's condemnation authority is PV absence,
+        // but its EXECUTION still passes the live-consumer chokepoint — a
+        // leaked export with a live admitted consumer stays refused (fail
+        // closed, strikes retry) rather than killed cross-node.
+        let sweep_probe = {
+            let ds = self.disk_service.clone();
+            move |req: serde_json::Value| {
+                let ds = ds.clone();
+                async move { ds.call_spdk_rpc(&req).await }
+            }
+        };
+        let own_host = crate::nvmeof_export::flint_host_nqn(&self.node_name);
+        let sweep_ctx = crate::guarded_destroy::BoundaryContext {
+            own_host_nqn: &own_host,
+            self_node: &self.node_name,
+            // The owning PV is absent (that IS the condemnation), so there
+            // is no VolumeAttachment to consult.
+            va: None,
+        };
+
         // Subsystems first: their write-opens block lvol deletion.
         for nqn in &plan.delete_subsystem_nqns {
+            if let Some(crate::guarded_destroy::Verdict::Refuse(reason))
+            | Some(crate::guarded_destroy::Verdict::Defer(reason)) =
+                crate::guarded_destroy::boundary_verdict(
+                    &sweep_probe,
+                    crate::guarded_destroy::RPC_NVMF_DELETE_SUBSYSTEM,
+                    &json!({ "nqn": nqn }),
+                    &sweep_ctx,
+                )
+                .await
+            {
+                warn!(nqn = %nqn, reason = %reason,
+                    "[ORPHAN_SWEEP] guarded_destroy blocked subsystem delete — stays condemned, retried next cycle");
+                continue;
+            }
             match self
                 .disk_service
-                .call_spdk_rpc(&json!({"method": "nvmf_delete_subsystem", "params": {"nqn": nqn}}))
+                .call_spdk_rpc(&json!({"method": crate::guarded_destroy::RPC_NVMF_DELETE_SUBSYSTEM, "params": {"nqn": nqn}}))
                 .await
             {
                 Ok(_) => info!(nqn = %nqn, "[ORPHAN_SWEEP] deleted orphan subsystem"),
@@ -4351,9 +4560,24 @@ impl NodeAgent {
             let before = remaining.len();
             let mut next = Vec::new();
             for alias in std::mem::take(&mut remaining) {
+                if let Some(crate::guarded_destroy::Verdict::Refuse(reason))
+                | Some(crate::guarded_destroy::Verdict::Defer(reason)) =
+                    crate::guarded_destroy::boundary_verdict(
+                        &sweep_probe,
+                        crate::guarded_destroy::RPC_BDEV_LVOL_DELETE,
+                        &json!({ "name": alias }),
+                        &sweep_ctx,
+                    )
+                    .await
+                {
+                    warn!(lvol = %alias, reason = %reason,
+                        "[ORPHAN_SWEEP] guarded_destroy blocked lvol delete — retried next cycle");
+                    next.push(alias);
+                    continue;
+                }
                 match self
                     .disk_service
-                    .call_spdk_rpc(&json!({"method": "bdev_lvol_delete", "params": {"name": alias}}))
+                    .call_spdk_rpc(&json!({"method": crate::guarded_destroy::RPC_BDEV_LVOL_DELETE, "params": {"name": alias}}))
                     .await
                 {
                     Ok(_) => info!(lvol = %alias, "[ORPHAN_SWEEP] deleted orphan lvol"),
@@ -4458,7 +4682,7 @@ impl NodeAgent {
             let _ = self
                 .disk_service
                 .call_spdk_rpc(&json!({
-                    "method": "bdev_raid_delete",
+                    "method": crate::guarded_destroy::RPC_BDEV_RAID_DELETE,
                     "params": { "name": crate::identity::raid_name(volume_handle) }
                 }))
                 .await;
@@ -4570,7 +4794,23 @@ impl NodeAgent {
         // Degraded-direct chains serve a ublk disk straight off an initiator
         // bdev with NO raid above it — protect those controllers exactly
         // like raid legs, or a transient reconnect gets them reaped and the
-        // sole surviving leg torn down.
+        // sole surviving leg torn down. Contract R3 (C4): the protection is
+        // derived from LIVE ublk_get_disks, never the in-memory registry
+        // alone — a restarted agent's empty registry must not unprotect a
+        // live chain. Probe failure skips the whole reap pass (fail closed).
+        if Self::ublk_backend() {
+            let live_resp = self
+                .disk_service
+                .call_spdk_rpc(&json!({"method": "ublk_get_disks"}))
+                .await?;
+            for d in live_resp["result"].as_array().cloned().unwrap_or_default() {
+                if let Some(bdev) = d["bdev_name"].as_str() {
+                    raid_base_bdevs.insert(bdev.to_string());
+                }
+            }
+        }
+        // Registry entries stay as ADDITIONAL protection (a disk mid-recover
+        // may be absent from the live list for a tick).
         for bdev in self.expected_ublk.lock().await.values() {
             raid_base_bdevs.insert(bdev.clone());
         }
@@ -4595,7 +4835,7 @@ impl NodeAgent {
             match self
                 .disk_service
                 .call_spdk_rpc(
-                    &json!({"method": "bdev_nvme_detach_controller", "params": {"name": name}}),
+                    &json!({"method": crate::guarded_destroy::RPC_BDEV_NVME_DETACH_CONTROLLER, "params": {"name": name}}),
                 )
                 .await
             {
@@ -4935,12 +5175,46 @@ impl NodeAgent {
         let minor = version["result"]["fields"]["minor"].as_i64().unwrap_or(0);
         let clear_sb = major > 26 || (major == 26 && minor >= 5);
 
+        // Contract R3: consumer probe before the delete. A raid with a live
+        // frontend here (ublk disk over it, or an export with live
+        // controllers) is NOT a phantom whatever the VA says — deleting it
+        // hot-removes the block device under a mounted filesystem (D2).
+        let agent_probe = {
+            let ds = self.disk_service.clone();
+            move |req: serde_json::Value| {
+                let ds = ds.clone();
+                async move { ds.call_spdk_rpc(&req).await }
+            }
+        };
+        let forms = vec![raid_name.clone()];
+        let ublk = crate::guarded_destroy::ublk_consumer_of(&agent_probe, &forms)
+            .await
+            .ok()
+            .flatten();
+        let exports =
+            match crate::guarded_destroy::exports_with_live_controllers(&agent_probe, &forms).await
+            {
+                Ok(x) => x,
+                Err(e) => {
+                    warn!(volume_id, error = %e,
+                        "[RECONCILE] phantom-raid consumer probe inconclusive — failing closed this tick");
+                    return Ok(());
+                }
+            };
+        if let Some(reason) =
+            crate::guarded_destroy::raid_delete_verdict(true, ublk, &exports).blocked()
+        {
+            warn!(volume_id, reason = %reason,
+                "[RECONCILE] guarded_destroy blocked phantom-raid delete");
+            return Ok(());
+        }
+
         let mut params = json!({ "name": raid_name });
         if clear_sb {
             params["clear_sb"] = json!(true);
         }
         self.disk_service
-            .call_spdk_rpc(&json!({ "method": "bdev_raid_delete", "params": params }))
+            .call_spdk_rpc(&json!({ "method": crate::guarded_destroy::RPC_BDEV_RAID_DELETE, "params": params }))
             .await?;
         warn!(
             volume_id, clear_sb,
@@ -5014,11 +5288,25 @@ impl NodeAgent {
     }
 
     /// Node currently attached to this volume per its VolumeAttachment, if any.
+    /// NOTE: collapses API errors into "unattached" — convergence paths that
+    /// treat None as retry-later may use it, but DESTRUCTIVE decisions must
+    /// use [`Self::get_attached_node_checked`] (an API error reading as
+    /// "unattached" was the delete_phantom_raid_local fail-open, C4).
     async fn get_attached_node(&self, volume_id: &str) -> Option<String> {
+        self.get_attached_node_checked(volume_id).await.ok().flatten()
+    }
+
+    /// VolumeAttachment owner with the error surfaced: Ok(None) means
+    /// verifiably unattached; Err means the lookup FAILED and no destructive
+    /// conclusion may be drawn from it.
+    async fn get_attached_node_checked(&self, volume_id: &str) -> Result<Option<String>, String> {
         use k8s_openapi::api::storage::v1::VolumeAttachment;
         let vas: Api<VolumeAttachment> = Api::all(self.driver.kube_client.clone());
-        let list = vas.list(&ListParams::default()).await.ok()?;
-        list.items.into_iter().find_map(|va| {
+        let list = vas
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| format!("VolumeAttachment list failed: {e}"))?;
+        Ok(list.items.into_iter().find_map(|va| {
             let source_pv = va.spec.source.persistent_volume_name.as_deref();
             let attached = va.status.as_ref().map(|s| s.attached).unwrap_or(false);
             if source_pv == Some(volume_id) && attached {
@@ -5026,7 +5314,28 @@ impl NodeAgent {
             } else {
                 None
             }
-        })
+        }))
+    }
+
+    /// Contract R3: node-local ublk-stop guard — the F37 kernel opener probe
+    /// ("never reap blind") applied to EVERY stop path. A missing /dev node
+    /// reads Free deliberately: SPDK-side cleanup of a DEAD device must
+    /// proceed so the DEL_DEV ladder rung stays reachable.
+    fn guard_ublk_stop(ublk_id: u32) -> crate::guarded_destroy::Verdict {
+        use crate::guarded_destroy::Verdict;
+        match Self::ublk_opener_state(ublk_id) {
+            UblkOpenerState::Free => Verdict::Allow,
+            UblkOpenerState::Busy => Verdict::Refuse(format!(
+                "guarded_destroy: ublk disk {} has live opener(s) — stopping it EIOs the \
+                 consumer above; unmount first (ghost-mount sweep) or let unstage order it",
+                ublk_id
+            )),
+            UblkOpenerState::Unknown => Verdict::Defer(format!(
+                "guarded_destroy: ublk disk {} opener probe inconclusive — failing closed \
+                 (never reap blind)",
+                ublk_id
+            )),
+        }
     }
 }
 

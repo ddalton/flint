@@ -231,10 +231,18 @@ impl VolumeSyncRecord {
     }
 
     /// Align the record's membership with the authoritative identity list,
-    /// preserving known states and positional order. New identities (replica
-    /// replacement, records written by an older build) enter as in_sync —
-    /// CreateVolume's initial state; replacement flows own their state from
-    /// phase 5 on. Returns true if anything changed.
+    /// preserving known states and positional order. Returns true if
+    /// anything changed.
+    ///
+    /// Laundering pins (contract, C2): a new/re-entering identity enters
+    /// STALE — it reaches in_sync only through the fenced final-delta
+    /// admission. The old in_sync default let any membership write launder
+    /// an arbitrary lvol into the trusted set with zero copies. And this
+    /// method NEVER touches the writer set: membership drift (a bad
+    /// replicas-override write, an intent bug) must not silently drop a
+    /// writer and silence the F36c gate. Writers leave the set only through
+    /// [`Self::prune_writers_for_replacement`], called by the replacement
+    /// flow that KNOWS the leg is permanently gone.
     pub fn reconcile_membership(&mut self, replicas: &[ReplicaInfo]) -> bool {
         let rebuilt: Vec<ReplicaSyncRecord> = replicas
             .iter()
@@ -247,30 +255,36 @@ impl VolumeSyncRecord {
                         node_name: r.node_name.clone(),
                         node_uid: r.node_uid.clone(),
                         lvol_uuid: r.lvol_uuid.clone(),
-                        sync_state: SyncState::InSync,
+                        sync_state: SyncState::Stale,
                         last_epoch: None,
                         since: None,
-                        reason: None,
+                        reason: Some(
+                            "membership-reconcile: new identity enters stale pending fenced admission"
+                                .to_string(),
+                        ),
                         active_lvol_uuid: None,
                         reverted_to: None,
                         hot_rejoin: None,
                     })
             })
             .collect();
-        let mut changed = rebuilt != self.replicas;
+        let changed = rebuilt != self.replicas;
         self.replicas = rebuilt;
-        // F36c: prune writer-set members that left the authoritative
-        // identity list (replica replacement) — they can never attach again,
-        // so waiting on them would hold the gate open forever.
-        if let Some(ws) = &mut self.writer_set {
-            let before = ws.lvol_uuids.len();
-            ws.lvol_uuids
-                .retain(|u| replicas.iter().any(|r| r.lvol_uuid == *u));
-            if ws.lvol_uuids.len() != before {
-                changed = true;
-            }
-        }
         changed
+    }
+
+    /// F36c + C2 pin: the ONLY path by which a lvol_uuid leaves the writer
+    /// set. The replacement flow calls this at identity-swap time — the old
+    /// leg's node is verifiably gone (Node deleted / NotReady past the
+    /// budget), so its acked tail is unrecoverable and waiting on it would
+    /// hold the gate open forever. Returns true if anything changed.
+    pub fn prune_writers_for_replacement(&mut self, replaced_uuids: &[String]) -> bool {
+        let Some(ws) = &mut self.writer_set else {
+            return false;
+        };
+        let before = ws.lvol_uuids.len();
+        ws.lvol_uuids.retain(|u| !replaced_uuids.contains(u));
+        ws.lvol_uuids.len() != before
     }
 
     pub fn get(&self, lvol_uuid: &str) -> Option<&ReplicaSyncRecord> {
@@ -1163,17 +1177,56 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_membership_prunes_replaced_writers() {
+    fn reconcile_membership_never_touches_the_writer_set() {
+        // C2 laundering pin: membership drift (a bad replicas-override
+        // write, an intent bug) must not silently drop a writer and silence
+        // the F36c gate. Only the replacement flow prunes.
         let mut r = three_replica_record();
         r.set_writer_set(&["uuid-a".to_string(), "uuid-b".to_string()], "t1");
-        // Replica replacement: uuid-b leaves the authoritative list.
         let changed = r.reconcile_membership(&[
             replica("node-a", "uuid-a"),
             replica("node-d", "uuid-d"),
             replica("node-c", "uuid-c"),
         ]);
         assert!(changed);
+        assert_eq!(
+            r.writer_uuids(),
+            &["uuid-a".to_string(), "uuid-b".to_string()],
+            "uuid-b left membership but must remain a writer until replacement prunes it"
+        );
+    }
+
+    #[test]
+    fn replacement_prune_is_the_only_writer_set_exit_besides_mark_stale() {
+        let mut r = three_replica_record();
+        r.set_writer_set(&["uuid-a".to_string(), "uuid-b".to_string()], "t1");
+        assert!(r.prune_writers_for_replacement(&["uuid-b".to_string()]));
         assert_eq!(r.writer_uuids(), &["uuid-a".to_string()]);
+        // Idempotent: pruning an absent uuid is a no-op.
+        assert!(!r.prune_writers_for_replacement(&["uuid-b".to_string()]));
+        // No writer set at all: no-op, no panic.
+        let mut fresh = three_replica_record();
+        assert!(!fresh.prune_writers_for_replacement(&["uuid-a".to_string()]));
+    }
+
+    #[test]
+    fn reconcile_membership_enters_new_identities_stale() {
+        // C2 laundering pin: an unknown identity appearing in membership must
+        // NOT be trusted — it reaches in_sync only via the fenced final-delta
+        // admission. The old in_sync default let one membership write launder
+        // an arbitrary lvol into the trusted set with zero copies.
+        let mut r = three_replica_record();
+        let changed = r.reconcile_membership(&[
+            replica("node-a", "uuid-a"),
+            replica("node-d", "uuid-d"),
+            replica("node-c", "uuid-c"),
+        ]);
+        assert!(changed);
+        let entered = r.get("uuid-d").expect("new identity present");
+        assert_eq!(entered.sync_state, SyncState::Stale);
+        assert!(entered.reason.as_deref().unwrap_or("").contains("fenced admission"));
+        // Known identities keep their states untouched.
+        assert_eq!(r.get("uuid-a").unwrap().sync_state, SyncState::InSync);
     }
 
     #[test]
@@ -1286,9 +1339,10 @@ mod tests {
         assert!(record.reconcile_membership(&replicas));
         let uuids: Vec<&str> = record.replicas.iter().map(|r| r.lvol_uuid.as_str()).collect();
         assert_eq!(uuids, vec!["uuid-b", "uuid-a", "uuid-d"]);
-        // Known state survives reordering; the new identity enters in_sync.
+        // Known state survives reordering; the new identity enters STALE
+        // (C2 laundering pin — trusted only via fenced admission).
         assert_eq!(record.get("uuid-b").unwrap().sync_state, SyncState::Stale);
-        assert_eq!(record.get("uuid-d").unwrap().sync_state, SyncState::InSync);
+        assert_eq!(record.get("uuid-d").unwrap().sync_state, SyncState::Stale);
 
         // Idempotent.
         assert!(!record.reconcile_membership(&replicas));

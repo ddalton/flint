@@ -353,12 +353,41 @@ impl MinimalDiskService {
         Ok(lvol_uuid)
     }
 
-    /// Delete logical volume
+    /// Delete logical volume. Contract R3: probes for live consumers first
+    /// (raid base / exported-with-live-controllers) — DeleteVolume for a
+    /// volume still staged somewhere must refuse, not sever (the orphan
+    /// sweep is the convergent backstop for the unreachable-node case).
     pub async fn delete_lvol(&self, lvol_uuid: &str) -> Result<(), MinimalStateError> {
         debug!(lvol_uuid, "[MINIMAL_DISK] Deleting lvol");
 
+        let guard_probe = {
+            let this = self.clone();
+            move |req: serde_json::Value| {
+                let this = this.clone();
+                async move { this.call_spdk_rpc(&req).await }
+            }
+        };
+        let ctx = crate::guarded_destroy::BoundaryContext {
+            own_host_nqn: "",
+            self_node: "",
+            va: None,
+        };
+        if let Some(crate::guarded_destroy::Verdict::Refuse(reason))
+        | Some(crate::guarded_destroy::Verdict::Defer(reason)) =
+            crate::guarded_destroy::boundary_verdict(
+                &guard_probe,
+                crate::guarded_destroy::RPC_BDEV_LVOL_DELETE,
+                &json!({ "name": lvol_uuid }),
+                &ctx,
+            )
+            .await
+        {
+            warn!(lvol_uuid, reason = %reason, "[MINIMAL_DISK] guarded_destroy blocked lvol delete");
+            return Err(MinimalStateError::SpdkRpcError { message: reason });
+        }
+
         let delete_params = json!({
-            "method": "bdev_lvol_delete",
+            "method": crate::guarded_destroy::RPC_BDEV_LVOL_DELETE,
             "params": {
                 "name": lvol_uuid
             }
@@ -1754,7 +1783,7 @@ impl MinimalDiskService {
                 eprintln!("✅ [SPDK_METHOD] bdev_lvol_create returned UUID: {}", uuid);
                 json!(uuid)
             }
-            "bdev_lvol_delete" => {
+            m if m == crate::guarded_destroy::RPC_BDEV_LVOL_DELETE => {
                 let params = rpc_request["params"].as_object()
                     .ok_or("Missing params for lvol deletion")?;
                 let name = params["name"].as_str().unwrap_or("");

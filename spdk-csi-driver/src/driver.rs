@@ -16,6 +16,31 @@ use k8s_openapi::api::core::v1::Node as k8sNode;
 use crate::minimal_models::{MinimalStateError, DiskInfo, VolumeCreationResult, ReplicaInfo};
 use crate::capacity_cache::CapacityCache;
 
+/// Contract R5: the controller→node-agent HTTP leg carries deadlines. The
+/// default reqwest client has NO request timeout, so a wedged node agent (or
+/// a blackholed node) used to hang the calling task forever — the F39 wedge
+/// did not even need a wedged spdk-tgt, just this unbounded await. Connect is
+/// bounded tight (10s); the request budget is generous because agent routes
+/// legitimately fan out into multiple SPDK RPCs, each now bounded themselves
+/// (FLINT_SPDK_RPC_TIMEOUT_SECS in spdk_native.rs).
+fn node_agent_http_client() -> Result<HttpClient, Box<dyn std::error::Error + Send + Sync>> {
+    static CLIENT: std::sync::OnceLock<HttpClient> = std::sync::OnceLock::new();
+    if let Some(c) = CLIENT.get() {
+        return Ok(c.clone());
+    }
+    let request_secs = std::env::var("FLINT_NODE_AGENT_HTTP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(300);
+    let built = HttpClient::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(request_secs))
+        .build()
+        .map_err(|e| format!("Failed to build node-agent HTTP client: {e}"))?;
+    Ok(CLIENT.get_or_init(|| built).clone())
+}
+
 /// Block device backend type
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockDeviceBackend {
@@ -657,7 +682,7 @@ impl SpdkCsiDriver {
         debug!(node_name, endpoint, "[CONTROLLER_HTTP] GET node agent");
         let node_agent_url = self.get_node_agent_url(node_name).await?;
         let full_url = format!("{}{}", node_agent_url, endpoint);
-        let response = HttpClient::new().get(&full_url).send().await?;
+        let response = node_agent_http_client()?.get(&full_url).send().await?;
         if !response.status().is_success() {
             let error_text = response.text().await?;
             return Err(format!("Node agent HTTP GET failed: {}", error_text).into());
@@ -672,8 +697,8 @@ impl SpdkCsiDriver {
         let node_agent_url = self.get_node_agent_url(node_name).await?;
         let full_url = format!("{}{}", node_agent_url, endpoint);
         
-        let http_client = HttpClient::new();
-        
+        let http_client = node_agent_http_client()?;
+
         // All endpoints use POST (RPC-style communication)
         let response = http_client.post(&full_url).json(payload).send().await?;
 
@@ -1013,28 +1038,11 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
-    /// Cleanup NVMe-oF target (minimal implementation)
-    pub async fn cleanup_nvmeof_target(&self, nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        debug!(nqn, "[MINIMAL_NVMEOF] Cleaning up NVMe-oF target");
-
-        let delete_params = json!({
-            "method": "nvmf_delete_subsystem",
-            "params": {
-                "nqn": nqn
-            }
-        });
-
-        match self.call_node_agent(&self.node_id, "/api/nvmeof/delete_subsystem", &delete_params).await {
-            Ok(_) => info!(nqn, "[MINIMAL_NVMEOF] Successfully deleted subsystem"),
-            Err(e) => {
-                let err = e.to_string();
-                warn!(nqn, err, "[MINIMAL_NVMEOF] Failed to delete subsystem (may not exist)");
-                // Don't fail - cleanup is best effort
-            }
-        }
-
-        Ok(())
-    }
+    // (cleanup_nvmeof_target deleted 2026-07-22: dead code — zero callers,
+    // and it POSTed /api/nvmeof/delete_subsystem, a route that never
+    // existed, so every invocation would have 404ed. Historical bypass
+    // fossil noted in the C1 review; removal shrinks the destruction
+    // surface the guarded_destroy lint polices.)
 
     /// Create ublk device (simplified - keeping core functionality)
     /// Legacy public method - kept for backward compatibility
@@ -1898,10 +1906,23 @@ impl SpdkCsiDriver {
                 .collect();
             let mut missing: Vec<MissingWriter> = Vec::new();
             for uuid in writer_uuids.iter().filter(|u| !attached_now.contains(&u.as_str())) {
-                // Only legs still in the authoritative membership can be
-                // probed or waited for; reconcile_membership prunes the
-                // record on its next write.
+                // C2 laundering pin: a recorded writer that is NOT in the
+                // authoritative membership is still evaluated — skipping it
+                // let one membership write silence the gate entirely.
+                // Legitimate replacement prunes the writer set in the same
+                // guarded patch (prune_writers_for_replacement), so this
+                // shape only survives for drift/laundering. With no node to
+                // probe it evaluates as transiently missing: defer, then the
+                // bounded, evented serve-with-risk path — never silence.
+                // (When the chain-intent record lands, an intent that
+                // excludes a READY node's leg upgrades this to an outright
+                // refusal — wave 2.)
                 let Some(rep) = replicas.iter().find(|r| r.lvol_uuid == *uuid) else {
+                    missing.push(MissingWriter {
+                        lvol_uuid: uuid.clone(),
+                        node_name: "<not-in-membership>".to_string(),
+                        availability: LegAvailability::NodeNotReady { not_ready_secs: 0 },
+                    });
                     continue;
                 };
                 let availability = match unavailable_replicas

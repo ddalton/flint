@@ -8,7 +8,51 @@ use serde_json::{json, Value};
 use tokio::net::UnixStream;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
+
+/// Contract R5: no unbounded awaits. Every SPDK RPC carries a deadline so a
+/// wedged spdk-tgt (examine stuck behind a dead NVMe-oF controller, blackholed
+/// attach) fails the CALL instead of hanging the calling task forever — the
+/// F39 substrate fix. Methods that legitimately run long inside the target
+/// get the slow budget; everything else answers in milliseconds when healthy.
+const SLOW_RPC_METHODS: &[&str] = &[
+    "bdev_wait_for_examine",      // examine settle can wait on fabric teardown
+    "bdev_lvol_create_lvstore",   // metadata format scales with store size
+    "bdev_nvme_attach_controller", // remote fabric connect
+];
+
+fn rpc_timeout_env(var: &str, default_secs: u64) -> u64 {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(default_secs)
+}
+
+/// Pure deadline table — unit-testable without env access.
+fn deadline_for(method: &str, default_secs: u64, slow_secs: u64) -> Duration {
+    if SLOW_RPC_METHODS.contains(&method) {
+        Duration::from_secs(slow_secs)
+    } else {
+        Duration::from_secs(default_secs)
+    }
+}
+
+/// Deadline for one RPC. FLINT_SPDK_RPC_TIMEOUT_SECS (default 30) bounds the
+/// common case; FLINT_SPDK_RPC_SLOW_TIMEOUT_SECS (default 180) bounds the
+/// slow list. Cached once per process.
+pub fn rpc_deadline(method: &str) -> Duration {
+    static BUDGETS: OnceLock<(u64, u64)> = OnceLock::new();
+    let (default_secs, slow_secs) = *BUDGETS.get_or_init(|| {
+        (
+            rpc_timeout_env("FLINT_SPDK_RPC_TIMEOUT_SECS", 30),
+            rpc_timeout_env("FLINT_SPDK_RPC_SLOW_TIMEOUT_SECS", 180),
+        )
+    });
+    deadline_for(method, default_secs, slow_secs)
+}
 
 // SPDK v25.05.x uses RPC calls for all operations
 // This implementation follows the official SPDK Go client pattern
@@ -121,9 +165,15 @@ impl SpdkNative {
     pub async fn new(socket_path: Option<String>) -> Result<Self> {
         let socket_path = socket_path.unwrap_or_else(|| "/var/tmp/spdk.sock".to_string());
         
-        // Test connection to ensure SPDK is available
-        let _test_conn = UnixStream::connect(&socket_path).await
-            .map_err(|e| anyhow!("Failed to connect to SPDK socket {}: {}", socket_path, e))?;
+        // Test connection to ensure SPDK is available (bounded: a wedged
+        // listener must not hang client construction)
+        let _test_conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            UnixStream::connect(&socket_path),
+        )
+        .await
+        .map_err(|_| anyhow!("Timed out connecting to SPDK socket {} after 10s", socket_path))?
+        .map_err(|e| anyhow!("Failed to connect to SPDK socket {}: {}", socket_path, e))?;
         
         tracing::info!("[SPDK_RPC] Connected to SPDK at {}", socket_path);
         
@@ -162,7 +212,40 @@ impl SpdkNative {
         if let Some(ref p) = normalized_params {
             self.validate_rpc_params(p)?;
         }
-        
+
+        // Contract R5: the whole connect/send/receive exchange runs under one
+        // per-method deadline. On expiry the error deliberately matches NO
+        // benign classifier (is_missing/is_busy/is_claim_blocked), so guarded
+        // callers treat it as transport-unknown and fail closed.
+        self.call_rpc_bounded(method, normalized_params, rpc_deadline(method))
+            .await
+    }
+
+    /// Deadline-explicit variant of the exchange — the seam unit tests use to
+    /// exercise the timeout path without env coupling.
+    async fn call_rpc_bounded(
+        &self,
+        method: &str,
+        normalized_params: Option<Value>,
+        deadline: Duration,
+    ) -> Result<Value> {
+        tokio::time::timeout(deadline, self.call_rpc_unbounded(method, normalized_params))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "SPDK RPC '{}' timed out after {}s (socket {})",
+                    method,
+                    deadline.as_secs(),
+                    self.socket_path
+                )
+            })?
+    }
+
+    async fn call_rpc_unbounded(
+        &self,
+        method: &str,
+        normalized_params: Option<Value>,
+    ) -> Result<Value> {
         // Create connection for this call
         let mut stream = UnixStream::connect(&self.socket_path).await
             .map_err(|e| anyhow!("Failed to connect to SPDK socket: {}", e))?;
@@ -585,6 +668,56 @@ mod tests {
         assert_eq!(parsed["id"], 17);
         
         println!("✅ JSON-RPC request structure matches Go client: {}", json_str);
+    }
+
+    // ------------------------------------------------------------------
+    // Contract R5: bounded RPC transport (F39 substrate)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn deadline_table_routes_slow_methods_to_slow_budget() {
+        assert_eq!(deadline_for("bdev_wait_for_examine", 30, 180), Duration::from_secs(180));
+        assert_eq!(deadline_for("bdev_lvol_create_lvstore", 30, 180), Duration::from_secs(180));
+        assert_eq!(deadline_for("bdev_nvme_attach_controller", 30, 180), Duration::from_secs(180));
+        // the workhorse read path and destructive ops stay on the tight budget
+        assert_eq!(deadline_for("bdev_get_bdevs", 30, 180), Duration::from_secs(30));
+        assert_eq!(deadline_for("nvmf_delete_subsystem", 30, 180), Duration::from_secs(30));
+        assert_eq!(deadline_for("bdev_lvol_check_shallow_copy", 30, 180), Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn hung_socket_times_out_with_transport_shaped_error() {
+        // A listener that accepts and then never answers — the F39 wedge shape.
+        let dir = std::env::temp_dir().join(format!("flint-spdk-hang-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("hang.sock");
+        let _ = std::fs::remove_file(&sock);
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let accept_task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { break };
+                // Hold the connection open forever without responding.
+                std::mem::forget(stream);
+            }
+        });
+
+        let spdk = SpdkNative::new(Some(sock.to_string_lossy().to_string()))
+            .await
+            .expect("constructor test-connect succeeds against an accepting listener");
+        let started = std::time::Instant::now();
+        let err = spdk
+            .call_rpc_bounded("bdev_get_bdevs", None, Duration::from_millis(250))
+            .await
+            .expect_err("hung exchange must fail, not hang");
+        assert!(started.elapsed() < Duration::from_secs(5), "returned promptly");
+        let msg = err.to_string();
+        assert!(msg.contains("timed out"), "timeout shape: {msg}");
+        // The expiry error must match NO benign classifier — guards fail closed on it.
+        for benign in ["does not exist", "not found", "No such device", "already exists"] {
+            assert!(!msg.contains(benign), "timeout error must not read as '{benign}'");
+        }
+        accept_task.abort();
+        let _ = std::fs::remove_file(&sock);
     }
 }
 

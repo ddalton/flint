@@ -2533,7 +2533,22 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 eprintln!("🆕 [WIPEFS_CHECK] Brand new volume (no filesystem-initialized marker)");
             }
             
-            if fs_initialized {
+            // Structural no-op check FIRST (contract, C8): if the staging
+            // path is already a live mountpoint, this call is a kubelet
+            // retry over a staged volume and NO cache-clear step may run.
+            // wipefs-after-the-fact is the 2026-06-12 reformat incident's
+            // shape — the blkid signature guard below stays as defense in
+            // depth, no longer as the only thing between a retry and a wipe.
+            let already_staged = std::process::Command::new("mountpoint")
+                .arg("-q")
+                .arg(&staging_target_path)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if already_staged {
+                eprintln!("✅ [WIPEFS_CHECK] Staging path already mounted — skipping cache-clear (idempotent restage)");
+            } else if fs_initialized {
                 // Filesystem exists (clone/snapshot/previously formatted) - only flush cache
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 eprintln!("🧹 [CACHE_CLEAR] Filesystem initialized - blockdev flush only");

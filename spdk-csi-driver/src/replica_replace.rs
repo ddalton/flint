@@ -21,9 +21,12 @@
 //!      (`revert_head_to_empty`), so size/thin here only reserve capacity.
 //!   4. ONE resourceVersion-guarded PV metadata patch atomically writes the
 //!      identity override annotation, the swapped sync record (new uuid
-//!      enters STALE — `reconcile_membership` would enter an unknown
-//!      identity as in_sync, so identity and record must never be
-//!      observable apart), and the replica node-label swap.
+//!      enters STALE explicitly; since the C2 laundering pins,
+//!      `reconcile_membership` also defaults unknown identities to STALE —
+//!      but identity and record must still never be observable apart), the
+//!      writer-set prune for the lost leg (`prune_writers_for_replacement`
+//!      — replacement is the ONLY writer-set exit), and the replica
+//!      node-label swap.
 //!   5. The same tick's catch-up finds a stale replica with no shared
 //!      history on a reachable node → §9-5 thin-aware full build → standby
 //!      → chase → hot-rejoin admits it into the live (degraded) raid. A
@@ -128,6 +131,10 @@ pub fn build_swapped_record(
     let pos = record.replicas.iter().position(|r| r.lvol_uuid == old_uuid)?;
     record.replicas[pos] = new_rec;
     record.reconcile_membership(new_replicas);
+    // C2 pin: replacement is the ONLY writer-set exit. The old leg's node is
+    // verifiably gone (that is what qualified it for replacement), so its
+    // acked tail is unrecoverable — release the F36c gate from waiting on it.
+    record.prune_writers_for_replacement(&[old_uuid.to_string()]);
     Some(record)
 }
 
