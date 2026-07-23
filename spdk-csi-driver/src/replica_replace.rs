@@ -179,7 +179,12 @@ pub async fn maybe_replace_for_volume(
     let pv_name = replica_sync::record_pv_name(volume_id);
     let pvs: Api<PersistentVolume> = Api::all(driver.kube_client.clone());
     let pv = pvs.get(pv_name).await?;
-    if pv.metadata.deletion_timestamp.is_some() || replica_sync::is_rwx_pv(&pv) {
+    // F40 (runab 2026-07-23): RWX volumes were skipped here, so a
+    // permanently-lost leg was NEVER re-placed — the backing chain stayed
+    // single-survivor forever. The user PV is the record home (override +
+    // record land here); backing-chain staging resolves the override
+    // through the parent read-through in get_replicas_from_pv.
+    if pv.metadata.deletion_timestamp.is_some() {
         return Ok(None);
     }
     if pv

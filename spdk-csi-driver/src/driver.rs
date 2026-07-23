@@ -1556,6 +1556,26 @@ impl SpdkCsiDriver {
                         // single-replica volumes never have this field.
                         // Override-aware (U11): a re-placed identity in the
                         // annotation supersedes the immutable attribute.
+                        // F40 read-through (runab 2026-07-23): for the RWX
+                        // backing PV, replica re-placement writes its
+                        // override on the PARENT user PV (the record home).
+                        // Resolve through it so backing-chain staging sees
+                        // replaced identities — otherwise the backing chain
+                        // assembles from the dead pre-replacement list.
+                        if let Some(parent_id) = crate::replica_sync::nfs_backing_parent(&pv) {
+                            if let Ok(parent_pv) = pvs.get(crate::replica_sync::record_pv_name(&parent_id)).await {
+                                if let Some(over) = parent_pv
+                                    .metadata
+                                    .annotations
+                                    .as_ref()
+                                    .and_then(|a| a.get(crate::replica_sync::REPLICAS_OVERRIDE_ANNOTATION))
+                                {
+                                    println!("📊 [DRIVER] Backing PV replica identities resolved through parent override ({})", parent_id);
+                                    let replicas: Vec<ReplicaInfo> = serde_json::from_str(over)?;
+                                    return Ok(Some(replicas));
+                                }
+                            }
+                        }
                         if let Some(replicas_json) =
                             crate::replica_sync::raw_replicas_json(&pv)
                         {

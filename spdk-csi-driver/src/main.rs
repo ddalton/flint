@@ -2389,11 +2389,32 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // MULTI-REPLICA: Create RAID 1 from replicas
             println!("🔧 [NODE] Multi-replica volume - creating RAID");
             
-            let replicas_json = publish_context.get("replicas")
-                .ok_or_else(|| tonic::Status::invalid_argument("No replicas in publish context"))?;
-            
-            let replicas: Vec<ReplicaInfo> = serde_json::from_str(replicas_json)
-                .map_err(|e| tonic::Status::internal(format!("Failed to parse replicas: {}", e)))?;
+            // F41 (runab 2026-07-23): publish_context is a snapshot kubelet
+            // cached in the VolumeAttachment at ATTACH time. A same-node
+            // restage after U11 replica re-placement reuses it, so assembly
+            // saw the PRE-replacement identities: the dead leg attached-and-
+            // failed while the caught-up replacement standby was invisible —
+            // the volume stayed single-survivor direct-serve forever. Read
+            // the LIVE PV (override-aware) first; the cached context is the
+            // fallback for ephemeral volumes and API outages (staging must
+            // survive an API blip — the stale list is still safe: the gate
+            // and record checks run downstream either way).
+            let live_replicas = self.driver.get_replicas_from_pv(&volume_id).await;
+            let replicas: Vec<ReplicaInfo> = match live_replicas {
+                Ok(Some(live)) => {
+                    println!("📊 [NODE] Replica identities from LIVE PV (override-aware)");
+                    live
+                }
+                other => {
+                    if let Err(e) = &other {
+                        println!("⚠️ [NODE] Live PV replica read failed ({}) — falling back to cached publish context", e);
+                    }
+                    let replicas_json = publish_context.get("replicas")
+                        .ok_or_else(|| tonic::Status::invalid_argument("No replicas in publish context"))?;
+                    serde_json::from_str(replicas_json)
+                        .map_err(|e| tonic::Status::internal(format!("Failed to parse replicas: {}", e)))?
+                }
+            };
             
             println!("📊 [NODE] Volume has {} replicas", replicas.len());
             for (i, replica) in replicas.iter().enumerate() {

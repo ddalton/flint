@@ -2221,6 +2221,11 @@ pub struct VolumeHotRejoinView {
     pub rwo_bounce_enabled: bool,
     /// `flint.csi.storage.io/hot-rejoin` == "disabled" (the opt-out).
     pub hot_rejoin_disabled: bool,
+    /// Record-home PV carries flint.io/degraded-direct: single-survivor
+    /// DIRECT serve — there is NO raid to admit into. Hot-rejoin planning
+    /// against it just churns claims every tick (found live on runab,
+    /// 2026-07-23); the healer for this state is restage admission.
+    pub degraded_direct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2256,6 +2261,9 @@ pub fn plan_hot_rejoin(
     }
     if view.rwx {
         return HotRejoinDecision::Wait("RWX volume — the Tier-1 NFS bounce owns reassembly");
+    }
+    if view.degraded_direct {
+        return HotRejoinDecision::Wait("direct-serve (no raid layer): the caught-up standby admits at the next restage (final-delta admission), not via hot-rejoin");
     }
     if view.hot_rejoin_disabled {
         return HotRejoinDecision::Wait("hot-rejoin disabled by PV annotation");
@@ -2409,6 +2417,9 @@ async fn hot_rejoin_tick(
             consumer: consumers.get(&volume_id).cloned(),
             rwx: crate::replica_sync::is_rwx_pv(&pv),
             nfs_backing: crate::replica_sync::nfs_backing_parent(&pv).is_some(),
+            degraded_direct: annotations
+                .and_then(|a| a.get("flint.io/degraded-direct"))
+                .is_some(),
             rwo_bounce_enabled: annotations
                 .and_then(|a| a.get(crate::cutover::REJOIN_BOUNCE_ANNOTATION))
                 .map(|v| v.eq_ignore_ascii_case("enabled") || v == "true" || v == "1")
@@ -4472,6 +4483,7 @@ mod tests {
             nfs_backing: false,
             rwo_bounce_enabled: false,
             hot_rejoin_disabled: false,
+            degraded_direct: false,
         }
     }
 
@@ -4573,6 +4585,16 @@ mod tests {
         // The (B) class: attached multi-replica RWO, no opt-in/out, ready
         // standby.
         assert_eq!(plan_hot_rejoin(&hr_view(standby_b_record()), &cfg), HotRejoinDecision::Rejoin);
+
+        // Direct-serve (no raid): planning Rejoin would churn claims every
+        // tick against a raid that does not exist (runab 2026-07-23). Wait
+        // with the restage-admission reason instead.
+        let mut dd = hr_view(standby_b_record());
+        dd.degraded_direct = true;
+        assert!(matches!(
+            plan_hot_rejoin(&dd, &cfg),
+            HotRejoinDecision::Wait(r) if r.contains("direct-serve")
+        ));
 
         // Synthetic RWX backing PV: cutover owns its bounce.
         let mut v = hr_view(standby_b_record());
