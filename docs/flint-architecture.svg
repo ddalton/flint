@@ -1,0 +1,238 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="1000" viewBox="0 0 1360 1000" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="arrData" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrSetup" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#ea580c"/>
+    </marker>
+    <style>
+      .title  { font-size:26px; font-weight:700; fill:#0f172a; }
+      .sub    { font-size:14px; fill:#475569; }
+      .h      { font-size:15px; font-weight:700; fill:#0f172a; }
+      .h2     { font-size:13px; font-weight:700; fill:#0f172a; }
+      .lbl    { font-size:12px; fill:#0f172a; }
+      .mut    { font-size:11px; fill:#475569; }
+      .mono   { font-size:10.5px; fill:#334155; font-family:'SFMono-Regular',Consolas,'Liberation Mono',monospace; }
+      .chip   { font-size:10.5px; fill:#3730a3; }
+      .badge  { font-size:14px; font-weight:700; fill:#ffffff; }
+      .flowo  { stroke:#ea580c; stroke-width:2.5; fill:none; }
+      .flowd  { stroke:#2563eb; stroke-width:2; fill:none; }
+      .flowd2 { stroke:#2563eb; stroke-width:2; fill:none; stroke-dasharray:5 4; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1360" height="1000" fill="#ffffff"/>
+
+  <!-- Header -->
+  <text x="30" y="42" class="title">Flint CSI Driver — Architecture &amp; Setup Happy Path</text>
+  <text x="30" y="66" class="sub">SPDK-backed local NVMe storage for Kubernetes · three-container node mode · default nvmeof (NVMe-over-TCP) backend</text>
+
+  <!-- ===================== OPERATOR PANEL ===================== -->
+  <rect x="24" y="92" width="286" height="612" rx="12" fill="#fff7ed" stroke="#ea580c" stroke-width="1.5"/>
+  <text x="44" y="124" class="h" fill="#9a3412">Operator setup — happy path</text>
+
+  <!-- Step 1 -->
+  <g>
+    <rect x="44" y="140" width="246" height="150" rx="9" fill="#ffffff" stroke="#fdba74"/>
+    <circle cx="70" cy="166" r="15" fill="#ea580c"/>
+    <text x="70" y="171" text-anchor="middle" class="badge">1</text>
+    <text x="96" y="171" class="h2">Install the chart</text>
+    <text x="60" y="196" class="mono">helm install flint-csi \</text>
+    <text x="60" y="211" class="mono">  ./flint-csi-driver-chart \</text>
+    <text x="60" y="226" class="mono">  -n flint-system --create-namespace</text>
+    <text x="60" y="252" class="mut">Deploys the controller, dashboard, and</text>
+    <text x="60" y="267" class="mut">the per-node DaemonSet. Install the v1</text>
+    <text x="60" y="282" class="mut">snapshot CRDs first (see README).</text>
+  </g>
+
+  <!-- Step 2 -->
+  <g>
+    <rect x="44" y="304" width="246" height="150" rx="9" fill="#ffffff" stroke="#fdba74"/>
+    <circle cx="70" cy="330" r="15" fill="#ea580c"/>
+    <text x="70" y="335" text-anchor="middle" class="badge">2</text>
+    <text x="96" y="335" class="h2">Prepare each host node</text>
+    <text x="60" y="358" class="mut">Host-level, not an in-cluster pod. Run</text>
+    <text x="60" y="373" class="mono">scripts/setup-nodes.sh</text>
+    <text x="60" y="388" class="mut">on each node — or manually:</text>
+    <text x="60" y="405" class="mut">• hugepages: echo N &gt; …/nr_hugepages</text>
+    <text x="60" y="421" class="mut">• modprobe nvme_tcp nvme_fabrics</text>
+    <text x="60" y="437" class="mut">• systemctl restart kubelet (advertise pages)</text>
+  </g>
+
+  <!-- Step 3 -->
+  <g>
+    <rect x="44" y="468" width="246" height="164" rx="9" fill="#ffffff" stroke="#fdba74"/>
+    <circle cx="70" cy="494" r="15" fill="#ea580c"/>
+    <text x="70" y="499" text-anchor="middle" class="badge">3</text>
+    <text x="96" y="499" class="h2">Initialize NVMe disks (UI)</text>
+    <text x="60" y="524" class="mono">kubectl port-forward \</text>
+    <text x="60" y="539" class="mono">  svc/flint-dashboard 3000:3000</text>
+    <text x="60" y="563" class="mut">Open http://localhost:3000 → the</text>
+    <text x="60" y="578" class="mut">"Disk Setup" tab → select the extra</text>
+    <text x="60" y="593" class="mut">NVMe disks → Initialize. Each disk</text>
+    <text x="60" y="608" class="mut">gets an SPDK blobstore / LVS and</text>
+    <text x="60" y="623" class="mut">turns "Ready" for volumes.</text>
+  </g>
+
+  <text x="44" y="662" class="mut">Then: create a PVC (StorageClass</text>
+  <text x="44" y="677" class="mut">"flint") and mount it in a Pod — the</text>
+  <text x="44" y="692" class="mut">blue data path below is automatic.</text>
+
+  <!-- ===================== KUBERNETES CLUSTER ===================== -->
+  <rect x="334" y="92" width="1002" height="812" rx="14" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text x="356" y="120" class="h">Kubernetes cluster</text>
+  <text x="356" y="139" class="mut">namespace: flint-system</text>
+
+  <!-- flint-csi-controller pod -->
+  <rect x="356" y="156" width="452" height="196" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="374" y="182" class="h2" fill="#3730a3">flint-csi-controller · Deployment</text>
+  <text x="374" y="200" class="mut">flint-driver binary · CSI_MODE=controller</text>
+  <text x="374" y="223" class="mut">CSI sidecars:</text>
+  <g>
+    <rect x="374" y="232" width="120" height="24" rx="12" fill="#e0e7ff" stroke="#a5b4fc"/><text x="434" y="248" text-anchor="middle" class="chip">csi-provisioner</text>
+    <rect x="502" y="232" width="108" height="24" rx="12" fill="#e0e7ff" stroke="#a5b4fc"/><text x="556" y="248" text-anchor="middle" class="chip">csi-attacher</text>
+    <rect x="618" y="232" width="104" height="24" rx="12" fill="#e0e7ff" stroke="#a5b4fc"/><text x="670" y="248" text-anchor="middle" class="chip">csi-resizer</text>
+    <rect x="374" y="264" width="128" height="24" rx="12" fill="#e0e7ff" stroke="#a5b4fc"/><text x="438" y="280" text-anchor="middle" class="chip">csi-snapshotter</text>
+    <rect x="510" y="264" width="110" height="24" rx="12" fill="#e0e7ff" stroke="#a5b4fc"/><text x="565" y="280" text-anchor="middle" class="chip">livenessprobe</text>
+  </g>
+  <text x="374" y="312" class="mut">Watches PVCs → CreateVolume / attach /</text>
+  <text x="374" y="327" class="mut">resize / snapshot against SPDK on nodes.</text>
+
+  <!-- flint-dashboard pod -->
+  <rect x="832" y="156" width="326" height="196" rx="10" fill="#ecfeff" stroke="#06b6d4" stroke-width="1.5"/>
+  <text x="850" y="182" class="h2" fill="#0e7490">flint-dashboard · Deployment</text>
+  <rect x="850" y="196" width="290" height="60" rx="8" fill="#ffffff" stroke="#67e8f9"/>
+  <text x="864" y="218" class="lbl" fill="#0891b2" font-weight="700">frontend — nginx :3000</text>
+  <text x="864" y="236" class="mut">React SPA · proxies /api → backend</text>
+  <text x="864" y="250" class="mut">(the web UI you port-forward to)</text>
+  <rect x="850" y="264" width="290" height="56" rx="8" fill="#ffffff" stroke="#67e8f9"/>
+  <text x="864" y="286" class="lbl" fill="#0891b2" font-weight="700">backend :8080  (/api)</text>
+  <text x="864" y="304" class="mut">flint-driver w/ ENABLE_DASHBOARD;</text>
+  <text x="864" y="317" class="mut">calls each node-agent to init disks.</text>
+  <text x="850" y="340" class="mut">Auth: admin / viewer (bearer token).</text>
+
+  <!-- Application Pod -->
+  <rect x="1176" y="156" width="148" height="196" rx="10" fill="#fdf4ff" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="1250" y="182" text-anchor="middle" class="h2" fill="#7e22ce">Application</text>
+  <text x="1250" y="199" text-anchor="middle" class="h2" fill="#7e22ce">Pod</text>
+  <rect x="1194" y="214" width="112" height="52" rx="8" fill="#ffffff" stroke="#d8b4fe"/>
+  <text x="1250" y="235" text-anchor="middle" class="mut">PVC (SC "flint")</text>
+  <text x="1250" y="251" text-anchor="middle" class="mut">mounted at /data</text>
+  <text x="1250" y="292" text-anchor="middle" class="mut">Sees a normal</text>
+  <text x="1250" y="307" text-anchor="middle" class="mut">block device /</text>
+  <text x="1250" y="322" text-anchor="middle" class="mut">filesystem.</text>
+
+  <!-- Worker node (DaemonSet) -->
+  <!-- ghost node behind to imply "one per node" -->
+  <rect x="372" y="392" width="936" height="484" rx="12" fill="#e2e8f0" stroke="#cbd5e1"/>
+  <rect x="356" y="376" width="936" height="484" rx="12" fill="#f1f5f9" stroke="#475569" stroke-width="1.5"/>
+  <text x="374" y="402" class="h2">Worker node — DaemonSet: flint-csi-node  (3 containers)</text>
+  <text x="374" y="420" class="mut">one such pod per node · node pods are system-node-critical</text>
+
+  <!-- spdk-tgt container (highlighted) -->
+  <rect x="374" y="434" width="360" height="150" rx="9" fill="#fff7ed" stroke="#f59e0b" stroke-width="2"/>
+  <text x="392" y="460" class="h2" fill="#b45309">spdk-tgt  (privileged)</text>
+  <text x="392" y="480" class="mut">SPDK v26.05 storage target daemon.</text>
+  <text x="392" y="498" class="mut">Owns the NVMe disks in userspace and</text>
+  <text x="392" y="513" class="mut">serves volumes as lvols on a blobstore.</text>
+  <text x="392" y="536" class="mut">Backs volumes out over NVMe-oF (TCP)</text>
+  <text x="392" y="551" class="mut">to the node kernel; needs hugepages.</text>
+  <rect x="392" y="558" width="150" height="20" rx="10" fill="#fde68a" stroke="#f59e0b"/>
+  <text x="467" y="572" text-anchor="middle" class="mono" fill="#92400e">RAID1 for multi-replica</text>
+
+  <!-- flint-csi-driver (node) container -->
+  <rect x="374" y="596" width="360" height="104" rx="9" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="392" y="622" class="h2" fill="#3730a3">flint-csi-driver · CSI_MODE=node</text>
+  <text x="392" y="641" class="mut">CSI NodeStage/NodePublish → mount.</text>
+  <text x="392" y="659" class="mut">Node-agent HTTP API on :9081</text>
+  <text x="392" y="674" class="mut">(disk discovery + initialize disks).</text>
+  <text x="392" y="691" class="mut">Embeds the dashboard backend logic.</text>
+
+  <!-- node-driver-registrar -->
+  <rect x="374" y="712" width="360" height="44" rx="9" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="392" y="739" class="lbl">node-driver-registrar — registers the CSI socket with kubelet</text>
+
+  <!-- Hugepages -->
+  <rect x="754" y="434" width="180" height="150" rx="9" fill="#fef9c3" stroke="#eab308" stroke-width="1.5"/>
+  <text x="844" y="460" text-anchor="middle" class="h2" fill="#854d0e">Hugepages</text>
+  <text x="844" y="482" text-anchor="middle" class="mut">2Mi pages · ≈8Gi</text>
+  <text x="844" y="500" text-anchor="middle" class="mut">reserved on the</text>
+  <text x="844" y="515" text-anchor="middle" class="mut">host (step 2)</text>
+  <text x="844" y="540" text-anchor="middle" class="mut">SPDK maps these</text>
+  <text x="844" y="555" text-anchor="middle" class="mut">for zero-copy</text>
+  <text x="844" y="570" text-anchor="middle" class="mut">userspace I/O.</text>
+
+  <!-- NVMe disks + blobstore -->
+  <rect x="754" y="596" width="536" height="248" rx="9" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="772" y="622" class="h2" fill="#047857">Extra NVMe disks on the node</text>
+  <text x="772" y="640" class="mut">separate from the root filesystem · initialized in step 3</text>
+
+  <!-- disk cylinders -->
+  <g>
+    <!-- disk 1 -->
+    <ellipse cx="852" cy="676" rx="60" ry="14" fill="#a7f3d0" stroke="#059669"/>
+    <path d="M792,676 v58 a60,14 0 0 0 120,0 v-58" fill="#d1fae5" stroke="#059669"/>
+    <ellipse cx="852" cy="676" rx="60" ry="14" fill="#a7f3d0" stroke="#059669"/>
+    <text x="852" y="700" text-anchor="middle" class="mono" fill="#065f46">/dev/nvme1n1</text>
+    <text x="852" y="724" text-anchor="middle" class="mono" fill="#065f46">blobstore</text>
+    <!-- disk 2 -->
+    <ellipse cx="1002" cy="676" rx="60" ry="14" fill="#a7f3d0" stroke="#059669"/>
+    <path d="M942,676 v58 a60,14 0 0 0 120,0 v-58" fill="#d1fae5" stroke="#059669"/>
+    <ellipse cx="1002" cy="676" rx="60" ry="14" fill="#a7f3d0" stroke="#059669"/>
+    <text x="1002" y="700" text-anchor="middle" class="mono" fill="#065f46">/dev/nvme2n1</text>
+    <text x="1002" y="724" text-anchor="middle" class="mono" fill="#065f46">blobstore</text>
+  </g>
+  <rect x="1088" y="662" width="184" height="84" rx="8" fill="#ffffff" stroke="#6ee7b7"/>
+  <text x="1180" y="686" text-anchor="middle" class="lbl" fill="#047857">lvol volumes</text>
+  <text x="1180" y="706" text-anchor="middle" class="mut">one lvol per PVC,</text>
+  <text x="1180" y="721" text-anchor="middle" class="mut">thin-provisioned;</text>
+  <text x="1180" y="736" text-anchor="middle" class="mut">snapshots &amp; clones</text>
+  <text x="772" y="800" class="mut">⚠ Initializing a disk erases it. The root disk cannot be used by SPDK.</text>
+  <text x="772" y="820" class="mut">RWX/pNFS volumes are exported over NFS on top of the same lvols (opt-in).</text>
+
+  <!-- ===================== SETUP FLOW ARROWS (orange) ===================== -->
+  <!-- 1: install chart → cluster -->
+  <path class="flowo" d="M310,180 C325,165 336,150 352,132" marker-end="url(#arrSetup)"/>
+  <circle cx="322" cy="176" r="13" fill="#ea580c"/><text x="322" y="181" text-anchor="middle" class="badge">1</text>
+
+  <!-- 2 marker on hugepages (prepared in step 2) -->
+  <circle cx="772" cy="452" r="13" fill="#ea580c"/><text x="772" y="457" text-anchor="middle" class="badge">2</text>
+
+  <!-- 3 marker on the dashboard frontend (accessed in step 3) -->
+  <circle cx="1126" cy="212" r="13" fill="#ea580c"/><text x="1126" y="217" text-anchor="middle" class="badge">3</text>
+
+  <!-- 3b: dashboard backend → node-agent (init disks) -->
+  <path class="flowo" d="M995,320 C980,420 820,560 736,636" marker-end="url(#arrSetup)"/>
+  <text x="1006" y="470" class="mut" fill="#c2410c" font-weight="700">init disks</text>
+  <text x="1006" y="485" class="mut" fill="#c2410c">:8080 → :9081</text>
+
+  <!-- ===================== DATA PATH ARROWS (blue) ===================== -->
+  <!-- controller provisioner → spdk-tgt (CreateVolume) -->
+  <path class="flowd" d="M582,352 C560,378 620,400 640,430" marker-end="url(#arrData)"/>
+  <text x="470" y="369" class="mut" fill="#1d4ed8" font-weight="700">CreateVolume → lvol</text>
+
+  <!-- spdk-tgt → disks (allocate on blobstore) -->
+  <path class="flowd" d="M734,520 C744,560 760,600 780,632" marker-end="url(#arrData)"/>
+
+  <!-- flint-csi-driver (NodeStage, nvme-tcp) → app pod -->
+  <path class="flowd2" d="M734,648 C980,660 1120,470 1210,352" marker-end="url(#arrData)"/>
+  <text x="946" y="560" class="mut" fill="#1d4ed8" font-weight="700">NodeStage → NVMe-oF</text>
+  <text x="946" y="575" class="mut" fill="#1d4ed8" font-weight="700">(nvme-tcp) → mount into Pod</text>
+
+  <!-- ===================== LEGEND ===================== -->
+  <g>
+    <rect x="24" y="726" width="286" height="120" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+    <text x="44" y="750" class="h2">Legend</text>
+    <line x1="44" y1="768" x2="82" y2="768" class="flowo" marker-end="url(#arrSetup)"/>
+    <text x="92" y="772" class="lbl">One-time operator setup (steps 1–3)</text>
+    <line x1="44" y1="792" x2="82" y2="792" class="flowd" marker-end="url(#arrData)"/>
+    <text x="92" y="796" class="lbl">Automatic volume data path</text>
+    <rect x="44" y="808" width="16" height="14" rx="3" fill="#fff7ed" stroke="#f59e0b"/>
+    <text x="68" y="820" class="lbl">SPDK</text>
+    <rect x="120" y="808" width="16" height="14" rx="3" fill="#ecfdf5" stroke="#10b981"/>
+    <text x="144" y="820" class="lbl">Storage / disks</text>
+    <rect x="238" y="808" width="16" height="14" rx="3" fill="#ecfeff" stroke="#06b6d4"/>
+    <text x="262" y="820" class="lbl">UI</text>
+  </g>
+</svg>

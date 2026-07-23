@@ -88,6 +88,16 @@ non-pNFS StorageClass for volumes that need snapshots.
 
 == Installation
 
+The diagram below shows the Flint components and the three one-time setup
+steps: **①** install the chart, **②** prepare each host node (hugepages +
+kernel modules + kubelet restart), and **③** initialize the NVMe disks
+from the dashboard. The blue path is the automatic volume flow once setup
+is done.
+
+image::docs/flint-architecture.png[Flint architecture and setup happy path,align="center"]
+
+_(Editable source: link:docs/flint-architecture.svg[flint-architecture.svg].)_
+
 === 1. Set Your Kubeconfig
 
 [source,bash]
