@@ -23,16 +23,28 @@ Each worker node must have:
 * **Kubernetes cluster** (1.21+) with kubectl access
 * **Helm 3** installed locally
 * **KUBECONFIG** pointing to your cluster
-* **ublk kernel module** loaded on all worker nodes:
+* **Kernel initiator modules** loaded on all worker nodes, matching the
+  configured block-device backend (`blockDevice.backend` in
+  `values.yaml`):
 +
+--
+The default backend is **`nvmeof`** (kernel NVMe-over-TCP), which requires
+the `nvme_tcp` and `nvme_fabrics` modules:
+
 [source,bash]
 ----
-# Load kernel module on each node
-sudo modprobe ublk_drv
+# Load on each node
+sudo modprobe nvme_tcp nvme_fabrics
 
 # Make it persistent across reboots
-echo "ublk_drv" | sudo tee /etc/modules-load.d/ublk.conf
+printf 'nvme_tcp\nnvme_fabrics\n' | sudo tee /etc/modules-load.d/flint-nvme.conf
 ----
+
+If you instead set `blockDevice.backend: ublk`, load `ublk_drv` on each node
+(`sudo modprobe ublk_drv`; persist via `/etc/modules-load.d/ublk.conf`).
+Note that `ublk_drv` is absent on some kernels (e.g. certain AWS 6.8
+builds) — verify with `modprobe ublk_drv` before choosing that backend.
+--
 
 === Snapshot Prerequisites (only if you plan to use snapshots)
 
@@ -90,16 +102,16 @@ Edit `flint-csi-driver-chart/values.yaml` and configure:
 [source,yaml]
 ----
 images:
-  repository: docker-sandbox.infra.cloudera.com/ddalton  # Your container registry
+  repository: dilipdalton  # Your container registry (default: Docker Hub)
   flintCsiDriver:
-    tag: latest
+    tag: "1.18.0"   # pinned per release — see values.yaml for the current tag
   spdkTarget:
-    tag: latest
+    tag: "1.6.0"
 
 dashboard:
   enabled: true  # Enable web UI for disk management
   frontend:
-    tag: latest
+    tag: "1.9.0"
 ----
 
 === 3. Install via Helm
@@ -214,6 +226,11 @@ spec:
 * **Volume Cloning**: Clone existing volumes for fast copies
 * **Volume Expansion**: Expand volumes online without downtime
 * **Ephemeral Volumes**: CSI inline volumes for temporary storage
+* **ReadWriteMany (RWX)**: Shared volumes via a per-volume NFS server
+  (`nfs.enabled`, on by default)
+* **pNFS (Parallel NFS, RFC 8881)**: Opt-in striped volumes served by a
+  Flint MDS + Data Server fleet (`pnfs.enabled`; StorageClass
+  `parameters.layout: pnfs`) — see `docs/pnfs-operator-runbook.md`
 * **Web Dashboard**: Visual management and monitoring
 
 == Testing
@@ -256,18 +273,24 @@ Verify disks are initialized:
 ----
 # Check dashboard or query nodes directly
 kubectl exec -n flint-system flint-csi-node-xxx -c flint-csi-driver -- \
-  curl localhost:8081/api/disks/list
+  curl localhost:9081/api/disks/list
 ----
 
-=== UBLK Module Not Loaded
+=== Kernel Initiator Module Not Loaded
 
-If you see "No such device" errors:
+If you see "No such device" errors, or `nvme connect failed: Failed to
+open /dev/nvme-fabrics`, the backend's kernel module is missing. Load the
+module that matches `blockDevice.backend`:
+
 [source,bash]
 ----
-# Load on all worker nodes
+# Default nvmeof backend — load on all worker nodes
+ssh <node> 'sudo modprobe nvme_tcp nvme_fabrics && lsmod | grep nvme'
+
+# ublk backend instead
 ssh <node> 'sudo modprobe ublk_drv && lsmod | grep ublk'
 
-# Restart CSI driver pods after loading module
+# Restart CSI node pods after loading the module
 kubectl delete pods -n flint-system -l app=flint-csi-node
 ----
 
@@ -290,7 +313,10 @@ kubectl delete namespace flint-system
 * `docs/decisions/` — architectural decision records (one CSI driver,
   pNFS perf baseline, write-path deep dive)
 * `docs/plans/pnfs-production-readiness.md` — pNFS production
-  hardening roadmap (Phase A + B done, Phase C deferred)
+  hardening roadmap: Phase A (CB_LAYOUTRECALL backchannel) and Phase B
+  (state persistence) shipped; optional Phase C (FFL replication)
+  deferred
+* `docs/pnfs-operator-runbook.md` — pNFS deployment and trust model
 * `tests/lima/STATUS.md` — living project status with phase notes,
   test gates, and conformance scores
 * `CHANGELOG.md` — release notes

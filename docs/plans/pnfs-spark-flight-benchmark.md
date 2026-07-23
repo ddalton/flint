@@ -3,8 +3,10 @@
 **Date**: 2026-07-07
 **Status**: Proposed — Phase 0 dry-run + N=2 baseline + N=2→N=4 raw-read
 scaling done 2026-07-07 (DS side scales linearly, 1.81× at N=4, MDS ~0
-CPU); two CSI/committer blockers still open before the Parquet-Spark
-headline
+CPU). The two CSI/committer blockers below are now FIXED (see
+`docs/plans/pnfs-csi-rwx-and-committer-fixes.md`, all three fixes done
+2026-07-07); the full Parquet-Spark headline run is still pending more
+nodes
 **Prior art**: ADR 0004 (`docs/decisions/0004-pnfs-cross-host-scaling.md`,
 cross-host linear scaling with `fio`), `docs/plans/pnfs-performance-plan.md`
 (Phases 0–3 landed), `docs/plans/mds-performance-plan.md` (metadata path

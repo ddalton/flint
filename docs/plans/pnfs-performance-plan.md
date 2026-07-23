@@ -1,7 +1,8 @@
 # pNFS performance: improvement & benchmarking plan
 
 **Date**: 2026-07-04
-**Status**: Proposed (Phase 0 landed)
+**Status**: Phases 0–3 LANDED (through 2026-07-05, all cross-host gates
+pass — see ADR 0004); Phase 4 (productionization gates) open
 **Prior art**: ADR 0002 (first baseline), ADR 0003 (write-perf deep dive),
 `docs/plans/pnfs-production-readiness-design-spec.md` (pipelining spec)
 

@@ -1,43 +1,77 @@
-# Build the docker images 
+= Flint CSI driver (Rust crate)
 
-docker build -t docker-sandbox.infra.cloudera.com/ddalton/flint-controller:0.0.1 . -f docker/Dockerfile.controller --push
-docker build -t docker-sandbox.infra.cloudera.com/ddalton/flint-driver:0.0.1 . -f docker/Dockerfile.csi --push
-docker build -t docker-sandbox.infra.cloudera.com/ddalton/flint-node-agent:0.0.1 . -f docker/Dockerfile.node-agent --push
-docker build -t docker-sandbox.infra.cloudera.com/ddalton/spdk-tgt:0.0.1 . -f docker/Dockerfile.spdk --push
+This crate builds the container images that make up the Flint data path:
 
+[cols="1,2,2",options="header"]
+|===
+| Image | Dockerfile | Contents
 
+| `flint-driver`
+| `docker/Dockerfile.csi`
+| The CSI driver binary. One image serves **both** controller and node
+  roles — the role is selected at runtime via the `CSI_MODE` env var
+  (`controller` / `node`). Also embeds the dashboard backend
+  (`ENABLE_DASHBOARD=true`) and the `flint-nfs-server` binary used for
+  RWX volumes.
 
+| `spdk-tgt`
+| `docker/Dockerfile.spdk`
+| The SPDK target daemon (SPDK v26.05) plus Flint's SPDK patches. Runs as
+  a privileged sidecar on each node.
 
-# In your DaemonSet or Pod definition for the node agent pods
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: spdk-csi-node
-spec:
-  template:
-    spec:
-      containers:
-        - name: node-agent
-          # ... your existing container configuration ...
-          env:
-            - name: API_PORT
-              value: "8081"
-          ports:
-            - name: api-port
-              containerPort: 8081 # Expose the port for the API server
-          lifecycle:
-            preStop:
-              exec:
-                # This command is executed inside the 'node-agent' container
-                # before it receives the SIGTERM signal.
-                command:
-                  - "/bin/sh"
-                  - "-c"
-                  - "curl -X POST http://localhost:8081/api/spdk/shutdown"
-        - name: spdk-tgt # The SPDK sidecar
-          # ... your existing spdk-tgt container configuration ...
-      
-      # Crucially, give SPDK enough time to perform the graceful shutdown.
-      # This value should be long enough for the preStop hook to run and
-      # for SPDK to unmount its blobstores.
-      terminationGracePeriodSeconds: 60
+| `flint-pnfs`
+| `docker/Dockerfile.pnfs`
+| The pNFS MDS + Data Server (one image; the entrypoint selects the
+  role). Only needed when `pnfs.server.enabled` is set in the chart.
+|===
+
+NOTE: The legacy `flint-controller` and `flint-node-agent` images no
+longer exist. The controller, node agent, and dashboard backend were all
+merged into the single `flint-driver` binary.
+
+== Building the images
+
+`flint-csi-driver-chart/values.yaml` is the source of truth for which
+image tags ship. Use the release gate rather than building by hand — it
+derives the image list from `values.yaml`, builds only what's missing,
+and refuses to push a chart whose images aren't published:
+
+[source,bash]
+----
+scripts/release.sh check    # verify every tag the chart references
+scripts/release.sh images   # build + push the MISSING images only
+scripts/release.sh all      # images, then chart
+----
+
+To build one image manually (registry comes from `images.repository` in
+`values.yaml`, default `dilipdalton` on Docker Hub):
+
+[source,bash]
+----
+# from the repo root
+docker buildx build --platform linux/amd64 \
+  -f spdk-csi-driver/docker/Dockerfile.csi \
+  -t dilipdalton/flint-driver:<tag> --push spdk-csi-driver
+
+docker buildx build --platform linux/amd64 \
+  -f spdk-csi-driver/docker/Dockerfile.spdk \
+  -t dilipdalton/spdk-tgt:<tag> --push spdk-csi-driver
+----
+
+NOTE: Images build for `linux/amd64`. On Apple Silicon the SPDK image is
+best built on a native x86 node — see
+`spdk-csi-driver/docs/remote-x86-build-node.md`.
+
+== Graceful shutdown
+
+Graceful SPDK shutdown is handled by a `preStop` hook baked into the CSI
+node DaemonSet (`flint-csi-driver-chart/templates/node.yaml`), with
+`terminationGracePeriodSeconds: 30`. On the default `nvmeof` backend the
+hook deletes the node's NVMe-oF subsystems before SPDK exits; on the
+`ublk` backend it is a no-op (the entrypoint's SIGTERM trap tears down
+`spdk_tgt`). No manual configuration is required — the earlier
+hand-rolled `curl .../api/spdk/shutdown` DaemonSet snippet is obsolete.
+
+The node-agent HTTP API (disk listing, etc.) listens on port **9081**
+(`healthCheck.nodeAgentPort`), moved from 8081 to avoid nginx-ingress
+conflicts.

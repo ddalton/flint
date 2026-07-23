@@ -1,5 +1,14 @@
 # pNFS production readiness — plan for Tasks #4 + #5
 
+**Status: Phase A + Phase B SHIPPED.** Phase A (CB_LAYOUTRECALL
+backchannel) lives in `src/nfs/v4/back_channel.rs`,
+`src/nfs/v4/cb_compound.rs`, and `src/pnfs/mds/callback.rs` (layout
+recall on DS loss via `recall_layouts_for_device`). Phase B (state
+persistence) lives in `src/state_backend/` (production `SqliteBackend`,
+restart-survival). Phase C (FFL replication) remains deferred until a
+customer asks. The phase descriptions below are the original design
+plan, retained for context.
+
 **Goal**: make the pNFS data path safe to run in production, where DSes
 die and MDS pods get rolled, without losing data or breaking active
 mounts. Two well-scoped phases (#4 then #5), then optional Phase C

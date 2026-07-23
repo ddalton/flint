@@ -1,6 +1,6 @@
 # Identity unification — one typed volume identity at every boundary
 
-**Status:** Phases 0–1 COMPLETE (2026-07-04). Phase 0: `src/identity.rs`
+**Status:** ALL PHASES COMPLETE (0–4, 2026-07-04). Phase 0: `src/identity.rs`
 (canonical vocabulary, delegating parsers, live-shape tests) +
 `identity-unification-phase0-audit.md` (eleven role signals, full RPC×role
 matrix, ~25-site inventory, latent findings L1–L6). Phase 1: all queue

@@ -10,22 +10,26 @@ This Helm chart deploys the Flint CSI driver for Kubernetes, providing high-perf
 - **Real-time Monitoring**: Integrated dashboard for cluster-wide storage visibility
 - **Snapshot Support**: Volume snapshots and clones via CSI snapshot controller
 - **Topology Awareness**: Intelligent scheduling based on storage locality
-- **Custom Resource Management**: All storage resources managed in the same namespace as the CSI driver
+- **ReadWriteMany (RWX)**: Shared volumes via a per-volume NFS server (`nfs.enabled`)
+- **pNFS (RFC 8881)**: Opt-in striped volumes served by an MDS + Data Server fleet (`pnfs.enabled`)
 
 == Prerequisites
 
 === Volume Snapshot CRDs
 
-The Flint CSI driver requires Kubernetes Volume Snapshot CRDs to be installed before deployment. Install them with:
+Snapshot support requires the cluster-scoped Volume Snapshot CRDs. Install
+the pinned v1 CRDs once per cluster before deployment:
 
 [source,bash]
 ----
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+kubectl apply -k https://github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=v8.2.0
 ----
 
-**Note**: Some Kubernetes distributions (RKE2, EKS, GKE) may already have these CRDs installed.
+**Note**: Some Kubernetes distributions (RKE2, EKS, GKE) may already have
+these CRDs installed. The chart can also install them for you via
+`crds.installSnapshotCRDs: true` (the default) — set it to `false` if they
+are already present. Snapshots are optional: all non-snapshot operations
+work without the CRDs.
 
 === Hugepages Configuration
 
@@ -74,21 +78,24 @@ kubectl get csidriver flint.csi.storage.io
 
 == Configuration
 
+=== State architecture
+
+Flint uses a **minimal-state architecture**: the CSI driver queries SPDK
+directly for real-time volume and disk state, so the legacy
+`SpdkDisk`/`SpdkVolume`/`SpdkSnapshot` CRDs are **no longer required** and
+are not installed (`crds.installSpdkCRDs` defaults to `false`).
+
 === Custom Resource Namespace
 
-**NEW**: The Flint CSI driver now creates all custom resources (SpdkDisk, SpdkVolume, SpdkSnapshot) in the same namespace where it is installed. This eliminates cross-namespace access issues and simplifies RBAC management.
+Any custom resources the driver does create are placed in the release
+namespace by default. All components receive a `FLINT_NAMESPACE`
+environment variable derived from `driver.customResourceNamespace`:
 
 [source,yaml]
 ----
 driver:
-  # Custom Resources Namespace Configuration
-  # By default, all Flint custom resources are created in .Release.Namespace
-  # This eliminates cross-namespace access issues and simplifies RBAC
-  customResourceNamespace: ""  # Empty means use .Release.Namespace
-  
-  # Override only if you need custom resources in a different namespace
-  # Note: Ensure RBAC permissions are configured appropriately
-  # customResourceNamespace: "my-storage-namespace"
+  # Empty means use .Release.Namespace (recommended — avoids
+  # cross-namespace RBAC). Override only if you need a different namespace,
+  # and ensure RBAC permissions match.
+  customResourceNamespace: ""
 ----
-
-**Environment Variable**: All components receive `FLINT_NAMESPACE` environment variable that specifies where custom resources should be created.
