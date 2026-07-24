@@ -2,21 +2,31 @@
 # Runtime-only variant of Dockerfile.csi for HOST-CROSS-COMPILED binaries.
 #
 # The canonical Dockerfile.csi builds inside rust:1.92-alpine (musl), so a
-# host cross-compile to x86_64-unknown-linux-musl produces the same static
-# linkage — this file just skips the in-container build. Use it when no
-# x86 builder is available (e.g. cutting an rc from an arm64 Mac):
+# host cross-compile to <arch>-unknown-linux-musl produces the same static
+# linkage — this file just skips the in-container build. MULTI-ARCH: buildx
+# sets TARGETARCH per platform (amd64/arm64); stage each arch's binaries
+# under ${BIN_DIR}/${TARGETARCH}/ and buildx picks the right ones, emitting
+# ONE manifest list covering both. Cross-compile both arches on one host
+# (an arm64 Mac needs no Graviton builder):
 #
-#   RUSTFLAGS="-C force-frame-pointers=yes" cargo zigbuild --release \
-#       --target x86_64-unknown-linux-musl --bin csi-driver --bin flint-nfs-server
-#   docker build --platform linux/amd64 -f docker/Dockerfile.csi.prebuilt \
-#       --build-arg BIN_DIR=target/x86_64-unknown-linux-musl/release \
-#       -t dilipdalton/flint-driver:<tag> .
+#   for T in x86_64 aarch64; do
+#     cargo zigbuild --release --target $T-unknown-linux-musl \
+#       --bin csi-driver --bin flint-nfs-server; done
+#   # stage: docker/prebuilt/amd64/{csi-driver,flint-nfs-server} (from x86_64)
+#   #        docker/prebuilt/arm64/{csi-driver,flint-nfs-server} (from aarch64)
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#       -f docker/Dockerfile.csi.prebuilt --build-arg BIN_DIR=docker/prebuilt \
+#       -t dilipdalton/flint-driver:<tag> --push .
 #
 # The runtime stage below must stay IDENTICAL to Dockerfile.csi's — same
 # base, same packages, same setcap line. If you change one, change both.
 FROM ubuntu:24.04
 
-ARG BIN_DIR=target/x86_64-unknown-linux-musl/release
+# BIN_DIR holds per-arch subdirs (amd64/, arm64/); TARGETARCH is buildx's
+# per-platform value. Single-arch callers can still point BIN_DIR at a dir
+# that itself contains an amd64/ or arm64/ subdir.
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
 
 # Install runtime dependencies for the CSI driver (controller + node modes)
 RUN apt-get update && apt-get install -y \
@@ -32,8 +42,8 @@ RUN apt-get update && apt-get install -y \
     libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
-COPY ${BIN_DIR}/csi-driver /usr/local/bin/csi-driver
-COPY ${BIN_DIR}/flint-nfs-server /usr/local/bin/flint-nfs-server
+COPY ${BIN_DIR}/${TARGETARCH}/csi-driver /usr/local/bin/csi-driver
+COPY ${BIN_DIR}/${TARGETARCH}/flint-nfs-server /usr/local/bin/flint-nfs-server
 
 # F26 §12 C3: the NFS server pod runs NON-ROOT (runAsUser 65532); these
 # file capabilities are how the caps activate for a non-root user (the
