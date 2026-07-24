@@ -149,14 +149,58 @@ fires end-to-end in milliseconds with no C changes.
 **The one genuine SPDK-level gap — kernel exposure:**
 
 - **`ublk` backend** (`spdk-csi-driver/helm` default): SPDK's ublk module
-  ignores `SPDK_BDEV_EVENT_RESIZE` (`module/ublk/ublk.c:1530` handles only
-  REMOVE), so `/dev/ublkbN` stays at the old size. No post-create resize
-  mechanism exists — needs a sysfs poke, ublk restart, or an upstream ublk
-  patch. **This is the real long pole.**
+  ignores `SPDK_BDEV_EVENT_RESIZE` (`/Users/ddalton/github/spdk/lib/ublk/ublk.c:1530-1538`
+  — `ublk_bdev_event_cb` handles only `REMOVE`; every other event, resize
+  included, logs "Unsupported bdev event" and returns), so `/dev/ublkbN` stays
+  at the old size while the raid bdev underneath has grown. **This is the real
+  long pole** — see §2.2.
 - **`nvmeof` backend** (shipping chart default, `flint-csi-driver-chart/values.yaml:426`
   — raid re-exported over a kernel nvme-tcp loopback): lighter — the kernel
   initiator needs an NS rescan, and flint already has `kernel_nvme_ns_rescan`
   (`src/node_agent.rs:1772-1787`).
+
+### 2.2 ublk online-resize: the kernel floor and the two-part fix
+
+Verified against the checked-out SPDK (`/Users/ddalton/github/spdk`,
+v26.05.1-pre) and the upstream Linux `ublk_cmd.h` (tag bisect):
+
+**The kernel primitive exists, but is new.** Linux added online ublk resize via
+`UBLK_U_CMD_UPDATE_SIZE` (`_IOWR('u', 0x15, struct ublksrv_ctrl_cmd)`), gated by
+the negotiated feature flag `UBLK_F_UPDATE_SIZE` (`1ULL << 10`); the new size is
+passed in `cmd->data[0]` in **sectors**. It is **absent in Linux v6.15 and
+present in v6.16** → the hard floor for ublk-backed online expansion is
+**kernel ≥ 6.16**. This compounds flint's existing ublk caveat (README: `ublk_drv`
+is missing entirely on some kernels, e.g. certain AWS 6.8 builds).
+
+**SPDK needs *two* additions, not one.** The current SPDK ublk client
+(`lib/ublk/ublk.c`) implements only eight control commands — `GET_DEV_INFO`,
+`ADD_DEV`, `DEL_DEV`, `START_DEV`, `STOP_DEV`, `SET_PARAMS`,
+`START_USER_RECOVERY`, `END_USER_RECOVERY` (`lib/ublk/ublk.c:67-74`) — and has
+**no** `UPDATE_SIZE` command at all. So a proper fix is:
+1. add a `SPDK_BDEV_EVENT_RESIZE` case to `ublk_bdev_event_cb` that reads the new
+   `spdk_bdev_get_num_blocks`, and
+2. add a new control command wrapping the kernel's `UBLK_U_CMD_UPDATE_SIZE`
+   (0x15), submitted like the other `ublk_ctrl_cmd_submit` opcodes, with the
+   device having negotiated `UBLK_F_UPDATE_SIZE` at `ADD_DEV` time.
+
+This is an in-band SPDK patch (flint already carries ublk/raid SPDK patches), not
+a new maintenance category — but it is a genuine C change plus a kernel-version
+dependency.
+
+**Take / recommendation (opinion):**
+- Do **not** use the disruptive fallbacks for a mounted CSI volume: destroy +
+  recreate the ublk device interrupts I/O, and a raw `/sys/block/ublkbN/size`
+  write is *not* a supported interface (retracted from an earlier draft) — the
+  capacity update must go through the kernel control channel (`set_capacity`),
+  i.e. `UBLK_U_CMD_UPDATE_SIZE`.
+- **Sequence the work:** ship multi-replica / RWO online grow on the `nvmeof`
+  backend first (easy — reuse `kernel_nvme_ns_rescan`), and treat ublk online
+  grow as a follow-up gated on the SPDK patch + kernel ≥ 6.16.
+- **Fail cleanly** on ublk when the kernel lacks `UBLK_F_UPDATE_SIZE`: refuse
+  the expand with a clear message (the same pattern flint already uses for
+  absent capabilities) rather than resizing the lvol/raid and leaving the kernel
+  device stale — a half-applied expand where the filesystem never sees the new
+  space.
 
 ---
 
@@ -252,5 +296,6 @@ feature. The genuine work for multi-replica online grow is **moderate**:
 (trivial — `get_replicas_from_pv` already exists), partial-failure retry
 (moderate), and propagating the new size through the **kernel-exposure layer**
 (the true long pole: trivial on the `nvmeof` backend via the existing
-`kernel_nvme_ns_rescan`; needs a real fix on the `ublk` backend, which has no
-resize path). RWX then adds the NFS-server-pod filesystem-resize step on top.
+`kernel_nvme_ns_rescan`; on the `ublk` backend it needs a two-part SPDK patch
+plus **kernel ≥ 6.16** for `UBLK_U_CMD_UPDATE_SIZE` — see §2.2). RWX then adds
+the NFS-server-pod filesystem-resize step on top.
