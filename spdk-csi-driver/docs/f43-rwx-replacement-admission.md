@@ -125,8 +125,9 @@ F43 is not the only item the two-wave campaign deferred. The waves shipped
 the **correctness-urgent half** of each contract rule and deferred the
 **completeness half** to v1.20.0 (consistent pattern: R2 shipped its
 node-local lock, deferred its controller-claim → F43; R1 shipped its
-generation counter, deferred its intent record → item 7 below). Land these
-together, since #1 and #2 share the record-schema work and #5 validates both.
+generation counter, deferred its intent record → #2 below). Land these
+together, since #1 and #2 share the record-schema work and #5 validates both;
+#7 is independent (it reuses the existing guarded-destroy probe).
 
 ### 1. F43 / R2 controller-claim arbitration (this doc — headline)
 Replace the process-global, expiry-less, priority-less `volume_claims.rs`
@@ -174,16 +175,106 @@ campaign — the empty cell between validated RWX-r1 (Phase 3) and RWO-r2
 standing matrix entry.
 
 ### 6. The 4 MUST-VERIFY-ON-REAL-SPDK assumptions (not fixes — latent risks)
-From the contract's wave-2 drill list; unclear if ever validated on real
-SPDK. Each is a "the guard assumes X but SPDK may do Y" risk:
-1. `bdev_lvol_start_shallow_copy` to a dst already copying — EBUSY or silent
-   concurrent interleave?
-2. Does allowed-host REMOVAL sever an established controller connection, or
-   only block new connects?
-3. Does deleting an lvol reliably hot-remove its nvmf namespace?
-4. Does a ublk-served lvol block `bdev_raid_create` / `nvmf_subsystem_add_ns`
-   the way an nvmf write-open does? (If ublk takes no exclusive claim,
-   duplicate-construction over a ublk chain may silently succeed.)
+From the contract's wave-2 drill list; each is a "the guard assumes X but SPDK
+may do Y" risk. **Resolved 2026-07-24 by source read of SPDK v26.05.1-pre**
+(the tree flint targets — matches `mock-spdk-tgt.py`'s reported version).
+These are static code-path reads (claim/event/RPC *wiring*), definitive for
+what they cover; a runtime confirmation is still nice-to-have but there is no
+ambiguity left in the code. **Three of four hold; #4 is a real hazard.**
+
+1. **`bdev_lvol_start_shallow_copy` to a busy lvol — GUARDED (EBUSY/EPERM,
+   never silent interleave).** Two mechanisms:
+   - *Same destination:* the dst takes `SPDK_BDEV_CLAIM_READ_MANY_WRITE_ONE`
+     (`module/bdev/lvol/vbdev_lvol.c:2055`); a second copy fails
+     **synchronously** with `-EPERM` (`lib/bdev/bdev.c:8867`; `claim_verify_rwo`
+     at `bdev.c:9590` scans open descriptors).
+   - *Same source, different dst:* the blob's `locked_operation_in_progress`
+     flag returns `-EBUSY` (`lib/blob/blobstore.c:7509`) — but
+     **asynchronously**: `start` returns success + an `operation_id`; the error
+     surfaces only via `bdev_lvol_check_shallow_copy`.
+   - *Flint:* SAFE. `catchup::shallow_copy` (`src/catchup.rs:1302`) polls
+     `bdev_lvol_check_shallow_copy` (`catchup.rs:1350`) and surfaces the error
+     state (test `shallow_copy_surfaces_error_state`). The async delivery does
+     not reach flint as a false success.
+
+2. **Allowed-host REMOVAL — SEVERS (because flint uses the RPC, not the C
+   API).** The bare C API `spdk_nvmf_subsystem_remove_host` blocks new connects
+   only — the header says so (`include/spdk/nvmf.h:908`); the allowed-host check
+   is connect-time only (`lib/nvmf/ctrlr.c:848`), with **no I/O-path check**.
+   But the **RPC** `nvmf_subsystem_remove_host` does the documented two-call
+   pattern: remove-from-list **then** `spdk_nvmf_subsystem_disconnect_host`
+   (`lib/nvmf/nvmf_rpc.c:2038`), which walks all qpairs, disconnects the
+   matching host, and polls a drain loop until torn down.
+   - *Flint:* SAFE — no fencing hole. Flint issues the RPC method
+     (`src/hot_rejoin.rs:535`, `src/nvmeof_export.rs:345`), so it gets active
+     severing. Caveat: severing completes only when the disconnect+drain
+     finishes within `timeout_ms`; flint sends none, so it rides the default.
+
+3. **Deleting an lvol hot-removes its nvmf ns — RELIABLE, no use-after-free.**
+   ns-add opens the bdev with an event cb (`spdk_bdev_open_ext_v2(...,
+   nvmf_ns_event, ...)`, `lib/nvmf/subsystem.c:2564`). On
+   `SPDK_BDEV_EVENT_REMOVE` the chain `nvmf_ns_event → nvmf_ns_hot_remove →
+   pause → remove_ns` closes the desc and frees the ns
+   (`subsystem.c:2235`). The bdev is kept alive until the last descriptor
+   closes (`lib/bdev/bdev.c:9317`) — no UAF; a concurrent explicit `remove_ns`
+   is safe (the REMOVE event sees `desc->closed` and skips). Failure windows
+   are OOM / subsystem-destroy only — negligible.
+   - *Caveat (intersects R5):* the `bdev_lvol_delete` RPC response is **gated
+     on the subsystem pause→remove→resume cycle**. Against a busy subsystem
+     that pause can take real time — relevant to the R5 RPC-deadline scenario.
+
+4. **ublk-served bdev vs `bdev_raid_create` / `nvmf_subsystem_add_ns` — HAZARD:
+   duplicate construction SILENTLY SUCCEEDS.** ublk opens the bdev for write
+   but **never claims it** (`lib/ublk/ublk.c:1912` — no `spdk_bdev_module_claim_*`
+   anywhere in the ublk module), so `claim_type` stays `SPDK_BDEV_CLAIM_NONE`.
+   Both raid's base-add claim (`module/bdev/raid/bdev_raid.c:3519`) and nvmf's
+   add-ns claim (`lib/nvmf/subsystem.c:2592`) check only `claim_type != NONE`,
+   so both **succeed silently** → two live writers, no mutual exclusion. The
+   legacy `SPDK_BDEV_CLAIM_EXCL_WRITE` blocks a *later open* but never scans for
+   an *existing* unclaimed write-opener (the newer `READ_MANY_WRITE_ONE` would,
+   but neither raid nor nvmf uses it). Contrast: nvmf-then-raid IS blocked,
+   because nvmf claims.
+   - *This is the one open risk.* SPDK will not stop it — the fix is a
+     **flint-side control-plane guard**: refuse `bdev_raid_create` /
+     `nvmf_subsystem_add_ns` over a bdev this node is currently serving via
+     ublk. **Promoted to v1.20.0 item #7 below** (the construction-side mirror
+     of the existing guarded-destroy). That guard is control-plane logic the
+     **kind race tier CAN regression-test** (assert the construct-over-ublk-
+     served call is refused), even though the underlying SPDK permissiveness
+     cannot be reproduced there — the same "half on each tier" split as R2/F43.
+     NOTE: the race-tier mock's canned `add_ns`/`raid_create` return success, so
+     it would give *false confidence* here until the flint-side guard exists to
+     assert against.
+
+### 7. ublk-served-bdev construction guard — from §6.4 (the SPDK #4 hazard)
+The source read (§6.4) confirmed the worst case: neither `bdev_raid_create`
+(base-bdev add) nor `nvmf_subsystem_add_ns` takes a claim that conflicts with
+ublk's unclaimed write-open, so **constructing a raid or nvmf namespace over a
+bdev this node is already serving via ublk silently succeeds** → two live
+writers on one bdev, silent corruption. SPDK will not stop it; the guard must
+be flint-side.
+
+**It is the construction-side mirror of the existing guarded-destroy.**
+`guarded_destroy.rs` already refuses a raid *delete* while a ublk disk consumes
+it (`guarded_destroy.rs:190-205`), probing via `ublk_consumer_of` →
+`ublk_get_disks` (`guarded_destroy.rs:423-436`). The fix reuses that same probe
+in the *construction* path: before `bdev_raid_create` / `nvmf_subsystem_add_ns`
+over a base bdev, refuse if `ublk_consumer_of` reports a live ublk disk on it.
+
+**Reachability / priority — structural hardening, not a happy-path hole.** Not
+reachable on the normal backing-first, frontend-last construction order; it
+requires a *stale/rogue* ublk disk surviving into a reconstruction — the
+phantom/re-mint family (cf. `identity.rs:90-91,774-775`: ublk devices re-minted
+under the hash-fallback id across abrupt csi-node restarts). Same duplicate-
+construction risk class as R1's chain-gen and R3's guarded-destroy. So: lower
+urgency than F43 (#1), but genuine silent corruption if the race is hit, and
+cheap (reuses the guarded-destroy probe) — it belongs in the same landing.
+
+**Kind-testable (unlike the SPDK behavior itself).** The guard is control-plane
+logic: the race tier can seed a mock `ublk_get_disks` reporting a live consumer,
+then assert the driver *refuses* `bdev_raid_create` / `add_ns` over that bdev —
+a new race-tier scenario alongside R1/R2/R5. Per §6.4, the mock's canned
+construction success means this scenario only has teeth once the guard exists.
 
 ---
 
