@@ -763,6 +763,18 @@ gap.
   (spdk/spdk#3349, opened 2024-04) is still open/Todo. CHANGELOG v24.01–v26.05
   contains no alternative primitive.
 
+> **Scope note (added 2026-07-24):** the "grow" / spdk/spdk#3349 discussed in
+> this section is **replica-count growth** (add a base to a live array *without*
+> triggering a rebuild — the `skip_rebuild` primitive below). Do **not** read
+> it as "SPDK cannot grow a raid's *size*." Online raid **volume-size** growth
+> is a separate, already-shipped feature: `raid1_resize`
+> (`module/bdev/raid/raid1.c:587-630`, upstream since v24.09) fires
+> automatically on a base-bdev `SPDK_BDEV_EVENT_RESIZE`
+> (`bdev_raid.c:2466-2544`), and for flint's `bdev_nvme` legs the
+> lvol→NVMe-oF-AEN→`bdev_nvme`→raid chain propagates with zero SPDK patches.
+> The two are orthogonal. Volume-expansion analysis:
+> `volume-expansion-status-2026-07.md` §2.1.
+
 ### The minimal primitive — and proof it's the right one
 
 The only missing piece is **"add this base without starting the rebuild
