@@ -117,6 +117,77 @@ cutover BounceNfsPod → restage admit → 2/2`, with **zero acked loss** (oracl
   gated.
 - **F42 for RWX** — the backing raid faults the dead leg and keeps serving.
 
-Related: R2/R4 in `attach-detach-robustness-contract.md`;
-`docs/UnansweredOn7b.md` (Option B, hot-rejoin RWO-scoping);
-`docs/attach-detach-campaign-2026-07.md` (skipped drill 3.6/r2).
+---
+
+# v1.20.0 scope — the deferred "completeness half" of the contract
+
+F43 is not the only item the two-wave campaign deferred. The waves shipped
+the **correctness-urgent half** of each contract rule and deferred the
+**completeness half** to v1.20.0 (consistent pattern: R2 shipped its
+node-local lock, deferred its controller-claim → F43; R1 shipped its
+generation counter, deferred its intent record → item 7 below). Land these
+together, since #1 and #2 share the record-schema work and #5 validates both.
+
+### 1. F43 / R2 controller-claim arbitration (this doc — headline)
+Replace the process-global, expiry-less, priority-less `volume_claims.rs`
+with R2's **leased, visible, arbitrated** controller claims (episode fields
+on the record). Add an explicit **priority rule: cutover (resolver) preempts
+catch-up (maintainer) for a converged standby** — lease-expiry alone is
+insufficient because catch-up is an *active* re-claimer, not a paused holder.
+Keeps hot-rejoin RWO-only. Un-starves the RWX admission (`BounceNfsPod`).
+
+### 2. R1 ChainIntent record — wave-1 item 7 (ready-node exclusion refusal)
+`chain-gen` (the CAS generation counter) landed (`main.rs:1680` bump-before-
+attach; `node_agent.rs` phantom-hygiene re-read), but the full **ChainIntent
+desired-topology record did NOT** (`driver.rs:1937`: *"When the chain-intent
+record lands…"*, future tense). So wave-1 item 7 — **outright-refuse an
+intent-driven exclusion of a HEALTHY (Ready-node) leg** — is still deferred;
+today it is defer-then-serve-with-risk. NOTE: the interim already closes the
+acked-loss *laundering* hole (evented, bounded serve), so this is
+structural hardening, not an open data-loss hole — lower urgency than F43,
+but it is the same "half-a-rule-landed" shape and belongs here.
+
+### 3. Wire the `out-of-service` taint feed (R-upstream)
+`node.kubernetes.io/out-of-service` (and the unreachable `NoExecute` taint)
+are **consumed by no NodeGone detector** (grep-empty in `src/`), yet the pNFS
+operator runbook already tells operators to apply the taint on a dead node.
+Operator-expectation mismatch: applying it accelerates nothing today (the
+existing NodeGone signals — Node-object deletion, NotReady threshold — still
+fire, just slower). Feed the taint into the NodeGone detectors as death
+evidence. **Never treat a taint as an I/O fence** (contract "Lean on
+upstream").
+
+### 4. R4 cordon/anti-affinity escalation (lower priority)
+For a **persistently ineffective** bounce. The common same-node-reuse case is
+ALREADY handled by the bounce taint (`BOUNCE_TAINT_KEY`, `cutover.rs:66-77` —
+forces a restage even on same-node placement). Deferred piece
+(`cutover.rs:31-32`): a further scheduling-hint escalation when a bounce stays
+`CutoverIneffective` across cooldowns. It is *evented*, not silent, so this is
+the lowest-risk item — but it becomes reachable once #1 lets cutover run for
+RWX-r2.
+
+### 5. Chaos drill 3.6/r2 — RWX numReplicas≥2 nfs-server NODE kill
+AWS-gated ("needs SSM+EC2 and an r2 harness"), **never run** in the 2026-07
+campaign — the empty cell between validated RWX-r1 (Phase 3) and RWO-r2
+(Phase 2). This is the acceptance for #1 (and exercises #4). Recipe: see
+"Acceptance drill" above. runad ran it once and found F43; make it a
+standing matrix entry.
+
+### 6. The 4 MUST-VERIFY-ON-REAL-SPDK assumptions (not fixes — latent risks)
+From the contract's wave-2 drill list; unclear if ever validated on real
+SPDK. Each is a "the guard assumes X but SPDK may do Y" risk:
+1. `bdev_lvol_start_shallow_copy` to a dst already copying — EBUSY or silent
+   concurrent interleave?
+2. Does allowed-host REMOVAL sever an established controller connection, or
+   only block new connects?
+3. Does deleting an lvol reliably hot-remove its nvmf namespace?
+4. Does a ublk-served lvol block `bdev_raid_create` / `nvmf_subsystem_add_ns`
+   the way an nvmf write-open does? (If ublk takes no exclusive claim,
+   duplicate-construction over a ublk chain may silently succeed.)
+
+---
+
+Related: R1/R2/R4 in `attach-detach-robustness-contract.md` (see the wave
+tables + "Deferred deliberately"); `docs/UnansweredOn7b.md` (Option B,
+hot-rejoin RWO-scoping); `docs/attach-detach-campaign-2026-07.md` (skipped
+drill 3.6/r2, MUST-VERIFY list).
