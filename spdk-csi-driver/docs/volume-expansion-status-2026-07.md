@@ -299,3 +299,47 @@ feature. The genuine work for multi-replica online grow is **moderate**:
 `kernel_nvme_ns_rescan`; on the `ublk` backend it needs a two-part SPDK patch
 plus **kernel ≥ 6.16** for `UBLK_U_CMD_UPDATE_SIZE` — see §2.2). RWX then adds
 the NFS-server-pod filesystem-resize step on top.
+
+---
+
+## 6. Prerequisite — this work is ordered behind F43 / v1.20.0 item #1
+
+Expansion and F43 (`docs/f43-rwx-replacement-admission.md`) are
+**architecturally independent** — disjoint code paths, neither reads the
+other's state — but the landing order is **not** free. Full analysis with
+evidence lives in that doc under **"Ordering constraint — volume expansion must
+land after #1"**; do not start the implementation without reading it. In brief:
+
+- **C1** — `ControllerExpandVolume` is today the only controller mutation path
+  taking **no** per-volume claim (`main.rs:2240-2249`). A multi-replica fan-out
+  expand must claim: `spdk_blob_resize` returns `-EBUSY` while a shallow copy
+  holds the blob (`lib/blob/blobstore.c:8040-8051`), so an unclaimed expand
+  mid-catch-up partially fails. But it cannot join the *current* expiry-less,
+  priority-less `volume_claims.rs` without worsening F43's starvation → **F43's
+  R2 arbitration first**, then register expand as a *maintainer*.
+- **C2 — the data-integrity one.** Expanding during a degraded window makes the
+  raid grow on the surviving legs only (`raid1_resize` skips `desc == NULL`,
+  `raid1.c:594`). The stale leg's return then fails **two different ways**: a
+  hot-add to a live raid is refused `-EINVAL` (`bdev_raid.c:3570-3573`) — a
+  parked standby, loud, no data risk; but a NodeStage **reassembly**
+  (`admit_standbys_at_stage`, `catchup.rs:1973`) rebuilds the raid at
+  `min(leg blockcnt)` with **no error at all** (`raid1_start` — the `-EBUSY`
+  shrink guard can't fire on a fresh bdev with no open descriptors), i.e. a
+  **silent shrink under an already-grown filesystem**. This is now **v1.20.0
+  item #8** (admission-side leg-size guard), which must land *before* this
+  work; the expansion side owes the cheap belt — refuse the expand unless every
+  replica is `in_sync`.
+- **C3** — an undersized leg makes the next resize attempt a shrink, rejected
+  `-EBUSY` (`bdev.c:5737-5741`) and logged only. Worth an emit.
+- **C4** — RWX layer-4 (patch the backing PVC so kubelet drives the FS grow)
+  collides with cutover's `BounceNfsPod`; reachable only once F43 lets cutover
+  run for RWX-r2. Also opens a **second** `expand_refusal` arm
+  (`VolumeRef::NfsBacking`, `identity.rs:194-196`).
+
+**Attach/detach regression risk:** none material for the recommended first
+slice (multi-replica RWO on `nvmeof` — `NodeExpandVolume` runs post-stage on an
+already-mounted device and touches no staging/publish/export logic). The **ublk
+patch is the real vector**: it edits `ublk_bdev_event_cb`
+(`lib/ublk/ublk.c:1530-1538`), the same callback the DEL_DEV / F8 / F9 detach
+work depends on — another reason to keep §2.2's sequencing (nvmeof first, ublk
+last).

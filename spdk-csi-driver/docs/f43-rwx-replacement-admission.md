@@ -127,7 +127,9 @@ the **correctness-urgent half** of each contract rule and deferred the
 node-local lock, deferred its controller-claim → F43; R1 shipped its
 generation counter, deferred its intent record → #2 below). Land these
 together, since #1 and #2 share the record-schema work and #5 validates both;
-#7 is independent (it reuses the existing guarded-destroy probe).
+#7 is independent (it reuses the existing guarded-destroy probe). #8 is the
+admission-side size guard — it must precede any volume-expansion work (see
+"Ordering constraint" at the end).
 
 ### 1. F43 / R2 controller-claim arbitration (this doc — headline)
 Replace the process-global, expiry-less, priority-less `volume_claims.rs`
@@ -136,6 +138,19 @@ on the record). Add an explicit **priority rule: cutover (resolver) preempts
 catch-up (maintainer) for a converged standby** — lease-expiry alone is
 insufficient because catch-up is an *active* re-claimer, not a paused holder.
 Keeps hot-rejoin RWO-only. Un-starves the RWX admission (`BounceNfsPod`).
+
+**Design input — size the arbitration for a fourth claimant.** Volume
+expansion (`docs/volume-expansion-status-2026-07.md`) will have to enter the
+registry. Today `ControllerExpandVolume` is the **only controller mutation
+path that takes no claim at all** (`main.rs:2240-2249`; the three claimants
+are `catchup.rs:2491`, `cutover.rs:995`, `hot_rejoin.rs:2464,2511`) — tolerable
+only because it resizes one lvol on one node. A multi-replica fan-out expand is
+a long-running per-volume op and must claim. Classify it as a **maintainer**
+(yields to cutover and hot-rejoin), and note it is an *active* re-claimer like
+catch-up, since external-resizer retries a failed `ControllerExpandVolume`
+indefinitely. So build the priority rule as a resolver/maintainer **class**,
+not a hardcoded cutover-beats-catch-up special case — otherwise #1 is rewritten
+when expansion lands. Detail: "Ordering constraint" below.
 
 ### 2. R1 ChainIntent record — wave-1 item 7 (ready-node exclusion refusal)
 `chain-gen` (the CAS generation counter) landed (`main.rs:1680` bump-before-
@@ -276,9 +291,182 @@ then assert the driver *refuses* `bdev_raid_create` / `add_ns` over that bdev �
 a new race-tier scenario alongside R1/R2/R5. Per §6.4, the mock's canned
 construction success means this scenario only has teeth once the guard exists.
 
+### 8. Leg-size precondition on admission + expand health-gate
+**The hazard (full derivation in C2 under "Ordering constraint" below):** once
+legs can differ in size — which only volume expansion makes possible — the two
+admission paths fail in opposite ways. A hot-add to a live raid is **refused**
+`-EINVAL` (`bdev_raid.c:3570-3573`) → parked standby, loud, no data risk. A
+NodeStage **reassembly** (`admit_standbys_at_stage`, `catchup.rs:1973`) instead
+brings the raid back at `min(leg blockcnt)` with **no error whatsoever**
+(`raid1_start`; the `-EBUSY` shrink guard at `bdev.c:5737-5741` cannot fire on
+a fresh bdev with no open descriptors) — **a silent shrink underneath an
+already-grown filesystem.** That is the data-integrity case, and SPDK will not
+stop it.
+
+**Two guards, both flint-side control plane:**
+1. **Admission-side (the real fix).** Before including a leg in
+   `bdev_raid_create` / `bdev_raid_add_base_bdev`, compare its actual
+   `num_blocks` against the other members and against the record's expected
+   size. Refuse-and-event a short leg rather than constructing over it. Compare
+   **measured `num_blocks`, not requested bytes** — `resize_lvol` rounds up to
+   MiB (`minimal_disk_service.rs:409`) while `create_lvol` sizes in bytes, and
+   both land on lvstore cluster granularity, so a byte-level comparison will
+   produce false mismatches.
+2. **Expand-side (cheap belt).** Refuse `ControllerExpandVolume` when the
+   record shows any replica not `in_sync` — a degraded volume should not start
+   an expand at all. Land this with the expansion work; it is one precondition
+   in the fan-out path.
+
+**Why it belongs in v1.20.0 and not in the expansion work.** Guard 1 hardens
+the **admission step #1 exists to unblock**, and it is the difference between
+an opaque `-EINVAL` park (indistinguishable from F43 itself, which will make
+#5's drill ambiguous to read) and a named, evented refusal. It also stands on
+its own: any future path that produces a size-diverged leg — a partially-failed
+expand, a hand-repaired lvol, a restore — gets the same protection. Landing the
+guard first means expansion cannot ship the hazard, in either direction.
+
+**Reachability / priority — same shape as #7.** Not reachable today: without
+expansion every leg is created at `pv.spec.capacity`
+(`replica_replace.rs:239`) and catch-up sizes rebuilt heads from the source
+head exactly (`catchup.rs:1713-1725`), so legs cannot diverge. It is a
+**prerequisite**, not an open hole — lower urgency than #1, higher than #4,
+and cheap.
+
+**Kind-testable.** Like #7, this is control-plane logic the race tier can cover
+without real SPDK: have `mock-spdk-tgt.py` report a short `num_blocks` for one
+leg, then assert the driver **refuses** the create/add and emits, instead of
+constructing a shrunken raid. Note the same caveat as #7 — the mock's canned
+construction success means the scenario only has teeth once the guard exists.
+
+---
+
+# Ordering constraint — volume expansion must land after #1
+
+`docs/volume-expansion-status-2026-07.md` scopes multi-replica / RWX volume
+expansion. The two workstreams are **architecturally independent** — disjoint
+code paths (expand: `main.rs:2138-2259` / `4354-4443`,
+`minimal_disk_service.rs:405-426`, dashboard; F43: `volume_claims.rs`,
+`cutover.rs`, `catchup.rs`, record schema), neither reads the other's state,
+and F43's fix changes no expand path — but the **ordering is not free**. Four
+coupling points, in priority order. Verified against `main` @ 2026-07-24 and
+SPDK v26.05.1-pre.
+
+### C1. Expansion must join the claim registry — and the current registry can't take it
+See "Design input" under #1 above for the classification rule. The reason it
+*must* claim rather than stay outside: SPDK's `spdk_blob_resize` returns
+**`-EBUSY`** when `locked_operation_in_progress` is set
+(`lib/blob/blobstore.c:8040-8051`) — exactly the flag catch-up's shallow copy
+sets on the source blob (§6.1). So an unclaimed expand firing mid-catch-up
+fails on that leg → **partial expansion** (some legs grown, one not). Adding
+expand to today's expiry-less, priority-less mutex instead makes F43 *worse*:
+a second active re-claimer competing in a registry that cannot arbitrate.
+**Therefore: #1 first, then wire expand in.** Implementing expand's claim
+integration against the current `volume_claims.rs` means writing the
+arbitration twice.
+
+### C2. Expanding during a degraded window → parked standby OR silent shrink
+`raid1_resize` is deliberately degraded-safe — it **skips absent legs**
+(`desc == NULL`, `raid1.c:594`) and grows the raid on the survivors, setting
+`base_info->data_size = min_blockcnt` on all of them. That is precisely what
+makes this reachable: expand while a leg is faulted (the F42/F43 window) and
+the raid's `blockcnt` rises without that leg. What happens when the stale,
+still-old-sized leg comes back **depends on the admission path**, and the two
+differ sharply:
+
+**A — hot-add to a LIVE raid (`hot_rejoin.rs:892,1260`, `--skip-rebuild`):
+refused, loudly.** `raid_bdev_free_base_bdev_resource` clears `data_offset` but
+**not `data_size`** (`bdev_raid.c:429-459`), so the vacated slot still carries
+the grown size. The re-add then trips:
+
+```c
+} else if (base_info->data_offset + base_info->data_size > bdev->blockcnt) {
+        SPDK_ERRLOG("Data offset and size exceeds base bdev capacity %lu on bdev '%s'\n", ...);
+        rc = -EINVAL;            /* module/bdev/raid/bdev_raid.c:3570-3573 */
+```
+
+Result: a **permanently parked standby — the exact F43 user-visible failure**,
+from an unrelated cause, on the very step #1 exists to unblock. No corruption.
+
+**B — fresh raid CREATE at reassembly (`admit_standbys_at_stage`,
+`catchup.rs:1973`): SILENT SHRINK.** That path deliberately defers when the
+raid is already ONLINE (`catchup.rs:2006-2021`), so its admission *is* a
+NodeStage reassembly — a fresh `bdev_raid_create` where every
+`base_info->data_size` starts at 0 and is therefore set to that leg's own
+`bdev->blockcnt` (`bdev_raid.c:3568-3569`). `raid1_start` then takes the
+minimum and applies it to the raid itself:
+
+```c
+RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+        min_blockcnt = spdk_min(min_blockcnt, base_info->data_size);
+}
+...
+raid_bdev->bdev.blockcnt = min_blockcnt;    /* module/bdev/raid/raid1.c raid1_start */
+```
+
+The raid comes back **smaller than it was**, with **no error at all** — the
+`-EBUSY` shrink guard in `spdk_bdev_notify_blockcnt_change`
+(`bdev.c:5737-5741`) does not apply, because a freshly-created bdev has no open
+descriptors yet. And the filesystem on it was already grown to the larger size
+by `NodeExpandVolume`, so ext4/xfs now believes in blocks the device no longer
+has: I/O errors on the tail, remount-ro, potential corruption. **This is a
+data-integrity hazard, not an availability one** — and it is the reason the
+guard is v1.20.0 item **#8** rather than a note on the expansion work.
+
+`replica_replace.rs:239` sizes the placeholder from `pv.spec.capacity` and
+catch-up's `revert_head_to_empty` sizes from the source head exactly
+(`catchup.rs:1713-1725`), so the steady state is consistent; the expand window
+is the race that makes legs diverge in the first place.
+
+### C3. The undersized-leg direction fails quietly
+If an undersized leg does get in and a resize event fires, `raid1_resize`
+computes `min < blockcnt` → `spdk_bdev_notify_blockcnt_change` rejects the
+shrink with `-EBUSY` while descriptors are open (`lib/bdev/bdev.c:5737-5741`)
+→ logs "Failed to notify blockcount change", returns false, and `data_size` is
+left un-updated (`raid1.c:607-616`). The raid stays large over a small leg. No
+corruption and no unwind — but no event either. Worth an emit if expansion
+lands.
+
+### C4. RWX expansion collides with cutover — and only #1 makes the collision reachable
+The expansion doc's layer-4 fix (patch the backing PVC capacity so kubelet
+drives `NodeExpandVolume` on the NFS server's node) needs that pod **stable and
+mounted** while `resize2fs` runs. `BounceNfsPod` deletes and restages it, with
+`BOUNCE_TAINT_KEY` forcing a restage even on same-node placement
+(`cutover.rs:66-77`). Today they cannot collide — cutover is starved for
+RWX-r2, which *is* F43. Once #1 lands, they will: RWX expansion must hold the
+claim across the backing-PVC-driven FS grow, or be preempted cleanly and
+retried. Note also the backing PV is flint-provisioned (`rwx_nfs.rs:227-333`)
+and its handle is `VolumeRef::NfsBacking`, refused by a **separate** arm of
+`expand_refusal` (`identity.rs:194-196`) — RWX expansion has to open both arms,
+and drill 3.6/r2 (#5) should then run once with an expand in flight.
+
+### Attach/detach regression risk (the narrow question)
+For the scope the expansion doc recommends shipping first — **multi-replica RWO
+grow on the `nvmeof` backend — essentially none.** `NodeExpandVolume` runs
+after staging on an already-mounted device (`findmnt`/`blkid`/`resize2fs`,
+`main.rs:4416-4427`) and touches no staging, publish, export or assembly logic;
+the controller side adds a fan-out loop and reuses `kernel_nvme_ns_rescan`
+(`node_agent.rs:1772-1787`).
+
+**The ublk piece is a genuine regression vector.** Part 1 of the required SPDK
+patch adds a `SPDK_BDEV_EVENT_RESIZE` case to `ublk_bdev_event_cb`
+(`lib/ublk/ublk.c:1530-1538`) — the same callback whose `REMOVE` handling the
+DEL_DEV / F8 / F9 detach work depends on — plus a kernel ≥ 6.16 floor. Keep it
+last, as the expansion doc's own §2.2 sequencing already recommends.
+
+### Recommended sequence
+1. **#1 (F43 / R2 leased + arbitrated claims)** — the substrate expansion needs.
+1b. **#8 admission-side leg-size guard** — before any leg can diverge in size.
+2. Multi-replica **RWO** grow on `nvmeof`, registered as a maintainer claimant,
+   with #8's expand-side not-`in_sync` refusal.
+3. **RWX** expansion (cutover-vs-expand ordering — cheap once #1 gives priority
+   semantics).
+4. **ublk** online grow last, gated on the SPDK patch + kernel floor, with the
+   clean-refusal fallback.
+
 ---
 
 Related: R1/R2/R4 in `attach-detach-robustness-contract.md` (see the wave
 tables + "Deferred deliberately"); `docs/UnansweredOn7b.md` (Option B,
 hot-rejoin RWO-scoping); `docs/attach-detach-campaign-2026-07.md` (skipped
-drill 3.6/r2, MUST-VERIFY list).
+drill 3.6/r2, MUST-VERIFY list); `docs/volume-expansion-status-2026-07.md`
+(volume expansion — see "Ordering constraint" above).
