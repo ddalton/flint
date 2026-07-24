@@ -278,8 +278,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // reassembly that never comes on attached no-bounce RWO volumes, then
     // localizes the esnap chain. Decision 1 policy (B): automatic for that
     // class, per-PV opt-out via flint.csi.storage.io/hot-rejoin=disabled.
-    // Default-disabled: enabling is the operator's acceptance of the
-    // carried SPDK patch.
+    // Default-ENABLED (runad drill 2.5): without it a converged standby
+    // parks forever and a node-loss volume serves degraded indefinitely.
+    // The flint-shipped spdk-tgt always carries the skip_rebuild patch, so
+    // the admission is safe here; fleet opt-out is FLINT_HOT_REJOIN=disabled.
     if mode == "controller" || mode == "all" {
         let hr_cfg = spdk_csi_driver::hot_rejoin::HotRejoinTriggerConfig::from_env();
         if hr_cfg.enabled {
@@ -295,7 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 spdk_csi_driver::hot_rejoin::run_hot_rejoin_orchestrator(hr_driver, hr_cfg).await;
             });
         } else {
-            println!("ℹ️ [HOT_REJOIN] Hot-rejoin orchestrator disabled (set FLINT_HOT_REJOIN=enabled to activate)");
+            println!("ℹ️ [HOT_REJOIN] Hot-rejoin orchestrator disabled by FLINT_HOT_REJOIN=disabled (redundancy will NOT auto-restore after node loss)");
         }
     }
 

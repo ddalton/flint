@@ -2168,9 +2168,14 @@ pub const HOT_REJOIN_ANNOTATION: &str = "flint.csi.storage.io/hot-rejoin";
 
 #[derive(Debug, Clone)]
 pub struct HotRejoinTriggerConfig {
-    /// FLINT_HOT_REJOIN=enabled — default off. Turning this on is the
-    /// operator's deliberate acceptance of the carried skip_rebuild patch;
-    /// it is the blast-radius control Decision 1 leans on.
+    /// Default ON; opt out with FLINT_HOT_REJOIN=disabled. Hot-rejoin is
+    /// the admission step that restores redundancy after replace+catch-up
+    /// bring a leg to standby — without it the standby parks forever and a
+    /// node-loss volume serves degraded indefinitely (found live, runad
+    /// drill 2.5). It needs the raid-skip-rebuild SPDK patch, which the
+    /// flint-shipped spdk-tgt always includes; the earlier default-off was
+    /// over-conservative for arbitrary targets and is the footgun that let
+    /// an env-block omission silently disable healing.
     pub enabled: bool,
     /// A standby may trail by at most this many epochs to be rejoined —
     /// same readiness bar as the cutover planner (the chase has converged;
@@ -2185,7 +2190,7 @@ pub struct HotRejoinTriggerConfig {
 impl Default for HotRejoinTriggerConfig {
     fn default() -> Self {
         HotRejoinTriggerConfig {
-            enabled: false,
+            enabled: true,
             max_lag: 1,
             retry_backoff: Duration::from_secs(300),
         }
@@ -2196,11 +2201,13 @@ impl HotRejoinTriggerConfig {
     pub fn from_env() -> Self {
         let d = HotRejoinTriggerConfig::default();
         HotRejoinTriggerConfig {
+            // Opt-out (default ON): only an explicit disabled/false/0 turns
+            // it off; unset or any other value keeps healing on.
             enabled: std::env::var("FLINT_HOT_REJOIN")
                 .map(|v| {
-                    v.eq_ignore_ascii_case("enabled")
-                        || v.eq_ignore_ascii_case("true")
-                        || v == "1"
+                    !(v.eq_ignore_ascii_case("disabled")
+                        || v.eq_ignore_ascii_case("false")
+                        || v == "0")
                 })
                 .unwrap_or(d.enabled),
             max_lag: std::env::var("FLINT_HOT_REJOIN_MAX_LAG")
@@ -4499,6 +4506,21 @@ mod tests {
             hot_rejoin_disabled: false,
             degraded_direct: false,
         }
+    }
+
+    #[test]
+    fn trigger_config_defaults_enabled_opt_out_semantics() {
+        // runad drill 2.5: hot-rejoin must be ON by default — a parked
+        // standby otherwise never restores redundancy.
+        assert!(HotRejoinTriggerConfig::default().enabled, "default must be ON");
+        // Only an explicit disabled/false/0 opts out; the enable-side
+        // spellings still parse to on. (from_env reads the process env, so
+        // exercise the same predicate the parse uses.)
+        let off = |v: &str| {
+            !(v.eq_ignore_ascii_case("disabled") || v.eq_ignore_ascii_case("false") || v == "0")
+        };
+        assert!(!off("disabled") && !off("false") && !off("0"), "opt-out tokens turn it off");
+        assert!(off("enabled") && off("true") && off("1"), "enable tokens keep it on");
     }
 
     #[tokio::test]
