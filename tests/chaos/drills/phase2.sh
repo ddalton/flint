@@ -432,12 +432,15 @@ case "$DRILL" in
   [ "${DF_POST:-0}" -gt "${DF_PRE:-0}" ] && ok "consumer filesystem grew ${DF_PRE}M → ${DF_POST}M" \
     || fail "filesystem did NOT grow (${DF_PRE}M → ${DF_POST:-?}M) — device-size guard should have refused NodeExpand; investigate"
   for n in $RAID_HOST $REMOTE; do
-    [ -n "$n" ] && note "leg bytes on $n: $(spdk_rpc "$n" bdev_get_bdevs 2>/dev/null | jq -r --arg pv "$PV" '[.[] | select((.aliases // [])[]? | contains($pv)) | .block_size * .num_blocks] | max // "n/a"')"
+    # On a leg host the lvol is ALIASED "<lvs>/<pv>"; on the raid host the raid
+    # and its nvme legs carry the pv in the bdev NAME and are aliased by uuid —
+    # match either or the raid host silently reports "n/a".
+    [ -n "$n" ] && note "leg bytes on $n: $(spdk_rpc "$n" bdev_get_bdevs 2>/dev/null | jq -r --arg pv "$PV" '[.[] | select((.name | contains($pv)) or ((.aliases // [])[]? | contains($pv))) | .block_size * .num_blocks] | max // "n/a"')"
   done
   note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
   wait_acks_fresh 60 || fail "acks stalled after expansion"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=60 \
-    NOTES="online expand $CUR→$NEW in ${T_DONE}s under writes; df ${DF_PRE}M→${DF_POST}M; raid=$(raid_summary "$RAID_HOST" | head -1)" verify
+    NOTES="online expand ${CUR}->${NEW} in ${T_DONE}s under writes; df ${DF_PRE}M->${DF_POST}M; raid=$(raid_summary "$RAID_HOST" | head -1)" verify
   ;;
 
 *) fail "unknown drill '$DRILL' (phase-1 regression subset: PHASE_LABEL=2 ./drills/phase1.sh <id>)" ;;

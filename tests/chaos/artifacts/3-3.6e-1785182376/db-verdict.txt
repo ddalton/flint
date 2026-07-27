@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-27T19:59:36Z)
+  ✓ pg_isready
+  ✓ ledger: all 2057 acked writes present
+  · pg_amcheck CORRUPTION/ERROR (rc=1):     	before or while processing the request.     invalid socket command terminated with exit code 1 
+  · 1 corruption-pattern lines in postgres log
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( amcheck pglog write-probe)

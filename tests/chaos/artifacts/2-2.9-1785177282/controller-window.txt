@@ -1,0 +1,55 @@
+2026-07-27T18:23:52.807729Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" epoch=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-4 replicas=2
+2026-07-27T18:28:52.806439Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" epoch=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-5 replicas=2
+2026-07-27T18:33:52.808749Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" epoch=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-6 replicas=2
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+2026-07-27T18:38:23.721891Z  INFO [CATCHUP] Replica caught up to warm standby volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-1 base=empty through=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-6
+2026-07-27T18:38:52.762165Z  INFO [CLAIMS] resolver reserved the next claim — maintainer re-claims will yield (F43 arbitration) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" wanted_op="hot-rejoin" held_by="catch-up"
+2026-07-27T18:38:52.762181Z  INFO [CLAIMS] volume claimed by another operation — skipping this tick volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" wanted_op="hot-rejoin" held_by="catch-up" held_secs=0
+2026-07-27T18:38:52.807714Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" epoch=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-7 replicas=1
+2026-07-27T18:38:52.919278Z  INFO [EPOCH] Reaped rolled-out epoch snapshot volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-2 snapshot=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-1
+2026-07-27T18:39:52.809062Z  INFO [CLAIMS] yielding to a reserved resolver operation (F43 arbitration) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" wanted_op="catch-up" reserved_by="hot-rejoin" reserved_secs=60
+2026-07-27T18:40:52.760485Z  INFO [CLAIMS] yielding to a reserved resolver operation (F43 arbitration) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" wanted_op="catch-up" reserved_by="hot-rejoin" reserved_secs=119
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+2026-07-27T18:41:22.152800Z  INFO [CLAIMS] yielding to a reserved resolver operation (F43 arbitration) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" wanted_op="expand" reserved_by="hot-rejoin" reserved_secs=149
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+2026-07-27T18:41:22.158205Z  INFO [CLAIMS] yielding to a reserved resolver operation (F43 arbitration) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" wanted_op="expand" reserved_by="hot-rejoin" reserved_secs=149
+2026-07-27T18:41:52.761424Z  INFO [CLAIMS] yielding to a reserved resolver operation (F43 arbitration) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" wanted_op="catch-up" reserved_by="hot-rejoin" reserved_secs=179
+2026-07-27T18:42:52.847420Z  WARN [CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-1 consumer=subsystem nqn.2024-11.com.flint:volume:pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4_0 exports this head to 1 live controller(s): nqn.2024-11.com.flint:node:runah-aws-3
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+2026-07-27T18:43:52.790020Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" epoch=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-8 replicas=1
+2026-07-27T18:43:52.861248Z  WARN [CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-1 consumer=subsystem nqn.2024-11.com.flint:volume:pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4_0 exports this head to 1 live controller(s): nqn.2024-11.com.flint:node:runah-aws-3
+2026-07-27T18:43:52.882859Z  INFO [EPOCH] Reaped rolled-out epoch snapshot volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-2 snapshot=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-2
+2026-07-27T18:44:52.859383Z  WARN [CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-1 consumer=subsystem nqn.2024-11.com.flint:volume:pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4_0 exports this head to 1 live controller(s): nqn.2024-11.com.flint:node:runah-aws-3
+2026-07-27T18:45:52.861379Z  WARN [CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-1 consumer=subsystem nqn.2024-11.com.flint:volume:pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4_0 exports this head to 1 live controller(s): nqn.2024-11.com.flint:node:runah-aws-3
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+📏 [CONTROLLER] Expanding volume pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4 to 24696061952 bytes
+📏 [CONTROLLER] pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4: expansion refused while replicas lag: 2b6c0300-195f-43aa-9b23-c6031407bc44 on runah-aws-1 is stale
+2026-07-27T18:46:52.859387Z  WARN [CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-1 consumer=subsystem nqn.2024-11.com.flint:volume:pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4_0 exports this head to 1 live controller(s): nqn.2024-11.com.flint:node:runah-aws-3
+2026-07-27T18:47:52.861388Z  WARN [CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-1 consumer=subsystem nqn.2024-11.com.flint:volume:pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4_0 exports this head to 1 live controller(s): nqn.2024-11.com.flint:node:runah-aws-3
+2026-07-27T18:48:52.792486Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" epoch=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-9 replicas=1
+2026-07-27T18:48:52.885479Z  INFO [EPOCH] Reaped rolled-out epoch snapshot volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-2 snapshot=epoch-pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4-3
+2026-07-27T18:48:52.887418Z  WARN [CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-1 consumer=subsystem nqn.2024-11.com.flint:volume:pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4_0 exports this head to 1 live controller(s): nqn.2024-11.com.flint:node:runah-aws-3
+2026-07-27T18:49:52.873267Z  WARN [CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36) volume_id="pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4" node=runah-aws-1 consumer=subsystem nqn.2024-11.com.flint:volume:pvc-570e8c1e-58d7-49c4-bbb9-1b667bf5cae4_0 exports this head to 1 live controller(s): nqn.2024-11.com.flint:node:runah-aws-3

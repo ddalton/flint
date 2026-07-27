@@ -806,11 +806,14 @@ case "$DRILL" in
     *) fail "backing PVC status '$BST_RAW' != $NEW/$NEW_BYTES — user PVC completed WITHOUT the backing chain?!" ;;
   esac
   note "server-side df: $(kubectl exec -n "$DRIVER_NS" "$(nfs_pod)" -- sh -c 'df -m 2>/dev/null' | grep -m1 -E '/mnt|/export|/data' || echo 'n/a')"
-  note "client-side df: $(kubectl exec -n "$NS" $PG -- sh -c 'df -m 2>/dev/null' | grep -m1 -E ':/' || echo 'n/a')"
+  # The client mount is NOT a growth signal: a bare `df` does not list it, and
+  # statfs on the export root comes back all-zeros, so the client sees "0" both
+  # before and after. That is why the backing PVC status above is the gate.
+  note "client-side df (informational, zeros are expected): $(kubectl exec -n "$NS" $PG -c postgres -- df -m /var/lib/postgresql/data 2>/dev/null | awk 'NR==2{print $1" "$2"M"}' || echo 'n/a')"
   wait_acks_fresh 60 || fail "acks stalled after expansion"
   witness_verdict "$T0"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=120 \
-    NOTES="RWX online expand $CUR→$NEW in ${T_DONE}s under writes; backing=$BST_RAW" verify
+    NOTES="RWX online expand ${CUR}->${NEW} in ${T_DONE}s under writes; backing=$BST_RAW" verify
   ;;
 
 *) fail "unknown drill '$DRILL'" ;;

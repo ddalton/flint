@@ -1,0 +1,21 @@
+=== F49 evidence: RWX post-cutover raid assembly EPERM (runah, 2026-07-27) ===
+--- NodeStage on runah-aws-4 (server co-located with the replacement leg):
+🔧 [DRIVER] Creating RAID 1 on node: runah-aws-4
+   Replica 2: LOCAL access (lvol: 8c9c7714-3662-4b56-9fbe-82f29d7477d8)
+   Dropping stale local export nqn.2024-11.com.flint:volume:pvc-d3f0a906-8261-441e-941c-5e6b57100044_1 of 8c9c7714-3662-4b56-9fbe-82f29d7477d8
+🔧 [DRIVER] Creating RAID 1 bdev: raid_nfs-server-pvc-d3f0a906-8261-441e-941c-5e6b57100044 with 2 base bdevs
+❌ [SPDK_RPC] bdev_raid_create failed: Code=-1 Msg=... Operation not permitted
+(loop repeats every ~60s; kubelet FailedMount x8)
+--- SPDK state on runah-aws-4 DURING the wedge (after the drop supposedly ran):
+bdev 8c9c7714-3662-4b56-9fbe-82f29d7477d8
+     aliases=[lvs_runah-aws-4_0000-00-1f-0/vol_pvc-d3f0a906-..._replica_1]
+     claimed=True  size=23622320128
+subsystem nqn.2024-11.com.flint:volume:pvc-d3f0a906-..._1
+     namespaces=[(8c9c7714-..., 8c9c7714-...)]  hosts=1
+=> the leg-export subsystem is STILL present and still holds the write claim,
+   so the raid module's exclusive claim of the local base is refused (EPERM).
+   drop_stale_local_exports() matched and issued nvmf_delete_subsystem for the
+   RIGHT nqn — the export comes back.
+--- Recovery observed: a csi-node DS roll (spdk-tgt restart) wipes SPDK state
+    including the stale export; the very next NodeStage succeeded:
+    ✓ Local replica verified: 8c9c7714-... / ✅ [NODE] RAID created: raid_nfs-server-...

@@ -1,11 +1,11 @@
 # Volume expansion — capability analysis (RWO / RWX / multi-replica / UI)
 
-**Status:** **IMPLEMENTED for v1.21.0 (2026-07-27) — multi-replica RWO
-fan-out, RWX orchestration, and the device-size guard are in-tree; live
-validation pending (drills 2.10 / 3.11).** The analysis below is kept as
-the reference; per-section addenda mark what shipped. Deferred by design:
-ublk online resize (§2.2 — now refused cleanly instead of half-applying)
-and the dashboard UI (§4).
+**Status:** **SHIPPED in v1.21.0 (2026-07-27) — multi-replica RWO fan-out,
+RWX orchestration, and the device-size guard, LIVE-VALIDATED on the runah
+cluster (drills 2.10 ×2, the degraded-refusal variant, and 3.11 — see §7).**
+The analysis below is kept as the reference; per-section addenda mark what
+shipped. Deferred by design: ublk online resize (§2.2 — now refused cleanly
+instead of half-applying) and the dashboard UI (§4).
 **Originally:** analysis — reflected `main` @ 2026-07-24.
 **Revised:** §2/§3/§5 corrected after reading the actual SPDK source at
 `/Users/ddalton/github/spdk` (v26.05.1-pre) — the "no SPDK raid-grow
@@ -513,15 +513,38 @@ passes, ROX/backing refuse); `replicas_not_in_sync` (in_sync passes,
 stale/standby/unrecorded refuse — `replica_sync.rs`); `class_of(OP_EXPAND)
 == Maintainer` was already pinned in `volume_claims.rs`. Suite: 864 green.
 
-**Chaos drills (live acceptance, pending a cluster):**
-- **2.10** (phase 2, RWO r2): expand +1Gi under live writes → PVC status,
-  consumer `df` growth, per-leg sizes, raid 2/2, acks fresh, full verify.
-  Run again after 2.1 (degraded) to prove the refusal belt: PVC stays
-  pending with `ExpandRefusedReplicasNotInSync`, I/O unaffected, and the
-  expand completes on its own after the leg rejoins.
-- **3.11** (phase 3, RWX): expand the user RWX PVC under writes → user PVC
-  status, backing PVC status (the fs-growth proof — kubelet stamps it only
-  after the server-node fs grew), server/client `df`, witness, verify.
+**Chaos drills — LIVE-VALIDATED 2026-07-27 on runah (4× i4i.xlarge spot,
+us-west-1, k8s 1.34.10, driver `1.21.0-rc1`, backend nvmeof):**
+
+- **2.10** (phase 2, RWO r2) — **PASS ×2**, 7/7 checks both times.
+  20Gi→21Gi in 33s and 21Gi→22Gi in 49s, both under live pgbench writes.
+  Consumer fs grew 19987M→20995M→22003M; raid stayed `online 2/2`; max
+  ledger stall **1s** (the expand is genuinely online). On the wire after
+  the second run, *both* nvme legs and the raid bdev read exactly
+  23622320128 bytes = 22Gi — the lvol→nvmf→`bdev_nvme` re-identify→
+  `raid1_resize` chain propagates with **no SPDK patch**, as §2.1 predicted.
+- **2.10 degraded-refusal variant** — **PASS.** With one leg `stale`
+  (induced by drill 2.9), the expand refused on the belt: `Warning
+  ExpandRefusedReplicasNotInSync` on the PV naming the lagging leg,
+  `VolumeResizeFailed` on the PVC carrying the `Unavailable` status and the
+  "retries automatically" wording, PVC `status.capacity` unmoved at 22Gi,
+  and **no partial fan-out** (the belt runs before the first `resize_lvol`).
+  I/O was unaffected throughout. The claim registry behaved as F43 intends:
+  `expand` (maintainer) logged `yielding to a reserved resolver operation`
+  rather than ever holding the claim against a resolver.
+- **3.11** (phase 3, RWX) — **PASS**, 7/7 checks. User PVC 21Gi→22Gi in 88s
+  under writes; backing PVC `status.capacity` reached 23622320128 (the
+  kubelet-stamped fs-growth proof); server-node fs 22003M; witness clean
+  (0 mismatches); db PASS; max ledger stall 1s.
+  Note the client mount is **not** a growth signal — statfs on the export
+  root returns zeros before and after, which is exactly why the gate is the
+  backing PVC status.
+
+Two drill-script bugs were found and fixed by these runs: `"$CUR→$NEW"` in
+both `NOTES=` strings (bash swallows the UTF-8 arrow into the variable name
+and dies under `set -u` — now `${CUR}->${NEW}`), and 2.10's per-leg size
+probe matching only bdev *aliases* (on the raid host the pv is in the bdev
+*name* and the alias is a uuid, so the raid host silently reported "n/a").
 
 **Not covered anywhere yet:** raw-block expand (`blkid`-empty gap, §1 —
 pre-existing, unchanged), ublk-backend refusal end-to-end (needs a
