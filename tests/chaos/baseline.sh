@@ -29,6 +29,8 @@ case "${1:-}" in
     done
     kubectl get volumeattachments -o name > "$BDIR/vas.txt" 2>/dev/null
     ok "captured VAs ($(wc -l < "$BDIR/vas.txt" | tr -d ' '))"
+    capture_node_fs "$BDIR/node-fs.txt"
+    ok "captured node fs pressure (diff against a drill's node-fs.txt to see what grew)"
     ;;
   diff)
     need_env

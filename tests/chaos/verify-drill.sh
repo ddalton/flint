@@ -147,6 +147,12 @@ for n in $(worker_nodes); do
 done
 [ "$MOUNTS_OK" = "Y" ] && ok "no orphaned pod mounts"
 
+# Node filesystem pressure (capture + warn, not a gate — instrumentation
+# first: runag 3.6e run 4's only red mark was a DiskPressure eviction whose
+# cause nothing had measured). Reads the kubelet stats summary per node.
+capture_node_fs "$ART/node-fs.txt"
+note "node fs pressure captured ($ART/node-fs.txt)"
+
 # 6. driver log scan ----------------------------------------------------------
 step "6/7 driver logs since T0"
 SINCE=$(rfc3339 "$T0")

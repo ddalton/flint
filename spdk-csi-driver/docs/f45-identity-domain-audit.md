@@ -89,6 +89,13 @@ spurious subsystem) recovered the volume to 2/2 within 50 s.
   legacy wrapper shape.
 
 ## OK-but-fragile (watch on refactor)
+**2026-07-27 addendum:** the loopback/bare-volume export family got its own
+audit after the runag capture showed an inner-named subsystem exporting the
+wrapper-named raid — attributed and documented as
+[F47](f47-loopback-export-teardown-domain.md) (inner mint is deliberate and
+must NOT change; both delete paths are broken — one wrong-domain no-op, one
+F9-guard refusal on a node-local subsystem).
+
 raid-membership uuid-belt is single-domain (replica_sync); hot-rejoin is
 inner-domain-throughout and safe only behind its RWX refusal gate (the
 marker-reconcile dispatch checks only `nfs_backing`, not `rwx`); rehydrate's

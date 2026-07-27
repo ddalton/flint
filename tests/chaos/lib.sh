@@ -336,3 +336,45 @@ csv_append() { # phase,drill,... (writes header on first use)
   [ -f "$RESULTS" ] || echo "date,phase,drill,t_ready_s,stall_s,restarts_delta,pre_node,post_node,va_ok,nvme_ok,mounts_ok,db_verdict,logscan,verdict,notes" > "$RESULTS"
   echo "$*" >> "$RESULTS"
 }
+
+# Node filesystem pressure via the kubelet stats summary (host truth, no
+# exec): nodeFs + imageFs used/capacity and the top per-pod ephemeral
+# consumers. Added after runag 3.6e run 4 (2026-07-27): DiskPressure on the
+# replacement-leg node evicted pg-0 ONE SECOND after catch-up completed, and
+# nothing captured what had filled the 8G root — the eviction-armor requests
+# (43f2ad6) can't protect against a pressure source nobody has measured.
+# Emits one line per node: "<node> nodefs=<used>/<cap>GiB <pct>% imagefs=..."
+# plus top-3 pod ephemeral usage; WARNs at >=80% (kubelet default eviction
+# threshold is 85% nodefs).
+capture_node_fs() { # <outfile>
+  local out=$1 n summary
+  : > "$out"
+  for n in $(worker_nodes); do
+    summary=$(kubectl get --raw "/api/v1/nodes/$n/proxy/stats/summary" 2>/dev/null) || {
+      echo "$n stats-summary UNAVAILABLE" >> "$out"; continue; }
+    echo "$summary" | python3 -c '
+import json,sys
+node=sys.argv[1]
+d=json.load(sys.stdin)
+def gib(b): return round((b or 0)/2**30,2)
+nf=d.get("node",{}).get("fs",{}) or {}
+imf=(d.get("node",{}).get("runtime") or {}).get("imageFs",{}) or {}
+def pct(fs):
+    c=fs.get("capacityBytes") or 0
+    return round(100*(fs.get("usedBytes") or 0)/c,1) if c else 0.0
+nu,nc,np = gib(nf.get("usedBytes")), gib(nf.get("capacityBytes")), pct(nf)
+iu,ic,ip = gib(imf.get("usedBytes")), gib(imf.get("capacityBytes")), pct(imf)
+print(f"{node} nodefs={nu}/{nc}GiB {np}% imagefs={iu}/{ic}GiB {ip}%")
+pods=[]
+for p in d.get("pods",[]):
+    eb=(p.get("ephemeral-storage") or {}).get("usedBytes") or 0
+    if eb: pods.append((eb,p["podRef"]["namespace"]+"/"+p["podRef"]["name"]))
+for eb,name in sorted(pods,reverse=True)[:3]:
+    g=gib(eb)
+    print(f"  pod-ephemeral {name} {g}GiB")
+' "$n" >> "$out" 2>/dev/null || echo "$n stats-summary UNPARSEABLE" >> "$out"
+  done
+  # Surface pressure now, not in the post-mortem.
+  awk '$2 ~ /^nodefs/ { for(i=2;i<=NF;i++) if ($i ~ /%$/) { gsub(/%/,"",$i);
+        if ($i+0 >= 80) print "  ⚠ "$1" filesystem at "$i"% — kubelet evicts at 85% nodefs" } }' "$out"
+}
