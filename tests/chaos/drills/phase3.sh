@@ -23,6 +23,12 @@
 #         (fresh local leg dies with it) — must serve the trailing leg
 #         within the defer bound + raise flint.io/acked-tail-risk.
 #         EXPECTED-BOUNDED-LOSS drill: db verdict shows the trailed tail.
+#   3.6e ☠ F43 ACCEPTANCE (r2-perm): TERMINATE a backing-LEG node that is
+#         NOT the nfs-server's node. The server stays alive and writing, so
+#         the replacement can only be admitted by CUTOVER — the cell every
+#         other 3.6* variant structurally cannot reach. Pre-fix the standby
+#         parks forever; post-fix it lands in_sync. Needs SC=flint-r2 +
+#         v1.20.0 driver and a spare storage node (consumes one).
 #   3.7   client node kill (kubelet stop + taint)
 #   3.8   client churn ×10 — nfs pod must survive untouched (same UID)
 #   3.9 ☠ full csi-node DS roll (documented-limit drill, run last)
@@ -168,6 +174,46 @@ degrade_remote_leg() { # picks the leg NOT on $NFS_NODE, kills its spdk-tgt,
   # gate exists to protect.
   sleep 20
   export DEG_NODE DEG_UUID FRESH_UUID GATE_ARMED
+}
+
+# ---- r2 leg helpers (3.6e) ----------------------------------------------
+# Same shapes phase2.sh uses; duplicated rather than sourced because the two
+# drivers are independently runnable.
+spdk_rpc() { # <node> <rpc args...> — spdk RPC via the node's spdk-tgt container
+  local pod; pod=$(csi_node_pod "$1"); shift
+  [ -n "$pod" ] || return 1
+  kubectl exec -n "$DRIVER_NS" "$pod" -c spdk-tgt -- sh -c \
+    "rpc.py $* 2>/dev/null || /usr/local/scripts/rpc.py $* 2>/dev/null || python3 /usr/local/scripts/rpc.py $* 2>/dev/null"
+}
+
+raid_summary() { # <node> — compact raid bdev state on the node
+  spdk_rpc "$1" bdev_raid_get_bdevs all 2>/dev/null \
+    | jq -r '.[] | .name + " state=" + .state + " base=" + ((.base_bdevs_list // []) | map(select(.is_configured)) | length | tostring) + "/" + (.num_base_bdevs | tostring)' 2>/dev/null
+}
+
+evict_load_from() { # <node...> — the ledger oracle must survive the drill.
+  # acked.log IS the loss ground truth; if it dies with the target node the
+  # drill blinds itself (the 2u/2.3 lesson).
+  local lp ln n hit=""
+  lp=$(load_pod); [ -n "$lp" ] || return 0
+  ln=$(kubectl get pod -n "$NS" "$lp" -o jsonpath='{.spec.nodeName}' 2>/dev/null)
+  for n in "$@"; do [ "$ln" = "$n" ] && hit=1; done
+  [ -n "$hit" ] || return 0
+  note "ledger oracle on drill-target $ln — relocating (acked.log must survive)"
+  for n in "$@"; do kubectl cordon "$n" >/dev/null 2>&1; done
+  kubectl delete pod -n "$NS" "$lp" --wait=false
+  kubectl wait --for=delete pod -n "$NS" "$lp" --timeout=120s >/dev/null 2>&1
+  local i
+  for i in $(seq 1 24); do
+    lp=$(load_pod); [ -n "$lp" ] && break; sleep 5
+  done
+  for n in "$@"; do kubectl uncordon "$n" >/dev/null 2>&1; done
+  [ -n "$lp" ] || fail "load pod never came back after relocation"
+  ok "oracle relocated to $(kubectl get pod -n "$NS" "$lp" -o jsonpath='{.spec.nodeName}')"
+}
+
+leg_state_on() { # <node> — sync_state of this volume's replica on a node
+  sync_record | jq -r --arg n "$1" '.replicas[]? | select(.node_name==$n) | .sync_state' 2>/dev/null | head -1
 }
 
 pre_rwx() {
@@ -460,6 +506,164 @@ case "$DRILL" in
   untaint_oos "$NFS_NODE"; TAINTED=""
   kubectl delete node "$NFS_NODE" >/dev/null 2>&1
   note "NEXT: node terminated — cluster is a worker down; volume single-leg until re-placement"
+  ;;
+
+3.6e) # ☠ F43 ACCEPTANCE (r2-perm) — permanently TERMINATE a backing-LEG node
+      # that is NOT the nfs-server's node, then delete its Node object.
+      #
+      # This is the cell the campaign never ran. Every prior 3.6* variant
+      # kills the NFS SERVER's node, which structurally cannot show the bug:
+      # the server dies, gets resurrected elsewhere, and the fresh stage
+      # re-admits legs on the attach path. Killing a REMOTE leg leaves the
+      # server alive and writing, so the replacement can only be admitted by
+      # CUTOVER — the resolver that owns RWX admission via the NFS bounce.
+      #
+      # F43: cutover is perpetually out-raced for the per-volume claim by
+      # catch-up, whose epoch scheduler re-claims on a 30s writes-independent
+      # timer. Pre-fix the replacement converges and then PARKS at
+      # sync_state=standby forever; the volume never returns to 2/2.
+      # Post-fix (v1.20.0 #1) cutover RESERVES the next claim and lands
+      # within ~2 maintainer ticks.
+  pre_rwx
+  kubectl get pv "$PV" -o jsonpath='{.spec.storageClassName}' | grep -q "flint-r2" \
+    || fail "3.6e needs SC=flint-r2 (current: $(kubectl get pv "$PV" -o jsonpath='{.spec.storageClassName}')) — reset the harness"
+  REPL=$(pv_replicas_json)
+  LEG_NODE=$(echo "$REPL" | jq -r '.[].node_name' | grep -v "^$NFS_NODE$" | head -1)
+  [ -n "$LEG_NODE" ] || fail "both legs live on the nfs node ($NFS_NODE) — 3.6e needs a REMOTE leg"
+  DEAD_UUID=$(echo "$REPL" | jq -r --arg n "$LEG_NODE" '.[] | select(.node_name==$n) | .lvol_uuid' | head -1)
+  [ "$LEG_NODE" != "$PRE_NODE" ] \
+    || note "CAVEAT: the leg node is also the pg client node — client loss is conflated with storage loss"
+  evict_load_from "$LEG_NODE"
+  OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+  ACK_AT_KILL=$(last_ack_line)
+  note "acked tail at kill: $ACK_AT_KILL"
+  note "raid pre (on $NFS_NODE): $(raid_summary "$NFS_NODE" | head -2)"
+  IID=$(instance_id_for_node "$LEG_NODE")
+  [ -n "$IID" ] || fail "no instance id for $LEG_NODE"
+  aws ec2 terminate-instances --region "$AWS_REGION" --instance-ids "$IID" >/dev/null
+  note "TERMINATED $IID ($LEG_NODE) — remote leg ${DEAD_UUID:0:8}… permanently lost; the nfs server keeps writing"
+  wait_node_notready "$LEG_NODE" 300
+  kubectl delete node "$LEG_NODE" >/dev/null 2>&1
+  T_NODEGONE=$(( $(epoch) - T0 ))
+  note "Node object deleted at ${T_NODEGONE}s — re-placement trigger armed"
+
+  # (a) F42 regression check: the raid must FAULT the dead leg, not stall.
+  wait_acks_fresh 180 && ok "I/O never stalled through the kill (F42 fast_io_fail held)" \
+    || note "acks went stale after the kill — F42 REGRESSION?"
+
+  # (b) F40: RWX re-placement must actually dispatch (identity swap).
+  T_SWAP=-1; NEW_NODE=""
+  for i in $(seq 1 60); do
+    OVR=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+    if [ -n "$OVR" ] && [ "$OVR" != "$OVR_PRE" ]; then
+      T_SWAP=$(( $(epoch) - T0 ))
+      NEW_NODE=$(echo "$OVR" | jq -r '.[].node_name' | grep -v "^$NFS_NODE$" | head -1)
+      break
+    fi
+    sleep 10
+  done
+  [ "$T_SWAP" -ge 0 ] || fail "3.6e FAIL: replicas-override never appeared — RWX re-placement never dispatched (F40 regression)"
+  ok "identity swapped to ${NEW_NODE:-?} at ${T_SWAP}s"
+
+  # (c) ☠ THE F43 GATE — one convergence loop watching the replacement's
+  # sync_state and the nfs pod uid together. Pre-fix: state parks at
+  # "standby" and the uid never changes. Post-fix: cutover bounces the pod
+  # and the leg lands in_sync.
+  T_STANDBY=-1; T_CUTOVER=-1; T_SYNC=-1; ST=""; NFS_UID_NEW=""
+  for i in $(seq 1 180); do        # 30 min budget
+    ST=$(leg_state_on "$NEW_NODE")
+    if [ "$T_STANDBY" -lt 0 ] && [ "$ST" = "standby" ]; then
+      T_STANDBY=$(( $(epoch) - T0 )); note "replacement reached standby at ${T_STANDBY}s"
+    fi
+    U=$(nfs_pod_uid)
+    if [ "$T_CUTOVER" -lt 0 ] && [ -n "$U" ] && [ "$U" != "$NFS_UID" ]; then
+      T_CUTOVER=$(( $(epoch) - T0 )); NFS_UID_NEW=$U
+      note "nfs pod BOUNCED at ${T_CUTOVER}s (uid ${NFS_UID:0:8} → ${U:0:8}) — cutover took the claim"
+    fi
+    [ "$ST" = "in_sync" ] && { T_SYNC=$(( $(epoch) - T0 )); break; }
+    sleep 10
+  done
+  [ "$T_SYNC" -ge 0 ] && ok "replacement leg in_sync at ${T_SYNC}s — RWX redundancy restored (2/2)" \
+    || note "replacement leg NOT in_sync after 30min (state=${ST:-unknown})"
+
+  # (d) F44 settle assertion — the first run collapsed ~3min AFTER in_sync
+  # (leaked leg controller on the outgoing server node → F36 head-in-use →
+  # stale-mark → DegradedDirectServe). in_sync at an instant is not the
+  # verdict; in_sync that SURVIVES the cutover cooldown is.
+  T_SETTLED=-1; HEADINUSE=0; NFS_PHASE=""; NFS_READY=""; ASM_BLOCKED=""
+  if [ "$T_SYNC" -ge 0 ]; then
+    note "settle window: re-asserting 2/2 at +360s (F44 signature: ReplicaHeadInUse + collapse)"
+    sleep 360
+    N_SYNC=$(sync_record | jq -r '[.replicas[]?|select(.sync_state=="in_sync")]|length' 2>/dev/null)
+    WS_N=$(writer_uuids | grep -c .)
+    HEADINUSE=$(pv_events_since "$T0" ReplicaHeadInUse)
+    # F46 lesson: record state is NOT liveness — run 3's settle "passed" on
+    # a 2/2 record while the nfs pod sat Pending, unmountable. The settle
+    # verdict now requires the SERVER to be alive too: pod Running+Ready
+    # and no assembly-blocked marker on the PV.
+    NFS_PHASE=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.status.phase}' 2>/dev/null)
+    NFS_READY=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+    ASM_BLOCKED=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/assembly-blocked}' 2>/dev/null)
+    if [ "$N_SYNC" = "2" ] && [ "$NFS_PHASE" = "Running" ] && [ "$NFS_READY" = "True" ] && [ -z "$ASM_BLOCKED" ]; then
+      T_SETTLED=$(( $(epoch) - T0 ))
+      ok "redundancy HELD through the settle window (2/2 in_sync, writer_set=$WS_N, head_in_use_events=$HEADINUSE, nfs Running/Ready, no assembly-blocked marker)"
+    elif [ "$N_SYNC" = "2" ]; then
+      note "RECORD-ONLY health in the settle window: 2/2 in_sync but nfs phase=$NFS_PHASE ready=$NFS_READY assembly_blocked='${ASM_BLOCKED:-}' (F46 shape)"
+    else
+      note "COLLAPSED in the settle window: in_sync=$N_SYNC writer_set=$WS_N head_in_use_events=$HEADINUSE (F44 shape)"
+    fi
+  fi
+
+  # (e) F44-cousin latent-pin sweep — a leaked copy/leg controller on any
+  # node OTHER than the current server pins the head for future rebuilds
+  # even while 2/2 serves fine (chase-controller leak, found run 2). This
+  # only bites LATER, so assert it here rather than wait for the next drill.
+  CUR_SRV=$(nfs_node)
+  FOREIGN=""
+  for n in $(worker_nodes); do
+    [ "$n" = "$CUR_SRV" ] && continue
+    C=$(spdk_rpc "$n" bdev_nvme_get_controllers 2>/dev/null | jq -r '[.[]?.name] | join(",")' 2>/dev/null | grep -o "${PV}" | head -1)
+    [ -n "$C" ] && FOREIGN="$FOREIGN $n"
+  done
+  if [ -z "$FOREIGN" ]; then
+    ok "no foreign leg/copy controllers linger off the server node (latent-pin sweep clean)"
+  else
+    note "LATENT PIN: volume controllers still attached on non-server node(s):$FOREIGN"
+  fi
+
+  CUT_START=$(pv_events_since "$T0" CutoverStarted)
+  CUT_OK=$(pv_events_since "$T0" CutoverSucceeded)
+  CUT_INEFF=$(pv_events_since "$T0" CutoverIneffective)
+  YIELDS=$(driver_log_hits "$T0" "resolver reserved the next claim")
+  SEIZES=$(driver_log_hits "$T0" "claim SEIZED")
+  note "cutover events: started=$CUT_START succeeded=$CUT_OK ineffective=$CUT_INEFF"
+  note "claim arbitration: maintainer yields=$YIELDS lease seizures=$SEIZES (seizures should be 0 — the lease is a wedge backstop, not the mechanism)"
+  note "raid post (on $(nfs_node)): $(raid_summary "$(nfs_node)" | head -2)"
+
+  T_WITNESS=$(wait_witness_fresh 420)
+  [ "$T_WITNESS" -ge 0 ] && ok "witness fresh at ${T_WITNESS}s (multi-node access intact)" \
+    || note "witness NOT fresh in 420s"
+  wait_acks_fresh 300 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
+  witness_verdict "$T0"
+  RISK=$(risk_annotation)
+  [ -z "$RISK" ] && ok "no acked-tail-risk raised (the surviving leg never trailed)" \
+    || note "acked-tail-risk: $RISK"
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
+    NOTES="F43 r2-perm: node_gone=${T_NODEGONE}s swap=${T_SWAP}s standby=${T_STANDBY}s cutover=${T_CUTOVER}s in_sync=${T_SYNC}s settled=${T_SETTLED}s witness=${T_WITNESS}s io_resume=${T_RESUME}s new_node=${NEW_NODE:-?} cut_ev=$CUT_START/$CUT_OK/$CUT_INEFF yields=$YIELDS seizes=$SEIZES head_in_use=$HEADINUSE risk=${RISK:-none}" verify
+
+  # The F43 verdict. in_sync is the load-bearing assertion: a parked standby
+  # is exactly the bug. The bounce is the expected mechanism — if redundancy
+  # came back WITHOUT one, say so loudly rather than quietly passing.
+  [ "$T_SYNC" -ge 0 ] \
+    || fail "3.6e FAIL (F43): replacement parked at '${ST:-unknown}' — RWX admission is still starved; cutover never landed"
+  [ "$T_SETTLED" -ge 0 ] \
+    || fail "3.6e FAIL (F44/F46): the settle window did not hold — in_sync=${N_SYNC:-?}/2, nfs phase=${NFS_PHASE:-?} ready=${NFS_READY:-?}, assembly_blocked='${ASM_BLOCKED:-}' (record-only health = F46 shape; collapse = F44 shape, head_in_use_events=$HEADINUSE)"
+  [ -z "$FOREIGN" ] \
+    || fail "3.6e FAIL (F44-cousin): latent head pin — foreign controllers on$FOREIGN would deadlock the NEXT rebuild (chase-controller leak)"
+  [ "$T_CUTOVER" -ge 0 ] \
+    || note "3.6e ANOMALY: redundancy restored WITHOUT an nfs bounce — admitted by another path; confirm which before crediting the F43 fix"
+  note "fleet is one storage node down — replace via trove before further node-consuming drills"
   ;;
 
 3.7) # client node kill — STS replace + NFS remount elsewhere

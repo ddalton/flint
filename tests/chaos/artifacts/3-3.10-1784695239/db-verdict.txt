@@ -1,0 +1,10 @@
+
+▶ db verdict (since 2026-07-22T04:40:39Z)
+command terminated with exit code 1
+  · pg_isready FAILED (or 30s timeout)
+  · ledger check SKIPPED (pg unreachable — loss unknown, not counted)
+  · pg_amcheck CORRUPTION/ERROR (rc=1): pg_amcheck: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: FATAL:  the database system is in recovery mode command terminated with exit code 1 
+  · 1 corruption-pattern lines in postgres log
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( isready amcheck pglog write-probe)

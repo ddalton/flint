@@ -1,0 +1,14 @@
+== nvme list-subsys ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS22C13CBC880751766
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol049888e8f1462770d
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== globalmounts ==
+0

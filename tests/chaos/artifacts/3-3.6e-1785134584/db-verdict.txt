@@ -1,0 +1,10 @@
+
+▶ db verdict (since 2026-07-27T06:43:04Z)
+error: Internal error occurred: error executing command in container: failed to exec in container: failed to create exec "4e8ac8e0c9198b2cf4c6324401774a540e618342c132d727b109c7057de453d5": cannot exec in a stopped state
+  · pg_isready FAILED (or 30s timeout)
+  · ledger check SKIPPED (pg unreachable — loss unknown, not counted)
+  · pg_amcheck CORRUPTION/ERROR (rc=1): error: Internal error occurred: error executing command in container: failed to exec in container: failed to create exec "d24f9de97f6ad8b93e5d2c03f2fd9eaa7ef64408c9b1f9e9e9e9156299c0c0b6": cannot exec in a stopped state 
+  ✓ postgres log clean
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( isready amcheck write-probe)

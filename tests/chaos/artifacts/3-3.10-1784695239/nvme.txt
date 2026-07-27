@@ -1,0 +1,80 @@
+== runaa-aws-1 ==
+nvme-subsys2 - NQN=nqn.2024-11.com.flint:volume:pvc-fcce4972-9fd9-404d-b143-3cd350a75122
+               hostnqn=nqn.2024-11.com.flint:node:runaa-aws-1
+               iopolicy=(null)
+\
+ +- nvme2 tcp traddr=127.0.0.1,trsvcid=4420,src_addr=127.0.0.1 live
+
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS643FE7A1BBE5D1144
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol0a9cef9e21a4335c9
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== runaa-aws-1784685483 ==
+NO-CSI-NODE-POD
+== runaa-aws-2 ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS44B9AEBF0C6211ED8
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol05cd2296ada94dcd7
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== runaa-aws-3 ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS22C13CBC880751766
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol049888e8f1462770d
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== runaa-aws-4 ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS23EE65F59A3B9D449
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol0beb7ec89d07c9b87
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== runaa-aws-5 ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS44E2F0B1D54F6E0D0
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol052ad0bc3b39db744
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live
+== runaa-aws-6 ==
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS665BA3FBC72949F85
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol0e4378b89f0de5258
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:ec2ca7bf-a9c3-57ca-395d-60b5f166956f
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live
