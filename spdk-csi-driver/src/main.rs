@@ -961,6 +961,380 @@ impl MinimalControllerService {
         println!("🎉 [CONTROLLER] PVC clone created successfully");
         Ok(tonic::Response::new(response))
     }
+
+    // ── v1.21.0 volume expansion (docs/volume-expansion-status-2026-07.md) ──
+
+    /// Block-side expand: grow every replica lvol. The SPDK
+    /// lvol→NVMe-oF→bdev_nvme→raid resize chain then propagates on its own
+    /// (`raid1_resize` is event-driven; there is no raid-resize RPC and none
+    /// is needed — doc §2.1), and the kernel-exposure device is verified
+    /// grown by NodeExpandVolume's device-size guard before any fs resize.
+    ///
+    /// `handle` is the volumeHandle whose PV carries the replica identity
+    /// list (user handle for RWO, backing handle for RWX); `record_home` is
+    /// the storage id whose PV holds the sync record and authoritative
+    /// capacity (== `handle` for RWO, the parent user PV for RWX). The
+    /// caller holds the volume claim.
+    async fn expand_block_core(
+        &self,
+        handle: &str,
+        record_home: &str,
+        new_size_bytes: u64,
+    ) -> Result<tonic::Response<spdk_csi_driver::csi::ControllerExpandVolumeResponse>, tonic::Status>
+    {
+        let replicas = match self.driver.get_replicas_from_pv(handle).await {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(tonic::Status::failed_precondition(format!(
+                    "Volume {} metadata not found: {}",
+                    handle, e
+                )))
+            }
+        };
+
+        let Some(replicas) = replicas else {
+            // Legacy single-replica volume (no replicas attribute): the
+            // pre-v1.21 path, behavior-identical.
+            let volume_info = self.driver.get_volume_info(handle).await.map_err(|e| {
+                tonic::Status::failed_precondition(format!(
+                    "Volume {} metadata not found: {}",
+                    handle, e
+                ))
+            })?;
+
+            println!("✅ [CONTROLLER] Found volume on node: {}", volume_info.node_name);
+
+            // Check if new size is larger than current size
+            if new_size_bytes <= volume_info.size_bytes {
+                println!(
+                    "ℹ️ [CONTROLLER] New size {} <= current size {}, no expansion needed",
+                    new_size_bytes, volume_info.size_bytes
+                );
+                // Return current size - CSI spec says this is OK
+                return Ok(tonic::Response::new(
+                    spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                        capacity_bytes: volume_info.size_bytes as i64,
+                        node_expansion_required: false,
+                    },
+                ));
+            }
+
+            let payload = serde_json::json!({
+                "lvol_uuid": volume_info.lvol_uuid,
+                "new_size_bytes": new_size_bytes
+            });
+            self.driver
+                .call_node_agent(&volume_info.node_name, "/api/volumes/resize_lvol", &payload)
+                .await
+                .map_err(|e| {
+                    tonic::Status::internal(format!("Failed to resize volume: {}", e))
+                })?;
+
+            println!(
+                "✅ [CONTROLLER] Volume {} expanded to {} bytes",
+                handle, new_size_bytes
+            );
+            // node_expansion_required=true tells Kubernetes to call
+            // NodeExpandVolume to resize the filesystem (ext4, xfs, etc.)
+            return Ok(tonic::Response::new(
+                spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                    capacity_bytes: new_size_bytes as i64,
+                    node_expansion_required: true,
+                },
+            ));
+        };
+
+        // Replicated volume: shrink/no-op guard + sync belt read from the
+        // record-home PV, then fan the lvol resize out across every leg.
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let record_pv = pvs.get(record_home).await.map_err(|e| {
+            tonic::Status::unavailable(format!(
+                "record PV {} unreadable (retried automatically): {}",
+                record_home, e
+            ))
+        })?;
+
+        let current_bytes = record_pv
+            .spec
+            .as_ref()
+            .and_then(|s| s.capacity.as_ref())
+            .and_then(|c| c.get("storage"))
+            .and_then(|q| SpdkCsiDriver::parse_quantity(&q.0).ok());
+        match current_bytes {
+            Some(cur) if new_size_bytes <= cur => {
+                println!(
+                    "ℹ️ [CONTROLLER] New size {} <= current size {}, no expansion needed",
+                    new_size_bytes, cur
+                );
+                return Ok(tonic::Response::new(
+                    spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                        capacity_bytes: cur as i64,
+                        node_expansion_required: false,
+                    },
+                ));
+            }
+            Some(_) => {}
+            // bdev_lvol_resize would happily SHRINK; without a readable
+            // current size the shrink guard cannot run — refuse.
+            None => {
+                return Err(tonic::Status::failed_precondition(format!(
+                    "Volume {}: PV capacity unreadable — refusing a resize whose shrink \
+                     guard cannot run",
+                    record_home
+                )))
+            }
+        }
+
+        let record = record_pv
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(spdk_csi_driver::replica_sync::SYNC_STATE_ANNOTATION))
+            .and_then(|s| {
+                spdk_csi_driver::replica_sync::VolumeSyncRecord::from_annotation(s).ok()
+            });
+
+        // The belt (F43 ordering constraint, C2): never grow while a leg
+        // lags — the raid grows on the serving legs only and the lagging
+        // leg returns undersized (the leg-size guard then refuses it loudly,
+        // but the volume is left needing re-placement). One leg with no
+        // record to prove anything: same refusal — absence of evidence.
+        if replicas.len() > 1 {
+            let Some(record) = record.as_ref() else {
+                return Err(tonic::Status::unavailable(format!(
+                    "Volume {}: no replica sync record — cannot prove every leg holds the \
+                     acknowledged history; expansion retries automatically",
+                    record_home
+                )));
+            };
+            let lagging =
+                spdk_csi_driver::replica_sync::replicas_not_in_sync(record, &replicas);
+            if !lagging.is_empty() {
+                let msg = format!(
+                    "expansion refused while replicas lag: {}",
+                    lagging.join("; ")
+                );
+                println!("📏 [CONTROLLER] {}: {}", record_home, msg);
+                spdk_csi_driver::replica_sync::emit_pv_event(
+                    &self.driver.kube_client,
+                    "flint-controller",
+                    record_home,
+                    "Warning",
+                    "ExpandRefusedReplicasNotInSync",
+                    &msg,
+                )
+                .await;
+                return Err(tonic::Status::unavailable(format!(
+                    "Volume {}: {} — expansion retries automatically once all replicas \
+                     are in_sync",
+                    record_home, msg
+                )));
+            }
+        }
+
+        // Fan-out. Addressed by the LIVE lvol uuid: after a catch-up revert
+        // the head is a re-created clone under a new uuid
+        // (`active_lvol_uuid`) — resizing the identity uuid would target a
+        // dead lvol. Same-size resize is a blobstore no-op, so the
+        // external-resizer's retry safely re-drives a partial failure.
+        let mut failures: Vec<String> = Vec::new();
+        for r in &replicas {
+            let live_uuid = record
+                .as_ref()
+                .and_then(|rec| rec.get(&r.lvol_uuid))
+                .map(|rec| rec.live_lvol_uuid().to_string())
+                .unwrap_or_else(|| r.lvol_uuid.clone());
+            let payload = serde_json::json!({
+                "lvol_uuid": live_uuid,
+                "new_size_bytes": new_size_bytes
+            });
+            match self
+                .driver
+                .call_node_agent(&r.node_name, "/api/volumes/resize_lvol", &payload)
+                .await
+            {
+                Ok(_) => println!(
+                    "✅ [CONTROLLER] Resized leg {} on {} to {} bytes",
+                    live_uuid, r.node_name, new_size_bytes
+                ),
+                Err(e) => failures.push(format!("{} on {}: {}", live_uuid, r.node_name, e)),
+            }
+        }
+        if !failures.is_empty() {
+            let msg = format!(
+                "resize applied to {}/{} legs; failed: {}",
+                replicas.len() - failures.len(),
+                replicas.len(),
+                failures.join("; ")
+            );
+            spdk_csi_driver::replica_sync::emit_pv_event(
+                &self.driver.kube_client,
+                "flint-controller",
+                record_home,
+                "Warning",
+                "ExpandReplicaFanoutIncomplete",
+                &msg,
+            )
+            .await;
+            return Err(tonic::Status::unavailable(format!(
+                "Volume {}: {} — retried automatically (lvol resize is idempotent)",
+                record_home, msg
+            )));
+        }
+
+        println!(
+            "✅ [CONTROLLER] Volume {} expanded to {} bytes on all {} replicas \
+             (raid + namespace growth propagate via SPDK resize events)",
+            handle,
+            new_size_bytes,
+            replicas.len()
+        );
+        Ok(tonic::Response::new(
+            spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                capacity_bytes: new_size_bytes as i64,
+                node_expansion_required: true,
+            },
+        ))
+    }
+
+    /// RWX expand orchestration (v1.21.0, doc §3): grow the backing chain,
+    /// let kubelet on the server node grow the filesystem, and report
+    /// success to the USER PV's resizer only once the whole chain landed.
+    ///
+    /// Deliberately controller-driven end to end: the backing PV/PVC pair
+    /// is statically provisioned with `storageClassName: "flint"` — an SC
+    /// that need not exist as an object — so external-resizer machinery
+    /// cannot be relied on for the backing chain. Instead:
+    ///   1. fan the lvol resize across the backing replicas (claim already
+    ///      held by the caller; raid + namespace growth is automatic),
+    ///   2. patch the backing PV's spec.capacity — kubelet's volume-manager
+    ///      populator compares it against the backing PVC's status.capacity
+    ///      for a mounted volume and drives NodeExpandVolume on the server
+    ///      node (the fs grow under the NFS export, protected by the
+    ///      device-size guard),
+    ///   3. succeed only once the backing PVC's status.capacity reached the
+    ///      target (kubelet stamps it after the fs grew); until then return
+    ///      Unavailable so the user-side resizer retries.
+    /// Every step is idempotent. A cutover mid-flow (resolver, preempts our
+    /// maintainer claim on retry) relocates the server pod; kubelet on the
+    /// NEW node then completes the pending fs grow — the flow converges.
+    /// NFS clients need nothing: statfs comes from the server (layer 5).
+    async fn expand_rwx(
+        &self,
+        storage_id: &str,
+        new_size_bytes: u64,
+    ) -> Result<tonic::Response<spdk_csi_driver::csi::ControllerExpandVolumeResponse>, tonic::Status>
+    {
+        use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim};
+        use kube::api::{Patch, PatchParams};
+        use kube::Api;
+
+        let backing_handle = spdk_csi_driver::identity::backing_handle(storage_id);
+        let backing_pv_name = spdk_csi_driver::identity::backing_pv_name(storage_id);
+
+        // 1. Block side — replica fan-out + sync belt, records keyed on the
+        //    parent user PV (the record home).
+        self.expand_block_core(&backing_handle, storage_id, new_size_bytes)
+            .await?;
+
+        // 2. Backing PV capacity — the kubelet fs-grow trigger.
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let backing_pv = pvs.get(&backing_pv_name).await.map_err(|e| {
+            tonic::Status::unavailable(format!(
+                "backing PV {} unreadable (NFS server infrastructure not ready?): {}",
+                backing_pv_name, e
+            ))
+        })?;
+        let capacity_patch = serde_json::json!({
+            "spec": { "capacity": { "storage": format!("{}", new_size_bytes) } }
+        });
+        pvs.patch(
+            &backing_pv_name,
+            &PatchParams::default(),
+            &Patch::Merge(&capacity_patch),
+        )
+        .await
+        .map_err(|e| {
+            tonic::Status::unavailable(format!(
+                "failed to patch backing PV {} capacity: {}",
+                backing_pv_name, e
+            ))
+        })?;
+
+        // 3. Completion: kubelet stamps the backing PVC's status.capacity
+        //    after NodeExpandVolume grew the filesystem on the server node.
+        let claim_ref = backing_pv.spec.as_ref().and_then(|s| s.claim_ref.as_ref());
+        let (pvc_ns, pvc_name) = match claim_ref {
+            Some(cr) => (
+                cr.namespace.clone().unwrap_or_default(),
+                cr.name.clone().unwrap_or_default(),
+            ),
+            None => (String::new(), String::new()),
+        };
+        if pvc_ns.is_empty() || pvc_name.is_empty() {
+            return Err(tonic::Status::unavailable(format!(
+                "backing PV {} has no claimRef — NFS server infrastructure incomplete",
+                backing_pv_name
+            )));
+        }
+        let pvcs: Api<PersistentVolumeClaim> =
+            Api::namespaced(self.driver.kube_client.clone(), &pvc_ns);
+        let backing_pvc = pvcs.get(&pvc_name).await.map_err(|e| {
+            tonic::Status::unavailable(format!(
+                "backing PVC {}/{} unreadable: {}",
+                pvc_ns, pvc_name, e
+            ))
+        })?;
+        let grown_bytes = backing_pvc
+            .status
+            .as_ref()
+            .and_then(|s| s.capacity.as_ref())
+            .and_then(|c| c.get("storage"))
+            .and_then(|q| SpdkCsiDriver::parse_quantity(&q.0).ok())
+            .unwrap_or(0);
+        if grown_bytes < new_size_bytes {
+            println!(
+                "⏳ [CONTROLLER] RWX {} backing fs grow pending on the server node \
+                 ({}/{} bytes) — kubelet completes it; the resizer retries us",
+                storage_id, grown_bytes, new_size_bytes
+            );
+            return Err(tonic::Status::unavailable(format!(
+                "Volume {}: backing filesystem grow to {} bytes pending on the NFS server \
+                 node ({} bytes so far) — completes automatically",
+                storage_id, new_size_bytes, grown_bytes
+            )));
+        }
+
+        // Tidy: align the backing PVC's requests with reality so
+        // `kubectl get pvc` reads sane. Best-effort — status above is the
+        // completion authority.
+        let requests_patch = serde_json::json!({
+            "spec": { "resources": { "requests": { "storage": format!("{}", new_size_bytes) } } }
+        });
+        if let Err(e) = pvcs
+            .patch(&pvc_name, &PatchParams::default(), &Patch::Merge(&requests_patch))
+            .await
+        {
+            println!(
+                "⚠️ [CONTROLLER] backing PVC {}/{} requests patch failed (cosmetic): {}",
+                pvc_ns, pvc_name, e
+            );
+        }
+
+        println!(
+            "✅ [CONTROLLER] RWX volume {} fully expanded to {} bytes (backing chain \
+             grown; NFS clients observe the new statfs, no client node work)",
+            storage_id, new_size_bytes
+        );
+        Ok(tonic::Response::new(
+            spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                capacity_bytes: new_size_bytes as i64,
+                node_expansion_required: false,
+            },
+        ))
+    }
 }
 
 #[tonic::async_trait]
@@ -2174,7 +2548,12 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         use k8s_openapi::api::core::v1::PersistentVolume;
 
         let pv_api: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
-        let pv = match pv_api.get(&volume_id).await {
+        // F32 rule: resolve the PV via pv_name_of_handle — a backing
+        // volumeHandle's PV lives under `flint-nfs-pv-…`, so a raw-handle
+        // get 404s and would misreport the (refused) backing expand as
+        // "volume not found" instead of stating the real policy.
+        let pv_lookup_name = spdk_csi_driver::identity::pv_name_of_handle(&volume_id);
+        let pv = match pv_api.get(&pv_lookup_name).await {
             Ok(pv) => pv,
             Err(kube::Error::Api(err)) if err.code == 404 => {
                 return Err(tonic::Status::not_found(format!("Volume {} not found", volume_id)));
@@ -2226,43 +2605,54 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             )));
         }
 
-        let volume_info = self.driver.get_volume_info(&volume_id).await
-            .map_err(|e| tonic::Status::failed_precondition(format!(
-                "Volume {} metadata not found: {}", volume_id, e
-            )))?;
+        // v1.21.0 (F43 ordering constraint, C1): every expand that reaches
+        // a mutation path runs under the volume's claim as OP_EXPAND —
+        // maintainer class, so cutover/hot-rejoin (resolvers) preempt it
+        // and catch-up excludes it (spdk_blob_resize during a shallow copy
+        // is -EBUSY, i.e. an unclaimed expand mid-catch-up partially
+        // fails). Single-replica RWO volumes never contend (no other op
+        // claims them), so this is behavior-neutral for the v1.20 path.
+        let claim_key = vref.storage_id().to_string();
+        let claims = spdk_csi_driver::volume_claims::global();
+        let Some(_claim) =
+            claims.try_claim(&claim_key, spdk_csi_driver::volume_claims::OP_EXPAND)
+        else {
+            spdk_csi_driver::volume_claims::log_claim_skip(
+                &claim_key,
+                spdk_csi_driver::volume_claims::OP_EXPAND,
+                claims,
+            );
+            return Err(tonic::Status::unavailable(format!(
+                "Volume {} is claimed by another operation — expansion retries automatically",
+                volume_id
+            )));
+        };
 
-        println!("✅ [CONTROLLER] Found volume on node: {}", volume_info.node_name);
-
-        // Check if new size is larger than current size
-        if new_size_bytes <= volume_info.size_bytes {
-            println!("ℹ️ [CONTROLLER] New size {} <= current size {}, no expansion needed", 
-                     new_size_bytes, volume_info.size_bytes);
-            // Return current size - CSI spec says this is OK
-            return Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerExpandVolumeResponse {
-                capacity_bytes: volume_info.size_bytes as i64,
-                node_expansion_required: false,
-            }));
+        // Dispatch on the access modes of the PV ALREADY IN HAND, not on
+        // `vref`: the resolver's unreadable-PV fallback defaults to Block,
+        // and the block arm now mutates every replica — a shared volume
+        // misread as Block would fan out onto the backing lvols while
+        // skipping the server-side filesystem grow (exactly the half-apply
+        // the identity-contract L1 refusal exists to prevent). The fetched
+        // PV is the authority; vref keeps the refusal-matrix duty above.
+        let modes = pv
+            .spec
+            .as_ref()
+            .and_then(|s| s.access_modes.clone())
+            .unwrap_or_default();
+        let shared_write = modes.iter().any(|m| m == "ReadWriteMany");
+        if !shared_write && modes.iter().any(|m| m == "ReadOnlyMany") {
+            return Err(tonic::Status::failed_precondition(format!(
+                "Volume {}: read-only shared (ROX) NFS volume — readers hold no writable \
+                 filesystem to grow",
+                volume_id
+            )));
         }
-
-        // Call node agent to resize the volume
-        let payload = serde_json::json!({
-            "lvol_uuid": volume_info.lvol_uuid,
-            "new_size_bytes": new_size_bytes
-        });
-
-        self.driver
-            .call_node_agent(&volume_info.node_name, "/api/volumes/resize_lvol", &payload)
+        if shared_write {
+            return self.expand_rwx(&volume_id, new_size_bytes).await;
+        }
+        self.expand_block_core(&volume_id, &volume_id, new_size_bytes)
             .await
-            .map_err(|e| tonic::Status::internal(format!("Failed to resize volume: {}", e)))?;
-
-        println!("✅ [CONTROLLER] Volume {} expanded to {} bytes", volume_id, new_size_bytes);
-
-        // node_expansion_required=true tells Kubernetes to call NodeExpandVolume
-        // to resize the filesystem (ext4, xfs, etc.)
-        Ok(tonic::Response::new(spdk_csi_driver::csi::ControllerExpandVolumeResponse {
-            capacity_bytes: new_size_bytes as i64,
-            node_expansion_required: true, // Filesystem resize needed
-        }))
     }
 
     async fn controller_get_volume(
@@ -4417,6 +4807,57 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             return Ok(tonic::Response::new(spdk_csi_driver::csi::NodeExpandVolumeResponse {
                 capacity_bytes: target_bytes,
             }));
+        }
+
+        // v1.21.0 device-size guard: verify the kernel block device already
+        // reflects the target BEFORE growing the filesystem. resize2fs on a
+        // stale device is a silent success-no-op — the PVC then reports the
+        // new capacity over a filesystem that never grew (the ublk backend
+        // has no online-resize path until kernel ≥ 6.16 + an SPDK patch,
+        // and on the nvmeof backend the AEN-driven rescan may not have
+        // landed yet — doc §2.2). A short settle window absorbs the AEN
+        // propagation; a genuinely stale device fails LOUDLY so kubelet
+        // keeps retrying instead of recording a half-applied expand.
+        // Fail-open only when the probe tool itself is unavailable.
+        if target_bytes > 0 {
+            let mut dev_bytes: Option<u64> = None;
+            for attempt in 0..4u32 {
+                let probe = std::process::Command::new("blockdev")
+                    .args(&["--getsize64", &block_device])
+                    .output();
+                match probe {
+                    Ok(o) if o.status.success() => {
+                        match String::from_utf8_lossy(&o.stdout).trim().parse::<u64>() {
+                            Ok(sz) => {
+                                dev_bytes = Some(sz);
+                                if sz >= target_bytes as u64 {
+                                    break;
+                                }
+                                if attempt < 3 {
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                }
+                            }
+                            Err(_) => break, // unparseable → fail-open
+                        }
+                    }
+                    _ => break, // blockdev missing/failed → fail-open
+                }
+            }
+            match dev_bytes {
+                Some(sz) if sz < target_bytes as u64 => {
+                    let msg = format!(
+                        "block device {} is {} bytes but the expand target is {} — the \
+                         kernel device has not grown (ublk has no online resize below \
+                         kernel 6.16; an NVMe-oF namespace rescan may still be pending). \
+                         Refusing to report success over a stale device; kubelet retries.",
+                        block_device, sz, target_bytes
+                    );
+                    eprintln!("❌ [GRPC] {}", msg);
+                    return Err(tonic::Status::failed_precondition(msg));
+                }
+                Some(sz) => println!("   Device size verified: {} bytes >= target {}", sz, target_bytes),
+                None => println!("   Device size unverifiable (blockdev unavailable) — proceeding as before v1.21"),
+            }
         }
 
         // Detect filesystem type

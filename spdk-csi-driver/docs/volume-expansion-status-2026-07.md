@@ -1,15 +1,28 @@
 # Volume expansion — capability analysis (RWO / RWX / multi-replica / UI)
 
-**Status:** analysis — reflects `main` @ 2026-07-24. No code changes; this
-documents the current expansion surface and what full support would require.
+**Status:** **IMPLEMENTED for v1.21.0 (2026-07-27) — multi-replica RWO
+fan-out, RWX orchestration, and the device-size guard are in-tree; live
+validation pending (drills 2.10 / 3.11).** The analysis below is kept as
+the reference; per-section addenda mark what shipped. Deferred by design:
+ublk online resize (§2.2 — now refused cleanly instead of half-applying)
+and the dashboard UI (§4).
+**Originally:** analysis — reflected `main` @ 2026-07-24.
 **Revised:** §2/§3/§5 corrected after reading the actual SPDK source at
 `/Users/ddalton/github/spdk` (v26.05.1-pre) — the "no SPDK raid-grow
 primitive" framing was **wrong** (see §2.1). `raid1_resize` exists and works;
 the real blockers are flint orchestration + the kernel-exposure layer.
+**Re-verified 2026-07-27** against post-v1.20.0 `main` before implementation:
+every mechanical claim held; §6's two prerequisites had LANDED (F43 closed);
+three gaps found and fixed in this doc — the `is_nfs_emptydir` no-op arm was
+missing from §1, the ublk stale-device half-apply was already live in the
+shipped RWO path (§2.2a — the TL;DR's old "works today" verdict was
+backend-unqualified), and the kuttl test surface (§7) was undocumented with
+a verify hole that masked exactly that half-apply.
 **Author:** produced with Claude (Opus 4.8, 1M context) via verified
 multi-agent workflows — parallel source readers (controller/node mechanics,
 RWX, multi-replica, dashboard UI, and the SPDK raid/nvme-of/ublk source),
 each adversarially re-checked against source, then synthesized.
+Re-verification + implementation: Claude (Fable 5, 1M context).
 **Scope:** Flint CSI `ControllerExpandVolume` / `NodeExpandVolume`, the
 `expand_refusal` gate, the SPDK raid1-over-lvols multi-replica stack, the
 NFS-over-SPDK RWX stack, and the `spdk-dashboard` React UI.
@@ -20,16 +33,27 @@ NFS-over-SPDK RWX stack, and the `spdk-dashboard` React UI.
 2. Is there a **UI menu item** for volume expansion (RWO and RWX)?
 3. Does volume expansion support **replicas** (multi-replica volumes)?
 
-**TL;DR:** Expansion works only for **single-replica RWO block** volumes today.
-Multi-replica expansion fails outright, RWX is explicitly refused, and the
-dashboard has no expand control for either. **Correction to an earlier
-assumption:** these gaps are *not* blocked by a missing SPDK primitive — SPDK
-v24.09+ (including the checked-out v26.05) already has `raid1_resize`, and the
-lvol→NVMe-oF→`bdev_nvme`→raid resize chain propagates automatically. The real
-work is (a) flint controller orchestration to fan `resize_lvol` out across all
-replicas, and (b) propagating the new size through the **kernel-exposure
-layer** (ublk today has no resize path; the nvme-of loopback path can reuse the
-existing `kernel_nvme_ns_rescan`). Effort: **moderate, not hard.**
+**TL;DR (as implemented, v1.21.0):** Online expansion now works for
+**single-replica RWO** (pre-existing), **multi-replica RWO** (new: claim +
+sync-belt + per-leg fan-out), and **RWX** (new: controller-driven backing
+chain) — on the **nvmeof** kernel-exposure backend (the shipping chart
+default). On the **ublk** backend the kernel device cannot grow (no online
+resize below kernel 6.16, §2.2) and the driver now REFUSES loudly at
+NodeExpand instead of half-applying — before v1.21.0 the shipped RWO path
+silently reported success over a never-grown filesystem there. The
+dashboard still has no expand control (§4, deferred).
+
+**TL;DR (original analysis, 2026-07-24):** Expansion works only for
+**single-replica RWO block** volumes today. Multi-replica expansion fails
+outright, RWX is explicitly refused, and the dashboard has no expand control
+for either. **Correction to an earlier assumption:** these gaps are *not*
+blocked by a missing SPDK primitive — SPDK v24.09+ (including the checked-out
+v26.05) already has `raid1_resize`, and the lvol→NVMe-oF→`bdev_nvme`→raid
+resize chain propagates automatically. The real work is (a) flint controller
+orchestration to fan `resize_lvol` out across all replicas, and (b)
+propagating the new size through the **kernel-exposure layer** (ublk today
+has no resize path; the nvme-of loopback path can reuse the existing
+`kernel_nvme_ns_rescan`). Effort: **moderate, not hard.**
 
 ---
 
@@ -51,28 +75,70 @@ block volumes:
    mounted block device via `findmnt`, detects the filesystem via `blkid`,
    and runs `resize2fs` (ext2/3/4) or `xfs_growfs` (xfs) **online** on the
    mounted device (`src/main.rs:4416-4427`).
-3. **Refusal / guard gates:**
-   - `expand_refusal` (`src/identity.rs:186-198`): allows only
-     `VolumeRef::Block`; refuses `VolumeRef::NfsShared` (RWX/ROX) and
-     `VolumeRef::NfsBacking`.
+3. **Refusal / guard gates** (line refs @ v1.21.0):
+   - `expand_refusal` (`src/identity.rs:186`): allows `VolumeRef::Block` —
+     and, since v1.21.0, writable `NfsShared` (routed to the RWX
+     orchestration, §3); still refuses read-only `NfsShared` (ROX) and
+     `NfsBacking` (now "expand the parent RWX PVC instead" — the backing
+     chain is driver-orchestrated).
    - pNFS shard-pinned volumes (`~m` suffix) refused at the top of the
-     controller path (`src/main.rs:2155-2161`).
-   - Shrink prevented controller-side: `new_size_bytes <= volume_info.size_bytes`
-     returns early with `node_expansion_required: false` (`src/main.rs:2230-2237`).
+     controller path.
+   - **NFS emptyDir-backed volumes** (`nfs.flint.io/backend=emptydir` PV
+     attribute) succeed as a controller-side **no-op** — emptyDir enforces
+     no size, so there is nothing to grow (this arm was MISSING from the
+     original analysis; it is what the `tests-nfs-only` kuttl suite
+     exercises, §7).
+   - Shrink prevented controller-side: `new_size_bytes <= current` returns
+     early with `node_expansion_required: false`; the replicated path
+     additionally refuses outright when the PV capacity is unreadable
+     (`bdev_lvol_resize` would happily shrink — no guard, no resize).
+   - **v1.21.0 claim gate:** every expand that reaches a mutation path runs
+     under the volume's claim as `OP_EXPAND` (maintainer class — cutover /
+     hot-rejoin preempt it, catch-up excludes it). Denial returns
+     `Unavailable`; the resizer retries.
+   - **v1.21.0 sync belt:** replicated volumes refuse to grow unless every
+     replica is `in_sync` (`replica_sync::replicas_not_in_sync`; event
+     `ExpandRefusedReplicasNotInSync`) — the C2 belt from the F43 ordering
+     constraint.
    - NFS **client** mounts are a node-side no-op — `NodeExpandVolume` detects
-     them via `fstype_is_nfs` and returns success immediately
-     (`src/main.rs:4398-4402`).
+     them via `fstype_is_nfs` and returns success immediately.
+   - **v1.21.0 device-size guard (NodeExpand):** before any fs resize, the
+     node verifies the kernel block device already reflects the target
+     (`blockdev --getsize64`, short settle window for the AEN-driven
+     rescan). A stale device — ublk backend, or an nvmeof rescan that never
+     landed — now fails `failed_precondition` LOUDLY instead of letting
+     `resize2fs` no-op "successfully" over the old size. Fail-open only
+     when the probe tool itself is unavailable.
    - Raw block (`volumeMode: Block`, no filesystem): `blkid` returns empty and
      falls through to `Status::unimplemented("Unsupported filesystem type: ")`
-     (`src/main.rs:4429`) — a known gap, fails loudly rather than crashing.
+     — a known gap, fails loudly rather than crashing.
 
-**Online expansion:** yes for RWO — `resize2fs`/`xfs_growfs` run on the live
-mounted device. Note there is **no** explicit NVMe-oF namespace rescan/reconnect
-in the expand path; it relies on the kernel observing the new size implicitly.
+**Online expansion:** yes — `resize2fs`/`xfs_growfs` run on the live mounted
+device. There is still no explicit flint-issued NVMe-oF rescan in the expand
+path; the kernel initiator's AEN handling grows the device, and the v1.21.0
+device-size guard converts "the rescan never landed" from a silent
+half-apply into a loud retryable failure.
 
 ---
 
-## 2. Q3 — Does expansion support replicas? **No.**
+## 2. Q3 — Does expansion support replicas? **YES since v1.21.0** (was: No)
+
+**Implemented 2026-07-27:** `ControllerExpandVolume` dispatches on the
+fetched PV's access modes (not the resolver's fallback — a shared volume
+misread as Block must never fan out while skipping the server-side fs grow);
+the block path takes the `OP_EXPAND` maintainer claim, resolves the replica
+list (override-aware via `get_replicas_from_pv`), refuses unless every leg
+is `in_sync` (the C2 belt), and fans `resize_lvol` to every replica node —
+addressed by the **live** lvol uuid (`active_lvol_uuid` after a catch-up
+revert; resizing the identity uuid would target a dead lvol). Partial
+failure emits `ExpandReplicaFanoutIncomplete` and returns `Unavailable` —
+same-size resize is a blobstore no-op, so the resizer's retry safely
+re-drives it. Raid + namespace growth propagate automatically (§2.1,
+unchanged). Legacy single-replica volumes keep the pre-v1.21 path
+behavior-identical. Acceptance: chaos drill **2.10** (+ its run-after-2.1
+degraded-refusal variant).
+
+The original failure analysis (all confirmed in code before implementing):
 
 Multi-replica expansion fails outright **today** — but not for the reason
 originally assumed. It is a *flint orchestration* gap, not a missing SPDK
@@ -187,7 +253,25 @@ This is an in-band SPDK patch (flint already carries ublk/raid SPDK patches), no
 a new maintenance category — but it is a genuine C change plus a kernel-version
 dependency.
 
-**Take / recommendation (opinion):**
+### 2.2a Found at re-verification (2026-07-27): the half-apply was ALREADY live
+
+The original TL;DR's "expansion works for single-replica RWO today" was
+**backend-unqualified** — and on `backend=ublk` it was false in the worst
+way: `ControllerExpandVolume` grew the lvol, the ublk device stayed at the
+old size (§2.2), `resize2fs` no-opped **successfully**, and the PVC reported
+the new capacity over a filesystem that never grew. Silent, shipped, and the
+kuttl verify hole (§7) was shaped exactly wrong to catch it. Two compounding
+drift hazards: the driver binary's built-in default when `BLOCK_DEVICE_BACKEND`
+is absent is `"ublk"` (the chart always sets it — to `nvmeof` — but any
+deployment path that drops the env inherits the hazard), and the chart
+comment mislabeled ublk as the default (fixed alongside v1.21.0).
+
+**v1.21.0 resolution:** the NodeExpand device-size guard (§1) — the third
+"fail cleanly" recommendation below, implemented as a device-size assertion
+rather than a feature-flag probe, which also covers "nvmeof rescan never
+landed" for free.
+
+**Take / recommendation (opinion; recommendations 2 and 3 SHIPPED v1.21.0):**
 - Do **not** use the disruptive fallbacks for a mounted CSI volume: destroy +
   recreate the ublk device interrupts I/O, and a raw `/sys/block/ublkbN/size`
   write is *not* a supported interface (retracted from an earlier draft) — the
@@ -195,19 +279,56 @@ dependency.
   i.e. `UBLK_U_CMD_UPDATE_SIZE`.
 - **Sequence the work:** ship multi-replica / RWO online grow on the `nvmeof`
   backend first (easy — reuse `kernel_nvme_ns_rescan`), and treat ublk online
-  grow as a follow-up gated on the SPDK patch + kernel ≥ 6.16.
+  grow as a follow-up gated on the SPDK patch + kernel ≥ 6.16. *(Done — ublk
+  online grow remains the deferred follow-up.)*
 - **Fail cleanly** on ublk when the kernel lacks `UBLK_F_UPDATE_SIZE`: refuse
   the expand with a clear message (the same pattern flint already uses for
   absent capabilities) rather than resizing the lvol/raid and leaving the kernel
   device stale — a half-applied expand where the filesystem never sees the new
-  space.
+  space. *(Done, generalized: the device-size guard refuses ANY stale kernel
+  device at NodeExpand time.)*
 
 ---
 
-## 3. Q1 — What is needed for RWX volume expansion? **Currently refused.**
+## 3. Q1 — What is needed for RWX volume expansion? **IMPLEMENTED v1.21.0** (was: refused)
 
-`expand_refusal` returns (`src/identity.rs:189-191`, enforced at
-`src/main.rs:2215-2220` as `failed_precondition`):
+**Implemented 2026-07-27 — controller-driven end to end (`expand_rwx`):**
+
+1. **Block side:** the same claimed, belted, live-uuid fan-out as §2, run
+   against the backing handle with records keyed on the parent user PV
+   (the record home — the same key catch-up and cutover claim, so the
+   claim actually excludes them).
+2. **Backing PV `spec.capacity` patch** — the kubelet fs-grow trigger:
+   kubelet's volume-manager populator compares it against the backing
+   PVC's `status.capacity` for a mounted volume and drives
+   `NodeExpandVolume` on the **server node** (the fs grow under the NFS
+   export, protected by the device-size guard).
+3. **Completion = backing PVC `status.capacity` reached the target** —
+   kubelet stamps it only after the fs actually grew, so it doubles as the
+   fs-growth proof. Until then the user-PV expand returns `Unavailable`
+   and the resizer retries; on completion the backing PVC's `requests` are
+   aligned (cosmetic) and the user expand succeeds with
+   `node_expansion_required: false` (clients read statfs from the server).
+
+**Why not delegate the backing chain to external-resizer** (the original
+"cleanest fix" sketch): re-verification found the backing PV/PVC pair is
+**statically provisioned** with `storageClassName: "flint"` — a match
+string for pre-binding that need NOT exist as an SC object (standard chart
+installs create `flint-spdk`/`flint-nfs`, not `flint`). The resizer looks
+the SC up and would simply never act. Controller-driven avoids the
+dependency entirely and keeps every step idempotent: a cutover mid-flow
+(resolver — preempts our maintainer claim on the retry) relocates the
+server pod and kubelet on the NEW node completes the pending grow; the
+flow converges instead of colliding (C4 resolved).
+
+Acceptance: chaos drill **3.11**. ROX stays refused (readers hold no
+writable filesystem); direct backing-PVC expands stay refused with the
+pointer to the parent (and the controller now resolves backing handles via
+`pv_name_of_handle`, so that refusal actually surfaces instead of 404ing).
+
+The original analysis (layer map still the reference):
+
+`expand_refusal` returned (enforced as `failed_precondition`):
 
 > "shared (RWX/ROX) NFS volume -- expansion is not yet supported: the
 > filesystem lives under the NFS server's backing attachment and a client-side
@@ -280,11 +401,12 @@ authorization matching existing destructive routes (e.g. orphan delete).
 
 ## 5. Summary
 
-| Question | Verdict | Key evidence |
-|----------|---------|--------------|
-| **Q3 — Replica expansion?** | **Not supported today, but not hard to enable.** Fails now because the multi-replica PV lacks `node-name` and there is no replica fan-out — both flint-side. SPDK's `raid1_resize` already exists and auto-propagates. | `src/main.rs:2222`, `src/driver.rs:1682`, `spdk raid1.c:587-630`, `spdk bdev_raid.c:2466-2544` |
-| **Q1 — RWX expansion needs?** | **Explicitly refused.** Needs: fan-out lvol resize (partial), raid grow (**auto in SPDK**), NVMe-oF namespace resize (**auto for `bdev_nvme`**), NFS-server-pod FS grow (missing), client statfs (free). | `src/identity.rs:189-191`, `src/main.rs:2215-2220`, `src/nfs_main.rs`, §2.1 |
-| **Q2 — UI menu item?** | **No — neither RWO nor RWX.** Dashboard is read-only for volumes; "expand" hits are accordion state only. | `VolumesTable.tsx:417-441`, `schema.d.ts:247-262`, `src/spdk_dashboard_backend_minimal.rs` |
+| Question | Verdict @ v1.21.0 | Key evidence |
+|----------|-------------------|--------------|
+| **Q3 — Replica expansion?** | **IMPLEMENTED** — claim + sync belt + live-uuid fan-out; raid/namespace growth auto (`raid1_resize`). Was: failed on the `node-name` lookup with no fan-out. Live validation: drill 2.10. | §2 addendum; `spdk raid1.c:587-630`, `spdk bdev_raid.c:2466-2544` |
+| **Q1 — RWX expansion needs?** | **IMPLEMENTED** — controller-driven backing chain (fan-out → backing-PV capacity patch → kubelet fs grow on the server node → completion by backing-PVC status). Was: explicitly refused. ROX + direct backing expands stay refused. Live validation: drill 3.11. | §3 addendum; `src/nfs_main.rs` (still no resize hook — none needed) |
+| **Q2 — UI menu item?** | **No — unchanged, deferred.** Dashboard is read-only for volumes; "expand" hits are accordion state only. | `VolumesTable.tsx:417-441`, `schema.d.ts:247-262`, `src/spdk_dashboard_backend_minimal.rs` |
+| **ublk backend** | **Refused loudly** (device-size guard) instead of the pre-v1.21 silent half-apply (§2.2a). Online ublk grow deferred: SPDK 2-part patch + kernel ≥ 6.16. | §2.2, §2.2a |
 
 **Corrected verdict on the "keystone blocker":** there is **no** missing SPDK
 raid-grow primitive — `raid1_resize` shipped in SPDK v24.09 and the
@@ -304,11 +426,34 @@ the NFS-server-pod filesystem-resize step on top.
 
 ## 6. Prerequisite — this work is ordered behind F43 / v1.20.0 item #1
 
+**SATISFIED AND HONORED (v1.21.0).** Both blockers landed in v1.20.0 — F43
+closed with the leased+arbitrated claim registry (whose module header had
+already reserved `OP_EXPAND` as the fourth claimant, maintainer class), and
+item #8's leg-size guard shipped. How each constraint was honored:
+
+- **C1** → every mutating expand runs under `try_claim(storage_id,
+  OP_EXPAND)`; denial is `Unavailable` (resizer retries). Maintainer class:
+  cutover/hot-rejoin preempt via reservation, catch-up excludes.
+- **C2** → the `replicas_not_in_sync` belt refuses grow-while-degraded up
+  front; downstream, a synergy the original analysis predates: the leg-size
+  guard floors on **PV capacity**, which an expand raises — a leg that
+  somehow missed the fan-out is refused at its next stage LOUDLY instead of
+  silently shrinking the raid.
+- **C3** → partial fan-out emits `ExpandReplicaFanoutIncomplete` and
+  retries; same-size lvol resize is a blobstore no-op, so the re-drive is
+  safe.
+- **C4** → the backing-PVC-patch collision with `BounceNfsPod` dissolved
+  into the claim system: cutover (resolver) preempts expand (maintainer),
+  and the kubelet-driven fs grow re-converges on whichever node the server
+  pod lands on.
+
+The original constraint analysis (kept for the record; evidence lives in
+the F43 doc under **"Ordering constraint — volume expansion must land after
+#1"**):
+
 Expansion and F43 (`docs/f43-rwx-replacement-admission.md`) are
 **architecturally independent** — disjoint code paths, neither reads the
-other's state — but the landing order is **not** free. Full analysis with
-evidence lives in that doc under **"Ordering constraint — volume expansion must
-land after #1"**; do not start the implementation without reading it. In brief:
+other's state — but the landing order is **not** free. In brief:
 
 - **C1** — `ControllerExpandVolume` is today the only controller mutation path
   taking **no** per-volume claim (`main.rs:2240-2249`). A multi-replica fan-out
@@ -342,4 +487,43 @@ already-mounted device and touches no staging/publish/export logic). The **ublk
 patch is the real vector**: it edits `ublk_bdev_event_cb`
 (`lib/ublk/ublk.c:1530-1538`), the same callback the DEL_DEV / F8 / F9 detach
 work depends on — another reason to keep §2.2's sequencing (nvmeof first, ublk
-last).
+last). *(v1.21.0 held to this: no staging/publish/export path was touched,
+no SPDK patch shipped, the legacy single-replica expand path is
+behavior-identical, and every refusal class — pNFS, emptydir, ROX,
+NfsBacking — kept its semantics.)*
+
+---
+
+## 7. Test surface (added 2026-07-27 — undocumented in the original)
+
+**Pre-existing kuttl suites** (`tests/system/`):
+- `tests-standard/volume-expansion` — the RWO baseline regression (1Gi→2Gi
+  under a writer, data-preservation check). **Verify hole, fixed in
+  v1.21.0:** the old step dd'd 500M `|| true` — 500M fits in the ORIGINAL
+  1Gi and the failure was swallowed, so a stale-device half-apply (§2.2a)
+  passed the suite. It now asserts `df` grew past 1.5G and writes 1200M
+  with failures fatal.
+- `tests-nfs-only/volume-expansion` — RWO on the `flint-nfs` SC = the
+  **emptydir no-op arm's** test (data preservation through the metadata
+  no-op). Left as-is deliberately: emptyDir enforces no size, and dd'ing
+  past "capacity" there just pressures the node root fs.
+
+**Unit tests (v1.21.0):** the `expand_refusal` matrix update (writable RWX
+passes, ROX/backing refuse); `replicas_not_in_sync` (in_sync passes,
+stale/standby/unrecorded refuse — `replica_sync.rs`); `class_of(OP_EXPAND)
+== Maintainer` was already pinned in `volume_claims.rs`. Suite: 864 green.
+
+**Chaos drills (live acceptance, pending a cluster):**
+- **2.10** (phase 2, RWO r2): expand +1Gi under live writes → PVC status,
+  consumer `df` growth, per-leg sizes, raid 2/2, acks fresh, full verify.
+  Run again after 2.1 (degraded) to prove the refusal belt: PVC stays
+  pending with `ExpandRefusedReplicasNotInSync`, I/O unaffected, and the
+  expand completes on its own after the leg rejoins.
+- **3.11** (phase 3, RWX): expand the user RWX PVC under writes → user PVC
+  status, backing PVC status (the fs-growth proof — kubelet stamps it only
+  after the server-node fs grew), server/client `df`, witness, verify.
+
+**Not covered anywhere yet:** raw-block expand (`blkid`-empty gap, §1 —
+pre-existing, unchanged), ublk-backend refusal end-to-end (needs a
+`backend=ublk` cluster; the guard's unit surface is the size comparison
+itself), UI (none exists).

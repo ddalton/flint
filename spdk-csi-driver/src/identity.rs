@@ -186,13 +186,17 @@ impl VolumeRef {
 pub fn expand_refusal(vref: &VolumeRef) -> Option<&'static str> {
     match vref {
         VolumeRef::Block { .. } => None,
-        VolumeRef::NfsShared { .. } => Some(
-            "shared (RWX/ROX) NFS volume — expansion is not yet supported: \
-             the filesystem lives under the NFS server's backing attachment \
-             and a client-side expand cannot apply",
+        // v1.21.0: writable shared volumes are orchestrated — the controller
+        // grows the backing chain (replica lvols → raid → server-node fs)
+        // itself; see ControllerExpandVolume's NfsShared arm.
+        VolumeRef::NfsShared { read_only: false, .. } => None,
+        VolumeRef::NfsShared { read_only: true, .. } => Some(
+            "read-only shared (ROX) NFS volume — readers hold no writable \
+             filesystem to grow",
         ),
         VolumeRef::NfsBacking { .. } => Some(
-            "NFS backing volume — driver-managed, never provisioner-resized",
+            "NFS backing volume — driver-orchestrated: expand the parent RWX \
+             PVC instead; the driver grows the backing chain itself",
         ),
     }
 }
@@ -1047,8 +1051,10 @@ mod tests {
     #[test]
     fn expand_refusal_matches_the_matrix() {
         assert!(expand_refusal(&VolumeRef::Block { storage_id: VOL.into() }).is_none());
+        // v1.21.0: writable RWX passes — ControllerExpandVolume orchestrates
+        // the backing chain (it is NOT the client-side block path).
         assert!(expand_refusal(&VolumeRef::NfsShared { storage_id: VOL.into(), read_only: false })
-            .is_some());
+            .is_none());
         assert!(expand_refusal(&VolumeRef::NfsShared { storage_id: VOL.into(), read_only: true })
             .is_some());
         assert!(expand_refusal(&VolumeRef::NfsBacking { storage_id: VOL.into() }).is_some());

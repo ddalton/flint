@@ -422,7 +422,12 @@ pnfs:
 
 # Block device configuration
 blockDevice:
-  # Backend type: "ublk" (default, high performance) or "nvmeof" (kernel NVMe-oF)
+  # Backend type: "nvmeof" (chart default — kernel NVMe-oF loopback; supports
+  # online volume expansion) or "ublk" (high performance; NO online expansion —
+  # the kernel ublk device cannot grow below kernel 6.16, and the driver
+  # refuses the expand rather than half-applying it). NOTE: the driver
+  # binary's built-in default when this env is absent is "ublk" — the chart
+  # always sets it explicitly.
   backend: "nvmeof"
 
   # Device discovery mode

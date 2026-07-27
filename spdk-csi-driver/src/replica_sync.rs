@@ -891,6 +891,31 @@ pub fn record_pv_name(volume_id: &str) -> &str {
     crate::identity::storage_id_of_handle(volume_id)
 }
 
+/// Volume-expansion belt (F43 ordering constraint, C2): replicas from the
+/// authoritative identity list whose sync record is missing or not
+/// `in_sync`. Growing while a leg lags makes the raid grow on the serving
+/// legs only; the lagging leg then returns undersized, and although the
+/// leg-size admission guard (F43 item #8) refuses it loudly, the volume is
+/// left needing a full re-placement — so the expand path refuses up front
+/// instead. A replica mid-hot-rejoin sits in stale/standby and is refused
+/// here too (its head is an esnap clone mid-localization; growing under it
+/// belongs to nobody's choreography). Pure; callers decide severity.
+pub fn replicas_not_in_sync(record: &VolumeSyncRecord, replicas: &[ReplicaInfo]) -> Vec<String> {
+    replicas
+        .iter()
+        .filter_map(|r| match record.get(&r.lvol_uuid) {
+            Some(rec) if rec.sync_state == SyncState::InSync => None,
+            Some(rec) => Some(format!(
+                "{} on {} is {}",
+                r.lvol_uuid,
+                r.node_name,
+                rec.sync_state.as_str()
+            )),
+            None => Some(format!("{} on {} has no sync record", r.lvol_uuid, r.node_name)),
+        })
+        .collect()
+}
+
 /// `Some(parent_pv_name)` when this PV is the synthetic backing PV behind an
 /// RWX volume's NFS server (volumeHandle `nfs-server-<parent>`). The backing
 /// PV carries the same replica volumeAttributes as the parent, so every
@@ -1217,6 +1242,35 @@ mod tests {
             replica("node-b", "uuid-b"),
             replica("node-c", "uuid-c"),
         ])
+    }
+
+    // ── expansion belt (v1.21.0) ─────────────────────────────────────────
+
+    #[test]
+    fn expansion_belt_flags_lagging_and_unrecorded_replicas() {
+        let mut r = three_replica_record();
+        let ids = [
+            replica("node-a", "uuid-a"),
+            replica("node-b", "uuid-b"),
+            replica("node-c", "uuid-c"),
+        ];
+        // Freshly seeded record: everything in_sync, belt passes.
+        assert!(replicas_not_in_sync(&r, &ids).is_empty());
+        // A stale leg is named with its state and node.
+        r.mark_stale("uuid-b", "leg failed", "t1");
+        let lagging = replicas_not_in_sync(&r, &ids);
+        assert_eq!(lagging.len(), 1);
+        assert!(lagging[0].contains("uuid-b") && lagging[0].contains("stale"));
+        // Standby (caught up, not yet admitted) still refuses — the raid
+        // has not re-admitted the leg, so a grow would skip it.
+        r.mark_standby("uuid-b", "epoch-1", "caught up; chasing epochs", "t2");
+        assert_eq!(replicas_not_in_sync(&r, &ids).len(), 1);
+        // An identity the record has never seen counts as lagging, not as
+        // a pass — absence of evidence refuses.
+        let unknown = [replica("node-d", "uuid-d")];
+        let missing = replicas_not_in_sync(&r, &unknown);
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].contains("no sync record"));
     }
 
     // ── F36c writer set ──────────────────────────────────────────────────

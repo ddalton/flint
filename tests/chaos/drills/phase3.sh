@@ -35,6 +35,8 @@
 #   3.10  F37: force-delete the nfs pod ×3 (same-node recreate races
 #         NodeUnstage) — assert ONE ublk id per bdev after each cycle,
 #         acks stay fresh (no EIO), reap lines attributed in agent logs.
+#   3.11  v1.21.0 RWX online expansion under writes (controller-driven
+#         backing chain; backing PVC status is the fs-growth proof)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./lib.sh
@@ -763,6 +765,52 @@ case "$DRILL" in
   witness_verdict "$T0"
   NOTES="F37 force-delete x3: dups_max=$DUPS_MAX reaps=$REAPS_TOTAL refusals=$REFUSALS" verify
   [ "$DUPS_MAX" -eq 0 ] || fail "3.10 FAIL: duplicate ublk id persisted past the settle window"
+  ;;
+
+3.11) # v1.21.0 RWX online expansion under writes.
+  # ACCEPTANCE for the RWX orchestration (volume-expansion doc §3): patch
+  # the USER RWX PVC +1Gi; the controller fans the backing-replica lvol
+  # resize, patches the backing PV capacity, kubelet on the SERVER node
+  # grows the fs (device-size guard first), and only then does the user PVC
+  # complete. Clients need nothing — statfs comes from the server.
+  # Hard gates: user PVC status, backing PVC status (kubelet stamps it only
+  # AFTER the fs grew — it is the fs-growth proof), acks fresh, witness.
+  pre_rwx
+  PGPVC=$(kubectl get pod -n "$NS" $PG -o json | jq -r '.spec.volumes[] | select(.persistentVolumeClaim) | .persistentVolumeClaim.claimName' | head -1)
+  [ -n "$PGPVC" ] || fail "no PVC behind $PG"
+  BACKING_PVC="flint-nfs-pvc-$PV"
+  SC=$(kubectl get pvc -n "$NS" "$PGPVC" -o jsonpath='{.spec.storageClassName}')
+  [ "$(kubectl get sc "$SC" -o jsonpath='{.allowVolumeExpansion}' 2>/dev/null)" = "true" ] \
+    || fail "SC $SC lacks allowVolumeExpansion:true — patch the SC first (the API refuses the PVC edit otherwise)"
+  CUR=$(kubectl get pvc -n "$NS" "$PGPVC" -o jsonpath='{.status.capacity.storage}')
+  case "$CUR" in *Gi) ;; *) fail "PVC capacity '$CUR' not in Gi — adjust the drill" ;; esac
+  NEW="$(( ${CUR%Gi} + 1 ))Gi"
+  NEW_BYTES=$(( (${CUR%Gi} + 1) * 1024 * 1024 * 1024 ))
+  step "expanding RWX $PGPVC $CUR → $NEW under live writes (server $NFS_NODE, backing pvc $BACKING_PVC)"
+  kubectl patch pvc -n "$NS" "$PGPVC" --type merge -p "{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"$NEW\"}}}}" >/dev/null || fail "PVC patch refused"
+  T_DONE=-1
+  for i in $(seq 1 72); do
+    ST=$(kubectl get pvc -n "$NS" "$PGPVC" -o jsonpath='{.status.capacity.storage}')
+    [ "$ST" = "$NEW" ] && { T_DONE=$(( $(epoch) - T0 )); break; }
+    sleep 5
+  done
+  if [ "$T_DONE" -lt 0 ]; then
+    kubectl get events -n "$NS" --field-selector "involvedObject.name=$PGPVC" --no-headers | tail -5
+    kubectl get pvc -n "$DRIVER_NS" "$BACKING_PVC" -o jsonpath='{.status.capacity.storage}{"\n"}' 2>/dev/null
+    fail "RWX expansion did not complete in 360s (user pvc status=$ST)"
+  fi
+  ok "user PVC reports $NEW after ${T_DONE}s"
+  BST_RAW=$(kubectl get pvc -n "$DRIVER_NS" "$BACKING_PVC" -o jsonpath='{.status.capacity.storage}' 2>/dev/null)
+  case "$BST_RAW" in
+    "$NEW"|"$NEW_BYTES") ok "backing PVC status grew to $BST_RAW (server fs verified grown by kubelet)" ;;
+    *) fail "backing PVC status '$BST_RAW' != $NEW/$NEW_BYTES — user PVC completed WITHOUT the backing chain?!" ;;
+  esac
+  note "server-side df: $(kubectl exec -n "$DRIVER_NS" "$(nfs_pod)" -- sh -c 'df -m 2>/dev/null' | grep -m1 -E '/mnt|/export|/data' || echo 'n/a')"
+  note "client-side df: $(kubectl exec -n "$NS" $PG -- sh -c 'df -m 2>/dev/null' | grep -m1 -E ':/' || echo 'n/a')"
+  wait_acks_fresh 60 || fail "acks stalled after expansion"
+  witness_verdict "$T0"
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=120 \
+    NOTES="RWX online expand $CUR→$NEW in ${T_DONE}s under writes; backing=$BST_RAW" verify
   ;;
 
 *) fail "unknown drill '$DRILL'" ;;

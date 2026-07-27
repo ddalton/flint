@@ -1744,7 +1744,7 @@ impl SpdkCsiDriver {
     /// replica re-placement refuse Ti volumes outright). Binary suffixes
     /// (Ki..Ei), decimal SI (k..E), decimal mantissas ("1.5Gi"), plain
     /// bytes, and exponent forms ("5e9") all parse.
-    pub(crate) fn parse_quantity(quantity_str: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn parse_quantity(quantity_str: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let s = quantity_str.trim();
         const BIN: &[(&str, u64)] = &[
             ("Ki", 1 << 10),

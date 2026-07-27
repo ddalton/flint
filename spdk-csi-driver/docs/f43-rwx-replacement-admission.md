@@ -515,6 +515,13 @@ construction success means the scenario only has teeth once the guard exists.
 
 # Ordering constraint — volume expansion must land after #1
 
+**HONORED — expansion implemented 2026-07-27 for v1.21.0, after #1 and #8
+had shipped in v1.20.0.** C1: expand claims as `OP_EXPAND` (maintainer);
+C2: the up-front `replicas_not_in_sync` belt + #8's PV-capacity floor
+downstream; C3: `ExpandReplicaFanoutIncomplete` event + idempotent retry;
+C4: dissolved into claim arbitration (cutover preempts; kubelet re-drives
+the fs grow post-cutover). Details: the expansion doc's §6.
+
 `docs/volume-expansion-status-2026-07.md` scopes multi-replica / RWX volume
 expansion. The two workstreams are **architecturally independent** — disjoint
 code paths (expand: `main.rs:2138-2259` / `4354-4443`,

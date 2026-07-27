@@ -28,14 +28,22 @@ spec:
             exit 1
           fi
           
-          # Check disk space increased
+          # Assert the filesystem actually grew: a stale kernel device makes
+          # resize2fs a silent no-op, and a 500M write fits in the ORIGINAL
+          # 1Gi — the old `|| true` dd proved nothing (v1.21.0 fix). The fs
+          # must now hold more than 1Gi could.
           echo "Checking available space..."
           df -h /data
-          
-          # Try to write more data to use expanded space
-          dd if=/dev/zero of=/data/expanded-file bs=1M count=500 || true
+          TOTAL_MB=$(df -m /data | awk 'NR==2 {print $2}')
+          if [ "$TOTAL_MB" -lt 1500 ]; then
+            echo "ERROR: filesystem is ${TOTAL_MB}M — never grew past the original 1Gi!"
+            exit 1
+          fi
+
+          # Write PAST the original capacity; failure fails the pod.
+          dd if=/dev/zero of=/data/expanded-file bs=1M count=1200
           sync
-          
+
           echo "Post-expansion verification completed"
       volumeMounts:
         - name: test-volume

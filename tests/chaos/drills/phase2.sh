@@ -25,6 +25,8 @@
 #        re-placement + full rebuild to in_sync (consumes a node)
 #   2.9  F11: destroy the remote leg's lvstore → detection (3×60s) +
 #        in-place re-init + catch-up rebuild to in_sync
+#   2.10 v1.21.0 online expansion under writes (multi-replica fan-out;
+#        run again after 2.1 to prove the degraded-refusal belt)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./lib.sh
@@ -389,6 +391,53 @@ case "$DRILL" in
   note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=60 \
     NOTES="F11 self-heal: reinit=${T_REINIT}s in_sync=${T_SYNC}s lvs=$LVS old_uuid=${UUID_PRE:0:8}" verify
+  ;;
+
+2.10) # v1.21.0 online expansion under writes (multi-replica RWO).
+  # ACCEPTANCE for the expand fan-out (volume-expansion doc §2): patch the
+  # PVC +1Gi while pg writes; the resizer→controller fan-out grows every
+  # leg, SPDK propagates lvol→nvmf→bdev_nvme→raid automatically, kubelet's
+  # NodeExpand passes the device-size guard and grows the fs. Assert the
+  # END-TO-END truth (PVC status + df inside the consumer), not the plumbing.
+  # Variant: run after 2.1 (degraded r2) — the expand must REFUSE (event
+  # ExpandRefusedReplicasNotInSync, PVC stays pending, I/O unaffected) and
+  # then complete on its own after the leg rejoins.
+  pre_r2
+  PGPVC=$(kubectl get pod -n "$NS" $PG -o json | jq -r '.spec.volumes[] | select(.persistentVolumeClaim) | .persistentVolumeClaim.claimName' | head -1)
+  [ -n "$PGPVC" ] || fail "no PVC behind $PG"
+  VOLNAME=$(kubectl get pod -n "$NS" $PG -o json | jq -r --arg c "$PGPVC" '.spec.volumes[] | select(.persistentVolumeClaim.claimName==$c) | .name')
+  MP=$(kubectl get pod -n "$NS" $PG -o json | jq -r --arg v "$VOLNAME" '.spec.containers[0].volumeMounts[] | select(.name==$v) | .mountPath')
+  DF_PRE=$(kubectl exec -n "$NS" $PG -- df -m "$MP" 2>/dev/null | awk 'NR==2{print $2}')
+  SC=$(kubectl get pvc -n "$NS" "$PGPVC" -o jsonpath='{.spec.storageClassName}')
+  [ "$(kubectl get sc "$SC" -o jsonpath='{.allowVolumeExpansion}' 2>/dev/null)" = "true" ] \
+    || fail "SC $SC lacks allowVolumeExpansion:true — patch the SC first (the API refuses the PVC edit otherwise)"
+  CUR=$(kubectl get pvc -n "$NS" "$PGPVC" -o jsonpath='{.status.capacity.storage}')
+  case "$CUR" in *Gi) ;; *) fail "PVC capacity '$CUR' not in Gi — adjust the drill" ;; esac
+  NEW="$(( ${CUR%Gi} + 1 ))Gi"
+  step "expanding $PGPVC $CUR → $NEW under live writes (mount $MP, df_pre=${DF_PRE}M)"
+  kubectl patch pvc -n "$NS" "$PGPVC" --type merge -p "{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"$NEW\"}}}}" >/dev/null || fail "PVC patch refused"
+  T_DONE=-1
+  for i in $(seq 1 60); do
+    ST=$(kubectl get pvc -n "$NS" "$PGPVC" -o jsonpath='{.status.capacity.storage}')
+    [ "$ST" = "$NEW" ] && { T_DONE=$(( $(epoch) - T0 )); break; }
+    sleep 5
+  done
+  if [ "$T_DONE" -lt 0 ]; then
+    kubectl get events -n "$NS" --field-selector "involvedObject.name=$PGPVC" --no-headers | tail -5
+    kubectl get events -n default --field-selector reason=ExpandRefusedReplicasNotInSync --no-headers 2>/dev/null | tail -3
+    fail "expansion did not complete in 300s (status=$ST) — if the volume is degraded this is the DESIGNED refusal; heal the leg and re-check"
+  fi
+  ok "PVC reports $NEW after ${T_DONE}s"
+  DF_POST=$(kubectl exec -n "$NS" $PG -- df -m "$MP" 2>/dev/null | awk 'NR==2{print $2}')
+  [ "${DF_POST:-0}" -gt "${DF_PRE:-0}" ] && ok "consumer filesystem grew ${DF_PRE}M → ${DF_POST}M" \
+    || fail "filesystem did NOT grow (${DF_PRE}M → ${DF_POST:-?}M) — device-size guard should have refused NodeExpand; investigate"
+  for n in $RAID_HOST $REMOTE; do
+    [ -n "$n" ] && note "leg bytes on $n: $(spdk_rpc "$n" bdev_get_bdevs 2>/dev/null | jq -r --arg pv "$PV" '[.[] | select((.aliases // [])[]? | contains($pv)) | .block_size * .num_blocks] | max // "n/a"')"
+  done
+  note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
+  wait_acks_fresh 60 || fail "acks stalled after expansion"
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=60 \
+    NOTES="online expand $CUR→$NEW in ${T_DONE}s under writes; df ${DF_PRE}M→${DF_POST}M; raid=$(raid_summary "$RAID_HOST" | head -1)" verify
   ;;
 
 *) fail "unknown drill '$DRILL' (phase-1 regression subset: PHASE_LABEL=2 ./drills/phase1.sh <id>)" ;;
