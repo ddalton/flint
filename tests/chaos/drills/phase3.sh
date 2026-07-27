@@ -29,6 +29,13 @@
 #         other 3.6* variant structurally cannot reach. Pre-fix the standby
 #         parks forever; post-fix it lands in_sync. Needs SC=flint-r2 +
 #         v1.20.0 driver and a spare storage node (consumes one).
+#   3.6f ☠ F49 ACCEPTANCE (server-onto-leg) + F47: MOVE the nfs server onto
+#         the node hosting the OTHER leg (cordon the rest, delete the pod).
+#         That node's legitimately-remote leg export becomes a consumer-local
+#         SQUATTER holding the lvol, so pre-fix bdev_raid_create loops on
+#         EPERM and the volume is unmountable. Also asserts the outgoing
+#         server keeps zero loopback shells (F47). Needs SC=flint-r2 +
+#         v1.21.0 driver. Consumes no nodes — repeatable.
 #   3.7   client node kill (kubelet stop + taint)
 #   3.8   client churn ×10 — nfs pod must survive untouched (same UID)
 #   3.9 ☠ full csi-node DS roll (documented-limit drill, run last)
@@ -218,6 +225,14 @@ leg_state_on() { # <node> — sync_state of this volume's replica on a node
   sync_record | jq -r --arg n "$1" '.replicas[]? | select(.node_name==$n) | .sync_state' 2>/dev/null | head -1
 }
 
+vol_subsystems_on() { # <node> <pv> — flint subsystem NQNs on the node naming this volume
+  # Via the node-agent proxy, not rpc.py: the driver's node container has no
+  # rpc.py (runag lesson). Covers BOTH id domains — a wrapper-named
+  # (`nfs-server-<pv>`) subsystem still contains the pv substring.
+  agent_spdk_rpc "$1" '{"method":"nvmf_get_subsystems"}' \
+    | jq -r --arg pv "$2" '.result[]? | select(.nqn | contains($pv)) | .nqn' 2>/dev/null
+}
+
 pre_rwx() {
   need_env
   harness_healthy
@@ -233,10 +248,13 @@ pre_rwx() {
 
 verify() { ./verify-drill.sh "$PHASE_LABEL" "$DRILL" "$T0"; }
 
-CORDONED=""; TAINTED=""; DEAD_IID=""
+CORDONED=""; TAINTED=""; DEAD_IID=""; CORDONED_MANY=""
 restore() {
   set +e
   [ -n "$CORDONED" ] && kubectl uncordon "$CORDONED" >/dev/null 2>&1
+  # 3.6f cordons the whole fleet bar one node to force placement; an early
+  # exit must never leave the cluster unschedulable.
+  for n in $CORDONED_MANY; do kubectl uncordon "$n" >/dev/null 2>&1; done
   [ -n "$TAINTED" ] && untaint_oos "$TAINTED"
   [ -n "$DEAD_IID" ] && kubelet_start_ssm "$DEAD_IID"
 }
@@ -666,6 +684,142 @@ case "$DRILL" in
   [ "$T_CUTOVER" -ge 0 ] \
     || note "3.6e ANOMALY: redundancy restored WITHOUT an nfs bounce — admitted by another path; confirm which before crediting the F43 fix"
   note "fleet is one storage node down — replace via trove before further node-consuming drills"
+  ;;
+
+3.6f) # ☠ F49 ACCEPTANCE (server-onto-leg) + F47 (unstage leaves no shell).
+      # MOVE the NFS server onto the node that hosts the OTHER leg, then
+      # assert the raid assembles there.
+      #
+      # Why a move and not a bounce in place: while the server runs on node
+      # X, leg A on node A is consumed REMOTELY, so A legitimately carries a
+      # leg export (`:volume:<pv>_<i>`, fenced to X). The moment the server
+      # lands on A that export becomes a SQUATTER holding a write-mode open
+      # on the lvol, and the raid module's exclusive claim fails EPERM.
+      # NodeStage drops it (drop_stale_local_exports, correct NQN) — but
+      # pre-fix two reconcilers re-mint it faster than the claim can land:
+      # the 60s replica reconcile (no "consumer is me" skip) and the 10s
+      # loss-detector (whose registry seed adopted leg NQNs). The volume
+      # then loops `bdev_raid_create … Operation not permitted` forever and
+      # the server is UNMOUNTABLE — an availability outage, no self-heal
+      # (docs/f49-local-leg-export-squatter.md).
+      #
+      # F47 rides along: the OUTGOING server's unstage must leave ZERO
+      # loopback subsystems for this volume — pre-fix the teardown belt
+      # derived the WRAPPER NQN (silent no-op) and the F9 guard refused the
+      # node its own loopback, leaving an empty bare-inner shell per cutover
+      # (docs/f47-loopback-export-teardown-domain.md).
+  pre_rwx
+  kubectl get pv "$PV" -o jsonpath='{.spec.storageClassName}' | grep -q "flint-r2" \
+    || fail "3.6f needs SC=flint-r2 (current: $(kubectl get pv "$PV" -o jsonpath='{.spec.storageClassName}')) — reset the harness"
+  HANDLE=$(kubectl get pv "$PV" -o jsonpath='{.spec.csi.volumeHandle}')
+  REPL=$(pv_replicas_json)
+  # The target: a leg node that is NOT today's server. Landing there turns a
+  # legitimately-remote leg export into a consumer-local squatter.
+  TARGET=$(echo "$REPL" | jq -r '.[].node_name' | grep -v "^$NFS_NODE$" | head -1)
+  [ -n "$TARGET" ] || fail "both legs already live on the server node ($NFS_NODE) — 3.6f needs a remote leg to move onto"
+  TGT_IDX=$(echo "$REPL" | jq -r --arg n "$TARGET" 'to_entries[] | select(.value.node_name==$n) | .key' | head -1)
+  LEG_NQN="nqn.2024-11.com.flint:volume:${PV}_${TGT_IDX}"
+  OLD_SRV="$NFS_NODE"
+  note "moving the nfs server $OLD_SRV → $TARGET (hosts leg #$TGT_IDX); squatter-to-be: $LEG_NQN"
+  note "leg export on $TARGET pre-move: $(vol_subsystems_on "$TARGET" "$PV" | tr '\n' ' ')"
+  note "raid pre (on $OLD_SRV): $(raid_summary "$OLD_SRV" | head -1)"
+  ACK_AT_MOVE=$(last_ack_line)
+
+  # Force placement: the pod's affinity to replica nodes is PREFERRED, so
+  # cordoning the rest is what makes the landing deterministic.
+  UNCORDON=""
+  for n in $(worker_nodes); do
+    [ "$n" = "$TARGET" ] && continue
+    kubectl cordon "$n" >/dev/null 2>&1 && UNCORDON="$UNCORDON $n"
+  done
+  CORDONED_MANY="$UNCORDON"
+  kubectl delete pod -n "$DRIVER_NS" "$NFS_POD" --wait=false >/dev/null 2>&1
+  kubectl wait --for=delete pod -n "$DRIVER_NS" "$NFS_POD" --timeout=180s >/dev/null 2>&1
+
+  # (a) THE F49 GATE: the server must come back Running+Ready ON the target.
+  # Pre-fix this never happens — kubelet reports FailedMount while NodeStage
+  # loops on EPERM.
+  T_SERVED=-1; NEWPOD=""; NEWNODE=""
+  for i in $(seq 1 60); do   # 60 x 10s = 10 min
+    NEWPOD=$(nfs_pod)
+    if [ -n "$NEWPOD" ]; then
+      NEWNODE=$(kubectl get pod -n "$DRIVER_NS" "$NEWPOD" -o jsonpath='{.spec.nodeName}' 2>/dev/null)
+      PH=$(kubectl get pod -n "$DRIVER_NS" "$NEWPOD" -o jsonpath='{.status.phase}' 2>/dev/null)
+      RD=$(kubectl get pod -n "$DRIVER_NS" "$NEWPOD" \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+      if [ "$PH" = "Running" ] && [ "$RD" = "True" ]; then
+        T_SERVED=$(( $(epoch) - T0 )); break
+      fi
+    fi
+    sleep 10
+  done
+  for n in $CORDONED_MANY; do kubectl uncordon "$n" >/dev/null 2>&1; done
+  CORDONED_MANY=""
+  [ "$T_SERVED" -ge 0 ] \
+    && ok "nfs server Running/Ready on $NEWNODE at ${T_SERVED}s (assembly succeeded on a leg-hosting node)" \
+    || note "nfs server NEVER became Ready (pod=${NEWPOD:-none} node=${NEWNODE:-?}) — the F49 shape"
+
+  # (b) the EPERM signature itself — the pre-fix loop, in the driver's words.
+  EPERM_HITS=$(driver_log_hits "$T0" "Operation not permitted")
+  RAIDFAIL=$(driver_log_hits "$T0" "bdev_raid_create failed")
+  [ "$EPERM_HITS" = "0" ] && [ "$RAIDFAIL" = "0" ] \
+    && ok "no bdev_raid_create EPERM anywhere in the fleet since T0" \
+    || note "EPERM signature present: 'Operation not permitted'=$EPERM_HITS 'bdev_raid_create failed'=$RAIDFAIL"
+
+  # (c) the FIX's own invariant: a consumer-local leg carries NO export.
+  # (The raid consumes it as a raw bdev; an export could only squat.)
+  LOCAL_LEG_EXPORT=$(vol_subsystems_on "$NEWNODE" "$PV" | grep -x "$LEG_NQN" || true)
+  [ -z "$LOCAL_LEG_EXPORT" ] \
+    && ok "consumer-local leg #$TGT_IDX carries no export on $NEWNODE (F49 fix 1 held)" \
+    || note "SQUATTER PRESENT: $LOCAL_LEG_EXPORT still exported on the server's own node"
+
+  # (d) the raid actually assembled 2/2 there.
+  RAID_POST=$(raid_summary "$NEWNODE" | head -1)
+  echo "$RAID_POST" | grep -q "base=2/2" \
+    && ok "raid online 2/2 on $NEWNODE ($RAID_POST)" \
+    || note "raid not 2/2 on $NEWNODE: ${RAID_POST:-<none>}"
+
+  # (e) the OTHER leg must still be exported (fenced to the new server) —
+  # the fix must not over-reach and tear down legitimately-remote exports.
+  OTHER=$(echo "$REPL" | jq -r --arg n "$TARGET" '.[] | select(.node_name!=$n) | .node_name' | head -1)
+  if [ -n "$OTHER" ] && [ "$OTHER" != "$NEWNODE" ]; then
+    OTHER_IDX=$(echo "$REPL" | jq -r --arg n "$OTHER" 'to_entries[] | select(.value.node_name==$n) | .key' | head -1)
+    OTHER_NQN="nqn.2024-11.com.flint:volume:${PV}_${OTHER_IDX}"
+    vol_subsystems_on "$OTHER" "$PV" | grep -qx "$OTHER_NQN" \
+      && ok "remote leg #$OTHER_IDX still exported on $OTHER (no over-reach)" \
+      || note "OVER-REACH: the remote leg export $OTHER_NQN is gone from $OTHER — the raid cannot reach that leg"
+  fi
+
+  # (f) F47: the outgoing server must retain ZERO loopback subsystems.
+  # Leg exports on that node are legitimate and excluded by shape.
+  OLD_SHELLS=$(vol_subsystems_on "$OLD_SRV" "$PV" \
+    | grep -E "^nqn\.2024-11\.com\.flint:volume:(nfs-server-)?${PV}$" || true)
+  [ -z "$OLD_SHELLS" ] \
+    && ok "outgoing server $OLD_SRV retains no loopback subsystem for the volume (F47 held)" \
+    || note "F47 RESIDUE on $OLD_SRV: $(echo "$OLD_SHELLS" | tr '\n' ' ')"
+
+  # (g) the volume is actually usable again, end to end.
+  T_WITNESS=$(wait_witness_fresh 420)
+  [ "$T_WITNESS" -ge 0 ] && ok "witness fresh at ${T_WITNESS}s" || note "witness NOT fresh in 420s"
+  wait_acks_fresh 300 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
+  witness_verdict "$T0"
+
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
+    NOTES="F49 server-onto-leg: ${OLD_SRV}->${NEWNODE:-?} served=${T_SERVED}s eperm=$EPERM_HITS raidfail=$RAIDFAIL squatter='${LOCAL_LEG_EXPORT:-none}' f47_residue='$(echo "${OLD_SHELLS:-none}" | tr '\n' ' ')' raid='${RAID_POST}' witness=${T_WITNESS}s io_resume=${T_RESUME}s" verify
+
+  # Verdicts. (a) is the outage; (c)+(f) are the fixes' own invariants.
+  [ "$T_SERVED" -ge 0 ] \
+    || fail "3.6f FAIL (F49): the nfs server never became Ready on the leg-hosting node — raid assembly is wedged (EPERM hits=$EPERM_HITS); the volume is UNMOUNTABLE"
+  [ "$NEWNODE" = "$TARGET" ] \
+    || fail "3.6f INVALID: the server landed on ${NEWNODE:-?}, not the leg node $TARGET — the vector was not exercised"
+  [ "$EPERM_HITS" = "0" ] && [ "$RAIDFAIL" = "0" ] \
+    || fail "3.6f FAIL (F49): assembly hit the EPERM loop ('Operation not permitted'=$EPERM_HITS, 'bdev_raid_create failed'=$RAIDFAIL) even though the pod came Ready — the squatter race is still live"
+  [ -z "$LOCAL_LEG_EXPORT" ] \
+    || fail "3.6f FAIL (F49 fix 1): a leg export survives on the consumer's own node ($LOCAL_LEG_EXPORT) — it will squat the next assembly"
+  echo "$RAID_POST" | grep -q "base=2/2" \
+    || fail "3.6f FAIL: raid did not assemble 2/2 on $NEWNODE (${RAID_POST:-none})"
+  [ -z "$OLD_SHELLS" ] \
+    || fail "3.6f FAIL (F47): the outgoing server kept loopback subsystem(s) for the volume: $(echo "$OLD_SHELLS" | tr '\n' ' ')"
   ;;
 
 3.7) # client node kill — STS replace + NFS remount elsewhere

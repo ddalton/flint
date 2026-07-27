@@ -50,6 +50,17 @@ replica_nodes() { # <pv> — nodes whose spdk-tgt holds an lvol bdev for this PV
   done
 }
 
+controller_log_since() { # <t0> — controller (driver) log lines since t0
+  # The claim registry and catch-up orchestrator are CONTROLLER-side, so the
+  # F48 signatures live here, not in the per-node csi-node logs.
+  local t; t=$(rfc3339 "$1")
+  kubectl logs -n "$DRIVER_NS" -l app=flint-csi-controller --all-containers \
+    --since-time="$t" --tail=-1 2>/dev/null \
+    || kubectl logs -n "$DRIVER_NS" \
+         "$(kubectl get pod -n "$DRIVER_NS" -o name 2>/dev/null | grep -m1 controller)" \
+         --all-containers --since-time="$t" --tail=-1 2>/dev/null
+}
+
 raid_summary() { # <node> — compact raid bdev state on the node
   spdk_rpc "$1" bdev_raid_get_bdevs all 2>/dev/null \
     | jq -r '.[] | .name + " state=" + .state + " base=" + ((.base_bdevs_list // []) | map(select(.is_configured)) | length | tostring) + "/" + (.num_base_bdevs | tostring)' 2>/dev/null
@@ -389,8 +400,40 @@ case "$DRILL" in
   [ "${EV:-0}" -ge 1 ] && ok "ReplicaStoreReinitialized event emitted" || note "no ReplicaStoreReinitialized event found"
   wait_acks_fresh 60 || note "acks not fresh at drill end"
   note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
+
+  # ---- F48 gate (runah 2.9 run A) ---------------------------------------
+  # Run A wedged this exact drill at 1/2 forever. Three signatures, each
+  # tied to one fix in docs/f48-standby-rejoin-epoch-race.md:
+  CLOG=$(controller_log_since "$T0")
+  HEADINUSE=$(echo "$CLOG" | grep -c "ReplicaHeadInUse\|stale head is LIVE-CONSUMED" || true)
+  ZOMBIE=$(echo "$CLOG" | grep -c "severing zombie consumer" || true)
+  # fix 2: a resolver that finds no work must hand the reservation back, so
+  # no maintainer should ever yield for more than about one 60s tick.
+  MAXRES=$(echo "$CLOG" | grep -o "reserved_secs=[0-9]*" | cut -d= -f2 | sort -n | tail -1)
+  MAXRES=${MAXRES:-0}
+  RELEASED=$(echo "$CLOG" | grep -c "released its reservation" || true)
+  # fix 3: the -32603 duplicate shape must be adopted, not fatal.
+  EFDUP=$(echo "$CLOG" | grep -c "Unable to create subsystem" || true)
+
+  [ "$ZOMBIE" = "0" ] \
+    && note "no zombie consumers needed severing this run" \
+    || ok "F48 fix 1 FIRED: severed $ZOMBIE zombie consumer(s) — pre-fix this run would have wedged at 1/2"
+  [ "$MAXRES" -le 65 ] \
+    && ok "no reservation starvation (max reserved_secs=${MAXRES}s, releases=$RELEASED)" \
+    || note "RESERVATION STARVATION: a maintainer yielded up to ${MAXRES}s (releases=$RELEASED) — F48 fix 2 shape"
+  [ "$EFDUP" = "0" ] \
+    && ok "no E_f duplicate-create errors" \
+    || note "E_f duplicate shape seen ${EFDUP}x — adopted if the rebuild still converged (F48 fix 3)"
+
   EXPECT_RESCHEDULE=none READY_TIMEOUT=60 \
-    NOTES="F11 self-heal: reinit=${T_REINIT}s in_sync=${T_SYNC}s lvs=$LVS old_uuid=${UUID_PRE:0:8}" verify
+    NOTES="F11 self-heal: reinit=${T_REINIT}s in_sync=${T_SYNC}s lvs=$LVS old_uuid=${UUID_PRE:0:8}; F48: head_in_use=$HEADINUSE zombies_severed=$ZOMBIE max_reserved=${MAXRES}s releases=$RELEASED efdup=$EFDUP" verify
+
+  # THE F48 VERDICT: run A ended here with in_sync never reached, the raid
+  # slot unconfigured, and the F36 defer looping on a zombie controller.
+  [ "$T_SYNC" -ge 0 ] \
+    || fail "2.9 FAIL (F48): the rebuilt leg never reached in_sync (state='${ST:-unknown}') — head_in_use=$HEADINUSE zombies_severed=$ZOMBIE max_reserved=${MAXRES}s; the volume is stuck degraded 1/2 with no self-heal"
+  [ "$MAXRES" -le 65 ] \
+    || fail "2.9 FAIL (F48 fix 2): a resolver reservation starved maintainers for ${MAXRES}s — releases=$RELEASED"
   ;;
 
 2.10) # v1.21.0 online expansion under writes (multi-replica RWO).
