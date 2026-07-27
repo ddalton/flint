@@ -2461,13 +2461,17 @@ async fn hot_rejoin_tick(
         if !view.nfs_backing
             && view.record.replicas.iter().any(|r| r.hot_rejoin.is_some())
         {
+            // Maintainer-class claim (F43 arbitration): this dispatch does
+            // the same reconcile work the catch-up orchestrator performs —
+            // it must never preempt catch-up, and it must yield to cutover
+            // exactly as catch-up does. Only the Rejoin site below resolves.
             let Some(claim) = crate::volume_claims::global()
-                .try_claim(&volume_id, crate::volume_claims::OP_HOT_REJOIN)
+                .try_claim(&volume_id, crate::volume_claims::OP_HOT_REJOIN_RECONCILE)
             else {
                 // F39: starvation must be visible — log holder + age.
                 crate::volume_claims::log_claim_skip(
                     &volume_id,
-                    crate::volume_claims::OP_HOT_REJOIN,
+                    crate::volume_claims::OP_HOT_REJOIN_RECONCILE,
                     crate::volume_claims::global(),
                 );
                 continue;

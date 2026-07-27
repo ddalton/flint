@@ -2244,6 +2244,38 @@ async fn admit_one_standby(
         }
     };
 
+    // F43 doc item #8: never record in_sync for a size-diverged head. The
+    // driver's assembly belt would exclude it AFTER this record write —
+    // leaving a record that claims an in_sync leg the raid does not
+    // contain — so the size check runs HERE, before the load-bearing
+    // record-then-join ordering commits anything. A refusal is the
+    // ordinary deferral: StandbyAdmissionDeferred, the replica keeps
+    // chasing. Unreachable today (revert sizes heads from the source
+    // exactly); the prerequisite for volume expansion.
+    if crate::leg_size_guard::enabled() {
+        let dst_row = get_bdev(rpc, &src.node_name, &dst_bdev).await?;
+        let src_row = source_head_bdev(rpc, src, source_live_uuid(&record, src)).await?;
+        if let (Some(d), Some(s)) = (
+            dst_row.as_ref().and_then(crate::leg_size_guard::bytes_of),
+            crate::leg_size_guard::bytes_of(&src_row),
+        ) {
+            if d < s {
+                // C6 hygiene: don't leave the copy controller attached on
+                // the source node behind a deferral (an enabled controller
+                // wedges the F36 guard); the chase re-attaches on retry.
+                let controller = dst_bdev.strip_suffix("n1").unwrap_or(&dst_bdev).to_string();
+                detach_controller(rpc, &src.node_name, &controller).await;
+                return Err(format!(
+                    "standby head is {}B but its copy source is {}B — size-diverged leg \
+                     refused before in_sync (F43 doc item #8; a short leg admitted to the \
+                     assembly would silently shrink the device)",
+                    d, s
+                )
+                .into());
+            }
+        }
+    }
+
     // Admission order is load-bearing (module note): record in_sync —
     // clearing the write-virgin marker — BEFORE the head joins the raid.
     store.record_in_sync(volume_id, replica_uuid, &newest).await?;
@@ -4283,6 +4315,89 @@ mod tests {
         .await;
         assert!(again.is_empty());
         assert_eq!(store.events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admission_refuses_size_diverged_standby_head_before_in_sync() {
+        // F43 doc item #8: the standby's head is SHORTER than its copy
+        // source (the post-expansion divergence shape). The size check
+        // runs before record_in_sync, so the refusal is an ordinary
+        // deferral — no in_sync record, replica keeps chasing — instead
+        // of an in_sync record for a leg the raid will never contain.
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+        // Pre-seed the dst attachment on the copy-source node with a SHORT
+        // size (install_chain's source head is 2048 x 512 = 1MiB); the
+        // matching uuid makes ensure_dst_attached reuse it as-is.
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-a".to_string(), expected_remote_base_bdev("vol1", 1)),
+            json!({
+                "name": expected_remote_base_bdev("vol1", 1),
+                "uuid": "uuid-b-v2",
+                "num_blocks": 1024,
+                "block_size": 512
+            }),
+        );
+        let store = FakeStore::new(standby_b_record());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert!(admitted.is_empty(), "short standby head must not be admitted");
+        // The final cut happened (it precedes the size check; an extra
+        // epoch is harmless) but in_sync was NEVER recorded.
+        let ops = store.ops.lock().unwrap().clone();
+        assert!(ops.iter().all(|o| !o.starts_with("in_sync")), "ops: {:?}", ops);
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Standby,
+            "the replica stays a chasing standby"
+        );
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events, vec![("StandbyAdmissionDeferred".to_string(), "Warning".to_string())]);
+        // C6 hygiene: the copy controller on the source node was detached
+        // behind the deferral.
+        assert!(!rpc.calls_of("bdev_nvme_detach_controller").is_empty());
+    }
+
+    #[tokio::test]
+    async fn admission_proceeds_when_head_size_matches_the_source() {
+        // Equal sizes sail through the F43 #8 pre-check (the positive
+        // control for the test above; also pins the reuse path carrying
+        // sized bdev rows).
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-a".to_string(), expected_remote_base_bdev("vol1", 1)),
+            json!({
+                "name": expected_remote_base_bdev("vol1", 1),
+                "uuid": "uuid-b-v2",
+                "num_blocks": 2048,
+                "block_size": 512
+            }),
+        );
+        let store = FakeStore::new(standby_b_record());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert_eq!(admitted.len(), 1, "equal-size standby admits normally");
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::InSync
+        );
     }
 
     #[tokio::test]

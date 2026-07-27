@@ -1176,6 +1176,38 @@ impl NodeAgent {
             }
         }
 
+        // ── Contract R3, construction half (F43 doc #7/#8) ──────────────
+        // Writer-admitting construction arriving over the wire (NodeStage
+        // assembly, hot-rejoin window adds, controller export flows) is
+        // guarded HERE too: SPDK silently accepts a raid/namespace over a
+        // bdev this node is serving via ublk (two live writers) and
+        // silently assembles a raid at min(leg size) (shrink under a grown
+        // filesystem). Probes run against this node's SPDK — the only
+        // place its ublk table is visible.
+        if crate::guarded_destroy::CONSTRUCTION_GUARDED_METHODS.contains(&method) {
+            let params = rpc_request.get("params").cloned().unwrap_or_else(|| json!({}));
+            let agent = node_agent.clone();
+            let probe = move |req: serde_json::Value| {
+                let agent = agent.clone();
+                async move { agent.disk_service.call_spdk_rpc(&req).await }
+            };
+            match crate::guarded_destroy::construction_boundary_verdict(&probe, method, &params)
+                .await
+            {
+                Some(crate::guarded_destroy::Verdict::Refuse(reason))
+                | Some(crate::guarded_destroy::Verdict::Defer(reason)) => {
+                    warn!(method, reason = %reason,
+                        "[HTTP_API] guarded_construct blocked a writer-admitting RPC");
+                    let error_response = json!({ "success": false, "error": reason });
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&error_response),
+                        StatusCode::CONFLICT,
+                    ));
+                }
+                _ => {} // Allow / out of scope / guard disabled
+            }
+        }
+
         // Proxy the RPC request directly to SPDK
         match node_agent.disk_service.call_spdk_rpc(&rpc_request).await {
             Ok(response) => {

@@ -1,9 +1,13 @@
 # F43 — RWX multi-replica re-placement never restores redundancy (claim starvation)
 
-**Status:** OPEN, deferred to v1.20.0. Found live on runad 2026-07-23 (RWX
-`flint-r2`, numReplicas=2). Not a regression — a pre-existing gap the
-attach/detach contract already earmarked (see "Why deferred"). No data-loss
-component: the volume serves correctly **degraded** throughout.
+**Status:** FIX IMPLEMENTED 2026-07-26 (items #1, #7, #8 — unit-tested, 850
+tests green; see "Implementation record" below for the pinned decisions and
+site corrections). Live acceptance (drill #5, the permanent leg-node-kill
+variant) still pending — that is the gate for calling F43 CLOSED. Found live
+on runad 2026-07-23 (RWX `flint-r2`, numReplicas=2). Not a regression — a
+pre-existing gap the attach/detach contract already earmarked (see "Why
+deferred"). No data-loss component: the volume serves correctly **degraded**
+throughout.
 
 **Scope of impact:** RWX (NFS) volumes at **numReplicas ≥ 2** only. RWO of
 any replica count is unaffected (validated: drill 2.5, F41/F42 PASS,
@@ -93,11 +97,16 @@ loop). This is a **fairness** failure, not a wedge — `held_secs=0` each time.
 3. **Unreachable until wave 2.** `FLINT_CUTOVER` was default-OFF before wave
    2 — with no cutover running, there was no contender to starve. Wave 2
    enabled cutover but didn't add the arbitration to let it win.
-4. **The triggering drill was never run.** The campaign
-   (`docs/attach-detach-campaign-2026-07.md`) matrix skipped drill **3.6
-   "nfs-server NODE kill (r2)" — "needs SSM+EC2 and an r2 harness; not run."**
-   RWX×r2×node-kill is the empty cell between validated RWX-r1 (Phase 3) and
-   RWO-r2 (Phase 2). runad is the first cluster to fill it.
+4. **The triggering drill variant was never run.** (Corrected 2026-07-26:
+   the campaign DID run 3.6-family drills at RWX numReplicas=2 — runz runs
+   1-3, 3.6c on runaa at `SC=flint-r2 MODE=RWX WITNESS=1`, 3.6d on runab —
+   but every one was a TRANSIENT kill (kubelet stop; the node returned or
+   the server restaged elsewhere), so admission always happened at the
+   natural restage and cutover starvation was structurally unreachable.
+   The never-run cell is the **permanent-termination / re-placement**
+   variant: terminate a backing-LEG node for good while the NFS server's
+   node stays up — no natural restage ever comes, so only cutover can
+   admit the replacement. runad is the first cluster to run that variant.)
 
 ## Acceptance drill (add to the matrix as 3.6/r2 — RWX re-placement)
 
@@ -116,6 +125,152 @@ cutover BounceNfsPod → restage admit → 2/2`, with **zero acked loss** (oracl
   removed); the new leg is placed and converges. Only the *admission* step is
   gated.
 - **F42 for RWX** — the backing raid faults the dead leg and keeps serving.
+
+---
+
+# Implementation record — 2026-07-26 (items #1, #7, #8)
+
+Landed together, unit-tested (850 crate tests green, +27 new). The design
+questions this doc left open were pinned as follows; a six-lens audit of
+this doc against the flint tree and SPDK v26.05.1-pre preceded the landing
+(all 26 flint citations and all SPDK citations verified; both §6.4 hazards
+confirmed at source).
+
+**#1 — leased + arbitrated claims (`volume_claims.rs`), the F43 fix.**
+- **Preemption = reservation, NOT live seizure.** The doc's own evidence
+  (`held_secs=0` every tick) shows catch-up releases and re-acquires each
+  cycle — the starvation is a *between-acquisitions fairness race*. A
+  resolver denied by a live maintainer holder posts a reservation; while a
+  live reservation stands, maintainer re-claims are refused, so the
+  resolver wins the natural release. No mid-copy abort exists anywhere.
+- **In-process, not record-persisted** (decision 2026-07-26). The
+  single-controller assumption is load-bearing already; a controller
+  restart RELEASING claims is correct; correctness rests on the record's
+  chain-gen, never on this registry (it is anti-waste). Persistence would
+  add a kube CAS write per volume per tick and new failure modes for zero
+  F43 benefit. R2's "episode fields on the record" remains open only as a
+  visibility upgrade, to fold into #2's schema work if ever needed.
+- **Classes are per claim SITE, not per module.** `cutover` and
+  hot-rejoin's Rejoin window are **resolvers**; `catch-up`, hot-rejoin's
+  marked-dispatch reconcile (new op `hot-rejoin-reconcile` — it performs
+  the same work catch-up does and must not preempt it), and future
+  `expand` are **maintainers**. Unregistered ops default to maintainer.
+  Intra-class is first-come. The epoch scheduler defers cuts for BOTH
+  hot-rejoin ops (`is_hot_rejoin_op`), preserving pre-change behavior.
+- **Convergence stays `plan_cutover`'s job.** Cutover only try_claims
+  after the planner returns a bounce decision (standby present, lag ≤
+  max_lag) — the registry's class rule is unconditional.
+- **Anti-starvation both directions** (catch-up's claim carries the F40
+  replace dispatch): a reservation lapses when idle
+  (`FLINT_CLAIM_RESERVATION_TTL_SECS`, 180) and even while actively
+  refreshed lapses at an age cap (`FLINT_CLAIM_RESERVATION_MAX_SECS`,
+  900) into a backoff (`FLINT_CLAIM_RESERVATION_BACKOFF_SECS`, 120) that
+  guarantees the maintainer a periodic turn under a persistently failing
+  bounce.
+- **Lease = wedge-backstop only** (`FLINT_CLAIM_LEASE_SECS`, default
+  14400): seizure bumps the entry generation so the stale holder's RAII
+  drop is inert; it never aborts the old task (rev-5 makes the overlap
+  safe-wasteful). Renewal deliberately omitted — catch-up's no-watchdog
+  design stands; FLINT_COPY_STALL_SECS remains the wedge detector.
+- Kill switch `FLINT_CLAIM_ARBITRATION=disabled` restores v1.19
+  first-come. `log_claim_skip` gained the third outcome ("yielding to a
+  reserved resolver"). Regression test:
+  `resolver_wins_within_two_ticks_of_a_reclaiming_maintainer`.
+
+**#7 — ublk construction guard.** TWO insertion points, not one:
+- the node agent's `/api/spdk/rpc` boundary
+  (`guarded_destroy::construction_boundary_verdict`, wired beside the R3
+  destruction interception) — covers EVERY remote construction, because
+  all controller flows and the driver's own NodeStage `bdev_raid_create`
+  route through the executing node's agent;
+- `nvmeof_export::ensure_export`'s pre-add_ns probe — the one LOCAL
+  executor (unix socket), reached from exactly the post-restart
+  rehydration flows the stale-ublk hazard targets.
+  
+  Probe = `bdev_identity_and_bytes` + `ublk_consumer_of` (forms-matched:
+  name/uuid/aliases, the F36 lesson). ublk `Method not found` = no ublk
+  support = no consumer (nvmeof-backend clusters must not brick); any
+  other probe error DEFERS (F37). Refusal texts dodge every benign
+  classifier (not-found / EEXIST / EBUSY — enforced by test). Site-list
+  corrections vs this doc's original text: `driver.rs:992`
+  (`create_nvmeof_target`) has no callers, `controller_operator.rs:369`
+  is a disabled bin, `raid/raid_service.rs` is caller-less, and
+  `catchup.rs` issues NO `bdev_raid_create` (admission only returns the
+  base list; the create is `driver.rs ensure_raid1_bdev`). A construction
+  lint test now mirrors the destruction lint. Kill switch
+  `FLINT_CONSTRUCTION_GUARD=disabled`.
+
+**#8 — leg-size guard (`leg_size_guard.rs`), three layers.**
+- **Comparison is BYTES** (`num_blocks × block_size`), not num_blocks —
+  lvstores auto-detect block size, so heterogeneous fleets can carry
+  512-vs-4096 legs.
+- **"The record's expected size" does not exist** (VolumeSyncRecord has
+  no size field): the floor authority is `pv.spec.capacity` with `>=`
+  semantics (MiB/cluster round-up), fetched best-effort.
+- **The rule exploits the hazard's asymmetry** (larger leg = waste,
+  shorter leg = corruption): keep the largest-size cohort, exclude
+  shorter legs loudly (`LegSizeMismatchExcluded`), and FAIL the stage
+  when even the largest cohort is below the capacity floor
+  (`LegSizeGuardRefusedStage`) — the all-legs-short and single-survivor
+  direct-serve cases member comparison cannot see. No majority voting: a
+  lone grown survivor beats a stale majority.
+- Layers: (a) the driver's **assembly belt** over the finalized base list
+  (before the freshness gate and the record stamp; covers phase-3 legs,
+  admitted standbys, and — via an inline check — forced-stale legs, the
+  two routes that bypass `admit_standbys_at_stage`); (b)
+  `admit_one_standby`'s pre-`record_in_sync` check (a refusal is a clean
+  `StandbyAdmissionDeferred`, never an in_sync record for a leg the raid
+  won't contain); (c) the construction boundary's create/add size arms as
+  the last-resort backstop (also upgrades the hot-add short-leg park from
+  an opaque `-EINVAL` to a named refusal at `hot_rejoin.rs`'s two add
+  sites, which both route through the boundary). Kill switch
+  `FLINT_LEG_SIZE_GUARD=disabled`.
+
+**Post-landing adversarial review (same day, 18 findings → 12 confirmed →
+all fixed, 855 tests green):**
+1. *Claim generation was per-entry and reset on entry removal* — a
+   seized-from holder's late drop could evict a LATER innocent holder
+   (repro-proven: it also silenced the epoch scheduler's hot-rejoin cut
+   deferral). Generations are now registry-wide monotonic
+   (`next_generation: AtomicU64`); releases also garbage-collect dead
+   entries (a volume deleted mid-episode no longer leaks its entry).
+2. *Kill-switch split-brain*: the boundary's #8 size arms were gated on
+   `FLINT_CONSTRUCTION_GUARD`, so `FLINT_LEG_SIZE_GUARD=disabled` turned
+   the documented escape hatch into a harder brick (belt off → mixed-size
+   create → boundary 409). The size arms now gate on
+   `FLINT_LEG_SIZE_GUARD` (read on the NODE AGENT process — the boundary
+   runs there); the ublk arms stay on `FLINT_CONSTRUCTION_GUARD`. Tests
+   are env-free (`construction_boundary_verdict_gated`).
+3. *Forced-stale-only assembly bypassed #8 entirely* (belt skipped on an
+   empty in-sync list → no floor → the inline check inert → a solo short
+   stale leg direct-serves with no boundary to catch it — the exact C2-B
+   hazard). The capacity floor is now fetched whenever the guard is
+   enabled, independent of the belt.
+4. *`parse_quantity` couldn't parse `Ti`* (k8s canonicalizes BinarySI to
+   the LARGEST even suffix) — the floor silently vanished for exactly the
+   large volumes, and replica re-placement refused Ti volumes outright.
+   Now parses Ki..Ei, decimal SI, decimal mantissas, and exponent forms;
+   an unparseable capacity logs loudly instead of degrading silently.
+5. *Belt-excluded writers tripped the F36c gate* as transiently-missing
+   (manufactured 180s defer + a false AckedTailRisk): size-excluded legs
+   now count as PRESENT for missingness — their lineage attached; the
+   exclusion is a serving-size decision, not a missing writer.
+6. *The #7 boundary could permanently wedge the single-survivor
+   direct-serve → raid redundancy-restore path*: the volume's own stale
+   direct-serve ublk disk over a leg 409'd the create with no healer (the
+   rehydrate reaper skips multi-replica PVs). A pre-assembly CONVERGER now
+   stops disks attributable to THIS volume (id ∈ {`flint.io/ublk-id`
+   annotation, hash fallback}, bdev ≠ the raid itself) through the guarded
+   stop — whose F37 kernel-opener probe still vetoes a genuinely live
+   consumer. Foreign-id disks stay untouched (the boundary refusal is the
+   correct outcome for those).
+
+**Still open after this landing:** #2 (ChainIntent — needs its own design
+pass), #3 (taint feed — needs detector-site enumeration), #4 (cordon
+escalation — reachable now that #1 lets cutover run; still lowest
+priority), #5 (the live acceptance drill, permanent-variant — the gate for
+closing F43), and the kind race tier's deploy/scenario/runner build (the
+mock needs a per-bdev size knob before #7/#8 scenarios have teeth).
 
 ---
 
@@ -182,12 +337,19 @@ forces a restage even on same-node placement). Deferred piece
 the lowest-risk item — but it becomes reachable once #1 lets cutover run for
 RWX-r2.
 
-### 5. Chaos drill 3.6/r2 — RWX numReplicas≥2 nfs-server NODE kill
-AWS-gated ("needs SSM+EC2 and an r2 harness"), **never run** in the 2026-07
-campaign — the empty cell between validated RWX-r1 (Phase 3) and RWO-r2
-(Phase 2). This is the acceptance for #1 (and exercises #4). Recipe: see
-"Acceptance drill" above. runad ran it once and found F43; make it a
-standing matrix entry.
+### 5. Chaos drill 3.6/r2-perm — RWX numReplicas≥2 backing-LEG node kill (PERMANENT)
+(Renamed 2026-07-26 — the old title "nfs-server NODE kill" named the one
+kill vector that structurally CANNOT demonstrate the fix: killing the
+server's node resurrects the NFS pod on a survivor → fresh NodeStage →
+`admit_standbys_at_stage` admits at restage without cutover ever running.
+The recipe was always right: **terminate a backing-raid LEG node, NOT the
+NFS server's node, and delete its Node object** so no natural restage ever
+comes — only then does admission depend on cutover's bounce and exercise
+the #1 arbitration.) AWS-gated; the permanent variant was never run in the
+2026-07 campaign (the transient 3.6 family was — see "Why deferred" #4).
+This is the acceptance for #1 (and exercises #4). Recipe: see "Acceptance
+drill" above. runad ran it once and found F43; make it a standing matrix
+entry.
 
 ### 6. The 4 MUST-VERIFY-ON-REAL-SPDK assumptions (not fixes — latent risks)
 From the contract's wave-2 drill list; each is a "the guard assumes X but SPDK

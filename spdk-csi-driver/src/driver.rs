@@ -1736,22 +1736,101 @@ impl SpdkCsiDriver {
     }
 
     /// Parse Kubernetes quantity string (e.g., "1Gi", "500Mi") to bytes
+    /// Kubernetes Quantity → bytes. Covers the grammar Kubernetes actually
+    /// emits, not just the Ki/Mi/Gi subset (review finding 2026-07-26: the
+    /// API server canonicalizes BinarySI to the LARGEST even suffix, so a
+    /// 1 TiB+ PV renders as "1Ti" — the old parser errored, which silently
+    /// disabled the leg-size floor for exactly the large volumes, and made
+    /// replica re-placement refuse Ti volumes outright). Binary suffixes
+    /// (Ki..Ei), decimal SI (k..E), decimal mantissas ("1.5Gi"), plain
+    /// bytes, and exponent forms ("5e9") all parse.
     pub(crate) fn parse_quantity(quantity_str: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-        let quantity_str = quantity_str.trim();
-        
-        // Simple parser for common cases
-        if quantity_str.ends_with("Gi") {
-            let num: u64 = quantity_str.trim_end_matches("Gi").parse()?;
-            Ok(num * 1024 * 1024 * 1024)
-        } else if quantity_str.ends_with("Mi") {
-            let num: u64 = quantity_str.trim_end_matches("Mi").parse()?;
-            Ok(num * 1024 * 1024)
-        } else if quantity_str.ends_with("Ki") {
-            let num: u64 = quantity_str.trim_end_matches("Ki").parse()?;
-            Ok(num * 1024)
-        } else {
-            // Assume bytes
-            Ok(quantity_str.parse()?)
+        let s = quantity_str.trim();
+        const BIN: &[(&str, u64)] = &[
+            ("Ki", 1 << 10),
+            ("Mi", 1 << 20),
+            ("Gi", 1 << 30),
+            ("Ti", 1 << 40),
+            ("Pi", 1 << 50),
+            ("Ei", 1 << 60),
+        ];
+        const DEC: &[(&str, u64)] = &[
+            ("k", 1_000),
+            ("M", 1_000_000),
+            ("G", 1_000_000_000),
+            ("T", 1_000_000_000_000),
+            ("P", 1_000_000_000_000_000),
+            ("E", 1_000_000_000_000_000_000),
+        ];
+        let scaled = |num: &str, mul: u64| -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+            // Integer fast path keeps big values exact; f64 covers decimal
+            // mantissas (exact for integers ≤ 2^53 ≈ 9 PiB — plenty).
+            if let Ok(v) = num.parse::<u64>() {
+                return v
+                    .checked_mul(mul)
+                    .ok_or_else(|| format!("quantity overflows u64: {}", s).into());
+            }
+            let v: f64 = num.parse()?;
+            if !v.is_finite() || v < 0.0 {
+                return Err(format!("invalid quantity: {}", s).into());
+            }
+            Ok((v * mul as f64).round() as u64)
+        };
+        for (suf, mul) in BIN {
+            if let Some(num) = s.strip_suffix(suf) {
+                return scaled(num, *mul);
+            }
+        }
+        for (suf, mul) in DEC {
+            if let Some(num) = s.strip_suffix(suf) {
+                return scaled(num, *mul);
+            }
+        }
+        // Plain bytes, or exponent forms ("5e9") via the f64 arm.
+        scaled(s, 1)
+    }
+
+    /// The volume's recorded capacity in bytes (pv.spec.capacity.storage) —
+    /// the leg-size guard's FLOOR (F43 doc item #8: "the record's expected
+    /// size" lives nowhere else today). None on any failure: the floor is
+    /// belt-and-suspenders on top of the member comparison, so a transient
+    /// PV read must degrade the check, never brick the stage.
+    async fn pv_capacity_bytes(&self, pv_name: &str) -> Option<u64> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        let pvs: kube::Api<PersistentVolume> = kube::Api::all(self.kube_client.clone());
+        match pvs.get(pv_name).await {
+            Ok(pv) => {
+                let quantity = pv
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.capacity.as_ref())
+                    .and_then(|c| c.get("storage"))
+                    .cloned();
+                match quantity {
+                    Some(q) => match Self::parse_quantity(&q.0) {
+                        Ok(b) => Some(b),
+                        Err(e) => {
+                            // Loud and distinct from "no capacity set": an
+                            // absent floor silently drops the all-legs-short
+                            // protection (review finding 2026-07-26).
+                            println!(
+                                "⚠️ [DRIVER] PV {} capacity '{}' UNPARSEABLE — leg-size floor \
+                                 disabled for this stage: {}",
+                                pv_name, q.0, e
+                            );
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            }
+            Err(e) => {
+                println!(
+                    "⚠️ [DRIVER] PV capacity read failed for {} (leg-size floor skipped): {}",
+                    pv_name, e
+                );
+                None
+            }
         }
     }
 
@@ -1795,6 +1874,9 @@ impl SpdkCsiDriver {
         let enforce = record.as_ref().map(|r| !r.epochs.is_empty()).unwrap_or(false);
 
         let mut base_bdevs = Vec::new();
+        // Identity uuid per base_bdevs entry, same order — the leg-size
+        // belt below needs to walk an exclusion back to its replica.
+        let mut base_uuids: Vec<String> = Vec::new();
         let mut attached_in_sync: Vec<String> = Vec::new();
         let mut unavailable_replicas: Vec<(&ReplicaInfo, String)> = Vec::new();
         let mut deferred_standbys: Vec<&ReplicaInfo> = Vec::new();
@@ -1846,6 +1928,7 @@ impl SpdkCsiDriver {
             match self.attach_replica_base(volume_id, i, replica, &live_uuid).await {
                 Ok(bdev) => {
                     base_bdevs.push(bdev);
+                    base_uuids.push(replica.lvol_uuid.clone());
                     attached_in_sync.push(replica.lvol_uuid.clone());
                 }
                 Err(reason) => {
@@ -1885,6 +1968,87 @@ impl SpdkCsiDriver {
                     a.node_name, a.final_epoch, a.bdev
                 );
                 base_bdevs.push(a.bdev.clone());
+                base_uuids.push(a.lvol_uuid.clone());
+            }
+        }
+
+        // ── F43 doc item #8: the leg-size belt (silent-shrink guard) ────
+        // SPDK assembles a fresh raid1 at min(leg size) with no error, so
+        // a stale short leg here would shrink the device under a possibly
+        // already-grown filesystem. Runs over the finalized in-sync +
+        // admitted list, BEFORE the freshness gate (so the gate reasons
+        // about the post-exclusion reality) and before the record stamp.
+        // Excluded legs take the ordinary unavailable path — degrade,
+        // don't brick; healing is catch-up / re-placement. Unreachable
+        // today (legs are created equal); this is the prerequisite that
+        // keeps volume expansion from ever shipping the hazard. The node
+        // agent's construction boundary is the last-resort backstop.
+        let mut leg_size_reference: Option<u64> = None;
+        let mut size_excluded_uuids: Vec<String> = Vec::new();
+        if crate::leg_size_guard::enabled() {
+            // The floor must exist even when NO in-sync leg attached: the
+            // forced-stale fallback below may be the only admission, and a
+            // solo short stale leg takes the direct-serve path no
+            // raid-create boundary ever sees (review finding 2026-07-26 —
+            // the C2-B bypass shape).
+            leg_size_reference = self.pv_capacity_bytes(&record_volume_id).await;
+        }
+        if crate::leg_size_guard::enabled() && !base_bdevs.is_empty() {
+            let mut sized: Vec<(String, Option<u64>)> = Vec::new();
+            for b in &base_bdevs {
+                match catchup::get_bdev(self, current_node, b).await {
+                    Ok(row) => {
+                        sized.push((b.clone(), row.as_ref().and_then(crate::leg_size_guard::bytes_of)))
+                    }
+                    Err(e) => {
+                        // F37: never admit writers blind — a probe failure
+                        // fails the stage (kubelet retries), it does not
+                        // fail open into a possibly-shrunken assembly.
+                        return Err(format!(
+                            "leg-size probe failed for {} on {}: {} — failing closed (retry)",
+                            b, current_node, e
+                        )
+                        .into());
+                    }
+                }
+            }
+            let floor = leg_size_reference;
+            let part = crate::leg_size_guard::partition_legs(&sized, floor);
+            leg_size_reference = part.serving_bytes.or(floor);
+            if let Some(reason) = part.fail_stage {
+                crate::replica_sync::emit_pv_event(
+                    &self.kube_client,
+                    current_node,
+                    &record_volume_id,
+                    "Warning",
+                    "LegSizeGuardRefusedStage",
+                    &reason,
+                )
+                .await;
+                return Err(format!("leg-size guard refused the stage: {}", reason).into());
+            }
+            for (idx, reason) in part.exclude.iter().rev() {
+                let bdev = base_bdevs.remove(*idx);
+                let uuid = base_uuids.remove(*idx);
+                println!("⚠️ [DRIVER] LEG-SIZE EXCLUSION: {} ({})", bdev, reason);
+                crate::replica_sync::emit_pv_event(
+                    &self.kube_client,
+                    current_node,
+                    &record_volume_id,
+                    "Warning",
+                    "LegSizeMismatchExcluded",
+                    reason,
+                )
+                .await;
+                attached_in_sync.retain(|u| *u != uuid);
+                // An admitted standby that fails the belt returns to the
+                // deferred pool (its in_sync record re-converges through
+                // record_assembly_sync_state below).
+                admitted_standbys.retain(|a| a.lvol_uuid != uuid);
+                if let Some(replica) = replicas.iter().find(|r| r.lvol_uuid == uuid) {
+                    unavailable_replicas.push((replica, reason.clone()));
+                }
+                size_excluded_uuids.push(uuid);
             }
         }
 
@@ -1919,10 +2083,19 @@ impl SpdkCsiDriver {
                 }
             }
 
+            // Size-excluded legs count as PRESENT for missingness: their
+            // lineage ATTACHED and supplied freshness evidence — the belt's
+            // exclusion is a serving-size decision, not a missing writer.
+            // Without this, a belt-excluded recorded writer on a Ready node
+            // reads as transiently-unavailable: a manufactured 180s defer
+            // outage plus a false AckedTailRisk marker (review finding
+            // 2026-07-26). A short leg of a synchronous raid1 holds no
+            // acked write the kept, larger legs lack.
             let attached_now: Vec<&str> = attached_in_sync
                 .iter()
                 .map(|s| s.as_str())
                 .chain(admitted_standbys.iter().map(|a| a.lvol_uuid.as_str()))
+                .chain(size_excluded_uuids.iter().map(|s| s.as_str()))
                 .collect();
             let mut missing: Vec<MissingWriter> = Vec::new();
             for uuid in writer_uuids.iter().filter(|u| !attached_now.contains(&u.as_str())) {
@@ -2120,7 +2293,50 @@ impl SpdkCsiDriver {
                     .unwrap_or_else(|| replica.lvol_uuid.clone());
                 match self.attach_replica_base(volume_id, *i, replica, &live_uuid).await {
                     Ok(bdev) => {
+                        // F43 doc item #8: a stale leg is admitted for
+                        // availability, but never a SHORT one — the belt
+                        // above already fixed the serving size, and this
+                        // leg joins after it. Covers the solo-short-leg
+                        // direct-serve case no raid-create boundary sees.
+                        if crate::leg_size_guard::enabled() {
+                            if let Some(reference) = leg_size_reference {
+                                let bytes = match catchup::get_bdev(self, current_node, &bdev).await {
+                                    Ok(row) => row.as_ref().and_then(crate::leg_size_guard::bytes_of),
+                                    Err(e) => {
+                                        return Err(format!(
+                                            "leg-size probe failed for {} on {}: {} — failing \
+                                             closed (retry)",
+                                            bdev, current_node, e
+                                        )
+                                        .into())
+                                    }
+                                };
+                                if let Some(b) = bytes {
+                                    if b < reference {
+                                        let reason = format!(
+                                            "forced-stale leg {} is {}B but the assembly serves \
+                                             {}B — a short leg shrinks the device under its \
+                                             filesystem (F43 doc item #8); refused",
+                                            bdev, b, reference
+                                        );
+                                        println!("⚠️ [DRIVER] LEG-SIZE EXCLUSION: {}", reason);
+                                        crate::replica_sync::emit_pv_event(
+                                            &self.kube_client,
+                                            current_node,
+                                            &record_volume_id,
+                                            "Warning",
+                                            "LegSizeMismatchExcluded",
+                                            &reason,
+                                        )
+                                        .await;
+                                        unavailable_replicas.push((replica, reason));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         base_bdevs.push(bdev);
+                        base_uuids.push(replica.lvol_uuid.clone());
                         forced_stale.push(replica.lvol_uuid.clone());
                     }
                     Err(reason) => {
@@ -2249,6 +2465,82 @@ impl SpdkCsiDriver {
             .await;
             direct
         } else {
+            // ── F43 #7 pre-assembly converger (review finding 2026-07-26) ─
+            // A stale direct-serve ublk disk of THIS volume's previous
+            // stage attempt over a base leg would 409 the create at the
+            // construction boundary with NO healer (the rehydrate reaper
+            // skips multi-replica PVs). Stop our own stale disks first —
+            // the guarded stop's F37 kernel-opener probe refuses a disk
+            // with live openers, so a genuinely-consumed leg keeps its
+            // veto and the stage fails loudly instead of corrupting.
+            if crate::guarded_destroy::construction_guard_enabled() {
+                match catchup::CatchupRpc::spdk_rpc(
+                    self,
+                    current_node,
+                    &serde_json::json!({ "method": "ublk_get_disks" }),
+                )
+                .await
+                {
+                    Ok(resp) => {
+                        let disks: Vec<serde_json::Value> = resp
+                            .get("result")
+                            .and_then(|r| r.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut expected_ids = vec![self.generate_ublk_id(volume_id)];
+                        if let Some(anno) = self
+                            .get_pv_annotations(&record_volume_id)
+                            .await
+                            .unwrap_or_default()
+                            .get("flint.io/ublk-id")
+                            .and_then(|v| v.parse::<u32>().ok())
+                        {
+                            expected_ids.push(anno);
+                        }
+                        for (id, bdev) in crate::guarded_destroy::stale_own_ublk_disks(
+                            &disks,
+                            &expected_ids,
+                            &raid_name,
+                        ) {
+                            println!(
+                                "🧹 [DRIVER] Stopping this volume's STALE ublk disk {} over {} \
+                                 before assembly (guarded; a live consumer refuses the stop)",
+                                id, bdev
+                            );
+                            // NOT delete_ublk_block_device — that helper
+                            // swallows failures as best-effort cleanup, and
+                            // a REFUSED stop (live openers, the F37 veto)
+                            // must fail this stage loudly.
+                            self.call_node_agent(
+                                current_node,
+                                "/api/ublk/delete",
+                                &serde_json::json!({
+                                    "method": crate::guarded_destroy::RPC_UBLK_STOP_DISK,
+                                    "params": { "ublk_id": id }
+                                }),
+                            )
+                            .await
+                            .map_err(|e| {
+                                format!(
+                                    "stale ublk disk {} over {} could not be stopped before \
+                                     assembly: {} — failing the stage rather than constructing \
+                                     a second writer (F43 doc §6.4)",
+                                    id, bdev, e
+                                )
+                            })?;
+                        }
+                    }
+                    Err(e) if e.to_string().contains("Method not found") => {} // no ublk support
+                    Err(e) => {
+                        println!(
+                            "⚠️ [DRIVER] ublk pre-assembly probe failed (boundary guard remains \
+                             the backstop): {}",
+                            e
+                        );
+                    }
+                }
+            }
+
             // Create RAID 1 bdev with available replicas
             println!("🔧 [DRIVER] Creating RAID 1 bdev: {} with {} base bdevs",
                      raid_name, base_bdevs.len());
@@ -3255,6 +3547,33 @@ fn flint_subsystems_exporting_bdev(subsystems: &Value, bdev: &str) -> Vec<String
         }
     }
     nqns
+}
+
+#[cfg(test)]
+mod quantity_tests {
+    use super::SpdkCsiDriver;
+
+    /// Review finding 2026-07-26: Kubernetes canonicalizes BinarySI to the
+    /// largest even suffix, so Ti+ volumes MUST parse — the old Ki/Mi/Gi
+    /// parser silently disabled the leg-size floor for them and made
+    /// replica re-placement refuse Ti volumes.
+    #[test]
+    fn parses_the_quantity_grammar_kubernetes_emits() {
+        let q = |s: &str| SpdkCsiDriver::parse_quantity(s).unwrap();
+        assert_eq!(q("1Ti"), 1 << 40);
+        assert_eq!(q("2048Gi"), 2048 * (1u64 << 30));
+        assert_eq!(q("10Gi"), 10 * (1u64 << 30));
+        assert_eq!(q("512Mi"), 512 * (1u64 << 20));
+        assert_eq!(q("3Ki"), 3 * 1024);
+        assert_eq!(q("2Pi"), 1u64 << 51);
+        assert_eq!(q("5G"), 5_000_000_000);
+        assert_eq!(q("5e9"), 5_000_000_000);
+        assert_eq!(q("1.5Gi"), 3 * (1u64 << 29));
+        assert_eq!(q("1073741824"), 1 << 30);
+        assert_eq!(q(" 1Ti "), 1 << 40, "trimmed");
+        assert!(SpdkCsiDriver::parse_quantity("banana").is_err());
+        assert!(SpdkCsiDriver::parse_quantity("-5Gi").is_err(), "negative refused");
+    }
 }
 
 #[cfg(test)]

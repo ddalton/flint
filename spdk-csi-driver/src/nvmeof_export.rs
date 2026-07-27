@@ -201,6 +201,55 @@ pub async fn ensure_export(
                 }
             }
         }
+        // Contract R3, construction half (F43 doc #7): this is the ONE
+        // add_ns path that executes over the local unix socket instead of
+        // the node agent's guarded /api/spdk/rpc boundary — and it is
+        // reached from exactly the post-restart rehydration flows the
+        // stale-ublk hazard targets. Probe before admitting a second
+        // writer: SPDK itself accepts an add_ns over a ublk-served bdev
+        // silently (ublk never claims; nvmf's legacy claim checks only
+        // claim_type != NONE). Guarded only when the namespace is actually
+        // being ADDED — an already-matching namespace above is a no-op.
+        if crate::guarded_destroy::construction_guard_enabled() {
+            let probe = |req: Value| async move { rpc.rpc(&req).await };
+            match crate::guarded_destroy::bdev_identity_and_bytes(&probe, spec.bdev_name).await {
+                Ok(Some((forms, _))) => {
+                    match crate::guarded_destroy::ublk_consumer_of(&probe, &forms).await {
+                        Ok(Some(id)) => {
+                            return Err(format!(
+                                "guarded_construct: refusing nvmf_subsystem_add_ns over {} — \
+                                 ublk disk {} is live on this bdev right now; a second writer \
+                                 would corrupt silently (F43 doc §6.4). Stop the stale ublk \
+                                 disk first",
+                                spec.bdev_name, id
+                            )
+                            .into());
+                        }
+                        Ok(None) => {}
+                        // No ublk support ⇒ no ublk consumer.
+                        Err(e) if e.contains("Method not found") => {}
+                        Err(e) => {
+                            return Err(format!(
+                                "guarded_construct: ublk probe inconclusive for {}: {} — \
+                                 failing closed (F37: never admit a writer blind)",
+                                spec.bdev_name, e
+                            )
+                            .into());
+                        }
+                    }
+                }
+                Ok(None) => {} // bdev absent — the add below fails naturally
+                Err(e) => {
+                    return Err(format!(
+                        "guarded_construct: identity probe inconclusive for {}: {} — failing \
+                         closed (F37: never admit a writer blind)",
+                        spec.bdev_name, e
+                    )
+                    .into());
+                }
+            }
+        }
+
         let mut ns_obj = json!({ "bdev_name": spec.bdev_name });
         if let Some((uuid, nguid)) = spec.ns_identity {
             ns_obj["uuid"] = json!(uuid);
@@ -432,6 +481,10 @@ mod tests {
         calls: Mutex<Vec<Value>>,
         subsystem: Mutex<Option<Value>>,
         fail_methods: Vec<&'static str>,
+        /// Rows served by `bdev_get_bdevs` (matched on name/uuid/aliases).
+        bdevs: Vec<Value>,
+        /// Disks served by `ublk_get_disks` — seeds the construction guard.
+        ublk_disks: Vec<Value>,
     }
 
     impl FakeRpc {
@@ -440,6 +493,8 @@ mod tests {
                 calls: Mutex::new(vec![]),
                 subsystem: Mutex::new(subsystem),
                 fail_methods: vec![],
+                bdevs: vec![],
+                ublk_disks: vec![],
             }
         }
 
@@ -533,6 +588,24 @@ mod tests {
                     Ok(json!({ "result": true }))
                 }
                 "nvmf_subsystem_get_controllers" => Ok(json!({ "result": [] })),
+                "bdev_get_bdevs" => {
+                    let name = payload["params"]["name"].as_str().unwrap_or("");
+                    let hit: Vec<Value> = self
+                        .bdevs
+                        .iter()
+                        .filter(|b| {
+                            b["name"] == name
+                                || b["uuid"] == name
+                                || b["aliases"]
+                                    .as_array()
+                                    .map(|a| a.iter().any(|x| x == name))
+                                    .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect();
+                    Ok(json!({ "result": hit }))
+                }
+                "ublk_get_disks" => Ok(json!({ "result": self.ublk_disks })),
                 _ => Ok(json!({ "result": null })),
             }
         }
@@ -690,6 +763,40 @@ mod tests {
         })));
         ensure_export(&rpc, &spec()).await.unwrap();
         assert_eq!(rpc.method_calls("nvmf_subsystem_remove_ns"), 1);
+        assert_eq!(rpc.method_calls("nvmf_subsystem_add_ns"), 1);
+    }
+
+    /// F43 doc #7, the local-transport half: the rehydration flows call
+    /// ensure_export over the unix socket, bypassing the node agent's
+    /// guarded boundary — the pre-add probe here is their only defense
+    /// against admitting a second writer over a ublk-served bdev.
+    #[tokio::test]
+    async fn refuses_add_ns_over_ublk_served_bdev() {
+        let mut rpc = FakeRpc::new(None);
+        rpc.bdevs = vec![json!({
+            "name": "lvs/vol1", "uuid": "11111111-2222-3333-4444-555555555555",
+            "aliases": ["lvs/vol1"], "num_blocks": 262144, "block_size": 4096
+        })];
+        // A stale ublk disk still serves the bdev — by ALIAS, not the uuid
+        // the spec spells (the F36 name-agnostic lesson).
+        rpc.ublk_disks = vec![json!({ "id": 5, "bdev_name": "lvs/vol1" })];
+        let err = ensure_export(&rpc, &spec())
+            .await
+            .expect_err("must refuse a second writer");
+        assert!(err.to_string().contains("guarded_construct"), "{err}");
+        assert!(err.to_string().contains("ublk disk 5"), "{err}");
+        assert_eq!(rpc.method_calls("nvmf_subsystem_add_ns"), 0, "add_ns must not fire");
+    }
+
+    #[tokio::test]
+    async fn add_ns_proceeds_when_no_ublk_disk_serves_the_bdev() {
+        let mut rpc = FakeRpc::new(None);
+        rpc.bdevs = vec![json!({
+            "name": "lvs/vol1", "uuid": "11111111-2222-3333-4444-555555555555",
+            "aliases": ["lvs/vol1"], "num_blocks": 262144, "block_size": 4096
+        })];
+        rpc.ublk_disks = vec![json!({ "id": 5, "bdev_name": "some-other-bdev" })];
+        ensure_export(&rpc, &spec()).await.unwrap();
         assert_eq!(rpc.method_calls("nvmf_subsystem_add_ns"), 1);
     }
 }

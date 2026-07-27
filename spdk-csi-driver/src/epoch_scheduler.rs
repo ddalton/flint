@@ -493,11 +493,15 @@ async fn scheduler_tick(driver: &Arc<SpdkCsiDriver>, cfg: &EpochConfig) -> Resul
         };
         // A hot rejoin holds this volume: its quiesce window cuts E_f
         // strict-fresh, so a scheduler cut racing the same seq would abort
-        // the window (Tier-2 7b-2 / design item 4). Defer one tick. The
+        // the window (Tier-2 7b-2 / design item 4). Defer one tick. Both
+        // hot-rejoin ops defer (the marked reconcile can resume a crashed
+        // window; pre-arbitration one op string covered both sites). The
         // chase and cutover claims do NOT defer cuts — their machinery
         // consumes the epoch stream and stalling it starves them.
-        if crate::volume_claims::global().holder(&volume_id).map(|(op, _)| op)
-            == Some(crate::volume_claims::OP_HOT_REJOIN)
+        if crate::volume_claims::global()
+            .holder(&volume_id)
+            .map(|(op, _)| crate::volume_claims::is_hot_rejoin_op(op))
+            .unwrap_or(false)
         {
             debug!(volume_id, "[EPOCH] Hot rejoin in progress — deferring this volume's cut");
             continue;

@@ -53,6 +53,46 @@ pub const GUARDED_METHODS: &[&str] = &[
     RPC_BDEV_NVME_DETACH_CONTROLLER,
 ];
 
+// ---------------------------------------------------------------------------
+// Contract R3's OTHER half: writer-admitting CONSTRUCTION (v1.20.0 items
+// #7/#8, docs/f43-rwx-replacement-admission.md §6.4 + item #8).
+//
+// SPDK will not stop either hazard (verified at v26.05.1-pre source):
+//   - ublk never claims the bdev it serves (lib/ublk/ublk.c write-open, no
+//     claim call in the module), and both raid base-add and nvmf add-ns use
+//     the legacy v1 claim whose only check is claim_type != NONE — so
+//     constructing a raid or namespace over a ublk-served bdev silently
+//     yields TWO LIVE WRITERS (#7);
+//   - a fresh raid1 create takes min() over base sizes with no error path
+//     (raid1_start assigns blockcnt directly, pre-registration, so the
+//     bdev-layer shrink guard is structurally unreachable) — a stale
+//     short leg at reassembly is a SILENT SHRINK under an already-grown
+//     filesystem (#8).
+//
+// Both guards run here, at the same boundary that guards destruction: the
+// probes execute on the node where the RPC lands, which is exactly the
+// spdk-tgt whose ublk table and bdev sizes matter. The node agent's own
+// LOCAL add_ns path (nvmeof_export::ensure_export over the unix socket)
+// bypasses this boundary and carries its own pre-add probe.
+//
+// Kill switch: FLINT_CONSTRUCTION_GUARD=disabled (new refusals on the
+// staging path get a standing off-switch, the FLINT_VOLUME_LOCK pattern).
+// ---------------------------------------------------------------------------
+pub const RPC_BDEV_RAID_CREATE: &str = "bdev_raid_create";
+pub const RPC_BDEV_RAID_ADD_BASE_BDEV: &str = "bdev_raid_add_base_bdev";
+pub const RPC_NVMF_SUBSYSTEM_ADD_NS: &str = "nvmf_subsystem_add_ns";
+
+/// Construction methods the /api/spdk/rpc boundary intercepts.
+pub const CONSTRUCTION_GUARDED_METHODS: &[&str] = &[
+    RPC_BDEV_RAID_CREATE,
+    RPC_BDEV_RAID_ADD_BASE_BDEV,
+    RPC_NVMF_SUBSYSTEM_ADD_NS,
+];
+
+pub fn construction_guard_enabled() -> bool {
+    !std::env::var("FLINT_CONSTRUCTION_GUARD").is_ok_and(|v| v.eq_ignore_ascii_case("disabled"))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     /// Destruction may proceed.
@@ -291,6 +331,303 @@ pub async fn bdev_identity_forms(
         }
         Err(e) if probe_error_is_missing(&e.to_string()) => Ok(None),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Identity forms of a bdev PLUS its byte size (`num_blocks * block_size`)
+/// from the same single `bdev_get_bdevs` row — one probe pass serves both
+/// the ublk-consumer match (#7, needs the forms) and the leg-size guard
+/// (#8, needs BYTES: block_size is auto-detected per lvstore, so
+/// num_blocks alone is not comparable across legs). Ok(None) = bdev absent
+/// (let the construction call fail downstream); size None = row present
+/// but unsized (never seen live; treated as unknown, not as mismatch).
+pub async fn bdev_identity_and_bytes(
+    probe: &dyn SpdkProbe,
+    name: &str,
+) -> Result<Option<(Vec<String>, Option<u64>)>, String> {
+    match probe
+        .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": name } }))
+        .await
+    {
+        Ok(resp) => {
+            let rows = result_array(&resp);
+            let Some(b) = rows.first() else { return Ok(None) };
+            let mut forms: Vec<String> = vec![name.to_string()];
+            for k in ["name", "uuid"] {
+                if let Some(s) = b.get(k).and_then(|v| v.as_str()) {
+                    forms.push(s.to_string());
+                }
+            }
+            if let Some(aliases) = b.get("aliases").and_then(|v| v.as_array()) {
+                forms.extend(aliases.iter().filter_map(|a| a.as_str().map(str::to_string)));
+            }
+            forms.sort();
+            forms.dedup();
+            let bytes = b
+                .get("num_blocks")
+                .and_then(|v| v.as_u64())
+                .zip(b.get("block_size").and_then(|v| v.as_u64()))
+                .map(|(nb, bs)| nb.saturating_mul(bs));
+            Ok(Some((forms, bytes)))
+        }
+        Err(e) if probe_error_is_missing(&e.to_string()) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// #7 companion, the pre-assembly CONVERGER's decision core (review
+/// finding 2026-07-26): a stale direct-serve disk of the volume's OWN
+/// previous stage attempt over a base leg would 409 the raid create at the
+/// boundary with no healer — nothing else stops it (the rehydrate reaper
+/// deliberately skips multi-replica PVs; the F37 stranger-reap only fires
+/// for same-bdev strangers). Before the create, the driver stops disks
+/// that are (a) ATTRIBUTABLE to this volume — id ∈ its expected set (the
+/// `flint.io/ublk-id` annotation + the hash fallback) — and (b) NOT the
+/// volume's legitimate end-state disk (bdev_name == the raid itself, which
+/// a restage-reuse must keep). The stop routes through the node agent's
+/// guarded ublk_stop_disk, whose F37 kernel-opener probe refuses a disk
+/// with live openers — a genuinely-consumed disk keeps its veto and the
+/// stage then fails loudly instead of corrupting. Foreign-id disks are
+/// never touched: the boundary refusal (with its named reason) is the
+/// correct outcome for those.
+pub fn stale_own_ublk_disks(
+    disks: &[Value],
+    expected_ids: &[u32],
+    raid_name: &str,
+) -> Vec<(u64, String)> {
+    disks
+        .iter()
+        .filter_map(|d| {
+            let id = d.get("id").or_else(|| d.get("ublk_id")).and_then(|i| i.as_u64())?;
+            let bdev = d.get("bdev_name").and_then(|b| b.as_str())?;
+            let ours = expected_ids.iter().any(|e| u64::from(*e) == id);
+            if ours && bdev != raid_name {
+                Some((id, bdev.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// #7 pure core: a live ublk disk over the construction target is
+/// disqualifying in EVERY flow — no flint flow deliberately builds a second
+/// writer over a bdev this node is serving; a match means a stale/rogue
+/// disk survived into reconstruction (the phantom/re-mint family).
+pub fn construction_over_ublk_verdict(
+    method: &str,
+    bdev: &str,
+    ublk_consumer: Option<u64>,
+) -> Verdict {
+    match ublk_consumer {
+        Some(id) => Verdict::Refuse(format!(
+            "guarded_construct: refusing {} over {} — ublk disk {} is live on this bdev right \
+             now; a second writer would corrupt silently (F43 doc §6.4). Stop the stale ublk \
+             disk first",
+            method, bdev, id
+        )),
+        None => Verdict::Allow,
+    }
+}
+
+/// #8 pure core, create path: every sized base of a raid1 create must agree
+/// in BYTES. SPDK constructs the raid at min(size) with zero errors — under
+/// a filesystem grown to max(size) that is silent corruption, so a
+/// mismatched set is refused outright here (the driver's assembly belt
+/// drops mismatched legs GRACEFULLY before ever issuing the create; a
+/// refusal here means some path skipped that hygiene). Unknown sizes are
+/// not treated as mismatches.
+pub fn raid_create_size_verdict(sized_bases: &[(String, u64)]) -> Verdict {
+    let mut distinct: Vec<u64> = sized_bases.iter().map(|(_, b)| *b).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    if distinct.len() <= 1 {
+        return Verdict::Allow;
+    }
+    let detail: Vec<String> = sized_bases
+        .iter()
+        .map(|(n, b)| format!("{}={}B", n, b))
+        .collect();
+    Verdict::Refuse(format!(
+        "guarded_construct: refusing bdev_raid_create — base bdevs disagree in size ({}); \
+         SPDK would assemble at the minimum with no error, silently shrinking the device \
+         under its filesystem (F43 doc item #8). Exclude or repair the divergent leg first",
+        detail.join(", ")
+    ))
+}
+
+/// #8 pure core, hot-add path: a SHORT leg is refused by SPDK anyway
+/// (-EINVAL, opaque and indistinguishable from a parked standby) — this
+/// upgrade makes it a NAMED refusal. A LONGER leg is allowed (SPDK caps at
+/// the raid's data_size; the tail is waste, not risk).
+pub fn raid_add_size_verdict(base: &str, base_bytes: u64, raid: &str, raid_bytes: u64) -> Verdict {
+    if base_bytes < raid_bytes {
+        return Verdict::Refuse(format!(
+            "guarded_construct: refusing bdev_raid_add_base_bdev — leg {} is {}B but raid {} \
+             is {}B; a short leg can never join and would park the standby with an opaque \
+             EINVAL (F43 doc item #8). Rebuild the leg at full size first",
+            base, base_bytes, raid, raid_bytes
+        ));
+    }
+    Verdict::Allow
+}
+
+/// Guard one intercepted CONSTRUCTION RPC (contract R3's writer-admitting
+/// half). Returns None when the method is out of scope or the guard is
+/// disabled. Probe policy mirrors the destruction boundary: ublk
+/// Method-not-found = no ublk support = no consumer (nvmeof-backend
+/// clusters must not defer every stage); absent target bdevs fail the
+/// construction downstream on their own; transport/unknown errors DEFER —
+/// never fail open (F37).
+///
+/// Two independent gates, matching the two hazards' kill switches (both
+/// read on the NODE AGENT process — the boundary runs there):
+/// FLINT_CONSTRUCTION_GUARD governs the #7 ublk two-writer arms;
+/// FLINT_LEG_SIZE_GUARD governs the #8 size arms — so disabling the size
+/// guard stands down ALL its layers coherently (the driver belt would
+/// stop excluding short legs; the boundary hard-refusing the resulting
+/// mixed-size create would turn the documented escape hatch into a brick).
+pub async fn construction_boundary_verdict(
+    probe: &dyn SpdkProbe,
+    method: &str,
+    params: &Value,
+) -> Option<Verdict> {
+    construction_boundary_verdict_gated(
+        probe,
+        method,
+        params,
+        construction_guard_enabled(),
+        crate::leg_size_guard::enabled(),
+    )
+    .await
+}
+
+/// The env-free core (tests inject the gates; production reads them once
+/// in the wrapper above — no test ever mutates process env for these).
+pub async fn construction_boundary_verdict_gated(
+    probe: &dyn SpdkProbe,
+    method: &str,
+    params: &Value,
+    construction_on: bool,
+    size_on: bool,
+) -> Option<Verdict> {
+    if !construction_on {
+        return None;
+    }
+    match method {
+        m if m == RPC_BDEV_RAID_CREATE => {
+            let bases: Vec<String> = params
+                .get("base_bdevs")?
+                .as_array()?
+                .iter()
+                .filter_map(|b| b.as_str().map(str::to_string))
+                .collect();
+            let mut sized: Vec<(String, u64)> = Vec::new();
+            for base in &bases {
+                let (forms, bytes) = match bdev_identity_and_bytes(probe, base).await {
+                    Ok(Some(fb)) => fb,
+                    Ok(None) => continue, // absent: the create fails downstream
+                    Err(e) => {
+                        return Some(Verdict::Defer(format!(
+                            "guarded_construct: identity probe inconclusive for base {}: {} — \
+                             failing closed",
+                            base, e
+                        )))
+                    }
+                };
+                match ublk_consumer_of(probe, &forms).await {
+                    Ok(Some(id)) => {
+                        return Some(construction_over_ublk_verdict(m, base, Some(id)))
+                    }
+                    Ok(None) => {}
+                    // No ublk support ⇒ no ublk consumer.
+                    Err(e) if e.contains("Method not found") => {}
+                    Err(e) => {
+                        return Some(Verdict::Defer(format!(
+                            "guarded_construct: ublk probe inconclusive for base {}: {} — \
+                             failing closed",
+                            base, e
+                        )))
+                    }
+                }
+                if let Some(b) = bytes {
+                    sized.push((base.clone(), b));
+                }
+            }
+            if !size_on {
+                return Some(Verdict::Allow);
+            }
+            Some(raid_create_size_verdict(&sized))
+        }
+        m if m == RPC_BDEV_RAID_ADD_BASE_BDEV => {
+            let base = params.get("base_bdev")?.as_str()?;
+            let raid = params.get("raid_bdev")?.as_str()?;
+            let (forms, base_bytes) = match bdev_identity_and_bytes(probe, base).await {
+                Ok(Some(fb)) => fb,
+                Ok(None) => return Some(Verdict::Allow), // absent: fails downstream
+                Err(e) => {
+                    return Some(Verdict::Defer(format!(
+                        "guarded_construct: identity probe inconclusive for base {}: {} — \
+                         failing closed",
+                        base, e
+                    )))
+                }
+            };
+            match ublk_consumer_of(probe, &forms).await {
+                Ok(Some(id)) => return Some(construction_over_ublk_verdict(m, base, Some(id))),
+                Ok(None) => {}
+                Err(e) if e.contains("Method not found") => {}
+                Err(e) => {
+                    return Some(Verdict::Defer(format!(
+                        "guarded_construct: ublk probe inconclusive for base {}: {} — failing \
+                         closed",
+                        base, e
+                    )))
+                }
+            }
+            if !size_on {
+                return Some(Verdict::Allow);
+            }
+            let raid_bytes = match bdev_identity_and_bytes(probe, raid).await {
+                Ok(Some((_, b))) => b,
+                Ok(None) => None, // raid absent: the add fails downstream
+                Err(e) => {
+                    return Some(Verdict::Defer(format!(
+                        "guarded_construct: raid size probe inconclusive for {}: {} — failing \
+                         closed",
+                        raid, e
+                    )))
+                }
+            };
+            match (base_bytes, raid_bytes) {
+                (Some(b), Some(r)) => Some(raid_add_size_verdict(base, b, raid, r)),
+                _ => Some(Verdict::Allow),
+            }
+        }
+        m if m == RPC_NVMF_SUBSYSTEM_ADD_NS => {
+            let bdev = params.get("namespace")?.get("bdev_name")?.as_str()?;
+            let forms = match bdev_identity_and_bytes(probe, bdev).await {
+                Ok(Some((f, _))) => f,
+                Ok(None) => return Some(Verdict::Allow), // absent: fails downstream
+                Err(e) => {
+                    return Some(Verdict::Defer(format!(
+                        "guarded_construct: identity probe inconclusive for {}: {} — failing \
+                         closed",
+                        bdev, e
+                    )))
+                }
+            };
+            match ublk_consumer_of(probe, &forms).await {
+                Ok(Some(id)) => Some(construction_over_ublk_verdict(m, bdev, Some(id))),
+                Ok(None) => Some(Verdict::Allow),
+                Err(e) if e.contains("Method not found") => Some(Verdict::Allow),
+                Err(e) => Some(Verdict::Defer(format!(
+                    "guarded_construct: ublk probe inconclusive for {}: {} — failing closed",
+                    bdev, e
+                ))),
+            }
+        }
+        _ => None,
     }
 }
 
@@ -746,19 +1083,278 @@ mod tests {
     #[test]
     fn refusal_texts_never_match_benign_classifiers() {
         // A Refuse that reads as "does not exist" would be swallowed as an
-        // idempotent no-op by half the call sites.
+        // idempotent no-op by half the call sites. Construction refusals
+        // additionally must not read as EEXIST (ensure_raid1_bdev retries
+        // "File exists"/Code=-17) or EBUSY (hot_rejoin's is_busy add-retry
+        // loop would spin on them).
         let refusals = [
             subsystem_delete_verdict(&s(&[OWN]), &[], false, OWN, None, false, "n"),
             subsystem_delete_verdict(&s(&[OTHER]), &s(&[OTHER]), false, OWN, None, false, "n"),
             lvol_delete_verdict(&s(&["r"]), &[]),
             raid_delete_verdict(true, Some(1), &[]),
             detach_controller_verdict("c", &s(&["cn1"])),
+            construction_over_ublk_verdict(RPC_BDEV_RAID_CREATE, "lvs/leg1", Some(3)),
+            raid_create_size_verdict(&[("a".into(), 100), ("b".into(), 90)]),
+            raid_add_size_verdict("lvs/leg1", 90, "raid_v", 100),
         ];
         for v in refusals {
             let msg = v.blocked().expect("is a refusal").to_string();
             assert!(!probe_error_is_missing(&msg), "refusal reads as benign: {msg}");
             assert!(!msg.contains("already exists"), "reads as EEXIST: {msg}");
+            assert!(!msg.contains("File exists"), "reads as EEXIST: {msg}");
+            assert!(!msg.contains("Code=-17"), "reads as EEXIST: {msg}");
+            assert!(!msg.to_lowercase().contains("busy"), "reads as EBUSY: {msg}");
+            assert!(!msg.contains("Code=-16"), "reads as EBUSY: {msg}");
         }
+    }
+
+    // ---- construction boundary (#7 ublk two-writer, #8 leg-size) ----
+
+    #[test]
+    fn converger_stops_only_own_stale_disks_never_the_raid_disk_or_foreign_ids() {
+        let disks = vec![
+            json!({ "id": 7, "bdev_name": "uuid-leg-a" }),   // ours, stale (leg)
+            json!({ "id": 7, "bdev_name": "raid_vol1" }),    // ours, LEGIT end-state
+            json!({ "id": 9, "bdev_name": "uuid-leg-b" }),   // foreign id — boundary's job
+            json!({ "ublk_id": 12, "bdev_name": "lvs/x" }),  // ours via annotation, alt key
+        ];
+        let stale = stale_own_ublk_disks(&disks, &[7, 12], "raid_vol1");
+        assert_eq!(
+            stale,
+            vec![(7, "uuid-leg-a".to_string()), (12, "lvs/x".to_string())],
+            "stop exactly the volume's own non-raid disks"
+        );
+        assert!(stale_own_ublk_disks(&disks, &[], "raid_vol1").is_empty());
+    }
+
+    #[tokio::test]
+    async fn construction_refuses_raid_create_over_ublk_served_base() {
+        // The §6.4 hazard shape: a stale direct-serve ublk disk survived
+        // into a 2-leg reassembly; SPDK would silently accept two writers.
+        let probe = canned(json!({
+            "bdev_get_bdevs": { "result": [
+                { "name": "lvs/leg1", "uuid": "uuid-leg1", "aliases": ["lvs/leg1"],
+                  "num_blocks": 262144, "block_size": 4096 }
+            ]},
+            "ublk_get_disks": { "result": [
+                { "id": 7, "bdev_name": "uuid-leg1" }
+            ]}
+        }));
+        let v = construction_boundary_verdict(
+            &probe,
+            RPC_BDEV_RAID_CREATE,
+            &json!({ "name": "raid_v", "base_bdevs": ["lvs/leg1", "pvc-x_r2n1"] }),
+        )
+        .await
+        .unwrap();
+        // Matched via the uuid FORM, not the spelled name (F36 lesson).
+        assert!(matches!(v, Verdict::Refuse(ref r) if r.contains("ublk disk 7")));
+    }
+
+    #[tokio::test]
+    async fn construction_refuses_add_ns_over_ublk_and_allows_clean_bdev() {
+        let served = canned(json!({
+            "bdev_get_bdevs": { "result": [
+                { "name": "raid_v", "uuid": "uuid-raid", "num_blocks": 262144, "block_size": 4096 }
+            ]},
+            "ublk_get_disks": { "result": [ { "id": 2, "bdev_name": "raid_v" } ] }
+        }));
+        let v = construction_boundary_verdict(
+            &served,
+            RPC_NVMF_SUBSYSTEM_ADD_NS,
+            &json!({ "nqn": "nqn.x", "namespace": { "bdev_name": "raid_v" } }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(v, Verdict::Refuse(_)));
+
+        let clean = canned(json!({
+            "bdev_get_bdevs": { "result": [
+                { "name": "lvs/leg2", "uuid": "uuid-leg2", "num_blocks": 262144, "block_size": 4096 }
+            ]},
+            "ublk_get_disks": { "result": [ { "id": 2, "bdev_name": "something-else" } ] }
+        }));
+        let v = construction_boundary_verdict(
+            &clean,
+            RPC_NVMF_SUBSYSTEM_ADD_NS,
+            &json!({ "nqn": "nqn.x", "namespace": { "bdev_name": "lvs/leg2" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v, Verdict::Allow);
+    }
+
+    #[tokio::test]
+    async fn construction_no_ublk_support_is_not_a_consumer() {
+        // nvmeof-backend clusters run spdk-tgt without the ublk target:
+        // ublk_get_disks = Method not found. Deferring here would brick
+        // every NodeStage on those clusters.
+        let probe = canned(json!({
+            "bdev_get_bdevs": { "result": [
+                { "name": "lvs/leg1", "uuid": "u1", "num_blocks": 262144, "block_size": 4096 }
+            ]}
+            // no ublk_get_disks arm → canned returns Method not found
+        }));
+        let v = construction_boundary_verdict(
+            &probe,
+            RPC_BDEV_RAID_CREATE,
+            &json!({ "name": "raid_v", "base_bdevs": ["lvs/leg1"] }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v, Verdict::Allow);
+    }
+
+    #[tokio::test]
+    async fn construction_refuses_size_mismatched_create_and_short_hot_add() {
+        // #8 backstop: the C2-B silent shrink — one stale old-size leg in a
+        // fresh create. SPDK would assemble at min() with zero errors.
+        // canned() keys by method only, so use a per-name closure.
+        let by_name = |req: Value| {
+            Box::pin(async move {
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                match method {
+                    "ublk_get_disks" => Ok(json!({ "result": [] })),
+                    "bdev_get_bdevs" => {
+                        let name =
+                            req["params"]["name"].as_str().unwrap_or("").to_string();
+                        let (blocks, bs) = match name.as_str() {
+                            "lvs/grown" => (524288u64, 4096u64),
+                            "raid_v" => (524288, 4096),
+                            _ => (262144, 4096), // the stale short leg
+                        };
+                        Ok(json!({ "result": [
+                            { "name": name, "uuid": format!("uuid-{}", name),
+                              "num_blocks": blocks, "block_size": bs }
+                        ]}))
+                    }
+                    _ => Err(format!("Method not found: {method}").into()),
+                }
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = SpdkResult> + Send>>
+        };
+        let v = construction_boundary_verdict(
+            &by_name,
+            RPC_BDEV_RAID_CREATE,
+            &json!({ "name": "raid_v", "base_bdevs": ["lvs/grown", "lvs/stale"] }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(v, Verdict::Refuse(ref r) if r.contains("disagree in size")));
+
+        // Short leg hot-add: named refusal instead of SPDK's opaque EINVAL.
+        let v = construction_boundary_verdict(
+            &by_name,
+            RPC_BDEV_RAID_ADD_BASE_BDEV,
+            &json!({ "raid_bdev": "raid_v", "base_bdev": "lvs/stale", "skip_rebuild": true }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(v, Verdict::Refuse(ref r) if r.contains("short leg")));
+
+        // Equal-size add passes both hazards.
+        let v = construction_boundary_verdict(
+            &by_name,
+            RPC_BDEV_RAID_ADD_BASE_BDEV,
+            &json!({ "raid_bdev": "raid_v", "base_bdev": "lvs/grown", "skip_rebuild": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v, Verdict::Allow);
+    }
+
+    #[tokio::test]
+    async fn construction_defers_on_transport_error_never_fails_open() {
+        let probe = |_req: Value| {
+            Box::pin(async move {
+                Err::<Value, Box<dyn std::error::Error + Send + Sync>>(
+                    "SPDK RPC 'bdev_get_bdevs' timed out after 30s (socket /var/tmp/spdk.sock)"
+                        .into(),
+                )
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = SpdkResult> + Send>>
+        };
+        let v = construction_boundary_verdict(
+            &probe,
+            RPC_BDEV_RAID_CREATE,
+            &json!({ "name": "raid_v", "base_bdevs": ["lvs/leg1"] }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(v, Verdict::Defer(_)));
+    }
+
+    #[tokio::test]
+    async fn construction_kill_switch_stands_down() {
+        // Env-free: the gates are injected (review finding 2026-07-26 —
+        // mutating process env raced env readers in other test modules).
+        let probe = canned(json!({}));
+        let v = construction_boundary_verdict_gated(
+            &probe,
+            RPC_BDEV_RAID_CREATE,
+            &json!({ "name": "raid_v", "base_bdevs": ["lvs/leg1"] }),
+            false,
+            true,
+        )
+        .await;
+        assert!(v.is_none(), "disabled construction guard must not intercept");
+    }
+
+    /// FLINT_LEG_SIZE_GUARD=disabled must stand down the boundary's SIZE
+    /// arms too (review finding 2026-07-26: with only the driver belt
+    /// gated, the documented escape hatch let the un-filtered mixed-size
+    /// base list reach a boundary that still hard-refused it — disabling
+    /// the guard made staging strictly WORSE). The #7 ublk arms stay up.
+    #[tokio::test]
+    async fn size_kill_switch_stands_down_boundary_size_arms_but_not_ublk() {
+        let by_name = |req: Value| {
+            Box::pin(async move {
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                match method {
+                    "ublk_get_disks" => Ok(json!({ "result": [ { "id": 9, "bdev_name": "lvs/served" } ] })),
+                    "bdev_get_bdevs" => {
+                        let name = req["params"]["name"].as_str().unwrap_or("").to_string();
+                        let blocks = if name == "lvs/grown" || name == "raid_v" { 524288u64 } else { 262144 };
+                        Ok(json!({ "result": [
+                            { "name": name, "uuid": format!("uuid-{}", name),
+                              "num_blocks": blocks, "block_size": 4096 }
+                        ]}))
+                    }
+                    _ => Err(format!("Method not found: {method}").into()),
+                }
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = SpdkResult> + Send>>
+        };
+        // Mismatched create passes with the size guard off...
+        let v = construction_boundary_verdict_gated(
+            &by_name,
+            RPC_BDEV_RAID_CREATE,
+            &json!({ "name": "raid_v", "base_bdevs": ["lvs/grown", "lvs/stale"] }),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(v, Verdict::Allow, "size arms must stand down with the guard");
+        // ...and so does a short hot-add...
+        let v = construction_boundary_verdict_gated(
+            &by_name,
+            RPC_BDEV_RAID_ADD_BASE_BDEV,
+            &json!({ "raid_bdev": "raid_v", "base_bdev": "lvs/stale", "skip_rebuild": true }),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(v, Verdict::Allow);
+        // ...but the #7 two-writer refusal still fires.
+        let v = construction_boundary_verdict_gated(
+            &by_name,
+            RPC_BDEV_RAID_CREATE,
+            &json!({ "name": "raid_v", "base_bdevs": ["lvs/served"] }),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(v, Verdict::Refuse(ref r) if r.contains("ublk disk 9")));
     }
 
     // ---- boundary probe plumbing over a canned SPDK ----
@@ -910,6 +1506,76 @@ mod tests {
             violations.is_empty(),
             "destructive RPC literal(s) outside guarded_destroy — route through the chokepoint \
              (or document a `guarded-destroy-lint: allow`):\n{}",
+            violations.join("\n")
+        );
+    }
+
+    /// Contract R3, construction half: a writer-admitting RPC literal
+    /// outside the sanctioned files is a new unguarded construction
+    /// surface. Sanctioned:
+    ///   - guarded_destroy.rs (the constants + boundary live here);
+    ///   - spdk_native.rs — raw transport;
+    ///   - remote senders whose requests EXECUTE through the node agent's
+    ///     boundary (driver.rs ensure_raid1_bdev + setup paths, hot_rejoin
+    ///     window RPCs, raid_service via injected HTTP transport);
+    ///   - nvmeof_export.rs — the ONE local executor, self-guarded: its
+    ///     ensure_export probes ublk before the add_ns it issues;
+    ///   - freshness_gate.rs — an error CLASSIFIER quotes the method name,
+    ///     no RPC is issued;
+    ///   - controller_operator.rs — dead code (bin commented out).
+    #[test]
+    fn no_construction_rpc_literals_outside_the_chokepoint() {
+        let allowed_files = [
+            "guarded_destroy.rs",
+            "spdk_native.rs",
+            "driver.rs",
+            "hot_rejoin.rs",
+            "nvmeof_export.rs",
+            "freshness_gate.rs",
+            "raid_service.rs",
+            "controller_operator.rs", // dead code (bin commented out of Cargo.toml)
+        ];
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        walk(&src_dir, &mut files);
+
+        let mut violations = Vec::new();
+        for f in files {
+            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if allowed_files.contains(&name) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&f).unwrap();
+            let prod = match text.find("#[cfg(test)]") {
+                Some(i) => &text[..i],
+                None => &text[..],
+            };
+            for (lineno, line) in prod.lines().enumerate() {
+                if line.contains("guarded-construct-lint: allow") {
+                    continue;
+                }
+                for m in CONSTRUCTION_GUARDED_METHODS {
+                    if line.contains(&format!("\"{}\"", m)) {
+                        violations.push(format!("{}:{}: {}", f.display(), lineno + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "construction RPC literal(s) outside the chokepoint — route through the node \
+             agent boundary or self-guard like ensure_export (or document a \
+             `guarded-construct-lint: allow`):\n{}",
             violations.join("\n")
         );
     }
