@@ -213,9 +213,20 @@ pub fn describe_missing(missing: &[MissingWriter]) -> String {
 // ── Defer-deadline marker (persisted as a PV annotation by driver.rs) ────
 //
 // Format: "<deadline_rfc3339>|<uuid1>,<uuid2>" with uuids sorted. The uuid
-// list re-arms the deadline whenever the missing set CHANGES — partial
-// progress (one of two writers came back) is new evidence and earns a
-// fresh bound.
+// list re-arms the deadline ONLY when the missing set strictly SHRINKS —
+// partial progress (one of two writers came back) is new evidence and
+// earns a fresh bound. Any other change keeps the running deadline: on
+// runae drill 3.6e run 3 (F46) the NFS pod ping-ponged between two nodes
+// whose leg each read claim-blocked from the other side, the missing set
+// alternated {A}↔{B} faster than the bound, and "changed = re-arm" turned
+// a 180s defer into a forever-wedge behind a healthy-looking record.
+
+/// A CHANGED missing set earns a fresh defer bound only if it is a strict
+/// subset of the previous one (progress). Oscillation and growth keep the
+/// running deadline so the gate stays a bound, not a treadmill (F46).
+pub fn change_is_progress(prev_uuids: &[String], now_uuids: &[String]) -> bool {
+    now_uuids.len() < prev_uuids.len() && now_uuids.iter().all(|u| prev_uuids.contains(u))
+}
 
 pub fn encode_defer_marker(deadline_rfc3339: &str, missing_uuids: &[String]) -> String {
     let mut uuids = missing_uuids.to_vec();
@@ -301,6 +312,23 @@ mod tests {
     fn node_ready_defers() {
         let m = [missing(LegAvailability::NodeReady)];
         assert_eq!(evaluate(&m, false, &cfg()), GateDecision::Defer);
+    }
+
+    /// F46 (runae 3.6e run 3): the defer bound must survive a ping-ponging
+    /// missing set. Only a strict shrink is progress.
+    #[test]
+    fn defer_rearm_requires_strict_progress() {
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // The run-3 oscillation: {A} → {B} → {A} — never progress.
+        assert!(!change_is_progress(&s(&["a"]), &s(&["b"])));
+        assert!(!change_is_progress(&s(&["b"]), &s(&["a"])));
+        // One of two writers came back: fresh evidence, fresh bound.
+        assert!(change_is_progress(&s(&["a", "b"]), &s(&["a"])));
+        // Growth and same-set are not progress.
+        assert!(!change_is_progress(&s(&["a"]), &s(&["a", "b"])));
+        assert!(!change_is_progress(&s(&["a"]), &s(&["a"])));
+        // Swap at equal size is not progress either.
+        assert!(!change_is_progress(&s(&["a", "b"]), &s(&["a", "c"])));
     }
 
     #[test]

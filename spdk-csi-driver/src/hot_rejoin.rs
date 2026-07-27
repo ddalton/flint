@@ -733,12 +733,7 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
     // window swaps only the namespace.
     let pad_alias = format!("{}/{}", topo.identity.lvs_name, topo.identity.lvol_name);
     let conn = rpc
-        .export_replica(
-            dst_node,
-            &pad_alias,
-            &format!("{}_{}", vol, topo.idx),
-            topo.consumer,
-        )
+        .export_replica(dst_node, &pad_alias, vol, topo.idx, topo.consumer)
         .await?;
     let expected = expected_remote_base_bdev(vol, topo.idx);
     let ctrl = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
@@ -1100,7 +1095,7 @@ async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<
     let ctrl = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
 
     let conn = rpc
-        .export_replica(dst_node, &leg_alias, &format!("{}_{}", vol, topo.idx), topo.consumer)
+        .export_replica(dst_node, &leg_alias, vol, topo.idx, topo.consumer)
         .await?;
 
     // Consumer pre-connect, identity-verified (a reconnect-looping stale
@@ -2026,12 +2021,7 @@ async fn localize(
             // under its OWN export id: the replica export belongs to the live
             // head leg now.
             let conn = rpc
-                .export_replica(
-                    dst_node,
-                    &pad_uuid,
-                    &pad_export_volume_id(volume_id, idx),
-                    &src.node_name,
-                )
+                .export_pad(dst_node, &pad_uuid, volume_id, idx, &src.node_name)
                 .await?;
             let pad_ctrl = format!("nvme_{}", conn.nqn.replace(':', "_").replace('.', "_"));
             let pad_bdev = format!("{}n1", pad_ctrl);
@@ -3075,13 +3065,42 @@ mod tests {
             &self,
             node: &str,
             bdev_name: &str,
-            export_volume_id: &str,
+            volume_id: &str,
+            replica_index: usize,
             consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
-            let nqn = crate::identity::volume_nqn(&export_volume_id);
+            let export_volume_id = format!("{}_{}", volume_id, replica_index);
+            self.fake_export(node, bdev_name, &export_volume_id, consumer_node, "export_replica")
+        }
+
+        async fn export_pad(
+            &self,
+            node: &str,
+            bdev_name: &str,
+            volume_id: &str,
+            replica_index: usize,
+            consumer_node: &str,
+        ) -> Result<NvmeofConnectionInfo, RpcError> {
+            let export_volume_id = pad_export_volume_id(volume_id, replica_index);
+            self.fake_export(node, bdev_name, &export_volume_id, consumer_node, "export_pad")
+        }
+    }
+
+    impl FakeRpc {
+        /// Shared body of the two export fakes: converge the subsystem in
+        /// the world model exactly as the old single-method fake did.
+        fn fake_export(
+            &self,
+            node: &str,
+            bdev_name: &str,
+            export_volume_id: &str,
+            consumer_node: &str,
+            label: &str,
+        ) -> Result<NvmeofConnectionInfo, RpcError> {
+            let nqn = crate::identity::volume_nqn(export_volume_id);
             self.calls.lock().unwrap().push((
                 node.to_string(),
-                "export_replica".to_string(),
+                label.to_string(),
                 json!({ "bdev": bdev_name, "id": export_volume_id, "consumer": consumer_node }),
             ));
             let mut w = self.world.lock().unwrap();

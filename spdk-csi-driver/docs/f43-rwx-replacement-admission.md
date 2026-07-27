@@ -1,9 +1,20 @@
 # F43 — RWX multi-replica re-placement never restores redundancy (claim starvation)
 
-**Status:** FIX IMPLEMENTED 2026-07-26 (items #1, #7, #8 — unit-tested, 850
-tests green; see "Implementation record" below for the pinned decisions and
-site corrections). Live acceptance (drill #5, the permanent leg-node-kill
-variant) still pending — that is the gate for calling F43 CLOSED. Found live
+**Status: CLOSED 2026-07-27 — live-proven end to end.** Fix implemented
+2026-07-26 (items #1, #7, #8; see "Implementation record"). The runae
+campaign (drill 3.6e runs 1–3, rc1–rc4) proved the arbitration mechanism
+but each run died to a downstream defect it had newly made reachable —
+[F44](f44-cutover-leg-detach-leak.md) → F45/B2 → [F46
+(f46-cutover-serving-node-residue.md)]. **Run 4 on cluster `runag`
+(driver `1.20.0-rc5`, 2026-07-27) met the closing bar: kill → swap 172s →
+standby 194s → ONE cutover bounce 301s (started/succeeded/ineffective =
+1/1/0) → in_sync 344s → STABLE 2/2 through the settle window with the
+pod-liveness gate green (nfs Running/Ready, head_in_use=0, no
+assembly-blocked marker) → latent-pin sweep clean → db PASS, zero acked
+loss, no manual intervention.** (The run's one red mark, "attribution",
+was a kubelet DiskPressure eviction of the client pod off an 8 GB root
+disk — environmental, outside the storage path, and the zero-loss verdict
+holds THROUGH it.)** Found live
 on runad 2026-07-23 (RWX `flint-r2`, numReplicas=2). Not a regression — a
 pre-existing gap the attach/detach contract already earmarked (see "Why
 deferred"). No data-loss component: the volume serves correctly **degraded**

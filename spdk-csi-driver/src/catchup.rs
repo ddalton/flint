@@ -136,16 +136,33 @@ pub type RpcError = Box<dyn std::error::Error + Send + Sync>;
 #[async_trait]
 pub trait CatchupRpc: Sync {
     async fn spdk_rpc(&self, node: &str, payload: &Value) -> Result<Value, RpcError>;
-    /// Export `bdev_name` on `node` under the per-replica NQN for
-    /// `export_volume_id` ("{volume}_{replica_index}"), with the fence
-    /// admitting exactly `consumer_node`. Converges from any partial state
-    /// (nvmeof_export::ensure_export), including swapping the namespace to a
-    /// new bdev after a revert.
+    /// Export `bdev_name` on `node` under the leg's per-replica NQN
+    /// (inner-domain `identity::replica_export_nqn`, F46 unification), with
+    /// the fence admitting exactly `consumer_node`. Converges from any
+    /// partial state (nvmeof_export::ensure_export), including swapping the
+    /// namespace to a new bdev after a revert; a pre-unification
+    /// wrapper-shape export still serving the leg is adopted via
+    /// `resolve_replica_export_nqn` rather than fought over.
     async fn export_replica(
         &self,
         node: &str,
         bdev_name: &str,
-        export_volume_id: &str,
+        volume_id: &str,
+        replica_index: usize,
+        consumer_node: &str,
+    ) -> Result<NvmeofConnectionInfo, RpcError>;
+
+    /// Export a hot-rejoin localization PAD (`<vol>_hrpad<i>`) — its own
+    /// export id on purpose: the replica NQN belongs to the live head leg.
+    /// Split from [`Self::export_replica`] at the F46 unification so the
+    /// leg mint could take (volume, index) without squeezing pads through
+    /// the leg naming.
+    async fn export_pad(
+        &self,
+        node: &str,
+        bdev_name: &str,
+        volume_id: &str,
+        replica_index: usize,
         consumer_node: &str,
     ) -> Result<NvmeofConnectionInfo, RpcError>;
 }
@@ -160,11 +177,27 @@ impl CatchupRpc for SpdkCsiDriver {
         &self,
         node: &str,
         bdev_name: &str,
-        export_volume_id: &str,
+        volume_id: &str,
+        replica_index: usize,
         consumer_node: &str,
     ) -> Result<NvmeofConnectionInfo, RpcError> {
-        self.setup_nvmeof_target_on_node(node, bdev_name, export_volume_id, consumer_node)
+        self.setup_replica_export_on_node(node, bdev_name, volume_id, replica_index, consumer_node)
             .await
+    }
+
+    async fn export_pad(
+        &self,
+        node: &str,
+        bdev_name: &str,
+        volume_id: &str,
+        replica_index: usize,
+        consumer_node: &str,
+    ) -> Result<NvmeofConnectionInfo, RpcError> {
+        let export_id = crate::identity::hrpad_export_id(
+            crate::identity::storage_id_of_handle(volume_id),
+            replica_index,
+        );
+        self.setup_nvmeof_target_on_node(node, bdev_name, &export_id, consumer_node).await
     }
 }
 
@@ -1191,12 +1224,7 @@ async fn ensure_dst_attached(
     clear_head_sb(rpc, &dst.node_name, head_alias, raid_name).await?;
 
     let conn = rpc
-        .export_replica(
-            &dst.node_name,
-            head_uuid,
-            &format!("{}_{}", volume_id, replica_index),
-            src_node,
-        )
+        .export_replica(&dst.node_name, head_uuid, volume_id, replica_index, src_node)
         .await?;
 
     let controller = format!("nvme_{}", conn.nqn.replace(':', "_").replace('.', "_"));
@@ -1821,6 +1849,18 @@ async fn catchup_stale(
         }
     };
 
+    // C6 on SUCCESS too (F44 cousin, found live on runae 3.6e 2026-07-27):
+    // a completed round used to keep the controller for the next round's
+    // reuse, banking on admit_one_standby's fenced-out sever. RWX admission
+    // goes through the cutover RESTAGE instead, which never runs that
+    // sever — the enabled controller then pins the head for every future
+    // rebuild (ReplicaHeadInUse). Every round is now attach → copy →
+    // sever; ensure_dst_attached re-attaches next round.
+    {
+        let controller = dst_bdev.strip_suffix("n1").unwrap_or(&dst_bdev).to_string();
+        detach_controller(rpc, &src.node_name, &controller).await;
+    }
+
     store
         .record_standby(volume_id, &rec.lvol_uuid, &newest)
         .await?;
@@ -1929,6 +1969,14 @@ async fn chase_standby(
             return Err(e);
         }
     };
+    // C6 on SUCCESS (F44 cousin — see catchup_stale): the live leak was
+    // exactly this site — the chase re-attached 8s AFTER the F44 unstage
+    // sweep cleaned the node, then admission went via the cutover restage
+    // and nothing ever severed it.
+    {
+        let controller = dst_bdev.strip_suffix("n1").unwrap_or(&dst_bdev).to_string();
+        detach_controller(rpc, &src.node_name, &controller).await;
+    }
     store.record_standby(volume_id, &rec.lvol_uuid, &newest).await?;
     info!(volume_id, node = %identity.node_name, through = %newest, "[CATCHUP] Standby chased to latest epoch");
     Ok(())
@@ -2794,21 +2842,34 @@ mod tests {
             &self,
             node: &str,
             bdev_name: &str,
-            export_volume_id: &str,
+            volume_id: &str,
+            replica_index: usize,
             consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
+            let export_volume_id = format!("{}_{}", volume_id, replica_index);
             self.exports.lock().unwrap().push((
                 node.to_string(),
                 bdev_name.to_string(),
-                export_volume_id.to_string(),
+                export_volume_id.clone(),
                 consumer_node.to_string(),
             ));
             Ok(NvmeofConnectionInfo {
-                nqn: crate::identity::volume_nqn(&export_volume_id),
+                nqn: crate::identity::replica_export_nqn(volume_id, replica_index),
                 target_ip: "10.0.0.99".to_string(),
                 target_port: 4420,
                 transport: "tcp".to_string(),
             })
+        }
+
+        async fn export_pad(
+            &self,
+            _node: &str,
+            _bdev_name: &str,
+            _volume_id: &str,
+            _replica_index: usize,
+            _consumer_node: &str,
+        ) -> Result<NvmeofConnectionInfo, RpcError> {
+            unreachable!("catch-up never exports pads")
         }
     }
 
@@ -3956,6 +4017,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chase_success_severs_the_copy_controller() {
+        // F44 cousin (runae 3.6e, 2026-07-27): a SUCCESSFUL chase round used
+        // to leave the copy controller enabled on the source node, banking
+        // on admit_one_standby's fenced-out sever — which the RWX cutover
+        // RESTAGE admission path never runs. The enabled controller then
+        // counts as a live consumer and pins the head for every future
+        // rebuild (ReplicaHeadInUse forever). Every round must end severed.
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.replicas[1].reverted_to = Some(epoch("vol1", 4));
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "caught up", "t");
+        let store = FakeStore::new(record);
+
+        let rpc = FakeRpc::new("uuid-b-v2");
+        let expected = expected_remote_base_bdev("vol1", 1);
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-a".to_string(), expected.clone()),
+            json!({ "name": expected, "uuid": "uuid-b-v2" }),
+        );
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        // The round succeeded (mark advanced) …
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().last_epoch.as_deref(),
+            Some(epoch("vol1", 5).as_str())
+        );
+        // … and the copy controller was severed ON the source node.
+        let controller = expected.strip_suffix("n1").unwrap().to_string();
+        let severed = rpc
+            .calls_of("bdev_nvme_detach_controller")
+            .iter()
+            .any(|(node, p)| node == "node-a" && p["params"]["name"] == json!(controller));
+        assert!(
+            severed,
+            "successful chase round must detach the copy controller on the source \
+             (detaches seen: {:?})",
+            rpc.calls_of("bdev_nvme_detach_controller")
+                .iter()
+                .map(|(n, p)| format!("{}:{}", n, p["params"]["name"]))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn chase_fails_over_to_a_source_covering_the_base() {
         // b is a standby caught up through epoch 4. The PREFERRED source
         // (non-consumer node-a) was itself rebuilt after a staggered
@@ -4807,7 +4919,19 @@ mod tests {
             &self,
             _node: &str,
             _bdev_name: &str,
-            _export_volume_id: &str,
+            _volume_id: &str,
+            _replica_index: usize,
+            _consumer_node: &str,
+        ) -> Result<NvmeofConnectionInfo, RpcError> {
+            unreachable!("guard never exports")
+        }
+
+        async fn export_pad(
+            &self,
+            _node: &str,
+            _bdev_name: &str,
+            _volume_id: &str,
+            _replica_index: usize,
             _consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
             unreachable!("guard never exports")

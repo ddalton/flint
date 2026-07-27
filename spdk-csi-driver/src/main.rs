@@ -1488,9 +1488,16 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                         }
                     }
 
-                    // Cleanup NVMe-oF target if it exists
-                    let nqn = spdk_csi_driver::identity::replica_alias_nqn(&volume_id, i);
+                    // Cleanup NVMe-oF leg exports, both id domains (F45 S5:
+                    // the alias shape `…:volume:<vol>:replica:<i>` this used
+                    // to delete is minted by NOTHING — live leg exports leaked
+                    // until the orphan sweep condemned them). replica_export_nqn
+                    // is the canonical inner-domain shape; the legacy wrapper
+                    // shape covers exports minted by pre-F46 stage-side code.
+                    let nqn = spdk_csi_driver::identity::replica_export_nqn(&volume_id, i);
                     let _ = self.driver.remove_nvmeof_target(&replica.node_name, &nqn).await;
+                    let legacy = spdk_csi_driver::identity::legacy_replica_export_nqn(&volume_id, i);
+                    let _ = self.driver.remove_nvmeof_target(&replica.node_name, &legacy).await;
                 }
 
                 println!("✅ [CONTROLLER] Multi-replica volume deleted: {}", volume_id);
@@ -2497,10 +2504,20 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     let volume_info = self.driver.get_volume_info(&actual_volume_id).await
                         .map_err(|ve| tonic::Status::internal(format!(
                             "Failed to connect to NVMe-oF: {} (and could not resolve volume for target re-ensure: {})", e, ve)))?;
+                    // Identity-domain audit B2 (2026-07-27, confirmed LIVE on
+                    // runae): this re-ensure must use the RAW handle —
+                    // ControllerPublish minted the export from `volume_id`
+                    // (the wrapper for backing volumes), and unstage /
+                    // rehydrate are keyed on that same domain. Passing the
+                    // inner id here created a spurious `volume:<pv>`
+                    // subsystem and MIGRATED the leg's namespace into it,
+                    // leaving the wrapper-domain subsystem the next stage
+                    // attaches as an empty shell (F36c defer loop, observed
+                    // after drill 3.6e run 2).
                     let healed_conn = self.driver.setup_nvmeof_target_on_node(
                         &volume_info.node_name,
                         &volume_info.lvol_uuid,
-                        &actual_volume_id,
+                        &volume_id,
                         &self.driver.node_id,
                     ).await.map_err(|se| tonic::Status::internal(format!(
                         "Failed to connect to NVMe-oF: {} (and target re-ensure failed: {})", e, se)))?;

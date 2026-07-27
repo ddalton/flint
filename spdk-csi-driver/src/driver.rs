@@ -2066,6 +2066,13 @@ impl SpdkCsiDriver {
         let gate_cfg = crate::freshness_gate::GateConfig::from_env();
         const F36C_DEFER_KEY: &str = "flint.io/f36c-defer";
         const F36C_RISK_KEY: &str = "flint.io/acked-tail-risk";
+        // F46 fix 4: assembly LIVENESS, distinct from data-lineage health.
+        // Run 3's record read a perfect `2/2 in_sync` (true — both legs held
+        // every acked write) while the gate refused assembly forever and the
+        // volume was unmountable. Sync state must not lie about data to
+        // signal liveness; this marker carries "assembly is being refused"
+        // instead, set while the gate defers and cleared when it stops.
+        const ASSEMBLY_BLOCKED_KEY: &str = "flint.io/assembly-blocked";
         if gate_cfg.enabled {
             use crate::freshness_gate::{self as gate, GateDecision, LegAvailability, MissingWriter};
 
@@ -2151,6 +2158,9 @@ impl SpdkCsiDriver {
                 if annos.contains_key(F36C_DEFER_KEY) {
                     self.set_pv_annotation(&record_volume_id, F36C_DEFER_KEY, None).await;
                 }
+                if annos.contains_key(ASSEMBLY_BLOCKED_KEY) {
+                    self.set_pv_annotation(&record_volume_id, ASSEMBLY_BLOCKED_KEY, None).await;
+                }
                 if let Some(marker) = annos.get(F36C_RISK_KEY) {
                     let member_uuids: Vec<String> =
                         replicas.iter().map(|r| r.lvol_uuid.clone()).collect();
@@ -2191,13 +2201,30 @@ impl SpdkCsiDriver {
                     }
                 };
                 // Wall-clock defer bound, persisted so kubelet's retry
-                // cadence can't stretch it; re-armed when the missing set
-                // changes (partial progress is new evidence).
+                // cadence can't stretch it; re-armed ONLY when the missing
+                // set strictly shrinks (partial progress is new evidence).
+                // Any other change keeps the running deadline: F46's
+                // server ping-pong alternated the missing set {A}↔{B}
+                // faster than the bound, and "changed = re-arm" turned the
+                // 180s defer into a forever-wedge.
                 let deadline_passed = match annos
                     .get(F36C_DEFER_KEY)
                     .and_then(|v| gate::parse_defer_marker(v))
                 {
                     Some((deadline, prev)) if prev == missing_uuids => {
+                        gate::deadline_passed(&deadline, &now)
+                    }
+                    Some((deadline, prev))
+                        if !gate::change_is_progress(&prev, &missing_uuids) =>
+                    {
+                        // Oscillation/growth: carry the deadline, record the
+                        // new set so a LATER strict shrink still re-arms.
+                        self.set_pv_annotation(
+                            &record_volume_id,
+                            F36C_DEFER_KEY,
+                            Some(&gate::encode_defer_marker(&deadline, &missing_uuids)),
+                        )
+                        .await;
                         gate::deadline_passed(&deadline, &now)
                     }
                     _ => {
@@ -2220,6 +2247,12 @@ impl SpdkCsiDriver {
                              refusing to assemble from a possibly-trailing leg: {}",
                             detail
                         );
+                        self.set_pv_annotation(
+                            &record_volume_id,
+                            ASSEMBLY_BLOCKED_KEY,
+                            Some(&format!("{}|{}", now, detail)),
+                        )
+                        .await;
                         crate::replica_sync::emit_pv_event(
                             &self.kube_client,
                             current_node,
@@ -2253,6 +2286,10 @@ impl SpdkCsiDriver {
                         )
                         .await;
                         self.set_pv_annotation(&record_volume_id, F36C_DEFER_KEY, None).await;
+                        if annos.contains_key(ASSEMBLY_BLOCKED_KEY) {
+                            self.set_pv_annotation(&record_volume_id, ASSEMBLY_BLOCKED_KEY, None)
+                                .await;
+                        }
                         crate::replica_sync::emit_pv_event(
                             &self.kube_client,
                             current_node,
@@ -2487,15 +2524,34 @@ impl SpdkCsiDriver {
                             .and_then(|r| r.as_array())
                             .cloned()
                             .unwrap_or_default();
-                        let mut expected_ids = vec![self.generate_ublk_id(volume_id)];
-                        if let Some(anno) = self
-                            .get_pv_annotations(&record_volume_id)
-                            .await
-                            .unwrap_or_default()
-                            .get("flint.io/ublk-id")
-                            .and_then(|v| v.parse::<u32>().ok())
-                        {
-                            expected_ids.push(anno);
+                        // Identity-domain audit B1 (2026-07-27): ublk ids
+                        // are minted from the INNER storage id and the
+                        // `flint.io/ublk-id` annotation lives on the
+                        // BACKING PV — deriving both from the staged
+                        // (wrapper) id made this attribution empty on RWX
+                        // server nodes, defeating the converger it feeds.
+                        // Cover both domains (identical for RWO), same
+                        // philosophy as per_replica_controller_prefixes.
+                        let mut expected_ids = vec![
+                            self.generate_ublk_id(crate::identity::storage_id_of_handle(volume_id)),
+                            self.generate_ublk_id(volume_id),
+                        ];
+                        expected_ids.dedup();
+                        for pv in [
+                            crate::identity::pv_name_of_handle(volume_id),
+                            record_volume_id.to_string(),
+                        ] {
+                            if let Some(anno) = self
+                                .get_pv_annotations(&pv)
+                                .await
+                                .unwrap_or_default()
+                                .get("flint.io/ublk-id")
+                                .and_then(|v| v.parse::<u32>().ok())
+                            {
+                                if !expected_ids.contains(&anno) {
+                                    expected_ids.push(anno);
+                                }
+                            }
                         }
                         for (id, bdev) in crate::guarded_destroy::stale_own_ublk_disks(
                             &disks,
@@ -2788,11 +2844,18 @@ impl SpdkCsiDriver {
         replica_index: usize,
         bdev_name: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Create NVMe-oF target on remote node
-        let conn_info = self.setup_nvmeof_target_on_node(
+        // Create NVMe-oF target on remote node. F46: this is a LEG export —
+        // minted in the inner domain no matter which handle we staged under.
+        // The old wrapper-derived mint (`volume_nqn("<staged>_<i>")`) is what
+        // left every RWX leg with dual-domain subsystems: catch-up had
+        // already exported the head under the inner shape, so the wrapper
+        // add_ns failed claim-shaped and the freshness gate read its own
+        // residue as "claim-blocked" forever.
+        let conn_info = self.setup_replica_export_on_node(
             &replica.node_name,
             bdev_name,
-            &format!("{}_{}", volume_id, replica_index),
+            volume_id,
+            replica_index,
             &self.node_id,
         ).await?;
 
@@ -3098,9 +3161,37 @@ impl SpdkCsiDriver {
     /// consumer (ControllerPublish runs in the controller process, where
     /// `self.node_id` is the controller pod, not the consumer).
     pub async fn setup_nvmeof_target_on_node(&self, node_name: &str, bdev_name: &str, volume_id: &str, consumer_node: &str) -> Result<NvmeofConnectionInfo, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🌐 [DRIVER] Setting up NVMe-oF target on node: {} for bdev: {}", node_name, bdev_name);
-
         let nqn = crate::identity::volume_nqn(volume_id);
+        self.setup_export_on_node_with_nqn(node_name, bdev_name, &nqn, consumer_node).await
+    }
+
+    /// Per-replica LEG export (F46/F45-S3): the NQN is the inner-domain
+    /// `replica_export_nqn` regardless of which handle the caller stages
+    /// under, resolved through the transition belt so a leg still served by
+    /// a pre-unification wrapper-shape subsystem is adopted rather than
+    /// fought over (the `-32602` duplicate-claim family).
+    pub async fn setup_replica_export_on_node(
+        &self,
+        node_name: &str,
+        bdev_name: &str,
+        volume_id: &str,
+        replica_index: usize,
+        consumer_node: &str,
+    ) -> Result<NvmeofConnectionInfo, Box<dyn std::error::Error + Send + Sync>> {
+        let transport = crate::nvmeof_export::NodeAgentTransport { driver: self, node_name };
+        let nqn = crate::nvmeof_export::resolve_replica_export_nqn(
+            &transport,
+            volume_id,
+            replica_index,
+            bdev_name,
+            &[],
+        )
+        .await?;
+        self.setup_export_on_node_with_nqn(node_name, bdev_name, &nqn, consumer_node).await
+    }
+
+    async fn setup_export_on_node_with_nqn(&self, node_name: &str, bdev_name: &str, nqn: &str, consumer_node: &str) -> Result<NvmeofConnectionInfo, Box<dyn std::error::Error + Send + Sync>> {
+        println!("🌐 [DRIVER] Setting up NVMe-oF target on node: {} for bdev: {}", node_name, bdev_name);
 
         let node_ip = self.get_node_ip(node_name).await
             .map_err(|e| format!("Failed to get node IP: {}", e))?;
@@ -3115,7 +3206,7 @@ impl SpdkCsiDriver {
         let allowed = vec![crate::nvmeof_export::flint_host_nqn(consumer_node)];
         let transport = crate::nvmeof_export::NodeAgentTransport { driver: self, node_name };
         let spec = crate::nvmeof_export::ExportSpec {
-            nqn: &nqn,
+            nqn,
             bdev_name,
             bdev_aliases: &[],
             trtype: &self.nvmeof_transport,
@@ -3129,7 +3220,7 @@ impl SpdkCsiDriver {
         println!("🎉 [DRIVER] NVMe-oF target setup completed: {}", nqn);
 
         Ok(NvmeofConnectionInfo {
-            nqn: nqn.clone(),
+            nqn: nqn.to_string(),
             target_ip: node_ip.clone(),
             target_port: self.nvmeof_target_port,
             transport: self.nvmeof_transport.clone(),
@@ -3363,24 +3454,58 @@ impl SpdkCsiDriver {
             println!("✅ [DRIVER] RAID deleted at unstage: {} (clear_sb: {})", raid_name, clear_sb);
         }
 
-        // 3. Per-replica initiator controllers (nvme_..._volume_{vol}_{i})
-        let per_replica_prefix = format!(
-            "nvme_{}_",
-            crate::identity::volume_nqn(volume_id)
-                .replace(":", "_")
-                .replace(".", "_")
-        );
+        // 3. Per-replica initiator controllers (nvme_..._volume_{vol}_{i}).
+        // F44: leg controllers are named for the INNER storage id (the
+        // per-replica export NQNs are `volume:<pv>_N`), but an RWX server
+        // stages under the `nfs-server-<pv>` backing handle. Deriving this
+        // prefix from the staged id alone made the sweep a silent no-op on
+        // the NFS server's node; the leaked controllers pinned the
+        // replacement leg's head and deadlocked catch-up behind the F36
+        // guard (docs/f44-cutover-leg-detach-leak.md). Sweep BOTH
+        // identities — for RWO they are the same string.
+        let per_replica_prefixes = per_replica_controller_prefixes(volume_id);
         let list = json!({ "method": "bdev_nvme_get_controllers" });
         if let Ok(response) = self.call_node_agent(&self.node_id, "/api/spdk/rpc", &list).await {
             if let Some(controllers) = response.get("result").and_then(|r| r.as_array()) {
                 for ctrlr in controllers {
                     if let Some(name) = ctrlr.get("name").and_then(|n| n.as_str()) {
-                        if name.starts_with(&per_replica_prefix) {
+                        if per_replica_prefixes.iter().any(|p| name.starts_with(p.as_str())) {
                             match self.delete_nvme_controller(name).await {
                                 Ok(_) => println!("✅ [DRIVER] Detached replica controller: {}", name),
                                 Err(e) => println!("⚠️ [DRIVER] Failed to detach controller {} (continuing): {}", name, e),
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // 4. EMPTY per-replica export shells, both id domains (F46 hygiene).
+        // A node that briefly served an RWX volume kept a wrapper-domain leg
+        // subsystem whose namespace had been claimed by its inner-domain
+        // sibling — an empty shell that convinces name-keyed probes the head
+        // is "exported to somebody else" and wedges the next assembly
+        // (docs/f46-cutover-serving-node-residue.md). Empty = no namespace =
+        // no data path, so deletion cannot sever a consumer; leg exports
+        // that HOLD a namespace belong to the leg's current consumer and
+        // must survive this node's unstage untouched.
+        let storage_id = crate::identity::storage_id_of_handle(volume_id);
+        let subs_list = json!({ "method": "nvmf_get_subsystems" });
+        if let Ok(response) = self.call_node_agent(&self.node_id, "/api/spdk/rpc", &subs_list).await {
+            for sub in response.get("result").and_then(|r| r.as_array()).into_iter().flatten() {
+                let nqn = sub.get("nqn").and_then(|n| n.as_str()).unwrap_or("");
+                let is_leg = is_leg_export_nqn_for(nqn, volume_id)
+                    || is_leg_export_nqn_for(nqn, storage_id);
+                let empty = sub
+                    .get("namespaces")
+                    .and_then(|n| n.as_array())
+                    .map(|n| n.is_empty())
+                    .unwrap_or(false);
+                if is_leg && empty {
+                    let del = json!({ "method": "nvmf_delete_subsystem", "params": { "nqn": nqn } });
+                    match self.call_node_agent(&self.node_id, "/api/spdk/rpc", &del).await {
+                        Ok(_) => println!("✅ [DRIVER] Retired empty leg-export shell: {}", nqn),
+                        Err(e) => println!("⚠️ [DRIVER] Failed to retire empty shell {} (continuing): {}", nqn, e),
                     }
                 }
             }
@@ -3547,6 +3672,109 @@ fn flint_subsystems_exporting_bdev(subsystems: &Value, bdev: &str) -> Vec<String
         }
     }
     nqns
+}
+
+/// Controller-name prefixes identifying a volume's per-replica initiator
+/// controllers at teardown (F44). The attach path names leg controllers
+/// `nvme_<replica_export_nqn sanitized>` with the *inner* storage id, so
+/// the sweep must derive its prefix from `storage_id_of_handle`; the
+/// staged-handle prefix is kept as a belt (identical for RWO, harmless
+/// extra for RWX).
+fn per_replica_controller_prefixes(staged_volume_id: &str) -> Vec<String> {
+    let sanitized = |id: &str| {
+        format!(
+            "nvme_{}_",
+            crate::identity::volume_nqn(id).replace(":", "_").replace(".", "_")
+        )
+    };
+    let inner = sanitized(crate::identity::storage_id_of_handle(staged_volume_id));
+    let staged = sanitized(staged_volume_id);
+    if staged == inner {
+        vec![inner]
+    } else {
+        vec![inner, staged]
+    }
+}
+
+/// Exact-shape test: is `nqn` a per-replica leg export of the volume known
+/// by `id`? Matches `…:volume:<id>_<N>` with strictly numeric N — the bare
+/// volume export (no suffix) and hrpad exports (`_hrpad<N>`) don't match,
+/// and the mandatory `_` keeps `pvc-a` from claiming `pvc-ab`'s exports.
+/// Used by the F46 teardown sweep, which must pair it with an
+/// empty-namespace check before deleting anything.
+fn is_leg_export_nqn_for(nqn: &str, id: &str) -> bool {
+    let prefix = crate::identity::volume_nqn(id);
+    nqn.strip_prefix(prefix.as_str())
+        .and_then(|rest| rest.strip_prefix('_'))
+        .map(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod f44_teardown_prefix_tests {
+    use super::per_replica_controller_prefixes;
+
+    /// F44 regression (docs/f44-cutover-leg-detach-leak.md): on an RWX
+    /// server node the volume stages under the `nfs-server-<pv>` backing
+    /// handle while leg controllers are named for the inner PV. The old
+    /// sweep derived its prefix from the staged id and never matched —
+    /// NodeUnstage reported success while leaking every leg controller.
+    #[test]
+    fn backing_handle_sweep_matches_inner_leg_controller_names() {
+        let pv = "pvc-737e63a3-5099-4a88-90e4-64a399107a42";
+        // The name the attach path builds for replica 1's controller.
+        let leg_nqn = crate::identity::replica_export_nqn(pv, 1);
+        let leg_controller = format!("nvme_{}", leg_nqn.replace(":", "_").replace(".", "_"));
+
+        let staged = crate::identity::backing_handle(pv);
+        let prefixes = per_replica_controller_prefixes(&staged);
+        assert!(
+            prefixes.iter().any(|p| leg_controller.starts_with(p.as_str())),
+            "RWX sweep must match inner-id leg controllers; prefixes={prefixes:?} leg={leg_controller}"
+        );
+
+        // RWO: staged id IS the pv — single prefix, unchanged behavior.
+        let rwo = per_replica_controller_prefixes(pv);
+        assert_eq!(rwo.len(), 1, "RWO must not gain a second prefix");
+        assert!(rwo.iter().any(|p| leg_controller.starts_with(p.as_str())));
+    }
+
+    /// The trailing underscore is the boundary that keeps the sweep from
+    /// matching a different volume whose id shares a prefix.
+    #[test]
+    fn prefixes_end_at_the_volume_id_boundary() {
+        for p in per_replica_controller_prefixes("nfs-server-pvc-a") {
+            assert!(p.ends_with("_"), "prefix must end at the id boundary: {p}");
+        }
+        let other = format!(
+            "nvme_{}",
+            crate::identity::replica_export_nqn("pvc-ab", 0).replace(":", "_").replace(".", "_")
+        );
+        assert!(
+            !per_replica_controller_prefixes("pvc-a").iter().any(|p| other.starts_with(p.as_str())),
+            "pvc-a's sweep must not match pvc-ab's controllers"
+        );
+    }
+
+    /// F46 shell sweep: match exactly the leg-export shapes in either id
+    /// domain, nothing adjacent (bare volume export, hrpad, other volumes).
+    #[test]
+    fn leg_export_shape_matcher_is_exact() {
+        use super::is_leg_export_nqn_for;
+        let pv = "pvc-5574462a-a13a-4641-ae02-8c7d2e293490";
+        let staged = crate::identity::backing_handle(pv);
+        let inner_leg = crate::identity::replica_export_nqn(pv, 1);
+        let wrapper_leg = crate::identity::legacy_replica_export_nqn(pv, 1);
+
+        assert!(is_leg_export_nqn_for(&inner_leg, pv));
+        assert!(is_leg_export_nqn_for(&wrapper_leg, &staged), "the F46 shell shape must match");
+        assert!(!is_leg_export_nqn_for(&crate::identity::volume_nqn(pv), pv), "bare volume export");
+        assert!(
+            !is_leg_export_nqn_for(&crate::identity::volume_nqn(&crate::identity::hrpad_export_id(pv, 1)), pv),
+            "hrpad exports are not leg exports"
+        );
+        assert!(!is_leg_export_nqn_for(&crate::identity::replica_export_nqn("pvc-ab", 0), "pvc-a"));
+    }
 }
 
 #[cfg(test)]

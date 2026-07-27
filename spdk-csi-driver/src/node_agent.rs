@@ -5373,8 +5373,22 @@ impl NodeAgent {
         bdev_name: &str,
         attached_node: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Generate NQN using same format as driver
-        let nqn = crate::identity::replica_export_nqn(volume_id, replica_index);
+        // Same mint as the driver's leg-attach path: inner-domain
+        // `replica_export_nqn` (normalizes the wrapper volumeHandle this
+        // reconcile is keyed on — pre-F46 this site resurrected the
+        // wrapper shape while catch-up admitted legs under the inner one,
+        // F45 S3), resolved through the transition belt so a leg still
+        // served by a pre-unification export is adopted, not re-minted
+        // against its own claim.
+        let nqn = crate::nvmeof_export::resolve_replica_export_nqn(
+            &self.disk_service,
+            volume_id,
+            replica_index,
+            bdev_name,
+            &[&replica.lvol_name],
+        )
+        .await
+        .map_err(|e| format!("leg-export NQN resolve failed: {}", e))?;
 
         debug!(nqn, "[RECONCILE] Setting up NVMe-oF target");
 

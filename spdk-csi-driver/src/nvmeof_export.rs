@@ -127,11 +127,92 @@ pub async fn get_subsystem(
 }
 
 fn ns_matches(ns: &Value, spec: &ExportSpec<'_>) -> bool {
+    ns_matches_names(ns, spec.bdev_name, spec.bdev_aliases)
+}
+
+fn ns_matches_names(ns: &Value, bdev_name: &str, aliases: &[&str]) -> bool {
     let name = ns.get("bdev_name").and_then(|b| b.as_str()).unwrap_or("");
     let uuid = ns.get("uuid").and_then(|u| u.as_str()).unwrap_or("");
-    name == spec.bdev_name
-        || uuid == spec.bdev_name
-        || spec.bdev_aliases.iter().any(|a| *a == name || *a == uuid)
+    name == bdev_name || uuid == bdev_name || aliases.iter().any(|a| *a == name || *a == uuid)
+}
+
+fn subsystem_holds_ns(sub: &Value, bdev_name: &str, aliases: &[&str]) -> bool {
+    sub.get("namespaces")
+        .and_then(|n| n.as_array())
+        .map(|nss| nss.iter().any(|ns| ns_matches_names(ns, bdev_name, aliases)))
+        .unwrap_or(false)
+}
+
+fn subsystem_ns_empty(sub: &Value) -> bool {
+    sub.get("namespaces").and_then(|n| n.as_array()).map(|n| n.is_empty()).unwrap_or(true)
+}
+
+/// F46/F45-S3 transition belt: which NQN should this node's export of a
+/// replica leg SERVE under right now?
+///
+/// The canonical shape is the inner-domain [`identity::replica_export_nqn`].
+/// But a node running pre-unification code may already export the leg under
+/// the legacy wrapper shape with a live consumer attached through it —
+/// re-minting canonically then fails claim-shaped (`nvmf_subsystem_add_ns
+/// -32602`, the F46 wedge in mirror image), and migrating the namespace
+/// would sever that consumer mid-I/O. So: serve whichever subsystem already
+/// holds the leg's namespace, mint canonically when neither does, and retire
+/// an EMPTY legacy shell when found (the F46 fingerprint: a wrapper
+/// subsystem whose namespace was long since claimed by its inner sibling —
+/// left standing, it convinces name-keyed probes the head is "exported to
+/// somebody else" and wedges assembly forever).
+pub async fn resolve_replica_export_nqn(
+    rpc: &dyn SpdkRpcTransport,
+    volume_id: &str,
+    replica_index: usize,
+    bdev_name: &str,
+    bdev_aliases: &[&str],
+) -> Result<String, RpcError> {
+    let canonical = crate::identity::replica_export_nqn(volume_id, replica_index);
+    let legacy = crate::identity::legacy_replica_export_nqn(volume_id, replica_index);
+
+    if let Some(sub) = get_subsystem(rpc, &canonical).await? {
+        if subsystem_holds_ns(&sub, bdev_name, bdev_aliases) {
+            retire_empty_shell(rpc, &legacy).await;
+            return Ok(canonical);
+        }
+    }
+    if let Some(sub) = get_subsystem(rpc, &legacy).await? {
+        if subsystem_holds_ns(&sub, bdev_name, bdev_aliases) {
+            tracing::info!(
+                nqn = %legacy,
+                "adopting legacy wrapper-domain leg export — a live consumer may be \
+                 attached through it; canonical takes over on the next fresh mint"
+            );
+            return Ok(legacy);
+        }
+        if subsystem_ns_empty(&sub) {
+            retire_empty_shell(rpc, &legacy).await;
+        }
+        // A legacy subsystem holding a DIFFERENT namespace is not ours to
+        // touch — fall through and let ensure_export converge canonically.
+    }
+    Ok(canonical)
+}
+
+/// Best-effort delete of an empty leg-export shell. Empty = no namespace =
+/// nothing any initiator can do I/O through, so deletion cannot sever a
+/// data path; a connected controller (if any) was already dead weight.
+async fn retire_empty_shell(rpc: &dyn SpdkRpcTransport, nqn: &str) {
+    let Ok(Some(sub)) = get_subsystem(rpc, nqn).await else { return };
+    if !subsystem_ns_empty(&sub) {
+        return;
+    }
+    // The guard's question for subsystem deletion is "does it still serve a
+    // consumer" — answered by the empty-namespace read above: no namespace,
+    // no data path. A concurrent pre-F46 driver re-minting this shape during
+    // a mixed-version roll loses the race benignly (its ensure retries and
+    // recreates).
+    let delete = json!({ "method": "nvmf_delete_subsystem", "params": { "nqn": nqn } }); // guarded-destroy-lint: allow
+    match rpc.rpc(&delete).await {
+        Ok(_) => tracing::info!(nqn, "retired empty leg-export shell (F46 residue)"),
+        Err(e) => tracing::debug!(nqn, error = %e, "empty-shell retire failed (continuing)"),
+    }
 }
 
 fn listener_matches(listener: &Value, spec: &ExportSpec<'_>) -> bool {
@@ -798,5 +879,105 @@ mod tests {
         rpc.ublk_disks = vec![json!({ "id": 5, "bdev_name": "some-other-bdev" })];
         ensure_export(&rpc, &spec()).await.unwrap();
         assert_eq!(rpc.method_calls("nvmf_subsystem_add_ns"), 1);
+    }
+
+    // ── F46 transition belt: resolve_replica_export_nqn ─────────────────
+
+    /// Per-NQN fake (the FakeRpc above models a single subsystem; the belt
+    /// reasons about the canonical/legacy PAIR).
+    struct SubsByNqn {
+        subs: Mutex<std::collections::HashMap<String, Value>>,
+        deletes: Mutex<Vec<String>>,
+    }
+
+    impl SubsByNqn {
+        fn new(entries: &[(&str, Value)]) -> Self {
+            Self {
+                subs: Mutex::new(
+                    entries.iter().map(|(n, s)| (n.to_string(), s.clone())).collect(),
+                ),
+                deletes: Mutex::new(vec![]),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SpdkRpcTransport for SubsByNqn {
+        async fn rpc(&self, payload: &Value) -> Result<Value, RpcError> {
+            match payload["method"].as_str().unwrap() {
+                "nvmf_get_subsystems" => {
+                    let nqn = payload["params"]["nqn"].as_str().unwrap();
+                    match self.subs.lock().unwrap().get(nqn) {
+                        Some(s) => Ok(json!({ "result": [s] })),
+                        None => Err("Code=-19 Msg=No such device".into()),
+                    }
+                }
+                "nvmf_delete_subsystem" => {
+                    let nqn = payload["params"]["nqn"].as_str().unwrap().to_string();
+                    self.subs.lock().unwrap().remove(&nqn);
+                    self.deletes.lock().unwrap().push(nqn);
+                    Ok(json!({ "result": true }))
+                }
+                m => panic!("belt should not issue {m}"),
+            }
+        }
+    }
+
+    const VOL: &str = "pvc-5574462a";
+    const HEAD: &str = "faa78582-aaaa-bbbb-cccc-000000000001";
+
+    fn ns_sub(nqn: &str, bdev: &str) -> (String, Value) {
+        (nqn.to_string(), json!({ "nqn": nqn, "namespaces": [{ "nsid": 1, "bdev_name": bdev }] }))
+    }
+    fn empty_sub(nqn: &str) -> (String, Value) {
+        (nqn.to_string(), json!({ "nqn": nqn, "namespaces": [] }))
+    }
+
+    /// The exact run-3 F46 state: inner subsystem holds the head, wrapper
+    /// sibling is an empty shell. The belt must serve canonically AND
+    /// retire the shell that was wedging name-keyed probes.
+    #[tokio::test]
+    async fn f46_state_resolves_canonical_and_retires_the_shell() {
+        let canonical = crate::identity::replica_export_nqn(VOL, 1);
+        let legacy = crate::identity::legacy_replica_export_nqn(VOL, 1);
+        let inner = ns_sub(&canonical, HEAD);
+        let shell = empty_sub(&legacy);
+        let rpc = SubsByNqn::new(&[(&inner.0, inner.1.clone()), (&shell.0, shell.1.clone())]);
+
+        // Staged (wrapper) handle in, canonical nqn out — domain normalized.
+        let staged = crate::identity::backing_handle(VOL);
+        let nqn = resolve_replica_export_nqn(&rpc, &staged, 1, HEAD, &[]).await.unwrap();
+        assert_eq!(nqn, canonical);
+        assert_eq!(*rpc.deletes.lock().unwrap(), vec![legacy], "the F46 shell must be retired");
+    }
+
+    /// Mid-upgrade: the leg is still served by a pre-unification wrapper
+    /// export with a live consumer attached through it. Adopt — re-minting
+    /// canonically would fail claim-shaped and migrating would sever I/O.
+    #[tokio::test]
+    async fn live_legacy_export_is_adopted_not_fought() {
+        let legacy = crate::identity::legacy_replica_export_nqn(VOL, 1);
+        let serving = ns_sub(&legacy, HEAD);
+        let rpc = SubsByNqn::new(&[(&serving.0, serving.1.clone())]);
+
+        let nqn = resolve_replica_export_nqn(&rpc, VOL, 1, HEAD, &[]).await.unwrap();
+        assert_eq!(nqn, legacy, "must adopt the serving legacy export");
+        assert!(rpc.deletes.lock().unwrap().is_empty(), "adoption must not delete anything");
+    }
+
+    /// Fresh node: nothing exists — mint canonically; a legacy subsystem
+    /// holding a FOREIGN namespace is not ours to touch.
+    #[tokio::test]
+    async fn fresh_mint_is_canonical_and_foreign_legacy_ns_is_left_alone() {
+        let rpc = SubsByNqn::new(&[]);
+        let nqn = resolve_replica_export_nqn(&rpc, VOL, 1, HEAD, &[]).await.unwrap();
+        assert_eq!(nqn, crate::identity::replica_export_nqn(VOL, 1));
+
+        let legacy = crate::identity::legacy_replica_export_nqn(VOL, 1);
+        let foreign = ns_sub(&legacy, "some-other-bdev");
+        let rpc = SubsByNqn::new(&[(&foreign.0, foreign.1.clone())]);
+        let nqn = resolve_replica_export_nqn(&rpc, VOL, 1, HEAD, &[]).await.unwrap();
+        assert_eq!(nqn, crate::identity::replica_export_nqn(VOL, 1));
+        assert!(rpc.deletes.lock().unwrap().is_empty(), "foreign ns must survive");
     }
 }

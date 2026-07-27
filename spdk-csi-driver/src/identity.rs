@@ -283,8 +283,32 @@ pub fn volume_nqn(export_id: &str) -> String {
 
 /// Replica export NQN: `…:volume:<vol>_<i>` (the `export_replica`
 /// convention; also what hot rejoin swaps namespaces under).
+///
+/// NORMALIZES to the inner (storage-id) domain: replica legs — their lvols,
+/// heads, and epochs — are inner-domain objects, so their exports are too,
+/// no matter which handle the caller holds. Before this (F46/F45-S3,
+/// 2026-07-27) stage-side assembly minted leg exports from the STAGED
+/// wrapper handle while catch-up minted from the record id, and any
+/// name-keyed matcher over legs was guessing which domain it would find.
+/// Transition: nodes upgraded mid-flight may still hold wrapper-shaped leg
+/// exports; `nvmeof_export::resolve_replica_export_nqn` is the read-both
+/// belt that adopts them.
 pub fn replica_export_nqn(volume_id: &str, replica_index: usize) -> String {
-    format!("{}{}_{}", VOLUME_NQN_PREFIX, volume_id, replica_index)
+    format!("{}{}_{}", VOLUME_NQN_PREFIX, storage_id_of_handle(volume_id), replica_index)
+}
+
+/// The pre-unification wrapper-domain leg export NQN
+/// (`…:volume:nfs-server-<pv>_<i>`) — the shape stage-side assembly minted
+/// before F46. Exists ONLY so transition belts and teardown hygiene can
+/// find and retire old exports; never mint under it.
+pub fn legacy_replica_export_nqn(volume_id: &str, replica_index: usize) -> String {
+    format!(
+        "{}{}{}_{}",
+        VOLUME_NQN_PREFIX,
+        NFS_BACKING_PREFIX,
+        storage_id_of_handle(volume_id),
+        replica_index
+    )
 }
 
 /// Alias replica NQN: `…:volume:<vol>:replica:<i>` (multi-replica publish
@@ -919,6 +943,19 @@ mod tests {
         assert_eq!(hrpad_export_id(VOL, 1), format!("{VOL}_hrpad1"));
         assert_eq!(replica_export_nqn(VOL, 0), crate::hot_rejoin::replica_export_nqn(VOL, 0));
         assert_eq!(replica_export_nqn(VOL, 0), format!("nqn.2024-11.com.flint:volume:{VOL}_0"));
+        // F46/F45-S3 unification: leg exports are inner-domain no matter
+        // which handle mints them — the wrapper handle yields the SAME nqn.
+        assert_eq!(
+            replica_export_nqn(&backing_handle(VOL), 1),
+            replica_export_nqn(VOL, 1),
+            "leg export mint normalizes the staged wrapper handle"
+        );
+        assert_eq!(
+            legacy_replica_export_nqn(VOL, 1),
+            format!("nqn.2024-11.com.flint:volume:nfs-server-{VOL}_1"),
+            "legacy shape is the pre-F46 wrapper mint, from either handle"
+        );
+        assert_eq!(legacy_replica_export_nqn(&backing_handle(VOL), 1), legacy_replica_export_nqn(VOL, 1));
         assert_eq!(hotrejoin_export_nqn(VOL), crate::hot_rejoin::ef_export_nqn(VOL));
         assert_eq!(hotrejoin_export_nqn(VOL), format!("nqn.2024-11.com.flint:hotrejoin:{VOL}"));
         assert_eq!(node_host_nqn(NODE), crate::nvmeof_export::flint_host_nqn(NODE));
