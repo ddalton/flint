@@ -2650,11 +2650,14 @@ impl SpdkCsiDriver {
         let subsystems = response.get("result").unwrap_or(&empty);
         for nqn in flint_subsystems_exporting_bdev(subsystems, bdev) {
             println!("   Dropping stale local export {} of {}", nqn, bdev);
-            let del = serde_json::json!({
-                "method": "nvmf_delete_subsystem",
-                "params": {"nqn": nqn}
-            });
-            self.call_node_agent(&self.node_id, "/api/spdk/rpc", &del).await?;
+            // Through the F49 deregister-then-delete endpoint, NOT the raw
+            // RPC passthrough: a raw nvmf_delete_subsystem leaves the NQN in
+            // the node agent's loss-detector registry, and the 10s detector
+            // then re-mints the export — re-claiming the lvol out from
+            // under the bdev_raid_create this cleanup exists to unblock
+            // (docs/f49-local-leg-export-squatter.md).
+            let del = serde_json::json!({ "nqn": nqn });
+            self.call_node_agent(&self.node_id, "/api/exports/drop_local", &del).await?;
         }
         Ok(())
     }
@@ -3437,11 +3440,17 @@ impl SpdkCsiDriver {
         // after force-detach + re-attach would otherwise kill the live
         // export — the raw RPC here bypassed the guard placed on the
         // delete_nvmeof path).
-        let loopback_nqn = crate::identity::volume_nqn(volume_id);
-        let delete_body = json!({ "nqn": loopback_nqn });
-        match self.call_node_agent(&self.node_id, "/api/blockdev/delete_nvmeof", &delete_body).await {
-            Ok(_) => println!("✅ [DRIVER] Loopback subsystem cleanup done (guarded): {}", loopback_nqn),
-            Err(e) => println!("ℹ️ [DRIVER] Loopback subsystem not deleted (may not exist): {}", e),
+        // F47: sweep BOTH id domains — the loopback family is inner-minted
+        // at stage while this belt is keyed on the staged handle, so the
+        // old single staged-domain NQN was a silent no-op on RWX server
+        // nodes and the real (inner) subsystem outlived every unstage
+        // (docs/f47-loopback-export-teardown-domain.md §3c). RWO sweeps one.
+        for loopback_nqn in crate::identity::loopback_teardown_nqns(volume_id) {
+            let delete_body = json!({ "nqn": loopback_nqn });
+            match self.call_node_agent(&self.node_id, "/api/blockdev/delete_nvmeof", &delete_body).await {
+                Ok(_) => println!("✅ [DRIVER] Loopback subsystem cleanup done (guarded): {}", loopback_nqn),
+                Err(e) => println!("ℹ️ [DRIVER] Loopback subsystem not deleted (may not exist): {}", e),
+            }
         }
 
         // 2. Raid bdev — frees the exclusive_write claims

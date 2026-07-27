@@ -1,11 +1,16 @@
 # F47 — the loopback export outlives its server (two broken deletes, one shell per cutover)
 
-**Status:** AUDITED 2026-07-27, root cause attributed from the runag drill
-3.6e run-4 incident logs. **Severity: P3 residue** — no data-path impact
-observed; one empty subsystem shell plus a fenced-out host accumulates on
-every RWX server node that unstages after a cutover. **Deliberately NOT
-fixed in this pass:** both fixes make destructive operations fire where
-they currently no-op, so they are drill-gated for the next campaign (§6).
+**Status:** FIXED in-tree 2026-07-27 (both §6 directions implemented:
+`identity::loopback_teardown_nqns` sweeps the teardown belt across both id
+domains, and the F9 guard bypasses its cross-node reasoning for local-only
+subsystems via `nvmeof_export::subsystem_is_local_only`). Root cause was
+attributed the same day from the runag drill 3.6e run-4 incident logs.
+**Severity: P3 residue** — no data-path impact observed; one empty
+subsystem shell plus a fenced-out host accumulated on every RWX server
+node that unstaged after a cutover. Both fixes make destructive operations
+fire where they previously no-op'd, so they stay **drill-gated** (§6
+acceptance: outgoing server node retains zero subsystems for the volume
+after unstage).
 
 This is the loopback edition of the [F44](f44-cutover-leg-detach-leak.md)/
 [F46](f46-cutover-serving-node-residue.md) class — a name derived in one

@@ -342,6 +342,35 @@ impl VolumeClaims {
         })
     }
 
+    /// F48 (runah 2.9 run A): a resolver that reserved a volume and then
+    /// found its work GONE on the next tick (the precondition evaporated —
+    /// e.g. hot-rejoin's standby was demoted 12s after the reservation)
+    /// must hand the queue back explicitly. Without this, the idle
+    /// reservation starves every maintainer until the TTL lapse — observed
+    /// live as ~4 minutes of catch-up AND expansion yielding to a resolver
+    /// that never came back. No-op unless `op` is the reserving operation
+    /// (never releases someone else's reservation).
+    pub fn release_reservation(&self, volume_id: &str, op: &'static str) {
+        let mut inner = self.inner.lock().expect("volume-claims lock poisoned");
+        let Some(entry) = inner.get_mut(volume_id) else { return };
+        if entry.reservation.as_ref().map(|r| r.op) != Some(op) {
+            return;
+        }
+        entry.reservation = None;
+        tracing::info!(
+            volume_id,
+            op,
+            "[CLAIMS] resolver released its reservation — no work left for this volume (F48)"
+        );
+        // Same GC rule as Drop: a holder-less, reservation-less entry with
+        // no live backoff has nothing left to remember.
+        let now = Instant::now();
+        if entry.holder.is_none() && !entry.reserve_backoff_until.map(|t| now < t).unwrap_or(false)
+        {
+            inner.remove(volume_id);
+        }
+    }
+
     /// Which operation currently holds `volume_id` and for how long.
     pub fn holder(&self, volume_id: &str) -> Option<(&'static str, Duration)> {
         self.inner
@@ -699,6 +728,60 @@ mod tests {
         );
         drop(held);
         // No reservation either: the maintainer's re-claim wins first-come.
+        assert!(claims.try_claim("vol", OP_CATCHUP).is_some());
+    }
+
+    /// F48 (runah 2.9 run A): hot-rejoin reserved, its standby was demoted
+    /// 12s later, and the idle reservation starved catch-up AND expansion
+    /// for the full TTL (~4 min observed). A resolver with no work must
+    /// hand the queue back immediately.
+    #[test]
+    fn released_reservation_frees_maintainers_immediately() {
+        let claims = wide();
+        let held = claims.try_claim("vol", OP_CATCHUP).expect("hold");
+        assert!(claims.try_claim("vol", OP_HOT_REJOIN).is_none()); // reserves
+        drop(held);
+        assert!(matches!(claims.denial("vol"), Some(Denial::Reserved { .. })));
+
+        // The resolver's next tick finds no work → releases.
+        claims.release_reservation("vol", OP_HOT_REJOIN);
+        assert!(
+            claims.try_claim("vol", OP_CATCHUP).is_some(),
+            "maintainer must claim immediately after the release — no TTL wait"
+        );
+    }
+
+    /// The release never touches someone else's reservation, and releasing
+    /// a volume with no entry is a no-op.
+    #[test]
+    fn release_reservation_is_owner_scoped() {
+        let claims = wide();
+        claims.release_reservation("never-claimed", OP_HOT_REJOIN); // no-op
+
+        let held = claims.try_claim("vol", OP_CATCHUP).expect("hold");
+        assert!(claims.try_claim("vol", OP_CUTOVER).is_none()); // cutover reserves
+        drop(held);
+        // A different resolver must not clear cutover's reservation.
+        claims.release_reservation("vol", OP_HOT_REJOIN);
+        assert!(
+            claims.try_claim("vol", OP_CATCHUP).is_none(),
+            "cutover's reservation must survive a foreign release"
+        );
+        claims.release_reservation("vol", OP_CUTOVER);
+        assert!(claims.try_claim("vol", OP_CATCHUP).is_some());
+    }
+
+    /// Releasing while a HOLDER exists clears only the reservation — the
+    /// holder (and its entry) stay.
+    #[test]
+    fn release_reservation_leaves_a_live_holder_alone() {
+        let claims = wide();
+        let held = claims.try_claim("vol", OP_CATCHUP).expect("hold");
+        assert!(claims.try_claim("vol", OP_HOT_REJOIN).is_none()); // reserves
+        claims.release_reservation("vol", OP_HOT_REJOIN);
+        assert_eq!(claims.holder("vol").map(|(op, _)| op), Some(OP_CATCHUP));
+        drop(held);
+        // With the reservation gone, first-come applies again.
         assert!(claims.try_claim("vol", OP_CATCHUP).is_some());
     }
 

@@ -986,6 +986,12 @@ async fn cutover_tick(
         match plan_cutover(&view, cfg) {
             CutoverDecision::Wait(reason) => {
                 debug!(volume_id, reason, "[CUTOVER] Waiting");
+                // F48: same reservation-release rule as hot-rejoin — a
+                // reservation posted while a bounce was needed must not
+                // outlive the need; idle reservations starve maintainers
+                // until the TTL lapse.
+                crate::volume_claims::global()
+                    .release_reservation(&volume_id, crate::volume_claims::OP_CUTOVER);
             }
             decision => {
                 // Shared per-volume claim (Tier-2 design item 4): never

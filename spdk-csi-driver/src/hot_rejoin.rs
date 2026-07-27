@@ -686,7 +686,28 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
     match rpc.spdk_rpc(src_node, &create).await {
         Ok(_) => {}
         Err(e) if is_already_exists(&e.to_string()) => {}
-        Err(e) => return Err(format!("E_f subsystem on {}: {}", src_node, e).into()),
+        Err(e) => {
+            // F48 (runah 2.9 run A): SPDK reports a DUPLICATE subsystem as
+            // the generic "-32603 Unable to create subsystem", which the
+            // textual already-exists matcher cannot recognize — a residual
+            // or concurrently-created E_f skeleton then failed the whole
+            // admission. Probe instead of parsing the message: if the
+            // subsystem exists now, creation is converged.
+            let exists = rpc
+                .spdk_rpc(src_node, &json!({ "method": "nvmf_get_subsystems" }))
+                .await
+                .ok()
+                .and_then(|resp| {
+                    resp.get("result").and_then(|r| r.as_array()).map(|subs| {
+                        subs.iter()
+                            .any(|s| s.get("nqn").and_then(|n| n.as_str()) == Some(nqn_ef.as_str()))
+                    })
+                })
+                .unwrap_or(false);
+            if !exists {
+                return Err(format!("E_f subsystem on {}: {}", src_node, e).into());
+            }
+        }
     }
     let host = json!({
         "method": "nvmf_subsystem_add_host",
@@ -2488,6 +2509,14 @@ async fn hot_rejoin_tick(
         match plan_hot_rejoin(&view, cfg) {
             HotRejoinDecision::Wait(reason) => {
                 tracing::debug!(volume_id, reason, "[HOT_REJOIN] Waiting");
+                // F48: if a reservation from an earlier tick still stands
+                // (posted while a standby existed) it must be released the
+                // moment the work is gone — the standby may have been
+                // demoted or admitted between ticks, and an idle
+                // reservation otherwise starves catch-up and expansion
+                // until the TTL lapse (~3-4 min observed live on runah).
+                crate::volume_claims::global()
+                    .release_reservation(&volume_id, crate::volume_claims::OP_HOT_REJOIN);
             }
             HotRejoinDecision::Rejoin => {
                 // Back off after a failed window — every attempt costs the
@@ -2952,6 +2981,16 @@ mod tests {
                 }
                 "nvmf_create_subsystem" => {
                     let nqn = params["nqn"].as_str().unwrap().to_string();
+                    // Faithful to SPDK: a duplicate create fails with the
+                    // GENERIC -32603 shape, not an "already exists" the
+                    // textual matcher would recognize (the F48 trap).
+                    if w.subsystems.contains_key(&(node_s.clone(), nqn.clone())) {
+                        return Err(format!(
+                            "SPDK RPC error: Code=-32603 Msg=Unable to create subsystem {}",
+                            nqn
+                        )
+                        .into());
+                    }
                     w.subsystems.entry((node_s.clone(), nqn)).or_default();
                     json!({ "result": true })
                 }
@@ -3451,6 +3490,32 @@ mod tests {
         drop(w);
 
         assert_eq!(store.events(), vec!["HotRejoinSucceeded", "HotRejoinLocalized"]);
+    }
+
+    /// F48 (runah 2.9 run A): a RESIDUAL E_f subsystem from an earlier
+    /// attempt makes `nvmf_create_subsystem` fail with SPDK's duplicate
+    /// shape ("-32603 Unable to create subsystem"), which the textual
+    /// already-exists matcher cannot recognize — the whole admission then
+    /// unwound and the standby was demoted to a full rebuild. The prestage
+    /// now probes the live subsystems and adopts the residue.
+    #[tokio::test]
+    async fn residual_ef_subsystem_does_not_fail_the_admission() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        {
+            // Residue on the source survivor: the E_f skeleton exists.
+            let mut w = rpc.world.lock().unwrap();
+            w.subsystems.entry(("node-a".into(), ef_export_nqn(VOL))).or_default();
+        }
+        let store = FakeStore::new(stale_b_record());
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, HotRejoinOutcome::Rejoined { .. }),
+            "residual E_f skeleton must be adopted, not fail the admission: {:?}",
+            out
+        );
     }
 
     /// `staged_world` where the survivor has ITSELF hot-rejoined: its live

@@ -510,6 +510,18 @@ impl NodeAgent {
             .and(self.with_node_agent(node_agent.clone()))
             .and_then(Self::handle_spdk_rpc);
 
+        // POST /api/exports/drop_local - Deregister-then-delete a flint
+        // volume export on this node (F49): the raw /api/spdk/rpc
+        // passthrough deletes the subsystem but cannot touch the
+        // loss-detector registry, so a registry-tracked NQN comes back
+        // within one 10s tick. NodeStage's local-claim cleanup goes
+        // through here instead.
+        let drop_local_export = warp::path!("api" / "exports" / "drop_local")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(self.with_node_agent(node_agent.clone()))
+            .and_then(Self::handle_drop_local_export);
+
         // POST /api/ublk/create_target - Create ublk target
         let ublk_create_target = warp::path!("api" / "ublk" / "create_target")
             .and(warp::post())
@@ -605,6 +617,7 @@ impl NodeAgent {
             .or(resize_lvol)
             .boxed()
             .or(spdk_rpc)
+            .or(drop_local_export)
             .or(ublk_create_target)
             .or(ublk_create)
             .or(ublk_delete)
@@ -1568,6 +1581,69 @@ impl NodeAgent {
         Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
     }
 
+    /// Handle POST /api/exports/drop_local — deregister-then-delete a flint
+    /// volume export on this node (F49). Registry removal comes FIRST so
+    /// the 10s loss-detector cannot resurrect the subsystem from a stale
+    /// entry between the delete and the caller's exclusive claim
+    /// (bdev_raid_create). No F9-style cross-node guard on purpose: the
+    /// caller is this node's own NodeStage local-claim path, which runs
+    /// only while this node is the volume's CSI-authorized consumer — any
+    /// live foreign controller on such an export is by definition a stale
+    /// consumer the fence already evicted. The only belt is the namespace
+    /// check: this endpoint deletes flint volume exports, nothing else.
+    async fn handle_drop_local_export(
+        request: serde_json::Value,
+        node_agent: Arc<NodeAgent>,
+    ) -> Result<impl Reply, Rejection> {
+        let Some(nqn) = request["nqn"].as_str() else {
+            let error_response = json!({ "success": false, "error": "Missing nqn" });
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&error_response),
+                StatusCode::BAD_REQUEST,
+            ));
+        };
+        if !nqn.starts_with(crate::identity::VOLUME_NQN_PREFIX) {
+            let error_response = json!({
+                "success": false,
+                "error": format!("refusing to drop non-flint-volume subsystem {}", nqn),
+            });
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&error_response),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+
+        let deregistered = node_agent.exported_targets.lock().await.remove(nqn).is_some();
+
+        let delete_params = json!({
+            "method": crate::guarded_destroy::RPC_NVMF_DELETE_SUBSYSTEM,
+            "params": { "nqn": nqn }
+        });
+        let deleted = match node_agent.disk_service.call_spdk_rpc(&delete_params).await {
+            Ok(_) => true,
+            Err(e) => {
+                let msg = e.to_string();
+                if crate::epoch_scheduler::is_missing(&msg) {
+                    false // already gone — the deregistration was the point
+                } else {
+                    warn!(nqn = %nqn, error = %msg, "[HTTP_API] drop_local export delete failed");
+                    let error_response = json!({
+                        "success": false,
+                        "deregistered": deregistered,
+                        "error": format!("nvmf_delete_subsystem {}: {}", nqn, msg),
+                    });
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&error_response),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    ));
+                }
+            }
+        };
+        info!(nqn = %nqn, deregistered, deleted, "[HTTP_API] Local export dropped (F49)");
+        let response = json!({ "success": true, "deregistered": deregistered, "deleted": deleted });
+        Ok(warp::reply::with_status(warp::reply::json(&response), StatusCode::OK))
+    }
+
     /// Handle POST /api/blockdev/delete_nvmeof - Delete NVMe-oF block device
     async fn handle_blockdev_delete_nvmeof(
         request: serde_json::Value,
@@ -1603,8 +1679,34 @@ impl NodeAgent {
         // F8 rehydration); a deleted live one is a cross-node data-plane
         // kill — and just fence this node out.
         let own_host = crate::nvmeof_export::flint_host_nqn(&node_agent.node_name);
+        // F47 (§4b): a subsystem whose every listener is loopback has
+        // exactly one possible consumer — this node — so its own unstage
+        // may delete it regardless of VA ownership. The cross-node
+        // reasoning below exists for remote-consumable exports; applying
+        // it to the loopback left an empty bare-inner shell (with this
+        // node fenced out of it) on every RWX server node that unstaged
+        // after a cutover (docs/f47-loopback-export-teardown-domain.md).
+        // Only literal loopback addresses qualify: not provably
+        // local-only ⇒ the guard stays.
+        let mut local_only = false;
+        if let Ok(resp) = node_agent
+            .disk_service
+            .call_spdk_rpc(&json!({ "method": "nvmf_get_subsystems" }))
+            .await
+        {
+            if let Some(sub) = resp.get("result").and_then(|r| r.as_array()).and_then(|subs| {
+                subs.iter().find(|s| s.get("nqn").and_then(|n| n.as_str()) == Some(nqn))
+            }) {
+                local_only = crate::nvmeof_export::subsystem_is_local_only(sub);
+                if local_only {
+                    debug!(nqn = %nqn,
+                        "[HTTP_API] F9 guard bypassed: subsystem listens on loopback only (F47) — this node is its only possible consumer");
+                }
+            }
+        }
         let mut foreign_reason: Option<String> = None;
         // (a) live controllers on the subsystem from another host?
+        if !local_only {
         if let Ok(resp) = node_agent
             .disk_service
             .call_spdk_rpc(&json!({
@@ -1661,6 +1763,7 @@ impl NodeAgent {
                 }
             }
         }
+        } // !local_only (F47)
         if let Some(reason) = foreign_reason {
             warn!(nqn = %nqn, reason = %reason,
                 "[HTTP_API] F9 guard: subsystem is serving another consumer — skipping delete, fencing this node out");
@@ -2447,9 +2550,24 @@ impl NodeAgent {
         let subs = resp.get("result").and_then(|r| r.as_array()).cloned().unwrap_or_default();
         let mut seeded = 0usize;
         let mut reg = self.exported_targets.lock().await;
+        let (local_ip, _) = Self::local_export_endpoint();
         for s in &subs {
             let Some(nqn) = s.get("nqn").and_then(|n| n.as_str()) else { continue };
             if !nqn.starts_with(FLINT_VOLUME_NQN_PREFIX) {
+                continue;
+            }
+            // F49: the registry's domain is kernel-facing LOOPBACK exports
+            // only. Replica-family exports are pass-owned (see the note in
+            // setup_nvmeof_target_for_replica); adopting one here turns the
+            // 10s detector into a resurrection loop against NodeStage's
+            // local-claim cleanup (drop_stale_local_exports), wedging RWX
+            // assembly at EPERM forever. The listener check keeps out the
+            // OTHER pass-owned family with the same hazard shape:
+            // storage-side exports for cross-node consumers listen on the
+            // node IP, and the detector would re-create them with stable-ns
+            // loopback semantics that are wrong for them (rehydrate-pass
+            // note at the storage_node branch).
+            if crate::identity::is_replica_export_nqn(nqn) {
                 continue;
             }
             // Reconstruct the re-export params from the live subsystem.
@@ -2471,6 +2589,9 @@ impl NodeAgent {
                 .and_then(|t| t.as_str())
                 .and_then(|t| t.parse::<u16>().ok());
             if let (Some(bdev_name), Some(traddr), Some(trsvcid)) = (bdev_name, traddr, trsvcid) {
+                if traddr != local_ip {
+                    continue; // non-loopback listener: pass-owned, never registry
+                }
                 reg.insert(
                     nqn.to_string(),
                     TargetExport {
@@ -3733,6 +3854,35 @@ impl NodeAgent {
                 .as_ref()
                 .map(|r| r.live_lvol_uuid().to_string())
                 .unwrap_or_else(|| local_replica.lvol_uuid.clone());
+
+            // F49: when this node is ALSO the volume's consumer, the raid
+            // claims the leg lvol directly (attach_replica_base's LOCAL
+            // branch) — no leg export may exist. Minting one here (fenced
+            // to ourselves — a local consumer uses the raw bdev, never
+            // nvme-tcp to self) parks a write-mode namespace claim on the
+            // lvol that fails bdev_raid_create with EPERM, and re-minting
+            // it every tick turns NodeStage's stale-export drop into a
+            // permanent assembly wedge (post-cutover server-on-leg-node,
+            // docs/f49-local-leg-export-squatter.md). Tear down any
+            // squatter instead. VA errors fail closed above (attached_node
+            // = None): that tick neither mints nor tears down.
+            if attached_node.as_deref() == Some(self.node_name.as_str()) {
+                match self.teardown_local_leg_export(&spdk_id, replica_index).await {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        warn!(volume_id, replica_index, removed = n,
+                            "[RECONCILE] Removed consumer-local leg export(s) (F49) — the raid consumes this leg directly");
+                    }
+                    Err(e) => {
+                        error!(volume_id, error = %e,
+                            "[RECONCILE] Failed to remove consumer-local leg export (F49)");
+                        error_count += 1;
+                        continue;
+                    }
+                }
+                skip_count += 1;
+                continue;
+            }
 
             // Verify the lvol exists locally
             match self.verify_local_lvol(&live_uuid).await {
@@ -5361,6 +5511,53 @@ impl NodeAgent {
             "[RECONCILE] Deleted phantom raid claiming local replica (§3 hygiene)"
         );
         Ok(())
+    }
+
+    /// F49: delete this node's leg export for `volume_id`/`replica_index`
+    /// in BOTH id domains (canonical inner + pre-F46 legacy wrapper),
+    /// deregistering each NQN from the loss-detector registry FIRST so the
+    /// 10s detector cannot re-mint it from a stale entry. The registry
+    /// should never hold leg NQNs at all (`seed_exported_nqns_from_spdk`
+    /// filters them), but a process that adopted one before that filter
+    /// existed may still be mid-flight. Returns the number of subsystems
+    /// actually deleted.
+    async fn teardown_local_leg_export(
+        &self,
+        volume_id: &str,
+        replica_index: usize,
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let candidates = [
+            crate::identity::replica_export_nqn(volume_id, replica_index),
+            crate::identity::legacy_replica_export_nqn(volume_id, replica_index),
+        ];
+        let resp = self
+            .disk_service
+            .call_spdk_rpc(&json!({ "method": "nvmf_get_subsystems" }))
+            .await?;
+        let live: std::collections::HashSet<&str> = resp
+            .get("result")
+            .and_then(|r| r.as_array())
+            .map(|subs| {
+                subs.iter().filter_map(|s| s.get("nqn").and_then(|n| n.as_str())).collect()
+            })
+            .unwrap_or_default();
+        let mut removed = 0usize;
+        for nqn in candidates {
+            // Deregister unconditionally — a registry entry can outlive its
+            // subsystem — but delete only what exists.
+            self.exported_targets.lock().await.remove(&nqn);
+            if !live.contains(nqn.as_str()) {
+                continue;
+            }
+            self.disk_service
+                .call_spdk_rpc(&json!({
+                    "method": crate::guarded_destroy::RPC_NVMF_DELETE_SUBSYSTEM,
+                    "params": { "nqn": nqn }
+                }))
+                .await?;
+            removed += 1;
+        }
+        Ok(removed)
     }
 
     /// `bdev_name` is the live head to export — the identity uuid unless a

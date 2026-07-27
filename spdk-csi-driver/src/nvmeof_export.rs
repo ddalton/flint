@@ -46,6 +46,28 @@ pub fn fencing_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// F47 (§4b): true when every listener of a live subsystem is a loopback
+/// address — such a subsystem has exactly ONE possible consumer, the node
+/// it lives on, so that node's own unstage may delete it regardless of
+/// cross-node VolumeAttachment ownership (the F9 guard's reasoning exists
+/// for remote-consumable exports). A subsystem with NO listeners is
+/// unreachable by anyone and counts as local-only too: deletion cannot
+/// sever a consumer that cannot connect. Listener entries may carry the
+/// address flat or nested under "address" (SPDK version differences —
+/// same tolerance as the loss-detector's seed pass).
+pub fn subsystem_is_local_only(subsystem: &serde_json::Value) -> bool {
+    let Some(listeners) = subsystem.get("listen_addresses").and_then(|l| l.as_array()) else {
+        return true;
+    };
+    listeners.iter().all(|l| {
+        let addr = l.get("address").unwrap_or(l);
+        matches!(
+            addr.get("traddr").and_then(|t| t.as_str()),
+            Some("127.0.0.1") | Some("::1")
+        )
+    })
+}
+
 /// Desired state of one replica/volume export.
 pub struct ExportSpec<'a> {
     pub nqn: &'a str,
@@ -979,5 +1001,59 @@ mod tests {
         let nqn = resolve_replica_export_nqn(&rpc, VOL, 1, HEAD, &[]).await.unwrap();
         assert_eq!(nqn, crate::identity::replica_export_nqn(VOL, 1));
         assert!(rpc.deletes.lock().unwrap().is_empty(), "foreign ns must survive");
+    }
+
+    // ── F47: local-only subsystem detection (F9 guard exception) ────────
+
+    /// A subsystem whose every listener is loopback is deletable by its own
+    /// node's unstage regardless of VA ownership; any remote listener keeps
+    /// the guard. Both SPDK listener encodings (flat and nested under
+    /// "address") must be understood, and no listeners at all counts as
+    /// local-only (nobody can be severed).
+    #[test]
+    fn local_only_subsystem_detection() {
+        let flat = serde_json::json!({
+            "nqn": "nqn.x",
+            "listen_addresses": [{ "trtype": "TCP", "traddr": "127.0.0.1", "trsvcid": "4420" }]
+        });
+        assert!(subsystem_is_local_only(&flat));
+
+        let nested = serde_json::json!({
+            "nqn": "nqn.x",
+            "listen_addresses": [{ "address": { "traddr": "127.0.0.1" }, "trtype": "TCP" }]
+        });
+        assert!(subsystem_is_local_only(&nested));
+
+        let v6 = serde_json::json!({
+            "nqn": "nqn.x",
+            "listen_addresses": [{ "traddr": "::1" }]
+        });
+        assert!(subsystem_is_local_only(&v6));
+
+        let remote = serde_json::json!({
+            "nqn": "nqn.x",
+            "listen_addresses": [{ "traddr": "172.31.15.167" }]
+        });
+        assert!(!subsystem_is_local_only(&remote));
+
+        // Mixed: one remote listener makes it remote-consumable.
+        let mixed = serde_json::json!({
+            "nqn": "nqn.x",
+            "listen_addresses": [{ "traddr": "127.0.0.1" }, { "traddr": "10.0.0.7" }]
+        });
+        assert!(!subsystem_is_local_only(&mixed));
+
+        // No listeners (empty or missing key): unreachable, local-only.
+        let empty = serde_json::json!({ "nqn": "nqn.x", "listen_addresses": [] });
+        assert!(subsystem_is_local_only(&empty));
+        let missing = serde_json::json!({ "nqn": "nqn.x" });
+        assert!(subsystem_is_local_only(&missing));
+
+        // A listener with no readable traddr is NOT provably loopback.
+        let unreadable = serde_json::json!({
+            "nqn": "nqn.x",
+            "listen_addresses": [{ "trtype": "TCP" }]
+        });
+        assert!(!subsystem_is_local_only(&unreadable));
     }
 }

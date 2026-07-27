@@ -713,6 +713,52 @@ pub fn classify_subsystem_nqn(nqn: &str) -> Option<String> {
     }
 }
 
+/// The loopback-subsystem NQNs NodeUnstage's lost-cleanup-data belt must
+/// sweep for a staged handle, both id domains (F47, the loopback edition of
+/// F44's `per_replica_controller_prefixes`): the loopback family is
+/// uniformly INNER-minted at stage (`create_nvmeof_block_device` keys on
+/// the storage id), while teardown is keyed on the STAGED handle — so a
+/// single staged-domain derivation was a silent wrong-domain no-op on
+/// every RWX server node (docs/f47-loopback-export-teardown-domain.md §3c).
+/// For RWO the domains collapse and this returns one NQN.
+pub fn loopback_teardown_nqns(staged_volume_id: &str) -> Vec<String> {
+    let staged = volume_nqn(staged_volume_id);
+    let inner = volume_nqn(storage_id_of_handle(staged_volume_id));
+    if inner == staged {
+        vec![staged]
+    } else {
+        vec![staged, inner]
+    }
+}
+
+/// True when a subsystem NQN is a replica-family export: a leg
+/// (`…:volume:<id>_<i>`, canonical inner or legacy wrapper id), an alias
+/// (`…:volume:<id>:replica:<i>`), or a localization pad
+/// (`…:volume:<id>_hrpad<i>`). These are consumed by a remote SPDK raid
+/// and owned by the replica reconcile / catch-up / hot-rejoin passes —
+/// NEVER by the kernel-facing loopback registry: the #1 loss-detector
+/// re-creates registry entries with stable-ns loopback semantics (wrong
+/// for legs), and a registry-resurrected leg export claims the lvol
+/// against its own raid's assembly (F49,
+/// docs/f49-local-leg-export-squatter.md).
+pub fn is_replica_export_nqn(nqn: &str) -> bool {
+    let Some(rest) = nqn.strip_prefix(VOLUME_NQN_PREFIX) else {
+        return false;
+    };
+    if rest.contains(":replica:") {
+        return true;
+    }
+    if strip_hrpad_suffix(rest) != rest {
+        return true;
+    }
+    match rest.rsplit_once('_') {
+        Some((id, idx)) => {
+            !id.is_empty() && !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
 /// `<vol>_replica_<i>` → `<vol>` (replica volume ids embed their owner).
 /// Also the hot-rejoin head shape `<vol>_replica_<i>_hr` (Tier-2 7b-1's
 /// esnap-clone head lvol): the live run 2026-07-02 caught the sweep
@@ -1265,5 +1311,40 @@ mod tests {
                 None => assert_eq!(legacy, "unknown"),
             }
         }
+    }
+
+    /// F49: the loss-detector registry must never adopt replica-family
+    /// exports — this predicate is the seed's filter, so every shape a leg
+    /// export can take must classify true and every loopback shape false.
+    #[test]
+    fn replica_export_nqn_classifier_covers_every_leg_shape() {
+        // Leg exports, canonical (inner) and legacy (wrapper) domains.
+        assert!(is_replica_export_nqn(&replica_export_nqn(VOL, 0)));
+        assert!(is_replica_export_nqn(&replica_export_nqn(VOL, 12)));
+        assert!(is_replica_export_nqn(&legacy_replica_export_nqn(VOL, 1)));
+        assert!(is_replica_export_nqn(&replica_export_nqn(&backing_handle(VOL), 1)));
+        // Alias and pad shapes.
+        assert!(is_replica_export_nqn(&replica_alias_nqn(VOL, 2)));
+        assert!(is_replica_export_nqn(&volume_nqn(&hrpad_export_id(VOL, 3))));
+        // Loopback/consumer exports — the registry's legitimate domain.
+        assert!(!is_replica_export_nqn(&volume_nqn(VOL)));
+        assert!(!is_replica_export_nqn(&volume_nqn(&backing_handle(VOL))));
+        // Not flint volume NQNs at all.
+        assert!(!is_replica_export_nqn(&hotrejoin_export_nqn(VOL)));
+        assert!(!is_replica_export_nqn("nqn.2014-08.org.nvmexpress:uuid:whatever"));
+    }
+
+    /// F47: NodeUnstage's lost-cleanup-data belt must sweep the loopback
+    /// NQN in BOTH id domains for a wrapper-staged (RWX) volume — the mint
+    /// is inner-domain, so the staged-only derivation was a silent no-op —
+    /// and exactly one for RWO where the domains collapse.
+    #[test]
+    fn loopback_teardown_sweeps_both_domains_for_wrapper_handles() {
+        let rwo = loopback_teardown_nqns(VOL);
+        assert_eq!(rwo, vec![volume_nqn(VOL)]);
+
+        let staged = backing_handle(VOL); // "nfs-server-<pv>"
+        let rwx = loopback_teardown_nqns(&staged);
+        assert_eq!(rwx, vec![volume_nqn(&staged), volume_nqn(VOL)]);
     }
 }

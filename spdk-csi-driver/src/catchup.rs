@@ -983,6 +983,28 @@ pub(crate) async fn list_lvol_names(
         .unwrap_or_default())
 }
 
+/// A live consumer of a stale head found by [`head_live_consumer`]: the
+/// exporting subsystem on the replica's node and the host NQNs holding
+/// live controllers on it. F48 needs the structure (not just a message)
+/// to ask, per host, whether the connection actually backs a configured
+/// raid base or is a zombie left behind when the raid dropped the slot.
+#[derive(Debug, Clone)]
+pub(crate) struct HeadConsumer {
+    pub nqn: String,
+    pub hosts: Vec<String>,
+}
+
+impl HeadConsumer {
+    pub fn describe(&self) -> String {
+        format!(
+            "subsystem {} exports this head to {} live controller(s): {}",
+            self.nqn,
+            self.hosts.len(),
+            self.hosts.join(", ")
+        )
+    }
+}
+
 /// F36 guard (runz 3.6, 2026-07-21, P0): is the stale head being SERVED
 /// right now? The §5/§9-5 safety argument ("a stale replica's unique
 /// data is only its unacked tail") collapses the moment a degraded
@@ -996,7 +1018,7 @@ pub(crate) async fn head_live_consumer(
     rpc: &dyn CatchupRpc,
     node: &str,
     head_ids: &[&str],
-) -> Result<Option<String>, RpcError> {
+) -> Result<Option<HeadConsumer>, RpcError> {
     let subs = rpc
         .spdk_rpc(node, &json!({ "method": "nvmf_get_subsystems" }))
         .await?;
@@ -1036,15 +1058,56 @@ pub(crate) async fn head_live_consumer(
             })
             .unwrap_or_default();
         if !hosts.is_empty() {
-            return Ok(Some(format!(
-                "subsystem {} exports this head to {} live controller(s): {}",
-                nqn,
-                hosts.len(),
-                hosts.join(", ")
-            )));
+            return Ok(Some(HeadConsumer { nqn: nqn.to_string(), hosts }));
         }
     }
     Ok(None)
+}
+
+/// F48 (runah 2.9 run A): among a [`HeadConsumer`]'s hosts, the ones
+/// PROVEN to be zombies — flint-node controllers whose node has no
+/// configured raid base backed by this head (neither by the deterministic
+/// remote base bdev name for this subsystem nor by any head id). SPDK
+/// nulls a failed slot's name and uuid but never detaches the initiator
+/// controller, so the dead connection pins the head against every rebuild
+/// (the F36 defer fires forever, `is_configured:false` the whole time).
+/// Returns `(node, controller_name)` pairs to sever. Empty means "treat
+/// as genuine": any non-flint host, any host whose node shows a matching
+/// configured base, and any probe error all fail closed to the defer.
+pub(crate) async fn zombie_head_consumers(
+    rpc: &dyn CatchupRpc,
+    consumer: &HeadConsumer,
+    head_ids: &[&str],
+) -> Result<Vec<(String, String)>, RpcError> {
+    let controller = crate::identity::initiator_controller_name(&consumer.nqn);
+    let base_bdev = format!("{}n1", controller);
+    let mut zombies = Vec::new();
+    for host in &consumer.hosts {
+        let Some(node) = host.strip_prefix(crate::nvmeof_export::FLINT_HOST_NQN_PREFIX) else {
+            return Ok(Vec::new()); // not ours to reason about — genuine
+        };
+        let raids = get_raids(rpc, node).await?;
+        let genuine = raids.iter().any(|raid| {
+            raid.get("base_bdevs_list")
+                .and_then(|b| b.as_array())
+                .map(|bases| {
+                    bases.iter().any(|b| {
+                        b.get("is_configured").and_then(|c| c.as_bool()).unwrap_or(false)
+                            && [b.get("name"), b.get("uuid")].iter().any(|v| {
+                                v.and_then(|x| x.as_str())
+                                    .map(|s| s == base_bdev || head_ids.contains(&s))
+                                    .unwrap_or(false)
+                            })
+                    })
+                })
+                .unwrap_or(false)
+        });
+        if genuine {
+            return Ok(Vec::new()); // a real consumer exists — sever nothing
+        }
+        zombies.push((node.to_string(), controller.clone()));
+    }
+    Ok(zombies)
 }
 
 /// §5 step 0: revert the head to the replica's own `base_alias` snapshot —
@@ -1683,6 +1746,48 @@ async fn catchup_stale(
     ];
     match head_live_consumer(rpc, &identity.node_name, &head_ids).await {
         Ok(Some(consumer)) => {
+            // F48 (runah 2.9 run A): before deferring, distinguish a GENUINE
+            // consumer — a controller whose node holds a configured raid
+            // base on this head, the degraded assembly F36 exists to
+            // protect — from a ZOMBIE controller its raid already dropped
+            // (slot nulled, is_configured:false, connection never
+            // detached). A zombie pins the head FOREVER: every tick
+            // defers, nothing ever detaches it, the volume sits at 1/2.
+            // Sever proven zombies now, then still defer THIS tick (fail
+            // closed against a same-tick attach race); the next tick finds
+            // the head clean and rebuilds. Any probe error, non-flint
+            // host, or matching configured base keeps the plain defer.
+            let zombies = match zombie_head_consumers(rpc, &consumer, &head_ids).await {
+                Ok(z) => z,
+                Err(e) => {
+                    debug!(volume_id, error = %e,
+                        "[CATCHUP] zombie-consumer probe failed — treating consumer as genuine (fail closed)");
+                    Vec::new()
+                }
+            };
+            if !zombies.is_empty() {
+                for (node, controller) in &zombies {
+                    warn!(volume_id, node = %node, controller = %controller,
+                        "[CATCHUP] severing zombie consumer of stale head — controller backs no configured raid base (F48)");
+                    detach_controller(rpc, node, controller).await;
+                }
+                store
+                    .emit(
+                        volume_id,
+                        "Warning",
+                        "ReplicaHeadZombieConsumerSevered",
+                        &format!(
+                            "Stale replica {} on {} was pinned by {} dead controller connection(s) \
+                             backing no raid slot; severed — rebuild resumes next cycle (F48)",
+                            rec.lvol_uuid,
+                            identity.node_name,
+                            zombies.len()
+                        ),
+                    )
+                    .await;
+                return Ok(());
+            }
+            let consumer = consumer.describe();
             warn!(volume_id, node = %identity.node_name, %consumer,
                 "[CATCHUP] stale head is LIVE-CONSUMED — rebuild deferred (F36)");
             store
@@ -4956,7 +5061,10 @@ mod tests {
         };
         // match by uuid
         let hit = head_live_consumer(&rpc, "node-b", &["head-uuid-live"]).await.unwrap();
-        assert!(hit.as_deref().unwrap_or("").contains("aws-3"), "got {hit:?}");
+        let hit = hit.expect("consumer detected");
+        assert!(hit.describe().contains("aws-3"), "got {}", hit.describe());
+        assert_eq!(hit.nqn, "nqn.2024-11.com.flint:volume:vol1_1");
+        assert_eq!(hit.hosts, vec!["nqn.2024-11.com.flint:node:aws-3"]);
         // match by alias
         let hit = head_live_consumer(&rpc, "node-b", &["lvs0/lvol-b"]).await.unwrap();
         assert!(hit.is_some());
@@ -4981,5 +5089,139 @@ mod tests {
             .collect(),
         };
         assert!(head_live_consumer(&rpc, "node-b", &["head-uuid-live"]).await.unwrap().is_none());
+    }
+
+    // ── F48: zombie-consumer discrimination ─────────────────────────────
+
+    /// Serves `bdev_raid_get_bdevs` to any node; everything else panics.
+    struct RaidsMock {
+        raids: Value,
+    }
+
+    #[async_trait]
+    impl CatchupRpc for RaidsMock {
+        async fn spdk_rpc(&self, _node: &str, payload: &Value) -> Result<Value, RpcError> {
+            match payload["method"].as_str().unwrap_or("") {
+                "bdev_raid_get_bdevs" => Ok(json!({ "result": self.raids })),
+                m => panic!("unexpected rpc {m}"),
+            }
+        }
+        async fn export_replica(
+            &self,
+            _node: &str,
+            _bdev_name: &str,
+            _volume_id: &str,
+            _replica_index: usize,
+            _consumer_node: &str,
+        ) -> Result<NvmeofConnectionInfo, RpcError> {
+            unreachable!("probe never exports")
+        }
+        async fn export_pad(
+            &self,
+            _node: &str,
+            _bdev_name: &str,
+            _volume_id: &str,
+            _replica_index: usize,
+            _consumer_node: &str,
+        ) -> Result<NvmeofConnectionInfo, RpcError> {
+            unreachable!("probe never exports")
+        }
+    }
+
+    fn f48_consumer() -> HeadConsumer {
+        HeadConsumer {
+            nqn: crate::identity::replica_export_nqn("vol1", 0),
+            hosts: vec!["nqn.2024-11.com.flint:node:aws-3".to_string()],
+        }
+    }
+
+    /// Run A's exact shape: the consumer node's raid dropped the slot
+    /// (SPDK nulls name/uuid, is_configured:false) but the controller was
+    /// never detached — that connection is a zombie, and severing it is
+    /// what un-wedges the rebuild.
+    #[tokio::test]
+    async fn f48_slotless_controller_is_a_zombie() {
+        let rpc = RaidsMock {
+            raids: json!([{
+                "name": "raid_vol1", "state": "online",
+                "base_bdevs_list": [
+                    { "name": null, "uuid": null, "is_configured": false },
+                    { "name": "some-other-leg-uuid", "uuid": "some-other-leg-uuid", "is_configured": true }
+                ]
+            }]),
+        };
+        let consumer = f48_consumer();
+        let zombies =
+            zombie_head_consumers(&rpc, &consumer, &["head-uuid-live"]).await.unwrap();
+        assert_eq!(
+            zombies,
+            vec![(
+                "aws-3".to_string(),
+                crate::identity::initiator_controller_name(&consumer.nqn)
+            )]
+        );
+    }
+
+    /// The genuine F36 case: the consumer's raid HAS a configured base for
+    /// this head (matched by the deterministic remote-base bdev name) — no
+    /// zombies, the defer must stand.
+    #[tokio::test]
+    async fn f48_configured_base_is_a_genuine_consumer() {
+        let consumer = f48_consumer();
+        let base = format!("{}n1", crate::identity::initiator_controller_name(&consumer.nqn));
+        let rpc = RaidsMock {
+            raids: json!([{
+                "name": "raid_vol1", "state": "online",
+                "base_bdevs_list": [{ "name": base, "uuid": "u1", "is_configured": true }]
+            }]),
+        };
+        assert!(zombie_head_consumers(&rpc, &consumer, &["head-uuid-live"])
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A configured base matching a HEAD id (local consumption after a
+    /// revert) is genuine too.
+    #[tokio::test]
+    async fn f48_head_id_base_match_is_genuine() {
+        let rpc = RaidsMock {
+            raids: json!([{
+                "name": "raid_vol1", "state": "online",
+                "base_bdevs_list": [{ "name": "head-uuid-live", "uuid": "head-uuid-live", "is_configured": true }]
+            }]),
+        };
+        assert!(zombie_head_consumers(&rpc, &f48_consumer(), &["head-uuid-live"])
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// No raids on the consumer node at all: the connection backs nothing.
+    #[tokio::test]
+    async fn f48_no_raids_means_zombie() {
+        let rpc = RaidsMock { raids: json!([]) };
+        assert_eq!(
+            zombie_head_consumers(&rpc, &f48_consumer(), &["head-uuid-live"])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// A non-flint host NQN is not ours to reason about — never a zombie,
+    /// the defer stands (fail closed).
+    #[tokio::test]
+    async fn f48_non_flint_host_is_genuine() {
+        let rpc = RaidsMock { raids: json!([]) };
+        let consumer = HeadConsumer {
+            nqn: crate::identity::replica_export_nqn("vol1", 0),
+            hosts: vec!["nqn.2014-08.org.nvmexpress:uuid:kernel-initiator".to_string()],
+        };
+        assert!(zombie_head_consumers(&rpc, &consumer, &["head-uuid-live"])
+            .await
+            .unwrap()
+            .is_empty());
     }
 }
