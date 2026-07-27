@@ -15,7 +15,7 @@ images:
   repository: dilipdalton  # Docker Hub registry
   flintCsiDriver:
     name: flint-driver      # CSI Driver binary (supports controller and node modes via CSI_MODE env var)
-    tag: "1.19.0"           # The attach/detach-robustness release: F36c freshness gate + F38 self-fencing veto + F39 claim-visibility (waves 1+2) — plus F40 RWX re-placement dispatch, F41 stale-VA restage read, F42 bounded raid-leg I/O (fast_io_fail — a dead storage node faults its leg instead of stalling the raid), and hot-rejoin default-ON (redundancy auto-restores after node loss). RWO node-loss self-heal live-validated (runad drill 2.5, zero acked loss). Known gap: RWX numReplicas>=2 re-placement admission (F43, deferred v1.20.0 — see docs/f43-rwx-replacement-admission.md)
+    tag: "1.20.0"           # The RWX replacement-admission release: F43 CLOSED — leased+arbitrated controller claims let cutover win the claim from catch-up, so an RWX numReplicas>=2 volume actually restores redundancy after a leg node dies (v1.19.0's known gap). Plus the cutover-residue family F44/F45/F46: the replica-leg export identity domain is now unified (inner storage id everywhere, adopt-or-mint transition belt), teardown retires empty leg-export shells, the F36c defer bound re-arms only on real progress, and flint.io/assembly-blocked reports assembly liveness separately from in_sync. Live-validated end to end (runag drill 3.6e: one cutover bounce, raid 2/2, zero acked loss)
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (SPDK v26.05)
