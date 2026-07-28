@@ -89,6 +89,22 @@
 (* order, retention relink) live in FlintSnapshots.tla, where they are     *)
 (* non-trivial; here content is a write-set and epochCut a single cut.     *)
 (*                                                                         *)
+(* S2 / R2 CLAIM ARBITRATION (the F43 machinery, modeled ahead of the      *)
+(* S2 bounce-free-RWX-admission implementation): control work runs under   *)
+(* a per-volume claim — "catchup" (reconcile/build/scrub) or "admission"   *)
+(* (the cutover/hot-rejoin window that admits a warm standby).  F43 was    *)
+(* a LIVENESS bug: catch-up's timer-driven claim renewal always beat the   *)
+(* admission claim to the lock, so a warm replacement standby PARKED       *)
+(* forever.  The fix (ClaimArb) is PRIORITY, not stronger fairness:        *)
+(* catch-up may not (re)acquire while a warm standby awaits admission —    *)
+(* which turns admission's enabling from intermittent (a race it can       *)
+(* lose forever under weak fairness) into continuous (weak fairness       *)
+(* fires it).  AdmissionNotStarved is the theorem; ClaimArb = FALSE is    *)
+(* the pre-F43 bug and the F43 mutation run must find the starvation      *)
+(* lasso.  Claims are leased: holder death frees the claim (ExpireClaim,   *)
+(* budgeted as a failure event).  The model does not track holder          *)
+(* identity — a real lease TTL guarantees what the conflation assumes.     *)
+(*                                                                         *)
 (* Out of scope: esnap-window INTERNALS (crash inside catch-up/scrub is    *)
 (* the crash-sweep sim harness's job — here those steps are atomic);       *)
 (* identity domains (killed at compile time by the newtypes).              *)
@@ -101,7 +117,8 @@ CONSTANTS
   MaxCrashes,  \* bound on failure events (die/blackhole/crash/partition/torn)
   GateStrict,  \* TRUE = F36c gate on; FALSE = pre-F36c bug (must fail)
   RejoinGuard, \* TRUE = hot-rejoin shared-base ancestry check on
-  FenceZombie  \* TRUE = assembly severs the previous head first (F48 fix)
+  FenceZombie, \* TRUE = assembly severs the previous head first (F48 fix)
+  ClaimArb     \* TRUE = admission-priority claim arbitration (F43 fix)
 
 VARIABLES
   \* ---- data plane -------------------------------------------------------
@@ -119,10 +136,11 @@ VARIABLES
   state,         \* [Legs -> {"insync", "stale", "standby"}]
   writerSet,     \* SUBSET Legs — recorded serving-assembly membership
   epochCut,      \* SUBSET 1..MaxWrites — content captured at the last cut
+  claim,         \* {"none", "catchup", "admission"} — the R2 volume claim
   crashes        \* failure budget spent
 
 vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
-          lineage, riskSurfaced, state, writerSet, epochCut, crashes>>
+          lineage, riskSurfaced, state, writerSet, epochCut, claim, crashes>>
 
 TypeOK ==
   /\ serving \subseteq Legs
@@ -138,12 +156,27 @@ TypeOK ==
   /\ state \in [Legs -> {"insync", "stale", "standby"}]
   /\ writerSet \subseteq Legs
   /\ epochCut \subseteq 1..MaxWrites
+  /\ claim \in {"none", "catchup", "admission"}
   /\ crashes \in 0..MaxCrashes
 
 UpInSync == {l \in Legs : state[l] = "insync" /\ legUp[l] = "up"}
 
 \* SPDK examine over an attached set: only the newest generation serves.
 NewestOf(A) == {l \in A : \A m \in A : legGen[l] >= legGen[m]}
+
+\* A warm standby awaits admission: caught up, its node live, a serving
+\* source available, and (with the ancestry check on) actually admittable.
+\* This is the predicate the F43 arbitration pivots on — catch-up must
+\* yield exactly when this is true.
+WarmWaiting ==
+  \E l \in Legs :
+    /\ state[l] = "standby"
+    /\ legUp[l] = "up"
+    /\ epochCut \subseteq legData[l]
+    /\ serving # {}
+    /\ \E src \in serving :
+         /\ legUp[src] = "up"
+         /\ (RejoinGuard => legData[l] \subseteq legData[src])
 
 Init ==
   /\ serving = Legs
@@ -159,6 +192,7 @@ Init ==
   /\ state = [l \in Legs |-> "insync"]
   /\ writerSet = Legs
   /\ epochCut = {}
+  /\ claim = "none"
   /\ crashes = 0
 
 (***************************************************************************)
@@ -179,7 +213,7 @@ Write ==
   /\ lineage' = lineage \cup {nextWrite}
   /\ nextWrite' = nextWrite + 1
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, riskSurfaced,
-                 state, writerSet, epochCut, crashes>>
+                 state, writerSet, epochCut, claim, crashes>>
 
 \* The head crashes between replicating a block and acking the client: the
 \* block lands on SOME serving legs, the client never hears.  Either outcome
@@ -199,7 +233,7 @@ WriteTorn ==
   /\ serving' = {}
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<zombie, legUp, raidGen, legGen, acked, lineage,
-                 riskSurfaced, state, writerSet, epochCut>>
+                 riskSurfaced, state, writerSet, epochCut, claim>>
 
 \* The F48 zombie: the partitioned old head still holds its leg
 \* connections and still acks client writes.  It writes OUTSIDE the
@@ -215,7 +249,7 @@ ZombieWrite ==
   /\ acked' = acked \cup {nextWrite}
   /\ nextWrite' = nextWrite + 1
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, lineage,
-                 riskSurfaced, state, writerSet, epochCut, crashes>>
+                 riskSurfaced, state, writerSet, epochCut, claim, crashes>>
 
 \* Verified death straight away (terminated AND observed so).
 LegDie(l) ==
@@ -224,7 +258,7 @@ LegDie(l) ==
   /\ legUp' = [legUp EXCEPT ![l] = "dead"]
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim>>
 
 \* Silent unreachability: maybe a dying node, maybe a transient partition.
 LegBlackhole(l) ==
@@ -233,7 +267,7 @@ LegBlackhole(l) ==
   /\ legUp' = [legUp EXCEPT ![l] = "blackhole"]
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim>>
 
 \* The transient case: the leg returns, data intact, whatever the record
 \* now says about it.  (The F36c ingredient.)
@@ -241,7 +275,7 @@ LegRecover(l) ==
   /\ legUp[l] = "blackhole"
   /\ legUp' = [legUp EXCEPT ![l] = "up"]
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, crashes>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, crashes>>
 
 \* The permanent case, confirmed: node object gone / instance verified
 \* terminated.  This — and only this — is the evidence Replace accepts.
@@ -249,7 +283,7 @@ ConfirmDead(l) ==
   /\ legUp[l] = "blackhole"
   /\ legUp' = [legUp EXCEPT ![l] = "dead"]
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, crashes>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, crashes>>
 
 \* The data plane faults an unresponsive leg out; survivors continue at a
 \* NEW incarnation (their superblocks record the shrink).  WF on this
@@ -262,7 +296,7 @@ RaidDeconfigure(l) ==
   /\ legGen' = [m \in Legs |-> IF m \in serving \ {l} THEN raidGen + 1
                                                       ELSE legGen[m]]
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
-                 riskSurfaced, state, writerSet, epochCut, crashes>>
+                 riskSurfaced, state, writerSet, epochCut, claim, crashes>>
 
 \* The whole assembly dies cleanly (process gone, connections dropped).
 ServerCrash ==
@@ -271,7 +305,7 @@ ServerCrash ==
   /\ serving' = {}
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim>>
 
 \* The F48 case: the head is PARTITIONED, not dead.  The record sees it
 \* gone; the process lives on with its leg connections — a zombie.  (One
@@ -284,7 +318,7 @@ ServerPartition ==
   /\ serving' = {}
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<legData, legUp, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim>>
 
 (***************************************************************************)
 (* Control plane — each action is one CAS round against the record         *)
@@ -301,7 +335,7 @@ MonitorMarkStale(l) ==
   /\ state' = [state EXCEPT ![l] = "stale"]
   /\ writerSet' = writerSet \ {l}
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
-                 nextWrite, lineage, riskSurfaced, epochCut, crashes>>
+                 nextWrite, lineage, riskSurfaced, epochCut, claim, crashes>>
 
 \* Epoch scheduler: cut a consistent snapshot of the served content.
 EpochCut ==
@@ -309,7 +343,8 @@ EpochCut ==
   /\ \A l \in serving : legUp[l] = "up"
   /\ epochCut' = acked
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
-                 nextWrite, lineage, riskSurfaced, state, writerSet, crashes>>
+                 nextWrite, lineage, riskSurfaced, state, writerSet, claim,
+                 crashes>>
 
 \* replica_replace + prune_writers_for_replacement: swap the identity of a
 \* stale leg on a VERIFIABLY dead node; the freed slot returns as an empty
@@ -325,7 +360,7 @@ Replace(l) ==
   /\ state' = [state EXCEPT ![l] = "standby"]
   /\ writerSet' = writerSet \ {l}
   /\ UNCHANGED <<serving, zombie, raidGen, acked, nextWrite, lineage,
-                 riskSurfaced, epochCut, crashes>>
+                 riskSurfaced, epochCut, claim, crashes>>
 
 \* hot_rejoin_volume: a stale leg on a LIVE node re-enters as a standby
 \* KEEPING its identity and payload (contrast Replace).  Whether the
@@ -337,13 +372,14 @@ HotRejoin(l) ==
   /\ state' = [state EXCEPT ![l] = "standby"]
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, writerSet, epochCut,
-                 crashes>>
+                 claim, crashes>>
 
 \* HotRejoinScrubbed: no usable shared history with ANY live in-sync
 \* source — wipe the payload and rebuild from scratch.  Requires a live
 \* source to rebuild from: a scrub with nothing to rebuild from would
 \* destroy the last copy.
 Scrub(l) ==
+  /\ claim = "catchup"                    \* reconciler work runs claimed
   /\ state[l] = "standby"
   /\ legUp[l] = "up"
   /\ legData[l] # {}
@@ -352,12 +388,13 @@ Scrub(l) ==
   /\ legData' = [legData EXCEPT ![l] = {}]
   /\ legGen' = [legGen EXCEPT ![l] = 0]
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, acked, nextWrite, lineage,
-                 riskSurfaced, state, writerSet, epochCut, crashes>>
+                 riskSurfaced, state, writerSet, epochCut, claim, crashes>>
 
 \* Catch-up: build to the last epoch cut from an in-sync source.  A block
 \* copy fills holes and never erases — union semantics — so the shared-base
 \* ancestry check (RejoinGuard) is what keeps a kept payload honest.
 CatchUp(l) ==
+  /\ claim = "catchup"                    \* builds run under the R2 claim
   /\ state[l] = "standby"
   /\ legUp[l] = "up"
   /\ \E src \in UpInSync :
@@ -365,7 +402,7 @@ CatchUp(l) ==
        /\ (RejoinGuard => legData[l] \subseteq legData[src])
   /\ legData' = [legData EXCEPT ![l] = legData[l] \cup epochCut]
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, crashes>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, crashes>>
 
 \* Admission (hot-rejoin window / cutover reassembly) + mark_in_sync's
 \* writer-set add: quiesced delta copy from a healthy serving survivor,
@@ -373,6 +410,7 @@ CatchUp(l) ==
 \* re-run HERE against the actual serving source — the admission-window
 \* verification — because the world may have reassembled since catch-up.
 Admit(l) ==
+  /\ claim = "admission"                  \* the window holds its claim
   /\ state[l] = "standby"
   /\ legUp[l] = "up"
   /\ epochCut \subseteq legData[l]        \* warm standby (caught up)
@@ -385,6 +423,7 @@ Admit(l) ==
   /\ legGen' = [legGen EXCEPT ![l] = raidGen]
   /\ state' = [state EXCEPT ![l] = "insync"]
   /\ writerSet' = writerSet \cup {l}
+  /\ claim' = "none"                      \* mark_in_sync closes the window
   /\ UNCHANGED <<zombie, legUp, raidGen, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, crashes>>
 
@@ -417,7 +456,8 @@ Assemble ==
                                                          ELSE legGen[m]]
   /\ raidGen' = raidGen + 1
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
-  /\ UNCHANGED <<legData, legUp, acked, nextWrite, state, epochCut, crashes>>
+  /\ UNCHANGED <<legData, legUp, acked, nextWrite, state, epochCut, claim,
+                 crashes>>
 
 \* The stale-only-survivor LAST RESORT — the RUNBOOK step, not code: the
 \* code's gate correctly Defers (the Deferred liveness escape), and an
@@ -440,7 +480,55 @@ LastResortServe(l) ==
   /\ riskSurfaced' = TRUE
   /\ state' = [state EXCEPT ![l] = "insync"]
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
-  /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, crashes>>
+  /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, claim, crashes>>
+
+(***************************************************************************)
+(* The R2 claim — the F43 machinery.  Catch-up work (builds, scrubs) and   *)
+(* the admission window each run under a per-volume claim.  The F43 bug:   *)
+(* catch-up's timer renewal always won the reacquisition race, so the      *)
+(* admission claim — and the warm standby behind it — starved.  The fix    *)
+(* is PRIORITY (ClaimArb): catch-up may not (re)acquire while a warm       *)
+(* standby awaits admission, which makes admission's enabling continuous   *)
+(* and lets weak fairness fire it.  Note stronger fairness alone would     *)
+(* NOT fix the real system: the model shows the un-arbitrated race is      *)
+(* fair-legal precisely because admission's enabling keeps being           *)
+(* interrupted.                                                            *)
+(***************************************************************************)
+
+AcquireCatchup ==
+  /\ claim = "none"
+  /\ (ClaimArb => ~WarmWaiting)           \* the F43 yield rule
+  /\ claim' = "catchup"
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, crashes>>
+
+ReleaseCatchup ==
+  /\ claim = "catchup"
+  /\ claim' = "none"
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, crashes>>
+
+AcquireAdmission ==
+  /\ claim = "none"
+  /\ WarmWaiting                          \* something to admit
+  /\ claim' = "admission"
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, crashes>>
+
+\* Lease expiry: the claim holder died; the lease frees the claim.  A
+\* controller death is a failure event — budgeted — which is also what
+\* keeps expire/reacquire churn finite.
+ExpireClaim ==
+  /\ claim # "none"
+  /\ crashes < MaxCrashes
+  /\ claim' = "none"
+  /\ crashes' = crashes + 1
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut>>
 
 Next ==
   \/ Write
@@ -450,6 +538,10 @@ Next ==
   \/ ServerCrash
   \/ ServerPartition
   \/ Assemble
+  \/ AcquireCatchup
+  \/ ReleaseCatchup
+  \/ AcquireAdmission
+  \/ ExpireClaim
   \/ \E l \in Legs :
        \/ LegDie(l)
        \/ LegBlackhole(l)
@@ -482,6 +574,9 @@ Fairness ==
        /\ WF_vars(Admit(l))
   /\ WF_vars(Assemble)
   /\ WF_vars(EpochCut)
+  /\ WF_vars(AcquireCatchup)
+  /\ WF_vars(ReleaseCatchup)
+  /\ WF_vars(AcquireAdmission)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -541,6 +636,17 @@ Deferred == serving = {} /\ UpInSync = {}
 
 EventuallyServingAgain ==
   <>[](crashes < MaxCrashes \/ GoodServing \/ Deferred)
+
+(***************************************************************************)
+(* The F43 theorem: no warm standby waits forever.  Every wait resolves — *)
+(* by admission (the arbitrated claim eventually reaches the window) or   *)
+(* by the world changing (the standby or its source died; a new epoch     *)
+(* cut de-warmed it — each makes WarmWaiting false, honestly).  With      *)
+(* ClaimArb = FALSE this FAILS: the starvation lasso is catch-up's        *)
+(* renewal beating the admission claim forever — F43's parked standby,    *)
+(* rediscovered as a temporal counterexample.                             *)
+(***************************************************************************)
+AdmissionNotStarved == [](WarmWaiting => <>(~WarmWaiting))
 
 \* State-space bound for TLC (raidGen grows with deconfigures/assemblies,
 \* both bounded by the crash budget in any real trace).

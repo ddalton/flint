@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine and the snapshot protocol
 
-Two modules, one gate (`scripts/check-tla.sh`, nine TLC runs).
+Two modules, one gate (`scripts/check-tla.sh`, ten TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -11,7 +11,13 @@ ancestry check, the Scrub demotion), **torn writes** (crash between
 replica write and client ack), and the **F48 zombie head** (a partitioned
 server still acking writes until admission severs it) — and since
 tranche 3: **LastResortServe**, the stale-only-survivor runbook step
-(operator override, risk surfaced; the code itself Defers).
+(operator override, risk surfaced; the code itself Defers). The S2
+model-first tranche added the **R2 claim arbitration** (the F43
+machinery): catch-up and admission run under a leased per-volume claim,
+with admission priority — `AdmissionNotStarved` is the theorem, and the
+F43 mutation must rediscover the starvation lasso. This is the formal
+half of the S2 bounce-free-RWX-admission design
+(`spdk-csi-driver/docs/s2-bounce-free-rwx-admission.md`).
 
 `FlintSnapshots.tla` (tranche 3) models the **snapshot protocol** at
 block-content level — the layer where content is `[Blocks -> version]`
@@ -56,6 +62,13 @@ It runs nine configs, ALL required:
    TLC **must find** a zombie-head violation — the partitioned old head
    keeps acking client writes after the new assembly serves (silent loss
    and/or split-brain divergence).
+5b. `FlintReplicationF43.cfg` — no claim arbitration (`ClaimArb=FALSE`):
+   TLC **must find** the temporal counterexample to
+   `AdmissionNotStarved` — the `ReleaseCatchup → AcquireCatchup`
+   starvation lasso with a warm standby parked forever (F43 as observed
+   live on runad). The lasso is **weak-fairness-legal**: admission's
+   enabling is intermittent, so WF never obligates it — machine-checked
+   proof that the F43 fix had to be *priority*, not stronger fairness.
 6. `FlintSnapshots.cfg` — the shipped copy protocol (full ordered walk,
    blobstore relink): `Inv_SessionFaithful` holds. Action coverage
    verified — the based suffix walk contributes zero new distinct
@@ -93,6 +106,8 @@ cannot rediscover the bug classes it exists for proves nothing.
 | `lineage` / `Inv_NoDivergentServing` | raid1 serves reads from ANY leg: one phantom block is a split-read surface |
 | `Deferred` (liveness escape) | NodeStage's Defer arm: no in-sync material ⇒ designed unavailability, never stale service |
 | `LastResortServe` | the stale-only-survivor RUNBOOK override (not code — the code Defers); risk surfaced, sb generations restart from the survivor |
+| `claim` / `AcquireCatchup` / `AcquireAdmission` / `ExpireClaim` | the R2 leased per-volume claim (F43); `WarmWaiting` is the yield predicate; expiry = holder death, budgeted |
+| `AdmissionNotStarved` | the F43 theorem: no warm standby waits forever; S2's liveness foundation |
 | `Inv_NoSilentLoss` | PacificA's commit invariant; the ledger oracle's zero-loss check is its runtime shadow |
 | **FlintSnapshots** | |
 | `Cut` / `chain` | `apply_epoch_cut` / the blobstore snapshot chain (retained epochs) |

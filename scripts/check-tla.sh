@@ -64,12 +64,23 @@ mutation_run() { # <module> <cfg> <label> <expected-violation-regex>
   echo "counterexample found (as required)"
 }
 
+liveness_mutation_run() { # <module> <cfg> <label>
+  echo "== $3 ($2): TLC must FIND the starvation lasso =="
+  local MOUT
+  MOUT=$(run_tlc "$1" "$2" || true)
+  echo "$MOUT" | grep -q "Temporal properties were violated" \
+    || { echo "$MOUT" | tail -30; echo "FAIL: $3 did NOT find the starvation — the model lost its teeth"; exit 1; }
+  echo "temporal counterexample found (as required)"
+}
+
 strict_run FlintReplication FlintReplication.cfg     "replication strict breadth (all guards TRUE)"
 strict_run FlintReplication FlintReplicationDeep.cfg "replication strict deep budget (scrub/divergence reachable)"
 
 mutation_run FlintReplication FlintReplicationF36c.cfg   "F36c mutation (GateStrict=FALSE)"    "Inv_NoSilentLoss"
 mutation_run FlintReplication FlintReplicationRejoin.cfg "rejoin mutation (RejoinGuard=FALSE)"  "Inv_NoDivergentServing"
 mutation_run FlintReplication FlintReplicationF48.cfg    "F48 mutation (FenceZombie=FALSE)"    "Inv_(NoSilentLoss|NoDivergentServing)"
+
+liveness_mutation_run FlintReplication FlintReplicationF43.cfg "F43 mutation (ClaimArb=FALSE, admission starvation)"
 
 strict_run FlintSnapshots FlintSnapshots.cfg "snapshots strict (full ordered walk, blobstore relink)"
 
