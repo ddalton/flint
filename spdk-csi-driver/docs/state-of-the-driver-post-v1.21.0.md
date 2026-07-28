@@ -139,6 +139,16 @@ least one new F-number.
   the bottleneck; *detection* dominates on the RWX path. Also S2's ~237s
   admission bounce stall (reframed as a feature: RWX admission without the
   bounce).
+
+> **S2 DESIGNED (model-first) 2026-07-28** —
+> `docs/s2-bounce-free-rwx-admission.md`: in-place admission via the
+> RWO-proven hot-rejoin window on the live serving raid; no NFS bounce
+> (F55 exposure and the F48 two-head phase removed structurally). The R2
+> claim arbitration is now formally verified (`formal/`,
+> `AdmissionNotStarved`; the F43 mutation rediscovers the starvation
+> lasso and proves the fix had to be priority, not fairness).
+> Implementation + drill 3.12 next cycle; kill switch
+> `FLINT_RWX_INPLACE_ADMISSION`.
 - **This is the availability headline number** for any database-on-RWX
   story; durability is already there.
 - **Gate:** 3.6e stall budget. Set an explicit target (e.g. ≤60s) rather
