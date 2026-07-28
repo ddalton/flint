@@ -1,0 +1,36 @@
+  ✓ harness healthy (pg-0 Ready, ledger acking)
+
+▶ T0=1785212019 pg-0 on runak-aws-1785210466; nfs flint-nfs-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 on runak-aws-1785210466 (uid 73efbaf6); witness on runak-aws-4
+
+▶ expanding RWX data-pg-0 20Gi → 21Gi under live writes (server runak-aws-1785210466, backing pvc flint-nfs-pvc-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264)
+  ✓ user PVC reports 21Gi after 32s
+  ✓ backing PVC status grew to 22548578304 (server fs verified grown by kubelet)
+  · server-side df: /dev/nvme2n1       20995  5066     14838  26% /mnt/volume
+  · client-side df (informational, zeros are expected): 10.101.136.223:/ 0M
+  ✓ witness clean (0 mismatches, last write 0s ago)
+
+▶ 1/7 pod Ready (timeout 120s)
+  ✓ pg-0 Ready 34s after T0
+  ✓ attribution: in-place (runak-aws-1785210466→runak-aws-1785210466, postgres restarts 0)
+
+▶ 2/7 db verdict
+  ✓ db PASS
+
+▶ 3/7 volumeattachments
+  ✓ VA consistent (consumer nodes covered, none stale)
+
+▶ 4/7 data-path sessions (nvmeof)
+  ✓ pg volume session live
+  ✓ data path clean (live volume healthy, no new leaks)
+
+▶ 5/7 orphaned mounts
+  ✓ no orphaned pod mounts
+  · node fs pressure captured (/Users/ddalton/github/flint/tests/chaos/artifacts/3-3.11-1785212019/node-fs.txt)
+
+▶ 6/7 driver logs since T0
+  ✓ no unresolved volume errors (full scan in /Users/ddalton/github/flint/tests/chaos/artifacts/3-3.11-1785212019/driver-logs.txt)
+
+▶ 7/7 timings
+  ✓ max ledger stall 3s
+
+PASS: drill 3/3.11 — ready=34s stall=3s 

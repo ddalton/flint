@@ -1,0 +1,40 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runak-aws-1785210466"
+                },
+                "creationTimestamp": "2026-07-28T03:55:21Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-bd9ae81d5f8caa84f1f531fbdb308c9db2a42acb55c8fb237891e45aa9ad1959",
+                "resourceVersion": "21879",
+                "uid": "6de9f01b-ca5d-4457-958d-8ef113cff475"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runak-aws-1785210466",
+                "source": {
+                    "persistentVolumeName": "pvc-42c321f3-73e6-47ee-9bfc-72449681fc60"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "replicas": "[{\"node_name\":\"runak-aws-1785210466\",\"node_uid\":\"95f2de6e-3461-42b4-9280-9b8533dee03c\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"3b8914b6-c06c-442a-9a66-46c5626d59cd\",\"lvol_name\":\"vol_pvc-42c321f3-73e6-47ee-9bfc-72449681fc60_replica_0\",\"lvs_name\":\"lvs_runak-aws-1785210466_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"},{\"node_name\":\"runak-aws-2\",\"node_uid\":\"5de06d93-ba0e-43ce-93c3-afa643c49742\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"0f3dc1e6-1a65-47ef-a189-b1380ee6cee2\",\"lvol_name\":\"vol_pvc-42c321f3-73e6-47ee-9bfc-72449681fc60_replica_1\",\"lvs_name\":\"lvs_runak-aws-2_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"}]",
+                    "volumeId": "pvc-42c321f3-73e6-47ee-9bfc-72449681fc60",
+                    "volumeType": "multi-replica"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

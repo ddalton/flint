@@ -1,0 +1,1788 @@
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+📏 [CONTROLLER] Expanding volume pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg fb40084e-2b8c-40fa-b2be-25bf51f2fd03 on runak-aws-1785210466 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg df287966-0c49-4fcc-8f7d-f59dd82d976e on runak-aws-2 to 22548578304 bytes
+✅ [CONTROLLER] Volume nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 expanded to 22548578304 bytes on all 2 replicas (raid + namespace growth propagate via SPDK resize events)
+⏳ [CONTROLLER] RWX pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 backing fs grow pending on the server node (21474836480/22548578304 bytes) — kubelet completes it; the resizer retries us
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+📏 [CONTROLLER] Expanding volume pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg fb40084e-2b8c-40fa-b2be-25bf51f2fd03 on runak-aws-1785210466 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg df287966-0c49-4fcc-8f7d-f59dd82d976e on runak-aws-2 to 22548578304 bytes
+✅ [CONTROLLER] Volume nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 expanded to 22548578304 bytes on all 2 replicas (raid + namespace growth propagate via SPDK resize events)
+⏳ [CONTROLLER] RWX pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 backing fs grow pending on the server node (21474836480/22548578304 bytes) — kubelet completes it; the resizer retries us
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+📏 [CONTROLLER] Expanding volume pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg fb40084e-2b8c-40fa-b2be-25bf51f2fd03 on runak-aws-1785210466 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg df287966-0c49-4fcc-8f7d-f59dd82d976e on runak-aws-2 to 22548578304 bytes
+✅ [CONTROLLER] Volume nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 expanded to 22548578304 bytes on all 2 replicas (raid + namespace growth propagate via SPDK resize events)
+⏳ [CONTROLLER] RWX pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 backing fs grow pending on the server node (21474836480/22548578304 bytes) — kubelet completes it; the resizer retries us
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+📏 [CONTROLLER] Expanding volume pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg fb40084e-2b8c-40fa-b2be-25bf51f2fd03 on runak-aws-1785210466 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg df287966-0c49-4fcc-8f7d-f59dd82d976e on runak-aws-2 to 22548578304 bytes
+✅ [CONTROLLER] Volume nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 expanded to 22548578304 bytes on all 2 replicas (raid + namespace growth propagate via SPDK resize events)
+⏳ [CONTROLLER] RWX pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 backing fs grow pending on the server node (21474836480/22548578304 bytes) — kubelet completes it; the resizer retries us
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+📏 [CONTROLLER] Expanding volume pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg fb40084e-2b8c-40fa-b2be-25bf51f2fd03 on runak-aws-1785210466 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg df287966-0c49-4fcc-8f7d-f59dd82d976e on runak-aws-2 to 22548578304 bytes
+✅ [CONTROLLER] Volume nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 expanded to 22548578304 bytes on all 2 replicas (raid + namespace growth propagate via SPDK resize events)
+⏳ [CONTROLLER] RWX pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 backing fs grow pending on the server node (21474836480/22548578304 bytes) — kubelet completes it; the resizer retries us
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:1.21.0-rc5
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:1.21.0-rc5
+   Port: 2049
+   Namespace: flint-system
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+📏 [CONTROLLER] Expanding volume pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg fb40084e-2b8c-40fa-b2be-25bf51f2fd03 on runak-aws-1785210466 to 22548578304 bytes
+✅ [CONTROLLER] Resized leg df287966-0c49-4fcc-8f7d-f59dd82d976e on runak-aws-2 to 22548578304 bytes
+✅ [CONTROLLER] Volume nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 expanded to 22548578304 bytes on all 2 replicas (raid + namespace growth propagate via SPDK resize events)
+⚠️ [CONTROLLER] backing PVC flint-system/flint-nfs-pvc-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 requests patch failed (cosmetic): ApiError: persistentvolumeclaims "flint-nfs-pvc-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264" is forbidden: only dynamically provisioned pvc can be resized and the storageclass that provisions the pvc must support resize: Forbidden (Status { status: Some(Failure), code: 403, message: "persistentvolumeclaims \"flint-nfs-pvc-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264\" is forbidden: only dynamically provisioned pvc can be resized and the storageclass that provisions the pvc must support resize", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: "Forbidden", details: Some(StatusDetails { name: "flint-nfs-pvc-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264", group: "", kind: "persistentvolumeclaims", uid: "", causes: [], retry_after_seconds: 0 }) })
+✅ [CONTROLLER] RWX volume pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 fully expanded to 22548578304 bytes (backing chain grown; NFS clients observe the new statfs, no client node work)
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runak-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runak-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runak-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runak-aws-1785210466
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runak-aws-4
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:1.21.0-rc5
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node runak-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runak-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runak-aws-3
+✅ [DRIVER] Found 0 initialized disks on node runak-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runak-aws-1785210466
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:1.21.0-rc5
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:1.21.0-rc5
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:1.21.0-rc5
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:1.21.0-rc5
+   Port: 2049
+   Namespace: flint-system
+[2m2026-07-28T04:13:40.530316Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:40.530864Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("fb40084e-2b8c-40fa-b2be-25bf51f2fd03"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="fb40084e-2b8c-40fa-b2be-25bf51f2fd03"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:40.540152Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3msize_mib[0m[2m=[0m21504
+[2m2026-07-28T04:13:40.630726Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:40.630812Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("fb40084e-2b8c-40fa-b2be-25bf51f2fd03"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="fb40084e-2b8c-40fa-b2be-25bf51f2fd03"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:40.640131Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3msize_mib[0m[2m=[0m21504
+[2m2026-07-28T04:13:41.568833Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:41.568959Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("fb40084e-2b8c-40fa-b2be-25bf51f2fd03"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="fb40084e-2b8c-40fa-b2be-25bf51f2fd03"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:41.577506Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3msize_mib[0m[2m=[0m21504
+🔵 [GRPC] Node.NodeGetCapabilities called
+✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition
+🔵 [GRPC] Node.NodeGetVolumeStats called for volume: nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264
+   Volume path: /var/lib/kubelet/pods/73efbaf6-b545-426e-b6ed-da817dc76b1f/volumes/kubernetes.io~csi/flint-nfs-pv-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264/mount
+🔍 [DRIVER] Getting volume info from PV metadata: nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264
+❌ [DRIVER] Volume metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+💡 [DRIVER] This means either:
+   1. Volume doesn't exist
+   2. Volume was created with old driver version (before metadata storage)
+   3. PV is corrupted or missing volumeAttributes
+⚠️ [NODE] Could not get volume info: Volume nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:42.102856Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+[2m2026-07-28T04:13:45.607316Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:45.607430Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("fb40084e-2b8c-40fa-b2be-25bf51f2fd03"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="fb40084e-2b8c-40fa-b2be-25bf51f2fd03"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:45.615593Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3msize_mib[0m[2m=[0m21504
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:52.079566Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 7 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:52.088577Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+[2m2026-07-28T04:13:52.100590Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:52.103064Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 1 controllers
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-1785210466_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 881991MB, lvols: 3)
+[2m2026-07-28T04:13:52.112397Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+[2m2026-07-28T04:13:53.646215Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:53.646421Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("fb40084e-2b8c-40fa-b2be-25bf51f2fd03"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="fb40084e-2b8c-40fa-b2be-25bf51f2fd03"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:53.655145Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3msize_mib[0m[2m=[0m21504
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.102845Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔵 [GRPC] Node.NodeGetCapabilities called
+✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition
+🔵 [GRPC] Node.NodeGetCapabilities called
+✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition
+🔵 [GRPC] Node.NodeExpandVolume called for volume: nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264
+   Volume path: /var/lib/kubelet/pods/73efbaf6-b545-426e-b6ed-da817dc76b1f/volumes/kubernetes.io~csi/flint-nfs-pv-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264/mount
+   Capacity range: Some(CapacityRange { required_bytes: 22548578304, limit_bytes: 0 })
+   Target capacity: 22548578304 bytes
+   Block device: /dev/nvme2n1
+   Device size verified: 22548578304 bytes >= target 22548578304
+   Detected filesystem type: ext4
+   Running resize2fs on /dev/nvme2n1
+✅ [GRPC] Filesystem resized successfully
+   Output: Filesystem at /dev/nvme2n1 is mounted on /var/lib/kubelet/plugins/kubernetes.io/csi/flint.csi.storage.io/9259118e35d96c8903aebdb0de3b11ad98f9ec11e840fe87dbc77fd550ce92de/globalmount; on-line resizing required
+old_desc_blocks = 3, new_desc_blocks = 3
+The filesystem on /dev/nvme2n1 is now 5505024 (4k) blocks long.
+
+
+[2m2026-07-28T04:14:09.681633Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:09.681730Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("fb40084e-2b8c-40fa-b2be-25bf51f2fd03"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="fb40084e-2b8c-40fa-b2be-25bf51f2fd03"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:14:09.689805Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"fb40084e-2b8c-40fa-b2be-25bf51f2fd03" [3msize_mib[0m[2m=[0m21504
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:12.102439Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:19.916369Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 7 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:19.925623Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:19.937085Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 1 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-1785210466_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 880330MB, lvols: 3)
+[2m2026-07-28T04:14:19.949334Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.077716Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.083316Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 7 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.086908Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+[2m2026-07-28T04:14:22.094463Z[0m [32m INFO[0m [RECONCILE] Reconciliation complete [3msuccess_count[0m[2m=[0m0 [3mskip_count[0m[2m=[0m2 [3merror_count[0m[2m=[0m0
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.102373Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+[2m2026-07-28T04:14:22.102398Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 1 controllers
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-1785210466_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 880325MB, lvols: 3)
+[2m2026-07-28T04:14:22.118417Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+[2m2026-07-28T04:14:22.180762Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.192296Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.204207Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.221481Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvols
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.230894Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvols' with params: Some(Object {"lvs_name": String("lvs_runak-aws-1785210466_0000-00-1f-0")})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvols, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvols' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.243262Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: Some(Object {})
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: 0 keys
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.254777Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: Some(Object {})
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: 0 keys
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: Some(Object {})
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 7 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: ublk_get_disks
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: ublk_get_disks, params: None
+[2m2026-07-28T04:14:22.267232Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'ublk_get_disks' with params: None
+✅ [SPDK_RPC] Method 'ublk_get_disks' completed successfully
+[2m2026-07-28T04:14:22.279993Z[0m [33m WARN[0m [MONITOR] Sub-pass failed (non-fatal) [3merror[0m[2m=[0mApiError: services is forbidden: User "system:serviceaccount:flint-system:flint-csi-node" cannot list resource "services" in API group "" at the cluster scope: Forbidden (Status { status: Some(Failure), code: 403, message: "services is forbidden: User \"system:serviceaccount:flint-system:flint-csi-node\" cannot list resource \"services\" in API group \"\" at the cluster scope", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: "Forbidden", details: Some(StatusDetails { name: "", group: "", kind: "services", uid: "", causes: [], retry_after_seconds: 0 }) }) [3mpass[0m[2m=[0m"sweep_orphan_nfs_mounts"
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.280108Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.294064Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 1 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:22.302786Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔵 [GRPC] Node.NodeGetCapabilities called
+✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition
+🔵 [GRPC] Node.NodeGetCapabilities called
+✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition
+🔵 [GRPC] Node.NodeExpandVolume called for volume: pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264
+   Volume path: /var/lib/kubelet/pods/300f5dc3-b4bc-46e9-a618-aa937f04642a/volumes/kubernetes.io~csi/pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264/mount
+   Capacity range: Some(CapacityRange { required_bytes: 22548578304, limit_bytes: 0 })
+   Target capacity: 22548578304 bytes
+   Block device: 10.101.136.223:/
+   NFS client mount (nfs4) — node-side expansion is a no-op by contract
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.102926Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+[2m2026-07-28T04:14:32.342431Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvols
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.342581Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvols' with params: Some(Object {"lvs_name": String("lvs_runak-aws-1785210466_0000-00-1f-0")})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvols, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 7 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.353565Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvols' completed successfully
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.369161Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 1 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-1785210466_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 880301MB, lvols: 3)
+[2m2026-07-28T04:14:32.381376Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:42.103394Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:52.078107Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 7 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:52.088992Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:52.100614Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:52.102803Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 1 controllers
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-1785210466_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 879834MB, lvols: 3)
+[2m2026-07-28T04:14:52.112049Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+[2m2026-07-28T04:15:02.103025Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔵 [GRPC] Node.NodeGetCapabilities called
+✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition
+🔵 [GRPC] Node.NodeGetVolumeStats called for volume: pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264
+   Volume path: /var/lib/kubelet/pods/300f5dc3-b4bc-46e9-a618-aa937f04642a/volumes/kubernetes.io~csi/pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264/mount
+🔍 [DRIVER] Getting volume info from PV metadata: pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264
+❌ [DRIVER] Volume metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+💡 [DRIVER] This means either:
+   1. Volume doesn't exist
+   2. Volume was created with old driver version (before metadata storage)
+   3. PV is corrupted or missing volumeAttributes
+⚠️ [NODE] Could not get volume info: Volume pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+[2m2026-07-28T04:13:40.540484Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:40.540574Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("df287966-0c49-4fcc-8f7d-f59dd82d976e"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="df287966-0c49-4fcc-8f7d-f59dd82d976e"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:40.549288Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3msize_mib[0m[2m=[0m21504
+[2m2026-07-28T04:13:40.640450Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:40.640529Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("df287966-0c49-4fcc-8f7d-f59dd82d976e"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="df287966-0c49-4fcc-8f7d-f59dd82d976e"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:40.649297Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3msize_mib[0m[2m=[0m21504
+[2m2026-07-28T04:13:41.577840Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:41.577941Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("df287966-0c49-4fcc-8f7d-f59dd82d976e"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="df287966-0c49-4fcc-8f7d-f59dd82d976e"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:41.589518Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3msize_mib[0m[2m=[0m21504
+[2m2026-07-28T04:13:45.615947Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:45.616058Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("df287966-0c49-4fcc-8f7d-f59dd82d976e"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="df287966-0c49-4fcc-8f7d-f59dd82d976e"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:45.627103Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3msize_mib[0m[2m=[0m21504
+[2m2026-07-28T04:13:53.655582Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="df287966-0c49-4fcc-8f7d-f59dd82d976e"
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:53.655673Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("df287966-0c49-4fcc-8f7d-f59dd82d976e"), "size_in_mib": Number(21504)})
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:13:53.663800Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3msize_mib[0m[2m=[0m21504
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:57.173710Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 5 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:13:57.183961Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+[2m2026-07-28T04:13:57.195924Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-2_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 881053MB, lvols: 3)
+[2m2026-07-28T04:13:57.208125Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+[2m2026-07-28T04:14:09.690183Z[0m [32m INFO[0m [MINIMAL_DISK] Resizing lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3mnew_size_bytes[0m[2m=[0m22548578304
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_resize
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:09.690285Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_resize' with params: Some(Object {"name": String("df287966-0c49-4fcc-8f7d-f59dd82d976e"), "size_in_mib": Number(21504)})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_resize, params: name="df287966-0c49-4fcc-8f7d-f59dd82d976e"
+✅ [SPDK_RPC] Method 'bdev_lvol_resize' completed successfully
+[2m2026-07-28T04:14:09.701954Z[0m [32m INFO[0m [MINIMAL_DISK] Successfully resized lvol [3mlvol_uuid[0m[2m=[0m"df287966-0c49-4fcc-8f7d-f59dd82d976e" [3msize_mib[0m[2m=[0m21504
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:19.916193Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 5 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:19.924997Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:19.936680Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-2_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 880330MB, lvols: 3)
+[2m2026-07-28T04:14:19.948790Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.173465Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.180257Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 5 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.185362Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.193149Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: Some(Object {"name": String("df287966-0c49-4fcc-8f7d-f59dd82d976e")})
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: name="df287966-0c49-4fcc-8f7d-f59dd82d976e"
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: Some(Object {"name": String("df287966-0c49-4fcc-8f7d-f59dd82d976e")})
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+[2m2026-07-28T04:14:27.201192Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 1 bdev(s)
+   Requested: name="df287966-0c49-4fcc-8f7d-f59dd82d976e"
+   Expected: 1 bdev
+   Actual: 1 bdev(s)
+   ✅ FILTERING WORKED!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: 1 keys
+[2m2026-07-28T04:14:27.209271Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: Some(Object {"nqn": String("nqn.2024-11.com.flint:volume:pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264_1")})
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-2_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 880312MB, lvols: 3)
+[2m2026-07-28T04:14:27.217284Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.225218Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: Some(Object {"nqn": String("nqn.2024-11.com.flint:volume:nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264_1")})
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: 1 keys
+❌ [SPDK_RPC] SPDK RPC call 'nvmf_get_subsystems' failed: SPDK RPC error: Code=-19 Msg=No such device
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: 1 keys
+[2m2026-07-28T04:14:27.238766Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: Some(Object {"nqn": String("nqn.2024-11.com.flint:volume:pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264_1")})
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+[2m2026-07-28T04:14:27.249235Z[0m [32m INFO[0m [RECONCILE] Reconciliation complete [3msuccess_count[0m[2m=[0m1 [3mskip_count[0m[2m=[0m1 [3merror_count[0m[2m=[0m0
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.250730Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.262417Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.274518Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.286455Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvols
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.297202Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvols' with params: Some(Object {"lvs_name": String("lvs_runak-aws-2_0000-00-1f-0")})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvols, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvols' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.309229Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: Some(Object {})
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: 0 keys
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.321177Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: Some(Object {})
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: 0 keys
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: Some(Object {})
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 5 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: ublk_get_disks
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.333452Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'ublk_get_disks' with params: None
+🔍 [SPDK_PARAMS] Method: ublk_get_disks, params: None
+✅ [SPDK_RPC] Method 'ublk_get_disks' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.345534Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.360450Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:27.369134Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.340760Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 5 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+[2m2026-07-28T04:14:32.349695Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+[2m2026-07-28T04:14:32.361475Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvols
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.361637Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvols' with params: Some(Object {"lvs_name": String("lvs_runak-aws-2_0000-00-1f-0")})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvols, params: 1 keys
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-2_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 880301MB, lvols: 3)
+[2m2026-07-28T04:14:32.373584Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvols' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:57.173846Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 5 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+[2m2026-07-28T04:14:57.183687Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+[2m2026-07-28T04:14:57.195339Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-2_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 879758MB, lvols: 3)
+[2m2026-07-28T04:14:57.207416Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.440379Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+[2m2026-07-28T04:14:02.443728Z[0m [32m INFO[0m [RECONCILE] Reconciliation complete [3msuccess_count[0m[2m=[0m0 [3mskip_count[0m[2m=[0m0 [3merror_count[0m[2m=[0m0
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.446481Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.449698Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.458807Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+[2m2026-07-28T04:14:02.465614Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.475441Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-3_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:14:02.481749Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvols
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+[2m2026-07-28T04:14:02.489621Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvols' with params: Some(Object {"lvs_name": String("lvs_runak-aws-3_0000-00-1f-0")})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvols, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvols' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.501580Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: 0 keys
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: Some(Object {})
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.513629Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: Some(Object {})
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: 0 keys
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: Some(Object {})
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: ublk_get_disks
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: ublk_get_disks, params: None
+[2m2026-07-28T04:14:02.525753Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'ublk_get_disks' with params: None
+✅ [SPDK_RPC] Method 'ublk_get_disks' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.537879Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.552695Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.561595Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:19.916235Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:19.925918Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+[2m2026-07-28T04:14:19.937801Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-3_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:14:19.949980Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.340789Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+[2m2026-07-28T04:14:32.350073Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+[2m2026-07-28T04:14:32.361943Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-3_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:14:32.374118Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.440412Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.450021Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+[2m2026-07-28T04:14:32.461956Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-3_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:14:32.473997Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.441351Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+[2m2026-07-28T04:15:02.444838Z[0m [32m INFO[0m [RECONCILE] Reconciliation complete [3msuccess_count[0m[2m=[0m0 [3mskip_count[0m[2m=[0m0 [3merror_count[0m[2m=[0m0
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.447507Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.450394Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.459600Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+[2m2026-07-28T04:15:02.466330Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.475890Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-3_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:15:02.482359Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvols
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvols, params: 1 keys
+[2m2026-07-28T04:15:02.490275Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvols' with params: Some(Object {"lvs_name": String("lvs_runak-aws-3_0000-00-1f-0")})
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvols' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.502241Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: Some(Object {})
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: 0 keys
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: 0 keys
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: Some(Object {})
+[2m2026-07-28T04:15:02.514261Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: Some(Object {})
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: ublk_get_disks
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: ublk_get_disks, params: None
+[2m2026-07-28T04:15:02.526377Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'ublk_get_disks' with params: None
+✅ [SPDK_RPC] Method 'ublk_get_disks' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.538640Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.553214Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.562271Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.778334Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+[2m2026-07-28T04:14:02.782092Z[0m [32m INFO[0m [RECONCILE] Reconciliation complete [3msuccess_count[0m[2m=[0m0 [3mskip_count[0m[2m=[0m0 [3merror_count[0m[2m=[0m0
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.784814Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.787302Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.796976Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.803199Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.812714Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-4_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:14:02.819389Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvols
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.827184Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvols' with params: Some(Object {"lvs_name": String("lvs_runak-aws-4_0000-00-1f-0")})
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvols, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvols' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.839217Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: 0 keys
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: Some(Object {})
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.851166Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: Some(Object {})
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: 0 keys
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: Some(Object {})
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: ublk_get_disks
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: ublk_get_disks, params: None
+[2m2026-07-28T04:14:02.863363Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'ublk_get_disks' with params: None
+✅ [SPDK_RPC] Method 'ublk_get_disks' completed successfully
+[2m2026-07-28T04:14:02.876506Z[0m [33m WARN[0m [MONITOR] Sub-pass failed (non-fatal) [3merror[0m[2m=[0mApiError: services is forbidden: User "system:serviceaccount:flint-system:flint-csi-node" cannot list resource "services" in API group "" at the cluster scope: Forbidden (Status { status: Some(Failure), code: 403, message: "services is forbidden: User \"system:serviceaccount:flint-system:flint-csi-node\" cannot list resource \"services\" in API group \"\" at the cluster scope", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: "Forbidden", details: Some(StatusDetails { name: "", group: "", kind: "services", uid: "", causes: [], retry_after_seconds: 0 }) }) [3mpass[0m[2m=[0m"sweep_orphan_nfs_mounts"
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.876604Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.891041Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:02.899124Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔵 [GRPC] Node.NodeGetCapabilities called
+✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition
+🔵 [GRPC] Node.NodeGetVolumeStats called for volume: pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264
+   Volume path: /var/lib/kubelet/pods/a09a38c9-fe37-4773-b34e-ad167b734bc1/volumes/kubernetes.io~csi/pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264/mount
+🔍 [DRIVER] Getting volume info from PV metadata: pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264
+❌ [DRIVER] Volume metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+💡 [DRIVER] This means either:
+   1. Volume doesn't exist
+   2. Volume was created with old driver version (before metadata storage)
+   3. PV is corrupted or missing volumeAttributes
+⚠️ [NODE] Could not get volume info: Volume pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:19.916381Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+[2m2026-07-28T04:14:19.925496Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+[2m2026-07-28T04:14:19.937271Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-4_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:14:19.949418Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.340831Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.349790Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.361609Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-4_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:14:32.373713Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.778434Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+[2m2026-07-28T04:14:32.789756Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:14:32.801617Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-4_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:14:32.813725Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+🔵 [GRPC] Node.NodeGetCapabilities called
+✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition
+🔵 [GRPC] Node.NodeGetCapabilities called
+✅ [GRPC] Node.NodeGetCapabilities returning: StageUnstageVolume, ExpandVolume, VolumeMountGroup, GetVolumeStats, VolumeCondition
+🔵 [GRPC] Node.NodeExpandVolume called for volume: pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264
+   Volume path: /var/lib/kubelet/pods/a09a38c9-fe37-4773-b34e-ad167b734bc1/volumes/kubernetes.io~csi/pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264/mount
+   Capacity range: Some(CapacityRange { required_bytes: 22548578304, limit_bytes: 0 })
+   Target capacity: 22548578304 bytes
+   Block device: 10.101.136.223:/
+   NFS client mount (nfs4) — node-side expansion is a no-op by contract
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.778614Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: None
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: None
+[2m2026-07-28T04:15:02.782445Z[0m [32m INFO[0m [RECONCILE] Reconciliation complete [3msuccess_count[0m[2m=[0m0 [3mskip_count[0m[2m=[0m0 [3merror_count[0m[2m=[0m0
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.785532Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: None
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: None
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.788488Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.797969Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+[2m2026-07-28T04:15:02.804451Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvstores
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvstores, params: None
+🔧 [SPDK_METHOD] bdev_lvol_get_lvstores (no params expected)
+[2m2026-07-28T04:15:02.814167Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvstores' with params: None
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+✅ [PCI_EXTRACT] Mapped nvme0n1 -> 0000:00:04.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme0n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+🔍 [DISK_DETECT] nvme0n1 has 3 partitions: ["nvme0n1", "nvme0n1p1", "nvme0n1p128", "nvme0n1p127"] -> marking as system disk
+✅ [PCI_EXTRACT] Mapped nvme1n1 -> 0000:00:1f.0
+🔍 [LVS_SEARCH] Looking for LVS on bdev: uring_nvme1n1
+✅ [LVS_SEARCH] Found 1 LVS stores to check
+✅ [LVS_RECOVERY] Found existing LVS 'lvs_runak-aws-4_0000-00-1f-0' on bdev 'uring_nvme1n1' (free: 890101MB, lvols: 0)
+[2m2026-07-28T04:15:02.820648Z[0m [32m INFO[0m [MINIMAL_DISK] Discovered local storage disks [3mcount[0m[2m=[0m2
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvstores' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_lvol_get_lvols
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_METHOD] bdev_lvol_get_lvstores returned 1 LVS
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.828436Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_lvol_get_lvols' with params: Some(Object {"lvs_name": String("lvs_runak-aws-4_0000-00-1f-0")})
+🔍 [SPDK_PARAMS] Method: bdev_lvol_get_lvols, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_lvol_get_lvols' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: nvmf_get_subsystems
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: nvmf_get_subsystems, params: 0 keys
+[2m2026-07-28T04:15:02.840480Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'nvmf_get_subsystems' with params: Some(Object {})
+✅ [SPDK_RPC] Method 'nvmf_get_subsystems' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.852465Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_get_bdevs' with params: Some(Object {})
+🔍 [SPDK_PARAMS] Method: bdev_get_bdevs, params: 0 keys
+🔧 [SPDK_FIX] Calling bdev_get_bdevs with params: Some(Object {})
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_FIX] bdev_get_bdevs returned 2 bdev(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [SPDK_RPC] Method 'bdev_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: ublk_get_disks
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+🔍 [SPDK_PARAMS] Method: ublk_get_disks, params: None
+[2m2026-07-28T04:15:02.864534Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'ublk_get_disks' with params: None
+✅ [SPDK_RPC] Method 'ublk_get_disks' completed successfully
+[2m2026-07-28T04:15:02.877710Z[0m [33m WARN[0m [MONITOR] Sub-pass failed (non-fatal) [3merror[0m[2m=[0mApiError: services is forbidden: User "system:serviceaccount:flint-system:flint-csi-node" cannot list resource "services" in API group "" at the cluster scope: Forbidden (Status { status: Some(Failure), code: 403, message: "services is forbidden: User \"system:serviceaccount:flint-system:flint-csi-node\" cannot list resource \"services\" in API group \"\" at the cluster scope", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: "Forbidden", details: Some(StatusDetails { name: "", group: "", kind: "services", uid: "", causes: [], retry_after_seconds: 0 }) }) [3mpass[0m[2m=[0m"sweep_orphan_nfs_mounts"
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.877820Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_nvme_get_controllers
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.892339Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔧 [SPDK_RPC] Calling method 'bdev_nvme_get_controllers' with params: None
+🔍 [SPDK_PARAMS] Method: bdev_nvme_get_controllers, params: None
+🔧 [SPDK_METHOD] bdev_nvme_get_controllers (no params expected)
+✅ [SPDK_METHOD] bdev_nvme_get_controllers returned 0 controllers
+✅ [SPDK_RPC] Method 'bdev_nvme_get_controllers' completed successfully
+🔧 [NODE_AGENT_SPDK] Calling SPDK method via Unix socket: bdev_raid_get_bdevs
+🔧 [SPDK_RPC] Original socket URL: unix:///var/tmp/spdk.sock
+🔧 [SPDK_RPC] Cleaned socket path: /var/tmp/spdk.sock
+✅ [SPDK_RPC] Socket file exists, creating SPDK client...
+[2m2026-07-28T04:15:02.900478Z[0m [32m INFO[0m [SPDK_RPC] Connected to SPDK at /var/tmp/spdk.sock
+🔍 [SPDK_PARAMS] Method: bdev_raid_get_bdevs, params: 1 keys
+🔧 [SPDK_RPC] Calling method 'bdev_raid_get_bdevs' with params: Some(Object {"category": String("all")})
+✅ [SPDK_RPC] Method 'bdev_raid_get_bdevs' completed successfully

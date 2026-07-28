@@ -1,0 +1,9 @@
+PV=pvc-7750fc95-617a-4daf-8858-89b17db946e3
+degraded window open: runak-aws-1:stale runak-aws-2:in_sync
+patching PVC 21Gi -> 22Gi WHILE degraded
+refusal_observed=1 capacity_moved_during_refusal=0 (cap now 21Gi)
+I0728 02:49:32.150078       1 connection.go:201] GRPC error: rpc error: code = Unavailable desc = Volume pvc-7750fc95-617a-4daf-8858-89b17db946e3: expansion refused while replicas lag: 5035b5fd-4b46-42eb-9812-7585405ece9d on runak-aws-1 is stale — expansion retries automatically once all replicas are in_sync
+E0728 02:49:32.150111       1 controller.go:286] Error syncing PVC: resize volume "pvc-7750fc95-617a-4daf-8858-89b17db946e3" by resizer "flint.csi.storage.io" failed: rpc error: code = Unavailable desc = Volume pvc-7750fc95-617a-4daf-8858-89b17db946e3: expansion refused while replicas lag: 5035b5fd-4b46-42eb-9812-7585405ece9d on runak-aws-1 is stale — expansion retries automatically once all replicas are in_sync
+I0728 02:49:32.150215       1 event.go:298] Event(v1.ObjectReference{Kind:"PersistentVolumeClaim", Namespace:"flint-chaos", Name:"data-pg-0", UID:"7750fc95-617a-4daf-8858-89b17db946e3", APIVersion:"v1", ResourceVersion:"7840", FieldPath:""}): type: 'Warning' reason: 'VolumeResizeFailed' resize volume "pvc-7750fc95-617a-4daf-8858-89b17db946e3" by resizer "flint.csi.storage.io" failed: rpc error: code = Unavailable desc = Volume pvc-7750fc95-617a-4daf-8858-89b17db946e3: expansion refused while replicas lag: 5035b5fd-4b46-42eb-9812-7585405ece9d on runak-aws-1 is stale — expansion retries automatically once all replicas are in_sync
+final: capacity=21Gi completed_after_rejoin=-1s sync=runak-aws-1:stale runak-aws-2:in_sync
+DEGRADED-REFUSAL: FAIL (refused=1 moved_during=0 completed=-1s)

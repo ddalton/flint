@@ -1,0 +1,16 @@
+runak-aws-1785210466 nodefs=4.56/7.93GiB 57.6% imagefs=1.83/7.93GiB 23.1%
+  pod-ephemeral flint-system/flint-csi-node-flhnf 0.0GiB
+  pod-ephemeral kube-system/cilium-jx8q5 0.0GiB
+  pod-ephemeral kube-system/cilium-envoy-mrrgj 0.0GiB
+runak-aws-2 nodefs=5.36/7.93GiB 67.6% imagefs=2.37/7.93GiB 29.9%
+  pod-ephemeral flint-system/flint-csi-node-z9c2m 0.03GiB
+  pod-ephemeral kube-system/cilium-69tpd 0.0GiB
+  pod-ephemeral flint-system/snapshot-controller-75cc446f55-kdmhv 0.0GiB
+runak-aws-3 nodefs=4.58/7.93GiB 57.8% imagefs=1.83/7.93GiB 23.1%
+  pod-ephemeral kube-system/cilium-mnb47 0.0GiB
+  pod-ephemeral flint-system/flint-csi-node-7l7tm 0.0GiB
+  pod-ephemeral flint-system/flint-csi-controller-64b8b4f678-ztnns 0.0GiB
+runak-aws-4 nodefs=5.11/7.93GiB 64.4% imagefs=2.21/7.93GiB 27.9%
+  pod-ephemeral kube-system/cilium-vzgl6 0.0GiB
+  pod-ephemeral flint-system/flint-csi-node-hbtm6 0.0GiB
+  pod-ephemeral kube-system/cilium-envoy-rb258 0.0GiB

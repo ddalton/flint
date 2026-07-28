@@ -1,0 +1,8 @@
+flint-system/flint-csi-controller-74759b56c5-hzjpv container=flint-csi-controller image=dilipdalton/flint-driver:1.20.0 CSI_MODE=controller FLINT_ORCHESTRATORS=<unset> ENABLE_DASHBOARD=true
+flint-system/flint-csi-node-fq9jk container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> ENABLE_DASHBOARD=<unset>
+flint-system/flint-csi-node-frmjs container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> ENABLE_DASHBOARD=<unset>
+flint-system/flint-csi-node-h6q9n container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> ENABLE_DASHBOARD=<unset>
+flint-system/flint-csi-node-hsdk2 container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> ENABLE_DASHBOARD=<unset>
+flint-system/flint-csi-node-nz954 container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> ENABLE_DASHBOARD=<unset>
+flint-system/spdk-controller-operator-8499558b7f-mp9sp container=spdk-controller-operator image=dilipdalton/flint-driver:1.20.0 CSI_MODE=<UNSET -> all> FLINT_ORCHESTRATORS=<unset> ENABLE_DASHBOARD=<unset>
+flint-system/spdk-dashboard-6bbb578f5c-w9qkw container=dashboard-backend image=dilipdalton/flint-driver:1.20.0 CSI_MODE=controller FLINT_ORCHESTRATORS=<unset> ENABLE_DASHBOARD=true

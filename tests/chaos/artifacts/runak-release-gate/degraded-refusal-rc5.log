@@ -1,0 +1,9 @@
+PV=pvc-42c321f3-73e6-47ee-9bfc-72449681fc60
+degraded window open: runak-aws-1785210466:in_sync runak-aws-2:stale
+patching PVC 21Gi -> 22Gi WHILE degraded
+refusal_observed=1 capacity_moved_during_refusal=0 (cap now 21Gi)
+📏 [CONTROLLER] pvc-42c321f3-73e6-47ee-9bfc-72449681fc60: expansion refused while replicas lag: 0f3dc1e6-1a65-47ef-a189-b1380ee6cee2 on runak-aws-2 is stale
+📏 [CONTROLLER] pvc-42c321f3-73e6-47ee-9bfc-72449681fc60: expansion refused while replicas lag: 0f3dc1e6-1a65-47ef-a189-b1380ee6cee2 on runak-aws-2 is stale
+📏 [CONTROLLER] pvc-42c321f3-73e6-47ee-9bfc-72449681fc60: expansion refused while replicas lag: 0f3dc1e6-1a65-47ef-a189-b1380ee6cee2 on runak-aws-2 is stale
+final: capacity=22Gi completed_after_rejoin=403s sync=runak-aws-1785210466:in_sync runak-aws-2:in_sync
+DEGRADED-REFUSAL: PASS (refused while lagging, no partial fan-out, completed after rejoin)

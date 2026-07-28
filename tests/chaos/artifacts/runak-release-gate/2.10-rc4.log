@@ -1,0 +1,38 @@
+  ✓ harness healthy (pg-0 Ready, ledger acking)
+
+▶ T0=1785206163 pg-0 on runak-aws-4 (pv pvc-7750fc95-617a-4daf-8…, remote leg: runak-aws-1)
+
+▶ raid state pre: raid_pvc-7750fc95-617a-4daf-8858-89b17db946e3 state=online base=2/2
+
+▶ expanding data-pg-0 20Gi → 21Gi under live writes (mount /var/lib/postgresql/data, df_pre=19987M)
+  ✓ PVC reports 21Gi after 70s
+  ✓ consumer filesystem grew 19987M → 20995M
+  · leg bytes on runak-aws-4: 22548578304
+  · leg bytes on runak-aws-1: 22548578304
+  · raid state post: raid_pvc-7750fc95-617a-4daf-8858-89b17db946e3 state=online base=2/2
+
+▶ 1/7 pod Ready (timeout 60s)
+  ✓ pg-0 Ready 74s after T0
+  ✓ attribution: in-place (runak-aws-4→runak-aws-4, postgres restarts 0)
+
+▶ 2/7 db verdict
+  ✓ db PASS
+
+▶ 3/7 volumeattachments
+  ✓ VA consistent (1 VA on runak-aws-4, none stale)
+
+▶ 4/7 data-path sessions (nvmeof)
+  ✓ pg volume session live
+  ✓ data path clean (live volume healthy, no new leaks)
+
+▶ 5/7 orphaned mounts
+  ✓ no orphaned pod mounts
+  · node fs pressure captured (/Users/ddalton/github/flint/tests/chaos/artifacts/2-2.10-1785206163/node-fs.txt)
+
+▶ 6/7 driver logs since T0
+  ✓ no unresolved volume errors (full scan in /Users/ddalton/github/flint/tests/chaos/artifacts/2-2.10-1785206163/driver-logs.txt)
+
+▶ 7/7 timings
+  ✓ max ledger stall 1s
+
+PASS: drill 2/2.10 — ready=74s stall=1s 

@@ -1,0 +1,7 @@
+flint-csi-controller-5b85994c8d-tvk4t :: 🎛️ [ORCHESTRATORS] ENABLED — FLINT_ORCHESTRATORS is set to enabled — this process owns the controller-side orchestrators
+flint-csi-node-9t47f :: 🎛️ [ORCHESTRATORS] DISABLED — CSI_MODE=node is not a controller role. This process runs no epoch scheduler, catch-up, cutover, hot-rejoin or NFS reconciler.
+flint-csi-node-jcgts :: 🎛️ [ORCHESTRATORS] DISABLED — CSI_MODE=node is not a controller role. This process runs no epoch scheduler, catch-up, cutover, hot-rejoin or NFS reconciler.
+flint-csi-node-nh8vl :: 🎛️ [ORCHESTRATORS] DISABLED — CSI_MODE=node is not a controller role. This process runs no epoch scheduler, catch-up, cutover, hot-rejoin or NFS reconciler.
+flint-csi-node-pxx7s :: 🎛️ [ORCHESTRATORS] DISABLED — CSI_MODE=node is not a controller role. This process runs no epoch scheduler, catch-up, cutover, hot-rejoin or NFS reconciler.
+flint-csi-node-st7sj :: 🎛️ [ORCHESTRATORS] DISABLED — CSI_MODE=node is not a controller role. This process runs no epoch scheduler, catch-up, cutover, hot-rejoin or NFS reconciler.
+spdk-dashboard-6bbb78f47b-mt5pz :: 🎛️ [ORCHESTRATORS] DISABLED — FLINT_ORCHESTRATORS is set to disabled — another process owns the controller-side orchestrators. This process runs no epoch scheduler, catch-up, cutover, hot-rejoin or NFS reconciler.

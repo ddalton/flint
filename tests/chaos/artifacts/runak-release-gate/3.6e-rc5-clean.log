@@ -1,0 +1,48 @@
+  ✓ harness healthy (pg-0 Ready, ledger acking)
+
+▶ T0=1785212126 pg-0 on runak-aws-1785210466; nfs flint-nfs-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 on runak-aws-1785210466 (uid 73efbaf6); witness on runak-aws-4
+  · acked tail at kill: 1531 1785212127
+  · raid pre (on runak-aws-1785210466): raid_nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 state=online base=2/2
+  · TERMINATED i-064e2547521ec2a45 (runak-aws-2) — remote leg df287966… permanently lost; the nfs server keeps writing
+  · Node object deleted at 56s — re-placement trigger armed
+  · I/O RESUMED but stalled 159s through the kill — inside the 180s budget, but fast_io_fail is 20s; detection latency, not fail-fast, dominated
+  ✓ identity swapped to runak-aws-4 at 187s
+  · replacement reached standby at 208s
+  · nfs pod BOUNCED at 324s (uid 73efbaf6 → 16ef0042) — cutover took the claim
+  ✓ replacement leg in_sync at 356s — RWX redundancy restored (2/2)
+  · settle window: re-asserting 2/2 at +360s (F44 signature: ReplicaHeadInUse + collapse)
+  ✓ redundancy HELD through the settle window (2/2 in_sync, writer_set=2, head_in_use_events=0, nfs Running/Ready, no assembly-blocked marker)
+  ✓ no foreign leg/copy controllers linger off the server node (latent-pin sweep clean)
+  · cutover events: started=1 succeeded=1 ineffective=0
+  · claim arbitration: maintainer yields=0 lease seizures=0 (seizures should be 0 — the lease is a wedge backstop, not the mechanism)
+  · raid post (on runak-aws-4): raid_nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264 state=online base=2/2
+  ✓ witness fresh at 726s (multi-node access intact)
+  ✓ witness clean (0 mismatches, last write 0s ago)
+  ✓ no acked-tail-risk raised (the surviving leg never trailed)
+
+▶ 1/7 pod Ready (timeout 180s)
+  ✓ pg-0 Ready 727s after T0
+  ✓ attribution: in-place (runak-aws-1785210466→runak-aws-1785210466, postgres restarts 0)
+
+▶ 2/7 db verdict
+  ✓ db PASS
+
+▶ 3/7 volumeattachments
+  ✓ VA consistent (consumer nodes covered, none stale)
+
+▶ 4/7 data-path sessions (nvmeof)
+  ✓ pg volume session live
+  ✓ data path clean (live volume healthy, no new leaks)
+
+▶ 5/7 orphaned mounts
+  ✓ no orphaned pod mounts
+  · node fs pressure captured (/Users/ddalton/github/flint/tests/chaos/artifacts/3-3.6e-1785212126/node-fs.txt)
+
+▶ 6/7 driver logs since T0
+  ✓ no unresolved volume errors (full scan in /Users/ddalton/github/flint/tests/chaos/artifacts/3-3.6e-1785212126/driver-logs.txt)
+
+▶ 7/7 timings
+  ✓ max ledger stall 159s
+
+PASS: drill 3/3.6e — ready=727s stall=159s 
+  · fleet is one storage node down — replace via trove before further node-consuming drills

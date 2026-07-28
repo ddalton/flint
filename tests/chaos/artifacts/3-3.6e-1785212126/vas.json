@@ -1,0 +1,108 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runak-aws-1785210466"
+                },
+                "creationTimestamp": "2026-07-28T04:07:19Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-825e32a11904adb7a24fcaa0cfec34c3fbe9b250dfcd3c734be57c2442b88d85",
+                "resourceVersion": "24671",
+                "uid": "42d0396a-fc5e-413d-a5dd-47d26c5617e7"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runak-aws-1785210466",
+                "source": {
+                    "persistentVolumeName": "pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.101.136.223",
+                    "nfs.flint.io/server-node": "runak-aws-1785210466",
+                    "volumeId": "pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264",
+                    "volumeType": "nfs"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runak-aws-4"
+                },
+                "creationTimestamp": "2026-07-28T04:13:24Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-e6e9ab2eabc2197021d5696775523923c5b30240f0330d78a5f1842fdef31e9a",
+                "resourceVersion": "25991",
+                "uid": "dfa65080-071c-4ec9-84fc-1cd7d85aab98"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runak-aws-4",
+                "source": {
+                    "persistentVolumeName": "pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "nfs.flint.io/export-path": "/exports/pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264",
+                    "nfs.flint.io/port": "2049",
+                    "nfs.flint.io/server-ip": "10.101.136.223",
+                    "nfs.flint.io/server-node": "runak-aws-1785210466",
+                    "volumeId": "pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264",
+                    "volumeType": "nfs"
+                }
+            }
+        },
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runak-aws-4"
+                },
+                "creationTimestamp": "2026-07-28T04:20:44Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-f8bc585b027421e6493591881518e711a3db2ccfc477bf40293acaf53c6bf89f",
+                "resourceVersion": "27650",
+                "uid": "781bd18e-4a83-4119-a92c-7696abb28c8d"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runak-aws-4",
+                "source": {
+                    "persistentVolumeName": "flint-nfs-pv-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "replicas": "[{\"node_name\":\"runak-aws-1785210466\",\"node_uid\":\"95f2de6e-3461-42b4-9280-9b8533dee03c\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"fb40084e-2b8c-40fa-b2be-25bf51f2fd03\",\"lvol_name\":\"vol_pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264_replica_0\",\"lvs_name\":\"lvs_runak-aws-1785210466_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"},{\"node_name\":\"runak-aws-4\",\"node_uid\":\"8c1a9869-8263-4283-85a6-59564e4d013a\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"8fcc703f-18c2-4f93-9973-22c7256c7640\",\"lvol_name\":\"vol_pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264_replica_1\",\"lvs_name\":\"lvs_runak-aws-4_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"}]",
+                    "volumeId": "nfs-server-pvc-32ed443c-8e9f-4364-9bc2-3e9315cc7264",
+                    "volumeType": "multi-replica"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

@@ -1,0 +1,7 @@
+flint-system/flint-csi-controller-5b85994c8d-tvk4t flint-csi-controller dilipdalton/flint-driver:1.21.0-rc4 CSI_MODE=controller FLINT_ORCHESTRATORS=enabled
+flint-system/flint-csi-node-9t47f flint-csi-driver dilipdalton/flint-driver:1.21.0-rc4 CSI_MODE=node FLINT_ORCHESTRATORS=<unset>
+flint-system/flint-csi-node-jcgts flint-csi-driver dilipdalton/flint-driver:1.21.0-rc4 CSI_MODE=node FLINT_ORCHESTRATORS=<unset>
+flint-system/flint-csi-node-nh8vl flint-csi-driver dilipdalton/flint-driver:1.21.0-rc4 CSI_MODE=node FLINT_ORCHESTRATORS=<unset>
+flint-system/flint-csi-node-pxx7s flint-csi-driver dilipdalton/flint-driver:1.21.0-rc4 CSI_MODE=node FLINT_ORCHESTRATORS=<unset>
+flint-system/flint-csi-node-st7sj flint-csi-driver dilipdalton/flint-driver:1.21.0-rc4 CSI_MODE=node FLINT_ORCHESTRATORS=<unset>
+flint-system/spdk-dashboard-6bbb78f47b-mt5pz dashboard-backend dilipdalton/flint-driver:1.21.0-rc4 CSI_MODE=controller FLINT_ORCHESTRATORS=disabled
