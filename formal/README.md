@@ -1,16 +1,40 @@
-# Formal model — the replica-lifecycle / writer-set machine
+# Formal models — the replica-lifecycle machine and the snapshot protocol
+
+Two modules, one gate (`scripts/check-tla.sh`, nine TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
 generations, the F36c freshness gate, the failure taxonomy the P4 work
-made explicit (crash-stop vs **silent omission** vs verified death) — and,
+made explicit (crash-stop vs **silent omission** vs verified death) —
 since tranche 2: **hot rejoin** (kept-payload readmission, the shared-base
 ancestry check, the Scrub demotion), **torn writes** (crash between
 replica write and client ack), and the **F48 zombie head** (a partitioned
-server still acking writes until admission severs it).
+server still acking writes until admission severs it) — and since
+tranche 3: **LastResortServe**, the stale-only-survivor runbook step
+(operator override, risk surfaced; the code itself Defers).
+
+`FlintSnapshots.tla` (tranche 3) models the **snapshot protocol** at
+block-content level — the layer where content is `[Blocks -> version]`
+and the hazards are about which version survives a chain walk, which the
+write-set abstraction above deliberately cannot express: epoch cuts onto
+a retained chain, shallow per-epoch deltas, oldest-first walk order,
+based sessions from a shared base vs full rebuilds, retention drops with
+blobstore cluster absorption. Its theorem (`Inv_SessionFaithful`): every
+completed copy session delivers exactly the cut. Sessions are atomic —
+crash *inside* a session is the crash-sweep sim harness's job.
+
+Verification of snapshots is layered deliberately:
+
+1. **SPDK blobstore internals** — not modeled; audited by citation (the
+   axioms section below) and enforced at runtime by the sim harness's
+   faithful mock + `assert_chains_are_trees` shadow.
+2. **flint's copy protocol over those primitives** — `FlintSnapshots.tla`.
+3. **the record-level lifecycle that consumes the copies** —
+   `FlintReplication.tla` (its atomic `CatchUp`/`Admit` steps are exactly
+   what `Inv_SessionFaithful` licenses).
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar on first use).
-It runs five configs, ALL required:
+It runs nine configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -32,9 +56,24 @@ It runs five configs, ALL required:
    TLC **must find** a zombie-head violation — the partitioned old head
    keeps acking client writes after the new assembly serves (silent loss
    and/or split-brain divergence).
+6. `FlintSnapshots.cfg` — the shipped copy protocol (full ordered walk,
+   blobstore relink): `Inv_SessionFaithful` holds. Action coverage
+   verified — the based suffix walk contributes zero new distinct
+   states, itself a proof that faithful delta catch-up is
+   content-equivalent to a full rebuild (why the optimization is legal).
+7. `FlintSnapshotsSplit.cfg` — the **delta-split** bug (`WalkFull=FALSE`,
+   catchup.rs's "shallow copy moves only the top layer" hazard): TLC
+   **must find** a lost middle-epoch block.
+8. `FlintSnapshotsOrder.cfg` — walk-order violation
+   (`OrderedWalk=FALSE`, what `chain.reverse()` enforces): TLC **must
+   find** an older version overwriting a newer one.
+9. `FlintSnapshotsBareDelete.cfg` — bare retention delete
+   (`RelinkOnDelete=FALSE`): the **finding #1 class** at content level —
+   exactly what the sim harness's fake `bdev_lvol_delete` used to do.
+   TLC **must find** a full build missing absorbed clusters.
 
-Runs 3–5 are the model's own regression tests; a model that cannot
-rediscover the bug classes it exists for proves nothing.
+The mutation runs are the models' own regression tests; a model that
+cannot rediscover the bug classes it exists for proves nothing.
 
 ## What maps to what
 
@@ -53,7 +92,15 @@ rediscover the bug classes it exists for proves nothing.
 | `ServerPartition` / `ZombieWrite` / Assemble's sever (`FenceZombie`) | the F48 zombie head; `catchup.rs`'s zombie-consumer sever at admission |
 | `lineage` / `Inv_NoDivergentServing` | raid1 serves reads from ANY leg: one phantom block is a split-read surface |
 | `Deferred` (liveness escape) | NodeStage's Defer arm: no in-sync material ⇒ designed unavailability, never stale service |
+| `LastResortServe` | the stale-only-survivor RUNBOOK override (not code — the code Defers); risk surfaced, sb generations restart from the survivor |
 | `Inv_NoSilentLoss` | PacificA's commit invariant; the ledger oracle's zero-loss check is its runtime shadow |
+| **FlintSnapshots** | |
+| `Cut` / `chain` | `apply_epoch_cut` / the blobstore snapshot chain (retained epochs) |
+| `Alloc(i)` / `ApplyWalk` oldest-first | per-epoch shallow copy; `lineage_chain` collects, `chain.reverse()` orders |
+| `CopyBased` guard (base retained) | `LINEAGE_NOT_COVERED` — an aged-out base cannot be indexed; demoted to full rebuild |
+| `ScrubTarget` | the full-rebuild demotion (`HotRejoinScrubbed` / "delta demoted to a full rebuild") |
+| `Drop` with `RelinkOnDelete` | blobstore snapshot delete: single clone re-parented, clusters absorbed (`blobstore.c:8310-8324`); >1 clones -EBUSY (`:8534`) |
+| `Inv_SessionFaithful` | a completed session = the cut, exactly; what licenses `FlintReplication`'s atomic `CatchUp`/`Admit` |
 
 ## What the model already caught
 
@@ -80,14 +127,19 @@ rediscover the bug classes it exists for proves nothing.
   strict gate forces the zombie's legs (still the recorded writers) into
   the next assembly; each belt alone is insufficient.
 
-## Deliberate scope limits (tranche 3 candidates)
+## Deliberate scope limits
 
-- Epoch chains deeper than one cut (`epochCut` holds only the latest).
-- The stale-only-survivor **last resort** as an explicit modeled action
-  (today: correctly absent — the code Defers; it is a manual runbook).
 - Hot-rejoin's esnap window internals — crash *inside* catch-up/scrub is
-  the crash-sweep sim harness's job (`hot_rejoin.rs` tests); here those
-  steps are atomic.
+  the crash-sweep sim harness's job (`hot_rejoin.rs` tests); in both
+  modules those steps are atomic. (Deep epoch chains and the
+  stale-only-survivor last resort — tranche 3 candidates — landed in
+  tranche 3: the former at content level in `FlintSnapshots`, the latter
+  as `LastResortServe`.)
+- SPDK blobstore internals (COW cluster mechanics, md sync ordering) —
+  axiom territory: audited by citation, shadowed at runtime.
+- Cross-module composition (a replication-level `CatchUp` step driving a
+  snapshots-level session as one refined machine) — a possible tranche 4
+  if a bug class ever demands it.
 - Identity domains (killed at compile time by the newtypes).
 
 ## Data-plane axioms — verified against SPDK source (v26.05.1-pre, ~/github/spdk)

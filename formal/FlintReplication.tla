@@ -82,12 +82,16 @@
 (* scripts/check-tla.sh REQUIRES each mutation run to find its loss — the  *)
 (* model must be able to rediscover every bug class it exists for.         *)
 (*                                                                         *)
-(* Out of scope this tranche: epoch chains deeper than one cut; the        *)
-(* stale-only-survivor last resort (the code Defers by design — an         *)
-(* availability choice, not a safety rule); esnap-window INTERNALS         *)
-(* (crash inside catch-up/scrub is the crash-sweep sim harness's job —     *)
-(* here those steps are atomic); identity domains (killed at compile       *)
-(* time by the newtypes).                                                  *)
+(* TRANCHE 3: LastResortServe models the stale-only-survivor RUNBOOK       *)
+(* step (the code itself Defers; an operator may serve the freshest        *)
+(* stale survivor with the risk surfaced) — verified sound after the       *)
+(* override.  Content-level snapshot semantics (epoch deltas, walk         *)
+(* order, retention relink) live in FlintSnapshots.tla, where they are     *)
+(* non-trivial; here content is a write-set and epochCut a single cut.     *)
+(*                                                                         *)
+(* Out of scope: esnap-window INTERNALS (crash inside catch-up/scrub is    *)
+(* the crash-sweep sim harness's job — here those steps are atomic);       *)
+(* identity domains (killed at compile time by the newtypes).              *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -415,6 +419,29 @@ Assemble ==
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, state, epochCut, crashes>>
 
+\* The stale-only-survivor LAST RESORT — the RUNBOOK step, not code: the
+\* code's gate correctly Defers (the Deferred liveness escape), and an
+\* OPERATOR may explicitly serve the freshest stale survivor, accepting
+\* surfaced risk.  Modeled to verify the machine stays sound after the
+\* override: riskSurfaced is stamped (every content invariant escapes
+\* honestly), the sb generations restart from the survivor, and
+\* post-override convergence holds.  No fairness — an operator choice.
+LastResortServe(l) ==
+  /\ serving = {}
+  /\ UpInSync = {}                       \* nothing the gate could use
+  /\ state[l] = "stale"
+  /\ legUp[l] = "up"
+  /\ l \in NewestOf({m \in Legs : state[m] = "stale" /\ legUp[m] = "up"})
+  /\ serving' = {l}
+  /\ writerSet' = {l}
+  /\ lineage' = legData[l]
+  /\ legGen' = [legGen EXCEPT ![l] = raidGen + 1]
+  /\ raidGen' = raidGen + 1
+  /\ riskSurfaced' = TRUE
+  /\ state' = [state EXCEPT ![l] = "insync"]
+  /\ zombie' = IF FenceZombie THEN {} ELSE zombie
+  /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, crashes>>
+
 Next ==
   \/ Write
   \/ WriteTorn
@@ -435,6 +462,7 @@ Next ==
        \/ Scrub(l)
        \/ CatchUp(l)
        \/ Admit(l)
+       \/ LastResortServe(l)
 
 \* Recovery actions are weakly fair.  WF(RaidDeconfigure) is P4;
 \* WF(ConfirmDead) is the replace-after threshold (a blackholed node is
