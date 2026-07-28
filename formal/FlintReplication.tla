@@ -89,6 +89,24 @@
 (* order, retention relink) live in FlintSnapshots.tla, where they are     *)
 (* non-trivial; here content is a write-set and epochCut a single cut.     *)
 (*                                                                         *)
+(* RESURRECTION / EVIDENCE FALLIBILITY: "verified death" is not an         *)
+(* oracle — it is a k8s OBSERVATION (Node object gone, instance API says   *)
+(* terminated), and the observation can be wrong or stale: a Node object   *)
+(* deleted while the instance still runs (a real operational recipe used   *)
+(* to unblock wedged DS rolls), or stale cloud state.  The model now       *)
+(* splits GROUND TRUTH (legUp; LegPerish is a blackhole actually dying)    *)
+(* from EVIDENCE (deemedDead; DeemDead is the record accepting node_gone   *)
+(* proof).  Replace and ServeWithRisk are justified by EVIDENCE — as in    *)
+(* the code — and EvidenceStrict is the axiom that evidence implies        *)
+(* truth.  EvidenceStrict = FALSE lets a recoverable (blackholed) node be  *)
+(* deemed dead: the resurrection world.  falseRisk records the harm: a     *)
+(* ServeWithRisk that excused a writer that was NOT truly dead — the       *)
+(* "surfaced risk" was hollow, the acked tail was recoverable all along.   *)
+(* Inv_NoFalseRisk is the theorem; the Resurrect mutation must find its    *)
+(* violation.  (Replace on a falsely-deemed node also strands the old      *)
+(* identity's exports on a live node — the F44-F46/F49 residue family,     *)
+(* fixed live and below this abstraction; see the comment at Replace.)     *)
+(*                                                                         *)
 (* S2 / R2 CLAIM ARBITRATION (the F43 machinery, modeled ahead of the      *)
 (* S2 bounce-free-RWX-admission implementation): control work runs under   *)
 (* a per-volume claim — "catchup" (reconcile/build/scrub) or "admission"   *)
@@ -118,14 +136,17 @@ CONSTANTS
   GateStrict,  \* TRUE = F36c gate on; FALSE = pre-F36c bug (must fail)
   RejoinGuard, \* TRUE = hot-rejoin shared-base ancestry check on
   FenceZombie, \* TRUE = assembly severs the previous head first (F48 fix)
-  ClaimArb     \* TRUE = admission-priority claim arbitration (F43 fix)
+  ClaimArb,    \* TRUE = admission-priority claim arbitration (F43 fix)
+  EvidenceStrict \* TRUE = node_gone evidence implies actual death
 
 VARIABLES
   \* ---- data plane -------------------------------------------------------
   serving,       \* SUBSET Legs: legs configured in the serving raid; {} = down
   zombie,        \* SUBSET Legs: a partitioned old head's assembly view (F48)
   legData,       \* [Legs -> SUBSET 1..MaxWrites]
-  legUp,         \* [Legs -> {"up", "blackhole", "dead"}]
+  legUp,         \* [Legs -> {"up", "blackhole", "dead"}] — GROUND TRUTH
+  deemedDead,    \* SUBSET Legs — the record's node_gone EVIDENCE
+  falseRisk,     \* TRUE once ServeWithRisk excused a not-truly-dead writer
   raidGen,       \* current raid incarnation (bumped on deconfigure/assemble)
   legGen,        \* [Legs -> Nat]: newest incarnation each leg participated in
   acked,         \* SUBSET 1..MaxWrites
@@ -140,13 +161,15 @@ VARIABLES
   crashes        \* failure budget spent
 
 vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
-          lineage, riskSurfaced, state, writerSet, epochCut, claim, crashes>>
+          lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
 
 TypeOK ==
   /\ serving \subseteq Legs
   /\ zombie \subseteq Legs
   /\ legData \in [Legs -> SUBSET (1..MaxWrites)]
   /\ legUp \in [Legs -> {"up", "blackhole", "dead"}]
+  /\ deemedDead \subseteq Legs
+  /\ falseRisk \in BOOLEAN
   /\ raidGen \in Nat
   /\ legGen \in [Legs -> Nat]
   /\ acked \subseteq 1..MaxWrites
@@ -183,6 +206,8 @@ Init ==
   /\ zombie = {}
   /\ legData = [l \in Legs |-> {}]
   /\ legUp = [l \in Legs |-> "up"]
+  /\ deemedDead = {}
+  /\ falseRisk = FALSE
   /\ raidGen = 1
   /\ legGen = [l \in Legs |-> 1]
   /\ acked = {}
@@ -213,7 +238,7 @@ Write ==
   /\ lineage' = lineage \cup {nextWrite}
   /\ nextWrite' = nextWrite + 1
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, riskSurfaced,
-                 state, writerSet, epochCut, claim, crashes>>
+                 state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
 
 \* The head crashes between replicating a block and acking the client: the
 \* block lands on SOME serving legs, the client never hears.  Either outcome
@@ -233,7 +258,7 @@ WriteTorn ==
   /\ serving' = {}
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<zombie, legUp, raidGen, legGen, acked, lineage,
-                 riskSurfaced, state, writerSet, epochCut, claim>>
+                 riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
 
 \* The F48 zombie: the partitioned old head still holds its leg
 \* connections and still acks client writes.  It writes OUTSIDE the
@@ -249,7 +274,7 @@ ZombieWrite ==
   /\ acked' = acked \cup {nextWrite}
   /\ nextWrite' = nextWrite + 1
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, lineage,
-                 riskSurfaced, state, writerSet, epochCut, claim, crashes>>
+                 riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
 
 \* Verified death straight away (terminated AND observed so).
 LegDie(l) ==
@@ -258,7 +283,7 @@ LegDie(l) ==
   /\ legUp' = [legUp EXCEPT ![l] = "dead"]
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, claim>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
 
 \* Silent unreachability: maybe a dying node, maybe a transient partition.
 LegBlackhole(l) ==
@@ -267,7 +292,7 @@ LegBlackhole(l) ==
   /\ legUp' = [legUp EXCEPT ![l] = "blackhole"]
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, claim>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
 
 \* The transient case: the leg returns, data intact, whatever the record
 \* now says about it.  (The F36c ingredient.)
@@ -275,15 +300,32 @@ LegRecover(l) ==
   /\ legUp[l] = "blackhole"
   /\ legUp' = [legUp EXCEPT ![l] = "up"]
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, claim, crashes>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
 
-\* The permanent case, confirmed: node object gone / instance verified
-\* terminated.  This — and only this — is the evidence Replace accepts.
-ConfirmDead(l) ==
+\* GROUND TRUTH: the silently-unreachable node actually dies (the cloud
+\* reaped it).  WF here is the axiom that a blackhole eventually RESOLVES
+\* — it perishes or it recovers; it does not hang forever.
+LegPerish(l) ==
   /\ legUp[l] = "blackhole"
   /\ legUp' = [legUp EXCEPT ![l] = "dead"]
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, claim, crashes>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
+
+\* EVIDENCE: the record accepts node_gone proof (Node object deleted /
+\* instance API says terminated).  With EvidenceStrict this only happens
+\* for a truly dead node — the axiom the pre-resurrection model baked in.
+\* Without it, a BLACKHOLED node can be deemed dead: a Node object
+\* deleted while the instance still runs (the wedged-DS-roll unblock
+\* recipe), or stale cloud state.  The belief persists through a
+\* LegRecover — an alive node the record thinks is dead.
+DeemDead(l) ==
+  /\ l \notin deemedDead
+  /\ IF EvidenceStrict THEN legUp[l] = "dead"
+                       ELSE legUp[l] \in {"dead", "blackhole"}
+  /\ deemedDead' = deemedDead \cup {l}
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, falseRisk, crashes>>
 
 \* The data plane faults an unresponsive leg out; survivors continue at a
 \* NEW incarnation (their superblocks record the shrink).  WF on this
@@ -296,7 +338,7 @@ RaidDeconfigure(l) ==
   /\ legGen' = [m \in Legs |-> IF m \in serving \ {l} THEN raidGen + 1
                                                       ELSE legGen[m]]
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
-                 riskSurfaced, state, writerSet, epochCut, claim, crashes>>
+                 riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
 
 \* The whole assembly dies cleanly (process gone, connections dropped).
 ServerCrash ==
@@ -305,7 +347,7 @@ ServerCrash ==
   /\ serving' = {}
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, claim>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
 
 \* The F48 case: the head is PARTITIONED, not dead.  The record sees it
 \* gone; the process lives on with its leg connections — a zombie.  (One
@@ -318,7 +360,7 @@ ServerPartition ==
   /\ serving' = {}
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<legData, legUp, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, claim>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
 
 (***************************************************************************)
 (* Control plane — each action is one CAS round against the record         *)
@@ -335,7 +377,7 @@ MonitorMarkStale(l) ==
   /\ state' = [state EXCEPT ![l] = "stale"]
   /\ writerSet' = writerSet \ {l}
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
-                 nextWrite, lineage, riskSurfaced, epochCut, claim, crashes>>
+                 nextWrite, lineage, riskSurfaced, epochCut, claim, deemedDead, falseRisk, crashes>>
 
 \* Epoch scheduler: cut a consistent snapshot of the served content.
 EpochCut ==
@@ -344,23 +386,30 @@ EpochCut ==
   /\ epochCut' = acked
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet, claim,
-                 crashes>>
+                 deemedDead, falseRisk, crashes>>
 
 \* replica_replace + prune_writers_for_replacement: swap the identity of a
-\* stale leg on a VERIFIABLY dead node; the freed slot returns as an empty
-\* standby with a new identity (its old sb generation dies with the old
-\* identity).
+\* stale leg whose node the record DEEMS dead (the C2 justification is
+\* EVIDENCE, not an oracle); the freed slot returns as an empty standby
+\* with a new identity on a fresh node (so legUp resets to "up" and the
+\* deemed flag is cleared — it referred to the old identity's node).
+\* When the evidence was FALSE, the old node later resurrects with the
+\* old identity's lvol and exports intact — the F44-F46/F49 residue
+\* family, fixed live by the teardown/identity-domain work and below
+\* this abstraction; the record-level machine stays safe because the old
+\* identity is no longer referenced anywhere.
 Replace(l) ==
   /\ state[l] = "stale"
-  /\ legUp[l] = "dead"
+  /\ l \in deemedDead
   /\ UpInSync # {}                        \* something to rebuild from
   /\ legUp' = [legUp EXCEPT ![l] = "up"]
   /\ legData' = [legData EXCEPT ![l] = {}]
   /\ legGen' = [legGen EXCEPT ![l] = 0]
   /\ state' = [state EXCEPT ![l] = "standby"]
   /\ writerSet' = writerSet \ {l}
+  /\ deemedDead' = deemedDead \ {l}
   /\ UNCHANGED <<serving, zombie, raidGen, acked, nextWrite, lineage,
-                 riskSurfaced, epochCut, claim, crashes>>
+                 riskSurfaced, epochCut, claim, falseRisk, crashes>>
 
 \* hot_rejoin_volume: a stale leg on a LIVE node re-enters as a standby
 \* KEEPING its identity and payload (contrast Replace).  Whether the
@@ -372,7 +421,7 @@ HotRejoin(l) ==
   /\ state' = [state EXCEPT ![l] = "standby"]
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, writerSet, epochCut,
-                 claim, crashes>>
+                 claim, deemedDead, falseRisk, crashes>>
 
 \* HotRejoinScrubbed: no usable shared history with ANY live in-sync
 \* source — wipe the payload and rebuild from scratch.  Requires a live
@@ -388,7 +437,7 @@ Scrub(l) ==
   /\ legData' = [legData EXCEPT ![l] = {}]
   /\ legGen' = [legGen EXCEPT ![l] = 0]
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, acked, nextWrite, lineage,
-                 riskSurfaced, state, writerSet, epochCut, claim, crashes>>
+                 riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
 
 \* Catch-up: build to the last epoch cut from an in-sync source.  A block
 \* copy fills holes and never erases — union semantics — so the shared-base
@@ -402,7 +451,7 @@ CatchUp(l) ==
        /\ (RejoinGuard => legData[l] \subseteq legData[src])
   /\ legData' = [legData EXCEPT ![l] = legData[l] \cup epochCut]
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, acked, nextWrite,
-                 lineage, riskSurfaced, state, writerSet, epochCut, claim, crashes>>
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
 
 \* Admission (hot-rejoin window / cutover reassembly) + mark_in_sync's
 \* writer-set add: quiesced delta copy from a healthy serving survivor,
@@ -425,7 +474,7 @@ Admit(l) ==
   /\ writerSet' = writerSet \cup {l}
   /\ claim' = "none"                      \* mark_in_sync closes the window
   /\ UNCHANGED <<zombie, legUp, raidGen, acked, nextWrite, lineage,
-                 riskSurfaced, epochCut, crashes>>
+                 riskSurfaced, epochCut, deemedDead, falseRisk, crashes>>
 
 \* NodeStage reassembly: the F36c freshness gate over the ATTACHABLE
 \* in-sync legs A, then SPDK examine serves only A's newest generation
@@ -442,13 +491,17 @@ Assemble ==
   /\ serving = {}
   /\ \E A \in (SUBSET UpInSync) \ {{}} :
        /\ \/ /\ writerSet \subseteq A
-             /\ UNCHANGED riskSurfaced
+             /\ UNCHANGED <<riskSurfaced, falseRisk>>
           \/ /\ GateStrict
              /\ writerSet \ A # {}
-             /\ \A w \in writerSet \ A : legUp[w] = "dead"
+             /\ \A w \in writerSet \ A : w \in deemedDead
              /\ riskSurfaced' = TRUE
+             \* The harm ghost: excusing a writer that was NOT truly
+             \* dead makes the surfaced risk hollow — the acked tail was
+             \* recoverable all along.
+             /\ falseRisk' = (falseRisk \/ \E w \in writerSet \ A : legUp[w] # "dead")
           \/ /\ ~GateStrict
-             /\ UNCHANGED riskSurfaced
+             /\ UNCHANGED <<riskSurfaced, falseRisk>>
        /\ serving' = NewestOf(A)
        /\ writerSet' = NewestOf(A)
        /\ lineage' = UNION {legData[m] : m \in NewestOf(A)}
@@ -457,7 +510,7 @@ Assemble ==
   /\ raidGen' = raidGen + 1
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, state, epochCut, claim,
-                 crashes>>
+                 deemedDead, crashes>>
 
 \* The stale-only-survivor LAST RESORT — the RUNBOOK step, not code: the
 \* code's gate correctly Defers (the Deferred liveness escape), and an
@@ -480,7 +533,7 @@ LastResortServe(l) ==
   /\ riskSurfaced' = TRUE
   /\ state' = [state EXCEPT ![l] = "insync"]
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
-  /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, claim, crashes>>
+  /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, claim, deemedDead, falseRisk, crashes>>
 
 (***************************************************************************)
 (* The R2 claim — the F43 machinery.  Catch-up work (builds, scrubs) and   *)
@@ -501,14 +554,14 @@ AcquireCatchup ==
   /\ claim' = "catchup"
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
-                 epochCut, crashes>>
+                 epochCut, deemedDead, falseRisk, crashes>>
 
 ReleaseCatchup ==
   /\ claim = "catchup"
   /\ claim' = "none"
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
-                 epochCut, crashes>>
+                 epochCut, deemedDead, falseRisk, crashes>>
 
 AcquireAdmission ==
   /\ claim = "none"
@@ -516,7 +569,7 @@ AcquireAdmission ==
   /\ claim' = "admission"
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
-                 epochCut, crashes>>
+                 epochCut, deemedDead, falseRisk, crashes>>
 
 \* Lease expiry: the claim holder died; the lease frees the claim.  A
 \* controller death is a failure event — budgeted — which is also what
@@ -528,7 +581,7 @@ ExpireClaim ==
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
-                 epochCut>>
+                 epochCut, deemedDead, falseRisk>>
 
 Next ==
   \/ Write
@@ -546,7 +599,8 @@ Next ==
        \/ LegDie(l)
        \/ LegBlackhole(l)
        \/ LegRecover(l)
-       \/ ConfirmDead(l)
+       \/ LegPerish(l)
+       \/ DeemDead(l)
        \/ RaidDeconfigure(l)
        \/ MonitorMarkStale(l)
        \/ Replace(l)
@@ -557,15 +611,17 @@ Next ==
        \/ LastResortServe(l)
 
 \* Recovery actions are weakly fair.  WF(RaidDeconfigure) is P4;
-\* WF(ConfirmDead) is the replace-after threshold (a blackholed node is
-\* eventually confirmed gone unless it recovers first — recovery is the
-\* environment's choice and gets no fairness).  WF(Scrub) is the
-\* HotRejoinScrubbed arm: a divergent standby is eventually demoted to a
-\* full rebuild rather than parking forever.  Failures and writes are
-\* the environment; HotRejoin is the orchestrator's choice.
+\* WF(LegPerish) is the axiom that a blackhole eventually resolves
+\* (perish or recover — recovery is the environment's choice and gets no
+\* fairness), and WF(DeemDead) is the replace-after threshold: evidence
+\* eventually reaches the record.  WF(Scrub) is the HotRejoinScrubbed
+\* arm: a divergent standby is eventually demoted to a full rebuild
+\* rather than parking forever.  Failures and writes are the
+\* environment; HotRejoin is the orchestrator's choice.
 Fairness ==
   /\ \A l \in Legs :
-       /\ WF_vars(ConfirmDead(l))
+       /\ WF_vars(LegPerish(l))
+       /\ WF_vars(DeemDead(l))
        /\ WF_vars(RaidDeconfigure(l))
        /\ WF_vars(MonitorMarkStale(l))
        /\ WF_vars(Replace(l))
@@ -609,8 +665,23 @@ Inv_NoDivergentServing ==
   ~riskSurfaced =>
     \A l \in serving : legData[l] \subseteq lineage
 
+\* Evidence soundness (the EvidenceStrict world): the record never deems
+\* a recoverable node dead.  With fallible evidence this fails trivially;
+\* the INTERESTING consequence is falseRisk below.
+Inv_EvidenceSound ==
+  \A l \in deemedDead : legUp[l] = "dead"
+
+\* The resurrection theorem: a surfaced risk is never HOLLOW — every
+\* writer a ServeWithRisk assembly excused was truly dead, so the
+\* "unrecoverable" claim behind riskSurfaced is real.  The Resurrect
+\* mutation (EvidenceStrict = FALSE) must violate this: a blackholed
+\* writer holding the acked tail is deemed dead, excused, and later
+\* recovers — the tail was there all along.
+Inv_NoFalseRisk == ~falseRisk
+
 Inv == TypeOK /\ Inv_NoSilentLoss /\ Inv_InsyncServingIsCurrent
              /\ Inv_ServingCurrentGen /\ Inv_NoDivergentServing
+             /\ Inv_EvidenceSound /\ Inv_NoFalseRisk
 
 (***************************************************************************)
 (* Liveness: availability after the storm.  Once the failure budget is    *)

@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine and the snapshot protocol
 
-Two modules, one gate (`scripts/check-tla.sh`, ten TLC runs).
+Two modules, one gate (`scripts/check-tla.sh`, eleven TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -69,6 +69,18 @@ It runs nine configs, ALL required:
    live on runad). The lasso is **weak-fairness-legal**: admission's
    enabling is intermittent, so WF never obligates it — machine-checked
    proof that the F43 fix had to be *priority*, not stronger fairness.
+5c. `FlintReplicationResurrect.cfg` — fallible death evidence
+   (`EvidenceStrict=FALSE`): "verified death" is a k8s observation
+   (Node object gone / instance API), and here it can be wrong — a
+   blackholed (recoverable) node deemed dead, e.g. a Node object
+   deleted while the instance runs (the wedged-DS-roll unblock recipe).
+   TLC **must find** an `Inv_NoFalseRisk` violation: ServeWithRisk
+   excuses the writer holding the acked tail on false evidence — the
+   surfaced risk is HOLLOW, the tail was recoverable all along. This is
+   the k8s-evidence-vs-ground-truth split (`legUp` vs `deemedDead`);
+   `Replace` and `ServeWithRisk` are justified by evidence, as in the
+   code, and the strict runs verify `Inv_EvidenceSound` +
+   `Inv_NoFalseRisk` under the strict-evidence axiom.
 6. `FlintSnapshots.cfg` — the shipped copy protocol (full ordered walk,
    blobstore relink): `Inv_SessionFaithful` holds. Action coverage
    verified — the based suffix walk contributes zero new distinct
@@ -105,6 +117,8 @@ cannot rediscover the bug classes it exists for proves nothing.
 | `ServerPartition` / `ZombieWrite` / Assemble's sever (`FenceZombie`) | the F48 zombie head; `catchup.rs`'s zombie-consumer sever at admission |
 | `lineage` / `Inv_NoDivergentServing` | raid1 serves reads from ANY leg: one phantom block is a split-read surface |
 | `Deferred` (liveness escape) | NodeStage's Defer arm: no in-sync material ⇒ designed unavailability, never stale service |
+| `legUp` vs `deemedDead` / `DeemDead` / `LegPerish` | ground truth vs the record's node_gone evidence (Node object deletion / instance-termination observation); `EvidenceStrict` is the axiom they agree |
+| `Inv_NoFalseRisk` | a surfaced risk is never hollow: every excused writer was truly dead (the C2 justification is real, not just recorded) |
 | `LastResortServe` | the stale-only-survivor RUNBOOK override (not code — the code Defers); risk surfaced, sb generations restart from the survivor |
 | `claim` / `AcquireCatchup` / `AcquireAdmission` / `ExpireClaim` | the R2 leased per-volume claim (F43); `WarmWaiting` is the yield predicate; expiry = holder death, budgeted |
 | `AdmissionNotStarved` | the F43 theorem: no warm standby waits forever; S2's liveness foundation |
