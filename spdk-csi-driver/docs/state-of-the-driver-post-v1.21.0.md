@@ -124,7 +124,16 @@ least one new F-number.
 > applied at agent startup before the first attach and re-applied on
 > baseline-collapse (tgt restart), -EPERM tolerated. Expected stall ≈30s.
 > 3.6e now records `degrade=<s>` and gates on P4_STALL_BUDGET=60.
-> **LIVE GATE OWED: 3.6e with stall ≤60s, next campaign.**
+>
+> **LIVE GATE PASSED same day on runam 3.6e: stall 36s ≤ 60s** (degrade
+> 76s from the terminate call incl. instance shutdown; swap 129s, in_sync
+> 298s — the whole chain sped up). **P4 is DONE.** The same drill found
+> **F55** (`docs/f55-bounce-truncated-reply-eio.md`): the cutover bounce
+> truncates in-flight RPC replies → client EIO → pg PANIC — deterministic
+> mid-checkpoint repro, quiesced bounces clean; fixed same day
+> (`DrainGate` frame-atomic shutdown, `a4902ef`); F55's own live gate
+> (bounce-mid-checkpoint on the fixed image, zero PANICs) is owed next
+> campaign. Evidence: `tests/chaos/artifacts/runam-p4-f55-gate/`.
 - **Evidence:** ledger stall 159s on runak's clean 3.6e, ~150s measured on
   runai — vs RWO 2.5 where writes never paused. fast_io_fail (20s) is not
   the bottleneck; *detection* dominates on the RWX path. Also S2's ~237s
