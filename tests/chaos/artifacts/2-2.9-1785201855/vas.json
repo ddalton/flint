@@ -1,0 +1,40 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "storage.k8s.io/v1",
+            "kind": "VolumeAttachment",
+            "metadata": {
+                "annotations": {
+                    "csi.alpha.kubernetes.io/node-id": "runaj-aws-2"
+                },
+                "creationTimestamp": "2026-07-28T01:22:03Z",
+                "finalizers": [
+                    "external-attacher/flint-csi-storage-io"
+                ],
+                "name": "csi-901c70216469d357749997e22150eadaa1dfad5992095d2534a1579b28171f7f",
+                "resourceVersion": "7739",
+                "uid": "6d549c75-32b3-48a5-a3b5-fd9eef92facb"
+            },
+            "spec": {
+                "attacher": "flint.csi.storage.io",
+                "nodeName": "runaj-aws-2",
+                "source": {
+                    "persistentVolumeName": "pvc-5b5fe0c9-72a5-40d3-966d-678a5400c751"
+                }
+            },
+            "status": {
+                "attached": true,
+                "attachmentMetadata": {
+                    "replicas": "[{\"node_name\":\"runaj-aws-1\",\"node_uid\":\"5d0a22c7-8ccf-4ef0-8bf9-dc197e0cdc94\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"c3b2cd7a-a320-49e6-8c6f-0bb117d907b2\",\"lvol_name\":\"vol_pvc-5b5fe0c9-72a5-40d3-966d-678a5400c751_replica_0\",\"lvs_name\":\"lvs_runaj-aws-1_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"},{\"node_name\":\"runaj-aws-2\",\"node_uid\":\"70311863-367c-4ef3-bbc3-dc8f67543281\",\"disk_pci_address\":\"0000:00:1f.0\",\"lvol_uuid\":\"f4264c85-c07a-4491-9766-8216d587c0a8\",\"lvol_name\":\"vol_pvc-5b5fe0c9-72a5-40d3-966d-678a5400c751_replica_1\",\"lvs_name\":\"lvs_runaj-aws-2_0000-00-1f-0\",\"nqn\":null,\"target_ip\":null,\"target_port\":null,\"health\":\"online\"}]",
+                    "volumeId": "pvc-5b5fe0c9-72a5-40d3-966d-678a5400c751",
+                    "volumeType": "multi-replica"
+                }
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

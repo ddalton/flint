@@ -1,0 +1,215 @@
+🎛️ [ORCHESTRATORS] DISABLED — FLINT_ORCHESTRATORS is set to disabled — another process owns the controller-side orchestrators. This process runs no epoch scheduler, catch-up, cutover, hot-rejoin or NFS reconciler.
+[2m2026-07-28T01:15:24.365708Z[0m [32m INFO[0m [CACHE] Creating capacity cache [3mttl_seconds[0m[2m=[0m30
+🎯 [CONFIG] Using namespace for custom resources: flint-system
+🚀 [MAIN] Initializing CSI driver...
+[2m2026-07-28T01:15:24.365737Z[0m [32m INFO[0m [DRIVER] Initializing CSI driver [3mmode[0m[2m=[0m"controller"
+[2m2026-07-28T01:15:24.365749Z[0m [32m INFO[0m [DRIVER] Warming up capacity cache
+[2m2026-07-28T01:15:24.365752Z[0m [32m INFO[0m [CACHE] Warming up capacity cache
+✅ [DRIVER] Found 5 nodes in cluster
+[2m2026-07-28T01:15:24.371351Z[0m [32m INFO[0m [CACHE] Found nodes to warm up [3mnode_count[0m[2m=[0m5
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+[2m2026-07-28T01:15:24.455583Z[0m [32m INFO[0m [CACHE] Warm up complete [3msuccess_count[0m[2m=[0m5
+[2m2026-07-28T01:15:24.455603Z[0m [32m INFO[0m [CACHE] Starting background refresh [3minterval_secs[0m[2m=[0m60
+[2m2026-07-28T01:15:24.455620Z[0m [32m INFO[0m [DRIVER] Initialization complete
+✅ [MAIN] CSI driver initialization complete
+📊 [DASHBOARD] Starting minimal dashboard backend on port 8080
+Starting in Controller mode...
+⚠️  [PREFLIGHT] Could not verify snapshot CRDs: ApiError: customresourcedefinitions.apiextensions.k8s.io "volumesnapshotclasses.snapshot.storage.k8s.io" is forbidden: User "system:serviceaccount:flint-system:flint-csi-controller" cannot get resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope: Forbidden (Status { status: Some(Failure), code: 403, message: "customresourcedefinitions.apiextensions.k8s.io \"volumesnapshotclasses.snapshot.storage.k8s.io\" is forbidden: User \"system:serviceaccount:flint-system:flint-csi-controller\" cannot get resource \"customresourcedefinitions\" in API group \"apiextensions.k8s.io\" at the cluster scope", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: "Forbidden", details: Some(StatusDetails { name: "volumesnapshotclasses.snapshot.storage.k8s.io", group: "apiextensions.k8s.io", kind: "customresourcedefinitions", uid: "", causes: [], retry_after_seconds: 0 }) }). Snapshot RPCs may fail; non-snapshot operations unaffected.
+ℹ️  [pNFS] disabled (neither FLINT_PNFS_MDS_SHARD_ENDPOINTS nor FLINT_PNFS_MDS_ENDPOINT set)
+Starting health server on port 9809
+Listening on TCP address: 0.0.0.0:50051
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [CSI_SERVER] Minimal State SPDK CSI Driver starting
+   Mode: controller
+   Endpoint: tcp://0.0.0.0:50051
+   Node ID: spdk-dashboard-6bbb78f47b-9mbd5
+   Clone Detection: ENABLED (commit c03bba7)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2m2026-07-28T01:15:24.456504Z[0m [32m INFO[0m [1mServer::run[0m[1m{[0m[3maddr[0m[2m=[0m0.0.0.0:9809[1m}[0m[2m:[0m listening on http://0.0.0.0:9809
+🚀 [MINIMAL_DASHBOARD] Starting minimal state dashboard backend on port 8080
+   Architecture: Cache-free, parallel node queries for real-time data
+🎯 [MINIMAL_DASHBOARD] Using namespace: flint-system
+🔍 [NODE_DISCOVERY] Found node agent for runaj-cp-1: http://172.31.11.154:9081
+🔍 [NODE_DISCOVERY] Found node agent for runaj-aws-3: http://172.31.4.31:9081
+🔍 [NODE_DISCOVERY] Found node agent for runaj-aws-1: http://172.31.1.145:9081
+🔍 [NODE_DISCOVERY] Found node agent for runaj-aws-2: http://172.31.4.19:9081
+🔍 [NODE_DISCOVERY] Found node agent for runaj-aws-4: http://172.31.15.186:9081
+✅ [NODE_DISCOVERY] Discovered 5 node agents
+🔍 [MINIMAL_DASHBOARD] Discovered 5 node agents
+✅ [MINIMAL_DASHBOARD] Dashboard backend ready - serving on 0.0.0.0:8080
+   Real-time mode: All queries fetch fresh data with parallel node requests
+[2m2026-07-28T01:15:24.464263Z[0m [32m INFO[0m [1mServer::run[0m[1m{[0m[3maddr[0m[2m=[0m0.0.0.0:8080[1m}[0m[2m:[0m listening on http://0.0.0.0:8080
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+[2m2026-07-28T01:17:24.460495Z[0m [33m WARN[0m [CACHE] Failed to refresh [3mnode_name[0m[2m=[0m"runaj-cp-1" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.11.154:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+[2m2026-07-28T01:18:24.461137Z[0m [33m WARN[0m [CACHE] Failed to refresh [3mnode_name[0m[2m=[0m"runaj-aws-2" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.4.19:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 0 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 0 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 0 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-4
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-3
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-2
+✅ [DRIVER] Found 0 initialized disks on node runaj-cp-1
+✅ [DRIVER] Found 1 initialized disks on node runaj-aws-1

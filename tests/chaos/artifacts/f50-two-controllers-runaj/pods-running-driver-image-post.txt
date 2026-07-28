@@ -1,0 +1,7 @@
+flint-system/flint-csi-controller-54c6974647-75f9p flint-csi-controller dilipdalton/flint-driver:1.21.0-rc3
+flint-system/flint-csi-node-2mq84 flint-csi-driver dilipdalton/flint-driver:1.21.0-rc3
+flint-system/flint-csi-node-92992 flint-csi-driver dilipdalton/flint-driver:1.21.0-rc3
+flint-system/flint-csi-node-htb7d flint-csi-driver dilipdalton/flint-driver:1.21.0-rc3
+flint-system/flint-csi-node-j95pm flint-csi-driver dilipdalton/flint-driver:1.21.0-rc3
+flint-system/flint-csi-node-vvvlx flint-csi-driver dilipdalton/flint-driver:1.21.0-rc3
+flint-system/spdk-dashboard-56486487dc-29wdl dashboard-backend dilipdalton/flint-driver:1.21.0-rc3

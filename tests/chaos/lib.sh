@@ -60,6 +60,40 @@ harness_healthy() {
   ok "harness healthy (pg-0 Ready, ledger acking)"
 }
 
+# F53/F50: exactly ONE process in the driver namespace may run the
+# controller-side orchestrators — the claim registry that serializes
+# catch-up/cutover/hot-rejoin is in-process, so a second one arbitrates
+# nothing and its admission windows scrub the first one's mid-flight.
+# Both known instances (the vestigial operator pod, the dashboard backend)
+# were found by LOOKING, never by an assertion, and both were invisible on
+# every vector except drill 2.9. Assert the cause directly, at deploy time,
+# where it is cheap and vector-independent.
+single_orchestrator() {
+  local pods p n=0 who=""
+  pods=$(kubectl -n "$DRIVER_NS" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+  for p in $pods; do
+    # grep -c, NOT grep -q: -q exits on the first match, kubectl takes
+    # SIGPIPE, and `set -o pipefail` then reports the whole pipeline as
+    # failed — every pod reads as a miss and the check degrades to its
+    # own "pre-F53 image?" note. Counting consumes the stream instead.
+    local hits
+    hits=$(kubectl -n "$DRIVER_NS" logs "$p" --all-containers --tail=-1 2>/dev/null \
+             | grep -ac '\[ORCHESTRATORS\] ENABLED')
+    if [ "${hits:-0}" -gt 0 ]; then
+      n=$(( n + 1 )); who="$who $p"
+    fi
+  done
+  if [ "$n" = "1" ]; then
+    ok "exactly one orchestrator process in $DRIVER_NS ($who )"
+  elif [ "$n" = "0" ]; then
+    # Pre-F53 images never log the marker at all; don't fail a build that
+    # predates it, but say so — a silent 0 must not read as a pass.
+    note "no [ORCHESTRATORS] marker in $DRIVER_NS — pre-F53 image? (cannot verify the single-orchestrator invariant)"
+  else
+    fail "F53: $n processes are running the controller-side orchestrators ($who ) — the in-process claim registry serializes NOTHING between them (docs/f53-dashboard-backend-second-orchestrator.md)"
+  fi
+}
+
 # Ensure load has been running against a healthy DB for >=N seconds of acks.
 warm_load() { # [secs]
   local want=${1:-60} t0

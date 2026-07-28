@@ -1,0 +1,73 @@
+[2m2026-07-28T00:58:24.109803Z[0m [32m INFO[0m [CACHE] Creating capacity cache [3mttl_seconds[0m[2m=[0m30
+🎯 [CONFIG] Using namespace for custom resources: flint-system
+🚀 [MAIN] Initializing CSI driver...
+[2m2026-07-28T00:58:24.109838Z[0m [32m INFO[0m [DRIVER] Initializing CSI driver [3mmode[0m[2m=[0m"controller"
+[2m2026-07-28T00:58:24.109853Z[0m [32m INFO[0m [DRIVER] Warming up capacity cache
+[2m2026-07-28T00:58:24.109856Z[0m [32m INFO[0m [CACHE] Warming up capacity cache
+✅ [DRIVER] Found 5 nodes in cluster
+[2m2026-07-28T00:58:24.116154Z[0m [32m INFO[0m [CACHE] Found nodes to warm up [3mnode_count[0m[2m=[0m5
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+[2m2026-07-28T00:58:24.122145Z[0m [33m WARN[0m [CACHE] Failed to warm up node [3mnode[0m[2m=[0m"runaj-aws-1" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.1.145:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+[2m2026-07-28T00:58:24.123328Z[0m [33m WARN[0m [CACHE] Failed to warm up node [3mnode[0m[2m=[0m"runaj-aws-4" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.15.186:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+[2m2026-07-28T00:58:24.123359Z[0m [33m WARN[0m [CACHE] Failed to warm up node [3mnode[0m[2m=[0m"runaj-cp-1" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.11.154:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+[2m2026-07-28T00:58:24.123526Z[0m [33m WARN[0m [CACHE] Failed to warm up node [3mnode[0m[2m=[0m"runaj-aws-3" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.4.31:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+[2m2026-07-28T00:58:24.160683Z[0m [33m WARN[0m [CACHE] Failed to warm up node [3mnode[0m[2m=[0m"runaj-aws-2" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.4.19:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+[2m2026-07-28T00:58:24.160800Z[0m [32m INFO[0m [CACHE] Warm up complete [3msuccess_count[0m[2m=[0m0
+[2m2026-07-28T00:58:24.160823Z[0m [32m INFO[0m [CACHE] Starting background refresh [3minterval_secs[0m[2m=[0m60
+[2m2026-07-28T00:58:24.160854Z[0m [32m INFO[0m [DRIVER] Initialization complete
+✅ [MAIN] CSI driver initialization complete
+ℹ️ [EPOCH] Epoch snapshot scheduler disabled (set FLINT_EPOCH_SCHEDULER=enabled to activate)
+ℹ️ [CATCHUP] Replica catch-up orchestrator disabled (set FLINT_CATCHUP=enabled to activate)
+🔁 [CUTOVER] Reassembly cutover orchestrator enabled (cooldown: 900s, max lag: 1 epoch(s))
+⚠️  [PREFLIGHT] Could not verify snapshot CRDs: ApiError: customresourcedefinitions.apiextensions.k8s.io "volumesnapshotclasses.snapshot.storage.k8s.io" is forbidden: User "system:serviceaccount:flint-system:flint-csi-controller" cannot get resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope: Forbidden (Status { status: Some(Failure), code: 403, message: "customresourcedefinitions.apiextensions.k8s.io \"volumesnapshotclasses.snapshot.storage.k8s.io\" is forbidden: User \"system:serviceaccount:flint-system:flint-csi-controller\" cannot get resource \"customresourcedefinitions\" in API group \"apiextensions.k8s.io\" at the cluster scope", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: "Forbidden", details: Some(StatusDetails { name: "volumesnapshotclasses.snapshot.storage.k8s.io", group: "apiextensions.k8s.io", kind: "customresourcedefinitions", uid: "", causes: [], retry_after_seconds: 0 }) }). Snapshot RPCs may fail; non-snapshot operations unaffected.
+♻️ [HOT_REJOIN] Hot-rejoin orchestrator enabled (max lag: 1 epoch(s), retry backoff: 300s, window target: 2000ms)
+📊 [DASHBOARD] Starting minimal dashboard backend on port 8080
+ℹ️  [pNFS] disabled (neither FLINT_PNFS_MDS_SHARD_ENDPOINTS nor FLINT_PNFS_MDS_ENDPOINT set)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [CSI_SERVER] Minimal State SPDK CSI Driver starting
+   Mode: controller
+   Endpoint: tcp://0.0.0.0:50051
+   Node ID: spdk-dashboard-6bbb578f5c-8k9ck
+   Clone Detection: ENABLED (commit c03bba7)
+Starting in Controller mode...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Listening on TCP address: 0.0.0.0:50051
+[2m2026-07-28T00:58:24.161734Z[0m [32m INFO[0m [CUTOVER] Reassembly cutover orchestrator started [3mcooldown_secs[0m[2m=[0m900 [3mmax_lag[0m[2m=[0m1
+ℹ️  [NFS] NFS support disabled (NFS_ENABLED=false)
+ℹ️  [NFS] All RWX requests will be rejected
+ℹ️  [NFS] Existing RWO functionality unaffected
+[2m2026-07-28T00:58:24.161764Z[0m [32m INFO[0m [HOT_REJOIN] Hot-rejoin orchestrator started [3mmax_lag[0m[2m=[0m1 [3mretry_backoff_secs[0m[2m=[0m300
+ℹ️ [NFS-RECONCILER] NFS_ENABLED=false — reconciler idle
+Starting health server on port 9809
+[2m2026-07-28T00:58:24.161906Z[0m [32m INFO[0m [1mServer::run[0m[1m{[0m[3maddr[0m[2m=[0m0.0.0.0:9809[1m}[0m[2m:[0m listening on http://0.0.0.0:9809
+🚀 [MINIMAL_DASHBOARD] Starting minimal state dashboard backend on port 8080
+   Architecture: Cache-free, parallel node queries for real-time data
+🎯 [MINIMAL_DASHBOARD] Using namespace: flint-system
+🔍 [NODE_DISCOVERY] Found node agent for runaj-aws-3: http://172.31.4.31:9081
+🔍 [NODE_DISCOVERY] Found node agent for runaj-aws-1: http://172.31.1.145:9081
+🔍 [NODE_DISCOVERY] Found node agent for runaj-aws-2: http://172.31.4.19:9081
+🔍 [NODE_DISCOVERY] Found node agent for runaj-cp-1: http://172.31.11.154:9081
+🔍 [NODE_DISCOVERY] Found node agent for runaj-aws-4: http://172.31.15.186:9081
+✅ [NODE_DISCOVERY] Discovered 5 node agents
+🔍 [MINIMAL_DASHBOARD] Discovered 5 node agents
+✅ [MINIMAL_DASHBOARD] Dashboard backend ready - serving on 0.0.0.0:8080
+   Real-time mode: All queries fetch fresh data with parallel node requests
+[2m2026-07-28T00:58:24.169789Z[0m [32m INFO[0m [1mServer::run[0m[1m{[0m[3maddr[0m[2m=[0m0.0.0.0:8080[1m}[0m[2m:[0m listening on http://0.0.0.0:8080
+✅ [DRIVER] Found 5 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: runaj-aws-4
+[2m2026-07-28T00:58:24.216627Z[0m [33m WARN[0m [CACHE] Failed to refresh [3mnode_name[0m[2m=[0m"runaj-aws-1" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.1.145:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+[2m2026-07-28T00:58:24.216706Z[0m [33m WARN[0m [CACHE] Failed to refresh [3mnode_name[0m[2m=[0m"runaj-aws-2" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.4.19:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+[2m2026-07-28T00:58:24.216738Z[0m [33m WARN[0m [CACHE] Failed to refresh [3mnode_name[0m[2m=[0m"runaj-cp-1" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.11.154:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+[2m2026-07-28T00:58:24.217232Z[0m [33m WARN[0m [CACHE] Failed to refresh [3mnode_name[0m[2m=[0m"runaj-aws-4" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.15.186:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+[2m2026-07-28T00:58:24.217272Z[0m [33m WARN[0m [CACHE] Failed to refresh [3mnode_name[0m[2m=[0m"runaj-aws-3" [3merror[0m[2m=[0mSPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.4.31:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+ℹ️  [NFS] NFS support disabled (NFS_ENABLED=false)
+ℹ️  [NFS] All RWX requests will be rejected
+ℹ️  [NFS] Existing RWO functionality unaffected

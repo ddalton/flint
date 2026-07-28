@@ -1,0 +1,8 @@
+flint-system/flint-csi-controller-74759b56c5-dg5j5 container=flint-csi-controller image=dilipdalton/flint-driver:1.20.0 CSI_MODE=controller cmd=None args=['--v=5']
+flint-system/flint-csi-node-9hpjd container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node cmd=None args=None
+flint-system/flint-csi-node-dfjcn container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node cmd=None args=None
+flint-system/flint-csi-node-nt99q container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node cmd=None args=None
+flint-system/flint-csi-node-q588r container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node cmd=None args=None
+flint-system/flint-csi-node-xm4vh container=flint-csi-driver image=dilipdalton/flint-driver:1.20.0 CSI_MODE=node cmd=None args=None
+flint-system/spdk-controller-operator-8499558b7f-sg9g8 container=spdk-controller-operator image=dilipdalton/flint-driver:1.20.0 CSI_MODE=<UNSET -> defaults to all> cmd=None args=None
+flint-system/spdk-dashboard-6bbb578f5c-8k9ck container=dashboard-backend image=dilipdalton/flint-driver:1.20.0 CSI_MODE=controller cmd=None args=None

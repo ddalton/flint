@@ -61,6 +61,7 @@ up() {
     sleep 5
   done
   harness_healthy
+  single_orchestrator
   step "harness up"
 }
 
