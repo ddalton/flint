@@ -3835,6 +3835,171 @@ mod tests {
         assert!(!detached.is_empty(), "the stale consumer controller was never detached");
     }
 
+    // -- Deterministic crash-sweep sim harness -------------------------------
+    // The formal model (formal/FlintReplication.tla) checks the DESIGN; this
+    // sweep checks the IMPLEMENTATION's crash discipline: a controller that
+    // dies at ANY RPC boundary of the hot-rejoin flow must leave a state the
+    // next controller's ticks (reconcile_marked + a fresh attempt) converge
+    // from. Crash = cancellation: the flow future is DROPPED mid-await —
+    // faithful to a controller crash, because the explicit unwind code after
+    // the await never runs (RAII claims release; nothing else may rely on
+    // running). The budgeted wrapper hangs the K-th RPC forever; virtual
+    // time (start_paused) makes the timeout that drops the flow instant.
+
+    struct CrashRpc<'a> {
+        inner: &'a FakeRpc,
+        budget: std::sync::atomic::AtomicI64,
+    }
+
+    impl CrashRpc<'_> {
+        async fn tick(&self) {
+            use std::sync::atomic::Ordering;
+            if self.budget.fetch_sub(1, Ordering::SeqCst) <= 0 {
+                std::future::pending::<()>().await;
+                unreachable!("pending resolved");
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CatchupRpc for CrashRpc<'_> {
+        async fn spdk_rpc(&self, node: &str, payload: &Value) -> Result<Value, RpcError> {
+            self.tick().await;
+            self.inner.spdk_rpc(node, payload).await
+        }
+        async fn export_replica(
+            &self,
+            node: &str,
+            bdev_name: &str,
+            volume_id: &StorageId,
+            replica_index: usize,
+            consumer_node: &str,
+        ) -> Result<NvmeofConnectionInfo, RpcError> {
+            self.tick().await;
+            self.inner.export_replica(node, bdev_name, volume_id, replica_index, consumer_node).await
+        }
+        async fn export_pad(
+            &self,
+            node: &str,
+            bdev_name: &str,
+            volume_id: &StorageId,
+            replica_index: usize,
+            consumer_node: &str,
+        ) -> Result<NvmeofConnectionInfo, RpcError> {
+            self.tick().await;
+            self.inner.export_pad(node, bdev_name, volume_id, replica_index, consumer_node).await
+        }
+    }
+
+    #[async_trait]
+    impl HotRejoinRpc for CrashRpc<'_> {
+        async fn node_ip(&self, node: &str) -> Result<String, RpcError> {
+            self.tick().await;
+            self.inner.node_ip(node).await
+        }
+    }
+
+    /// The reconciler acts only past the F50 grace (a young marker may be a
+    /// LIVE window in another process). The sim models the owner being
+    /// verifiably dead — grace elapsed — which is grace ZERO here.
+    fn sim_catchup_cfg() -> CatchupConfig {
+        let mut c = catchup_cfg();
+        c.reconcile_grace = Duration::ZERO;
+        c
+    }
+
+    /// Sweep K over every RPC boundary of the flow: crash there, then the
+    /// next controller's ticks must converge — the rejoining leg ends
+    /// InSync and no hot-rejoin marker is stranded. Terminates at the
+    /// first K that lets the flow complete naturally.
+    /// FINDING #1 (2026-07-28, maiden run): crash at RPC boundary 15 →
+    /// scrub → successful retry leaves an unlocalized standby whose
+    /// localize fails EVERY reconcile tick with "source lineage on node-a
+    /// exceeds 4096 elements — refusing to walk further": the snapshot
+    /// chain walk loops after the scrub-deleted epoch is re-created by
+    /// the retry. Suspected mock-fidelity gap (the fake's bdev_lvol
+    /// delete does not relink children the way real SPDK does), possibly
+    /// a real reconcile livelock — the volume would serve degraded-
+    /// localization forever with only ReconcileFailed events to show.
+    /// Un-ignore once attributed; boundaries 0-14 recover clean.
+    #[ignore = "sweep finding #1: post-scrub retry localize livelock (lineage walk loops) — under investigation"]
+    #[tokio::test(start_paused = true)]
+    async fn sim_crash_sweep_every_rpc_boundary_recovers() {
+        let mut crash_points = 0usize;
+        for k in 0..500i64 {
+            let rpc = FakeRpc::new();
+            staged_world(&rpc);
+            let store = FakeStore::new(stale_b_record());
+            let crash = CrashRpc {
+                inner: &rpc,
+                budget: std::sync::atomic::AtomicI64::new(k),
+            };
+            let replicas = replicas2();
+            let hcfg = cfg();
+            let flow = hot_rejoin_volume(&crash, &store, VOL, &replicas, "consumer", &hcfg);
+            let completed =
+                tokio::time::timeout(Duration::from_secs(600), flow).await.is_ok();
+            if !completed {
+                crash_points += 1;
+            }
+
+            // Recovery: the next controller process, unbudgeted, running
+            // the SAME ticks the real one does — the reconciler (adopt or
+            // scrub the marker), the catch-up orchestrator (an adopted
+            // standby belongs to the chase/admission path, which is what
+            // clears the marker at mark_in_sync), and a fresh hot-rejoin
+            // attempt for a still-stale leg.
+            let mut rejoined = false;
+            for _tick in 0..4 {
+                let record = store.record();
+                reconcile_marked(
+                    &rpc, &store, VOL, &record, &replicas2(), Some("consumer"),
+                    &sim_catchup_cfg(),
+                )
+                .await;
+                let _ = crate::catchup::run_catchup_for_volume(
+                    &rpc, &store, VOL, &replicas2(), Some("consumer"),
+                    &sim_catchup_cfg(),
+                )
+                .await;
+                if let Ok(HotRejoinOutcome::Rejoined { .. }) =
+                    hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg()).await
+                {
+                    rejoined = true;
+                }
+                let rec = store.record();
+                if rec.replicas[1].sync_state == SyncState::InSync
+                    && rec.replicas.iter().all(|r| r.hot_rejoin.is_none())
+                {
+                    rejoined = true;
+                    break;
+                }
+            }
+
+            let rec = store.record();
+            assert!(
+                rejoined || rec.replicas[1].sync_state == SyncState::InSync,
+                "crash at RPC boundary {k}: leg never re-admitted (state {:?}, reason {:?})",
+                rec.replicas[1].sync_state,
+                rec.replicas[1].reason,
+            );
+            assert!(
+                rec.replicas.iter().all(|r| r.hot_rejoin.is_none()),
+                "crash at RPC boundary {k}: stranded hot-rejoin marker after recovery",
+            );
+
+            if completed {
+                assert!(
+                    crash_points >= 10,
+                    "sweep covered only {crash_points} crash points before natural \
+                     completion — the flow shrank or the wrapper miscounts"
+                );
+                return;
+            }
+        }
+        panic!("flow never completed naturally within 500 RPC boundaries");
+    }
+
     /// P3: one layer below the name check, `spdk_bdev_nvme_create` reports
     /// a registered trid as -EALREADY = "Operation already in progress" —
     /// no matchable text (same family: a timeout whose attach landed).
