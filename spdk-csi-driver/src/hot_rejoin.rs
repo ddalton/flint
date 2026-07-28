@@ -1458,6 +1458,28 @@ pub async fn reconcile_marked(
     cfg: &CatchupConfig,
 ) {
     for rec in record.replicas.iter().filter(|r| r.hot_rejoin.is_some()) {
+        // F50: a marker younger than the grace may belong to a LIVE window
+        // in ANOTHER controller process (helm rolling-upgrade overlap; the
+        // vestigial operator pod pre-F50) — the in-process claim cannot
+        // see it, and a live pre-flip window is indistinguishable from a
+        // crashed one by record state alone (both are stale+marker, head
+        // not yet in the raid). Leave it alone: the owner commits, unwinds
+        // (clearing the marker), or dies — and a dead window's artifacts
+        // are inert (the data-plane quiesce lease self-expires). Markers
+        // without a timestamp (older builds) reconcile immediately.
+        if let Some(age) = rec.hot_rejoin_age(chrono::Utc::now()) {
+            let grace = chrono::Duration::from_std(cfg.reconcile_grace)
+                .unwrap_or_else(|_| chrono::Duration::seconds(300));
+            if age < grace {
+                debug!(
+                    volume_id,
+                    replica = %rec.lvol_uuid,
+                    age_secs = age.num_seconds(),
+                    "[HOT_REJOIN] Marker inside the reconcile grace — a live window may own it (F50); skipping"
+                );
+                continue;
+            }
+        }
         let outcome = match rec.sync_state {
             SyncState::Stale => {
                 adopt_or_scrub(rpc, store, volume_id, record, rec, replicas, consumer_node).await
@@ -1566,9 +1588,10 @@ async fn live_head_leg(
     Ok(None)
 }
 
-/// stale + marker: the window opened but the flip never landed. If the head
-/// leg is live in the raid the add committed — adopt it (re-flip). If not,
-/// the window died: scrub the strandings and release the claim.
+/// stale + marker OLDER THAN THE RECONCILE GRACE (the caller's F50 gate):
+/// the window opened but the flip never landed. If the head leg is live in
+/// the raid the add committed — adopt it (re-flip). If not, the window
+/// died: scrub the strandings and release the claim.
 /// A window that died between quiesce and unquiesce leaves the raid frozen
 /// under an orphaned lease: guest writes stall until the lease auto-expires
 /// (the full `lease_ms` — measured live at exactly 10.0 s, 2026-07-03). A
@@ -4071,6 +4094,84 @@ mod tests {
         assert_eq!(b.sync_state, SyncState::Stale);
         assert!(b.hot_rejoin.is_none());
         assert_eq!(store.events(), vec!["HotRejoinScrubbed"]);
+    }
+
+    /// F50: a marker inside the reconcile grace may belong to a LIVE
+    /// window in another controller process — the reconciler must not
+    /// touch ANYTHING: no scrub, no defensive unquiesce, no marker
+    /// clear, no events. (On runai the scrub deleted a mid-flight
+    /// window's E_f subsystem 200ms after its prestage — the -32602
+    /// livelock.) Once the marker ages past the grace, the same state
+    /// scrubs normally.
+    #[tokio::test]
+    async fn reconcile_leaves_a_young_marker_alone_until_the_grace_lapses() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        rpc.seed_lvol("node-b", "lvs_node-b", &format!("vol_{}_replica_1_hr", VOL), "uuid-head");
+        rpc.seed_lvol("node-a", "lvs_node-a", &epoch_name(VOL, 3), "uuid-ef");
+        {
+            let mut w = rpc.world.lock().unwrap();
+            w.subsystems
+                .entry(("node-a".into(), ef_export_nqn(VOL)))
+                .or_default();
+        }
+        let mut record = stale_b_record();
+        // A REAL just-now timestamp — the exact shape a live window's
+        // intent write produces.
+        record.mark_hot_rejoin_intent(
+            "uuid-b",
+            &epoch_name(VOL, 3),
+            &crate::replica_sync::now_rfc3339(),
+        );
+        let store = FakeStore::new(record.clone());
+
+        reconcile_marked(
+            &rpc, &store, VOL, &record, &replicas2(), Some("consumer"), &catchup_cfg(),
+        )
+        .await;
+
+        // Untouched, in every observable dimension.
+        assert!(
+            rpc.has_bdev("node-b", &format!("lvs_node-b/vol_{}_replica_1_hr", VOL)),
+            "head must survive"
+        );
+        assert!(
+            rpc.has_bdev("node-a", &format!("lvs_node-a/{}", epoch_name(VOL, 3))),
+            "E_f snapshot must survive"
+        );
+        assert!(
+            rpc.world
+                .lock()
+                .unwrap()
+                .subsystems
+                .contains_key(&("node-a".into(), ef_export_nqn(VOL))),
+            "E_f export must survive — deleting it is the F50 kill shot"
+        );
+        assert!(
+            rpc.calls_of("bdev_raid_unquiesce").is_empty(),
+            "no defensive unquiesce against a possibly-live window"
+        );
+        let rec = store.record();
+        assert!(rec.get("uuid-b").unwrap().hot_rejoin.is_some(), "marker retained");
+        assert!(store.events().is_empty(), "no events for a skip");
+
+        // Age the marker past the grace: now it scrubs as before.
+        let mut old = store.record();
+        if let Some(b) = old.replicas.iter_mut().find(|r| r.lvol_uuid == "uuid-b") {
+            b.hot_rejoin_at = Some("2026-07-27T00:00:00Z".into());
+        }
+        let store2 = FakeStore::new(old.clone());
+        reconcile_marked(
+            &rpc, &store2, VOL, &old, &replicas2(), Some("consumer"), &catchup_cfg(),
+        )
+        .await;
+        assert!(!rpc
+            .world
+            .lock()
+            .unwrap()
+            .subsystems
+            .contains_key(&("node-a".into(), ef_export_nqn(VOL))));
+        assert_eq!(store2.events(), vec!["HotRejoinScrubbed"]);
     }
 
     #[tokio::test]

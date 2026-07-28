@@ -130,19 +130,19 @@ healthCheck:
   # Changed from 8081 to 9081 to avoid conflicts with nginx ingress controllers
   nodeAgentPort: 9081
 
-# SPDK Controller Operator configuration — DEFAULT OFF (audit L4
-# verification, 2026-07-04): the legacy replacement-rebuild flow this pod
-# was named for is unreachable (module never invoked by the shipped
-# binary, dedicated bin target not built), and the pod as deployed only
-# ran the standard driver against a misconfigured SPDK socket URL,
-# logging connection errors every tick while REBUILD_ENABLED was read by
-# dead code. Replica healing is owned by the Tier-1/2 orchestrators in
-# the controller (FLINT_CATCHUP / FLINT_HOT_REJOIN). Re-enable only if
-# you know exactly why.
-spdkOperator:
-  enabled: false
-  healthCheckInterval: 30
-  rebuildEnabled: true
+# The legacy spdk-controller-operator Deployment was REMOVED entirely
+# (F50, 2026-07-27). Its intended module has been dead code since before
+# the audit-L4 default-off (2026-07-04) — but the pod it deployed ran the
+# standard driver with CSI_MODE unset, i.e. mode "all": a SECOND full
+# controller whose in-process claim registry arbitrated nothing against
+# the real controller. When hot-rejoin went default-ON (v1.19.0) that pod
+# silently became a live second hot-rejoin orchestrator, and its
+# unserialized admission windows were scrubbed mid-flight by the real
+# controller's reconciler — F50 (docs/f50-hotrejoin-window-concurrency.md).
+# A `spdkOperator.enabled` value set by an older installer (trove's SPDK
+# mode does) is now simply ignored. Revival requires a dedicated binary
+# and identity-legible mints first — see the audit note in
+# docs/plans/identity-unification-phase0-audit.md L4.
 
 # Replication orchestrators (Tier-1/2: epoch scheduler + stale catch-up +
 # hot rejoin) on the controller. ON BY DEFAULT: they are a strict no-op

@@ -671,6 +671,20 @@ pub fn classify_lvol(name: &str) -> Option<Owner> {
     None
 }
 
+/// Does this lvol name belong to `volume_id`? Resolves BOTH sides through
+/// [`storage_id_of_handle`], so an NFS backing handle and its user volume
+/// agree, and returns false for ephemerals and non-flint names.
+///
+/// F51: teardown must find a leg by NAME — a catch-up rebuild gives the leg
+/// a new uuid under the same name, and `epoch-<vol>-<n>` snapshots have no
+/// recorded uuid anywhere.
+pub fn lvol_belongs_to(name: &str, volume_id: &str) -> bool {
+    match classify_lvol(name) {
+        Some(Owner::Pv(id)) => storage_id_of_handle(&id) == storage_id_of_handle(volume_id),
+        _ => false,
+    }
+}
+
 /// Classify a subsystem NQN to its owning volume id (unresolved). Covers
 /// all three export shapes: `:volume:<id>` (consumer/loopback),
 /// `:volume:<id>_<i>` and `:volume:<id>:replica:<i>` (replica exports),
@@ -1332,6 +1346,43 @@ mod tests {
         // Not flint volume NQNs at all.
         assert!(!is_replica_export_nqn(&hotrejoin_export_nqn(VOL)));
         assert!(!is_replica_export_nqn("nqn.2014-08.org.nvmexpress:uuid:whatever"));
+    }
+
+    /// F51: DeleteVolume's teardown sweep finds a volume's lvols by NAME,
+    /// because the UUID recorded on the PV goes stale the moment catch-up
+    /// rebuilds a leg. Every shape the volume owns must match, every shape
+    /// it does not must not — this predicate authorises deletion.
+    #[test]
+    fn lvol_ownership_matches_by_name_across_rebuilds_and_domains() {
+        // The two shapes F51 leaked: a replica leg (any index, whatever its
+        // uuid became) and the epoch snapshots catch-up leaves behind.
+        assert!(lvol_belongs_to(&replica_lvol_name(VOL, 0), VOL));
+        assert!(lvol_belongs_to(&replica_lvol_name(VOL, 12), VOL));
+        assert!(lvol_belongs_to(&epoch_snapshot_name(VOL, 1), VOL));
+        assert!(lvol_belongs_to(&epoch_snapshot_name(VOL, 4096), VOL));
+        // Plain volume lvol and the operation-scoped scratch head.
+        assert!(lvol_belongs_to(&format!("vol_{VOL}"), VOL));
+        assert!(lvol_belongs_to(&crate::hot_rejoin::head_lvol_name(VOL, 1), VOL));
+
+        // Both id domains resolve to the same storage id, so an RWX volume
+        // owns lvols named under its backing handle and vice versa.
+        assert!(lvol_belongs_to(&replica_lvol_name(&backing_handle(VOL), 0), VOL));
+        assert!(lvol_belongs_to(&replica_lvol_name(VOL, 0), &backing_handle(VOL)));
+
+        // A DIFFERENT volume's lvols must never be swept — this is the
+        // predicate that authorises a delete, so a false positive here is
+        // data loss, not a leak.
+        let other = "pvc-00000000-0000-0000-0000-000000000000";
+        assert!(!lvol_belongs_to(&replica_lvol_name(other, 0), VOL));
+        assert!(!lvol_belongs_to(&epoch_snapshot_name(other, 1), VOL));
+        // Prefix collision: a volume whose id merely STARTS with ours.
+        assert!(!lvol_belongs_to(&replica_lvol_name(&format!("{VOL}-extra"), 0), VOL));
+
+        // Ephemerals are lease-owned, not PV-owned, and foreign names are
+        // invisible.
+        assert!(!lvol_belongs_to("eph_csi-0123abcd", VOL));
+        assert!(!lvol_belongs_to("some_other_bdev", VOL));
+        assert!(!lvol_belongs_to("", VOL));
     }
 
     /// F47: NodeUnstage's lost-cleanup-data belt must sweep the loopback

@@ -165,7 +165,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_namespace = get_current_namespace().await?;
     
     let spdk_socket_path = std::env::var("SPDK_RPC_URL").unwrap_or("unix:///var/tmp/spdk.sock".to_string());
-    let mode = std::env::var("CSI_MODE").unwrap_or("all".to_string());
+    // F50: an UNSET CSI_MODE silently becomes "all" — which includes the
+    // controller role and therefore EVERY controller orchestrator. The
+    // volume-claim registry that serializes them is in-process: a second
+    // pod running the controller role arbitrates NOTHING against the real
+    // controller (the vestigial spdk-controller-operator ran exactly this
+    // shape and its unserialized hot-rejoin windows were F50). Defaulting
+    // stays (kind/dev single-pod clusters rely on it), but loudly.
+    let mode = std::env::var("CSI_MODE").unwrap_or_else(|_| {
+        println!(
+            "⚠️ [CONFIG] CSI_MODE is unset — defaulting to \"all\" (node + controller \
+             + every orchestrator). If another pod already runs the controller role, \
+             per-volume claim arbitration DOES NOT apply between the two processes \
+             (F50). Set CSI_MODE explicitly in anything that is not a single-pod \
+             dev cluster."
+        );
+        "all".to_string()
+    });
 
     // Create minimal state driver
     let driver = Arc::new(SpdkCsiDriver::new(
@@ -1874,7 +1890,31 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     let _ = self.driver.remove_nvmeof_target(&replica.node_name, &legacy).await;
                 }
 
-                println!("✅ [CONTROLLER] Multi-replica volume deleted: {}", volume_id);
+                // F51: the loop above deletes by the UUID recorded on the PV,
+                // which a catch-up rebuild invalidates — the leg comes back
+                // under the same NAME with a new uuid, `check_exists` says
+                // "already gone", and the whole replica is skipped. Nothing
+                // above looks at `epoch-<vol>-<n>` snapshots at all. Sweep
+                // each replica node by name to catch both; the orphan sweep
+                // would eventually reap them (60s tick, 3 strikes), but the
+                // delete path should not be leaning on its own backstop.
+                let mut swept_nodes: std::collections::HashSet<&str> = Default::default();
+                let (mut swept, mut stuck) = (0usize, 0usize);
+                for replica in replicas.iter() {
+                    if !swept_nodes.insert(replica.node_name.as_str()) {
+                        continue;
+                    }
+                    let (d, f) = self.driver.sweep_volume_lvols(&replica.node_name, &volume_id).await;
+                    swept += d;
+                    stuck += f;
+                }
+                if swept > 0 || stuck > 0 {
+                    println!("🧹 [CONTROLLER] Teardown sweep: {} residual lvol(s) deleted, {} left to the orphan sweep",
+                             swept, stuck);
+                }
+
+                println!("✅ [CONTROLLER] Multi-replica volume deleted: {} ({} replicas, {} residual lvols swept)",
+                         volume_id, replicas.len(), swept);
                 self.driver.role_resolver.invalidate(&volume_id);
                 return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
             }

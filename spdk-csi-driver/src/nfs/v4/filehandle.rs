@@ -239,6 +239,27 @@ impl FileHandleManager {
             match crate::nfs::v4::fh_kernel::KernelFh::try_new(&export_path, instance_id) {
                 Ok(k) => {
                     info!("🧬 v4 kernel filehandles ACTIVE (probe passed) — path maps retired");
+                    // F52: a relocated server starts on a COLD dcache, where
+                    // open_by_handle_at materializes disconnected dentries
+                    // the kernel names "/". Walk the export once BEFORE any
+                    // handle arrives: connects every live dentry and builds
+                    // the inode-identity index the resolver recovers with.
+                    let t = std::time::Instant::now();
+                    let (n, complete) = k.prewarm();
+                    if complete {
+                        info!(
+                            "🔥 fh identity index prewarmed: {} entries in {:?} (F52)",
+                            n,
+                            t.elapsed()
+                        );
+                    } else {
+                        warn!(
+                            "fh identity index INCOMPLETE at {} entries \
+                             (FLINT_FH_IDENT_MAX) — cold-cache recovery falls \
+                             back to targeted walks (F52)",
+                            n
+                        );
+                    }
                     Some(Arc::new(k))
                 }
                 Err(e) => {

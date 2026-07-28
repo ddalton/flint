@@ -13,6 +13,14 @@ metadata:
     component: csi-controller
 spec:
   replicas: 1
+  # F50: the controller's per-volume claim registry is IN-PROCESS. Two
+  # controller instances arbitrate nothing against each other, so even the
+  # brief old+new overlap of a rolling upgrade is a live race window
+  # (an orchestrator in one pod can scrub a hot-rejoin window the other
+  # pod is mid-flight on). Recreate serializes upgrades: the old pod is
+  # fully gone before the new one starts. CSI requests just pend briefly.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: flint-csi-controller

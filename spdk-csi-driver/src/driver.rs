@@ -825,6 +825,71 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
+    /// Every lvol on `node_name` that belongs to `volume_id`, as
+    /// `(name, uuid)`. Ownership is decided by [`identity::classify_lvol`] —
+    /// the same name authority the orphan sweep trusts — so this finds a leg
+    /// whose UUID changed under us (catch-up rebuild) and the
+    /// `epoch-<vol>-<n>` snapshots that no record tracks at all.
+    ///
+    /// F51: `DeleteVolume` used to work purely from the UUIDs recorded on the
+    /// PV, so a rebuilt leg read as "already gone" and epochs were never
+    /// considered. Names are stable across rebuilds by construction; UUIDs
+    /// are not.
+    pub async fn list_volume_lvols(
+        &self,
+        node_name: &str,
+        volume_id: &str,
+    ) -> Result<Vec<(String, String)>, MinimalStateError> {
+        let payload = json!({ "method": "bdev_lvol_get_lvols", "params": {} });
+        let resp = self
+            .call_node_agent(node_name, "/api/spdk/rpc", &payload)
+            .await
+            .map_err(|e| MinimalStateError::SpdkRpcError {
+                message: format!("Failed to list lvols via node agent: {}", e),
+            })?;
+
+        let mut owned = Vec::new();
+        for entry in resp["result"].as_array().into_iter().flatten() {
+            let (Some(name), Some(uuid)) = (entry["name"].as_str(), entry["uuid"].as_str()) else {
+                continue;
+            };
+            if crate::identity::lvol_belongs_to(name, volume_id) {
+                owned.push((name.to_string(), uuid.to_string()));
+            }
+        }
+        Ok(owned)
+    }
+
+    /// Delete every lvol on `node_name` owned by `volume_id`. Returns
+    /// `(deleted, failed)`. Never errors on a per-lvol failure — the orphan
+    /// sweep is the backstop — but the caller must report the counts rather
+    /// than claim unconditional success (F51).
+    pub async fn sweep_volume_lvols(&self, node_name: &str, volume_id: &str) -> (usize, usize) {
+        let owned = match self.list_volume_lvols(node_name, volume_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(node_name, volume_id, error = %e,
+                    "[CONTROLLER] Could not list lvols for teardown sweep — leaving them to the orphan sweep");
+                return (0, 0);
+            }
+        };
+        let (mut deleted, mut failed) = (0, 0);
+        for (name, uuid) in owned {
+            match self.delete_lvol(node_name, &uuid).await {
+                Ok(()) => {
+                    info!(node_name, lvol = %name, "[CONTROLLER] Teardown sweep deleted lvol (F51)");
+                    deleted += 1;
+                }
+                Err(e) => {
+                    warn!(node_name, lvol = %name, error = %e,
+                        "[CONTROLLER] Teardown sweep could not delete lvol — orphan sweep will retry");
+                    failed += 1;
+                }
+            }
+        }
+        (deleted, failed)
+    }
+
     /// Check if backing storage exists on a node (for graceful deletion)
     /// Returns Ok(true) if storage exists, Ok(false) if not found or node unreachable
     /// This is used during volume deletion to handle cases where:

@@ -123,14 +123,19 @@ Deliberately NOT changed:
   "add an event" recommendation was already satisfied); with fix 1 the
   remaining defers are genuine and the event says why.
 
-## Open question for the drill gate
+## Open question for the drill gate — ANSWERED (F50)
 
 The exact issuer of the 18:38:52.8 admission attempt (E_f RPCs fired while
-hot-rejoin's tick had bounced) is not conclusively identified from the
-captured logs — candidates are catch-up's `admit_one_standby` inline
-admission and the marked-dispatch reconciler. The re-run of drill 2.9 with
-these fixes should capture it; if an admission path can run without the
-volume claim, that is its own finding.
+hot-rejoin's tick had bounced) was not identifiable from the captured logs.
+**It is now: the vestigial `spdk-controller-operator` pod** — deployed on
+every trove cluster (`--set spdkOperator.enabled=true`), running the
+standard driver with `CSI_MODE` defaulted to `"all"`, hot-rejoin
+default-ON since v1.19.0, and its own EMPTY in-process claim registry.
+Nothing runs *unclaimed*; it runs claimed in a second process where the
+claim serializes nothing. The full chain, the fix (operator deployment
+removed; controller `strategy: Recreate`; marker-age reconcile grace), and
+the harness lesson (capture logs from every pod running the driver image)
+are in [F50](f50-hotrejoin-window-concurrency.md) §4–§5.
 
 ## Drill gate
 

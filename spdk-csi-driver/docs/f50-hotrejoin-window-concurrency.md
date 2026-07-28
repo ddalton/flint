@@ -1,9 +1,14 @@
 # F50 — the hot-rejoin admission window races a concurrent catch-up on the same volume, and never lands
 
-**Status:** OPEN, found live 2026-07-27 on runai (drill 2.9, driver
-`1.21.0-rc2`). This is the finding the [F48](f48-standby-rejoin-epoch-race.md)
-write-up flagged as its open question — *"if an admission path can run without
-the volume claim, that is its own finding."* It is.
+**Status:** **FIX IMPLEMENTED** 2026-07-27 (§4–§5; 886 tests green; live
+validation pending — drill 2.9's new cycle gate is the acceptance). **Root
+cause CONFIRMED — §4: there were TWO controller processes.** Found live
+2026-07-27 on runai (drill 2.9, driver `1.21.0-rc2`). This is the finding
+the [F48](f48-standby-rejoin-epoch-race.md) write-up flagged as its open
+question — *"if an admission path can run without the volume claim, that is
+its own finding."* It is — and the answer to F48's "unidentified admission
+issuer at 18:38:52.8" is the same root cause: nothing runs *unclaimed*; it
+runs claimed **in a different process**, where the claim means nothing.
 
 **NOT a regression from the F47/F48/F49 wave.** Proven by ordering, §2.
 
@@ -85,44 +90,125 @@ connection(s) backing no raid slot; severed`), and claim contention stayed at
 `held_secs=0/4` with **zero** reservations recorded — F48 fixes 1 and 2 both
 working, run A's ~4-minute starvation gone.
 
-## 3. Fix directions (not implemented — needs the RCA below finished)
+## 3. Answers to §1's puzzles (from the code + bundle, 2026-07-27)
 
-1. **Make E_f state ownership follow the claim, not the module.** The scrub in
-   `reconcile_marked` must not delete E_f artifacts for a volume whose marker
-   is *live* (an intent written seconds ago is not "stranded"). Gate the scrub
-   on marker age / a window-in-progress flag, not merely on marker presence.
-2. **Serialize the window against catch-up's copy traffic properly.** Either
-   hot-rejoin takes the claim for the whole prestage+window (it may already
-   intend to — verify), or catch-up must yield before the window opens rather
-   than continuing shallow copies on the source.
-3. **Re-examine the AER budget for the ns swap** (attempt 2's failure) under
-   concurrent copy load on the consumer — it may simply be too tight when the
-   node is busy, which would make this a tuning issue layered on top of (1).
-4. Emit an event when N consecutive windows unwind, so "leg parked at standby
-   forever" is visible without reading controller logs (the F48 fix-1 event
-   only covers the zombie case).
+- **The window DOES hold `OP_HOT_REJOIN` for its whole duration** — the
+  orchestrator's spawned task owns the claim guard until it ends
+  (`hot_rejoin.rs`, the Rejoin arm). Claim discipline within one process is
+  sound. That is precisely what made the observations impossible to explain
+  in-process:
+- The controller's own hot-rejoin orchestrator was **refused** at
+  22:03:59.884 (`held_by="catch-up"`) and again at 22:04:59.884 — yet
+  windows prestaged at 22:03:59.836 and 22:04:59.969 anyway.
+- Attempts 1 and 2 emitted `HotRejoinUnwound` events but the controller log
+  has **no** `Rejoin failed (unwound) — backing off` line for them (attempt
+  3 has one, 22:09:00.010). Their spawn-arm logs went to a log nobody
+  captured.
+- A fourth window ran at ~22:11:59, **inside attempt 3's 300 s back-off**.
+  Back-off state is per-process.
 
-## 4. RCA still to do (offline, from the captured bundle)
+One process cannot produce that trace. Two can, exactly.
 
-Evidence: `tests/chaos/artifacts/f50-hotrejoin-window-runai/` — timestamped
-controller log, all four node-agent logs, the PV sync record, PV events, and
-live subsystem state per node.
+## 4. Root cause — CONFIRMED: a second controller process with its own claim registry
 
-Open questions:
-- **Which code path issues the two `nvmf_delete_subsystem` at 22:04:00?**
-  Scrub is the hypothesis; confirm against `reconcile_marked` and the prestage
-  unwind path.
-- **Does the hot-rejoin window hold `OP_HOT_REJOIN` for its whole duration?**
-  If it releases between prestage and window, that alone explains the race.
-- **Is the ns-swap AER budget failure independent**, or a consequence of the
-  source node being saturated by catch-up's shallow copies?
+**The `spdk-controller-operator` pod is a full second controller.** The
+chain, every link verified:
 
-## 5. Drill gate
+1. Trove's SPDK-mode installer passes `--set spdkOperator.enabled=true`
+   (`trove/backend/.../flint_csi.rs`) — every trove cluster deploys the
+   "operator" pod. The chart's own default has been `false` since the
+   audit-L4 review (2026-07-04).
+2. The operator's intended module is **dead code** (`controller_operator.rs`;
+   its `[[bin]]` is commented out of Cargo.toml). The pod runs the image
+   entrypoint: the standard `csi-driver` binary.
+3. The pod sets no `CSI_MODE`, and `main.rs` defaults it to **`"all"`** —
+   which includes the controller role and therefore every
+   `mode == "controller" || mode == "all"` orchestrator block.
+4. In the operator pod, chart-driven env is absent, so orchestrators run at
+   compiled defaults: epoch scheduler OFF, catch-up OFF, cutover OFF — and
+   **hot-rejoin ON** (`HotRejoinTriggerConfig::default().enabled = true`
+   since `076985d`, v1.19.0). The pod is a hot-rejoin-orchestrator-only
+   second controller.
+5. The F43 claim registry is **in-process** (`volume_claims::global()`).
+   The operator's registry is empty; its `try_claim(OP_HOT_REJOIN)` always
+   succeeds. Nothing serializes its windows against the real controller's
+   catch-up, scrubs, or anything else.
 
-Drill 2.9 must reach `in_sync` repeatedly. Add an assertion for the new shape:
-if the leg cycles `standby → stale → standby` more than twice without reaching
-`in_sync`, fail loudly as F50 rather than timing out generically — a silent
-15-minute timeout is what let this hide behind F48.
+The failure mechanics then follow §1 exactly: the operator's window writes
+intent (standby→stale + marker) and prestages E_f; the real controller's
+catch-up dispatch decodes stale+marker with no head in the raid — **which is
+also exactly what a live pre-flip window looks like** — and scrubs the E_f
+export out from under the in-flight window (attempt 1's `-32602` at
+`add_ns`, 200 ms after the create), plus a defensive unquiesce against the
+window's own lease. Every window dies at whichever step the concurrent
+scrub's deletes landed before; catch-up re-parks the leg; the operator's
+next eligible tick opens the next doomed window. `standby → stale → standby`
+forever.
+
+Why it appeared only now: the pod ran on every trove cluster all along, but
+was **inert until v1.19.0 flipped hot-rejoin default-ON** (the audit's
+2026-07-04 "verified unreachable" was true *at the time* — no orchestrator
+was default-enabled then, and its SPDK-socket calls fail). Drill 2.9 (the
+first vector that parks a standby under an attached consumer, triggering
+hot-rejoin) first ran 2026-07-27 on runah — and its "F48 run-A wedge"
+(including the unidentified 18:38:52.8 admission) was this same second
+process. Honest limit: per-attempt attribution of attempt 2's issuer
+(operator back-off should have blocked it; a CAS-conflict-prolonged unwind
+spanning the tick, or an unwind panic skipping the back-off insert, both
+fit) cannot be settled without the operator pod's log, which no drill
+captured — harness lesson: **capture logs from every pod running the
+driver image, not just the nominal controller.**
+
+## 5. The fix (implemented 2026-07-27)
+
+Layered — eliminate the second process, serialize the windows that can
+still produce one, and make the destructive decode tolerant of the shape:
+
+1. **Chart: the vestigial `spdk-controller-operator` Deployment is
+   REMOVED.** Not default-off — gone. An installer still passing
+   `spdkOperator.enabled=true` (trove does) now sets an unused value.
+   Revival requires a dedicated binary and identity-legible mints (audit
+   L4's precondition) — at which point re-adding a template is the easy
+   part.
+2. **Chart: the controller Deployment upgrades with `strategy: Recreate`.**
+   A rolling upgrade briefly runs old+new controllers side by side — the
+   same two-registry shape as the operator pod, on every roll (the runai
+   3.6e contamination). With in-process claims as the correctness backbone,
+   controller instances must never overlap.
+3. **Marker grace (`FLINT_HOT_REJOIN_RECONCILE_GRACE_SECS`, default 300):**
+   the intent write now stamps `hot_rejoin_at` alongside the marker
+   (refreshed at the flip), and `reconcile_marked` leaves any marker
+   younger than the grace completely alone — no scrub, no defensive
+   unquiesce, no marker clear. A young stale+marker is indistinguishable
+   from a live window by record state, so the reconciler stops pretending
+   otherwise. Old markers (crashed windows) reconcile as before, ≤5 min
+   later — their artifacts are inert and the data-plane quiesce lease
+   self-expires in `lease_ms` regardless. Records from older builds carry
+   no timestamp and reconcile immediately (the pre-F50 behavior).
+4. **Visibility:** `main.rs` warns loudly when `CSI_MODE` is unset and
+   defaults to `"all"` — the exact silent step that armed the operator pod.
+
+**Deliberately deferred:** kube Lease-based leader election for the
+orchestrator block — the complete answer to "two controller processes",
+and the right follow-up, but a bigger change than a validated release wave
+should absorb. Items (1)–(3) close every known two-process window today.
+
+Tests: `reconcile_leaves_a_young_marker_alone_until_the_grace_lapses`
+(hot_rejoin — the runai kill shot replayed against a just-stamped marker:
+E_f export, head, snapshot, quiesce, marker, events all untouched; then the
+same state aged past the grace scrubs normally) and
+`hot_rejoin_intent_stamps_marker_time_and_clears_it_with_the_marker`
+(replica_sync — stamp/age/clear lifecycle, legacy-record tolerance). Full
+suite: **886 green**. `helm template --set spdkOperator.enabled=true`
+renders zero operator manifests.
+
+## 6. Drill gate — DONE
+
+Drill 2.9's in_sync poll now tracks `standby → stale` flips (each one = a
+window opened on the parked leg) and **fails by name as F50 after the third
+flip without in_sync**, instead of timing out generically — a silent 15-min
+timeout is what let this hide behind F48. The flip count rides the PASS
+line too, so a healthy run records how many windows it took.
 
 Related: [F48](f48-standby-rejoin-epoch-race.md) (the wedge this replaces; its
 fixes are proven working in the same run), [F43 claim arbitration]

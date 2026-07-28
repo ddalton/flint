@@ -119,6 +119,15 @@ pub struct ReplicaSyncRecord {
     /// stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hot_rejoin: Option<String>,
+    /// RFC3339 time the marker was written (F50). The marker-driven
+    /// reconciler refuses to scrub/resume a marker younger than its grace
+    /// period: the in-process claim cannot see a window run by ANOTHER
+    /// controller process (a helm rolling-upgrade overlap; the vestigial
+    /// operator pod pre-F50), and a young marker most likely belongs to a
+    /// LIVE window. Absent on records written by older builds — treated
+    /// as old (reconcile freely, the pre-F50 behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_rejoin_at: Option<String>,
 }
 
 impl ReplicaSyncRecord {
@@ -126,6 +135,15 @@ impl ReplicaSyncRecord {
     /// the immutable identity uuid).
     pub fn live_lvol_uuid(&self) -> &str {
         self.active_lvol_uuid.as_deref().unwrap_or(&self.lvol_uuid)
+    }
+
+    /// Age of the hot-rejoin marker, or None when no marker is set or the
+    /// timestamp is absent/unparseable (legacy records) — callers treat
+    /// None as "old enough to reconcile".
+    pub fn hot_rejoin_age(&self, now: chrono::DateTime<chrono::Utc>) -> Option<chrono::Duration> {
+        self.hot_rejoin.as_ref()?;
+        let at = chrono::DateTime::parse_from_rfc3339(self.hot_rejoin_at.as_deref()?).ok()?;
+        Some(now - at.with_timezone(&chrono::Utc))
     }
 }
 
@@ -217,6 +235,7 @@ impl VolumeSyncRecord {
                     active_lvol_uuid: None,
                     reverted_to: None,
                     hot_rejoin: None,
+                    hot_rejoin_at: None,
                 })
                 .collect(),
         }
@@ -265,6 +284,7 @@ impl VolumeSyncRecord {
                         active_lvol_uuid: None,
                         reverted_to: None,
                         hot_rejoin: None,
+                        hot_rejoin_at: None,
                     })
             })
             .collect();
@@ -414,6 +434,7 @@ impl VolumeSyncRecord {
                 // hot-rejoin reconciler's claim on this replica ends.
                 if rec.hot_rejoin.is_some() {
                     rec.hot_rejoin = None;
+                    rec.hot_rejoin_at = None;
                     changed = true;
                 }
                 changed
@@ -482,11 +503,13 @@ impl VolumeSyncRecord {
                 rec.reason =
                     Some("hot-rejoin window opening (converged standby target)".to_string());
                 rec.hot_rejoin = Some(ef_epoch.to_string());
+                rec.hot_rejoin_at = Some(now_rfc3339.to_string());
                 true
             }
             Some(rec) if rec.sync_state == SyncState::Stale => {
                 if rec.hot_rejoin.as_deref() != Some(ef_epoch) {
                     rec.hot_rejoin = Some(ef_epoch.to_string());
+                    rec.hot_rejoin_at = Some(now_rfc3339.to_string());
                     return true;
                 }
                 false
@@ -526,6 +549,11 @@ impl VolumeSyncRecord {
                 rec.hot_rejoin = Some(ef_epoch.to_string());
                 changed = true;
             }
+            // Refresh the marker clock at the flip: localization starts
+            // now, and the F50 reconcile grace should count from here.
+            if changed {
+                rec.hot_rejoin_at = Some(now_rfc3339.to_string());
+            }
             // The esnap head is brand new — no write-virgin resume claim.
             if rec.reverted_to.is_some() {
                 rec.reverted_to = None;
@@ -553,6 +581,7 @@ impl VolumeSyncRecord {
         if let Some(rec) = self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
             if rec.hot_rejoin.is_some() {
                 rec.hot_rejoin = None;
+                rec.hot_rejoin_at = None;
                 changed = true;
             }
         }
@@ -2110,6 +2139,53 @@ mod tests {
         assert_eq!(b.sync_state, SyncState::Stale);
         assert!(b.hot_rejoin.is_none());
         assert_eq!(b.reason.as_deref(), Some("leg lost"));
+    }
+
+    #[test]
+    fn hot_rejoin_intent_stamps_marker_time_and_clears_it_with_the_marker() {
+        // F50: the reconcile grace needs to know how old a marker is. The
+        // intent write stamps it; every marker clear removes it; legacy
+        // records (no timestamp) and garbage timestamps read as "old".
+        let mut record = three_replica_record();
+        record.mark_stale("uuid-b", "drill", "t0");
+        let now = "2026-07-27T22:03:59.700Z";
+        assert!(record.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-3", now));
+        let b = record.get("uuid-b").unwrap();
+        assert_eq!(b.hot_rejoin_at.as_deref(), Some(now));
+
+        // Age arithmetic against a known "now".
+        let later = chrono::DateTime::parse_from_rfc3339("2026-07-27T22:05:59.700Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            b.hot_rejoin_age(later).map(|d| d.num_seconds()),
+            Some(120),
+            "marker age measured from the stamp"
+        );
+
+        // Unparseable stamp (what pre-F50 fixtures wrote) → None → callers
+        // reconcile immediately, the legacy behavior.
+        let mut legacy = b.clone();
+        legacy.hot_rejoin_at = Some("t".into());
+        assert!(legacy.hot_rejoin_age(later).is_none());
+        legacy.hot_rejoin_at = None;
+        assert!(legacy.hot_rejoin_age(later).is_none());
+        // No marker at all → None regardless of the stamp.
+        legacy.hot_rejoin = None;
+        legacy.hot_rejoin_at = Some(now.into());
+        assert!(legacy.hot_rejoin_age(later).is_none());
+
+        // Scrub clear removes the stamp with the marker.
+        let mut rec2 = record.clone();
+        assert!(rec2.clear_hot_rejoin("uuid-b", "window died", false, "t9"));
+        assert!(rec2.get("uuid-b").unwrap().hot_rejoin_at.is_none());
+
+        // Localization complete (mark_in_sync) removes it too.
+        record.mark_hot_rejoined("uuid-b", "epoch-vol1-3", &["uuid-a".into()], "h", now);
+        record.mark_in_sync("uuid-b", "epoch-vol1-3", "localized", "t9");
+        let b = record.get("uuid-b").unwrap();
+        assert!(b.hot_rejoin.is_none());
+        assert!(b.hot_rejoin_at.is_none());
     }
 
     #[test]

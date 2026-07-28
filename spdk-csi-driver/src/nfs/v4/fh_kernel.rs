@@ -188,6 +188,248 @@ pub enum ResolveError {
     Other(String),
 }
 
+// ---------------------------------------------------------------------------
+// F52: inode-identity path recovery.
+//
+// `open_by_handle_at` on a COLD dcache (a freshly staged mount — exactly
+// what a cross-node server relocation produces) succeeds but materializes
+// the inode as a DISCONNECTED dentry, and the kernel's name for such a
+// dentry is literally "/". The old resolve trusted the
+// `/proc/self/fd` readlink unconditionally, so every fh-only op resolved
+// to "/": WRITE opened the container root (EISDIR → NFS4ERR_IO → client
+// EIO → postgres PANIC on fdatasync) and GETATTR served the root
+// directory's attributes with NFS4_OK (type/fileid flip → client-side
+// ESTALE), with zero server-side errors. See
+// docs/f52-estale-on-rwx-server-relocation.md §4 and the repro in its
+// evidence bundle.
+//
+// The recovery below never trusts a resolved path unless it (a) sits
+// under the export root and (b) lstats back to the fd's own (dev,ino).
+// Anything else is re-located by inode identity with a bounded walk of
+// the export tree — which also reconnects dentries as it goes, so one
+// walk heals the whole storm. A walk that finds nothing answers Stale
+// (visible, and the F17b/c open-file fallbacks still get their turn) —
+// never a foreign path.
+// ---------------------------------------------------------------------------
+
+/// Inode identity on one filesystem: (st_dev, st_ino).
+#[cfg(any(target_os = "linux", test))]
+pub(crate) type InoKey = (u64, u64);
+
+/// Default cap on the identity index (entries). Tunable via
+/// FLINT_FH_IDENT_MAX; 0 disables the index (and the startup prewarm) —
+/// recovery then always uses targeted early-exit walks.
+#[cfg(any(target_os = "linux", test))]
+const IDENT_CAP_DEFAULT: usize = 200_000;
+/// Entry budget for a targeted (early-exit) walk.
+#[cfg(any(target_os = "linux", test))]
+const TARGETED_BUDGET: usize = 2_000_000;
+/// A COMPLETE index younger than this is authoritative for misses — a
+/// truly-gone inode must not trigger a re-walk per probe (unlink storms).
+#[cfg(any(target_os = "linux", test))]
+const REWALK_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn ident_cap_from_env() -> usize {
+    std::env::var("FLINT_FH_IDENT_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(IDENT_CAP_DEFAULT)
+}
+
+/// A resolved path is trustworthy iff it lies under the export root AND
+/// still names the fd's inode. "/" (the disconnected-dentry name), a
+/// "(deleted)"-suffixed path, or a since-renamed path all fail here.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn trusted_resolution(path: &Path, export_root: &Path, dev: u64, ino: u64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    path.starts_with(export_root)
+        && std::fs::symlink_metadata(path)
+            .map(|m| m.dev() == dev && m.ino() == ino)
+            .unwrap_or(false)
+}
+
+/// Bounded breadth walk of `root` building (dev,ino) → path for every
+/// entry on `dev`. Returns (index, complete). Side effect that matters
+/// as much as the result: every lstat CONNECTS the entry's dentry, so a
+/// walk warms the dcache for direct `/proc/self/fd` resolution too.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn walk_ino_index(
+    root: &Path,
+    dev: u64,
+    cap: usize,
+) -> (std::collections::HashMap<InoKey, PathBuf>, bool) {
+    use std::os::unix::fs::MetadataExt;
+    let mut map = std::collections::HashMap::new();
+    if let Ok(md) = std::fs::symlink_metadata(root) {
+        map.insert((md.dev(), md.ino()), root.to_path_buf());
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for ent in rd.flatten() {
+            let Ok(md) = ent.metadata() else { continue };
+            if md.dev() != dev {
+                continue; // never index across (or descend into) a foreign mount
+            }
+            if map.len() >= cap {
+                return (map, false);
+            }
+            let p = ent.path();
+            map.insert((md.dev(), md.ino()), p.clone());
+            if md.is_dir() {
+                stack.push(p);
+            }
+        }
+    }
+    (map, true)
+}
+
+/// Targeted early-exit variant: find ONE inode, touch at most `budget`
+/// entries. For trees too large to index.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn find_by_ino(root: &Path, key: InoKey, budget: usize) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(md) = std::fs::symlink_metadata(root) {
+        if (md.dev(), md.ino()) == key {
+            return Some(root.to_path_buf());
+        }
+    }
+    let mut seen = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for ent in rd.flatten() {
+            let Ok(md) = ent.metadata() else { continue };
+            if md.dev() != key.0 {
+                continue;
+            }
+            let p = ent.path();
+            if (md.dev(), md.ino()) == key {
+                return Some(p);
+            }
+            seen += 1;
+            if seen >= budget {
+                return None;
+            }
+            if md.is_dir() {
+                stack.push(p);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "linux", test))]
+struct IdentState {
+    map: std::collections::HashMap<InoKey, PathBuf>,
+    complete: bool,
+    built_at: Option<std::time::Instant>,
+}
+
+/// Serialized inode→path recovery over one export tree. One walker at a
+/// time; concurrent cold resolves (the relocation replay storm) queue on
+/// the lock and are all served by the first walk's index.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) struct IdentityResolver {
+    root: PathBuf,
+    dev: u64,
+    cap: usize,
+    state: std::sync::Mutex<IdentState>,
+    #[cfg(test)]
+    pub(crate) walks: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl IdentityResolver {
+    pub(crate) fn new(root: PathBuf, dev: u64, cap: usize) -> Self {
+        Self {
+            root,
+            dev,
+            cap,
+            state: std::sync::Mutex::new(IdentState {
+                map: Default::default(),
+                complete: false,
+                built_at: None,
+            }),
+            #[cfg(test)]
+            walks: Default::default(),
+        }
+    }
+
+    fn bump(&self) {
+        #[cfg(test)]
+        self.walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Build the index up front (server startup, before the listener
+    /// accepts) so relocation replay never hits a cold path at all.
+    /// Returns (entries, complete); no-op in cap=0 (targeted-only) mode.
+    pub(crate) fn prewarm(&self) -> (usize, bool) {
+        if self.cap == 0 {
+            return (0, false);
+        }
+        self.bump();
+        let (map, complete) = walk_ino_index(&self.root, self.dev, self.cap);
+        let n = map.len();
+        let mut st = self.state.lock().unwrap();
+        st.map = map;
+        st.complete = complete;
+        st.built_at = Some(std::time::Instant::now());
+        (n, complete)
+    }
+
+    /// The current path of (dev,ino), or None if it has no path under
+    /// the export root (unlinked, or budget exhausted — both answer
+    /// Stale upstream, engaging the F17b/c open-fd fallbacks).
+    pub(crate) fn locate(&self, dev: u64, ino: u64) -> Option<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        if dev != self.dev {
+            return None;
+        }
+        let key = (dev, ino);
+        if self.cap == 0 {
+            self.bump();
+            return find_by_ino(&self.root, key, TARGETED_BUDGET);
+        }
+        let mut st = self.state.lock().unwrap();
+        let hit_stale = match st.map.get(&key) {
+            Some(p) => {
+                if std::fs::symlink_metadata(p)
+                    .map(|m| m.dev() == dev && m.ino() == ino)
+                    .unwrap_or(false)
+                {
+                    return Some(p.clone());
+                }
+                true // the index lies (renamed/removed since the walk) — rebuild NOW
+            }
+            None => false,
+        };
+        // A miss against a fresh COMPLETE index is authoritative; a
+        // stale HIT is not (a rename inside the cooldown must re-walk,
+        // or postgres's write-temp-then-rename pattern would STALE).
+        if !hit_stale
+            && st.complete
+            && st.built_at.map_or(false, |t| t.elapsed() < REWALK_COOLDOWN)
+        {
+            return None;
+        }
+        self.bump();
+        let (map, complete) = walk_ino_index(&self.root, self.dev, self.cap);
+        st.map = map;
+        st.complete = complete;
+        st.built_at = Some(std::time::Instant::now());
+        match st.map.get(&key) {
+            Some(p) => Some(p.clone()),
+            None if !complete => {
+                self.bump();
+                find_by_ino(&self.root, key, TARGETED_BUDGET)
+            }
+            None => None,
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::*;
@@ -206,11 +448,16 @@ mod imp {
 
     /// Kernel-handle backend: an O_PATH fd on the export root (the
     /// `mount_fd` for `open_by_handle_at`), the per-volume HMAC key,
-    /// and the instance id stamped into every handle.
+    /// and the instance id stamped into every handle. `identity` is the
+    /// F52 recovery: resolutions that fall outside the export root
+    /// (disconnected dentries name themselves "/") are re-located by
+    /// (dev,ino) instead of being served as-is.
     pub struct KernelFh {
         mount_fd: i32,
         key: [u8; 32],
         instance_id: u64,
+        export_root: PathBuf,
+        identity: super::IdentityResolver,
     }
 
     // A RawFd and plain data — safe to share across threads.
@@ -247,10 +494,25 @@ mod imp {
                     std::io::Error::last_os_error()
                 ));
             }
+            // The export fs's device id anchors inode identity (F52):
+            // (st_dev, st_ino) is a file's identity on one filesystem.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd, &mut st) } != 0 {
+                let e = std::io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                return Err(format!("fstat export root: {}", e));
+            }
+            let export_root = export_root.to_path_buf();
             let this = Self {
                 mount_fd: fd,
                 key,
                 instance_id,
+                identity: super::IdentityResolver::new(
+                    export_root.clone(),
+                    st.st_dev as u64,
+                    super::ident_cap_from_env(),
+                ),
+                export_root,
             };
             let probe_obj = export_root.join(".flint-nfs").join("fh.key");
             let fh = match this.mint(&probe_obj) {
@@ -302,7 +564,30 @@ mod imp {
         /// Resolve a v4 handle to the object's CURRENT path. The kernel
         /// verifies inode + generation; the path comes from
         /// `/proc/self/fd` on the O_PATH fd, so it reflects renames.
+        ///
+        /// F52: that readlink is only trusted when it still names the
+        /// fd's own inode UNDER the export root. On a cold dcache (a
+        /// relocated server's fresh mount) `open_by_handle_at` returns a
+        /// DISCONNECTED dentry whose kernel name is "/" — serving that
+        /// gave clients EISDIR-as-EIO WRITEs and the container root's
+        /// attributes. Untrusted resolutions are re-located by inode
+        /// identity; irrecoverable ones answer Stale, never a foreign
+        /// path.
         pub fn resolve(&self, data: &[u8]) -> Result<PathBuf, ResolveError> {
+            let (fd, dev, ino) = self.open_handle(data)?;
+            let path = std::fs::read_link(format!("/proc/self/fd/{}", fd));
+            unsafe { libc::close(fd) };
+            let path =
+                path.map_err(|e| ResolveError::Other(format!("proc readlink: {}", e)))?;
+            if super::trusted_resolution(&path, &self.export_root, dev, ino) {
+                return Ok(path);
+            }
+            self.recover_by_identity(dev, ino, &path)
+        }
+
+        /// Decode + authenticate + open the handle; returns the O_PATH
+        /// fd and its ground-truth inode identity. Caller closes fd.
+        fn open_handle(&self, data: &[u8]) -> Result<(i32, u64, u64), ResolveError> {
             let (_ino, htype, kh) = decode_v4(&self.key, self.instance_id, data)
                 .map_err(ResolveError::Other)?;
             let mut buf = FileHandleBuf {
@@ -326,9 +611,66 @@ mod imp {
                     _ => Err(ResolveError::Other(format!("open_by_handle_at: {}", err))),
                 };
             }
-            let path = std::fs::read_link(format!("/proc/self/fd/{}", fd));
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd, &mut st) } != 0 {
+                let e = std::io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                return Err(ResolveError::Other(format!("fstat resolved fd: {}", e)));
+            }
+            Ok((fd, st.st_dev as u64, st.st_ino as u64))
+        }
+
+        /// F52 recovery for an untrusted resolution. Logged per event —
+        /// the original incident was invisible server-side precisely
+        /// because nothing on this path ever spoke up.
+        fn recover_by_identity(
+            &self,
+            dev: u64,
+            ino: u64,
+            bogus: &Path,
+        ) -> Result<PathBuf, ResolveError> {
+            match self.identity.locate(dev, ino) {
+                Some(p) => {
+                    tracing::warn!(
+                        "fh resolve: disconnected dentry for ino {} (kernel said {:?}) — \
+                         recovered to {:?} by identity walk (F52)",
+                        ino,
+                        bogus,
+                        p
+                    );
+                    Ok(p)
+                }
+                None => {
+                    tracing::warn!(
+                        "fh resolve: ino {} (kernel said {:?}) has no path under \
+                         {:?} — answering STALE (F52 belt)",
+                        ino,
+                        bogus,
+                        self.export_root
+                    );
+                    Err(ResolveError::Stale)
+                }
+            }
+        }
+
+        /// Build the identity index and warm the dcache before the
+        /// listener accepts (F52). Returns (entries, complete).
+        pub fn prewarm(&self) -> (usize, bool) {
+            self.identity.prewarm()
+        }
+
+        /// Test-only: resolve while REFUSING to trust the readlink path
+        /// — every lookup must go through identity recovery, exactly as
+        /// if the dcache were cold. Lets the lima e2e suite exercise the
+        /// F52 path without root (a real cold cache needs umount/remount).
+        #[cfg(test)]
+        pub(crate) fn resolve_as_if_disconnected(
+            &self,
+            data: &[u8],
+        ) -> Result<PathBuf, ResolveError> {
+            let (fd, dev, ino) = self.open_handle(data)?;
             unsafe { libc::close(fd) };
-            path.map_err(|e| ResolveError::Other(format!("proc readlink: {}", e)))
+            self.recover_by_identity(dev, ino, Path::new("/"))
         }
     }
 }
@@ -351,6 +693,9 @@ mod imp {
         }
         pub fn resolve(&self, _data: &[u8]) -> Result<PathBuf, ResolveError> {
             Err(ResolveError::Other("unsupported platform".to_string()))
+        }
+        pub fn prewarm(&self) -> (usize, bool) {
+            (0, false)
         }
     }
 }
@@ -393,6 +738,153 @@ mod tests {
         assert!(decode_v4(&KEY, 42, &fh.data[..20]).is_err());
     }
 
+    // ---- F52 identity-recovery machinery (all-platform: pure std::fs) ----
+
+    use std::os::unix::fs::MetadataExt;
+
+    fn ident_of(p: &Path) -> (u64, u64) {
+        let md = std::fs::symlink_metadata(p).unwrap();
+        (md.dev(), md.ino())
+    }
+
+    /// Fresh temp tree:  root/{a, sub/{b, deep/c}}
+    fn temp_tree(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("f52_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub/deep")).unwrap();
+        std::fs::write(dir.join("a"), b"a").unwrap();
+        std::fs::write(dir.join("sub/b"), b"b").unwrap();
+        std::fs::write(dir.join("sub/deep/c"), b"c").unwrap();
+        dir
+    }
+
+    #[test]
+    fn walk_ino_index_maps_tree_and_flags_cap() {
+        let dir = temp_tree("walk");
+        let dev = ident_of(&dir).0;
+        let (map, complete) = walk_ino_index(&dir, dev, 1000);
+        assert!(complete);
+        // root + sub + deep + 3 files
+        assert_eq!(map.len(), 6, "every entry indexed: {:?}", map);
+        for rel in ["a", "sub", "sub/b", "sub/deep", "sub/deep/c"] {
+            let p = dir.join(rel);
+            assert_eq!(map.get(&ident_of(&p)), Some(&p), "{}", rel);
+        }
+        // Cap exhaustion is reported, not silently truncated.
+        let (_capped, complete) = walk_ino_index(&dir, dev, 2);
+        assert!(!complete);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn find_by_ino_targeted_hits_and_misses() {
+        let dir = temp_tree("find");
+        let c = dir.join("sub/deep/c");
+        assert_eq!(find_by_ino(&dir, ident_of(&c), 10_000), Some(c.clone()));
+        // the export root itself resolves too (root-dir handles)
+        assert_eq!(find_by_ino(&dir, ident_of(&dir), 10_000), Some(dir.clone()));
+        // absent identity → None; ino 0 exists on no real fs
+        assert_eq!(find_by_ino(&dir, (ident_of(&dir).0, 0), 10_000), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The trust gate is THE F52 fix: "/" (a disconnected dentry's
+    /// kernel name), foreign paths, since-renamed paths, and deleted
+    /// paths must all be refused; only the live in-export path passes.
+    #[test]
+    fn trusted_resolution_gate() {
+        let dir = temp_tree("trust");
+        let a = dir.join("a");
+        let (dev, ino) = ident_of(&a);
+        assert!(trusted_resolution(&a, &dir, dev, ino));
+        // The exact F52 shape: kernel says "/" for a disconnected dentry.
+        assert!(!trusted_resolution(Path::new("/"), &dir, dev, ino));
+        // A path under the root that names a DIFFERENT inode (renamed-over).
+        let b = dir.join("sub/b");
+        assert!(!trusted_resolution(&b, &dir, dev, ino));
+        // Outside the export root entirely, even if the inode matched.
+        let (tdev, tino) = ident_of(&std::env::temp_dir());
+        assert!(!trusted_resolution(&std::env::temp_dir(), &dir, tdev, tino));
+        // Deleted: lstat fails → untrusted.
+        std::fs::remove_file(&a).unwrap();
+        assert!(!trusted_resolution(&a, &dir, dev, ino));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// End-to-end recovery shape of the runai incident: locate by
+    /// identity, then a RENAME invalidates the index mid-cooldown — the
+    /// stale hit must force a re-walk (postgres's write-temp-then-rename
+    /// would otherwise STALE), and an unlink must answer None.
+    #[test]
+    fn identity_locate_recovers_rename_and_stales_unlink() {
+        let dir = temp_tree("locate");
+        let r = IdentityResolver::new(dir.clone(), ident_of(&dir).0, 1000);
+        let a = dir.join("a");
+        let (dev, ino) = ident_of(&a);
+        assert_eq!(r.locate(dev, ino), Some(a.clone()));
+        // Rename: the indexed path is now a lie; locate must re-walk and
+        // return the NEW path even though the cooldown has not elapsed.
+        let a2 = dir.join("sub/a-renamed");
+        std::fs::rename(&a, &a2).unwrap();
+        assert_eq!(r.locate(dev, ino), Some(a2.clone()));
+        // Unlink: no path exists — None (upstream answers STALE, and the
+        // F17b/c open-fd fallbacks get their turn).
+        std::fs::remove_file(&a2).unwrap();
+        assert_eq!(r.locate(dev, ino), None);
+        // Foreign device is refused outright.
+        assert_eq!(r.locate(dev.wrapping_add(1), ino), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A miss against a fresh COMPLETE index must NOT re-walk per probe
+    /// (unlink storms would otherwise walk the tree once per second per
+    /// stale client handle).
+    #[test]
+    fn identity_miss_cooldown_skips_rewalk() {
+        use std::sync::atomic::Ordering;
+        let dir = temp_tree("cooldown");
+        let r = IdentityResolver::new(dir.clone(), ident_of(&dir).0, 1000);
+        r.prewarm();
+        let walks_after_prewarm = r.walks.load(Ordering::Relaxed);
+        let dev = ident_of(&dir).0;
+        assert_eq!(r.locate(dev, 0), None);
+        assert_eq!(r.locate(dev, 0), None);
+        assert_eq!(r.locate(dev, 0), None);
+        assert_eq!(
+            r.walks.load(Ordering::Relaxed),
+            walks_after_prewarm,
+            "misses within the cooldown of a complete index must not re-walk"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ident_cap_env_parsing() {
+        // No other test touches this var (single-var, no parallel racer).
+        std::env::remove_var("FLINT_FH_IDENT_MAX");
+        assert_eq!(ident_cap_from_env(), IDENT_CAP_DEFAULT);
+        std::env::set_var("FLINT_FH_IDENT_MAX", "12345");
+        assert_eq!(ident_cap_from_env(), 12345);
+        std::env::set_var("FLINT_FH_IDENT_MAX", "not-a-number");
+        assert_eq!(ident_cap_from_env(), IDENT_CAP_DEFAULT);
+        std::env::set_var("FLINT_FH_IDENT_MAX", "0");
+        assert_eq!(ident_cap_from_env(), 0);
+        std::env::remove_var("FLINT_FH_IDENT_MAX");
+    }
+
+    /// cap=0 (FLINT_FH_IDENT_MAX=0): no index, no prewarm — recovery
+    /// still works via targeted early-exit walks.
+    #[test]
+    fn identity_targeted_mode_cap_zero() {
+        let dir = temp_tree("targeted");
+        let r = IdentityResolver::new(dir.clone(), ident_of(&dir).0, 0);
+        assert_eq!(r.prewarm(), (0, false));
+        let c = dir.join("sub/deep/c");
+        let (dev, ino) = ident_of(&c);
+        assert_eq!(r.locate(dev, ino), Some(c));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn key_created_once_and_stable() {
         let dir = std::env::temp_dir().join(format!("fhkey_{}", std::process::id()));
@@ -428,11 +920,32 @@ mod tests {
             Err(MintError::Other(e)) => panic!("{}", e),
         };
         assert_eq!(k.resolve(&fh.data).unwrap(), f);
+        // F52: force the identity-recovery path — as if the dcache were
+        // cold and readlink had answered "/". The true path must come
+        // back from the walk, never the kernel's disconnected name.
+        // (A REAL cold cache needs root for umount/remount; the repro in
+        // the F52 evidence bundle covers that half.)
+        let (n, complete) = k.prewarm();
+        assert!(complete && n >= 2, "prewarm indexed {} entries", n);
+        assert_eq!(
+            k.resolve_as_if_disconnected(&fh.data).unwrap(),
+            f,
+            "identity recovery must find the true path"
+        );
         let g = dir.join("obj2");
         std::fs::rename(&f, &g).unwrap();
         assert_eq!(k.resolve(&fh.data).unwrap(), g, "handle follows rename");
+        assert_eq!(
+            k.resolve_as_if_disconnected(&fh.data).unwrap(),
+            g,
+            "identity recovery follows renames too"
+        );
         std::fs::remove_file(&g).unwrap();
         assert!(matches!(k.resolve(&fh.data), Err(ResolveError::Stale)));
+        assert!(
+            matches!(k.resolve_as_if_disconnected(&fh.data), Err(ResolveError::Stale)),
+            "unlinked: recovery answers Stale, never a foreign path"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

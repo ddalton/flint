@@ -554,6 +554,19 @@ pub struct CatchupConfig {
     /// FLINT_CATCHUP_FULL_BUILD, default enabled (the orchestrator itself
     /// is already opt-in).
     pub full_build: bool,
+    /// F50: the marker-driven reconciler leaves a hot-rejoin marker younger
+    /// than this alone. The per-volume claim is IN-PROCESS — it cannot see
+    /// a window run by another controller process (helm rolling-upgrade
+    /// overlap; the vestigial spdk-controller-operator pod pre-F50), and a
+    /// young stale+marker is exactly what a LIVE mid-flight window looks
+    /// like. Scrubbing it destroys the window's E_f export out from under
+    /// it. Old markers (a crashed window's) reconcile as before, just this
+    /// much later — their artifacts are inert and the data-plane quiesce
+    /// lease self-expires in lease_ms regardless.
+    /// FLINT_HOT_REJOIN_RECONCILE_GRACE_SECS, default 300 (the hot-rejoin
+    /// retry back-off: by then the owning process has committed, unwound,
+    /// or died).
+    pub reconcile_grace: Duration,
 }
 
 impl Default for CatchupConfig {
@@ -563,6 +576,7 @@ impl Default for CatchupConfig {
             t_back: Duration::from_secs(120),
             poll_interval: Duration::from_secs(2),
             full_build: true,
+            reconcile_grace: Duration::from_secs(300),
         }
     }
 }
@@ -595,6 +609,11 @@ impl CatchupConfig {
                         || v == "0")
                 })
                 .unwrap_or(d.full_build),
+            reconcile_grace: std::env::var("FLINT_HOT_REJOIN_RECONCILE_GRACE_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(d.reconcile_grace),
         }
     }
 }
@@ -2769,6 +2788,7 @@ mod tests {
             t_back: Duration::from_secs(120),
             poll_interval: Duration::ZERO,
             full_build: true,
+            ..CatchupConfig::default()
         }
     }
 
