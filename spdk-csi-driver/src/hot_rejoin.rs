@@ -769,9 +769,22 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
         .await?;
     let expected = expected_remote_base_bdev(&topo.sid, topo.idx);
     let ctrl = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
-    if get_bdev(rpc, topo.consumer, &expected).await?.is_none() {
+    // F54 §3: identity-verified, not presence-verified (prestage_inline's
+    // check, ported). The F48 zombie leaves a consumer controller + bdev
+    // behind whose namespace view is the DESTROYED head — presence passed
+    // here, then the window's ns-swap missed its AER budget and burned a
+    // whole backoff cycle (the 357s-vs-264s recovery difference). A bdev
+    // serving any uuid but the pad's is dead weight either way: replace it
+    // with a fresh attach whose namespace state cannot be stale.
+    let consumer_ok = get_bdev(rpc, topo.consumer, &expected)
+        .await?
+        .and_then(|b| b.get("uuid").and_then(|u| u.as_str()).map(String::from))
+        .as_deref()
+        == Some(topo.rec.live_lvol_uuid());
+    if !consumer_ok {
         // Controller may exist but serve nothing usable (dead reconnect
-        // loop after the replica's spdk-tgt restart) — replace it.
+        // loop after the replica's spdk-tgt restart, or the stale zombie
+        // above) — replace it.
         detach_controller(rpc, topo.consumer, &ctrl).await;
         let mut attach = json!({
             "method": "bdev_nvme_attach_controller",
@@ -2757,7 +2770,7 @@ mod tests {
     use crate::catchup::CatchupRpc;
     use crate::driver::NvmeofConnectionInfo;
     use serde_json::Value;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
     // -- Fake world ---------------------------------------------------------
@@ -2780,6 +2793,11 @@ mod tests {
         raids: HashMap<String, Vec<Value>>,
         copy_states: Vec<String>,
         uuid_seq: u64,
+        /// F54 §3 mock fidelity: controllers whose AER stream is "lost" —
+        /// propagate_namespaces leaves their namespace bdevs untouched, the
+        /// way a real zombie's stale view survives target-side ns changes.
+        /// A detach clears the freeze (a fresh controller sees live state).
+        frozen_aer: HashSet<(String, String)>,
     }
 
     impl World {
@@ -2802,7 +2820,11 @@ mod tests {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             // Drop stale namespace bdevs of every controller, then re-add.
+            // Frozen-AER controllers keep their (stale) view verbatim.
             for ((node, ctrl), _) in &ctrls {
+                if self.frozen_aer.contains(&(node.clone(), ctrl.clone())) {
+                    continue;
+                }
                 let prefix = format!("{}n", ctrl);
                 self.bdevs.retain(|(n, name), _| {
                     !(n == node
@@ -2811,6 +2833,9 @@ mod tests {
                 });
             }
             for ((node, ctrl), (target, nqn)) in &ctrls {
+                if self.frozen_aer.contains(&(node.clone(), ctrl.clone())) {
+                    continue;
+                }
                 for ((sub_node, sub_nqn), namespaces) in &subs {
                     if sub_node == target && sub_nqn == nqn {
                         for (nsid, backing) in namespaces {
@@ -3255,7 +3280,18 @@ mod tests {
                 }
                 "bdev_nvme_detach_controller" => {
                     let name = params["name"].as_str().unwrap().to_string();
-                    w.controllers.remove(&(node_s.clone(), name));
+                    w.controllers.remove(&(node_s.clone(), name.clone()));
+                    // The frozen stale view dies with its controller — and
+                    // its orphaned namespace bdevs go too (a re-attach
+                    // under the same name must start from live state).
+                    if w.frozen_aer.remove(&(node_s.clone(), name.clone())) {
+                        let prefix = format!("{}n", name);
+                        w.bdevs.retain(|(n, b), _| {
+                            !(n == &node_s
+                                && b.starts_with(&prefix)
+                                && b[prefix.len()..].bytes().all(|x| x.is_ascii_digit()))
+                        });
+                    }
                     w.propagate_namespaces();
                     json!({ "result": true })
                 }
@@ -3754,6 +3790,49 @@ mod tests {
             "residual pre-connect controller must be adopted, not fail the admission: {:?}",
             out
         );
+    }
+
+    /// F54 §3: the F48 zombie — a consumer-side controller whose namespace
+    /// view is the DESTROYED head (its AER stream died with the old
+    /// target). Presence-checking prestage trusted it and the window then
+    /// burned a backoff cycle on "old ns still visible within the AER
+    /// budget". The identity-verified pre-connect must detach the zombie
+    /// and re-attach fresh, and the admission must succeed first try.
+    #[tokio::test]
+    async fn f54s3_zombie_consumer_preconnect_is_replaced_not_trusted() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        let expected = expected_remote_base_bdev(&sid(VOL), 1);
+        let ctrl = expected.strip_suffix("n1").unwrap().to_string();
+        {
+            let mut w = rpc.world.lock().unwrap();
+            // The zombie: controller registered against the replica export,
+            // AER frozen, bdev pinned at the destroyed head's uuid.
+            w.controllers.insert(
+                ("consumer".into(), ctrl.clone()),
+                ("node-b".into(), replica_export_nqn(&sid(VOL), 1)),
+            );
+            w.frozen_aer.insert(("consumer".into(), ctrl.clone()));
+            w.bdevs.insert(
+                ("consumer".into(), expected.clone()),
+                json!({ "name": expected, "uuid": "uuid-old-destroyed-head" }),
+            );
+        }
+        let store = FakeStore::new(stale_b_record());
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, HotRejoinOutcome::Rejoined { .. }),
+            "the zombie must be replaced in prestage, not ride into the window: {:?}",
+            out
+        );
+        let detached: Vec<_> = rpc
+            .calls_of("bdev_nvme_detach_controller")
+            .into_iter()
+            .filter(|(node, p)| node == "consumer" && p["name"].as_str() == Some(&ctrl))
+            .collect();
+        assert!(!detached.is_empty(), "the stale consumer controller was never detached");
     }
 
     /// P3: one layer below the name check, `spdk_bdev_nvme_create` reports

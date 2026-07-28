@@ -157,6 +157,10 @@ least one new F-number.
    once the head goes stale). Bounded, but it's the difference between
    357s and 264s-class recovery. Options: liveness-probe the controller in
    prestage, or extend the sever to standby heads.
+   > **CLOSED 2026-07-28:** prestage's consumer pre-connect is now
+   > identity-verified (prestage_inline's uuid check, ported); the zombie
+   > is detached and re-attached fresh before the window. Regression test
+   > with a frozen-AER mock, verified red pre-fix. 918 lib tests.
 
 ## Deferred features (tracked, not campaign-blocking)
 

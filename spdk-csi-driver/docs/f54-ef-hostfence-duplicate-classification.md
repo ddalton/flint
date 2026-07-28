@@ -65,6 +65,18 @@ one-cycle race on current code, bounded by the sever. A deeper fix (probe
 controller path-liveness in prestage, or extend the sever to standby heads)
 is deliberately deferred — not a blind release-eve change.
 
+> **CLOSED 2026-07-28 (post-v1.21.0 cycle):** `prestage`'s consumer
+> pre-connect is now identity-verified — the consumer-side bdev must carry
+> the pad's uuid, else the controller is detached and re-attached fresh
+> (the check `prestage_inline` already used, ported). The zombie never
+> rides into the window, so the ns-swap's AER budget can't be spent on a
+> dead stream. Regression test:
+> `f54s3_zombie_consumer_preconnect_is_replaced_not_trusted`, with the mock
+> taught to freeze a controller's AER view (`frozen_aer`) — verified red
+> against the old presence-only check. 2.9's in_sync time is the live
+> metric: the 264s class should now be reachable on attempt #1 even when
+> the zombie race fires.
+
 ## 4. Live validation
 
 Gate: drill 2.9 on the fixed image must reach in_sync without an
