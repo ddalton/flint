@@ -690,6 +690,9 @@ pub async fn run_cutover_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: CutoverCo
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
+        if !crate::orchestrator_lease::is_leader() {
+            continue; // standing by — the orchestrator lease is held elsewhere
+        }
         if let Err(e) =
             cutover_tick(&driver, &ops, &cfg, &mut bounces, &mut data_path_seen).await
         {

@@ -2480,6 +2480,9 @@ pub async fn run_hot_rejoin_orchestrator(
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
+        if !crate::orchestrator_lease::is_leader() {
+            continue; // standing by — the orchestrator lease is held elsewhere
+        }
         if let Err(e) = hot_rejoin_tick(&driver, &cfg, &backoff, &inline_deny).await {
             warn!(error = %e, "[HOT_REJOIN] Orchestrator tick failed (non-fatal)");
         }

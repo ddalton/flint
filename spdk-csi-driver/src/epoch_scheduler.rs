@@ -441,6 +441,9 @@ pub async fn run_epoch_scheduler(driver: Arc<SpdkCsiDriver>, cfg: EpochConfig) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
+        if !crate::orchestrator_lease::is_leader() {
+            continue; // standing by — the orchestrator lease is held elsewhere
+        }
         if let Err(e) = scheduler_tick(&driver, &cfg).await {
             warn!(error = %e, "[EPOCH] Scheduler tick failed (non-fatal)");
         }

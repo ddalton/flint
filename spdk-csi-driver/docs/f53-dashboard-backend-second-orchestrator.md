@@ -188,6 +188,20 @@ each found only by looking, never by a failing assertion. A lease is the
 only construction that makes "exactly one" true by design rather than by
 audit. `orchestrator_role.rs` is where it belongs when it lands.
 
+> **Landed 2026-07-28 (post-v1.21.0): `orchestrator_lease.rs`.** The role
+> grant now decides *candidacy*, the `flint-orchestrators` Lease decides
+> *activity*: every orchestrator tick checks `is_leader()`, and the API
+> server's CAS hands the lease to exactly one holder. Clock-skew-independent
+> takeover (client-go style: local observation age, never remote
+> timestamps), step-down after a full unrenewable lease duration, kill
+> switch `FLINT_ORCHESTRATOR_LEASE=disabled`. The dashboard stays a
+> NON-candidate — this module never re-admits a process the grant excluded.
+> Residual: tick-granularity gating means one in-flight operation can
+> straddle a leadership loss under a pathological pause; the F43 claim
+> belts remain the defense there. Live gate (next campaign): 2.9/3.6e with
+> a deliberately mis-granted second candidate that must stay standing by,
+> plus a controller-kill proving failover.
+
 ## 5. Drill gate
 
 Drill 2.9's F50 cycle gate (fails by name after >2 `standby → stale` flips)

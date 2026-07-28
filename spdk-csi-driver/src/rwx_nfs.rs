@@ -1201,10 +1201,12 @@ pub async fn run_nfs_server_reconciler(kube_client: Client, source_node: String)
     }
     println!("🩺 [NFS-RECONCILER] NFS server-pod liveness reconciler running (30s tick; FLINT_NFS_RECONCILER=disabled to opt out)");
     loop {
-        let n = nfs_reconciler_pass(&kube_client, &source_node).await;
-        if n > 0 {
-            println!("🩺 [NFS-RECONCILER] Recreated {} NFS server pod(s) this pass", n);
-        }
+        if crate::orchestrator_lease::is_leader() {
+            let n = nfs_reconciler_pass(&kube_client, &source_node).await;
+            if n > 0 {
+                println!("🩺 [NFS-RECONCILER] Recreated {} NFS server pod(s) this pass", n);
+            }
+        } // else: standing by — the orchestrator lease is held elsewhere
         sleep(Duration::from_secs(30)).await;
     }
 }

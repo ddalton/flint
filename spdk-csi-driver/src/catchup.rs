@@ -2631,6 +2631,9 @@ pub async fn run_catchup_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: CatchupCo
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
+        if !crate::orchestrator_lease::is_leader() {
+            continue; // standing by — the orchestrator lease is held elsewhere
+        }
         if let Err(e) = orchestrator_tick(&driver, &cfg, &replace_cfg).await {
             warn!(error = %e, "[CATCHUP] Orchestrator tick failed (non-fatal)");
         }

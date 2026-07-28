@@ -192,6 +192,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // question instead. See orchestrator_role.rs.
     let run_orchestrators = spdk_csi_driver::orchestrator_role::orchestrators_enabled(&mode);
 
+    // The role grant decides CANDIDACY; the kube Lease decides ACTIVITY.
+    // F50 and F53 were both processes that drifted into the orchestrator
+    // role through configuration alone — the election makes the singleton
+    // mechanical: among however many candidates exist (one, in a correct
+    // chart), the API server hands the lease to exactly one, and every
+    // orchestrator tick checks it. FLINT_ORCHESTRATOR_LEASE=disabled
+    // reverts to the pure role-grant behavior (dev/emergency).
+    if run_orchestrators {
+        let lease_cfg = spdk_csi_driver::orchestrator_lease::LeaseConfig::from_env();
+        if lease_cfg.enabled {
+            let identity = std::env::var("HOSTNAME")
+                .unwrap_or_else(|_| format!("{}-{}", node_id, std::process::id()));
+            let ops = std::sync::Arc::new(
+                spdk_csi_driver::orchestrator_lease::KubeLeaseOps::new(
+                    kube_client.clone(),
+                    &target_namespace,
+                    &lease_cfg,
+                ),
+            );
+            println!(
+                "🗳️ [ORCH_LEASE] leader election enabled (lease {}/{}, holder {})",
+                target_namespace, lease_cfg.lease_name, identity
+            );
+            tokio::spawn(spdk_csi_driver::orchestrator_lease::run_election(
+                ops, identity, lease_cfg,
+            ));
+        } else {
+            println!(
+                "⚠️ [ORCH_LEASE] leader election DISABLED by FLINT_ORCHESTRATOR_LEASE — orchestrators run on the role grant alone (the F50/F53 class is config-guarded only)"
+            );
+        }
+    }
+
     // Create minimal state driver
     let driver = Arc::new(SpdkCsiDriver::new(
         kube_client.clone(),

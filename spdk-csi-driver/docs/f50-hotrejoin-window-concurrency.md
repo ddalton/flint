@@ -201,7 +201,9 @@ still produce one, and make the destructive decode tolerant of the shape:
 **Deliberately deferred:** kube Lease-based leader election for the
 orchestrator block — the complete answer to "two controller processes",
 and the right follow-up, but a bigger change than a validated release wave
-should absorb.
+should absorb. *(Update 2026-07-28: implemented post-v1.21.0 in
+`orchestrator_lease.rs` — see that module's doc; live gate pending the next
+campaign.)*
 
 > **The claim that items (1)–(3) "close every known two-process window
 > today" did not survive contact with the next cluster.** They closed every

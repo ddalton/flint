@@ -30,6 +30,9 @@ least one new F-number.
 ## Priorities for the next campaign (in order)
 
 ### P1 — kube-Lease leader election for the orchestrator block
+> **IMPLEMENTED 2026-07-28** (`orchestrator_lease.rs`; role grant =
+> candidacy, Lease = activity; 907 tests). **Live gate still owed** — run
+> the acceptance drill below in the next campaign before calling P1 done.
 - **Class it kills:** singleton-by-configuration (F50: operator pod as a
   second hot-rejoin orchestrator; F53: dashboard backend as a third —
   two instances of the family in one day).
