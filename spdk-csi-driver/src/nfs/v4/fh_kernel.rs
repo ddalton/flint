@@ -514,7 +514,7 @@ mod imp {
                 ),
                 export_root,
             };
-            let probe_obj = export_root.join(".flint-nfs").join("fh.key");
+            let probe_obj = this.export_root.join(".flint-nfs").join("fh.key");
             let fh = match this.mint(&probe_obj) {
                 Ok(fh) => fh,
                 Err(MintError::NoEnt) => return Err("probe object missing".to_string()),
