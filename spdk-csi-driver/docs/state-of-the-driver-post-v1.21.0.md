@@ -74,6 +74,16 @@ least one new F-number.
   existing identity CI lint stays.
 
 ### P3 — SPDK error-classification audit (probe, never parse)
+> **IMPLEMENTED 2026-07-28** (`docs/spdk-error-classification-audit.md`
+> — every site enumerated with a verdict, every shape claim verified
+> against SPDK v26.05.1-pre source). Converted: all five hot_rejoin
+> `bdev_nvme_attach_controller` sites → `attach_converged()` (three
+> previously hard-failed behind a best-effort detach), the F49
+> `drop_local` delete-of-absent (was an unmatchable `-32602`), and the
+> dead `driver.rs::create_nvmeof_target` fossil deleted (3 trap sites,
+> zero callers). Mock now refuses duplicate attaches with the real
+> v26.05 shape. Family-A (errno-mapped lvol/raid) textual classifiers
+> audited and kept. **Live canary owed: one 2.9 run next campaign.**
 - **Class it kills:** string-matched RPC errors — F48
   (`nvmf_create_subsystem` duplicate = "-32603 Unable to create…"), then
   F54 seven days later (`nvmf_subsystem_add_host` duplicate = bare

@@ -1623,7 +1623,25 @@ impl NodeAgent {
             Ok(_) => true,
             Err(e) => {
                 let msg = e.to_string();
-                if crate::epoch_scheduler::is_missing(&msg) {
+                // P3 (the F54 pattern): deleting an ABSENT subsystem is
+                // SPDK's "-32602 Invalid parameters" — there is no missing
+                // text to match, so probe the live list instead of parsing
+                // the message. Reachable when the caller's list races a
+                // concurrent teardown; gone is converged.
+                let still_present = node_agent
+                    .disk_service
+                    .call_spdk_rpc(&json!({ "method": "nvmf_get_subsystems", "params": {} }))
+                    .await
+                    .ok()
+                    .and_then(|r| {
+                        r.get("result").and_then(|subs| subs.as_array()).map(|a| {
+                            a.iter()
+                                .any(|s| s.get("nqn").and_then(|n| n.as_str()) == Some(nqn))
+                        })
+                    })
+                    // Probe unreachable → assume present → honest failure.
+                    .unwrap_or(true);
+                if !still_present {
                     false // already gone — the deregistration was the point
                 } else {
                     warn!(nqn = %nqn, error = %msg, "[HTTP_API] drop_local export delete failed");

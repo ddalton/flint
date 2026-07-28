@@ -1021,87 +1021,14 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
-    /// Create NVMe-oF target (minimal implementation - will be enhanced later)
-    pub async fn create_nvmeof_target(&self, bdev_name: &str, nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        debug!(bdev_name, nqn, "[MINIMAL_NVMEOF] Creating NVMe-oF target");
-        
-        // For now, we'll implement a basic version
-        // TODO: Enhance with full functionality later
-        
-        // 1. Create subsystem
-        let subsystem_params = json!({
-            "method": "nvmf_create_subsystem",
-            "params": {
-                "nqn": nqn,
-                "allow_any_host": true,
-                "serial_number": format!("SPDK{:016x}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64),
-                "model_number": "SPDK CSI Volume"
-            }
-        });
-
-        // NOTE: For NVMe-oF, the controller should delegate to the target node
-        // This is a placeholder - in real implementation, use call_node_agent
-        match self.call_node_agent(&self.node_id, "/api/nvmeof/create_subsystem", &subsystem_params).await {
-            Ok(_) => info!(nqn, "[MINIMAL_NVMEOF] Subsystem created"),
-            Err(e) if e.to_string().contains("already exists") => {
-                debug!(nqn, "[MINIMAL_NVMEOF] Subsystem already exists");
-            }
-            Err(e) => return Err(e),
-        }
-
-        // 2. Add namespace
-        let namespace_params = json!({
-            "method": "nvmf_subsystem_add_ns",
-            "params": {
-                "nqn": nqn,
-                "namespace": {
-                    "nsid": 1,
-                    "bdev_name": bdev_name
-                }
-            }
-        });
-
-        match self.call_node_agent(&self.node_id, "/api/nvmeof/add_namespace", &namespace_params).await {
-            Ok(_) => info!(bdev_name, "[MINIMAL_NVMEOF] Namespace added for bdev"),
-            Err(e) if e.to_string().contains("already exists") => {
-                debug!(bdev_name, "[MINIMAL_NVMEOF] Namespace already exists for bdev");
-            }
-            Err(e) => return Err(e),
-        }
-
-        // 3. Add listener
-        let node_ip = self.get_current_node_ip().await?;
-        let listener_params = json!({
-            "method": "nvmf_subsystem_add_listener",
-            "params": {
-                "nqn": nqn,
-                "listen_address": {
-                    "trtype": self.nvmeof_transport.to_uppercase(),
-                    "traddr": node_ip,
-                    "trsvcid": self.nvmeof_target_port.to_string(),
-                    "adrfam": "ipv4"
-                }
-            }
-        });
-
-        match self.call_node_agent(&self.node_id, "/api/nvmeof/add_listener", &listener_params).await {
-            Ok(_) => {
-                let port = self.nvmeof_target_port;
-                info!(node_ip, port, "[MINIMAL_NVMEOF] Listener added");
-            }
-            Err(e) if e.to_string().contains("already exists") => {
-                let port = self.nvmeof_target_port;
-                debug!(node_ip, port, "[MINIMAL_NVMEOF] Listener already exists");
-            }
-            Err(e) => return Err(e),
-        }
-
-        info!(nqn, "[MINIMAL_NVMEOF] NVMe-oF target setup completed");
-        Ok(())
-    }
+    // (create_nvmeof_target deleted 2026-07-28, P3 audit: dead code — zero
+    // callers, and its /api/nvmeof/{create_subsystem,add_namespace,
+    // add_listener} routes never existed either, so every invocation would
+    // have 404ed. Its three `contains("already exists")` guards were
+    // F48-class traps besides: SPDK v26.05 reports a duplicate create as
+    // "-32603 Unable to create subsystem" and a duplicate listener as
+    // "-32602 Invalid parameters" — no matchable text. The live export
+    // path is nvmeof_export::ensure_export, which probes instead.)
 
     // (cleanup_nvmeof_target deleted 2026-07-22: dead code — zero callers,
     // and it POSTed /api/nvmeof/delete_subsystem, a route that never

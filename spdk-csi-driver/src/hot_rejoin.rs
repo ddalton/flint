@@ -755,11 +755,7 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
         }
     });
     bound_attach_transport(&mut attach);
-    match rpc.spdk_rpc(dst_node, &attach).await {
-        Ok(_) => {}
-        Err(e) if is_already_exists(&e.to_string()) => {}
-        Err(e) => return Err(format!("E_f pre-connect on {}: {}", dst_node, e).into()),
-    }
+    attach_converged(rpc, dst_node, &attach, &ef_ctrl, "E_f pre-connect").await?;
 
     // Converge the replica export (subsystem/listener/fence; namespace =
     // the pad, its current state) and pre-connect the consumer to it. The
@@ -783,9 +779,9 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
             }
         });
         bound_attach_transport(&mut attach);
-        rpc.spdk_rpc(topo.consumer, &attach)
-            .await
-            .map_err(|e| format!("consumer pre-connect of {}: {}", conn.nqn, e))?;
+        // The detach above is best-effort — if it silently failed, this
+        // attach is a duplicate over a still-registered controller.
+        attach_converged(rpc, topo.consumer, &attach, &ctrl, "consumer pre-connect").await?;
     }
     Ok(())
 }
@@ -1149,9 +1145,9 @@ async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<
             }
         });
         bound_attach_transport(&mut attach);
-        rpc.spdk_rpc(topo.consumer, &attach)
-            .await
-            .map_err(|e| format!("consumer pre-connect of {}: {}", conn.nqn, e))?;
+        // The detach above is best-effort — if it silently failed, this
+        // attach is a duplicate over a still-registered controller.
+        attach_converged(rpc, topo.consumer, &attach, &ctrl, "consumer pre-connect").await?;
     }
 
     // Re-admit the copy source (the converge above fenced to the consumer
@@ -1190,9 +1186,7 @@ async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<
             }
         });
         bound_attach_transport(&mut attach);
-        rpc.spdk_rpc(src_node, &attach)
-            .await
-            .map_err(|e| format!("copy-source attach of {}: {}", conn.nqn, e))?;
+        attach_converged(rpc, src_node, &attach, &ctrl, "copy-source attach").await?;
     }
     Ok(expected)
 }
@@ -1501,6 +1495,44 @@ async fn subsystem_has_listener(
                     && a.get("trsvcid").and_then(|t| t.as_str()) == Some(trsvcid)
             })
         })
+}
+
+/// True when an initiator controller with this name exists on `node`.
+async fn controller_present(rpc: &dyn CatchupRpc, node: &str, controller: &str) -> bool {
+    rpc.spdk_rpc(
+        node,
+        &json!({ "method": "bdev_nvme_get_controllers", "params": { "name": controller } }),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.get("result").and_then(|c| c.as_array()).map(|c| !c.is_empty()))
+    .unwrap_or(false)
+}
+
+/// `bdev_nvme_attach_controller`, converged on state (P3, the F48/F54
+/// class on the initiator side). A duplicate attach has two v26.05 shapes:
+/// the name-checked one says "A controller named X already exists …", but
+/// one layer down `spdk_bdev_nvme_create` reports a registered trid as
+/// -EALREADY = "Operation already in progress" — no matchable text. And a
+/// timeout whose attach landed reads as failure with the controller live.
+/// So on any unrecognized error, ask for the controller instead of parsing.
+async fn attach_converged(
+    rpc: &dyn CatchupRpc,
+    node: &str,
+    attach: &serde_json::Value,
+    controller: &str,
+    context: &str,
+) -> Result<(), RpcError> {
+    match rpc.spdk_rpc(node, attach).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_already_exists(&e.to_string()) => Ok(()),
+        Err(e) => {
+            if controller_present(rpc, node, controller).await {
+                return Ok(());
+            }
+            Err(format!("{} on {}: {}", context, node, e).into())
+        }
+    }
 }
 
 async fn subsystem_nsid(
@@ -2172,9 +2204,7 @@ async fn localize(
                     }
                 });
                 bound_attach_transport(&mut attach);
-                rpc.spdk_rpc(&src.node_name, &attach)
-                    .await
-                    .map_err(|e| format!("pad attach on {}: {}", src.node_name, e))?;
+                attach_converged(rpc, &src.node_name, &attach, &pad_ctrl, "pad attach").await?;
             }
 
             // Base-inclusive replay to exactly E_f; the final align snapshots
@@ -3200,6 +3230,17 @@ mod tests {
                 "bdev_nvme_attach_controller" => {
                     let name = params["name"].as_str().unwrap().to_string();
                     let nqn = params["subnqn"].as_str().unwrap().to_string();
+                    // Faithful to v26.05 rpc_bdev_nvme_attach_controller: a
+                    // duplicate name is REFUSED (-EALREADY, this text) and
+                    // the existing controller is kept.
+                    if w.controllers.contains_key(&(node_s.clone(), name.clone())) {
+                        return Err(format!(
+                            "SPDK RPC error: Code=-114 Msg=A controller named {} \
+                             already exists with the specified network path",
+                            name
+                        )
+                        .into());
+                    }
                     // The fake routes by nqn: find the node hosting it.
                     let target = w
                         .subsystems
@@ -3678,6 +3719,77 @@ mod tests {
             "fully-built residual E_f (host already fenced) must be adopted: {:?}",
             out
         );
+    }
+
+    /// P3 (the F48/F54 class on the initiator side): a residual E_f
+    /// pre-connect controller from an unwound attempt makes the retry's
+    /// `bdev_nvme_attach_controller` a duplicate, which v26.05 REFUSES
+    /// ("A controller named X already exists…", kept intact). The
+    /// admission must adopt the live controller, not unwind.
+    #[tokio::test]
+    async fn residual_ef_preconnect_controller_is_adopted() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        {
+            // Residue on the rejoin target: attempt #1's E_f initiator
+            // controller is still registered.
+            let mut w = rpc.world.lock().unwrap();
+            w.controllers.insert(
+                ("node-b".into(), ef_controller_name(VOL)),
+                ("node-a".into(), ef_export_nqn(VOL)),
+            );
+        }
+        let store = FakeStore::new(stale_b_record());
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, HotRejoinOutcome::Rejoined { .. }),
+            "residual pre-connect controller must be adopted, not fail the admission: {:?}",
+            out
+        );
+    }
+
+    /// P3: one layer below the name check, `spdk_bdev_nvme_create` reports
+    /// a registered trid as -EALREADY = "Operation already in progress" —
+    /// no matchable text (same family: a timeout whose attach landed).
+    /// The probe arm must converge on the live controller.
+    #[tokio::test]
+    async fn attach_converged_probes_state_when_the_error_carries_no_text() {
+        let rpc = FakeRpc::new();
+        {
+            let mut w = rpc.world.lock().unwrap();
+            w.controllers
+                .insert(("node-x".into(), "ctrl-1".into()), ("node-a".into(), "nqn-1".into()));
+        }
+        rpc.fail(
+            "node-x",
+            "bdev_nvme_attach_controller",
+            "SPDK RPC error: Code=-114 Msg=Operation already in progress",
+        );
+        let attach = json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": { "name": "ctrl-1", "subnqn": "nqn-1" }
+        });
+        attach_converged(&rpc, "node-x", &attach, "ctrl-1", "test attach")
+            .await
+            .expect("an untextual duplicate over a live controller must converge");
+    }
+
+    /// P3: the probe arm must not degrade attach failures into false
+    /// convergence — an error with NO live controller stays an error.
+    #[tokio::test]
+    async fn attach_converged_fails_honestly_when_the_controller_is_absent() {
+        let rpc = FakeRpc::new();
+        rpc.fail("node-x", "bdev_nvme_attach_controller", "connect timeout");
+        let attach = json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": { "name": "ctrl-1", "subnqn": "nqn-1" }
+        });
+        let err = attach_converged(&rpc, "node-x", &attach, "ctrl-1", "test attach")
+            .await
+            .expect_err("no controller, no convergence");
+        assert!(err.to_string().contains("connect timeout"), "got: {}", err);
     }
 
     /// `staged_world` where the survivor has ITSELF hot-rejoined: its live
