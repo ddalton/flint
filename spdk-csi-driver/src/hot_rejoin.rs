@@ -3119,8 +3119,52 @@ mod tests {
                 }
                 "bdev_lvol_delete" => {
                     let name = params["name"].as_str().unwrap().to_string();
-                    if w.bdevs.remove(&(node_s.clone(), name.clone())).is_none() {
+                    // Blobstore fidelity (lib/blob/blobstore.c): a snapshot
+                    // with more than one clone refuses deletion
+                    // (bs_is_blob_deletable, -EBUSY), and deleting one with
+                    // a single clone RE-PARENTS that clone onto the deleted
+                    // snapshot's own parent (the delete_snapshot ctx's
+                    // clone->parent_id assignment). A bare remove() left
+                    // dangling base_snapshot pointers — a state real SPDK
+                    // cannot produce — and a same-named snapshot recreate
+                    // then became its own parent: sweep finding #1's
+                    // localize livelock was THIS fake, not the reconciler.
+                    let short = name.split('/').nth(1).unwrap_or(&name).to_string();
+                    let children: Vec<String> = w
+                        .bdevs
+                        .iter()
+                        .filter(|((n, _), b)| {
+                            *n == node_s
+                                && b["driver_specific"]["lvol"]["base_snapshot"].as_str()
+                                    == Some(short.as_str())
+                        })
+                        .map(|((_, k), _)| k.clone())
+                        .collect();
+                    if children.len() > 1 {
+                        return Err(format!(
+                            "SPDK RPC error: Code=-16 Msg=Cannot remove snapshot {} with more than one clone",
+                            name
+                        )
+                        .into());
+                    }
+                    let Some(removed) = w.bdevs.remove(&(node_s.clone(), name.clone())) else {
                         return Err(format!("lvol {} not found: No such device", name).into());
+                    };
+                    let parent = removed["driver_specific"]["lvol"]["base_snapshot"]
+                        .as_str()
+                        .map(String::from);
+                    for child in children {
+                        if let Some(b) = w.bdevs.get_mut(&(node_s.clone(), child)) {
+                            let l = b["driver_specific"]["lvol"].as_object_mut().unwrap();
+                            match &parent {
+                                Some(p) => {
+                                    l.insert("base_snapshot".into(), json!(p));
+                                }
+                                None => {
+                                    l.remove("base_snapshot");
+                                }
+                            }
+                        }
                     }
                     json!({ "result": true })
                 }
@@ -3908,21 +3952,54 @@ mod tests {
         c
     }
 
+    /// Runtime shadow of the chain axiom the formal model leans on (the
+    /// finding-#1 class): blobstore parent links form a TREE — every
+    /// base_snapshot resolves on its node and no walk cycles. Real SPDK
+    /// guarantees this structurally (snapshot delete re-parents the single
+    /// clone, lib/blob/blobstore.c; more than one clone refuses -EBUSY),
+    /// so if this fires, suspect the fake before the reconciler.
+    fn assert_chains_are_trees(rpc: &FakeRpc, context: &str) {
+        let w = rpc.world.lock().unwrap();
+        for ((node, name), b) in &w.bdevs {
+            let lvs = name.split('/').next().unwrap_or("");
+            let mut cur = b.clone();
+            let mut hops = 0;
+            while let Some(p) = cur["driver_specific"]["lvol"]["base_snapshot"].as_str() {
+                hops += 1;
+                assert!(
+                    hops <= 64,
+                    "{context}: parent chain from {node}/{name} exceeds 64 hops — a cycle \
+                     (finding-#1 class: a state real SPDK cannot produce)"
+                );
+                let key = (node.clone(), format!("{}/{}", lvs, p));
+                let Some(next) = w.bdevs.get(&key) else {
+                    panic!(
+                        "{context}: chain from {node}/{name} hits dangling parent {p} — \
+                         real SPDK re-parents the clone on snapshot delete"
+                    );
+                };
+                cur = next.clone();
+            }
+        }
+    }
+
     /// Sweep K over every RPC boundary of the flow: crash there, then the
     /// next controller's ticks must converge — the rejoining leg ends
     /// InSync and no hot-rejoin marker is stranded. Terminates at the
     /// first K that lets the flow complete naturally.
-    /// FINDING #1 (2026-07-28, maiden run): crash at RPC boundary 15 →
-    /// scrub → successful retry leaves an unlocalized standby whose
-    /// localize fails EVERY reconcile tick with "source lineage on node-a
-    /// exceeds 4096 elements — refusing to walk further": the snapshot
-    /// chain walk loops after the scrub-deleted epoch is re-created by
-    /// the retry. Suspected mock-fidelity gap (the fake's bdev_lvol
-    /// delete does not relink children the way real SPDK does), possibly
-    /// a real reconcile livelock — the volume would serve degraded-
-    /// localization forever with only ReconcileFailed events to show.
-    /// Un-ignore once attributed; boundaries 0-14 recover clean.
-    #[ignore = "sweep finding #1: post-scrub retry localize livelock (lineage walk loops) — under investigation"]
+    /// FINDING #1 (2026-07-28, maiden run) — ATTRIBUTED same day: crash
+    /// at RPC boundary 15 → scrub → the retry's same-named epoch
+    /// snapshot became ITS OWN PARENT, and localize failed every
+    /// reconcile tick with "source lineage exceeds 4096 elements".
+    /// Root cause: the fake's bdev_lvol_delete was a bare remove() that
+    /// left the head's base_snapshot dangling — a state real SPDK
+    /// cannot produce (blobstore re-parents the single clone onto the
+    /// deleted snapshot's parent, lib/blob/blobstore.c
+    /// delete_snapshot ctx; >1 clones refuses -EBUSY,
+    /// bs_is_blob_deletable). With the mock faithful, every boundary
+    /// recovers — the reconciler was innocent; the harness's first
+    /// finding was about the harness. The 4096 guard in lineage_chain
+    /// did its exact stated job: bounding a corrupted fake of reality.
     #[tokio::test(start_paused = true)]
     async fn sim_crash_sweep_every_rpc_boundary_recovers() {
         let mut crash_points = 0usize;
@@ -3987,6 +4064,7 @@ mod tests {
                 rec.replicas.iter().all(|r| r.hot_rejoin.is_none()),
                 "crash at RPC boundary {k}: stranded hot-rejoin marker after recovery",
             );
+            assert_chains_are_trees(&rpc, &format!("crash at RPC boundary {k}"));
 
             if completed {
                 assert!(
