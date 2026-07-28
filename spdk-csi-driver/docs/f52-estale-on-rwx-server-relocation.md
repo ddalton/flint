@@ -250,6 +250,49 @@ pressure *after* prewarm re-enters the recovery path (correctly, just
 slower). Neither affects the flint RWX shape (one backing PVC per volume,
 typically a database datadir).
 
+## 5b. LIVE-VALIDATED — runaj, 2026-07-28, rc4
+
+Drill 3.6f, server forced `runaj-aws-1 → runaj-aws-2` (a leg-hosting node,
+so the F49 vector too), postgres writing throughout:
+
+```
+✓ client saw ZERO ESTALE / ZERO PANIC across the relocation (F52 held)
+🔥 fh identity index prewarmed: 1433 entries in 17.163963ms (F52)   [new server, before serving]
+```
+
+Compare pre-fix on runai: 5,501 EISDIR-as-NFS4ERR_IO in one second, a
+postgres PANIC on the WAL fdatasync, ESTALE at 1/s for 251s, ~5m15s of
+database outage. Here: nothing. The witness was clean (0 mismatches) and
+the db verdict PASSed with both container instances scanned.
+
+Also green in the same run: no `bdev_raid_create` EPERM fleet-wide, the
+consumer-local leg carries no export (F49 fix 1), raid 2/2 on the new
+node, the remote leg still exported (no over-reach), and the outgoing
+server left zero loopback shells (F47).
+
+**The drill still printed FAIL, on `attribution` only** — and it is not
+F52. pg-0 was killed at T0+8s and recreated ~6 minutes later; kubelet
+could not complete the kill (`FailedKillPod … KillContainerError …
+DeadlineExceeded`, then `KillPodSandboxError`), the D-state-on-a-dead-NFS-
+mount signature, which is also why the ledger stall reads 457s. Two
+honest limits on that observation:
+
+- **The initial trigger is unattributed.** No cutover ran on this volume,
+  no eviction or StatefulSet delete appears in the events, and the drill
+  itself never touches pg-0 (`pre_rwx` only reads it). The only event is
+  kubelet's own `Killing / Stopping container chaos`. Worth resolving on
+  the next RWX run — capture kubelet's log on the consumer node, which no
+  drill does today.
+- **It may be co-location, not relocation.** Unlike runai's passing 3.6f,
+  here pg-0 lived on the *target* node, so the server landed on top of
+  its own client. That is a different shape and the drill's
+  `EXPECT_RESCHEDULE=none` may simply be the wrong expectation for it.
+
+Harness bug found by this run and fixed: check (h)'s prewarm assertion
+used `grep -q` on `kubectl logs` under `set -o pipefail`, so SIGPIPE made
+the pipeline "fail" and the marker read as absent even though it was
+present. Same trap as `lib.sh::single_orchestrator`. Use `grep -c`.
+
 ## 6. Drill gate — DONE
 
 3.6f check (h) (added 2026-07-27): **zero** `Stale file handle` and **zero**

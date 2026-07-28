@@ -834,7 +834,14 @@ case "$DRILL" in
   [ "${F52_ESTALE:-0}" -eq 0 ] && [ "${F52_PANIC:-0}" -eq 0 ] \
     && ok "client saw ZERO ESTALE / ZERO PANIC across the relocation (F52 held)" \
     || note "F52 SIGNATURE: estale=$F52_ESTALE panic=$F52_PANIC in the client's postgres log"
-  kubectl logs -n "$DRIVER_NS" "${NEWPOD:-x}" 2>/dev/null | grep -q "fh identity index prewarmed" \
+  # grep -c, NOT grep -q: this script runs under `set -o pipefail` (line 47)
+  # and a server log is unbounded, so -q exits on the match, kubectl takes
+  # SIGPIPE, and the pipeline reports failure — a FALSE NEGATIVE. It fired
+  # on the very first fixed run (runaj 3.6f: the marker was there,
+  # "1433 entries in 17.163963ms", and the drill said it was missing).
+  PREWARM=$(kubectl logs -n "$DRIVER_NS" "${NEWPOD:-x}" 2>/dev/null \
+    | grep -ac "fh identity index prewarmed")
+  [ "${PREWARM:-0}" -gt 0 ] \
     && ok "new server prewarmed its fh identity index before serving" \
     || note "no fh-identity prewarm marker in the new server's log (pre-F52-fix image?)"
 

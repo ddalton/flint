@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-28T01:37:14Z)
+  ✓ pg_isready
+  ✓ ledger: all 355 acked writes present
+  ✓ pg_amcheck clean
+  · pglog UNPROVEN, not clean: the pod restarted (0) or started after T0 (2026-07-28T01:43:41Z) — earlier instances' logs are unreachable
+  ✓ writability probe
+
+DB-VERDICT: PASS
