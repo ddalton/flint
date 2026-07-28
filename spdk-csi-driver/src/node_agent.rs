@@ -2316,7 +2316,7 @@ impl NodeAgent {
         // defensive cleanup), never reached from a locked CSI path —
         // serialize it against stage/unstage/repair on this volume.
         let _volume_guard = match crate::node_volume_locks::acquire(
-            crate::identity::storage_id_of_handle(volume_id),
+            &crate::identity::StorageId::of_handle(volume_id),
         )
         .await
         {
@@ -3927,7 +3927,15 @@ impl NodeAgent {
             // squatter instead. VA errors fail closed above (attached_node
             // = None): that tick neither mints nor tears down.
             if attached_node.as_deref() == Some(self.node_name.as_str()) {
-                match self.teardown_local_leg_export(&spdk_id, replica_index).await {
+                // spdk_id is the STAGED handle; the leg-export family is
+                // inner-domain — the crossing happens here, visibly.
+                match self
+                    .teardown_local_leg_export(
+                        &crate::identity::StorageId::of_handle(&spdk_id),
+                        replica_index,
+                    )
+                    .await
+                {
                     Ok(0) => {}
                     Ok(n) => {
                         warn!(volume_id, replica_index, removed = n,
@@ -4935,7 +4943,7 @@ impl NodeAgent {
         // lock means a stage/unstage is mid-flight; skip this tick (the
         // detector re-strikes).
         let _volume_guard = crate::node_volume_locks::acquire(
-            crate::identity::storage_id_of_handle(volume_handle),
+            &crate::identity::StorageId::of_handle(volume_handle),
         )
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
@@ -5584,13 +5592,12 @@ impl NodeAgent {
     /// actually deleted.
     async fn teardown_local_leg_export(
         &self,
-        volume_id: &str,
+        volume_id: &crate::identity::StorageId,
         replica_index: usize,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-        let sid = crate::identity::StorageId::of_handle(volume_id);
         let candidates = [
-            crate::identity::replica_export_nqn(&sid, replica_index),
-            crate::identity::legacy_replica_export_nqn(&sid, replica_index),
+            crate::identity::replica_export_nqn(volume_id, replica_index),
+            crate::identity::legacy_replica_export_nqn(volume_id, replica_index),
         ];
         let resp = self
             .disk_service

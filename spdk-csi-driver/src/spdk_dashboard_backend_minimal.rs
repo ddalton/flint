@@ -1171,8 +1171,10 @@ fn label_consumer_raid_members(
                 .enumerate()
                 .find(|(index, rec)| {
                     let live = rec.live_lvol_uuid();
-                    let remote =
-                        crate::replica_sync::expected_remote_base_bdev(volume_id, *index);
+                    let remote = crate::replica_sync::expected_remote_base_bdev(
+                        &crate::identity::StorageId::of_handle(volume_id),
+                        *index,
+                    );
                     uuid == rec.lvol_uuid
                         || uuid == live
                         || name == rec.lvol_uuid
@@ -4451,7 +4453,7 @@ mod tests {
                 },
                 // Remote base: deterministic attach name, replica index 1.
                 ConsumerRaidMember {
-                    name: Some(expected_remote_base_bdev(vol, 1)),
+                    name: Some(expected_remote_base_bdev(&crate::identity::StorageId::of_handle(vol), 1)),
                     uuid: Some("something-else".to_string()),
                     is_configured: true,
                     replica_node: None,

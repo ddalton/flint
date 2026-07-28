@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn prefix_matches_export_shape() {
         // Must equal replica_sync::expected_remote_base_bdev's stem.
-        let expected = crate::replica_sync::expected_remote_base_bdev("v", 0);
+        let expected = crate::replica_sync::expected_remote_base_bdev(&crate::identity::StorageId::of_handle("v"), 0);
         assert!(expected.starts_with(&flint_controller_prefix()));
         assert_eq!(flint_controller_prefix(), "nvme_nqn_2024-11_com_flint_volume_");
     }

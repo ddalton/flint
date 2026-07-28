@@ -840,11 +840,11 @@ pub fn parse_user_snapshot_id(snapshot_id: &str) -> Option<(&str, u64)> {
 /// replica: "nvme_" + per-replica NQN with ':' and '.' mangled to '_', plus
 /// the "n1" namespace suffix. Local replicas need no equivalent — an lvol
 /// bdev's name is its uuid.
-pub fn expected_remote_base_bdev(volume_id: &str, replica_index: usize) -> String {
-    let nqn = crate::identity::replica_export_nqn(
-        &crate::identity::StorageId::of_handle(volume_id),
-        replica_index,
-    );
+pub fn expected_remote_base_bdev(
+    volume_id: &crate::identity::StorageId,
+    replica_index: usize,
+) -> String {
+    let nqn = crate::identity::replica_export_nqn(volume_id, replica_index);
     format!("nvme_{}n1", nqn.replace(':', "_").replace('.', "_"))
 }
 
@@ -890,13 +890,16 @@ pub fn replicas_missing_from_raid(
         })
         .unwrap_or_default();
 
+    // Callers hold whichever handle their path gave them (NodeStage, the
+    // health monitor) — cross into the inner domain once, here.
+    let sid = crate::identity::StorageId::of_handle(volume_id);
     let missing = record
         .replicas
         .iter()
         .enumerate()
         .filter(|(_, rec)| rec.sync_state == SyncState::InSync)
         .filter(|(index, rec)| {
-            let remote_name = expected_remote_base_bdev(volume_id, *index);
+            let remote_name = expected_remote_base_bdev(&sid, *index);
             let live = rec.live_lvol_uuid();
             !configured.iter().any(|base| {
                 let uuid = base.get("uuid").and_then(|u| u.as_str()).unwrap_or("");
@@ -1544,8 +1547,8 @@ mod tests {
             "online",
             vec![
                 json!({"name": "uuid-a", "uuid": "uuid-a", "is_configured": true}),
-                json!({"name": expected_remote_base_bdev("vol1", 1), "uuid": "uuid-b", "is_configured": true}),
-                json!({"name": expected_remote_base_bdev("vol1", 2), "uuid": "uuid-c", "is_configured": true}),
+                json!({"name": expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1), "uuid": "uuid-b", "is_configured": true}),
+                json!({"name": expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 2), "uuid": "uuid-c", "is_configured": true}),
             ],
         );
         assert_eq!(replicas_missing_from_raid(&raid, "vol1", &record).unwrap(), Vec::<String>::new());
@@ -1562,7 +1565,7 @@ mod tests {
             vec![
                 json!({"name": "uuid-a", "uuid": "uuid-a", "is_configured": true}),
                 json!({"name": null, "uuid": "00000000-0000-0000-0000-000000000000", "is_configured": false}),
-                json!({"name": expected_remote_base_bdev("vol1", 2), "uuid": "uuid-c", "is_configured": true}),
+                json!({"name": expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 2), "uuid": "uuid-c", "is_configured": true}),
             ],
         );
         assert_eq!(
@@ -1580,7 +1583,7 @@ mod tests {
             "online",
             vec![
                 json!({"name": "uuid-a", "uuid": "uuid-a", "is_configured": true}),
-                json!({"name": expected_remote_base_bdev("vol1", 1), "uuid": "uuid-b", "is_configured": true}),
+                json!({"name": expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1), "uuid": "uuid-b", "is_configured": true}),
             ],
         );
         assert_eq!(
@@ -1607,8 +1610,8 @@ mod tests {
             "online",
             vec![
                 json!({"name": "uuid-a", "uuid": "uuid-a", "is_configured": true}),
-                json!({"name": expected_remote_base_bdev("vol1", 1), "uuid": "some-nguid", "is_configured": true}),
-                json!({"name": expected_remote_base_bdev("vol1", 2), "uuid": "other-nguid", "is_configured": true}),
+                json!({"name": expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1), "uuid": "some-nguid", "is_configured": true}),
+                json!({"name": expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 2), "uuid": "other-nguid", "is_configured": true}),
             ],
         );
         assert_eq!(replicas_missing_from_raid(&raid, "vol1", &record).unwrap(), Vec::<String>::new());
@@ -1619,7 +1622,7 @@ mod tests {
         // Mirrors connect_to_nvmeof_target: "nvme_" + NQN with ':' and '.'
         // replaced by '_', plus namespace suffix "n1".
         assert_eq!(
-            expected_remote_base_bdev("pvc-123", 1),
+            expected_remote_base_bdev(&crate::identity::StorageId::of_handle("pvc-123"), 1),
             "nvme_nqn_2024-11_com_flint_volume_pvc-123_1n1"
         );
     }
@@ -1913,7 +1916,7 @@ mod tests {
             vec![
                 json!({"name": "uuid-a", "uuid": "uuid-a", "is_configured": true}),
                 json!({"name": "uuid-b2", "uuid": "uuid-b2", "is_configured": true}),
-                json!({"name": expected_remote_base_bdev("vol1", 2), "uuid": "uuid-c", "is_configured": true}),
+                json!({"name": expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 2), "uuid": "uuid-c", "is_configured": true}),
             ],
         );
         assert_eq!(

@@ -123,6 +123,7 @@ use crate::driver::{NvmeofConnectionInfo, SpdkCsiDriver};
 use crate::epoch_scheduler::{
     execute_cut, is_already_exists, is_missing, CutOutcome, CutPlan, EpochTarget, NodeRpc,
 };
+use crate::identity::StorageId;
 use crate::minimal_models::ReplicaInfo;
 use crate::replica_sync::{
     self, epoch_name, epoch_seq, expected_remote_base_bdev, ReplicaSyncRecord, SyncState,
@@ -147,7 +148,7 @@ pub trait CatchupRpc: Sync {
         &self,
         node: &str,
         bdev_name: &str,
-        volume_id: &str,
+        volume_id: &StorageId,
         replica_index: usize,
         consumer_node: &str,
     ) -> Result<NvmeofConnectionInfo, RpcError>;
@@ -161,7 +162,7 @@ pub trait CatchupRpc: Sync {
         &self,
         node: &str,
         bdev_name: &str,
-        volume_id: &str,
+        volume_id: &StorageId,
         replica_index: usize,
         consumer_node: &str,
     ) -> Result<NvmeofConnectionInfo, RpcError>;
@@ -177,26 +178,29 @@ impl CatchupRpc for SpdkCsiDriver {
         &self,
         node: &str,
         bdev_name: &str,
-        volume_id: &str,
+        volume_id: &StorageId,
         replica_index: usize,
         consumer_node: &str,
     ) -> Result<NvmeofConnectionInfo, RpcError> {
-        self.setup_replica_export_on_node(node, bdev_name, volume_id, replica_index, consumer_node)
-            .await
+        self.setup_replica_export_on_node(
+            node,
+            bdev_name,
+            volume_id.as_str(),
+            replica_index,
+            consumer_node,
+        )
+        .await
     }
 
     async fn export_pad(
         &self,
         node: &str,
         bdev_name: &str,
-        volume_id: &str,
+        volume_id: &StorageId,
         replica_index: usize,
         consumer_node: &str,
     ) -> Result<NvmeofConnectionInfo, RpcError> {
-        let export_id = crate::identity::hrpad_export_id(
-            &crate::identity::StorageId::of_handle(volume_id),
-            replica_index,
-        );
+        let export_id = crate::identity::hrpad_export_id(volume_id, replica_index);
         self.setup_nvmeof_target_on_node(node, bdev_name, &export_id, consumer_node).await
     }
 }
@@ -1290,7 +1294,9 @@ async fn ensure_dst_attached(
     src_node: &str,
     raid_name: &str,
 ) -> Result<String, RpcError> {
-    let expected = expected_remote_base_bdev(volume_id, replica_index);
+    // The one inner-domain crossing for this attach (bdev name + export).
+    let sid = StorageId::of_handle(volume_id);
+    let expected = expected_remote_base_bdev(&sid, replica_index);
 
     if let Some(bdev) = get_bdev(rpc, src_node, &expected).await? {
         if bdev.get("uuid").and_then(|u| u.as_str()) == Some(head_uuid) {
@@ -1306,7 +1312,7 @@ async fn ensure_dst_attached(
     clear_head_sb(rpc, &dst.node_name, head_alias, raid_name).await?;
 
     let conn = rpc
-        .export_replica(&dst.node_name, head_uuid, volume_id, replica_index, src_node)
+        .export_replica(&dst.node_name, head_uuid, &sid, replica_index, src_node)
         .await?;
 
     let controller = format!("nvme_{}", conn.nqn.replace(':', "_").replace('.', "_"));
@@ -1901,7 +1907,7 @@ async fn catchup_stale(
             let hr_alias = format!(
                 "{}/{}",
                 identity.lvs_name,
-                crate::hot_rejoin::head_lvol_name(volume_id, index)
+                crate::hot_rejoin::head_lvol_name(&StorageId::of_handle(volume_id), index)
             );
             if let Some(holder) = get_bdev(rpc, &identity.node_name, &hr_alias).await? {
                 if holder.get("uuid").and_then(|u| u.as_str()) == Some(superseded) {
@@ -2466,7 +2472,7 @@ async fn admit_one_standby(
         // The copy controller on the source node is fenced out now — detach
         // it best-effort so it doesn't linger as dead weight.
         if src.node_name != consumer_node {
-            let expected = expected_remote_base_bdev(volume_id, index);
+            let expected = expected_remote_base_bdev(&StorageId::of_handle(volume_id), index);
             let controller = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
             detach_controller(rpc, &src.node_name, &controller).await;
         }
@@ -2970,7 +2976,7 @@ mod tests {
             &self,
             node: &str,
             bdev_name: &str,
-            volume_id: &str,
+            volume_id: &StorageId,
             replica_index: usize,
             consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
@@ -2982,10 +2988,7 @@ mod tests {
                 consumer_node.to_string(),
             ));
             Ok(NvmeofConnectionInfo {
-                nqn: crate::identity::replica_export_nqn(
-                    &crate::identity::StorageId::of_handle(volume_id),
-                    replica_index,
-                ),
+                nqn: crate::identity::replica_export_nqn(volume_id, replica_index),
                 target_ip: "10.0.0.99".to_string(),
                 target_port: 4420,
                 transport: "tcp".to_string(),
@@ -2996,7 +2999,7 @@ mod tests {
             &self,
             _node: &str,
             _bdev_name: &str,
-            _volume_id: &str,
+            _volume_id: &StorageId,
             _replica_index: usize,
             _consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
@@ -3480,7 +3483,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_dst_attached_reuses_live_attachment() {
         let rpc = FakeRpc::new("uuid-b-v2");
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.bdevs.lock().unwrap().insert(
             ("node-a".to_string(), expected.clone()),
             json!({ "name": expected, "uuid": "uuid-b-v2" }),
@@ -3507,7 +3510,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(bdev, expected_remote_base_bdev("vol1", 1));
+        assert_eq!(bdev, expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1));
 
         // Export on the replica node, fence admitting the source node.
         let exports = rpc.exports.lock().unwrap().clone();
@@ -3537,7 +3540,7 @@ mod tests {
     async fn ensure_dst_attached_replaces_stale_attachment() {
         // The expected bdev exists but is backed by the pre-revert head.
         let rpc = FakeRpc::new("uuid-b-v2");
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.bdevs.lock().unwrap().insert(
             ("node-a".to_string(), expected.clone()),
             json!({ "name": expected, "uuid": "uuid-b-OLD" }),
@@ -3561,7 +3564,7 @@ mod tests {
         // live consumer raids; the FakeRpc delete succeeds = zombie) now
         // clears it and the cycle proceeds.
         let rpc = FakeRpc::new("uuid-b-v2");
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.raids.lock().unwrap().insert(
             "node-a".to_string(),
             vec![json!({ "name": "raid_vol1", "state": "online",
@@ -3591,7 +3594,7 @@ mod tests {
             ("node-a".to_string(), "bdev_raid_delete".to_string()),
             "guarded_destroy: raid is served by ublk disk 3 — deleting it hot-removes the block device under a mounted filesystem (D2)".to_string(),
         );
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.raids.lock().unwrap().insert(
             "node-a".to_string(),
             vec![json!({ "name": "raid_vol1", "state": "online",
@@ -3610,7 +3613,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_dst_attached_releases_configuring_phantom_on_src() {
         let rpc = FakeRpc::new("uuid-b-v2");
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.raids.lock().unwrap().insert(
             "node-a".to_string(),
             vec![json!({ "name": "raid_vol1", "state": "configuring",
@@ -3735,7 +3738,7 @@ mod tests {
             .collect();
         assert_eq!(srcs, vec!["lvs0/epoch-vol1-4", "lvs0/epoch-vol1-5"]);
         assert!(copies.iter().all(|(node, _)| node == "node-a"));
-        let dst_bdev = expected_remote_base_bdev("vol1", 1);
+        let dst_bdev = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         assert!(copies
             .iter()
             .all(|(_, p)| p["params"]["dst_bdev_name"].as_str() == Some(dst_bdev.as_str())));
@@ -4115,7 +4118,7 @@ mod tests {
 
         let rpc = FakeRpc::new("uuid-b-v2");
         // Live attachment from the bulk session.
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.bdevs.lock().unwrap().insert(
             ("node-a".to_string(), expected.clone()),
             json!({ "name": expected, "uuid": "uuid-b-v2" }),
@@ -4162,7 +4165,7 @@ mod tests {
         let store = FakeStore::new(record);
 
         let rpc = FakeRpc::new("uuid-b-v2");
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.bdevs.lock().unwrap().insert(
             ("node-a".to_string(), expected.clone()),
             json!({ "name": expected, "uuid": "uuid-b-v2" }),
@@ -4213,7 +4216,7 @@ mod tests {
         let store = FakeStore::new(record);
 
         let rpc = FakeRpc::new("uuid-b-v2");
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         for node in ["node-a", "node-c"] {
             rpc.bdevs.lock().unwrap().insert(
                 (node.to_string(), expected.clone()),
@@ -4259,7 +4262,7 @@ mod tests {
             ("node-a".to_string(), "bdev_get_bdevs".to_string()),
             "connection refused".to_string(),
         );
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.bdevs.lock().unwrap().insert(
             ("node-c".to_string(), expected.clone()),
             json!({ "name": expected, "uuid": "uuid-b-v2" }),
@@ -4368,7 +4371,7 @@ mod tests {
             vec![(epoch("vol1", 3), "e3".to_string()), (epoch("vol1", 4), "e4".to_string())],
         );
         install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[&epoch("vol1", 5)]);
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.bdevs.lock().unwrap().insert(
             ("node-a".to_string(), expected.clone()),
             json!({ "name": expected, "uuid": "uuid-b-v2" }),
@@ -4476,7 +4479,7 @@ mod tests {
             vec![AdmittedStandby {
                 lvol_uuid: "uuid-b".to_string(),
                 node_name: "node-b".to_string(),
-                bdev: expected_remote_base_bdev("vol1", 1),
+                bdev: expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1),
                 final_epoch: epoch("vol1", 6),
             }]
         );
@@ -4576,9 +4579,9 @@ mod tests {
         // size (install_chain's source head is 2048 x 512 = 1MiB); the
         // matching uuid makes ensure_dst_attached reuse it as-is.
         rpc.bdevs.lock().unwrap().insert(
-            ("node-a".to_string(), expected_remote_base_bdev("vol1", 1)),
+            ("node-a".to_string(), expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1)),
             json!({
-                "name": expected_remote_base_bdev("vol1", 1),
+                "name": expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1),
                 "uuid": "uuid-b-v2",
                 "num_blocks": 1024,
                 "block_size": 512
@@ -4620,9 +4623,9 @@ mod tests {
             &[&epoch("vol1", 5), &epoch("vol1", 6)],
         );
         rpc.bdevs.lock().unwrap().insert(
-            ("node-a".to_string(), expected_remote_base_bdev("vol1", 1)),
+            ("node-a".to_string(), expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1)),
             json!({
-                "name": expected_remote_base_bdev("vol1", 1),
+                "name": expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1),
                 "uuid": "uuid-b-v2",
                 "num_blocks": 2048,
                 "block_size": 512
@@ -4873,7 +4876,7 @@ mod tests {
         let store = FakeStore::new(record);
 
         let rpc = FakeRpc::new("uuid-b-v2");
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.bdevs.lock().unwrap().insert(
             ("node-a".to_string(), expected.clone()),
             json!({ "name": expected, "uuid": "uuid-b-v2" }),
@@ -4923,7 +4926,7 @@ mod tests {
         let store = FakeStore::new(record);
 
         let rpc = FakeRpc::new("uuid-b-v2");
-        let expected = expected_remote_base_bdev("vol1", 1);
+        let expected = expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
         rpc.bdevs.lock().unwrap().insert(
             ("node-a".to_string(), expected.clone()),
             json!({ "name": expected, "uuid": "uuid-b-v2" }),
@@ -5050,7 +5053,7 @@ mod tests {
             &self,
             _node: &str,
             _bdev_name: &str,
-            _volume_id: &str,
+            _volume_id: &StorageId,
             _replica_index: usize,
             _consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
@@ -5061,7 +5064,7 @@ mod tests {
             &self,
             _node: &str,
             _bdev_name: &str,
-            _volume_id: &str,
+            _volume_id: &StorageId,
             _replica_index: usize,
             _consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
@@ -5136,7 +5139,7 @@ mod tests {
             &self,
             _node: &str,
             _bdev_name: &str,
-            _volume_id: &str,
+            _volume_id: &StorageId,
             _replica_index: usize,
             _consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
@@ -5146,7 +5149,7 @@ mod tests {
             &self,
             _node: &str,
             _bdev_name: &str,
-            _volume_id: &str,
+            _volume_id: &StorageId,
             _replica_index: usize,
             _consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {

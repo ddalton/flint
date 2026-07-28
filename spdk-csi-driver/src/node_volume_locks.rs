@@ -55,16 +55,18 @@ pub struct VolumeGuard {
     _guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
-/// Serialize on `key` (callers pass the identity-normalized storage id so
-/// the user-PV and backing-PV spellings of one volume contend on ONE lock).
+/// Serialize on `key` — the identity-normalized storage id, so the user-PV
+/// and backing-PV spellings of one volume contend on ONE lock (the typed
+/// parameter is the proof of normalization; callers construct it at their
+/// entry boundary).
 /// Err = the acquire budget elapsed — surface as a retryable failure.
-pub async fn acquire(key: &str) -> Result<VolumeGuard, String> {
+pub async fn acquire(key: &crate::identity::StorageId) -> Result<VolumeGuard, String> {
     if !enabled() {
         return Ok(VolumeGuard { _guard: None });
     }
     let entry = {
         let mut map = registry().lock().expect("volume-lock registry poisoned");
-        map.entry(key.to_string())
+        map.entry(key.as_str().to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
     };
@@ -85,12 +87,12 @@ mod tests {
 
     #[tokio::test]
     async fn lock_serializes_and_acquire_times_out_bounded() {
-        let g1 = acquire("test-vol-serialize").await.expect("first acquire");
+        let g1 = acquire(&crate::identity::StorageId::of_handle("test-vol-serialize")).await.expect("first acquire");
         // Second acquire on the same key must wait; with a tiny budget it
         // times out with a retryable error rather than hanging.
         std::env::set_var("FLINT_VOLUME_LOCK_ACQUIRE_SECS", "1");
         let started = std::time::Instant::now();
-        let second_err = acquire("test-vol-serialize")
+        let second_err = acquire(&crate::identity::StorageId::of_handle("test-vol-serialize"))
             .await
             .err()
             .expect("second acquire must not succeed while held");
@@ -98,15 +100,15 @@ mod tests {
         assert!(second_err.contains("retry"));
         drop(g1);
         // Released → immediate success.
-        let g3 = acquire("test-vol-serialize").await;
+        let g3 = acquire(&crate::identity::StorageId::of_handle("test-vol-serialize")).await;
         assert!(g3.is_ok());
         std::env::remove_var("FLINT_VOLUME_LOCK_ACQUIRE_SECS");
     }
 
     #[tokio::test]
     async fn different_volumes_do_not_contend() {
-        let _a = acquire("test-vol-a").await.expect("a");
-        let b = acquire("test-vol-b").await;
+        let _a = acquire(&crate::identity::StorageId::of_handle("test-vol-a")).await.expect("a");
+        let b = acquire(&crate::identity::StorageId::of_handle("test-vol-b")).await;
         assert!(b.is_ok(), "independent keys are independent locks");
     }
 }

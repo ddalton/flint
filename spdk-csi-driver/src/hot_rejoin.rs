@@ -49,6 +49,7 @@ use crate::catchup::{
 };
 use crate::driver::SpdkCsiDriver;
 use crate::epoch_scheduler::{is_already_exists, is_missing};
+use crate::identity::StorageId;
 use crate::minimal_models::ReplicaInfo;
 use crate::nvmeof_export::flint_host_nqn;
 use crate::replica_sync::{
@@ -182,18 +183,18 @@ fn fault_point(point: &str) {
 
 /// The E_f export subsystem on the source survivor. NOT under `:volume:`
 /// (see module note on the dead-controller reaper).
-pub fn ef_export_nqn(volume_id: &str) -> String {
-    crate::identity::hotrejoin_export_nqn(&crate::identity::StorageId::of_handle(volume_id))
+pub fn ef_export_nqn(volume_id: &StorageId) -> String {
+    crate::identity::hotrejoin_export_nqn(volume_id)
 }
 
 /// The controller name the rejoin target attaches the E_f export under
 /// (`bdev_nvme_attach_controller` name → bdevs `{name}n<nsid>`).
-pub fn ef_controller_name(volume_id: &str) -> String {
+pub fn ef_controller_name(volume_id: &StorageId) -> String {
     format!("nvme_{}", ef_export_nqn(volume_id).replace(':', "_").replace('.', "_"))
 }
 
 /// The E_f bdev as seen on the rejoin target (the esnap clone's source).
-pub fn ef_bdev_on_dst(volume_id: &str) -> String {
+pub fn ef_bdev_on_dst(volume_id: &StorageId) -> String {
     format!("{}n1", ef_controller_name(volume_id))
 }
 
@@ -209,21 +210,21 @@ fn bound_attach_transport(attach: &mut serde_json::Value) {
 /// The esnap-clone head's lvol name on the rejoin target. Distinct from the
 /// replica lvol name — the old head stays behind as the backfill landing
 /// pad until localization disposes of it.
-pub fn head_lvol_name(volume_id: &str, replica_index: usize) -> String {
-    crate::identity::hr_head_lvol_name(&crate::identity::StorageId::of_handle(volume_id), replica_index)
+pub fn head_lvol_name(volume_id: &StorageId, replica_index: usize) -> String {
+    crate::identity::hr_head_lvol_name(volume_id, replica_index)
 }
 
 /// Export id for the landing pad during the backfill (the pad is attached
 /// on the SOURCE node as the shallow-copy destination). Distinct from the
 /// replica export `{volume}_{index}`, which the live head leg owns.
-pub fn pad_export_volume_id(volume_id: &str, replica_index: usize) -> String {
-    crate::identity::hrpad_export_id(&crate::identity::StorageId::of_handle(volume_id), replica_index)
+pub fn pad_export_volume_id(volume_id: &StorageId, replica_index: usize) -> String {
+    crate::identity::hrpad_export_id(volume_id, replica_index)
 }
 
 /// The replica export NQN (`export_replica` convention) — the subsystem
 /// whose namespace the window swaps from the pad to the esnap head.
-pub fn replica_export_nqn(volume_id: &str, replica_index: usize) -> String {
-    crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle(volume_id), replica_index)
+pub fn replica_export_nqn(volume_id: &StorageId, replica_index: usize) -> String {
+    crate::identity::replica_export_nqn(volume_id, replica_index)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +254,9 @@ pub enum HotRejoinOutcome {
 
 struct Topology<'a> {
     volume_id: &'a str,
+    /// The inner-domain identity — the one wrapper→inner conversion for the
+    /// whole window path (every deterministic-name mint keys on this).
+    sid: StorageId,
     raid_name: String,
     consumer: &'a str,
     /// The stale replica being rejoined.
@@ -328,11 +332,11 @@ fn resolve<'a>(
         return Err("no in-sync survivor to cut E_f on");
     }
     let src = pick_source(record, replicas, Some(consumer)).ok_or("no in-sync source")?;
+    let sid = StorageId::of_handle(volume_id);
     Ok(Topology {
         volume_id,
-        raid_name: crate::identity::raid_name(&crate::identity::StagedHandle::user(
-            &crate::identity::StorageId::of_handle(volume_id),
-        )),
+        raid_name: crate::identity::raid_name(&crate::identity::StagedHandle::user(&sid)),
+        sid,
         consumer,
         rec,
         idx,
@@ -400,7 +404,7 @@ pub async fn hot_rejoin_volume(
     // still serving the leg's data — not ours to delete; refuse and let
     // catch-up supersede it first. Any other holder is a stranded stray:
     // delete it here, pre-intent, so every crash point stays marker-free.
-    let head_name = head_lvol_name(volume_id, topo.idx);
+    let head_name = head_lvol_name(&topo.sid, topo.idx);
     let head_alias = format!("{}/{}", topo.identity.lvs_name, head_name);
     if let Some(holder) = get_bdev(rpc, &topo.identity.node_name, &head_alias).await? {
         if holder.get("uuid").and_then(|u| u.as_str()) == Some(topo.rec.live_lvol_uuid()) {
@@ -528,14 +532,14 @@ pub async fn hot_rejoin_volume(
                 // Post-window transport hygiene, best-effort: the copy
                 // source's controller and its export re-admission are dead
                 // weight now.
-                let expected = expected_remote_base_bdev(volume_id, topo.idx);
+                let expected = expected_remote_base_bdev(&topo.sid, topo.idx);
                 let ctrl = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
                 detach_controller(rpc, &topo.src.node_name, &ctrl).await;
                 let _ = rpc
                     .spdk_rpc(
                         &topo.identity.node_name,
                         &json!({ "method": "nvmf_subsystem_remove_host",
-                                 "params": { "nqn": replica_export_nqn(volume_id, topo.idx),
+                                 "params": { "nqn": replica_export_nqn(&topo.sid, topo.idx),
                                               "host": flint_host_nqn(&topo.src.node_name) } }),
                     )
                     .await;
@@ -629,7 +633,7 @@ pub async fn hot_rejoin_volume(
                         .cloned();
                     match marked {
                         Some(m) if m.hot_rejoin.is_some() => localize(
-                            rpc, store, volume_id, &rec2, &m, replicas, Some(consumer), cfg,
+                            rpc, store, &topo.sid, &rec2, &m, replicas, Some(consumer), cfg,
                         )
                         .await
                         .map_err(|e| {
@@ -675,8 +679,7 @@ pub async fn hot_rejoin_volume(
 /// consumer-side controller to the replica export. In-window the only
 /// transport work left is `add_ns` / the ns swap, surfaced by AER.
 async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), RpcError> {
-    let vol = topo.volume_id;
-    let nqn_ef = ef_export_nqn(vol);
+    let nqn_ef = ef_export_nqn(&topo.sid);
     let src_node = &topo.src.node_name;
     let dst_node = &topo.identity.node_name;
 
@@ -746,7 +749,7 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
 
     // Pre-connect the rejoin target to the (still namespace-less) E_f
     // export — the in-window add_ns surfaces as an AER namespace hot-add.
-    let ef_ctrl = ef_controller_name(vol);
+    let ef_ctrl = ef_controller_name(&topo.sid);
     let mut attach = json!({
         "method": "bdev_nvme_attach_controller",
         "params": {
@@ -762,9 +765,9 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
     // window swaps only the namespace.
     let pad_alias = format!("{}/{}", topo.identity.lvs_name, topo.identity.lvol_name);
     let conn = rpc
-        .export_replica(dst_node, &pad_alias, vol, topo.idx, topo.consumer)
+        .export_replica(dst_node, &pad_alias, &topo.sid, topo.idx, topo.consumer)
         .await?;
-    let expected = expected_remote_base_bdev(vol, topo.idx);
+    let expected = expected_remote_base_bdev(&topo.sid, topo.idx);
     let ctrl = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
     if get_bdev(rpc, topo.consumer, &expected).await?.is_none() {
         // Controller may exist but serve nothing usable (dead reconnect
@@ -799,9 +802,9 @@ async fn window(
     let dst_node = &topo.identity.node_name;
     let src_node = &topo.src.node_name;
     let dst_lvs = &topo.identity.lvs_name;
-    let nqn_ef = ef_export_nqn(vol);
-    let nqn_replica = replica_export_nqn(vol, topo.idx);
-    let expected = expected_remote_base_bdev(vol, topo.idx);
+    let nqn_ef = ef_export_nqn(&topo.sid);
+    let nqn_replica = replica_export_nqn(&topo.sid, topo.idx);
+    let expected = expected_remote_base_bdev(&topo.sid, topo.idx);
     let pad_alias = format!("{}/{}", dst_lvs, topo.identity.lvol_name);
     let head_alias = format!("{}/{}", dst_lvs, head_name);
 
@@ -851,7 +854,7 @@ async fn window(
         .await
         .map_err(|e| format!("E_f add_ns: {}", e))?;
         ef_ns_added = true;
-        let ef_bdev = ef_bdev_on_dst(vol);
+        let ef_bdev = ef_bdev_on_dst(&topo.sid);
         wait_bdev(rpc, dst_node, &ef_bdev, true, None, cfg)
             .await
             .map_err(|e| format!("E_f bdev on {}: {}", dst_node, e))?;
@@ -1114,17 +1117,16 @@ async fn estimate_unchased_delta(
 /// SOURCE re-admitted on the same export and attached (the fenced final
 /// delta's push path). Returns the source-side copy bdev.
 async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<String, RpcError> {
-    let vol = topo.volume_id;
     let dst_node = &topo.identity.node_name;
     let src_node = &topo.src.node_name;
     let live_uuid = topo.rec.live_lvol_uuid();
     let leg_alias = format!("{}/{}", topo.identity.lvs_name, topo.identity.lvol_name);
-    let nqn_replica = replica_export_nqn(vol, topo.idx);
-    let expected = expected_remote_base_bdev(vol, topo.idx);
+    let nqn_replica = replica_export_nqn(&topo.sid, topo.idx);
+    let expected = expected_remote_base_bdev(&topo.sid, topo.idx);
     let ctrl = expected.strip_suffix("n1").unwrap_or(&expected).to_string();
 
     let conn = rpc
-        .export_replica(dst_node, &leg_alias, vol, topo.idx, topo.consumer)
+        .export_replica(dst_node, &leg_alias, &topo.sid, topo.idx, topo.consumer)
         .await?;
 
     // Consumer pre-connect, identity-verified (a reconnect-looping stale
@@ -1210,7 +1212,7 @@ async fn window_inline(
     let vol = topo.volume_id;
     let live_uuid = topo.rec.live_lvol_uuid().to_string();
     let leg_alias = format!("{}/{}", topo.identity.lvs_name, topo.identity.lvol_name);
-    let expected = expected_remote_base_bdev(vol, topo.idx);
+    let expected = expected_remote_base_bdev(&topo.sid, topo.idx);
     let base = topo
         .rec
         .last_epoch
@@ -1572,6 +1574,9 @@ pub async fn reconcile_marked(
     consumer_node: Option<&str>,
     cfg: &CatchupConfig,
 ) {
+    // The one wrapper→inner conversion for the whole reconcile family —
+    // callers (the two orchestrator ticks) hold the k8s PV name.
+    let sid = StorageId::of_handle(volume_id);
     for rec in record.replicas.iter().filter(|r| r.hot_rejoin.is_some()) {
         // F50: a marker younger than the grace may belong to a LIVE window
         // in ANOTHER controller process (helm rolling-upgrade overlap; the
@@ -1597,10 +1602,10 @@ pub async fn reconcile_marked(
         }
         let outcome = match rec.sync_state {
             SyncState::Stale => {
-                adopt_or_scrub(rpc, store, volume_id, record, rec, replicas, consumer_node).await
+                adopt_or_scrub(rpc, store, &sid, record, rec, replicas, consumer_node).await
             }
             SyncState::Standby => {
-                resume_standby(rpc, store, volume_id, record, rec, replicas, consumer_node, cfg)
+                resume_standby(rpc, store, &sid, record, rec, replicas, consumer_node, cfg)
                     .await
             }
             // mark_in_sync clears the marker — an in_sync marked replica is
@@ -1637,7 +1642,7 @@ pub async fn reconcile_marked(
 /// belong to this replica's `_hr` head lvol?
 async fn live_head_leg(
     rpc: &dyn CatchupRpc,
-    volume_id: &str,
+    volume_id: &StorageId,
     idx: usize,
     identity: &ReplicaInfo,
     consumer: Option<&str>,
@@ -1645,9 +1650,7 @@ async fn live_head_leg(
 ) -> Result<Option<String>, RpcError> {
     let Some(consumer) = consumer else { return Ok(None) };
     let expected = expected_remote_base_bdev(volume_id, idx);
-    let raid_name = crate::identity::raid_name(&crate::identity::StagedHandle::user(
-        &crate::identity::StorageId::of_handle(volume_id),
-    ));
+    let raid_name = crate::identity::raid_name(&crate::identity::StagedHandle::user(volume_id));
     let leg_configured = get_raids(rpc, consumer).await?.iter().any(|r| {
         r.get("name").and_then(|n| n.as_str()) == Some(raid_name.as_str())
             && r.get("base_bdevs_list")
@@ -1723,13 +1726,11 @@ async fn live_head_leg(
 /// data-plane lease expiry remains the backstop.
 async fn release_orphaned_quiesce(
     rpc: &dyn CatchupRpc,
-    volume_id: &str,
+    volume_id: &StorageId,
     consumer_node: Option<&str>,
 ) {
     let Some(consumer) = consumer_node else { return };
-    let raid_name = crate::identity::raid_name(&crate::identity::StagedHandle::user(
-        &crate::identity::StorageId::of_handle(volume_id),
-    ));
+    let raid_name = crate::identity::raid_name(&crate::identity::StagedHandle::user(volume_id));
     match rpc
         .spdk_rpc(
             consumer,
@@ -1738,14 +1739,14 @@ async fn release_orphaned_quiesce(
         .await
     {
         Ok(_) => {
-            info!(volume_id, consumer, "[HOT_REJOIN] Released an orphaned quiesce lease left by a crashed window");
+            info!(volume_id = volume_id.as_str(), consumer, "[HOT_REJOIN] Released an orphaned quiesce lease left by a crashed window");
         }
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("no quiesce lease held") || msg.contains("not found") {
-                debug!(volume_id, error = %msg, "[HOT_REJOIN] No orphaned quiesce to release");
+                debug!(volume_id = volume_id.as_str(), error = %msg, "[HOT_REJOIN] No orphaned quiesce to release");
             } else {
-                warn!(volume_id, error = %msg, "[HOT_REJOIN] Defensive unquiesce failed — the lease expiry remains the backstop");
+                warn!(volume_id = volume_id.as_str(), error = %msg, "[HOT_REJOIN] Defensive unquiesce failed — the lease expiry remains the backstop");
             }
         }
     }
@@ -1754,7 +1755,7 @@ async fn release_orphaned_quiesce(
 async fn adopt_or_scrub(
     rpc: &dyn CatchupRpc,
     store: &dyn CatchupStore,
-    volume_id: &str,
+    volume_id: &StorageId,
     record: &VolumeSyncRecord,
     rec: &ReplicaSyncRecord,
     replicas: &[ReplicaInfo],
@@ -1772,7 +1773,7 @@ async fn adopt_or_scrub(
         .find(|(_, ri)| ri.lvol_uuid == rec.lvol_uuid)
     else {
         return store
-            .record_hot_rejoin_cleared(volume_id, &rec.lvol_uuid, "identity replaced", false)
+            .record_hot_rejoin_cleared(volume_id.as_str(), &rec.lvol_uuid, "identity replaced", false)
             .await;
     };
 
@@ -1786,11 +1787,11 @@ async fn adopt_or_scrub(
             .map(|r| r.lvol_uuid.clone())
             .collect();
         store
-            .record_hot_rejoin_flip(volume_id, &rec.lvol_uuid, &ef, &cut_uuids, &head_uuid)
+            .record_hot_rejoin_flip(volume_id.as_str(), &rec.lvol_uuid, &ef, &cut_uuids, &head_uuid)
             .await?;
         store
             .emit(
-                volume_id,
+                volume_id.as_str(),
                 "Normal",
                 "HotRejoinAdopted",
                 &format!(
@@ -1799,14 +1800,14 @@ async fn adopt_or_scrub(
                 ),
             )
             .await;
-        info!(volume_id, node = %rec.node_name, "[HOT_REJOIN] Adopted committed window");
+        info!(volume_id = volume_id.as_str(), node = %rec.node_name, "[HOT_REJOIN] Adopted committed window");
         return Ok(());
     }
 
     scrub_uncommitted(rpc, volume_id, record, rec, replicas, idx, identity, &ef).await;
     store
         .record_hot_rejoin_cleared(
-            volume_id,
+            volume_id.as_str(),
             &rec.lvol_uuid,
             "hot-rejoin window died before commit; artifacts scrubbed",
             false,
@@ -1814,7 +1815,7 @@ async fn adopt_or_scrub(
         .await?;
     store
         .emit(
-            volume_id,
+            volume_id.as_str(),
             "Normal",
             "HotRejoinScrubbed",
             &format!(
@@ -1832,7 +1833,7 @@ async fn adopt_or_scrub(
 #[allow(clippy::too_many_arguments)]
 async fn scrub_uncommitted(
     rpc: &dyn CatchupRpc,
-    volume_id: &str,
+    volume_id: &StorageId,
     record: &VolumeSyncRecord,
     _rec: &ReplicaSyncRecord,
     replicas: &[ReplicaInfo],
@@ -1892,7 +1893,7 @@ async fn scrub_uncommitted(
 async fn resume_standby(
     rpc: &dyn CatchupRpc,
     store: &dyn CatchupStore,
-    volume_id: &str,
+    volume_id: &StorageId,
     record: &VolumeSyncRecord,
     rec: &ReplicaSyncRecord,
     replicas: &[ReplicaInfo],
@@ -1906,7 +1907,7 @@ async fn resume_standby(
         .find(|(_, ri)| ri.lvol_uuid == rec.lvol_uuid)
     else {
         return store
-            .record_hot_rejoin_cleared(volume_id, &rec.lvol_uuid, "identity replaced", true)
+            .record_hot_rejoin_cleared(volume_id.as_str(), &rec.lvol_uuid, "identity replaced", true)
             .await;
     };
 
@@ -1938,13 +1939,13 @@ async fn resume_standby(
     if localized {
         store
             .record_hot_rejoin_cleared(
-                volume_id,
+                volume_id.as_str(),
                 &rec.lvol_uuid,
                 "localized standby; leg not in the current raid — phase-4 admission owns it",
                 false,
             )
             .await?;
-        info!(volume_id, node = %rec.node_name, "[HOT_REJOIN] Promoted localized head to plain standby");
+        info!(volume_id = volume_id.as_str(), node = %rec.node_name, "[HOT_REJOIN] Promoted localized head to plain standby");
         return Ok(());
     }
 
@@ -1961,7 +1962,7 @@ async fn resume_standby(
     detach_controller(rpc, &identity.node_name, &ef_controller_name(volume_id)).await;
     store
         .record_hot_rejoin_cleared(
-            volume_id,
+            volume_id.as_str(),
             &rec.lvol_uuid,
             "hot-rejoined leg lost before localization; demoted for ordinary catch-up",
             true,
@@ -1969,7 +1970,7 @@ async fn resume_standby(
         .await?;
     store
         .emit(
-            volume_id,
+            volume_id.as_str(),
             "Warning",
             "HotRejoinDemoted",
             &format!(
@@ -1992,7 +1993,7 @@ async fn resume_standby(
 async fn localize(
     rpc: &dyn CatchupRpc,
     store: &dyn CatchupStore,
-    volume_id: &str,
+    volume_id: &StorageId,
     record: &VolumeSyncRecord,
     rec: &ReplicaSyncRecord,
     replicas: &[ReplicaInfo],
@@ -2040,10 +2041,10 @@ async fn localize(
             )
             .into());
         }
-        store.record_in_sync(volume_id, &rec.lvol_uuid, &ef).await?;
+        store.record_in_sync(volume_id.as_str(), &rec.lvol_uuid, &ef).await?;
         store
             .emit(
-                volume_id,
+                volume_id.as_str(),
                 "Normal",
                 "HotRejoinLocalized",
                 &format!(
@@ -2053,7 +2054,7 @@ async fn localize(
                 ),
             )
             .await;
-        info!(volume_id, node = %rec.node_name, ef = %ef, "[HOT_REJOIN] Inline admission promoted");
+        info!(volume_id = volume_id.as_str(), node = %rec.node_name, ef = %ef, "[HOT_REJOIN] Inline admission promoted");
         return Ok(());
     }
     let head = get_bdev(rpc, dst_node, &head_alias)
@@ -2067,7 +2068,7 @@ async fn localize(
         == Some(ef.as_str());
 
     if !already_localized {
-        let ef_seq = epoch_seq(volume_id, &ef)
+        let ef_seq = epoch_seq(volume_id.as_str(), &ef)
             .ok_or_else(|| format!("marker {} is not an epoch of {}", ef, volume_id))?;
         let present = list_lvol_names(rpc, dst_node, dst_lvs).await?;
 
@@ -2079,7 +2080,7 @@ async fn localize(
             // needs no source, no transport and no data movement — and
             // repeating the replay would collide with the existing local
             // E_f at the align. Straight to the re-root.
-            info!(volume_id, ef = %ef, "[HOT_REJOIN] Local E_f already present — resume skips the backfill");
+            info!(volume_id = volume_id.as_str(), ef = %ef, "[HOT_REJOIN] Local E_f already present — resume skips the backfill");
         } else {
             // §5 base for the pad: prefer the pad's OWN chain top when it
             // is an epoch of this volume (the B1 fix). The pre-window
@@ -2105,13 +2106,13 @@ async fn localize(
                         .and_then(|s| s.as_str())
                         .map(String::from)
                 })
-                .filter(|n| epoch_seq(volume_id, n).map(|s| s < ef_seq).unwrap_or(false));
+                .filter(|n| epoch_seq(volume_id.as_str(), n).map(|s| s < ef_seq).unwrap_or(false));
             let base: Option<String> = pad_chain_top.or_else(|| {
                 record
                     .epochs
                     .iter()
                     .map(|e| e.name.clone())
-                    .filter(|n| epoch_seq(volume_id, n).map(|s| s < ef_seq).unwrap_or(false))
+                    .filter(|n| epoch_seq(volume_id.as_str(), n).map(|s| s < ef_seq).unwrap_or(false))
                     .find(|n| present.contains(n))
             });
 
@@ -2211,7 +2212,7 @@ async fn localize(
             // the pad as the LOCAL E_f.
             copy_chain_to(
                 rpc,
-                volume_id,
+                volume_id.as_str(),
                 record,
                 src,
                 identity,
@@ -2281,7 +2282,7 @@ async fn localize(
     // The head's chain reaches the local E_f and the leg has taken every
     // raid write since the add: fully in sync. mark_in_sync clears the
     // marker atomically with the state change.
-    store.record_in_sync(volume_id, &rec.lvol_uuid, &ef).await?;
+    store.record_in_sync(volume_id.as_str(), &rec.lvol_uuid, &ef).await?;
     // Localization lag (design item 5): how long the leg depended on the
     // remote E_f export — the new-in-kind SPOF exposure the eval flags.
     // `since` was stamped at the record flip.
@@ -2295,7 +2296,7 @@ async fn localize(
         .unwrap_or_default();
     store
         .emit(
-            volume_id,
+            volume_id.as_str(),
             "Normal",
             "HotRejoinLocalized",
             &format!(
@@ -2304,7 +2305,7 @@ async fn localize(
             ),
         )
         .await;
-    info!(volume_id, node = %rec.node_name, ef = %ef, "[HOT_REJOIN] Localization complete");
+    info!(volume_id = volume_id.as_str(), node = %rec.node_name, ef = %ef, "[HOT_REJOIN] Localization complete");
     Ok(())
 }
 
@@ -3276,7 +3277,7 @@ mod tests {
             &self,
             node: &str,
             bdev_name: &str,
-            volume_id: &str,
+            volume_id: &StorageId,
             replica_index: usize,
             consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
@@ -3288,7 +3289,7 @@ mod tests {
             &self,
             node: &str,
             bdev_name: &str,
-            volume_id: &str,
+            volume_id: &StorageId,
             replica_index: usize,
             consumer_node: &str,
         ) -> Result<NvmeofConnectionInfo, RpcError> {
@@ -3509,6 +3510,11 @@ mod tests {
 
     const VOL: &str = "vol1";
 
+    /// Inner-domain id for the typed naming helpers (tests hold plain strs).
+    fn sid(v: &str) -> StorageId {
+        StorageId::of_handle(v)
+    }
+
     fn replica(node: &str, uuid: &str) -> ReplicaInfo {
         ReplicaInfo {
             node_name: node.to_string(),
@@ -3594,7 +3600,7 @@ mod tests {
             "consumer",
             &format!("raid_{}", VOL),
             "online",
-            &[(&expected_remote_base_bdev(VOL, 0), true)],
+            &[(&expected_remote_base_bdev(&sid(VOL), 0), true)],
         );
     }
 
@@ -3636,7 +3642,7 @@ mod tests {
         // The add used the standard replica bdev name with skip_rebuild.
         let adds = rpc.calls_of("bdev_raid_add_base_bdev");
         assert_eq!(adds.len(), 1);
-        assert_eq!(adds[0].1["base_bdev"].as_str().unwrap(), expected_remote_base_bdev(VOL, 1));
+        assert_eq!(adds[0].1["base_bdev"].as_str().unwrap(), expected_remote_base_bdev(&sid(VOL), 1));
         assert_eq!(adds[0].1["skip_rebuild"].as_bool(), Some(true));
 
         // End state: in_sync, marker cleared, E_f recorded, head is live.
@@ -3677,7 +3683,7 @@ mod tests {
         {
             // Residue on the source survivor: the E_f skeleton exists.
             let mut w = rpc.world.lock().unwrap();
-            w.subsystems.entry(("node-a".into(), ef_export_nqn(VOL))).or_default();
+            w.subsystems.entry(("node-a".into(), ef_export_nqn(&sid(VOL)))).or_default();
         }
         let store = FakeStore::new(stale_b_record());
         let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
@@ -3706,7 +3712,7 @@ mod tests {
             // host fence for the rejoin target, listener (the state attempt
             // #1 leaves behind when it unwinds inside the window).
             let mut w = rpc.world.lock().unwrap();
-            let sub = w.subsystems.entry(("node-a".into(), ef_export_nqn(VOL))).or_default();
+            let sub = w.subsystems.entry(("node-a".into(), ef_export_nqn(&sid(VOL)))).or_default();
             sub.hosts.push(flint_host_nqn("node-b"));
             sub.listener = true;
         }
@@ -3735,8 +3741,8 @@ mod tests {
             // controller is still registered.
             let mut w = rpc.world.lock().unwrap();
             w.controllers.insert(
-                ("node-b".into(), ef_controller_name(VOL)),
-                ("node-a".into(), ef_export_nqn(VOL)),
+                ("node-b".into(), ef_controller_name(&sid(VOL))),
+                ("node-a".into(), ef_export_nqn(&sid(VOL))),
             );
         }
         let store = FakeStore::new(stale_b_record());
@@ -3819,7 +3825,7 @@ mod tests {
             "consumer",
             &format!("raid_{}", VOL),
             "online",
-            &[(&expected_remote_base_bdev(VOL, 0), true)],
+            &[(&expected_remote_base_bdev(&sid(VOL), 0), true)],
         );
     }
 
@@ -4009,7 +4015,7 @@ mod tests {
         // The member added is the pre-staged LEG bdev with --skip-rebuild.
         let adds = rpc.calls_of("bdev_raid_add_base_bdev");
         assert_eq!(adds.len(), 1);
-        assert_eq!(adds[0].1["base_bdev"], json!(expected_remote_base_bdev(VOL, 1)));
+        assert_eq!(adds[0].1["base_bdev"], json!(expected_remote_base_bdev(&sid(VOL), 1)));
         assert_eq!(adds[0].1["skip_rebuild"], json!(true));
 
         // The leg's local chain is aligned at E_f (epoch-3).
@@ -4104,7 +4110,7 @@ mod tests {
                 .get_mut(&("node-b".to_string(), format!("lvs_node-b/vol_{}_replica_1", VOL)))
                 .unwrap();
             leg["driver_specific"]["lvol"]["base_snapshot"] = json!(epoch_name(VOL, 3));
-            let expected = expected_remote_base_bdev(VOL, 1);
+            let expected = expected_remote_base_bdev(&sid(VOL), 1);
             w.bdevs.insert(
                 ("consumer".to_string(), expected.clone()),
                 json!({ "name": expected, "uuid": "uuid-b" }),
@@ -4115,8 +4121,8 @@ mod tests {
             &format!("raid_{}", VOL),
             "online",
             &[
-                (&expected_remote_base_bdev(VOL, 0), true),
-                (&expected_remote_base_bdev(VOL, 1), true),
+                (&expected_remote_base_bdev(&sid(VOL), 0), true),
+                (&expected_remote_base_bdev(&sid(VOL), 1), true),
             ],
         );
         let mut record = standby_b_record();
@@ -4133,7 +4139,7 @@ mod tests {
         let store = FakeStore::new(record.clone());
 
         resume_standby(
-            &rpc, &store, VOL, &record, &rec, &replicas2(), Some("consumer"), &catchup_cfg(),
+            &rpc, &store, &sid(VOL), &record, &rec, &replicas2(), Some("consumer"), &catchup_cfg(),
         )
         .await
         .unwrap();
@@ -4206,7 +4212,7 @@ mod tests {
         let w = rpc.world.lock().unwrap();
         let sub = w
             .subsystems
-            .get(&("node-b".into(), replica_export_nqn(VOL, 1)))
+            .get(&("node-b".into(), replica_export_nqn(&sid(VOL), 1)))
             .expect("replica export kept");
         assert_eq!(sub.namespaces.len(), 1);
         assert!(sub.namespaces[0].1.contains("vol_vol1_replica_1"), "pad ns restored");
@@ -4286,10 +4292,10 @@ mod tests {
             raids[0]["base_bdevs_list"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!({ "name": expected_remote_base_bdev(VOL, 1), "is_configured": true }));
+                .push(json!({ "name": expected_remote_base_bdev(&sid(VOL), 1), "is_configured": true }));
             w.bdevs.insert(
-                ("consumer".into(), expected_remote_base_bdev(VOL, 1)),
-                json!({ "name": expected_remote_base_bdev(VOL, 1), "uuid": "uuid-head" }),
+                ("consumer".into(), expected_remote_base_bdev(&sid(VOL), 1)),
+                json!({ "name": expected_remote_base_bdev(&sid(VOL), 1), "uuid": "uuid-head" }),
             );
         }
         let mut record = stale_b_record();
@@ -4320,7 +4326,7 @@ mod tests {
         {
             let mut w = rpc.world.lock().unwrap();
             w.subsystems
-                .entry(("node-a".into(), ef_export_nqn(VOL)))
+                .entry(("node-a".into(), ef_export_nqn(&sid(VOL))))
                 .or_default();
         }
         let mut record = stale_b_record();
@@ -4339,7 +4345,7 @@ mod tests {
             .lock()
             .unwrap()
             .subsystems
-            .contains_key(&("node-a".into(), ef_export_nqn(VOL))));
+            .contains_key(&("node-a".into(), ef_export_nqn(&sid(VOL)))));
         let rec = store.record();
         let b = rec.get("uuid-b").unwrap();
         assert_eq!(b.sync_state, SyncState::Stale);
@@ -4363,7 +4369,7 @@ mod tests {
         {
             let mut w = rpc.world.lock().unwrap();
             w.subsystems
-                .entry(("node-a".into(), ef_export_nqn(VOL)))
+                .entry(("node-a".into(), ef_export_nqn(&sid(VOL))))
                 .or_default();
         }
         let mut record = stale_b_record();
@@ -4395,7 +4401,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .subsystems
-                .contains_key(&("node-a".into(), ef_export_nqn(VOL))),
+                .contains_key(&("node-a".into(), ef_export_nqn(&sid(VOL)))),
             "E_f export must survive — deleting it is the F50 kill shot"
         );
         assert!(
@@ -4421,7 +4427,7 @@ mod tests {
             .lock()
             .unwrap()
             .subsystems
-            .contains_key(&("node-a".into(), ef_export_nqn(VOL))));
+            .contains_key(&("node-a".into(), ef_export_nqn(&sid(VOL)))));
         assert_eq!(store2.events(), vec!["HotRejoinScrubbed"]);
     }
 
@@ -4471,10 +4477,10 @@ mod tests {
             raids[0]["base_bdevs_list"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!({ "name": expected_remote_base_bdev(VOL, 1), "is_configured": true }));
+                .push(json!({ "name": expected_remote_base_bdev(&sid(VOL), 1), "is_configured": true }));
             w.bdevs.insert(
-                ("consumer".into(), expected_remote_base_bdev(VOL, 1)),
-                json!({ "name": expected_remote_base_bdev(VOL, 1), "uuid": "uuid-head" }),
+                ("consumer".into(), expected_remote_base_bdev(&sid(VOL), 1)),
+                json!({ "name": expected_remote_base_bdev(&sid(VOL), 1), "uuid": "uuid-head" }),
             );
         }
         let mut record = stale_b_record();
@@ -4515,10 +4521,10 @@ mod tests {
             raids[0]["base_bdevs_list"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!({ "name": expected_remote_base_bdev(VOL, 1), "is_configured": true }));
+                .push(json!({ "name": expected_remote_base_bdev(&sid(VOL), 1), "is_configured": true }));
             w.bdevs.insert(
-                ("consumer".into(), expected_remote_base_bdev(VOL, 1)),
-                json!({ "name": expected_remote_base_bdev(VOL, 1), "uuid": "uuid-head" }),
+                ("consumer".into(), expected_remote_base_bdev(&sid(VOL), 1)),
+                json!({ "name": expected_remote_base_bdev(&sid(VOL), 1), "uuid": "uuid-head" }),
             );
         }
         let mut record = stale_b_record();
@@ -4580,10 +4586,10 @@ mod tests {
             raids[0]["base_bdevs_list"]
                 .as_array_mut()
                 .unwrap()
-                .push(json!({ "name": expected_remote_base_bdev(VOL, 1), "is_configured": true }));
+                .push(json!({ "name": expected_remote_base_bdev(&sid(VOL), 1), "is_configured": true }));
             w.bdevs.insert(
-                ("consumer".into(), expected_remote_base_bdev(VOL, 1)),
-                json!({ "name": expected_remote_base_bdev(VOL, 1), "uuid": "uuid-head" }),
+                ("consumer".into(), expected_remote_base_bdev(&sid(VOL), 1)),
+                json!({ "name": expected_remote_base_bdev(&sid(VOL), 1), "uuid": "uuid-head" }),
             );
         }
         let mut record = stale_b_record();
@@ -4696,16 +4702,16 @@ mod tests {
             &format!("raid_{}", VOL),
             "online",
             &[
-                (&expected_remote_base_bdev(VOL, 0), true),
-                (&expected_remote_base_bdev(VOL, 1), true),
-                (&expected_remote_base_bdev(VOL, 2), true),
+                (&expected_remote_base_bdev(&sid(VOL), 0), true),
+                (&expected_remote_base_bdev(&sid(VOL), 1), true),
+                (&expected_remote_base_bdev(&sid(VOL), 2), true),
             ],
         );
         {
             let mut w = rpc.world.lock().unwrap();
             w.bdevs.insert(
-                ("consumer".into(), expected_remote_base_bdev(VOL, 1)),
-                json!({ "name": expected_remote_base_bdev(VOL, 1), "uuid": "uuid-head" }),
+                ("consumer".into(), expected_remote_base_bdev(&sid(VOL), 1)),
+                json!({ "name": expected_remote_base_bdev(&sid(VOL), 1), "uuid": "uuid-head" }),
             );
         }
 
@@ -4906,7 +4912,7 @@ mod tests {
         // `nvme_nqn_2024-11_com_flint_volume_` controllers — the esnap
         // parent's controller must never match while its source restarts.
         let prefix = crate::controller_reap::flint_controller_prefix();
-        assert!(!ef_controller_name("pvc-x").starts_with(&prefix));
+        assert!(!ef_controller_name(&sid("pvc-x")).starts_with(&prefix));
     }
 
     #[test]
@@ -4914,7 +4920,7 @@ mod tests {
         // 36-char uuid volume names + "_hr" must stay under SPDK's 64-char
         // lvol name cap (the 1.2.0-rc2 clamp lesson).
         let vol = "pvc-0123456789abcdef0123456789abcdef0123";
-        assert!(head_lvol_name(vol, 2).len() < 64);
+        assert!(head_lvol_name(&sid(vol), 2).len() < 64);
     }
 
     // -- 7b-2: standby targets + the trigger planner ---------------------------

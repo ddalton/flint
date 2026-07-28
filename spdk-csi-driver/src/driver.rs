@@ -838,7 +838,7 @@ impl SpdkCsiDriver {
     pub async fn list_volume_lvols(
         &self,
         node_name: &str,
-        volume_id: &str,
+        volume_id: &crate::identity::StorageId,
     ) -> Result<Vec<(String, String)>, MinimalStateError> {
         let payload = json!({ "method": "bdev_lvol_get_lvols", "params": {} });
         let resp = self
@@ -853,7 +853,7 @@ impl SpdkCsiDriver {
             let (Some(name), Some(uuid)) = (entry["name"].as_str(), entry["uuid"].as_str()) else {
                 continue;
             };
-            if crate::identity::lvol_belongs_to(name, &crate::identity::StorageId::of_handle(volume_id)) {
+            if crate::identity::lvol_belongs_to(name, volume_id) {
                 owned.push((name.to_string(), uuid.to_string()));
             }
         }
@@ -864,11 +864,15 @@ impl SpdkCsiDriver {
     /// `(deleted, failed)`. Never errors on a per-lvol failure — the orphan
     /// sweep is the backstop — but the caller must report the counts rather
     /// than claim unconditional success (F51).
-    pub async fn sweep_volume_lvols(&self, node_name: &str, volume_id: &str) -> (usize, usize) {
+    pub async fn sweep_volume_lvols(
+        &self,
+        node_name: &str,
+        volume_id: &crate::identity::StorageId,
+    ) -> (usize, usize) {
         let owned = match self.list_volume_lvols(node_name, volume_id).await {
             Ok(v) => v,
             Err(e) => {
-                warn!(node_name, volume_id, error = %e,
+                warn!(node_name, volume_id = volume_id.as_str(), error = %e,
                     "[CONTROLLER] Could not list lvols for teardown sweep — leaving them to the orphan sweep");
                 return (0, 0);
             }

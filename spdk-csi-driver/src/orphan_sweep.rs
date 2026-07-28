@@ -300,13 +300,13 @@ mod tests {
         // same classification makes them reapable — both directions matter.
         let vol = "pvc-c689";
         assert_eq!(
-            classify_lvol(&crate::hot_rejoin::head_lvol_name(vol, 1)),
+            classify_lvol(&crate::hot_rejoin::head_lvol_name(&crate::identity::StorageId::of_handle(vol), 1)),
             Some(Owner::Pv(vol.into()))
         );
         assert_eq!(
             classify_subsystem_nqn(&format!(
                 "nqn.2024-11.com.flint:volume:{}",
-                crate::hot_rejoin::pad_export_volume_id(vol, 1)
+                crate::hot_rejoin::pad_export_volume_id(&crate::identity::StorageId::of_handle(vol), 1)
             ))
             .as_deref(),
             Some(vol)
@@ -314,7 +314,7 @@ mod tests {
         // The E_f export NQN is outside the `:volume:` prefix on purpose —
         // invisible to the sweep (its lifecycle belongs to the hot-rejoin
         // scrub/localize paths, which own targeted cleanup).
-        assert_eq!(classify_subsystem_nqn(&crate::hot_rejoin::ef_export_nqn(vol)), None);
+        assert_eq!(classify_subsystem_nqn(&crate::hot_rejoin::ef_export_nqn(&crate::identity::StorageId::of_handle(vol))), None);
     }
 
     #[test]

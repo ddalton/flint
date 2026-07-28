@@ -1893,6 +1893,11 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 // MULTI-REPLICA: Delete all replicas
                 println!("📊 [CONTROLLER] Deleting multi-replica volume ({} replicas)", replicas.len());
 
+                // The one wrapper→inner conversion for this delete path
+                // (backing handles were refused above, so this is a no-op
+                // normalization — the typed id is the domain proof).
+                let sid = spdk_csi_driver::identity::StorageId::of_handle(&volume_id);
+
                 // Delete each replica lvol
                 for (i, replica) in replicas.iter().enumerate() {
                     println!("🗑️ [CONTROLLER] Deleting replica {} on node {}",
@@ -1926,7 +1931,6 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     // until the orphan sweep condemned them). replica_export_nqn
                     // is the canonical inner-domain shape; the legacy wrapper
                     // shape covers exports minted by pre-F46 stage-side code.
-                    let sid = spdk_csi_driver::identity::StorageId::of_handle(&volume_id);
                     let nqn = spdk_csi_driver::identity::replica_export_nqn(&sid, i);
                     let _ = self.driver.remove_nvmeof_target(&replica.node_name, &nqn).await;
                     let legacy = spdk_csi_driver::identity::legacy_replica_export_nqn(&sid, i);
@@ -1947,7 +1951,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     if !swept_nodes.insert(replica.node_name.as_str()) {
                         continue;
                     }
-                    let (d, f) = self.driver.sweep_volume_lvols(&replica.node_name, &volume_id).await;
+                    let (d, f) = self.driver.sweep_volume_lvols(&replica.node_name, &sid).await;
                     swept += d;
                     stuck += f;
                 }
@@ -2792,7 +2796,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // the staging path reaches (via call_node_agent to self) must never
         // acquire — see node_volume_locks.rs.
         let _volume_guard = spdk_csi_driver::node_volume_locks::acquire(
-            spdk_csi_driver::identity::storage_id_of_handle(&volume_id),
+            &spdk_csi_driver::identity::StorageId::of_handle(&volume_id),
         )
         .await
         .map_err(tonic::Status::aborted)?;
@@ -3584,7 +3588,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         
         // Contract R2: same serialization as NodeStageVolume.
         let _volume_guard = spdk_csi_driver::node_volume_locks::acquire(
-            spdk_csi_driver::identity::storage_id_of_handle(&volume_id),
+            &spdk_csi_driver::identity::StorageId::of_handle(&volume_id),
         )
         .await
         .map_err(tonic::Status::aborted)?;

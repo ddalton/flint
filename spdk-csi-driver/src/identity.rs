@@ -1165,11 +1165,11 @@ mod tests {
     #[test]
     fn mints_agree_with_legacy_owners() {
         assert_eq!(epoch_snapshot_name(VOL, 7), crate::replica_sync::epoch_name(VOL, 7));
-        assert_eq!(hr_head_lvol_name(&sid(VOL), 1), crate::hot_rejoin::head_lvol_name(VOL, 1));
+        assert_eq!(hr_head_lvol_name(&sid(VOL), 1), crate::hot_rejoin::head_lvol_name(&sid(VOL), 1));
         assert_eq!(hr_head_lvol_name(&sid(VOL), 1), format!("vol_{VOL}_replica_1_hr"));
-        assert_eq!(hrpad_export_id(&sid(VOL), 1), crate::hot_rejoin::pad_export_volume_id(VOL, 1));
+        assert_eq!(hrpad_export_id(&sid(VOL), 1), crate::hot_rejoin::pad_export_volume_id(&sid(VOL), 1));
         assert_eq!(hrpad_export_id(&sid(VOL), 1), format!("{VOL}_hrpad1"));
-        assert_eq!(replica_export_nqn(&sid(VOL), 0), crate::hot_rejoin::replica_export_nqn(VOL, 0));
+        assert_eq!(replica_export_nqn(&sid(VOL), 0), crate::hot_rejoin::replica_export_nqn(&sid(VOL), 0));
         assert_eq!(replica_export_nqn(&sid(VOL), 0), format!("nqn.2024-11.com.flint:volume:{VOL}_0"));
         // F46/F45-S3 unification: leg exports are inner-domain no matter
         // which handle mints them — the wrapper handle yields the SAME nqn.
@@ -1184,13 +1184,13 @@ mod tests {
             "legacy shape is the pre-F46 wrapper mint, from either handle"
         );
         assert_eq!(legacy_replica_export_nqn(&sid(&backing_handle(VOL)), 1), legacy_replica_export_nqn(&sid(VOL), 1));
-        assert_eq!(hotrejoin_export_nqn(&sid(VOL)), crate::hot_rejoin::ef_export_nqn(VOL));
+        assert_eq!(hotrejoin_export_nqn(&sid(VOL)), crate::hot_rejoin::ef_export_nqn(&sid(VOL)));
         assert_eq!(hotrejoin_export_nqn(&sid(VOL)), format!("nqn.2024-11.com.flint:hotrejoin:{VOL}"));
         assert_eq!(node_host_nqn(NODE), crate::nvmeof_export::flint_host_nqn(NODE));
         assert_eq!(node_host_nqn(NODE), format!("nqn.2024-11.com.flint:node:{NODE}"));
         assert_eq!(
             initiator_controller_name(&hotrejoin_export_nqn(&sid(VOL))),
-            crate::hot_rejoin::ef_controller_name(VOL),
+            crate::hot_rejoin::ef_controller_name(&sid(VOL)),
             "E_f controller naming is the general initiator rule"
         );
     }
@@ -1526,7 +1526,7 @@ mod tests {
         assert!(lvol_belongs_to(&epoch_snapshot_name(VOL, 4096), &sid(VOL)));
         // Plain volume lvol and the operation-scoped scratch head.
         assert!(lvol_belongs_to(&format!("vol_{VOL}"), &sid(VOL)));
-        assert!(lvol_belongs_to(&crate::hot_rejoin::head_lvol_name(VOL, 1), &sid(VOL)));
+        assert!(lvol_belongs_to(&crate::hot_rejoin::head_lvol_name(&sid(VOL), 1), &sid(VOL)));
 
         // Both id domains resolve to the same storage id, so an RWX volume
         // owns lvols named under its backing handle and vice versa.
