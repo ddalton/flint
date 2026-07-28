@@ -1,0 +1,9 @@
+runal-aws-2 stats-summary UNAVAILABLE
+runal-aws-3 nodefs=4.95/7.93GiB 62.5% imagefs=2.11/7.93GiB 26.7%
+  pod-ephemeral flint-system/flint-csi-node-jgwzf 0.0GiB
+  pod-ephemeral kube-system/cilium-lw5h7 0.0GiB
+  pod-ephemeral flint-system/snapshot-controller-75cc446f55-kkssj 0.0GiB
+runal-aws-4 nodefs=4.61/7.93GiB 58.1% imagefs=1.83/7.93GiB 23.2%
+  pod-ephemeral flint-system/flint-csi-node-7cz6j 0.0GiB
+  pod-ephemeral kube-system/cilium-k9ct7 0.0GiB
+  pod-ephemeral flint-system/flint-csi-controller-7d4bcf8dd-lns4z 0.0GiB

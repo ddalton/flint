@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-28T16:18:49Z)
+  ✓ pg_isready
+  ✓ ledger: all 2351 acked writes present
+  · pg_amcheck CORRUPTION/ERROR (rc=143): command terminated with exit code 143 
+  ✓ postgres log clean (current + previous instance)
+  · writability probe FAILED
+
+DB-VERDICT: FAIL ( amcheck write-probe)

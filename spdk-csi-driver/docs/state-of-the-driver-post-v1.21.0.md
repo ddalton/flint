@@ -31,8 +31,13 @@ least one new F-number.
 
 ### P1 — kube-Lease leader election for the orchestrator block
 > **IMPLEMENTED 2026-07-28** (`orchestrator_lease.rs`; role grant =
-> candidacy, Lease = activity; 907 tests). **Live gate still owed** — run
-> the acceptance drill below in the next campaign before calling P1 done.
+> candidacy, Lease = activity; 907 tests). **LIVE GATE PASSED same day on
+> runal** (`tests/chaos/artifacts/runal-p1p3p4-gate/`): mis-granted
+> dashboard stood by across many lease periods; dead-holder CAS takeover
+> ~45s; the dashboard-as-usurper drove a full 2.9 rebuild
+> (`Window committed` in ITS log, zero work lines in the standing-by
+> controller's); reverse handover clean. Two lease transitions mid-drill
+> were invisible to I/O (stall 1s). **P1 is DONE.**
 - **Class it kills:** singleton-by-configuration (F50: operator pod as a
   second hot-rejoin orchestrator; F53: dashboard backend as a third —
   two instances of the family in one day).
@@ -83,7 +88,9 @@ least one new F-number.
 > dead `driver.rs::create_nvmeof_target` fossil deleted (3 trap sites,
 > zero callers). Mock now refuses duplicate attaches with the real
 > v26.05 shape. Family-A (errno-mapped lvol/raid) textual classifiers
-> audited and kept. **Live canary owed: one 2.9 run next campaign.**
+> audited and kept. **Live canary PASSED same day on runal: 2.9 in_sync
+> 325s, 0 window flips, 0 severs, 0 E_f duplicate errors — the
+> 264-380s class is now the norm across three runs. P3 is DONE.**
 - **Class it kills:** string-matched RPC errors — F48
   (`nvmf_create_subsystem` duplicate = "-32603 Unable to create…"), then
   F54 seven days later (`nvmf_subsystem_add_host` duplicate = bare
@@ -99,6 +106,11 @@ least one new F-number.
 - **Gate:** unit-level per site; one 2.9 run as the end-to-end canary.
 
 ### P4 — RWX node-loss detection latency
+> **MEASURED on runal 3.6e (2026-07-28): stall 177s** on the shipped
+> topology, clean config. fast_io_fail=20s → the detection gap is ~157s.
+> Confirmed the 150-177s class across three clusters; the ≤60s target
+> means closing DETECTION, not transport. This is the next availability
+> workstream — the fix itself is still open.
 - **Evidence:** ledger stall 159s on runak's clean 3.6e, ~150s measured on
   runai — vs RWO 2.5 where writes never paused. fast_io_fail (20s) is not
   the bottleneck; *detection* dominates on the RWX path. Also S2's ~237s
@@ -111,15 +123,15 @@ least one new F-number.
 
 ## Open investigations (carry into the next campaign's harness work)
 
-1. **3.6f's unattributed pg-0 kill** (runaj): when the relocated server
-   lands on its own client's node, pg-0 was killed at T0+8s with
-   `FailedKillPod … DeadlineExceeded` (D-state on the dead NFS mount) and
-   a 457s stall — no cutover, no eviction, no STS delete in evidence.
-   runai's passing 3.6f lacked the co-location. **Harness gap CLOSED
-   2026-07-28: `capture_kubelet_log` in `tests/chaos/lib.sh`, wired into
-   3.6f as check (i) — kubelet's journal from every node pg-0 touched
-   since T0, captured unconditionally, with a kill-signature line count.**
-   Until attributed, treat server-on-client co-location as suspect.
+1. **3.6f's unattributed pg-0 kill** (runaj): **RESOLVED-BY-ABSENCE on
+   runal (2026-07-28).** The exact co-location shape re-ran on rc
+   `1.22.0-rc1` (server moved onto pg-0's own node): pg-0 zero restarts,
+   zero ESTALE/PANIC, stall 40s (vs 457s), and the new kubelet capture
+   (check (i)) recorded ZERO kill-signature lines. Evidence-backed
+   attribution: the runaj kill was downstream of the pre-fix F52
+   ESTALE/PANIC crash loop; F52's fix removed the whole causal chain.
+   The capture stays armed in the harness should it ever recur.
+   Server-on-client co-location is no longer suspect.
 2. **The csi-node roll landmine** (standing since v1.12): a DS roll
    restarts spdk-tgt under mounted PVCs → EIO. Graceful recovery (v1.15)
    covers single-node events; a full roll still needs the
