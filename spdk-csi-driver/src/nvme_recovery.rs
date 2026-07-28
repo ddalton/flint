@@ -182,6 +182,97 @@ pub fn subsystem_is_satisfied(has_namespaces: bool, has_listeners: bool) -> bool
     has_namespaces && has_listeners
 }
 
+/// P4 (runal/runak/runai 3.6e, 2026-07-28): global SPDK-initiator timeouts
+/// that bound *dead-target detection*. A terminated instance is a TCP
+/// blackhole — no RST — so the qpair never sees a transport error and never
+/// enters the reset path where [`LegTransportPolicy`]'s `fast_io_fail` clock
+/// runs. The raid kept the dead base configured for 116–176s (runak clean
+/// 3.6e: degrade logged T0+176s, stale +176s, swap +186s — everything AFTER
+/// the failure is fast) and the RWX ledger stalled 150–177s. RWO 2.5 never
+/// stalled only because that shutdown produced an RST.
+///
+/// These are `bdev_nvme_set_options` fields — GLOBAL, and SPDK returns
+/// -EPERM once any controller is attached, so they must be applied at
+/// target bring-up before the first attach (agent startup, and the
+/// baseline-collapse recovery that detects a tgt restart).
+///
+/// * `transport_ack_timeout` (exponent: 2^n ms) becomes TCP_USER_TIMEOUT on
+///   the qpair socket — the KERNEL errors a blackholed connection once
+///   retransmitted data goes unacked that long. 13 → ~8.2s.
+/// * `timeout_us` + `action_on_timeout=reset` is the command-level watchdog
+///   for the complementary failure (peer kernel ACKs but the target is
+///   wedged). A spurious trip costs one reset/reconnect cycle, not data.
+/// * `tcp_connect_timeout_ms` bounds each reconnect attempt so the retry
+///   loop stays live against a blackholed address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeadTargetTimeouts {
+    /// 2^n milliseconds of unacked TCP retransmission → socket error.
+    /// 0 omits the field (kernel default: ~15 retries, 15+ minutes).
+    pub transport_ack_timeout_exp: u8,
+    /// Command timeout with action_on_timeout=reset; 0 omits both fields.
+    pub io_timeout_secs: u64,
+    /// Per-attempt connect bound for the reconnect loop; 0 omits.
+    pub tcp_connect_timeout_ms: u64,
+}
+
+impl Default for DeadTargetTimeouts {
+    fn default() -> Self {
+        // 13 → 8192ms: an in-VPC RTT is sub-ms, so 8s of unacked
+        // retransmission is unambiguous death, and 8s + fast_io_fail(20s)
+        // lands the whole failure inside the P4 ≤60s stall budget. 30s
+        // command timeout: an order of magnitude above any legitimate
+        // lvol/raid I/O, well under the pre-fix 150s+ blindness.
+        Self { transport_ack_timeout_exp: 13, io_timeout_secs: 30, tcp_connect_timeout_ms: 10_000 }
+    }
+}
+
+impl DeadTargetTimeouts {
+    /// `FLINT_SPDK_TRANSPORT_ACK_TIMEOUT_EXP` (0–31; 0 disables),
+    /// `FLINT_SPDK_IO_TIMEOUT_SECS` (0 disables),
+    /// `FLINT_SPDK_TCP_CONNECT_TIMEOUT_MS` (0 disables); garbage → default.
+    pub fn from_env() -> Self {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    pub fn from_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
+        let d = Self::default();
+        Self {
+            transport_ack_timeout_exp: get("FLINT_SPDK_TRANSPORT_ACK_TIMEOUT_EXP")
+                .and_then(|v| v.trim().parse::<u8>().ok())
+                .filter(|&v| v <= 31)
+                .unwrap_or(d.transport_ack_timeout_exp),
+            io_timeout_secs: get("FLINT_SPDK_IO_TIMEOUT_SECS")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(d.io_timeout_secs),
+            tcp_connect_timeout_ms: get("FLINT_SPDK_TCP_CONNECT_TIMEOUT_MS")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(d.tcp_connect_timeout_ms),
+        }
+    }
+
+    /// The `bdev_nvme_set_options` params object. `None` when every knob is
+    /// disabled (nothing to send). The RPC merges over current options
+    /// server-side, so only the configured fields are included.
+    pub fn set_options_params(&self) -> Option<serde_json::Value> {
+        let mut params = serde_json::Map::new();
+        if self.transport_ack_timeout_exp > 0 {
+            params.insert(
+                "transport_ack_timeout".into(),
+                serde_json::json!(self.transport_ack_timeout_exp),
+            );
+        }
+        if self.io_timeout_secs > 0 {
+            params.insert("timeout_us".into(), serde_json::json!(self.io_timeout_secs * 1_000_000));
+            params.insert("action_on_timeout".into(), serde_json::json!("reset"));
+        }
+        if self.tcp_connect_timeout_ms > 0 {
+            params
+                .insert("tcp_connect_timeout_ms".into(), serde_json::json!(self.tcp_connect_timeout_ms));
+        }
+        if params.is_empty() { None } else { Some(serde_json::Value::Object(params)) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +399,61 @@ mod tests {
         assert!(!subsystem_is_satisfied(false, true)); // no namespace (bdev not ready)
         assert!(!subsystem_is_satisfied(true, false)); // no listener
         assert!(!subsystem_is_satisfied(false, false));
+    }
+
+    #[test]
+    fn dead_target_defaults_land_inside_the_p4_stall_budget() {
+        let t = DeadTargetTimeouts::default();
+        // 2^13 ms ≈ 8.2s blackhole bound; +fast_io_fail(20s) ≈ 30s < 60s.
+        assert_eq!(t.transport_ack_timeout_exp, 13);
+        let p = t.set_options_params().expect("defaults produce params");
+        assert_eq!(p["transport_ack_timeout"], 13);
+        assert_eq!(p["timeout_us"], 30_000_000_u64);
+        assert_eq!(p["action_on_timeout"], "reset");
+        assert_eq!(p["tcp_connect_timeout_ms"], 10_000_u64);
+    }
+
+    #[test]
+    fn dead_target_disabled_knobs_omit_their_fields() {
+        // Each 0 removes its field(s); the RPC merges server-side, so an
+        // omitted field means "keep the target's current value", never 0.
+        let t = DeadTargetTimeouts {
+            transport_ack_timeout_exp: 0,
+            io_timeout_secs: 0,
+            tcp_connect_timeout_ms: 5_000,
+        };
+        let p = t.set_options_params().unwrap();
+        assert!(p.get("transport_ack_timeout").is_none());
+        assert!(p.get("timeout_us").is_none());
+        assert!(p.get("action_on_timeout").is_none(), "reset without a timeout is meaningless");
+        assert_eq!(p["tcp_connect_timeout_ms"], 5_000_u64);
+        // Everything off → nothing to send at all.
+        let off = DeadTargetTimeouts {
+            transport_ack_timeout_exp: 0,
+            io_timeout_secs: 0,
+            tcp_connect_timeout_ms: 0,
+        };
+        assert!(off.set_options_params().is_none());
+    }
+
+    #[test]
+    fn dead_target_env_overrides_and_validation() {
+        let p = DeadTargetTimeouts::from_lookup(|k| match k {
+            "FLINT_SPDK_TRANSPORT_ACK_TIMEOUT_EXP" => Some("14".to_string()),
+            "FLINT_SPDK_IO_TIMEOUT_SECS" => Some("0".to_string()),
+            "FLINT_SPDK_TCP_CONNECT_TIMEOUT_MS" => Some("3000".to_string()),
+            _ => None,
+        });
+        assert_eq!(p.transport_ack_timeout_exp, 14);
+        assert_eq!(p.io_timeout_secs, 0); // explicit opt-out honored
+        assert_eq!(p.tcp_connect_timeout_ms, 3000);
+        // Exponent above 31 (SPDK clamps at its TCP max anyway) and garbage
+        // fall back to the default rather than sending nonsense.
+        for bad in ["32", "abc", "-1"] {
+            let p = DeadTargetTimeouts::from_lookup(|k| {
+                (k == "FLINT_SPDK_TRANSPORT_ACK_TIMEOUT_EXP").then(|| bad.to_string())
+            });
+            assert_eq!(p, DeadTargetTimeouts::default(), "{bad:?} must fall back");
+        }
     }
 }

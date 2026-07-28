@@ -109,8 +109,22 @@ least one new F-number.
 > **MEASURED on runal 3.6e (2026-07-28): stall 177s** on the shipped
 > topology, clean config. fast_io_fail=20s → the detection gap is ~157s.
 > Confirmed the 150-177s class across three clusters; the ≤60s target
-> means closing DETECTION, not transport. This is the next availability
-> workstream — the fix itself is still open.
+> means closing DETECTION, not transport.
+>
+> **ATTRIBUTED + FIX IMPLEMENTED same day**
+> (`docs/p4-dead-target-detection.md`): the gap is the TCP blackhole — a
+> terminated instance sends no RST, the qpair never errors, and
+> fast_io_fail only counts from the reset path, so the raid kept the dead
+> base configured 116–176s (runak's complete 3.6e logs; stale-mark +10s
+> and swap +10s after that — everything downstream was already fast). RWO
+> 2.5 passed on RST luck, not a better path. Fix = `DeadTargetTimeouts`
+> (nvme_recovery.rs): global `bdev_nvme_set_options` at tgt bring-up —
+> transport_ack_timeout=13 (TCP_USER_TIMEOUT ≈8s, kernel-enforced),
+> timeout_us=30s + action_on_timeout=reset, tcp_connect_timeout_ms=10s;
+> applied at agent startup before the first attach and re-applied on
+> baseline-collapse (tgt restart), -EPERM tolerated. Expected stall ≈30s.
+> 3.6e now records `degrade=<s>` and gates on P4_STALL_BUDGET=60.
+> **LIVE GATE OWED: 3.6e with stall ≤60s, next campaign.**
 - **Evidence:** ledger stall 159s on runak's clean 3.6e, ~150s measured on
   runai — vs RWO 2.5 where writes never paused. fast_io_fail (20s) is not
   the bottleneck; *detection* dominates on the RWX path. Also S2's ~237s

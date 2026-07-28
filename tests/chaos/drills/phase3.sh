@@ -562,6 +562,19 @@ case "$DRILL" in
   [ -n "$IID" ] || fail "no instance id for $LEG_NODE"
   aws ec2 terminate-instances --region "$AWS_REGION" --instance-ids "$IID" >/dev/null
   note "TERMINATED $IID ($LEG_NODE) — remote leg ${DEAD_UUID:0:8}… permanently lost; the nfs server keeps writing"
+  # P4 decomposition: timestamp the moment the raid actually deconfigures
+  # the dead base (base=2/2 → 1/2 on the server node). Pre-fix this took
+  # 116-176s (TCP blackhole: no RST → no transport error → fast_io_fail
+  # never armed); with the dead-target timeouts it must land ≈ 8s (TCP
+  # user-timeout) + fast_io_fail (20s). The stall's release ≈ this moment.
+  DEGRADE_F=$(mktemp)
+  ( while :; do
+      B=$(raid_summary "$NFS_NODE" 2>/dev/null | grep -o 'base=[0-9]*/[0-9]*' | head -1)
+      if [ -n "$B" ] && [ "$B" != "base=2/2" ]; then echo $(( $(epoch) - T0 )) > "$DEGRADE_F"; exit 0; fi
+      [ $(( $(epoch) - T0 )) -ge 400 ] && exit 0
+      sleep 5
+    done ) &
+  DEGRADE_PID=$!
   wait_node_notready "$LEG_NODE" 300
   kubectl delete node "$LEG_NODE" >/dev/null 2>&1
   T_NODEGONE=$(( $(epoch) - T0 ))
@@ -576,12 +589,23 @@ case "$DRILL" in
   # two are not comparable and the message must not imply they are.
   if wait_acks_fresh 180; then
     KILL_GAP=$(max_stall_since "$T0")
+    kill "$DEGRADE_PID" 2>/dev/null; wait "$DEGRADE_PID" 2>/dev/null
+    T_DEGRADE=$(cat "$DEGRADE_F" 2>/dev/null); rm -f "$DEGRADE_F"
+    [ -n "$T_DEGRADE" ] && note "raid deconfigured the dead base at ${T_DEGRADE}s (P4 detection decomposition)" \
+      || { T_DEGRADE=-1; note "degrade moment not observed by the 5s watcher (raid gone/renamed before a poll saw 1/2?)"; }
+    # P4 gate (post dead-target-timeouts): the whole leg-loss blindness —
+    # blackhole detect + fast_io_fail + raid fault — must fit the budget.
+    P4_BUDGET=${P4_STALL_BUDGET:-60}
     if [ "${KILL_GAP:-0}" -le 30 ]; then
       ok "I/O never stalled through the kill (max gap ${KILL_GAP}s — F42 fast_io_fail held)"
+    elif [ "${KILL_GAP:-0}" -le "$P4_BUDGET" ]; then
+      ok "P4 budget MET: stalled ${KILL_GAP}s ≤ ${P4_BUDGET}s (degrade at ${T_DEGRADE}s)"
     else
-      note "I/O RESUMED but stalled ${KILL_GAP}s through the kill — inside the 180s budget, but fast_io_fail is 20s; detection latency, not fail-fast, dominated"
+      note "P4 BUDGET EXCEEDED: stalled ${KILL_GAP}s > ${P4_BUDGET}s (degrade at ${T_DEGRADE}s) — detection latency still dominates"
     fi
   else
+    kill "$DEGRADE_PID" 2>/dev/null; wait "$DEGRADE_PID" 2>/dev/null
+    T_DEGRADE=$(cat "$DEGRADE_F" 2>/dev/null || echo -1); rm -f "$DEGRADE_F"
     note "acks went stale after the kill and never recovered in 180s — F42 REGRESSION?"
   fi
 
@@ -684,7 +708,7 @@ case "$DRILL" in
   [ -z "$RISK" ] && ok "no acked-tail-risk raised (the surviving leg never trailed)" \
     || note "acked-tail-risk: $RISK"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
-    NOTES="F43 r2-perm: node_gone=${T_NODEGONE}s swap=${T_SWAP}s standby=${T_STANDBY}s cutover=${T_CUTOVER}s in_sync=${T_SYNC}s settled=${T_SETTLED}s witness=${T_WITNESS}s io_resume=${T_RESUME}s new_node=${NEW_NODE:-?} cut_ev=$CUT_START/$CUT_OK/$CUT_INEFF yields=$YIELDS seizes=$SEIZES head_in_use=$HEADINUSE risk=${RISK:-none}" verify
+    NOTES="F43 r2-perm: node_gone=${T_NODEGONE}s degrade=${T_DEGRADE:--1}s swap=${T_SWAP}s standby=${T_STANDBY}s cutover=${T_CUTOVER}s in_sync=${T_SYNC}s settled=${T_SETTLED}s witness=${T_WITNESS}s io_resume=${T_RESUME}s new_node=${NEW_NODE:-?} cut_ev=$CUT_START/$CUT_OK/$CUT_INEFF yields=$YIELDS seizes=$SEIZES head_in_use=$HEADINUSE risk=${RISK:-none}" verify
 
   # The F43 verdict. in_sync is the load-bearing assertion: a parked standby
   # is exactly the bug. The bounce is the expected mechanism — if redundancy

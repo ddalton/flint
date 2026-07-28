@@ -81,6 +81,37 @@ struct TargetExport {
     target_port: u16,
 }
 
+/// P4: apply the global dead-target timeouts (`bdev_nvme_set_options`) to a
+/// fresh spdk-tgt. Must run before the first controller attach; -EPERM
+/// means controllers already exist — either this boot already applied them
+/// or the target predates the agent (pre-fix window), and the options land
+/// on the next tgt restart. Best-effort by design: a failure here degrades
+/// detection latency back to pre-P4 behavior, never correctness.
+async fn apply_dead_target_timeouts(disk_service: &MinimalDiskService) {
+    let timeouts = crate::nvme_recovery::DeadTargetTimeouts::from_env();
+    let Some(params) = timeouts.set_options_params() else {
+        info!("[NODE_AGENT] Dead-target timeouts disabled by env — skipping bdev_nvme_set_options");
+        return;
+    };
+    let payload = json!({ "method": "bdev_nvme_set_options", "params": params });
+    match disk_service.call_spdk_rpc(&payload).await {
+        Ok(_) => info!(
+            transport_ack_timeout_exp = timeouts.transport_ack_timeout_exp,
+            io_timeout_secs = timeouts.io_timeout_secs,
+            tcp_connect_timeout_ms = timeouts.tcp_connect_timeout_ms,
+            "[NODE_AGENT] Dead-target timeouts applied (P4: blackholed leg now faults in ~2^exp ms + fast_io_fail)"
+        ),
+        Err(e) if e.to_string().contains("not permitted") => info!(
+            "[NODE_AGENT] bdev_nvme_set_options refused — controllers already attached; \
+             timeouts apply on the next spdk-tgt restart"
+        ),
+        Err(e) => warn!(
+            error = %e,
+            "[NODE_AGENT] bdev_nvme_set_options failed (continuing — detection latency stays pre-P4)"
+        ),
+    }
+}
+
 impl NodeAgent {
     pub fn new(
         node_name: String,
@@ -149,6 +180,13 @@ impl NodeAgent {
                 warn!(error = %e, "[NODE_AGENT] Failed to fetch node UID - replica reconciliation will be disabled");
             }
         }
+
+        // P4: bound dead-target detection BEFORE anything attaches an NVMe
+        // controller — bdev_nvme_set_options is -EPERM once one exists, and
+        // discover_local_disks below attaches the local PCIe controller. On
+        // the normal path (tgt + agent start together) this lands on a
+        // fresh target; an agent-only restart gets the tolerated -EPERM.
+        apply_dead_target_timeouts(&self.disk_service).await;
 
         // Initialize ublk subsystem on startup
         debug!("[NODE_AGENT] Initializing ublk subsystem");
@@ -229,6 +267,10 @@ impl NodeAgent {
                                  spdk-tgt likely restarted; re-running discovery with auto-recovery",
                                 last_disk_count.unwrap_or(0)
                             );
+                            // P4: the restarted target is empty — re-apply
+                            // the dead-target timeouts before recovery
+                            // re-attaches its first controller.
+                            apply_dead_target_timeouts(&disk_service).await;
                             match disk_service.discover_local_disks().await {
                                 Ok(recovered) => {
                                     info!(
