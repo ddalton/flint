@@ -90,6 +90,45 @@ rediscover the bug classes it exists for proves nothing.
   steps are atomic.
 - Identity domains (killed at compile time by the newtypes).
 
+## Data-plane axioms — verified against SPDK source (v26.05.1-pre, ~/github/spdk)
+
+The model's data-plane rules are *claims about SPDK raid1*, so they were
+audited against the actual module (P4 exists because an unverified
+transport axiom was wrong):
+
+- **Reads go to ANY configured leg** (the split-read premise of
+  `Inv_NoDivergentServing`): `raid1_channel_next_read_base_bdev` picks
+  the member with the fewest outstanding read blocks —
+  `module/bdev/raid/raid1.c:219`.
+- **Membership changes bump the generation**: every superblock write does
+  `sb->seq_number++` (`bdev_raid_sb.c:432`), and the writers are exactly
+  configure / remove-base-bdev / resize / process-finish
+  (`bdev_raid.c:1998,2208,2515,2662`) — the model's raidGen.
+- **Newest incarnation serves; a stale leg re-enters only as a returning
+  failed member**: examine compares `seq_number` — newer sb deletes and
+  recreates the raid from itself; an older-sb leg is governed by the
+  current sb, which marks its slot MISSING/FAILED, and it is re-added
+  via `raid_bdev_configure_base_bdev` (rebuild path), never as a serving
+  source (`bdev_raid.c:3883-3904,3949-3957`) — the model's `NewestOf` +
+  `Admit` stamping `legGen := raidGen`.
+- **The F36c lone-leg premise is real**: raid1 declares
+  `CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL = 1` (`raid1.c:622`), so a lone
+  returned leg whose sb is the only one in sight assembles ONLINE from
+  its own superblock and serves its trailing lineage — which is exactly
+  why the record-level gate exists.
+
+One nuance the audit surfaced: examine's newest-wins recreate runs only
+while the raid is CONFIGURING; once ONLINE, a later-attaching newer-sb
+leg gets `-EBUSY` and the stale assembly keeps serving
+(`bdev_raid.c:3888-3893`). "Newest of the attached set serves" is
+therefore guaranteed only when the set attaches into one assembly
+window — which is precisely what flint's NodeStage does (the gate picks
+A first, then assembles once), and why the model's atomic `Assemble` is
+a faithful abstraction of the orchestrated path rather than of raw
+examine auto-assembly. The concurrent-assembly hazard that remains is
+the F48 zombie, modeled at the record level.
+
 The model checks the design, not the Rust. The campaign drills and the
 ledger oracle remain the check on the axioms (P4 exists because a
-transport assumption, not a design step, was wrong).
+transport assumption, not a design step, was wrong) — the audit above
+converts the raid1 axioms from believed to cited.
