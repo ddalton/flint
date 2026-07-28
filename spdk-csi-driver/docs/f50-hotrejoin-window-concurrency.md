@@ -1,8 +1,13 @@
 # F50 — the hot-rejoin admission window races a concurrent catch-up on the same volume, and never lands
 
-**Status:** **FIX IMPLEMENTED** 2026-07-27 (§4–§5; 886 tests green; live
-validation pending — drill 2.9's new cycle gate is the acceptance). **Root
-cause CONFIRMED — §4: there were TWO controller processes.** Found live
+**Status:** **FIX IMPLEMENTED** 2026-07-27 (§4–§5), but **NECESSARY, NOT
+SUFFICIENT — see [F53](f53-dashboard-backend-second-orchestrator.md).** The
+runaj evidence capture found a *third* controller process this fix does not
+touch: the dashboard backend, which the chart gives `CSI_MODE=controller`.
+Two factual corrections to §4 are recorded in F53 §2 (the second process
+runs **cutover as well as** hot-rejoin — cutover's compiled default is ON,
+not OFF as stated below). **Root cause CONFIRMED — §4: there were TWO
+controller processes** *(at least — three, counting the dashboard)*. Found live
 2026-07-27 on runai (drill 2.9, driver `1.21.0-rc2`). This is the finding
 the [F48](f48-standby-rejoin-epoch-race.md) write-up flagged as its open
 question — *"if an admission path can run without the volume claim, that is
@@ -125,10 +130,15 @@ chain, every link verified:
    which includes the controller role and therefore every
    `mode == "controller" || mode == "all"` orchestrator block.
 4. In the operator pod, chart-driven env is absent, so orchestrators run at
-   compiled defaults: epoch scheduler OFF, catch-up OFF, cutover OFF — and
-   **hot-rejoin ON** (`HotRejoinTriggerConfig::default().enabled = true`
-   since `076985d`, v1.19.0). The pod is a hot-rejoin-orchestrator-only
-   second controller.
+   compiled defaults: epoch scheduler OFF, catch-up OFF — and **hot-rejoin
+   ON** (`HotRejoinTriggerConfig::default().enabled = true` since
+   `076985d`, v1.19.0).
+   **CORRECTION (runaj, 2026-07-28): cutover is compiled-default ON too**
+   — the captured startup log shows `[CUTOVER] Reassembly cutover
+   orchestrator started` right next to hot-rejoin's line. So the pod is a
+   second **cutover + hot-rejoin** controller, not hot-rejoin-only, and
+   since cutover owns RWX replacement admission it could perturb the
+   cutover path as well. See [F53](f53-dashboard-backend-second-orchestrator.md) §2.
 5. The F43 claim registry is **in-process** (`volume_claims::global()`).
    The operator's registry is empty; its `try_claim(OP_HOT_REJOIN)` always
    succeeds. Nothing serializes its windows against the real controller's
@@ -191,7 +201,15 @@ still produce one, and make the destructive decode tolerant of the shape:
 **Deliberately deferred:** kube Lease-based leader election for the
 orchestrator block — the complete answer to "two controller processes",
 and the right follow-up, but a bigger change than a validated release wave
-should absorb. Items (1)–(3) close every known two-process window today.
+should absorb.
+
+> **The claim that items (1)–(3) "close every known two-process window
+> today" did not survive contact with the next cluster.** They closed every
+> window *I had looked for*. The runaj capture found the dashboard backend
+> running the same shape, and F53 replaces the CSI_MODE inference with an
+> explicit `FLINT_ORCHESTRATORS` grant. Read (1)–(4) below together with
+> [F53](f53-dashboard-backend-second-orchestrator.md) §4 — that is the
+> actual fix set.
 
 Tests: `reconcile_leaves_a_young_marker_alone_until_the_grace_lapses`
 (hot_rejoin — the runai kill shot replayed against a just-stamped marker:

@@ -57,6 +57,15 @@ spec:
             # them off, a leg that fails out mid-serve is never marked
             # stale, and the next raid reassembly re-admits it as an equal
             # read source — a silent-rollback hazard for acked writes.
+            # F53: the explicit grant for the orchestrator block. The
+            # per-volume claim registry that serializes catch-up / cutover /
+            # hot-rejoin is IN-PROCESS, so exactly one pod may run them —
+            # this one. Every other pod built on this image (the dashboard
+            # backend, anything future) must leave it unset or "disabled".
+            # Two grants is F50, and the second one shipped in the chart
+            # itself until this was added.
+            - name: FLINT_ORCHESTRATORS
+              value: "enabled"
             - name: FLINT_EPOCH_SCHEDULER
               value: "enabled"
             - name: FLINT_CATCHUP

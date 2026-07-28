@@ -57,8 +57,17 @@ spec:
           image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
+            # CSI_MODE=controller here buys the controller-side QUERY
+            # surface the dashboard reads. It does NOT make this pod the
+            # CSI controller — but until F53 the orchestrator block was
+            # gated on exactly this string, so the dashboard backend ran a
+            # second cutover + hot-rejoin against its own empty in-process
+            # claim registry (F50's shape, found live on runaj). The grant
+            # below is what actually decides; ENABLE_DASHBOARD is a belt.
             - name: CSI_MODE
               value: "controller"
+            - name: FLINT_ORCHESTRATORS
+              value: "disabled"
             - name: ENABLE_DASHBOARD
               value: "true"
             - name: DASHBOARD_PORT

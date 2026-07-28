@@ -183,6 +183,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "all".to_string()
     });
 
+    // F53: CSI_MODE decides which gRPC services this process SERVES; it does
+    // not decide which process owns the cluster-wide singletons. Conflating
+    // the two is what let the dashboard backend (CSI_MODE=controller, by the
+    // chart's own hand) stand up a second cutover + hot-rejoin orchestrator
+    // against its own empty in-process claim registry — F50's shape, still
+    // shipping after F50's fix removed the operator pod. Ask the explicit
+    // question instead. See orchestrator_role.rs.
+    let run_orchestrators = spdk_csi_driver::orchestrator_role::orchestrators_enabled(&mode);
+
     // Create minimal state driver
     let driver = Arc::new(SpdkCsiDriver::new(
         kube_client.clone(),
@@ -220,7 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // placement already does). Default-disabled until the phase-3/4
     // consumers of epochs exist: epochs cost snapshot space on every
     // multi-replica volume and heal nothing on their own yet.
-    if mode == "controller" || mode == "all" {
+    if run_orchestrators {
         let epoch_cfg = spdk_csi_driver::epoch_scheduler::EpochConfig::from_env();
         if epoch_cfg.enabled {
             println!(
@@ -244,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // epoch-chain shallow copy) and keeps standbys chasing new epochs.
     // Default-disabled until phase 4 admits standbys at reassembly; it also
     // does nothing unless the epoch scheduler has cut common epochs.
-    if mode == "controller" || mode == "all" {
+    if run_orchestrators {
         let catchup_cfg = spdk_csi_driver::catchup::CatchupConfig::from_env();
         if catchup_cfg.enabled {
             println!(
@@ -270,7 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // opt-in via the PV annotation flint.csi.storage.io/rejoin-bounce —
     // the RWO workload pods. Verifies the outcome (CutoverSucceeded /
     // CutoverIneffective events) instead of assuming it.
-    if mode == "controller" || mode == "all" {
+    if run_orchestrators {
         let cutover_cfg = spdk_csi_driver::cutover::CutoverConfig::from_env();
         if cutover_cfg.enabled {
             println!(
@@ -298,7 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // parks forever and a node-loss volume serves degraded indefinitely.
     // The flint-shipped spdk-tgt always carries the skip_rebuild patch, so
     // the admission is safe here; fleet opt-out is FLINT_HOT_REJOIN=disabled.
-    if mode == "controller" || mode == "all" {
+    if run_orchestrators {
         let hr_cfg = spdk_csi_driver::hot_rejoin::HotRejoinTriggerConfig::from_env();
         if hr_cfg.enabled {
             let mech = spdk_csi_driver::hot_rejoin::HotRejoinConfig::from_env();
@@ -324,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // server (pvc-backed volumes only) through the exact publish-side
     // ensure machinery. Default-enabled; FLINT_NFS_RECONCILER=disabled
     // to opt out.
-    if mode == "controller" || mode == "all" {
+    if run_orchestrators {
         if spdk_csi_driver::rwx_nfs::nfs_reconciler_enabled() {
             let reconciler_client = kube_client.clone();
             let reconciler_node = node_id.clone();
