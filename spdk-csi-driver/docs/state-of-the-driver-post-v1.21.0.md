@@ -115,10 +115,11 @@ least one new F-number.
    lands on its own client's node, pg-0 was killed at T0+8s with
    `FailedKillPod … DeadlineExceeded` (D-state on the dead NFS mount) and
    a 457s stall — no cutover, no eviction, no STS delete in evidence.
-   runai's passing 3.6f lacked the co-location. **Harness gap: no drill
-   captures kubelet's log on the consumer node — add it before the next
-   RWX run.** Until attributed, treat server-on-client co-location as
-   suspect.
+   runai's passing 3.6f lacked the co-location. **Harness gap CLOSED
+   2026-07-28: `capture_kubelet_log` in `tests/chaos/lib.sh`, wired into
+   3.6f as check (i) — kubelet's journal from every node pg-0 touched
+   since T0, captured unconditionally, with a kill-signature line count.**
+   Until attributed, treat server-on-client co-location as suspect.
 2. **The csi-node roll landmine** (standing since v1.12): a DS roll
    restarts spdk-tgt under mounted PVCs → EIO. Graceful recovery (v1.15)
    covers single-node events; a full roll still needs the

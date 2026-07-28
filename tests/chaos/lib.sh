@@ -412,3 +412,25 @@ for eb,name in sorted(pods,reverse=True)[:3]:
   awk '$2 ~ /^nodefs/ { for(i=2;i<=NF;i++) if ($i ~ /%$/) { gsub(/%/,"",$i);
         if ($i+0 >= 80) print "  ⚠ "$1" filesystem at "$i"% — kubelet evicts at 85% nodefs" } }' "$out"
 }
+
+# Kubelet journal from a node since an epoch, via a privileged nsenter pod
+# (host truth: kubectl events age out, and nothing else records WHO asked
+# kubelet to kill a pod). Added for 3.6f's unattributed pg-0 kill (runaj
+# 2026-07-27): when the relocated server landed on its own client's node,
+# pg-0 died at T0+8s with FailedKillPod/DeadlineExceeded and a 457s stall
+# — no cutover, no eviction, no STS delete in evidence — and no artifact
+# held kubelet's own account of why. Bounded to the last 4000 lines.
+capture_kubelet_log() { # <node> <since_epoch> <outfile>
+  local n=$1 since=$2 out=$3 pod="kubelet-log-$$" i phase=""
+  kubectl run "$pod" --image=busybox:1.36 --restart=Never \
+    --overrides="{\"spec\":{\"nodeName\":\"${n}\",\"hostPID\":true,\"restartPolicy\":\"Never\",\"containers\":[{\"name\":\"k\",\"image\":\"busybox:1.36\",\"command\":[\"nsenter\",\"-t\",\"1\",\"-m\",\"-u\",\"-i\",\"-n\",\"--\",\"sh\",\"-c\",\"journalctl -u kubelet --since @${since} --no-pager | tail -n 4000\"],\"securityContext\":{\"privileged\":true}}]}}" >/dev/null 2>&1 \
+    || { echo "kubelet-log capture pod failed to start on $n" > "$out"; return 1; }
+  for i in $(seq 1 30); do
+    phase=$(kubectl get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)
+    { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
+    sleep 2
+  done
+  kubectl logs "$pod" > "$out" 2>/dev/null || echo "no journal output (phase=${phase:-?}) on $n" > "$out"
+  kubectl delete pod "$pod" --wait=false >/dev/null 2>&1
+  note "kubelet journal on $n since @$since → $out ($(wc -l < "$out" | tr -d ' ') lines)"
+}

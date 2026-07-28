@@ -845,6 +845,20 @@ case "$DRILL" in
     && ok "new server prewarmed its fh identity index before serving" \
     || note "no fh-identity prewarm marker in the new server's log (pre-F52-fix image?)"
 
+  # (i) Attribution artifact for the OPEN 3.6f mystery (runaj: pg-0 killed
+  # at T0+8s, FailedKillPod/DeadlineExceeded, nobody claimed the kill —
+  # state doc "open investigations" #1): kubelet's own journal from every
+  # node pg-0 touched since T0, captured UNCONDITIONALLY so a passing run
+  # still preserves the evidence a failing rerun will need.
+  PG_NODE_NOW=$(kubectl get pod -n "$NS" $PG -o jsonpath='{.spec.nodeName}' 2>/dev/null)
+  for n in $(printf '%s\n%s\n' "$PRE_NODE" "${PG_NODE_NOW:-}" | sort -u); do
+    [ -n "$n" ] || continue
+    capture_kubelet_log "$n" "$T0" "$ARTIFACTS/36f-kubelet-${n}.log" || continue
+    KILLSIG=$(grep -aEc "FailedKillPod|Killing container|killPodWithSyncResult" \
+      "$ARTIFACTS/36f-kubelet-${n}.log" || true)
+    note "kubelet kill-signature lines on $n since T0: ${KILLSIG:-0}"
+  done
+
   EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
     NOTES="F49 server-onto-leg: ${OLD_SRV}->${NEWNODE:-?} served=${T_SERVED}s eperm=$EPERM_HITS raidfail=$RAIDFAIL squatter='${LOCAL_LEG_EXPORT:-none}' f47_residue='$(echo "${OLD_SHELLS:-none}" | tr '\n' ' ')' raid='${RAID_POST}' witness=${T_WITNESS}s io_resume=${T_RESUME}s f52_estale=${F52_ESTALE} f52_panic=${F52_PANIC}" verify
 
