@@ -98,6 +98,102 @@ pub fn pv_name_of_handle(handle: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// The typed identity domains (F45 rec 2 — the compile-time class removal)
+// ---------------------------------------------------------------------------
+//
+// F44, F45/B1+B2, F46, F47 and F51 all landed the same way: the right
+// helper called with the wrong domain's string. Both domains are shaped
+// like plain ids, every helper took `&str`, so the wrong call compiled,
+// ran, and silently named an object that does not exist. The CI lint
+// cannot see which domain flows into a correct helper call — only the
+// type system can. These two newtypes make the domains distinct types;
+// the conversion between them exists in exactly one place
+// ([`StorageId::of_handle`]), and deliberately NEITHER type derefs to
+// `str` — an implicit coercion would let them satisfy legacy `&str`
+// parameters and forfeit the compile-time proof.
+//
+// Tranche 1 (this change) retypes the helpers where the domains CROSS:
+// the replica-leg export family, raid naming, loopback teardown, and the
+// name-based lvol matcher. The derived-id namespaces (`lvol_name`,
+// `volume_nqn`, epoch/snapshot naming) follow in a later tranche.
+
+/// The INNER identity domain: `pvc-<uuid>`, never carrying the
+/// `nfs-server-` wrapper prefix. Replica legs, their lvols, heads, epochs
+/// and leg exports are all inner-domain objects (the F46 unification).
+/// Construction NORMALIZES via [`storage_id_of_handle`], so holding a
+/// `StorageId` is itself the proof the wrapper prefix is gone — helpers
+/// taking one no longer re-normalize at run time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StorageId(String);
+
+impl StorageId {
+    /// THE wrapper→inner conversion — the one place the `nfs-server-`
+    /// prefix is stripped. Total: user handles and record ids pass
+    /// through unchanged, backing handles lose exactly one prefix.
+    pub fn of_handle(handle: &str) -> Self {
+        StorageId(storage_id_of_handle(handle).to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for StorageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The OUTER identity domain: a volumeHandle exactly as staged/attached —
+/// either a user handle (textually equal to the storage id) or the
+/// `nfs-server-<id>` backing handle. Held VERBATIM: constructing one never
+/// strips or adds the prefix. Which handle stages a given object is a
+/// per-object decision (an RWX volume's raid assembles under the BACKING
+/// handle; consumer exports under the user handle) — a parameter of this
+/// type forces that decision to be visible at the call site instead of
+/// implicit in a string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StagedHandle(String);
+
+impl StagedHandle {
+    /// Hold a volumeHandle verbatim (either shape).
+    pub fn new(handle: impl Into<String>) -> Self {
+        StagedHandle(handle.into())
+    }
+
+    /// The backing handle for a volume — the NFS server pod's own block
+    /// attachment (`nfs-server-<id>`).
+    pub fn backing_for(storage_id: &StorageId) -> Self {
+        StagedHandle(backing_handle(storage_id.as_str()))
+    }
+
+    /// The user handle for a volume (textually the storage id).
+    pub fn user(storage_id: &StorageId) -> Self {
+        StagedHandle(storage_id.as_str().to_string())
+    }
+
+    pub fn is_backing(&self) -> bool {
+        self.0.starts_with(NFS_BACKING_PREFIX)
+    }
+
+    /// Cross into the inner domain (the one conversion, delegated).
+    pub fn storage_id(&self) -> StorageId {
+        StorageId::of_handle(&self.0)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for StagedHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Role + VolumeRef
 // ---------------------------------------------------------------------------
 
@@ -154,6 +250,12 @@ impl VolumeRef {
             | VolumeRef::NfsShared { storage_id, .. }
             | VolumeRef::NfsBacking { storage_id } => storage_id,
         }
+    }
+
+    /// Typed storage identity — already inner-domain by construction
+    /// (`from_handle` stripped any backing prefix into the variant).
+    pub fn sid(&self) -> StorageId {
+        StorageId::of_handle(self.storage_id())
     }
 
     /// Whether THIS attachment owns a block data path (connect, fence,
@@ -221,32 +323,35 @@ pub fn lvol_name(volume_id: &str) -> String {
 }
 
 /// Per-replica volume id: `<vol>_replica_<i>` — embedded in lvol names,
-/// replica export NQNs, and record bookkeeping.
-pub fn replica_volume_id(volume_id: &str, replica_index: usize) -> String {
+/// replica export NQNs, and record bookkeeping. Replica legs are
+/// inner-domain objects (F46), so the owner is a [`StorageId`].
+pub fn replica_volume_id(volume_id: &StorageId, replica_index: usize) -> String {
     format!("{}_replica_{}", volume_id, replica_index)
 }
 
 /// Replica lvol name: `vol_<vol>_replica_<i>`.
-pub fn replica_lvol_name(volume_id: &str, replica_index: usize) -> String {
+pub fn replica_lvol_name(volume_id: &StorageId, replica_index: usize) -> String {
     lvol_name(&replica_volume_id(volume_id, replica_index))
 }
 
 /// Hot-rejoin esnap-clone head lvol: `vol_<vol>_replica_<i>_hr`.
-pub fn hr_head_lvol_name(volume_id: &str, replica_index: usize) -> String {
+pub fn hr_head_lvol_name(volume_id: &StorageId, replica_index: usize) -> String {
     format!("vol_{}_replica_{}_hr", volume_id, replica_index)
 }
 
 /// Hot-rejoin localization pad export id: `<vol>_hrpad<i>`.
-pub fn hrpad_export_id(volume_id: &str, replica_index: usize) -> String {
+pub fn hrpad_export_id(volume_id: &StorageId, replica_index: usize) -> String {
     format!("{}_hrpad{}", volume_id, replica_index)
 }
 
 /// Raid bdev name: `raid_<staging_handle>`. NOTE: keyed on the STAGING
 /// handle, not the storage id — an RWX volume's raid assembles on the NFS
 /// server's node under the BACKING handle (`raid_nfs-server-pvc-…`).
-/// Callers reasoning about "the volume's raid" must pick the handle for
-/// the attachment that stages it (node_agent health monitor, d7490de).
-pub fn raid_name(staging_handle: &str) -> String {
+/// The typed parameter is the point: callers must decide WHICH handle
+/// stages this raid and say so ([`StagedHandle::backing_for`] /
+/// [`StagedHandle::user`] / verbatim [`StagedHandle::new`]) instead of
+/// passing an ambiguous string (node_agent health monitor, d7490de).
+pub fn raid_name(staging_handle: &StagedHandle) -> String {
     format!("raid_{}", staging_handle)
 }
 
@@ -288,42 +393,38 @@ pub fn volume_nqn(export_id: &str) -> String {
 /// Replica export NQN: `…:volume:<vol>_<i>` (the `export_replica`
 /// convention; also what hot rejoin swaps namespaces under).
 ///
-/// NORMALIZES to the inner (storage-id) domain: replica legs — their lvols,
+/// The inner (storage-id) domain BY TYPE: replica legs — their lvols,
 /// heads, and epochs — are inner-domain objects, so their exports are too,
-/// no matter which handle the caller holds. Before this (F46/F45-S3,
-/// 2026-07-27) stage-side assembly minted leg exports from the STAGED
-/// wrapper handle while catch-up minted from the record id, and any
-/// name-keyed matcher over legs was guessing which domain it would find.
-/// Transition: nodes upgraded mid-flight may still hold wrapper-shaped leg
-/// exports; `nvmeof_export::resolve_replica_export_nqn` is the read-both
-/// belt that adopts them.
-pub fn replica_export_nqn(volume_id: &str, replica_index: usize) -> String {
-    format!("{}{}_{}", VOLUME_NQN_PREFIX, storage_id_of_handle(volume_id), replica_index)
+/// no matter which handle the caller holds. Before F46/F45-S3 (2026-07-27)
+/// stage-side assembly minted leg exports from the STAGED wrapper handle
+/// while catch-up minted from the record id, and any name-keyed matcher
+/// over legs was guessing which domain it would find; the fix normalized
+/// at run time. The [`StorageId`] parameter moves that proof to compile
+/// time — construction is where the normalization happened. Transition:
+/// nodes upgraded mid-flight may still hold wrapper-shaped leg exports;
+/// `nvmeof_export::resolve_replica_export_nqn` is the read-both belt that
+/// adopts them.
+pub fn replica_export_nqn(volume_id: &StorageId, replica_index: usize) -> String {
+    format!("{}{}_{}", VOLUME_NQN_PREFIX, volume_id, replica_index)
 }
 
 /// The pre-unification wrapper-domain leg export NQN
 /// (`…:volume:nfs-server-<pv>_<i>`) — the shape stage-side assembly minted
 /// before F46. Exists ONLY so transition belts and teardown hygiene can
 /// find and retire old exports; never mint under it.
-pub fn legacy_replica_export_nqn(volume_id: &str, replica_index: usize) -> String {
-    format!(
-        "{}{}{}_{}",
-        VOLUME_NQN_PREFIX,
-        NFS_BACKING_PREFIX,
-        storage_id_of_handle(volume_id),
-        replica_index
-    )
+pub fn legacy_replica_export_nqn(volume_id: &StorageId, replica_index: usize) -> String {
+    format!("{}{}{}_{}", VOLUME_NQN_PREFIX, NFS_BACKING_PREFIX, volume_id, replica_index)
 }
 
 /// Alias replica NQN: `…:volume:<vol>:replica:<i>` (multi-replica publish
 /// context; classify_subsystem_nqn's third shape).
-pub fn replica_alias_nqn(volume_id: &str, replica_index: usize) -> String {
+pub fn replica_alias_nqn(volume_id: &StorageId, replica_index: usize) -> String {
     format!("{}{}:replica:{}", VOLUME_NQN_PREFIX, volume_id, replica_index)
 }
 
 /// Hot-rejoin E_f export NQN: `…:hotrejoin:<vol>` — deliberately NOT under
 /// `:volume:` (kept out of the dead-controller reaper's namespace).
-pub fn hotrejoin_export_nqn(volume_id: &str) -> String {
+pub fn hotrejoin_export_nqn(volume_id: &StorageId) -> String {
     format!("nqn.2024-11.com.flint:hotrejoin:{}", volume_id)
 }
 
@@ -677,10 +778,12 @@ pub fn classify_lvol(name: &str) -> Option<Owner> {
 ///
 /// F51: teardown must find a leg by NAME — a catch-up rebuild gives the leg
 /// a new uuid under the same name, and `epoch-<vol>-<n>` snapshots have no
-/// recorded uuid anywhere.
-pub fn lvol_belongs_to(name: &str, volume_id: &str) -> bool {
+/// recorded uuid anywhere. The queried volume is a typed [`StorageId`]
+/// (normalized at construction); the PARSED side still resolves through
+/// [`storage_id_of_handle`] because lvol names can embed either shape.
+pub fn lvol_belongs_to(name: &str, volume_id: &StorageId) -> bool {
     match classify_lvol(name) {
-        Some(Owner::Pv(id)) => storage_id_of_handle(&id) == storage_id_of_handle(volume_id),
+        Some(Owner::Pv(id)) => storage_id_of_handle(&id) == volume_id.as_str(),
         _ => false,
     }
 }
@@ -734,10 +837,13 @@ pub fn classify_subsystem_nqn(nqn: &str) -> Option<String> {
 /// the storage id), while teardown is keyed on the STAGED handle — so a
 /// single staged-domain derivation was a silent wrong-domain no-op on
 /// every RWX server node (docs/f47-loopback-export-teardown-domain.md §3c).
-/// For RWO the domains collapse and this returns one NQN.
-pub fn loopback_teardown_nqns(staged_volume_id: &str) -> Vec<String> {
-    let staged = volume_nqn(staged_volume_id);
-    let inner = volume_nqn(storage_id_of_handle(staged_volume_id));
+/// For RWO the domains collapse and this returns one NQN. The parameter is
+/// a typed [`StagedHandle`] — this helper is exactly the place where BOTH
+/// domains of one handle matter, so it takes the outer one and crosses
+/// itself.
+pub fn loopback_teardown_nqns(staged_volume_id: &StagedHandle) -> Vec<String> {
+    let staged = volume_nqn(staged_volume_id.as_str());
+    let inner = volume_nqn(staged_volume_id.storage_id().as_str());
     if inner == staged {
         vec![staged]
     } else {
@@ -825,6 +931,64 @@ mod tests {
     const NODE: &str = "runj-aws-1";
     const PCI: &str = "0000:00:1f.0";
 
+    /// Shorthand typed constructors — every use is an explicit domain
+    /// assertion, same as production call sites.
+    fn sid(s: &str) -> StorageId {
+        StorageId::of_handle(s)
+    }
+    fn sh(s: &str) -> StagedHandle {
+        StagedHandle::new(s)
+    }
+
+    // -- the typed domains (F45 rec 2) ---------------------------------------
+
+    #[test]
+    fn storage_id_construction_is_the_one_normalization() {
+        // Inner ids pass through; wrapper handles lose exactly one prefix.
+        assert_eq!(sid(VOL).as_str(), VOL);
+        assert_eq!(sid(&backing_handle(VOL)).as_str(), VOL);
+        // Idempotent: constructing from an already-inner id changes nothing.
+        assert_eq!(sid(sid(&backing_handle(VOL)).as_str()), sid(VOL));
+    }
+
+    #[test]
+    fn staged_handles_are_verbatim_and_cross_once() {
+        let user = StagedHandle::user(&sid(VOL));
+        let backing = StagedHandle::backing_for(&sid(VOL));
+        assert_eq!(user.as_str(), VOL);
+        assert_eq!(backing.as_str(), backing_handle(VOL));
+        assert!(!user.is_backing());
+        assert!(backing.is_backing());
+        // Both cross to the same inner identity.
+        assert_eq!(user.storage_id(), backing.storage_id());
+        // Verbatim: construction never strips the prefix.
+        assert_eq!(sh(&backing_handle(VOL)).as_str(), backing_handle(VOL));
+    }
+
+    /// THE class the types kill (F44/F45-B1+B2/F46): a leg export minted
+    /// from whichever handle the caller held. Both roads into a StorageId
+    /// now yield the identical NQN — and passing a StagedHandle to
+    /// [`replica_export_nqn`] no longer compiles at all.
+    #[test]
+    fn leg_exports_are_domain_stable_by_construction() {
+        assert_eq!(
+            replica_export_nqn(&sid(VOL), 1),
+            replica_export_nqn(&sid(&backing_handle(VOL)), 1),
+        );
+    }
+
+    /// The deliberate asymmetry survives the types: raids key on the
+    /// staging handle VERBATIM (an RWX raid is `raid_nfs-server-…`), so the
+    /// StagedHandle parameter must never normalize.
+    #[test]
+    fn raid_names_keep_the_wrapper_through_the_type() {
+        assert_eq!(raid_name(&sh(VOL)), format!("raid_{}", VOL));
+        assert_eq!(
+            raid_name(&StagedHandle::backing_for(&sid(VOL))),
+            format!("raid_nfs-server-{}", VOL),
+        );
+    }
+
     // -- handles ------------------------------------------------------------
 
     #[test]
@@ -892,9 +1056,9 @@ mod tests {
     #[test]
     fn lvol_owner_round_trips_every_constructor() {
         assert_eq!(lvol_owner(&lvol_name(VOL)), Some((VOL, LvolKind::Primary)));
-        assert_eq!(lvol_owner(&replica_lvol_name(VOL, 0)), Some((VOL, LvolKind::Replica)));
-        assert_eq!(lvol_owner(&replica_lvol_name(VOL, 12)), Some((VOL, LvolKind::Replica)));
-        assert_eq!(lvol_owner(&hr_head_lvol_name(VOL, 1)), Some((VOL, LvolKind::Replica)));
+        assert_eq!(lvol_owner(&replica_lvol_name(&sid(VOL), 0)), Some((VOL, LvolKind::Replica)));
+        assert_eq!(lvol_owner(&replica_lvol_name(&sid(VOL), 12)), Some((VOL, LvolKind::Replica)));
+        assert_eq!(lvol_owner(&hr_head_lvol_name(&sid(VOL), 1)), Some((VOL, LvolKind::Replica)));
         assert_eq!(
             lvol_owner(&epoch_snapshot_name(VOL, 135)),
             Some((VOL, LvolKind::EpochSnapshot))
@@ -975,11 +1139,11 @@ mod tests {
     #[test]
     fn mints_match_live_shapes() {
         assert_eq!(lvol_name(VOL), format!("vol_{VOL}"));
-        assert_eq!(replica_volume_id(VOL, 0), format!("{VOL}_replica_0"));
-        assert_eq!(replica_lvol_name(VOL, 2), format!("vol_{VOL}_replica_2"));
-        assert_eq!(raid_name(VOL), format!("raid_{VOL}"));
+        assert_eq!(replica_volume_id(&sid(VOL), 0), format!("{VOL}_replica_0"));
+        assert_eq!(replica_lvol_name(&sid(VOL), 2), format!("vol_{VOL}_replica_2"));
+        assert_eq!(raid_name(&sh(VOL)), format!("raid_{VOL}"));
         assert_eq!(
-            raid_name(&backing_handle(VOL)),
+            raid_name(&sh(&backing_handle(VOL))),
             format!("raid_nfs-server-{VOL}"),
             "RWX raid keys on the BACKING handle"
         );
@@ -987,7 +1151,7 @@ mod tests {
         assert_eq!(user_snapshot_name(VOL, 1719872000), format!("snap_{VOL}_1719872000"));
         assert_eq!(temp_clone_snapshot_name(VOL), format!("temp_pvc_clone_{VOL}"));
         assert_eq!(volume_nqn(VOL), format!("nqn.2024-11.com.flint:volume:{VOL}"));
-        assert_eq!(replica_alias_nqn(VOL, 1), format!("nqn.2024-11.com.flint:volume:{VOL}:replica:1"));
+        assert_eq!(replica_alias_nqn(&sid(VOL), 1), format!("nqn.2024-11.com.flint:volume:{VOL}:replica:1"));
         // Live LVS from runj: lvs_runj-aws-1_0000-00-1f-0
         assert_eq!(lvs_name(NODE, PCI), "lvs_runj-aws-1_0000-00-1f-0");
         assert_eq!(lvs_name_for_disk("runj-aws-1_0000-00-1f-0"), "lvs_runj-aws-1_0000-00-1f-0");
@@ -1001,31 +1165,31 @@ mod tests {
     #[test]
     fn mints_agree_with_legacy_owners() {
         assert_eq!(epoch_snapshot_name(VOL, 7), crate::replica_sync::epoch_name(VOL, 7));
-        assert_eq!(hr_head_lvol_name(VOL, 1), crate::hot_rejoin::head_lvol_name(VOL, 1));
-        assert_eq!(hr_head_lvol_name(VOL, 1), format!("vol_{VOL}_replica_1_hr"));
-        assert_eq!(hrpad_export_id(VOL, 1), crate::hot_rejoin::pad_export_volume_id(VOL, 1));
-        assert_eq!(hrpad_export_id(VOL, 1), format!("{VOL}_hrpad1"));
-        assert_eq!(replica_export_nqn(VOL, 0), crate::hot_rejoin::replica_export_nqn(VOL, 0));
-        assert_eq!(replica_export_nqn(VOL, 0), format!("nqn.2024-11.com.flint:volume:{VOL}_0"));
+        assert_eq!(hr_head_lvol_name(&sid(VOL), 1), crate::hot_rejoin::head_lvol_name(VOL, 1));
+        assert_eq!(hr_head_lvol_name(&sid(VOL), 1), format!("vol_{VOL}_replica_1_hr"));
+        assert_eq!(hrpad_export_id(&sid(VOL), 1), crate::hot_rejoin::pad_export_volume_id(VOL, 1));
+        assert_eq!(hrpad_export_id(&sid(VOL), 1), format!("{VOL}_hrpad1"));
+        assert_eq!(replica_export_nqn(&sid(VOL), 0), crate::hot_rejoin::replica_export_nqn(VOL, 0));
+        assert_eq!(replica_export_nqn(&sid(VOL), 0), format!("nqn.2024-11.com.flint:volume:{VOL}_0"));
         // F46/F45-S3 unification: leg exports are inner-domain no matter
         // which handle mints them — the wrapper handle yields the SAME nqn.
         assert_eq!(
-            replica_export_nqn(&backing_handle(VOL), 1),
-            replica_export_nqn(VOL, 1),
+            replica_export_nqn(&sid(&backing_handle(VOL)), 1),
+            replica_export_nqn(&sid(VOL), 1),
             "leg export mint normalizes the staged wrapper handle"
         );
         assert_eq!(
-            legacy_replica_export_nqn(VOL, 1),
+            legacy_replica_export_nqn(&sid(VOL), 1),
             format!("nqn.2024-11.com.flint:volume:nfs-server-{VOL}_1"),
             "legacy shape is the pre-F46 wrapper mint, from either handle"
         );
-        assert_eq!(legacy_replica_export_nqn(&backing_handle(VOL), 1), legacy_replica_export_nqn(VOL, 1));
-        assert_eq!(hotrejoin_export_nqn(VOL), crate::hot_rejoin::ef_export_nqn(VOL));
-        assert_eq!(hotrejoin_export_nqn(VOL), format!("nqn.2024-11.com.flint:hotrejoin:{VOL}"));
+        assert_eq!(legacy_replica_export_nqn(&sid(&backing_handle(VOL)), 1), legacy_replica_export_nqn(&sid(VOL), 1));
+        assert_eq!(hotrejoin_export_nqn(&sid(VOL)), crate::hot_rejoin::ef_export_nqn(VOL));
+        assert_eq!(hotrejoin_export_nqn(&sid(VOL)), format!("nqn.2024-11.com.flint:hotrejoin:{VOL}"));
         assert_eq!(node_host_nqn(NODE), crate::nvmeof_export::flint_host_nqn(NODE));
         assert_eq!(node_host_nqn(NODE), format!("nqn.2024-11.com.flint:node:{NODE}"));
         assert_eq!(
-            initiator_controller_name(&hotrejoin_export_nqn(VOL)),
+            initiator_controller_name(&hotrejoin_export_nqn(&sid(VOL))),
             crate::hot_rejoin::ef_controller_name(VOL),
             "E_f controller naming is the general initiator rule"
         );
@@ -1037,8 +1201,8 @@ mod tests {
     fn lvol_classification_corpus() {
         let cases: &[(&str, Option<Owner>)] = &[
             (&lvol_name(VOL), Some(Owner::Pv(VOL.into()))),
-            (&replica_lvol_name(VOL, 2), Some(Owner::Pv(VOL.into()))),
-            (&hr_head_lvol_name(VOL, 1), Some(Owner::Pv(VOL.into()))),
+            (&replica_lvol_name(&sid(VOL), 2), Some(Owner::Pv(VOL.into()))),
+            (&hr_head_lvol_name(&sid(VOL), 1), Some(Owner::Pv(VOL.into()))),
             // Backing-handle-derived lvol id stays UNRESOLVED (orphan_sweep
             // resolves via record_pv_name at lookup time, not parse time).
             ("vol_nfs-server-pvc-rwx", Some(Owner::Pv("nfs-server-pvc-rwx".into()))),
@@ -1072,15 +1236,15 @@ mod tests {
     fn nqn_classification_corpus() {
         let cases: &[(String, Option<&str>)] = &[
             (volume_nqn(VOL), Some(VOL)),
-            (replica_export_nqn(VOL, 0), Some(VOL)),
-            (replica_alias_nqn(VOL, 1), Some(VOL)),
+            (replica_export_nqn(&sid(VOL), 0), Some(VOL)),
+            (replica_alias_nqn(&sid(VOL), 1), Some(VOL)),
             // Replica-volume-id and pad export ids embed their owner.
-            (volume_nqn(&replica_volume_id(VOL, 1)), Some(VOL)),
-            (volume_nqn(&hrpad_export_id(VOL, 1)), Some(VOL)),
+            (volume_nqn(&replica_volume_id(&sid(VOL), 1)), Some(VOL)),
+            (volume_nqn(&hrpad_export_id(&sid(VOL), 1)), Some(VOL)),
             // Backing-handle export id stays unresolved (raw), like lvols.
             (volume_nqn("nfs-server-pvc-a"), Some("nfs-server-pvc-a")),
             // Outside the :volume: namespace ⇒ never touched.
-            (hotrejoin_export_nqn(VOL), None),
+            (hotrejoin_export_nqn(&sid(VOL)), None),
             (node_host_nqn(NODE), None),
             ("nqn.2025-05.io.spdk:lvol-something".into(), None),
         ];
@@ -1239,9 +1403,9 @@ mod tests {
 
     #[test]
     fn raid_name_round_trip() {
-        assert_eq!(parse_raid_name(&raid_name(VOL)), Some(VOL));
+        assert_eq!(parse_raid_name(&raid_name(&sh(VOL))), Some(VOL));
         assert_eq!(
-            parse_raid_name(&raid_name(&backing_handle(VOL))),
+            parse_raid_name(&raid_name(&sh(&backing_handle(VOL)))),
             Some(backing_handle(VOL).as_str()),
             "RWX raids parse back to the BACKING handle, resolution is the caller's job"
         );
@@ -1333,18 +1497,18 @@ mod tests {
     #[test]
     fn replica_export_nqn_classifier_covers_every_leg_shape() {
         // Leg exports, canonical (inner) and legacy (wrapper) domains.
-        assert!(is_replica_export_nqn(&replica_export_nqn(VOL, 0)));
-        assert!(is_replica_export_nqn(&replica_export_nqn(VOL, 12)));
-        assert!(is_replica_export_nqn(&legacy_replica_export_nqn(VOL, 1)));
-        assert!(is_replica_export_nqn(&replica_export_nqn(&backing_handle(VOL), 1)));
+        assert!(is_replica_export_nqn(&replica_export_nqn(&sid(VOL), 0)));
+        assert!(is_replica_export_nqn(&replica_export_nqn(&sid(VOL), 12)));
+        assert!(is_replica_export_nqn(&legacy_replica_export_nqn(&sid(VOL), 1)));
+        assert!(is_replica_export_nqn(&replica_export_nqn(&sid(&backing_handle(VOL)), 1)));
         // Alias and pad shapes.
-        assert!(is_replica_export_nqn(&replica_alias_nqn(VOL, 2)));
-        assert!(is_replica_export_nqn(&volume_nqn(&hrpad_export_id(VOL, 3))));
+        assert!(is_replica_export_nqn(&replica_alias_nqn(&sid(VOL), 2)));
+        assert!(is_replica_export_nqn(&volume_nqn(&hrpad_export_id(&sid(VOL), 3))));
         // Loopback/consumer exports — the registry's legitimate domain.
         assert!(!is_replica_export_nqn(&volume_nqn(VOL)));
         assert!(!is_replica_export_nqn(&volume_nqn(&backing_handle(VOL))));
         // Not flint volume NQNs at all.
-        assert!(!is_replica_export_nqn(&hotrejoin_export_nqn(VOL)));
+        assert!(!is_replica_export_nqn(&hotrejoin_export_nqn(&sid(VOL))));
         assert!(!is_replica_export_nqn("nqn.2014-08.org.nvmexpress:uuid:whatever"));
     }
 
@@ -1356,33 +1520,33 @@ mod tests {
     fn lvol_ownership_matches_by_name_across_rebuilds_and_domains() {
         // The two shapes F51 leaked: a replica leg (any index, whatever its
         // uuid became) and the epoch snapshots catch-up leaves behind.
-        assert!(lvol_belongs_to(&replica_lvol_name(VOL, 0), VOL));
-        assert!(lvol_belongs_to(&replica_lvol_name(VOL, 12), VOL));
-        assert!(lvol_belongs_to(&epoch_snapshot_name(VOL, 1), VOL));
-        assert!(lvol_belongs_to(&epoch_snapshot_name(VOL, 4096), VOL));
+        assert!(lvol_belongs_to(&replica_lvol_name(&sid(VOL), 0), &sid(VOL)));
+        assert!(lvol_belongs_to(&replica_lvol_name(&sid(VOL), 12), &sid(VOL)));
+        assert!(lvol_belongs_to(&epoch_snapshot_name(VOL, 1), &sid(VOL)));
+        assert!(lvol_belongs_to(&epoch_snapshot_name(VOL, 4096), &sid(VOL)));
         // Plain volume lvol and the operation-scoped scratch head.
-        assert!(lvol_belongs_to(&format!("vol_{VOL}"), VOL));
-        assert!(lvol_belongs_to(&crate::hot_rejoin::head_lvol_name(VOL, 1), VOL));
+        assert!(lvol_belongs_to(&format!("vol_{VOL}"), &sid(VOL)));
+        assert!(lvol_belongs_to(&crate::hot_rejoin::head_lvol_name(VOL, 1), &sid(VOL)));
 
         // Both id domains resolve to the same storage id, so an RWX volume
         // owns lvols named under its backing handle and vice versa.
-        assert!(lvol_belongs_to(&replica_lvol_name(&backing_handle(VOL), 0), VOL));
-        assert!(lvol_belongs_to(&replica_lvol_name(VOL, 0), &backing_handle(VOL)));
+        assert!(lvol_belongs_to(&replica_lvol_name(&sid(&backing_handle(VOL)), 0), &sid(VOL)));
+        assert!(lvol_belongs_to(&replica_lvol_name(&sid(VOL), 0), &sid(&backing_handle(VOL))));
 
         // A DIFFERENT volume's lvols must never be swept — this is the
         // predicate that authorises a delete, so a false positive here is
         // data loss, not a leak.
         let other = "pvc-00000000-0000-0000-0000-000000000000";
-        assert!(!lvol_belongs_to(&replica_lvol_name(other, 0), VOL));
-        assert!(!lvol_belongs_to(&epoch_snapshot_name(other, 1), VOL));
+        assert!(!lvol_belongs_to(&replica_lvol_name(&sid(other), 0), &sid(VOL)));
+        assert!(!lvol_belongs_to(&epoch_snapshot_name(other, 1), &sid(VOL)));
         // Prefix collision: a volume whose id merely STARTS with ours.
-        assert!(!lvol_belongs_to(&replica_lvol_name(&format!("{VOL}-extra"), 0), VOL));
+        assert!(!lvol_belongs_to(&replica_lvol_name(&sid(&format!("{VOL}-extra")), 0), &sid(VOL)));
 
         // Ephemerals are lease-owned, not PV-owned, and foreign names are
         // invisible.
-        assert!(!lvol_belongs_to("eph_csi-0123abcd", VOL));
-        assert!(!lvol_belongs_to("some_other_bdev", VOL));
-        assert!(!lvol_belongs_to("", VOL));
+        assert!(!lvol_belongs_to("eph_csi-0123abcd", &sid(VOL)));
+        assert!(!lvol_belongs_to("some_other_bdev", &sid(VOL)));
+        assert!(!lvol_belongs_to("", &sid(VOL)));
     }
 
     /// F47: NodeUnstage's lost-cleanup-data belt must sweep the loopback
@@ -1391,11 +1555,11 @@ mod tests {
     /// and exactly one for RWO where the domains collapse.
     #[test]
     fn loopback_teardown_sweeps_both_domains_for_wrapper_handles() {
-        let rwo = loopback_teardown_nqns(VOL);
+        let rwo = loopback_teardown_nqns(&sh(VOL));
         assert_eq!(rwo, vec![volume_nqn(VOL)]);
 
         let staged = backing_handle(VOL); // "nfs-server-<pv>"
-        let rwx = loopback_teardown_nqns(&staged);
+        let rwx = loopback_teardown_nqns(&sh(&staged));
         assert_eq!(rwx, vec![volume_nqn(&staged), volume_nqn(VOL)]);
     }
 }

@@ -190,8 +190,12 @@ pub async fn resolve_replica_export_nqn(
     bdev_name: &str,
     bdev_aliases: &[&str],
 ) -> Result<String, RpcError> {
-    let canonical = crate::identity::replica_export_nqn(volume_id, replica_index);
-    let legacy = crate::identity::legacy_replica_export_nqn(volume_id, replica_index);
+    // The belt is the one deliberate both-domains boundary: callers hold
+    // whatever handle their path gave them, and resolution starts by
+    // crossing into the inner domain exactly once.
+    let sid = crate::identity::StorageId::of_handle(volume_id);
+    let canonical = crate::identity::replica_export_nqn(&sid, replica_index);
+    let legacy = crate::identity::legacy_replica_export_nqn(&sid, replica_index);
 
     if let Some(sub) = get_subsystem(rpc, &canonical).await? {
         if subsystem_holds_ns(&sub, bdev_name, bdev_aliases) {
@@ -960,8 +964,8 @@ mod tests {
     /// retire the shell that was wedging name-keyed probes.
     #[tokio::test]
     async fn f46_state_resolves_canonical_and_retires_the_shell() {
-        let canonical = crate::identity::replica_export_nqn(VOL, 1);
-        let legacy = crate::identity::legacy_replica_export_nqn(VOL, 1);
+        let canonical = crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle(VOL), 1);
+        let legacy = crate::identity::legacy_replica_export_nqn(&crate::identity::StorageId::of_handle(VOL), 1);
         let inner = ns_sub(&canonical, HEAD);
         let shell = empty_sub(&legacy);
         let rpc = SubsByNqn::new(&[(&inner.0, inner.1.clone()), (&shell.0, shell.1.clone())]);
@@ -978,7 +982,7 @@ mod tests {
     /// canonically would fail claim-shaped and migrating would sever I/O.
     #[tokio::test]
     async fn live_legacy_export_is_adopted_not_fought() {
-        let legacy = crate::identity::legacy_replica_export_nqn(VOL, 1);
+        let legacy = crate::identity::legacy_replica_export_nqn(&crate::identity::StorageId::of_handle(VOL), 1);
         let serving = ns_sub(&legacy, HEAD);
         let rpc = SubsByNqn::new(&[(&serving.0, serving.1.clone())]);
 
@@ -993,13 +997,13 @@ mod tests {
     async fn fresh_mint_is_canonical_and_foreign_legacy_ns_is_left_alone() {
         let rpc = SubsByNqn::new(&[]);
         let nqn = resolve_replica_export_nqn(&rpc, VOL, 1, HEAD, &[]).await.unwrap();
-        assert_eq!(nqn, crate::identity::replica_export_nqn(VOL, 1));
+        assert_eq!(nqn, crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle(VOL), 1));
 
-        let legacy = crate::identity::legacy_replica_export_nqn(VOL, 1);
+        let legacy = crate::identity::legacy_replica_export_nqn(&crate::identity::StorageId::of_handle(VOL), 1);
         let foreign = ns_sub(&legacy, "some-other-bdev");
         let rpc = SubsByNqn::new(&[(&foreign.0, foreign.1.clone())]);
         let nqn = resolve_replica_export_nqn(&rpc, VOL, 1, HEAD, &[]).await.unwrap();
-        assert_eq!(nqn, crate::identity::replica_export_nqn(VOL, 1));
+        assert_eq!(nqn, crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle(VOL), 1));
         assert!(rpc.deletes.lock().unwrap().is_empty(), "foreign ns must survive");
     }
 

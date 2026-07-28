@@ -3189,7 +3189,7 @@ impl NodeAgent {
                 // missing ones seed the expected pair for rebuild.
                 if is_ublk {
                     if va_map.get(&pv_name) == Some(&self.node_name) {
-                        let raid_bdev = crate::identity::raid_name(&csi.volume_handle);
+                        let raid_bdev = crate::identity::raid_name(&crate::identity::StagedHandle::new(csi.volume_handle.clone()));
                         if let Some((id, bdev)) = ublk_disks
                             .as_ref()
                             .and_then(|l| l.iter().find(|(_, b)| b.as_str() == raid_bdev.as_str()))
@@ -4918,7 +4918,7 @@ impl NodeAgent {
                 .disk_service
                 .call_spdk_rpc(&json!({
                     "method": crate::guarded_destroy::RPC_BDEV_RAID_DELETE,
-                    "params": { "name": crate::identity::raid_name(volume_handle) }
+                    "params": { "name": crate::identity::raid_name(&crate::identity::StagedHandle::new(volume_handle)) }
                 }))
                 .await;
             return Err("attachment left this node mid-repair — raid torn back down".into());
@@ -5178,7 +5178,7 @@ impl NodeAgent {
                 .map(|v| v.split('|').next() == Some(self.node_name.as_str()))
                 .unwrap_or(false);
             let attached = attached_here.contains(&pv_name);
-            let raid_present = raids.contains(&crate::identity::raid_name(&csi.volume_handle));
+            let raid_present = raids.contains(&crate::identity::raid_name(&crate::identity::StagedHandle::new(csi.volume_handle.clone())));
 
             // Collapse visibility (7b-3 P1): a raid previously observed
             // present that vanishes under a live attachment is announced
@@ -5418,7 +5418,8 @@ impl NodeAgent {
                 return Ok(());
             }
         };
-        let raid_name = crate::identity::raid_name(volume_id);
+        let raid_name =
+            crate::identity::raid_name(&crate::identity::StagedHandle::new(volume_id));
         let list = json!({ "method": "bdev_raid_get_bdevs", "params": { "category": "all" } });
         let response = self.disk_service.call_spdk_rpc(&list).await?;
         let exists = response
@@ -5526,9 +5527,10 @@ impl NodeAgent {
         volume_id: &str,
         replica_index: usize,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let sid = crate::identity::StorageId::of_handle(volume_id);
         let candidates = [
-            crate::identity::replica_export_nqn(volume_id, replica_index),
-            crate::identity::legacy_replica_export_nqn(volume_id, replica_index),
+            crate::identity::replica_export_nqn(&sid, replica_index),
+            crate::identity::legacy_replica_export_nqn(&sid, replica_index),
         ];
         let resp = self
             .disk_service

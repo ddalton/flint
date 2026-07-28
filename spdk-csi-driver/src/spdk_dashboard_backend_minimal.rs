@@ -1386,7 +1386,7 @@ async fn fetch_volumes_from_pvs(
                         // against the sync record when the volume has one.
                         let consumer_raids = {
                             let mut raids = consumer_raids_by_name
-                                .get(&crate::identity::raid_name(pv_name))
+                                .get(&crate::identity::raid_name(&crate::identity::StagedHandle::new(pv_name)))
                                 .cloned()
                                 .unwrap_or_default();
                             if let Some(rec) = &sync_record {
@@ -4437,7 +4437,7 @@ mod tests {
 
         let mut raids = vec![ConsumerRaid {
             node: "n1".to_string(),
-            raid_name: crate::identity::raid_name(vol),
+            raid_name: crate::identity::raid_name(&crate::identity::StagedHandle::new(vol)),
             state: "online".to_string(),
             num_base_bdevs: 2,
             num_base_bdevs_operational: 2,

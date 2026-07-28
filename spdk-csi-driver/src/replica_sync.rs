@@ -841,7 +841,10 @@ pub fn parse_user_snapshot_id(snapshot_id: &str) -> Option<(&str, u64)> {
 /// the "n1" namespace suffix. Local replicas need no equivalent — an lvol
 /// bdev's name is its uuid.
 pub fn expected_remote_base_bdev(volume_id: &str, replica_index: usize) -> String {
-    let nqn = crate::identity::replica_export_nqn(volume_id, replica_index);
+    let nqn = crate::identity::replica_export_nqn(
+        &crate::identity::StorageId::of_handle(volume_id),
+        replica_index,
+    );
     format!("nvme_{}n1", nqn.replace(':', "_").replace('.', "_"))
 }
 

@@ -853,7 +853,7 @@ impl SpdkCsiDriver {
             let (Some(name), Some(uuid)) = (entry["name"].as_str(), entry["uuid"].as_str()) else {
                 continue;
             };
-            if crate::identity::lvol_belongs_to(name, volume_id) {
+            if crate::identity::lvol_belongs_to(name, &crate::identity::StorageId::of_handle(volume_id)) {
                 owned.push((name.to_string(), uuid.to_string()));
             }
         }
@@ -2013,7 +2013,8 @@ impl SpdkCsiDriver {
         // the final delta and join the create as in-sync members. Deferral
         // is contained per-standby (the replica stays a chasing standby).
         let mut admitted_standbys: Vec<catchup::AdmittedStandby> = Vec::new();
-        let raid_name = crate::identity::raid_name(volume_id);
+        let raid_name =
+            crate::identity::raid_name(&crate::identity::StagedHandle::new(volume_id));
         if !deferred_standbys.is_empty() {
             let stage_cfg = catchup::StageConfig::from_env();
             admitted_standbys = catchup::admit_standbys_at_stage(
@@ -3457,7 +3458,8 @@ impl SpdkCsiDriver {
     /// Phase 0 fix: leg failure used to be invisible — the control plane kept
     /// reporting both replicas online while the array ran un-redundant.
     pub async fn check_local_raid_health(&self, volume_id: &str) -> Option<(bool, String)> {
-        let raid_name = crate::identity::raid_name(volume_id);
+        let raid_name =
+            crate::identity::raid_name(&crate::identity::StagedHandle::new(volume_id));
         let raid = self.get_raid_bdev(&raid_name).await.ok()??;
 
         let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
@@ -3510,7 +3512,9 @@ impl SpdkCsiDriver {
         // old single staged-domain NQN was a silent no-op on RWX server
         // nodes and the real (inner) subsystem outlived every unstage
         // (docs/f47-loopback-export-teardown-domain.md §3c). RWO sweeps one.
-        for loopback_nqn in crate::identity::loopback_teardown_nqns(volume_id) {
+        for loopback_nqn in
+            crate::identity::loopback_teardown_nqns(&crate::identity::StagedHandle::new(volume_id))
+        {
             let delete_body = json!({ "nqn": loopback_nqn });
             match self.call_node_agent(&self.node_id, "/api/blockdev/delete_nvmeof", &delete_body).await {
                 Ok(_) => println!("✅ [DRIVER] Loopback subsystem cleanup done (guarded): {}", loopback_nqn),
@@ -3519,7 +3523,8 @@ impl SpdkCsiDriver {
         }
 
         // 2. Raid bdev — frees the exclusive_write claims
-        let raid_name = crate::identity::raid_name(volume_id);
+        let raid_name =
+            crate::identity::raid_name(&crate::identity::StagedHandle::new(volume_id));
         if self.get_raid_bdev(&raid_name).await?.is_some() {
             let clear_sb = self.spdk_supports_clear_sb().await;
             self.delete_raid_bdev(&raid_name, clear_sb)
@@ -3797,7 +3802,7 @@ mod f44_teardown_prefix_tests {
     fn backing_handle_sweep_matches_inner_leg_controller_names() {
         let pv = "pvc-737e63a3-5099-4a88-90e4-64a399107a42";
         // The name the attach path builds for replica 1's controller.
-        let leg_nqn = crate::identity::replica_export_nqn(pv, 1);
+        let leg_nqn = crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle(pv), 1);
         let leg_controller = format!("nvme_{}", leg_nqn.replace(":", "_").replace(".", "_"));
 
         let staged = crate::identity::backing_handle(pv);
@@ -3822,7 +3827,7 @@ mod f44_teardown_prefix_tests {
         }
         let other = format!(
             "nvme_{}",
-            crate::identity::replica_export_nqn("pvc-ab", 0).replace(":", "_").replace(".", "_")
+            crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle("pvc-ab"), 0).replace(":", "_").replace(".", "_")
         );
         assert!(
             !per_replica_controller_prefixes("pvc-a").iter().any(|p| other.starts_with(p.as_str())),
@@ -3837,17 +3842,17 @@ mod f44_teardown_prefix_tests {
         use super::is_leg_export_nqn_for;
         let pv = "pvc-5574462a-a13a-4641-ae02-8c7d2e293490";
         let staged = crate::identity::backing_handle(pv);
-        let inner_leg = crate::identity::replica_export_nqn(pv, 1);
-        let wrapper_leg = crate::identity::legacy_replica_export_nqn(pv, 1);
+        let inner_leg = crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle(pv), 1);
+        let wrapper_leg = crate::identity::legacy_replica_export_nqn(&crate::identity::StorageId::of_handle(pv), 1);
 
         assert!(is_leg_export_nqn_for(&inner_leg, pv));
         assert!(is_leg_export_nqn_for(&wrapper_leg, &staged), "the F46 shell shape must match");
         assert!(!is_leg_export_nqn_for(&crate::identity::volume_nqn(pv), pv), "bare volume export");
         assert!(
-            !is_leg_export_nqn_for(&crate::identity::volume_nqn(&crate::identity::hrpad_export_id(pv, 1)), pv),
+            !is_leg_export_nqn_for(&crate::identity::volume_nqn(&crate::identity::hrpad_export_id(&crate::identity::StorageId::of_handle(pv), 1)), pv),
             "hrpad exports are not leg exports"
         );
-        assert!(!is_leg_export_nqn_for(&crate::identity::replica_export_nqn("pvc-ab", 0), "pvc-a"));
+        assert!(!is_leg_export_nqn_for(&crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle("pvc-ab"), 0), "pvc-a"));
     }
 }
 

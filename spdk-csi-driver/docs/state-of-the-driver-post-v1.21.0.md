@@ -50,6 +50,19 @@ least one new F-number.
   inert; plus a controller-kill mid-drill to prove failover.
 
 ### P2 — the newtype tranche (StagedHandle vs StorageId)
+> **TRANCHE 1 IMPLEMENTED 2026-07-28** (`identity.rs`: `StorageId` —
+> normalized at construction — and `StagedHandle` — verbatim, no `Deref`
+> to str; the helpers where the domains cross are retyped:
+> `replica_export_nqn`/`legacy_…`/`replica_alias_nqn`, `raid_name`,
+> `loopback_teardown_nqns`, `lvol_belongs_to`, the replica-family mints,
+> `hotrejoin_export_nqn`; 911 tests, all-targets + musl clean;
+> behavior-preserving by construction). Remaining tranches: hoist the
+> types upward through fn signatures/record structs so boundary
+> `StorageId::of_handle` constructions migrate to the RPC entry points
+> (each construction site is greppable — that IS the tranche-2 work
+> list), then type the derived-id namespaces (`lvol_name`, `volume_nqn`,
+> epoch/snapshot naming — zero field bugs to date, needs an ExportId-style
+> domain analysis first).
 - **Class it kills:** identity-domain confusion — F44, F45/B1/B2, F46,
   F47, F51 all landed as "right helper, wrong id domain". The CI lint
   cannot catch a wrong id passed to a right helper; the type system can.

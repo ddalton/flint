@@ -1926,9 +1926,10 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     // until the orphan sweep condemned them). replica_export_nqn
                     // is the canonical inner-domain shape; the legacy wrapper
                     // shape covers exports minted by pre-F46 stage-side code.
-                    let nqn = spdk_csi_driver::identity::replica_export_nqn(&volume_id, i);
+                    let sid = spdk_csi_driver::identity::StorageId::of_handle(&volume_id);
+                    let nqn = spdk_csi_driver::identity::replica_export_nqn(&sid, i);
                     let _ = self.driver.remove_nvmeof_target(&replica.node_name, &nqn).await;
-                    let legacy = spdk_csi_driver::identity::legacy_replica_export_nqn(&volume_id, i);
+                    let legacy = spdk_csi_driver::identity::legacy_replica_export_nqn(&sid, i);
                     let _ = self.driver.remove_nvmeof_target(&replica.node_name, &legacy).await;
                 }
 

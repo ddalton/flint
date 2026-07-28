@@ -194,7 +194,7 @@ impl CatchupRpc for SpdkCsiDriver {
         consumer_node: &str,
     ) -> Result<NvmeofConnectionInfo, RpcError> {
         let export_id = crate::identity::hrpad_export_id(
-            crate::identity::storage_id_of_handle(volume_id),
+            &crate::identity::StorageId::of_handle(volume_id),
             replica_index,
         );
         self.setup_nvmeof_target_on_node(node, bdev_name, &export_id, consumer_node).await
@@ -2548,7 +2548,7 @@ pub async fn run_catchup_for_volume(
         // an empty record must never condemn a healable replica.
         return Ok(());
     }
-    let raid_name = crate::identity::raid_name(volume_id);
+    let raid_name = crate::identity::raid_name(&crate::identity::StagedHandle::new(volume_id));
 
     // Tier-2 7b: replicas claimed by a hot rejoin (marker set) belong to its
     // reconciler — resume localization, adopt a committed-but-unflipped
@@ -2982,7 +2982,10 @@ mod tests {
                 consumer_node.to_string(),
             ));
             Ok(NvmeofConnectionInfo {
-                nqn: crate::identity::replica_export_nqn(volume_id, replica_index),
+                nqn: crate::identity::replica_export_nqn(
+                    &crate::identity::StorageId::of_handle(volume_id),
+                    replica_index,
+                ),
                 target_ip: "10.0.0.99".to_string(),
                 target_port: 4420,
                 transport: "tcp".to_string(),
@@ -5153,7 +5156,7 @@ mod tests {
 
     fn f48_consumer() -> HeadConsumer {
         HeadConsumer {
-            nqn: crate::identity::replica_export_nqn("vol1", 0),
+            nqn: crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle("vol1"), 0),
             hosts: vec!["nqn.2024-11.com.flint:node:aws-3".to_string()],
         }
     }
@@ -5239,7 +5242,7 @@ mod tests {
     async fn f48_non_flint_host_is_genuine() {
         let rpc = RaidsMock { raids: json!([]) };
         let consumer = HeadConsumer {
-            nqn: crate::identity::replica_export_nqn("vol1", 0),
+            nqn: crate::identity::replica_export_nqn(&crate::identity::StorageId::of_handle("vol1"), 0),
             hosts: vec!["nqn.2014-08.org.nvmexpress:uuid:kernel-initiator".to_string()],
         };
         assert!(zombie_head_consumers(&rpc, &consumer, &["head-uuid-live"])
