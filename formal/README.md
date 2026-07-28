@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine and the snapshot protocol
 
-Two modules, one gate (`scripts/check-tla.sh`, eleven TLC runs).
+Two modules, one gate (`scripts/check-tla.sh`, twelve TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -81,6 +81,17 @@ It runs nine configs, ALL required:
    `Replace` and `ServeWithRisk` are justified by evidence, as in the
    code, and the strict runs verify `Inv_EvidenceSound` +
    `Inv_NoFalseRisk` under the strict-evidence axiom.
+5d. `FlintReplicationP4.cfg` — the pre-P4 world (`SPECIFICATION
+   SpecNoP4`: weak fairness on `RaidDeconfigure` dropped — nothing
+   bounds dead-member detection). TLC **must find** a temporal
+   counterexample to `EventuallyWritable`: the stall lasso where a
+   blackholed serving leg sits in the raid forever and every write
+   hangs (the 150-177s ledger stalls, unbounded). Gating this exposed
+   that the prose claim "remove the P4 fairness and the liveness fails"
+   was FALSE of `EventuallyServingAgain` — the stall is invisible to a
+   content-shaped property (TLC verifies the old property HOLDS under
+   `SpecNoP4`), so the tooth required stating `EventuallyWritable`, the
+   property P4 actually guarantees; both strict runs now verify it.
 6. `FlintSnapshots.cfg` — the shipped copy protocol (full ordered walk,
    blobstore relink): `Inv_SessionFaithful` holds. Action coverage
    verified — the based suffix walk contributes zero new distinct
@@ -108,7 +119,7 @@ cannot rediscover the bug classes it exists for proves nothing.
 | `Assemble` gate disjunction | `freshness_gate.rs` (`Proceed` / `Defer` / `ServeWithRisk`) |
 | `Replace` guard `legUp = "dead"` | `replica_replace.rs::node_gone` (the C2 justification) |
 | `raidGen` / `legGen` / `NewestOf` | SPDK raid1 superblock examine (newest incarnation serves) |
-| WF on `RaidDeconfigure` | P4 dead-target timeouts (TCP_USER_TIMEOUT + fast_io_fail) |
+| WF on `RaidDeconfigure` (split into `Fairness` vs `SpecNoP4`) | P4 dead-target timeouts (TCP_USER_TIMEOUT + fast_io_fail); `EventuallyWritable`/`GoodWritable` is the write-availability guarantee those timeouts buy |
 | WF on `ConfirmDead` | the replace-after / node-gone threshold |
 | `HotRejoin` (kept identity + payload) | `hot_rejoin.rs::hot_rejoin_volume` (contrast `Replace`: fresh identity, empty payload) |
 | `RejoinGuard` at CatchUp **and** Admit | `catchup.rs`'s "usable shared epoch history" check; re-verified in the admission window |

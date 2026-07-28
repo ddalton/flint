@@ -618,11 +618,10 @@ Next ==
 \* arm: a divergent standby is eventually demoted to a full rebuild
 \* rather than parking forever.  Failures and writes are the
 \* environment; HotRejoin is the orchestrator's choice.
-Fairness ==
+FairnessCore ==
   /\ \A l \in Legs :
        /\ WF_vars(LegPerish(l))
        /\ WF_vars(DeemDead(l))
-       /\ WF_vars(RaidDeconfigure(l))
        /\ WF_vars(MonitorMarkStale(l))
        /\ WF_vars(Replace(l))
        /\ WF_vars(Scrub(l))
@@ -634,7 +633,21 @@ Fairness ==
   /\ WF_vars(ReleaseCatchup)
   /\ WF_vars(AcquireAdmission)
 
+\* WF on RaidDeconfigure IS P4: the data plane detects a dead/silent
+\* member in bounded time (TCP_USER_TIMEOUT + command watchdog +
+\* fast_io_fail) and faults it out.  It is split from FairnessCore so
+\* the P4 mutation (SpecNoP4) can drop exactly this assumption.
+Fairness ==
+  /\ FairnessCore
+  /\ \A l \in Legs : WF_vars(RaidDeconfigure(l))
+
 Spec == Init /\ [][Next]_vars /\ Fairness
+
+\* The pre-P4 world: nothing bounds detection.  A blackholed serving leg
+\* may sit in the raid forever, stalling every write — the 150-177s
+\* ledger stalls, unbounded.  FlintReplicationP4.cfg checks
+\* EventuallyWritable against THIS spec and must find the stall lasso.
+SpecNoP4 == Init /\ [][Next]_vars /\ FairnessCore
 
 (***************************************************************************)
 (* Invariants                                                              *)
@@ -686,10 +699,13 @@ Inv == TypeOK /\ Inv_NoSilentLoss /\ Inv_InsyncServingIsCurrent
 (***************************************************************************)
 (* Liveness: availability after the storm.  Once the failure budget is    *)
 (* exhausted, the system converges to a serving assembly with the acked   *)
-(* content intact (or the risk surfaced) — and stays there.  Remove the   *)
-(* P4/ConfirmDead fairness and this fails: a blackholed leg stalls        *)
-(* everything forever.  Remove WF(Scrub) and a divergent rejoiner parks   *)
-(* as a standby forever instead of demoting to a full rebuild.            *)
+(* content intact (or the risk surfaced) — and stays there.  NOTE: this   *)
+(* property is CONTENT-shaped and provably blind to the P4 stall (a       *)
+(* blackholed serving member keeps it content-good while every write      *)
+(* hangs) — TLC verifies it holds even under SpecNoP4.  The write-        *)
+(* availability claim lives in EventuallyWritable below, where it is      *)
+(* enforceable.  Remove WF(Scrub) and a divergent rejoiner parks as a     *)
+(* standby forever instead of demoting to a full rebuild.                 *)
 (*                                                                        *)
 (* Deferred is the one legitimate unavailability: NodeStage's Defer arm.  *)
 (* With no up in-sync leg there is no assembly material — every survivor  *)
@@ -707,6 +723,23 @@ Deferred == serving = {} /\ UpInSync = {}
 
 EventuallyServingAgain ==
   <>[](crashes < MaxCrashes \/ GoodServing \/ Deferred)
+
+(***************************************************************************)
+(* The P4 theorem — availability of WRITES, which GoodServing does NOT    *)
+(* imply: a raid holding a blackholed member is content-good (every leg   *)
+(* has the acked data) yet every write stalls, because a sync mirror      *)
+(* needs all members responsive.  Gating this claim exposed that the      *)
+(* earlier prose ("remove the P4 fairness and the liveness fails") was    *)
+(* not true of EventuallyServingAgain at all — the stall is invisible to  *)
+(* a content-shaped property.  EventuallyWritable is the property P4      *)
+(* actually guarantees: after the storm, the serving assembly is all-up   *)
+(* (writes flow) or the volume is honestly Deferred.  Remove WF on        *)
+(* RaidDeconfigure (SpecNoP4) and TLC finds the stall lasso.              *)
+(***************************************************************************)
+GoodWritable == serving # {} /\ \A l \in serving : legUp[l] = "up"
+
+EventuallyWritable ==
+  <>[](crashes < MaxCrashes \/ GoodWritable \/ Deferred)
 
 (***************************************************************************)
 (* The F43 theorem: no warm standby waits forever.  Every wait resolves — *)
