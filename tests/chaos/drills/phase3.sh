@@ -557,6 +557,13 @@ case "$DRILL" in
   OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
   ACK_AT_KILL=$(last_ack_line)
   note "acked tail at kill: $ACK_AT_KILL"
+  # F55 capture: the OUTGOING server instance's log is the only witness to
+  # any error it returns while the cutover bounce tears it down — and the
+  # pod's deletion erases it (runam 2026-07-28: fsync EIO → pg PANIC with
+  # no server-side rejection in the SURVIVING instance's log). Stream it
+  # from before the kill; the follow exits by itself when the pod dies.
+  ( kubectl logs -n "$DRIVER_NS" -f "$(nfs_pod)" > "$ARTIFACTS/36e-nfs-server-outgoing.log" 2>/dev/null ) &
+  NFSLOG_PID=$!
   note "raid pre (on $NFS_NODE): $(raid_summary "$NFS_NODE" | head -2)"
   IID=$(instance_id_for_node "$LEG_NODE")
   [ -n "$IID" ] || fail "no instance id for $LEG_NODE"
@@ -708,6 +715,7 @@ case "$DRILL" in
   [ -z "$RISK" ] && ok "no acked-tail-risk raised (the surviving leg never trailed)" \
     || note "acked-tail-risk: $RISK"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
+    kill "${NFSLOG_PID:-0}" 2>/dev/null || true
     NOTES="F43 r2-perm: node_gone=${T_NODEGONE}s degrade=${T_DEGRADE:--1}s swap=${T_SWAP}s standby=${T_STANDBY}s cutover=${T_CUTOVER}s in_sync=${T_SYNC}s settled=${T_SETTLED}s witness=${T_WITNESS}s io_resume=${T_RESUME}s new_node=${NEW_NODE:-?} cut_ev=$CUT_START/$CUT_OK/$CUT_INEFF yields=$YIELDS seizes=$SEIZES head_in_use=$HEADINUSE risk=${RISK:-none}" verify
 
   # The F43 verdict. in_sync is the load-bearing assertion: a parked standby

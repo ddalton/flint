@@ -355,8 +355,14 @@ async fn handle_tcp_connection(
     let pipeline = crate::nfs::pipeline::ConnectionPipeline::from_env();
 
     loop {
+        // F55: a draining server closes each connection at its frame
+        // boundary — the only point where a FIN cannot truncate a reply.
+        if crate::nfs::pipeline::DrainGate::global().is_draining() {
+            info!("🔻 [NFS_SERVER] Connection #{} from {} closed at frame boundary (draining for shutdown)", conn_id, peer);
+            return Ok(());
+        }
         debug!("📥 [NFS_SERVER] Connection #{}: Waiting for RPC message #{} from {}", conn_id, rpc_count + 1, peer);
-        
+
         // Read RPC record marker (4 bytes)
         let mut marker_buf = [0u8; 4];
         match reader.read_exact(&mut marker_buf).await {

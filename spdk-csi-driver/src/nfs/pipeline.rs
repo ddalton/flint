@@ -40,10 +40,97 @@
 
 use bytes::Bytes;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::warn;
+
+/// F55 (runam 2026-07-28): a SIGTERM that exits while a reply is mid-write
+/// truncates the RPC frame on the wire, and the client turns that into an
+/// instant EIO on the in-flight fsync/COMMIT — postgres PANICs (fsyncgate)
+/// and its abort wedges on the dying mount. Dropping connections is only
+/// safe BETWEEN complete frames: an unreplied request is retransmitted by
+/// the client against the next instance; a truncated reply is poison.
+///
+/// The gate makes shutdown frame-atomic: `begin()` stops new dispatches
+/// (submit refuses; read loops close at their next frame boundary), and
+/// `drain()` waits — bounded — for every reply already past dispatch to
+/// finish flushing. The bound matters more than completeness: the F33b
+/// prompt-exit obligation (lazy-umount data loss at kubelet's grace
+/// deadline) caps how long shutdown may linger, so an expired deadline
+/// exits anyway and reverts that one reply to pre-F55 behavior.
+pub struct DrainGate {
+    draining: AtomicBool,
+    inflight: AtomicU64,
+}
+
+impl DrainGate {
+    pub const fn new() -> Self {
+        Self { draining: AtomicBool::new(false), inflight: AtomicU64::new(0) }
+    }
+
+    /// The process-wide gate every production pipeline uses.
+    pub fn global() -> &'static DrainGate {
+        static GATE: DrainGate = DrainGate::new();
+        &GATE
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
+    }
+
+    /// Stop admitting new dispatches. Idempotent.
+    pub fn begin(&self) {
+        self.draining.store(true, Ordering::Release);
+    }
+
+    /// Enter the in-flight section, or `None` once draining: the caller
+    /// must then tear the connection down WITHOUT dispatching (the frame
+    /// stays unreplied, which the client handles by retransmitting).
+    fn enter(&'static self) -> Option<InflightReply> {
+        if self.is_draining() {
+            return None;
+        }
+        self.inflight.fetch_add(1, Ordering::AcqRel);
+        // Order matters: the count is visible before the second draining
+        // check, so a drain that begins between the two either sees this
+        // entry or this entry sees the drain and backs out.
+        if self.is_draining() {
+            self.inflight.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(InflightReply { gate: self })
+    }
+
+    /// Wait for in-flight replies to reach zero, at most `deadline`.
+    /// Returns `(remaining, clean)` — `clean` when everything flushed.
+    pub async fn drain(&self, deadline: std::time::Duration) -> (u64, bool) {
+        let start = tokio::time::Instant::now();
+        loop {
+            let n = self.inflight.load(Ordering::Acquire);
+            if n == 0 {
+                return (0, true);
+            }
+            if start.elapsed() >= deadline {
+                return (n, false);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+}
+
+/// RAII in-flight token: alive from just before dispatch until the reply
+/// write resolves (or the task dies — the Drop keeps the count honest
+/// even on panic/cancellation).
+struct InflightReply {
+    gate: &'static DrainGate,
+}
+
+impl Drop for InflightReply {
+    fn drop(&mut self) {
+        self.gate.inflight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// Default maximum concurrently-dispatching requests per connection
 /// (bound B1). Matches the Linux kernel client's default
@@ -69,16 +156,24 @@ pub struct ConnectionPipeline {
     /// Set when a spawned task's reply write fails: the connection is
     /// dead, so the read loop should stop feeding it.
     broken: Arc<AtomicBool>,
+    /// F55 shutdown gate; the global one in production, leaked locals in
+    /// tests so gate state never crosses concurrently-running tests.
+    gate: &'static DrainGate,
 }
 
 impl ConnectionPipeline {
     /// `max_inflight == 0` selects the sequential fallback (I5).
     pub fn new(max_inflight: u32) -> Self {
+        Self::with_gate(max_inflight, DrainGate::global())
+    }
+
+    pub fn with_gate(max_inflight: u32, gate: &'static DrainGate) -> Self {
         Self {
             sem: (max_inflight > 0)
                 .then(|| Arc::new(Semaphore::new(max_inflight as usize))),
             max_inflight: max_inflight as usize,
             broken: Arc::new(AtomicBool::new(false)),
+            gate,
         }
     }
 
@@ -131,10 +226,23 @@ impl ConnectionPipeline {
             ));
         }
 
+        // F55: once draining, never START a reply — the caller tears the
+        // connection down and the client retransmits this frame against
+        // the next instance. (A reply already past this point finishes;
+        // that is exactly what the drain waits for.)
+        let Some(token) = self.gate.enter() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "server draining for shutdown",
+            ));
+        };
+
         let Some(sem) = &self.sem else {
             // I5: sequential fallback.
             let reply = dispatch(request).await;
-            return write(reply).await;
+            let res = write(reply).await;
+            drop(token);
+            return res;
         };
 
         // Backpressure (B2): once max_inflight dispatches are running,
@@ -152,6 +260,7 @@ impl ConnectionPipeline {
         if !more_queued && !others_in_flight {
             let reply = dispatch(request).await;
             let res = write(reply).await;
+            drop(token);
             drop(permit);
             if res.is_err() {
                 self.broken.store(true, Ordering::Release);
@@ -166,6 +275,7 @@ impl ConnectionPipeline {
                 warn!("pipelined reply write failed (connection dying): {}", e);
                 broken.store(true, Ordering::Release);
             }
+            drop(token);
             drop(permit);
         });
 
@@ -472,6 +582,102 @@ mod tests {
             }
         }
         assert!(poisoned, "pipeline must reject submits after a write failure");
+    }
+
+    fn leaked_gate() -> &'static DrainGate {
+        Box::leak(Box::new(DrainGate::new()))
+    }
+
+    /// F55: drain must WAIT for a reply already past dispatch to finish
+    /// flushing — the truncated-frame hazard is exactly a write cut off
+    /// mid-flight.
+    #[tokio::test]
+    async fn f55_drain_waits_for_inflight_reply_write() {
+        let gate = leaked_gate();
+        let p = ConnectionPipeline::with_gate(8, gate);
+        let wrote: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+        let w = Arc::clone(&wrote);
+        p.submit(
+            req(0),
+            true, // force the spawned path
+            |r| async move {
+                sleep(Duration::from_millis(80)).await;
+                r
+            },
+            move |_| async move {
+                sleep(Duration::from_millis(40)).await;
+                w.store(true, Ordering::Release);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        gate.begin();
+        let (remaining, clean) = gate.drain(Duration::from_secs(2)).await;
+        assert!(clean, "drain must complete cleanly, {} left", remaining);
+        assert!(
+            wrote.load(Ordering::Acquire),
+            "the in-flight reply must have finished writing before drain returned"
+        );
+    }
+
+    /// F55: once draining, submit must REFUSE new dispatches — an
+    /// unreplied request is retransmitted by the client; starting a reply
+    /// during shutdown re-opens the truncation window.
+    #[tokio::test]
+    async fn f55_submit_refused_once_draining() {
+        let gate = leaked_gate();
+        let p = ConnectionPipeline::with_gate(8, gate);
+        gate.begin();
+        let dispatched: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let d = Arc::clone(&dispatched);
+        let res = p
+            .submit(
+                req(0),
+                true,
+                move |r| async move {
+                    d.store(true, Ordering::Release);
+                    r
+                },
+                |_| async { Ok(()) },
+            )
+            .await;
+        assert!(res.is_err(), "draining pipeline must refuse the frame");
+        assert!(!dispatched.load(Ordering::Acquire), "and must not have dispatched it");
+        // Nothing entered, so the drain is instant and clean.
+        let (remaining, clean) = gate.drain(Duration::from_millis(50)).await;
+        assert_eq!((remaining, clean), (0, true));
+    }
+
+    /// F55: the deadline is a hard bound (the F33b prompt-exit
+    /// obligation) — a wedged write reports dirty instead of hanging
+    /// shutdown past kubelet's grace.
+    #[tokio::test]
+    async fn f55_drain_deadline_expires_dirty() {
+        let gate = leaked_gate();
+        let p = ConnectionPipeline::with_gate(8, gate);
+        p.submit(
+            req(0),
+            true,
+            |r| async move { r },
+            |_| async {
+                std::future::pending::<()>().await;
+                unreachable!()
+            },
+        )
+        .await
+        .unwrap();
+        gate.begin();
+        let start = Instant::now();
+        let (remaining, clean) = gate.drain(Duration::from_millis(100)).await;
+        assert!(!clean, "a wedged reply must expire the deadline");
+        assert_eq!(remaining, 1);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "drain must return promptly at the deadline"
+        );
     }
 
     /// Sequential fallback propagates write errors synchronously (the

@@ -231,7 +231,34 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         _ = sigterm.recv() => {
-            info!("SIGTERM — shutting down (open TCP connections dropped; clients recover via persisted state)");
+            // F55 (runam 2026-07-28): exiting with a reply mid-write
+            // truncates the frame and the client turns it into an
+            // instant EIO on the in-flight fsync — postgres PANICs
+            // (fsyncgate) and its abort wedges on the dying mount
+            // (~5min outage, 227s ledger stall; zero loss). Deterministic
+            // repro: bounce mid-checkpoint. Quiesced bounces are clean,
+            // so the ONLY hazard is a reply in flight: stop admitting,
+            // drain the in-flight replies (bounded — the F33b prompt-exit
+            // obligation above still stands), then exit. Connections die
+            // at frame boundaries; unreplied requests are retransmitted
+            // by the client against the next instance.
+            let gate = spdk_csi_driver::nfs::pipeline::DrainGate::global();
+            gate.begin();
+            let drain_ms = std::env::var("FLINT_NFS_DRAIN_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(3000);
+            let (remaining, clean) =
+                gate.drain(std::time::Duration::from_millis(drain_ms)).await;
+            if clean {
+                info!("SIGTERM — drained in-flight replies, shutting down (frame-atomic; clients recover via persisted state)");
+            } else {
+                tracing::warn!(
+                    remaining,
+                    drain_ms,
+                    "SIGTERM — drain deadline expired with replies still in flight; exiting anyway (F33b prompt-exit obligation)"
+                );
+            }
         }
         _ = tokio::signal::ctrl_c() => {
             info!("SIGINT — shutting down");
