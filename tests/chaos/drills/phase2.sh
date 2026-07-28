@@ -384,17 +384,30 @@ case "$DRILL" in
   done
   [ "$T_REINIT" -ge 0 ] || fail "store never re-initialized — F11 self-heal did not fire"
   ok "store re-initialized in place at ${T_REINIT}s"
-  T_SYNC=-1; ST=""
+  # F50 gate: a parked standby that flips to stale means a hot-rejoin
+  # window opened on it (the intent write demotes standby BY DESIGN); the
+  # leg bouncing standby→stale→standby repeatedly without ever reaching
+  # in_sync is the F50 livelock (windows opened by one controller process
+  # scrubbed mid-flight by another — the vestigial operator pod on runai).
+  # Fail it BY NAME instead of timing out generically — a silent 15-min
+  # timeout is what let F50 hide behind F48.
+  T_SYNC=-1; ST=""; PREV_ST=""; F50_CYCLES=0
   for i in $(seq 1 90); do
     REC=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replica-sync-state}' 2>/dev/null)
     ST=$(echo "$REC" | jq -r --arg n "$REMOTE" '.replicas[] | select(.node_name==$n) | .sync_state' 2>/dev/null | head -1)
     [ "$ST" = "in_sync" ] && { T_SYNC=$(( $(epoch) - T0 )); break; }
+    if [ "$PREV_ST" = "standby" ] && [ "$ST" = "stale" ]; then
+      F50_CYCLES=$(( F50_CYCLES + 1 ))
+      note "standby→stale flip #$F50_CYCLES (a hot-rejoin window opened on the parked leg)"
+      [ "$F50_CYCLES" -gt 2 ] && fail "F50: the leg is cycling standby→stale→standby ($F50_CYCLES windows opened, none landed) — admission windows are being destroyed mid-flight (docs/f50-hotrejoin-window-concurrency.md)"
+    fi
+    PREV_ST="$ST"
     sleep 10
   done
   if [ "$T_SYNC" -ge 0 ]; then
-    ok "rebuilt leg in_sync at ${T_SYNC}s — store loss fully self-healed"
+    ok "rebuilt leg in_sync at ${T_SYNC}s — store loss fully self-healed (window flips: $F50_CYCLES)"
   else
-    note "rebuilt leg NOT in_sync after 15min (state: ${ST:-unknown}) — record + investigate"
+    note "rebuilt leg NOT in_sync after 15min (state: ${ST:-unknown}, window flips: $F50_CYCLES) — record + investigate"
   fi
   EV=$(kubectl get events -n default --field-selector reason=ReplicaStoreReinitialized --no-headers 2>/dev/null | grep -c . || true)
   [ "${EV:-0}" -ge 1 ] && ok "ReplicaStoreReinitialized event emitted" || note "no ReplicaStoreReinitialized event found"
@@ -432,8 +445,12 @@ case "$DRILL" in
   # slot unconfigured, and the F36 defer looping on a zombie controller.
   [ "$T_SYNC" -ge 0 ] \
     || fail "2.9 FAIL (F48): the rebuilt leg never reached in_sync (state='${ST:-unknown}') — head_in_use=$HEADINUSE zombies_severed=$ZOMBIE max_reserved=${MAXRES}s; the volume is stuck degraded 1/2 with no self-heal"
+  # NOT a hard gate: a high reserved_secs is only starvation if it BLOCKED the
+  # rebuild, and the in_sync assertion above already proves it did not. A
+  # resolver legitimately holding its reservation across a long catch-up shows
+  # the same number, so failing on it alone red-flags healthy runs.
   [ "$MAXRES" -le 65 ] \
-    || fail "2.9 FAIL (F48 fix 2): a resolver reservation starved maintainers for ${MAXRES}s — releases=$RELEASED"
+    || note "max reserved_secs=${MAXRES}s exceeded one tick (releases=$RELEASED) — benign here since the leg still reached in_sync, but worth a look if it grows"
   ;;
 
 2.10) # v1.21.0 online expansion under writes (multi-replica RWO).

@@ -1,0 +1,52 @@
+{
+    "current_epoch": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-5",
+    "epochs": [
+        {
+            "name": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-1",
+            "recorded_at": "2026-07-27T21:51:59Z"
+        },
+        {
+            "name": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-2",
+            "recorded_at": "2026-07-27T21:56:59Z"
+        },
+        {
+            "name": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-3",
+            "recorded_at": "2026-07-27T22:01:59Z"
+        },
+        {
+            "name": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-4",
+            "recorded_at": "2026-07-27T22:06:59Z"
+        },
+        {
+            "name": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-5",
+            "recorded_at": "2026-07-27T22:11:59Z"
+        }
+    ],
+    "retention_pin": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-4",
+    "writer_set": {
+        "lvol_uuids": [
+            "c2829f6c-16b3-4a8a-9c69-a6dcbf4a0ca1"
+        ],
+        "since": "2026-07-27T22:00:01Z"
+    },
+    "replicas": [
+        {
+            "node_name": "runai-aws-1",
+            "node_uid": "88517365-1d1e-4064-b13a-ba9163a41e7c",
+            "lvol_uuid": "17fd6f0c-1dfc-4a6b-ad61-11b8336b334f",
+            "sync_state": "stale",
+            "last_epoch": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-4",
+            "since": "2026-07-27T22:11:59Z",
+            "reason": "hot-rejoin window opening (converged standby target)",
+            "active_lvol_uuid": "0c29b75c-d938-4e7b-bb89-717c3e29699b",
+            "reverted_to": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-4"
+        },
+        {
+            "node_name": "runai-aws-2",
+            "node_uid": "ac72f9e9-0327-4b8e-b8a5-c826df222dfc",
+            "lvol_uuid": "c2829f6c-16b3-4a8a-9c69-a6dcbf4a0ca1",
+            "sync_state": "in_sync",
+            "last_epoch": "epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-5"
+        }
+    ]
+}

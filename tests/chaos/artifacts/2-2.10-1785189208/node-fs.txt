@@ -1,0 +1,16 @@
+runai-aws-1 nodefs=4.66/7.93GiB 58.8% imagefs=1.91/7.93GiB 24.1%
+  pod-ephemeral flint-system/flint-csi-node-bwt9q 0.0GiB
+  pod-ephemeral kube-system/cilium-blm2m 0.0GiB
+  pod-ephemeral flint-system/spdk-dashboard-6fb4dfdcd-xstx2 0.0GiB
+runai-aws-2 nodefs=5.12/7.93GiB 64.6% imagefs=2.22/7.93GiB 28.0%
+  pod-ephemeral kube-system/cilium-kxp66 0.0GiB
+  pod-ephemeral flint-system/flint-csi-node-c8k77 0.0GiB
+  pod-ephemeral kube-system/cilium-envoy-h9rtf 0.0GiB
+runai-aws-3 nodefs=4.74/7.93GiB 59.8% imagefs=1.96/7.93GiB 24.7%
+  pod-ephemeral flint-system/flint-csi-node-b7grl 0.0GiB
+  pod-ephemeral kube-system/cilium-g52dd 0.0GiB
+  pod-ephemeral flint-system/spdk-controller-operator-b5f44559b-6npn9 0.0GiB
+runai-aws-4 nodefs=4.43/7.93GiB 55.9% imagefs=1.71/7.93GiB 21.6%
+  pod-ephemeral kube-system/cilium-87c4f 0.0GiB
+  pod-ephemeral flint-system/flint-csi-node-rtrj8 0.0GiB
+  pod-ephemeral flint-system/flint-csi-controller-6798647dc9-wsxff 0.0GiB

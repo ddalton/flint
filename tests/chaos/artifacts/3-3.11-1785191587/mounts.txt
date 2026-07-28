@@ -1,0 +1,3 @@
+runai-aws-1 globalmounts=2 orphans=''
+runai-aws-2 globalmounts=1 orphans=''
+runai-aws-4 globalmounts=0 orphans=''

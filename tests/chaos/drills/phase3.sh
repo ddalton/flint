@@ -568,8 +568,22 @@ case "$DRILL" in
   note "Node object deleted at ${T_NODEGONE}s — re-placement trigger armed"
 
   # (a) F42 regression check: the raid must FAULT the dead leg, not stall.
-  wait_acks_fresh 180 && ok "I/O never stalled through the kill (F42 fast_io_fail held)" \
-    || note "acks went stale after the kill — F42 REGRESSION?"
+  # Report the MEASURED gap, not just "recovered inside the budget". runai
+  # 2026-07-27 printed "I/O never stalled" off a bare wait_acks_fresh 180
+  # while writes were actually gone for ~150s (last ack T0+6s, controller
+  # still state=resetting at T0+148s) — detection, not fast_io_fail, is what
+  # dominates on the RWX path. runad's RWO 2.5 never paused at all, so the
+  # two are not comparable and the message must not imply they are.
+  if wait_acks_fresh 180; then
+    KILL_GAP=$(max_stall_since "$T0")
+    if [ "${KILL_GAP:-0}" -le 30 ]; then
+      ok "I/O never stalled through the kill (max gap ${KILL_GAP}s — F42 fast_io_fail held)"
+    else
+      note "I/O RESUMED but stalled ${KILL_GAP}s through the kill — inside the 180s budget, but fast_io_fail is 20s; detection latency, not fail-fast, dominated"
+    fi
+  else
+    note "acks went stale after the kill and never recovered in 180s — F42 REGRESSION?"
+  fi
 
   # (b) F40: RWX re-placement must actually dispatch (identity swap).
   T_SWAP=-1; NEW_NODE=""
@@ -804,8 +818,28 @@ case "$DRILL" in
   wait_acks_fresh 300 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
   witness_verdict "$T0"
 
+  # (h) F52: the relocation must be INVISIBLE to the client. Pre-fix, the
+  # new server's cold dcache resolved every replayed filehandle to "/"
+  # (disconnected dentry), answering WRITE with EISDIR-as-IO — postgres
+  # PANICs on the fdatasync EIO — and GETATTR with the container root's
+  # attributes (client-side ESTALE, 1/s, server-silent). One Stale line
+  # IS the regression (docs/f52-estale-on-rwx-server-relocation.md).
+  # Both container instances: an eviction mid-drill erased the PANIC on
+  # runai 3.6e and minted a hollow db=PASS.
+  PGL_BOTH=$(printf '%s\n%s' \
+    "$(kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null || true)" \
+    "$(kubectl logs -n "$NS" $PG -c postgres --previous 2>/dev/null || true)")
+  F52_ESTALE=$(printf '%s' "$PGL_BOTH" | grep -ci "stale file handle" || true)
+  F52_PANIC=$(printf '%s' "$PGL_BOTH" | grep -c "PANIC" || true)
+  [ "${F52_ESTALE:-0}" -eq 0 ] && [ "${F52_PANIC:-0}" -eq 0 ] \
+    && ok "client saw ZERO ESTALE / ZERO PANIC across the relocation (F52 held)" \
+    || note "F52 SIGNATURE: estale=$F52_ESTALE panic=$F52_PANIC in the client's postgres log"
+  kubectl logs -n "$DRIVER_NS" "${NEWPOD:-x}" 2>/dev/null | grep -q "fh identity index prewarmed" \
+    && ok "new server prewarmed its fh identity index before serving" \
+    || note "no fh-identity prewarm marker in the new server's log (pre-F52-fix image?)"
+
   EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
-    NOTES="F49 server-onto-leg: ${OLD_SRV}->${NEWNODE:-?} served=${T_SERVED}s eperm=$EPERM_HITS raidfail=$RAIDFAIL squatter='${LOCAL_LEG_EXPORT:-none}' f47_residue='$(echo "${OLD_SHELLS:-none}" | tr '\n' ' ')' raid='${RAID_POST}' witness=${T_WITNESS}s io_resume=${T_RESUME}s" verify
+    NOTES="F49 server-onto-leg: ${OLD_SRV}->${NEWNODE:-?} served=${T_SERVED}s eperm=$EPERM_HITS raidfail=$RAIDFAIL squatter='${LOCAL_LEG_EXPORT:-none}' f47_residue='$(echo "${OLD_SHELLS:-none}" | tr '\n' ' ')' raid='${RAID_POST}' witness=${T_WITNESS}s io_resume=${T_RESUME}s f52_estale=${F52_ESTALE} f52_panic=${F52_PANIC}" verify
 
   # Verdicts. (a) is the outage; (c)+(f) are the fixes' own invariants.
   [ "$T_SERVED" -ge 0 ] \
@@ -820,6 +854,8 @@ case "$DRILL" in
     || fail "3.6f FAIL: raid did not assemble 2/2 on $NEWNODE (${RAID_POST:-none})"
   [ -z "$OLD_SHELLS" ] \
     || fail "3.6f FAIL (F47): the outgoing server kept loopback subsystem(s) for the volume: $(echo "$OLD_SHELLS" | tr '\n' ' ')"
+  [ "${F52_ESTALE:-0}" -eq 0 ] && [ "${F52_PANIC:-0}" -eq 0 ] \
+    || fail "3.6f FAIL (F52): the relocation was NOT invisible to the client (estale=$F52_ESTALE panic=$F52_PANIC) — cold-dcache filehandle resolution regressed"
   ;;
 
 3.7) # client node kill — STS replace + NFS remount elsewhere

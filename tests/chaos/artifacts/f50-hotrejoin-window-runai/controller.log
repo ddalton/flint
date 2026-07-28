@@ -1,0 +1,849 @@
+2026-07-27T21:43:59.743170777Z 2026-07-27T21:43:59.743098Z  INFO [CACHE] Creating capacity cache ttl_seconds=30
+2026-07-27T21:43:59.743188477Z 🎯 [CONFIG] Using namespace for custom resources: flint-system
+2026-07-27T21:43:59.743191174Z 🚀 [MAIN] Initializing CSI driver...
+2026-07-27T21:43:59.743193118Z 2026-07-27T21:43:59.743128Z  INFO [DRIVER] Initializing CSI driver mode="controller"
+2026-07-27T21:43:59.743194990Z 2026-07-27T21:43:59.743140Z  INFO [DRIVER] Warming up capacity cache
+2026-07-27T21:43:59.743196798Z 2026-07-27T21:43:59.743143Z  INFO [CACHE] Warming up capacity cache
+2026-07-27T21:43:59.771411572Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:43:59.771571744Z 2026-07-27T21:43:59.771523Z  INFO [CACHE] Found nodes to warm up node_count=5
+2026-07-27T21:43:59.771629118Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:43:59.771631928Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:43:59.771686475Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:43:59.771743710Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:43:59.771869518Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:43:59.847301696Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-1
+2026-07-27T21:43:59.849325252Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-4
+2026-07-27T21:43:59.849622987Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:43:59.849831761Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-2
+2026-07-27T21:43:59.878347385Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-3
+2026-07-27T21:43:59.878411251Z 2026-07-27T21:43:59.878369Z  INFO [CACHE] Warm up complete success_count=5
+2026-07-27T21:43:59.878415948Z 2026-07-27T21:43:59.878386Z  INFO [CACHE] Starting background refresh interval_secs=60
+2026-07-27T21:43:59.878466408Z 2026-07-27T21:43:59.878426Z  INFO [DRIVER] Initialization complete
+2026-07-27T21:43:59.878471313Z ✅ [MAIN] CSI driver initialization complete
+2026-07-27T21:43:59.879124033Z ⏱️ [EPOCH] Epoch snapshot scheduler enabled (interval: 300s, retain: 6)
+2026-07-27T21:43:59.879127790Z ⚠️  [PREFLIGHT] Could not verify snapshot CRDs: ApiError: customresourcedefinitions.apiextensions.k8s.io "volumesnapshotclasses.snapshot.storage.k8s.io" is forbidden: User "system:serviceaccount:flint-system:flint-csi-controller" cannot get resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope: Forbidden (Status { status: Some(Failure), code: 403, message: "customresourcedefinitions.apiextensions.k8s.io \"volumesnapshotclasses.snapshot.storage.k8s.io\" is forbidden: User \"system:serviceaccount:flint-system:flint-csi-controller\" cannot get resource \"customresourcedefinitions\" in API group \"apiextensions.k8s.io\" at the cluster scope", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: "Forbidden", details: Some(StatusDetails { name: "volumesnapshotclasses.snapshot.storage.k8s.io", group: "apiextensions.k8s.io", kind: "customresourcedefinitions", uid: "", causes: [], retry_after_seconds: 0 }) }). Snapshot RPCs may fail; non-snapshot operations unaffected.
+2026-07-27T21:43:59.879199212Z 🩹 [CATCHUP] Replica catch-up orchestrator enabled (t_back: 120s, poll: 2s, full build: on)
+2026-07-27T21:43:59.879201708Z 🔁 [CUTOVER] Reassembly cutover orchestrator enabled (cooldown: 900s, max lag: 1 epoch(s))
+2026-07-27T21:43:59.879203960Z ♻️ [HOT_REJOIN] Hot-rejoin orchestrator enabled (max lag: 1 epoch(s), retry backoff: 300s, window target: 2000ms)
+2026-07-27T21:43:59.879249180Z 2026-07-27T21:43:59.879185Z  INFO [EPOCH] Epoch snapshot scheduler started interval_secs=300 retain=6
+2026-07-27T21:43:59.879291284Z 📊 [DASHBOARD] Starting minimal dashboard backend on port 8080
+2026-07-27T21:43:59.879338669Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:43:59.879343556Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:43:59.879345240Z    Port: 2049
+2026-07-27T21:43:59.879346978Z    Namespace: flint-system
+2026-07-27T21:43:59.879348675Z ℹ️  [pNFS] disabled (neither FLINT_PNFS_MDS_SHARD_ENDPOINTS nor FLINT_PNFS_MDS_ENDPOINT set)
+2026-07-27T21:43:59.879356972Z 🩺 [NFS-RECONCILER] NFS server-pod liveness reconciler running (30s tick; FLINT_NFS_RECONCILER=disabled to opt out)
+2026-07-27T21:43:59.879359195Z 2026-07-27T21:43:59.879227Z  INFO [CATCHUP] Replica catch-up orchestrator started t_back_secs=120 replace_enabled=true replace_after_secs=600
+2026-07-27T21:43:59.879361184Z 🚀 [MINIMAL_DASHBOARD] Starting minimal state dashboard backend on port 8080
+2026-07-27T21:43:59.879365304Z    Architecture: Cache-free, parallel node queries for real-time data
+2026-07-27T21:43:59.879392172Z Starting in Controller mode...
+2026-07-27T21:43:59.879415302Z ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-07-27T21:43:59.879450748Z ✅ [CSI_SERVER] Minimal State SPDK CSI Driver starting
+2026-07-27T21:43:59.879514123Z    Mode: controller
+2026-07-27T21:43:59.879517549Z    Endpoint: unix:///csi/csi.sock
+2026-07-27T21:43:59.879521216Z    Node ID: flint-csi-controller-6798647dc9-wsxff
+2026-07-27T21:43:59.879523152Z    Clone Detection: ENABLED (commit c03bba7)
+2026-07-27T21:43:59.879525237Z ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-07-27T21:43:59.879527175Z 🔧 [CSI_SERVER] Setting up Unix socket: /csi/csi.sock
+2026-07-27T21:43:59.879631753Z    Creating parent directory: "/csi"
+2026-07-27T21:43:59.879691719Z 2026-07-27T21:43:59.879618Z  INFO [HOT_REJOIN] Hot-rejoin orchestrator started max_lag=1 retry_backoff_secs=300
+2026-07-27T21:43:59.879694012Z    Binding to socket...
+2026-07-27T21:43:59.879748624Z 2026-07-27T21:43:59.879251Z  INFO [CUTOVER] Reassembly cutover orchestrator started cooldown_secs=900 max_lag=1
+2026-07-27T21:43:59.879817497Z Starting health server on port 9809
+2026-07-27T21:43:59.879817999Z ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-07-27T21:43:59.879860386Z ✅ [CSI_SERVER] CSI gRPC server listening on: /csi/csi.sock
+2026-07-27T21:43:59.879864882Z    Waiting for CSI requests from kubelet...
+2026-07-27T21:43:59.879866857Z ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-07-27T21:43:59.879963048Z 2026-07-27T21:43:59.879912Z  INFO Server::run{addr=0.0.0.0:9809}: listening on http://0.0.0.0:9809
+2026-07-27T21:43:59.880131695Z 🎯 [MINIMAL_DASHBOARD] Using namespace: flint-system
+2026-07-27T21:43:59.881046510Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:43:59.881323396Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:43:59.881406777Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:43:59.881508757Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:43:59.881622269Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:43:59.881629061Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:43:59.884318503Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:43:59.884328563Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:43:59.884330306Z    Port: 2049
+2026-07-27T21:43:59.884332002Z    Namespace: flint-system
+2026-07-27T21:43:59.885721360Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:43:59.885726985Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:43:59.885729045Z    Port: 2049
+2026-07-27T21:43:59.885730910Z    Namespace: flint-system
+2026-07-27T21:43:59.888108010Z 🔍 [NODE_DISCOVERY] Found node agent for runai-aws-1: http://172.31.5.176:9081
+2026-07-27T21:43:59.888205335Z 🔍 [NODE_DISCOVERY] Found node agent for runai-aws-3: http://172.31.3.52:9081
+2026-07-27T21:43:59.888315927Z 🔍 [NODE_DISCOVERY] Found node agent for runai-aws-4: http://172.31.15.46:9081
+2026-07-27T21:43:59.888421511Z 🔍 [NODE_DISCOVERY] Found node agent for runai-aws-2: http://172.31.4.3:9081
+2026-07-27T21:43:59.888532156Z 🔍 [NODE_DISCOVERY] Found node agent for runai-cp-1: http://172.31.6.223:9081
+2026-07-27T21:43:59.888630625Z ✅ [NODE_DISCOVERY] Discovered 5 node agents
+2026-07-27T21:43:59.888633169Z 🔍 [MINIMAL_DASHBOARD] Discovered 5 node agents
+2026-07-27T21:43:59.888635170Z ⚠️ [DASHBOARD_AUTH] DASHBOARD_ADMIN_PASSWORD is not set — generated a one-time admin password: H4nqkkz0g64xYI0svQ7cc8rN
+2026-07-27T21:43:59.888637118Z    Set the spdk-dashboard-auth Secret (chart value dashboard.auth.adminPassword) for a stable credential.
+2026-07-27T21:43:59.888640762Z ✅ [MINIMAL_DASHBOARD] Dashboard backend ready - serving on 0.0.0.0:8080
+2026-07-27T21:43:59.888661867Z    Real-time mode: All queries fetch fresh data with parallel node requests
+2026-07-27T21:43:59.888725063Z 2026-07-27T21:43:59.888693Z  INFO Server::run{addr=0.0.0.0:8080}: listening on http://0.0.0.0:8080
+2026-07-27T21:43:59.923400249Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-1
+2026-07-27T21:43:59.925320535Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-4
+2026-07-27T21:43:59.925692631Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:43:59.925929013Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-2
+2026-07-27T21:43:59.926208583Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-3
+2026-07-27T21:44:01.488796211Z 🔵 [GRPC] Identity.Probe called
+2026-07-27T21:44:01.489270283Z 🔵 [GRPC] Identity.GetPluginInfo called
+2026-07-27T21:44:01.489998170Z 🔵 [GRPC] Identity.GetPluginCapabilities called
+2026-07-27T21:44:01.491022646Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T21:44:03.137656910Z 🔵 [GRPC] Identity.Probe called
+2026-07-27T21:44:03.138995033Z 🔵 [GRPC] Identity.GetPluginInfo called
+2026-07-27T21:44:03.139662204Z 🔵 [GRPC] Identity.GetPluginCapabilities called
+2026-07-27T21:44:03.140177169Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T21:44:04.774916974Z 🔵 [GRPC] Identity.Probe called
+2026-07-27T21:44:04.775367123Z 🔵 [GRPC] Identity.GetPluginInfo called
+2026-07-27T21:44:04.775714984Z 🔵 [GRPC] Identity.GetPluginCapabilities called
+2026-07-27T21:44:04.776090978Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T21:44:04.776416597Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T21:44:06.386353250Z 🔵 [GRPC] Identity.GetPluginInfo called
+2026-07-27T21:44:06.387077339Z 🔵 [GRPC] Identity.Probe called
+2026-07-27T21:44:06.387510698Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T21:44:06.748722987Z 🔵 [GRPC] Identity.GetPluginInfo called
+2026-07-27T21:44:29.892697896Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:44:29.892718040Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:44:29.892720324Z    Port: 2049
+2026-07-27T21:44:29.892722256Z    Namespace: flint-system
+2026-07-27T21:44:59.881491701Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:44:59.881586642Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:44:59.881594162Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:44:59.881632009Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:44:59.881708071Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:44:59.881734958Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:44:59.884090935Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:44:59.884102706Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:44:59.884105161Z    Port: 2049
+2026-07-27T21:44:59.884107195Z    Namespace: flint-system
+2026-07-27T21:44:59.897078677Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:44:59.897085422Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:44:59.897087345Z    Port: 2049
+2026-07-27T21:44:59.897089250Z    Namespace: flint-system
+2026-07-27T21:44:59.923913428Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-1
+2026-07-27T21:44:59.925591118Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:44:59.926006602Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-4
+2026-07-27T21:44:59.926622203Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-2
+2026-07-27T21:44:59.927480080Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-3
+2026-07-27T21:45:29.902084008Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:45:29.902105854Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:45:29.902108193Z    Port: 2049
+2026-07-27T21:45:29.902110137Z    Namespace: flint-system
+2026-07-27T21:45:59.881953932Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:45:59.882046196Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:45:59.882055733Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:45:59.882075564Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:45:59.882117577Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:45:59.882122826Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:45:59.882693976Z 2026-07-27T21:45:59.882605Z  WARN [CACHE] Failed to refresh node_name="runai-aws-3" error=SPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.3.52:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+2026-07-27T21:45:59.884219535Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:45:59.884229555Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:45:59.884231933Z    Port: 2049
+2026-07-27T21:45:59.884234071Z    Namespace: flint-system
+2026-07-27T21:45:59.906370317Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:45:59.906379462Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:45:59.906388648Z    Port: 2049
+2026-07-27T21:45:59.906390695Z    Namespace: flint-system
+2026-07-27T21:45:59.925594722Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-1
+2026-07-27T21:45:59.926162520Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:45:59.926564635Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-4
+2026-07-27T21:45:59.927229885Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-2
+2026-07-27T21:46:29.911818945Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:46:29.911837555Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:46:29.911839899Z    Port: 2049
+2026-07-27T21:46:29.911842016Z    Namespace: flint-system
+2026-07-27T21:46:59.881346532Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:46:59.881433897Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:46:59.881476379Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:46:59.881481228Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:46:59.881525649Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:46:59.881600812Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:46:59.881938636Z 2026-07-27T21:46:59.881872Z  WARN [CACHE] Failed to refresh node_name="runai-aws-4" error=SPDK RPC error: Failed to get disks from node agent: error sending request for url (http://172.31.15.46:9081/api/disks): error trying to connect: tcp connect error: Connection refused (os error 111)
+2026-07-27T21:46:59.884200309Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:46:59.884209139Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:46:59.884211162Z    Port: 2049
+2026-07-27T21:46:59.884213149Z    Namespace: flint-system
+2026-07-27T21:46:59.916377287Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:46:59.916390966Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:46:59.916393114Z    Port: 2049
+2026-07-27T21:46:59.916395216Z    Namespace: flint-system
+2026-07-27T21:46:59.926215455Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-1
+2026-07-27T21:46:59.927453644Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:46:59.927908883Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-2
+2026-07-27T21:46:59.928832503Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-3
+2026-07-27T21:47:29.921735505Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:47:29.921759629Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:47:29.921762331Z    Port: 2049
+2026-07-27T21:47:29.921764539Z    Namespace: flint-system
+2026-07-27T21:47:59.881549406Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:47:59.881625892Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:47:59.881690495Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:47:59.881765812Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:47:59.881805096Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:47:59.881988141Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:47:59.884173343Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:47:59.884184307Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:47:59.884186067Z    Port: 2049
+2026-07-27T21:47:59.884187888Z    Namespace: flint-system
+2026-07-27T21:47:59.924503025Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-2
+2026-07-27T21:47:59.925557395Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:47:59.925601571Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-3
+2026-07-27T21:47:59.926400763Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-4
+2026-07-27T21:47:59.926778684Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-1
+2026-07-27T21:47:59.926907341Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:47:59.926911354Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:47:59.926913180Z    Port: 2049
+2026-07-27T21:47:59.926914898Z    Namespace: flint-system
+2026-07-27T21:48:29.932421467Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:48:29.932443144Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:48:29.932445396Z    Port: 2049
+2026-07-27T21:48:29.932447490Z    Namespace: flint-system
+2026-07-27T21:48:59.881584122Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:48:59.881679951Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:48:59.881690261Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:48:59.881774181Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:48:59.881837717Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:48:59.881910292Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:48:59.883903015Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:48:59.883914651Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:48:59.883916579Z    Port: 2049
+2026-07-27T21:48:59.883918562Z    Namespace: flint-system
+2026-07-27T21:48:59.923326608Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:48:59.923500844Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:48:59.925365487Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:48:59.926208283Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:48:59.926409998Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:48:59.937462359Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:48:59.937470935Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:48:59.937473272Z    Port: 2049
+2026-07-27T21:48:59.937475442Z    Namespace: flint-system
+2026-07-27T21:49:29.944209222Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:49:29.944231753Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:49:29.944234891Z    Port: 2049
+2026-07-27T21:49:29.944236275Z    Namespace: flint-system
+2026-07-27T21:49:59.881456728Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:49:59.881610318Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:49:59.881613249Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:49:59.881615156Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:49:59.881617057Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:49:59.881765669Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:49:59.884274250Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:49:59.884285652Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:49:59.884287719Z    Port: 2049
+2026-07-27T21:49:59.884289531Z    Namespace: flint-system
+2026-07-27T21:49:59.923900196Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:49:59.926004932Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:49:59.926882386Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:49:59.926932564Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:49:59.928014499Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:49:59.949075216Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:49:59.949084292Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:49:59.949086228Z    Port: 2049
+2026-07-27T21:49:59.949087995Z    Namespace: flint-system
+2026-07-27T21:50:29.955220218Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:50:29.955243313Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:50:29.955245755Z    Port: 2049
+2026-07-27T21:50:29.955247573Z    Namespace: flint-system
+2026-07-27T21:50:59.882197273Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:50:59.882449544Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:50:59.882540244Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:50:59.882587314Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:50:59.882658709Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:50:59.882666441Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:50:59.884503904Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:50:59.884514408Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:50:59.884516414Z    Port: 2049
+2026-07-27T21:50:59.884518234Z    Namespace: flint-system
+2026-07-27T21:50:59.923479846Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:50:59.923685483Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:50:59.924428991Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:50:59.924912456Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:50:59.926739700Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:50:59.959425695Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:50:59.959435510Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:50:59.959437492Z    Port: 2049
+2026-07-27T21:50:59.959439608Z    Namespace: flint-system
+2026-07-27T21:51:29.964981722Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:51:29.965004956Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:51:29.965006591Z    Port: 2049
+2026-07-27T21:51:29.965007766Z    Namespace: flint-system
+2026-07-27T21:51:47.008993292Z 🎯 [CONTROLLER] Creating volume: pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a
+2026-07-27T21:51:47.009006721Z 📊 [CONTROLLER] Volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a - Size: 21474836480 bytes, Replicas: 2, Thin: true, RWX: false, ROX: false
+2026-07-27T21:51:47.009009054Z 📍 [CONTROLLER] Volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a topology-preferred nodes: ["runai-aws-3"]
+2026-07-27T21:51:47.012787319Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:51:47.012889621Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:51:47.049080864Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:51:47.049095477Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:51:47.083425973Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:51:47.083437480Z 2026-07-27T21:51:47.083381Z  INFO [DRIVER] Selected nodes for replicas count=2
+2026-07-27T21:51:47.108872162Z 2026-07-27T21:51:47.108811Z  INFO [CONTROLLER] Lvol created via node agent lvol_uuid="17fd6f0c-1dfc-4a6b-ad61-11b8336b334f"
+2026-07-27T21:51:47.108885319Z 2026-07-27T21:51:47.108827Z  INFO [DRIVER] Created replica replica_num=1 node_name="runai-aws-1" lvol_uuid="17fd6f0c-1dfc-4a6b-ad61-11b8336b334f"
+2026-07-27T21:51:47.131144818Z 2026-07-27T21:51:47.131073Z  INFO [CONTROLLER] Lvol created via node agent lvol_uuid="c2829f6c-16b3-4a8a-9c69-a6dcbf4a0ca1"
+2026-07-27T21:51:47.131157313Z 2026-07-27T21:51:47.131088Z  INFO [DRIVER] Created replica replica_num=2 node_name="runai-aws-2" lvol_uuid="c2829f6c-16b3-4a8a-9c69-a6dcbf4a0ca1"
+2026-07-27T21:51:47.131159619Z 2026-07-27T21:51:47.131100Z  INFO [DRIVER] Created replicas for volume replica_count=2 volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a"
+2026-07-27T21:51:47.132616412Z 2026-07-27T21:51:47.132551Z  WARN [DRIVER] Failed to patch PV, retrying attempt=1 err="ApiError: persistentvolumes \"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\" not found: NotFound (Status { status: Some(Failure), code: 404, message: \"persistentvolumes \\\"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\\\" not found\", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: \"NotFound\", details: Some(StatusDetails { name: \"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\", group: \"\", kind: \"persistentvolumes\", uid: \"\", causes: [], retry_after_seconds: 0 }) })"
+2026-07-27T21:51:48.135682799Z 2026-07-27T21:51:48.135584Z  WARN [DRIVER] Failed to patch PV, retrying attempt=2 err="ApiError: persistentvolumes \"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\" not found: NotFound (Status { status: Some(Failure), code: 404, message: \"persistentvolumes \\\"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\\\" not found\", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: \"NotFound\", details: Some(StatusDetails { name: \"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\", group: \"\", kind: \"persistentvolumes\", uid: \"\", causes: [], retry_after_seconds: 0 }) })"
+2026-07-27T21:51:49.137312559Z 2026-07-27T21:51:49.137207Z ERROR [DRIVER] Failed to add replica labels after retries attempt=3 err="ApiError: persistentvolumes \"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\" not found: NotFound (Status { status: Some(Failure), code: 404, message: \"persistentvolumes \\\"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\\\" not found\", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: \"NotFound\", details: Some(StatusDetails { name: \"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\", group: \"\", kind: \"persistentvolumes\", uid: \"\", causes: [], retry_after_seconds: 0 }) })"
+2026-07-27T21:51:49.137337802Z 2026-07-27T21:51:49.137244Z  WARN [DRIVER] Failed to add replica node labels (non-fatal) err="Failed to add replica labels: ApiError: persistentvolumes \"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\" not found: NotFound (Status { status: Some(Failure), code: 404, message: \"persistentvolumes \\\"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\\\" not found\", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: \"NotFound\", details: Some(StatusDetails { name: \"pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a\", group: \"\", kind: \"persistentvolumes\", uid: \"\", causes: [], retry_after_seconds: 0 }) })"
+2026-07-27T21:51:49.137339884Z ✅ [CONTROLLER] Volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a created successfully with 2 replica(s)
+2026-07-27T21:51:50.079738365Z 📤 [CONTROLLER] Publishing volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to node runai-aws-3
+2026-07-27T21:51:50.086001697Z 🔢 [CONTROLLER] chain-gen bumped to 1 before attach grant
+2026-07-27T21:51:50.087716512Z 📊 [CONTROLLER] Multi-replica volume with 2 replicas
+2026-07-27T21:51:50.087720650Z ✅ [CONTROLLER] Volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a published successfully
+2026-07-27T21:51:59.881623519Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:51:59.881798192Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:51:59.881805109Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:51:59.881807112Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:51:59.881873420Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:51:59.881917609Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:51:59.886750235Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:51:59.886760760Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:51:59.886763056Z    Port: 2049
+2026-07-27T21:51:59.886764919Z    Namespace: flint-system
+2026-07-27T21:51:59.923220196Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:51:59.924110282Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:51:59.926774725Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:51:59.933425592Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:51:59.934188293Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:51:59.967664421Z 2026-07-27T21:51:59.967531Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" epoch=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-1 replicas=2
+2026-07-27T21:51:59.974558883Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:51:59.974567905Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:51:59.974570199Z    Port: 2049
+2026-07-27T21:51:59.974573829Z    Namespace: flint-system
+2026-07-27T21:52:29.981501316Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:52:29.981528436Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:52:29.981530722Z    Port: 2049
+2026-07-27T21:52:29.981532552Z    Namespace: flint-system
+2026-07-27T21:52:59.880852207Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:52:59.880928415Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:52:59.880972480Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:52:59.881048951Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:52:59.881056785Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:52:59.881137424Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:52:59.885451497Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:52:59.885462677Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:52:59.885464896Z    Port: 2049
+2026-07-27T21:52:59.885466761Z    Namespace: flint-system
+2026-07-27T21:52:59.925188689Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:52:59.926098465Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:52:59.926455656Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:52:59.933407654Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:52:59.935216435Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:52:59.987884692Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:52:59.987908866Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:52:59.987921305Z    Port: 2049
+2026-07-27T21:52:59.987923320Z    Namespace: flint-system
+2026-07-27T21:53:29.993722840Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:53:29.993748206Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:53:29.993750748Z    Port: 2049
+2026-07-27T21:53:29.993752774Z    Namespace: flint-system
+2026-07-27T21:53:31.141003148Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T21:53:31.141685521Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 22548578304 bytes
+2026-07-27T21:53:31.169239424Z ✅ [CONTROLLER] Resized leg 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 to 22548578304 bytes
+2026-07-27T21:53:31.178846201Z ✅ [CONTROLLER] Resized leg c2829f6c-16b3-4a8a-9c69-a6dcbf4a0ca1 on runai-aws-2 to 22548578304 bytes
+2026-07-27T21:53:31.178859352Z ✅ [CONTROLLER] Volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a expanded to 22548578304 bytes on all 2 replicas (raid + namespace growth propagate via SPDK resize events)
+2026-07-27T21:53:59.881483028Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:53:59.881578749Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:53:59.881619287Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:53:59.881716926Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:53:59.881779522Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:53:59.881896320Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:53:59.884365130Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:53:59.884380401Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:53:59.884405203Z    Port: 2049
+2026-07-27T21:53:59.884433616Z    Namespace: flint-system
+2026-07-27T21:53:59.925703361Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:53:59.926121334Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:53:59.928742773Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:53:59.932240470Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:53:59.934068995Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:53:59.999115260Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:53:59.999125988Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:53:59.999128355Z    Port: 2049
+2026-07-27T21:53:59.999130120Z    Namespace: flint-system
+2026-07-27T21:54:30.005088746Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:54:30.005111357Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:54:30.005113126Z    Port: 2049
+2026-07-27T21:54:30.005114548Z    Namespace: flint-system
+2026-07-27T21:54:59.881721126Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:54:59.881746548Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:54:59.881754975Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:54:59.881809927Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:54:59.881895418Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:54:59.881898478Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:54:59.884626236Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:54:59.884642435Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:54:59.884644444Z    Port: 2049
+2026-07-27T21:54:59.884646415Z    Namespace: flint-system
+2026-07-27T21:54:59.925238911Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:54:59.926356894Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:54:59.926446744Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:54:59.926879321Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:54:59.933674285Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:55:00.009312096Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:55:00.009339827Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:55:00.009341934Z    Port: 2049
+2026-07-27T21:55:00.009343199Z    Namespace: flint-system
+2026-07-27T21:55:30.014858281Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:55:30.014896839Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:55:30.014898899Z    Port: 2049
+2026-07-27T21:55:30.014900179Z    Namespace: flint-system
+2026-07-27T21:55:59.882252574Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:55:59.882530254Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:55:59.882605784Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:55:59.882686812Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:55:59.882771560Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:55:59.882806952Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:55:59.885402953Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:55:59.885413881Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:55:59.885415299Z    Port: 2049
+2026-07-27T21:55:59.885416617Z    Namespace: flint-system
+2026-07-27T21:55:59.923719844Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:55:59.924168058Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:55:59.926421502Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:55:59.927052822Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:55:59.933014037Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:56:00.019528870Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:56:00.019546103Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:56:00.019548384Z    Port: 2049
+2026-07-27T21:56:00.019550603Z    Namespace: flint-system
+2026-07-27T21:56:30.026057395Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:56:30.026094239Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:56:30.026096755Z    Port: 2049
+2026-07-27T21:56:30.026098823Z    Namespace: flint-system
+2026-07-27T21:56:59.882439370Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:56:59.882619712Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:56:59.882625406Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:56:59.882695901Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:56:59.882819266Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:56:59.882825843Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:56:59.885020334Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:56:59.885030370Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:56:59.885032439Z    Port: 2049
+2026-07-27T21:56:59.885034284Z    Namespace: flint-system
+2026-07-27T21:56:59.924802738Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:56:59.926819504Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:56:59.927745295Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:56:59.933196833Z 2026-07-27T21:56:59.933143Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" epoch=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-2 replicas=2
+2026-07-27T21:56:59.934391506Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:56:59.934909405Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:57:00.031601629Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:57:00.031622739Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:57:00.031624667Z    Port: 2049
+2026-07-27T21:57:00.031626749Z    Namespace: flint-system
+2026-07-27T21:57:30.038746748Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:57:30.038771024Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:57:30.038773484Z    Port: 2049
+2026-07-27T21:57:30.038775431Z    Namespace: flint-system
+2026-07-27T21:57:59.881261658Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:57:59.881343460Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:57:59.881450577Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:57:59.881536769Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:57:59.881683947Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:57:59.881752959Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:57:59.885371845Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:57:59.885454854Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:57:59.885499752Z    Port: 2049
+2026-07-27T21:57:59.885580312Z    Namespace: flint-system
+2026-07-27T21:57:59.924915825Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:57:59.926504701Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:57:59.927451023Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:57:59.933119093Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:57:59.935936889Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:58:00.044693844Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:58:00.044714043Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:58:00.044726612Z    Port: 2049
+2026-07-27T21:58:00.044728588Z    Namespace: flint-system
+2026-07-27T21:58:30.050744072Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:58:30.050780089Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:58:30.050781973Z    Port: 2049
+2026-07-27T21:58:30.050783462Z    Namespace: flint-system
+2026-07-27T21:58:59.882254888Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:58:59.882404199Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:58:59.882481984Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:58:59.882500955Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:58:59.882575433Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:58:59.882634010Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:58:59.884661312Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:58:59.884681499Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:58:59.884732365Z    Port: 2049
+2026-07-27T21:58:59.884761614Z    Namespace: flint-system
+2026-07-27T21:58:59.923975798Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T21:58:59.924364729Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:58:59.924564345Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:58:59.927488092Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:58:59.932230603Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T21:59:00.055996682Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:59:00.056021306Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:59:00.056023450Z    Port: 2049
+2026-07-27T21:59:00.056025739Z    Namespace: flint-system
+2026-07-27T21:59:30.062158554Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:59:30.062196886Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:59:30.062200209Z    Port: 2049
+2026-07-27T21:59:30.062201609Z    Namespace: flint-system
+2026-07-27T21:59:59.882177459Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T21:59:59.882441652Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T21:59:59.882474913Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T21:59:59.882520560Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T21:59:59.883308265Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T21:59:59.883380217Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T21:59:59.884190426Z ✅ [NFS] NFS support ENABLED
+2026-07-27T21:59:59.884195902Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T21:59:59.884197743Z    Port: 2049
+2026-07-27T21:59:59.884199689Z    Namespace: flint-system
+2026-07-27T21:59:59.924945135Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T21:59:59.925092462Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T21:59:59.928386917Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T21:59:59.935225592Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-1
+2026-07-27T21:59:59.936342658Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:00:00.067703922Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:00:00.067726518Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:00:00.067728533Z    Port: 2049
+2026-07-27T22:00:00.067730155Z    Namespace: flint-system
+2026-07-27T22:00:04.287773415Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:00:04.288319372Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:00:04.292181017Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:00:05.301170350Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:00:05.301849635Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:00:05.306515672Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:00:05.313877152Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:00:05.314288732Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:00:05.407269778Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:00:07.316429131Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:00:07.316997966Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:00:07.321281008Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:00:15.332218303Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:00:15.332712417Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:00:15.337409368Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:00:30.074624282Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:00:30.074648723Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:00:30.074651175Z    Port: 2049
+2026-07-27T22:00:30.074653171Z    Namespace: flint-system
+2026-07-27T22:00:31.346725898Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:00:31.347270880Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:00:31.351612145Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:00:59.880930000Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:00:59.881038653Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:00:59.881101499Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:00:59.881157594Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:00:59.881197076Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:00:59.881294271Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:00:59.884793058Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:00:59.884804054Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:00:59.884806164Z    Port: 2049
+2026-07-27T22:00:59.884807869Z    Namespace: flint-system
+2026-07-27T22:00:59.923482730Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:00:59.925574292Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:00:59.925767687Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:00:59.926746016Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:00:59.940992038Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-1
+2026-07-27T22:01:00.080415245Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:01:00.080435620Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:01:00.080437607Z    Port: 2049
+2026-07-27T22:01:00.080439878Z    Namespace: flint-system
+2026-07-27T22:01:03.360331995Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:01:03.360932943Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:01:03.365036103Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:01:03.372113948Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:01:03.372480778Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:01:03.466443261Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:01:30.088004642Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:01:30.088029180Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:01:30.088039264Z    Port: 2049
+2026-07-27T22:01:30.088040670Z    Namespace: flint-system
+2026-07-27T22:01:59.882149868Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:01:59.882555773Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:01:59.882562065Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:01:59.882624764Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:01:59.882685573Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:01:59.882730028Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:01:59.886469328Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:01:59.886475684Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:01:59.886477644Z    Port: 2049
+2026-07-27T22:01:59.886479640Z    Namespace: flint-system
+2026-07-27T22:01:59.915304264Z 2026-07-27T22:01:59.915254Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" epoch=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-3 replicas=1
+2026-07-27T22:01:59.924330825Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:01:59.926494424Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:01:59.926646768Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:01:59.931884703Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:01:59.942262103Z ✅ [DRIVER] Found 0 initialized disks on node runai-aws-1
+2026-07-27T22:02:00.093130565Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:02:00.093143970Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:02:00.093146254Z    Port: 2049
+2026-07-27T22:02:00.093148220Z    Namespace: flint-system
+2026-07-27T22:02:07.374445410Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:02:07.374935852Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:02:07.379407088Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:02:30.098502716Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:02:30.098525785Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:02:30.098527473Z    Port: 2049
+2026-07-27T22:02:30.098528995Z    Namespace: flint-system
+2026-07-27T22:02:59.882244517Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:02:59.882442212Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:02:59.882609241Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:02:59.882736032Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:02:59.882765199Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:02:59.882802088Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:02:59.885009376Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:02:59.885019896Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:02:59.885021893Z    Port: 2049
+2026-07-27T22:02:59.885023865Z    Namespace: flint-system
+2026-07-27T22:02:59.925693318Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:02:59.925996414Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:02:59.927100394Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:02:59.936173329Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:02:59.941710146Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:03:00.104977387Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:03:00.104993877Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:03:00.104995392Z    Port: 2049
+2026-07-27T22:03:00.104996708Z    Namespace: flint-system
+2026-07-27T22:03:00.129534028Z 🌐 [DRIVER] Setting up NVMe-oF target on node: runai-aws-1 for bdev: 4e747a95-88d3-4898-900f-34fc02c5022b
+2026-07-27T22:03:00.237607842Z 🎉 [DRIVER] NVMe-oF target setup completed: nqn.2024-11.com.flint:volume:pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a_0
+2026-07-27T22:03:24.674046663Z 2026-07-27T22:03:24.673977Z  INFO [CATCHUP] Replica caught up to warm standby volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" node=runai-aws-1 base=empty through=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-3
+2026-07-27T22:03:30.110945713Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:03:30.110977288Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:03:30.110980563Z    Port: 2049
+2026-07-27T22:03:30.110982103Z    Namespace: flint-system
+2026-07-27T22:03:59.881136005Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:03:59.881201757Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:03:59.881238885Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:03:59.881260358Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:03:59.881322857Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:03:59.881374026Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:03:59.884242365Z 2026-07-27T22:03:59.884191Z  INFO [CLAIMS] volume claimed by another operation — skipping this tick volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" wanted_op="hot-rejoin-reconcile" held_by="catch-up" held_secs=0
+2026-07-27T22:03:59.884920026Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:03:59.884925719Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:03:59.884927480Z    Port: 2049
+2026-07-27T22:03:59.884929281Z    Namespace: flint-system
+2026-07-27T22:03:59.923451303Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:03:59.923737553Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:03:59.923916480Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:03:59.939735901Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:03:59.959225167Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:04:00.115571471Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:04:00.115582914Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:04:00.115585321Z    Port: 2049
+2026-07-27T22:04:00.115587118Z    Namespace: flint-system
+2026-07-27T22:04:00.283520554Z 🌐 [DRIVER] Setting up NVMe-oF target on node: runai-aws-1 for bdev: f0638091-62b3-405f-85fe-3fa86bdfc60a
+2026-07-27T22:04:00.391526676Z 🎉 [DRIVER] NVMe-oF target setup completed: nqn.2024-11.com.flint:volume:pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a_0
+2026-07-27T22:04:04.790933521Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:04:04.791502959Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:04:04.792916531Z 2026-07-27T22:04:04.792851Z  INFO [CLAIMS] volume claimed by another operation — skipping this tick volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" wanted_op="expand" held_by="catch-up" held_secs=4
+2026-07-27T22:04:22.727041646Z 2026-07-27T22:04:22.726963Z  INFO [CATCHUP] Replica caught up to warm standby volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" node=runai-aws-1 base=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-3 through=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-3
+2026-07-27T22:04:30.121344411Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:04:30.121367692Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:04:30.121370003Z    Port: 2049
+2026-07-27T22:04:30.121372133Z    Namespace: flint-system
+2026-07-27T22:04:59.881607760Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:04:59.881734185Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:04:59.881793040Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:04:59.881898700Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:04:59.881935584Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:04:59.882039145Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:04:59.884244029Z 2026-07-27T22:04:59.884183Z  INFO [CLAIMS] resolver reserved the next claim — maintainer re-claims will yield (F43 arbitration) volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" wanted_op="hot-rejoin" held_by="catch-up"
+2026-07-27T22:04:59.884254608Z 2026-07-27T22:04:59.884197Z  INFO [CLAIMS] volume claimed by another operation — skipping this tick volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" wanted_op="hot-rejoin" held_by="catch-up" held_secs=0
+2026-07-27T22:04:59.885146307Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:04:59.885152222Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:04:59.885156061Z    Port: 2049
+2026-07-27T22:04:59.885158189Z    Namespace: flint-system
+2026-07-27T22:04:59.923451712Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:04:59.925546538Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:04:59.933098419Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:04:59.933578307Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:04:59.942008725Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:05:00.127495460Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:05:00.127508247Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:05:00.127510518Z    Port: 2049
+2026-07-27T22:05:00.127512673Z    Namespace: flint-system
+2026-07-27T22:05:30.134477834Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:05:30.134519459Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:05:30.134521490Z    Port: 2049
+2026-07-27T22:05:30.134522920Z    Namespace: flint-system
+2026-07-27T22:05:59.881537126Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:05:59.881600935Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:05:59.881606685Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:05:59.881651514Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:05:59.881716005Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:05:59.881816401Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:05:59.884730477Z 2026-07-27T22:05:59.884670Z  INFO [CLAIMS] resolver released its reservation — no work left for this volume (F48) volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" op="hot-rejoin"
+2026-07-27T22:05:59.884917909Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:05:59.884922033Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:05:59.884923914Z    Port: 2049
+2026-07-27T22:05:59.884926051Z    Namespace: flint-system
+2026-07-27T22:05:59.923729899Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:05:59.923903931Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:05:59.926140188Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:05:59.927151259Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:05:59.940068585Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:05:59.974404935Z 2026-07-27T22:05:59.974346Z  WARN [CATCHUP] severing zombie consumer of stale head — controller backs no configured raid base (F48) volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" node=runai-aws-3 controller=nvme_nqn_2024-11_com_flint_volume_pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a_0
+2026-07-27T22:06:00.140185215Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:06:00.140196876Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:06:00.140198825Z    Port: 2049
+2026-07-27T22:06:00.140200790Z    Namespace: flint-system
+2026-07-27T22:06:23.390419654Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:06:23.391036331Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:06:23.395120321Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is stale
+2026-07-27T22:06:30.145724088Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:06:30.145750833Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:06:30.145753075Z    Port: 2049
+2026-07-27T22:06:30.145755053Z    Namespace: flint-system
+2026-07-27T22:06:59.881389957Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:06:59.881479185Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:06:59.881488864Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:06:59.881515645Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:06:59.881567052Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:06:59.881659183Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:06:59.885388531Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:06:59.885401522Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:06:59.885448410Z    Port: 2049
+2026-07-27T22:06:59.885492362Z    Namespace: flint-system
+2026-07-27T22:06:59.915729749Z 2026-07-27T22:06:59.915667Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" epoch=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-4 replicas=1
+2026-07-27T22:06:59.923386656Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:06:59.925482590Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:06:59.925945684Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:06:59.940771137Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:06:59.940913113Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:07:00.052529753Z 🌐 [DRIVER] Setting up NVMe-oF target on node: runai-aws-1 for bdev: f0638091-62b3-405f-85fe-3fa86bdfc60a
+2026-07-27T22:07:00.100477781Z 🎉 [DRIVER] NVMe-oF target setup completed: nqn.2024-11.com.flint:volume:pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a_0
+2026-07-27T22:07:00.150870827Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:07:00.150882909Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:07:00.150884715Z    Port: 2049
+2026-07-27T22:07:00.150886602Z    Namespace: flint-system
+2026-07-27T22:07:12.387761871Z 2026-07-27T22:07:12.387696Z  INFO [CATCHUP] Replica caught up to warm standby volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" node=runai-aws-1 base=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-3 through=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-3
+2026-07-27T22:07:30.158333215Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:07:30.158355131Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:07:30.158357562Z    Port: 2049
+2026-07-27T22:07:30.158359693Z    Namespace: flint-system
+2026-07-27T22:07:59.881254552Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:07:59.881270020Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:07:59.881321614Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:07:59.881395013Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:07:59.881465018Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:07:59.881536915Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:07:59.884369133Z 2026-07-27T22:07:59.884318Z  INFO [CLAIMS] resolver reserved the next claim — maintainer re-claims will yield (F43 arbitration) volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" wanted_op="hot-rejoin" held_by="catch-up"
+2026-07-27T22:07:59.884430569Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:07:59.884438503Z 2026-07-27T22:07:59.884402Z  INFO [CLAIMS] volume claimed by another operation — skipping this tick volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" wanted_op="hot-rejoin" held_by="catch-up" held_secs=0
+2026-07-27T22:07:59.884471773Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:07:59.884500961Z    Port: 2049
+2026-07-27T22:07:59.884528773Z    Namespace: flint-system
+2026-07-27T22:07:59.923688158Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:07:59.924127662Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:07:59.925708238Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:07:59.926439093Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:07:59.940688265Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:08:00.007457064Z 🌐 [DRIVER] Setting up NVMe-oF target on node: runai-aws-1 for bdev: f0638091-62b3-405f-85fe-3fa86bdfc60a
+2026-07-27T22:08:00.019515647Z 🎉 [DRIVER] NVMe-oF target setup completed: nqn.2024-11.com.flint:volume:pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a_0
+2026-07-27T22:08:00.163626830Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:08:00.163648027Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:08:00.163650469Z    Port: 2049
+2026-07-27T22:08:00.163652761Z    Namespace: flint-system
+2026-07-27T22:08:20.369514471Z 2026-07-27T22:08:20.369418Z  INFO [CATCHUP] Standby chased to latest epoch volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" node=runai-aws-1 through=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-4
+2026-07-27T22:08:30.169943422Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:08:30.169965956Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:08:30.169968484Z    Port: 2049
+2026-07-27T22:08:30.169970627Z    Namespace: flint-system
+2026-07-27T22:08:59.881060732Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:08:59.881118379Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:08:59.881222281Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:08:59.881406157Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:08:59.881467926Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:08:59.881531146Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:08:59.883655844Z 2026-07-27T22:08:59.883596Z  INFO [CLAIMS] yielding to a reserved resolver operation (F43 arbitration) volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" wanted_op="catch-up" reserved_by="hot-rejoin" reserved_secs=59
+2026-07-27T22:08:59.885143097Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:08:59.885317044Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:08:59.885455653Z    Port: 2049
+2026-07-27T22:08:59.885560388Z    Namespace: flint-system
+2026-07-27T22:08:59.925449289Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:08:59.927299380Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:08:59.933406133Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:08:59.934766083Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:08:59.942167669Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:09:00.010044694Z 2026-07-27T22:09:00.009983Z  WARN [HOT_REJOIN] Rejoin failed (unwound) — backing off volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" error=E_f host fence on runai-aws-2: Node agent HTTP call failed: {"error":"SPDK RPC call 'nvmf_subsystem_add_host' failed: SPDK RPC error: Code=-32603 Msg=Internal error","success":false}
+2026-07-27T22:09:00.175877891Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:09:00.175896826Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:09:00.175899053Z    Port: 2049
+2026-07-27T22:09:00.175901062Z    Namespace: flint-system
+2026-07-27T22:09:30.182195273Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:09:30.182218659Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:09:30.182221218Z    Port: 2049
+2026-07-27T22:09:30.182223482Z    Namespace: flint-system
+2026-07-27T22:09:59.881215281Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:09:59.881299351Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:09:59.881303849Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:09:59.881310429Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:09:59.881382583Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:09:59.881442017Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:09:59.884738704Z 2026-07-27T22:09:59.884672Z  INFO [CLAIMS] volume claimed by another operation — skipping this tick volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" wanted_op="catch-up" held_by="hot-rejoin-reconcile" held_secs=0
+2026-07-27T22:09:59.885070038Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:09:59.885077126Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:09:59.885079163Z    Port: 2049
+2026-07-27T22:09:59.885082017Z    Namespace: flint-system
+2026-07-27T22:09:59.926125368Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:09:59.927195298Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:09:59.927347023Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:09:59.928297115Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:09:59.959532811Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:10:00.188194857Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:10:00.188219730Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:10:00.188222017Z    Port: 2049
+2026-07-27T22:10:00.188223849Z    Namespace: flint-system
+2026-07-27T22:10:30.194748571Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:10:30.194771421Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:10:30.194774001Z    Port: 2049
+2026-07-27T22:10:30.194776062Z    Namespace: flint-system
+2026-07-27T22:10:59.880983922Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:10:59.881035139Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:10:59.881044691Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:10:59.881080116Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:10:59.881209105Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:10:59.881274793Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:10:59.884590256Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:10:59.884600406Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:10:59.884602622Z    Port: 2049
+2026-07-27T22:10:59.884605409Z    Namespace: flint-system
+2026-07-27T22:10:59.923669745Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:10:59.924032841Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:10:59.924544226Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:10:59.926741047Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:10:59.940096959Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:11:00.103791824Z 🌐 [DRIVER] Setting up NVMe-oF target on node: runai-aws-1 for bdev: 0c29b75c-d938-4e7b-bb89-717c3e29699b
+2026-07-27T22:11:00.175812738Z 🎉 [DRIVER] NVMe-oF target setup completed: nqn.2024-11.com.flint:volume:pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a_0
+2026-07-27T22:11:00.201258298Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:11:00.201273048Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:11:00.201275231Z    Port: 2049
+2026-07-27T22:11:00.201277196Z    Namespace: flint-system
+2026-07-27T22:11:20.502945406Z 2026-07-27T22:11:20.502875Z  INFO [CATCHUP] Replica caught up to warm standby volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" node=runai-aws-1 base=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-4 through=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-4
+2026-07-27T22:11:23.407725025Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:11:23.408329902Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:11:23.412242107Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is standby
+2026-07-27T22:11:23.420696482Z 🔵 [GRPC] Controller.ControllerGetCapabilities called
+2026-07-27T22:11:23.421092055Z 📏 [CONTROLLER] Expanding volume pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a to 23622320128 bytes
+2026-07-27T22:11:23.513438395Z 📏 [CONTROLLER] pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a: expansion refused while replicas lag: 17fd6f0c-1dfc-4a6b-ad61-11b8336b334f on runai-aws-1 is standby
+2026-07-27T22:11:30.206970433Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:11:30.207003515Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:11:30.207005261Z    Port: 2049
+2026-07-27T22:11:30.207006538Z    Namespace: flint-system
+2026-07-27T22:11:59.881578677Z ✅ [DRIVER] Found 5 nodes in cluster
+2026-07-27T22:11:59.881667233Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-cp-1
+2026-07-27T22:11:59.881671675Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-1
+2026-07-27T22:11:59.881724479Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-3
+2026-07-27T22:11:59.881815103Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-2
+2026-07-27T22:11:59.881898774Z 🔍 [DRIVER] Getting initialized disks (with LVS) from node: runai-aws-4
+2026-07-27T22:11:59.884011821Z 2026-07-27T22:11:59.883948Z  INFO [CLAIMS] volume claimed by another operation — skipping this tick volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" wanted_op="hot-rejoin-reconcile" held_by="catch-up" held_secs=0
+2026-07-27T22:11:59.884512612Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:11:59.884518044Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:11:59.884520218Z    Port: 2049
+2026-07-27T22:11:59.884522247Z    Namespace: flint-system
+2026-07-27T22:11:59.923260743Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:11:59.923585267Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:11:59.926813697Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:11:59.927297376Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:11:59.946490590Z 2026-07-27T22:11:59.946420Z  INFO [EPOCH] Common epoch recorded volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" epoch=epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-5 replicas=1
+2026-07-27T22:11:59.959079947Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-3
+2026-07-27T22:12:00.212011915Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:12:00.212033232Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:12:00.212035054Z    Port: 2049
+2026-07-27T22:12:00.212038060Z    Namespace: flint-system
+2026-07-27T22:12:00.231889096Z 2026-07-27T22:12:00.231813Z  WARN [CATCHUP] Catch-up failed — retrying next cycle volume_id="pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a" replica=17fd6f0c-1dfc-4a6b-ad61-11b8336b334f error=no in-sync source lineage contains epoch-pvc-98d84f1f-24e7-4d1b-9e40-ac52bc41170a-5 on any node

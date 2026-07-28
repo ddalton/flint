@@ -1,0 +1,36 @@
+$ docker run --rm --privileged -v .../f52-repro:/work alpine:3.20 sh /work/run.sh
+
+=== PHASE 1: mount, create file, mint handle, resolve WARM ===
+minted: type=1 bytes=8
+readlink(/proc/self/fd) = "/mnt/vol/pgdata/global/1262"
+fstat: ino=15 size=10 mode=100644  <- fd itself is CORRECT
+reopen-via-procfd read: "hello-f52
+"  <- fd-based I/O works
+
+=== PHASE 2: umount + remount (cold dcache, same fs image), resolve COLD ===
+readlink(/proc/self/fd) = "/"
+fstat: ino=15 size=10 mode=100644  <- fd itself is CORRECT
+reopen-via-procfd read: "hello-f52
+"  <- fd-based I/O works
+
+=== PHASE 3: same cold mount, after ONE path lookup of the file (dcache warmed) ===
+readlink(/proc/self/fd) = "/mnt/vol/pgdata/global/1262"
+fstat: ino=15 size=10 mode=100644  <- fd itself is CORRECT
+reopen-via-procfd read: "hello-f52
+"  <- fd-based I/O works
+
+=== PHASE 4: THE FIX, against a fresh cold mount (trust gate + identity walk) ===
+FIXED: readlink "/" UNTRUSTED -> recovered by identity walk -> "/mnt/vol/pgdata/global/1262"
+
+=== PHASE 5: THE FIX, warm path (trust gate passes, no walk) ===
+FIXED: trusted readlink -> "/mnt/vol/pgdata/global/1262"
+
+=== PHASE 6: THE FIX, unlinked file on a cold mount -> STALE, never a foreign path ===
+FIXED: STALE (Stale file handle)
+
+kernel: 5.10.104-linuxkit
+(run 2026-07-27; cluster kernel was 6.1.176 — d_obtain_alias's anonymous
+"/" dentry name is unchanged across these releases. Phases 4-6 exercise
+the FIX's algorithm — the same trust gate + identity walk implemented in
+fh_kernel.rs — against a genuinely cold dcache, which the Rust unit
+suite cannot produce without root.)

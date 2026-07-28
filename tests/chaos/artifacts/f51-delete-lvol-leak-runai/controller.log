@@ -1,0 +1,10 @@
+2026-07-27T22:24:59.884048287Z    Port: 2049
+2026-07-27T22:24:59.884049674Z    Namespace: flint-system
+2026-07-27T22:24:59.923763179Z ✅ [DRIVER] Found 0 initialized disks on node runai-cp-1
+2026-07-27T22:24:59.925247658Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-1
+2026-07-27T22:24:59.925939076Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-4
+2026-07-27T22:24:59.926111674Z ✅ [DRIVER] Found 1 initialized disks on node runai-aws-2
+2026-07-27T22:25:00.360760912Z ✅ [NFS] NFS support ENABLED
+2026-07-27T22:25:00.360777595Z    Image: dilipdalton/flint-driver:1.21.0-rc2
+2026-07-27T22:25:00.360780373Z    Port: 2049
+2026-07-27T22:25:00.360783046Z    Namespace: flint-system

@@ -1,0 +1,40 @@
+  ✓ harness healthy (pg-0 Ready, ledger acking)
+
+▶ T0=1785192076 pg-0 on runai-aws-1; nfs flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c on runai-aws-1 (uid 5ca23013); witness on runai-aws-2
+  · moving the nfs server runai-aws-1 → runai-aws-2 (hosts leg #1); squatter-to-be: nqn.2024-11.com.flint:volume:pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c_1
+  · leg export on runai-aws-2 pre-move: nqn.2024-11.com.flint:volume:pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c_1 
+  · raid pre (on runai-aws-1): raid_nfs-server-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c state=online base=2/2
+  ✓ nfs server Running/Ready on runai-aws-2 at 26s (assembly succeeded on a leg-hosting node)
+  ✓ no bdev_raid_create EPERM anywhere in the fleet since T0
+  ✓ consumer-local leg #1 carries no export on runai-aws-2 (F49 fix 1 held)
+  ✓ raid online 2/2 on runai-aws-2 (raid_nfs-server-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c state=online base=2/2)
+  ✓ remote leg #0 still exported on runai-aws-1 (no over-reach)
+  ✓ outgoing server runai-aws-1 retains no loopback subsystem for the volume (F47 held)
+  ✓ witness fresh at 31s
+  ✓ witness clean (0 mismatches, last write 1s ago)
+
+▶ 1/7 pod Ready (timeout 180s)
+  ✓ pg-0 Ready 324s after T0
+  ✓ attribution: in-place (runai-aws-1→runai-aws-1, postgres restarts 0)
+
+▶ 2/7 db verdict
+  · db FAIL — see /Users/ddalton/github/flint/tests/chaos/artifacts/3-3.6f-1785192076/db-verdict.txt
+
+▶ 3/7 volumeattachments
+  ✓ VA consistent (consumer nodes covered, none stale)
+
+▶ 4/7 data-path sessions (nvmeof)
+  ✓ pg volume session live
+  ✓ data path clean (live volume healthy, no new leaks)
+
+▶ 5/7 orphaned mounts
+  ✓ no orphaned pod mounts
+  · node fs pressure captured (/Users/ddalton/github/flint/tests/chaos/artifacts/3-3.6f-1785192076/node-fs.txt)
+
+▶ 6/7 driver logs since T0
+  ✓ no unresolved volume errors (full scan in /Users/ddalton/github/flint/tests/chaos/artifacts/3-3.6f-1785192076/driver-logs.txt)
+
+▶ 7/7 timings
+  ✓ max ledger stall 315s
+
+FAIL: drill 3/3.6f — ready=324s stall=315s (failed: db)

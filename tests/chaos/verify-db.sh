@@ -78,10 +78,32 @@ else
 fi
 
 # 4. log scan — benign: "was not properly shut down; automatic recovery"
-BAD=$(kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null \
-  | grep -cE 'PANIC|checksum verification failed|invalid page|could not read block')
-if [ "${BAD:-0}" -eq 0 ]; then ok "postgres log clean"; else
-  FAILED="$FAILED pglog"; note "$BAD corruption-pattern lines in postgres log"
+# MUST read --previous too. `kubectl logs` shows only the CURRENT container,
+# so a restart or reschedule silently erases findings: on runai 3.6e
+# (2026-07-27) kubelet evicted pg-0 for DiskPressure and it came back at
+# 23:11:12Z, wiping the 23:05:38 F52 PANIC that had been read live minutes
+# earlier — and the drill duly recorded db=PASS on a run that had panicked.
+PGPAT='PANIC|checksum verification failed|invalid page|could not read block'
+BAD=$(kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null | grep -cE "$PGPAT")
+PREV=$(kubectl logs -n "$NS" $PG -c postgres --previous 2>/dev/null | grep -cE "$PGPAT")
+# A restarted container is itself a caveat: --previous only reaches back ONE
+# instance, so two restarts inside the window can still hide something.
+RESTARTED=$(kubectl get pod -n "$NS" $PG -o jsonpath='{range .status.containerStatuses[*]}{.restartCount}{"\n"}{end}' 2>/dev/null \
+  | awk '{s+=$1} END{print s+0}')
+# BSD date, matching lib.sh's rfc3339(). A rescheduled StatefulSet pod keeps
+# its name but resets restartCount to 0 and has no --previous, so startTime is
+# the only signal that catches it.
+PG_START=$(kubectl get pod -n "$NS" $PG -o jsonpath='{.status.startTime}' 2>/dev/null)
+PG_START_EPOCH=$(date -u -jf '%Y-%m-%dT%H:%M:%SZ' "$PG_START" +%s 2>/dev/null || echo 0)
+if [ "${BAD:-0}" -eq 0 ] && [ "${PREV:-0}" -eq 0 ]; then
+  if [ "${RESTARTED:-0}" -gt 0 ] || [ "${PG_START_EPOCH:-0}" -gt "$T0" ]; then
+    note "pglog UNPROVEN, not clean: the pod restarted (${RESTARTED}) or started after T0 (${PG_START:-?}) — earlier instances' logs are unreachable"
+  else
+    ok "postgres log clean (current + previous instance)"
+  fi
+else
+  FAILED="$FAILED pglog"
+  note "$BAD corruption-pattern lines in postgres log (+$PREV in the previous container instance)"
 fi
 
 # 5. writability

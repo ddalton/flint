@@ -1,0 +1,104 @@
+[2m2026-07-27T22:27:25.919173Z[0m [32m INFO[0m ╔═══════════════════════════════════════════════════════════╗
+[2m2026-07-27T22:27:25.919190Z[0m [32m INFO[0m ║        Flint NFSv4.2 Server - RWX Volume Export          ║
+[2m2026-07-27T22:27:25.919193Z[0m [32m INFO[0m ║          RFC 7862 - Concurrent I/O Support               ║
+[2m2026-07-27T22:27:25.919195Z[0m [32m INFO[0m ╚═══════════════════════════════════════════════════════════╝
+[2m2026-07-27T22:27:25.919198Z[0m [32m INFO[0m 
+[2m2026-07-27T22:27:25.919262Z[0m [32m INFO[0m 🔧 FileHandleManager created:
+[2m2026-07-27T22:27:25.919265Z[0m [32m INFO[0m    Instance ID: 15422587554401453657 (shared across pNFS cluster)
+[2m2026-07-27T22:27:25.919268Z[0m [32m INFO[0m    Export path: "/mnt/volume"
+[2m2026-07-27T22:27:25.919271Z[0m [32m INFO[0m    Export name: volume
+[2m2026-07-27T22:27:25.919277Z[0m [32m INFO[0m 🌳 Pseudo-filesystem created (instance_id=15422587554401453657)
+[2m2026-07-27T22:27:25.919280Z[0m [32m INFO[0m    RFC 7530 Section 7: Unified namespace for NFSv4 exports
+[2m2026-07-27T22:27:25.919284Z[0m [32m INFO[0m 📁 Adding export to pseudo-filesystem:
+[2m2026-07-27T22:27:25.919287Z[0m [32m INFO[0m    Name: volume
+[2m2026-07-27T22:27:25.919289Z[0m [32m INFO[0m    Path: "/mnt/volume"
+[2m2026-07-27T22:27:25.919292Z[0m [32m INFO[0m    ID: 1
+[2m2026-07-27T22:27:25.919294Z[0m [32m INFO[0m    pNFS: Enabled (layout types: [2, 1])
+[2m2026-07-27T22:27:25.919443Z[0m [32m INFO[0m 🧬 v4 kernel filehandles ACTIVE (probe passed) — path maps retired
+[2m2026-07-27T22:27:25.923643Z[0m [32m INFO[0m 💾 NFSv4 state: persistent at "/mnt/volume/.flint-nfs/state.db" (synchronous=FULL)
+[2m2026-07-27T22:27:25.923715Z[0m [32m INFO[0m LeaseManager created - grace period for 90s
+[2m2026-07-27T22:27:25.923762Z[0m [32m INFO[0m ClientManager created - mode="standalone", server_owner=flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c, server_scope=flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c
+[2m2026-07-27T22:27:25.923791Z[0m [32m INFO[0m SessionManager created
+[2m2026-07-27T22:27:25.923800Z[0m [32m INFO[0m StateIdManager created
+[2m2026-07-27T22:27:25.923824Z[0m [32m INFO[0m DelegationManager created
+[2m2026-07-27T22:27:25.923854Z[0m [32m INFO[0m 🔐 Initializing RPCSEC_GSS manager (Pure Rust implementation)
+[2m2026-07-27T22:27:25.923857Z[0m [33m WARN[0m ⚠️  No keytab path specified, RPCSEC_GSS will use placeholder mode
+[2m2026-07-27T22:27:25.923912Z[0m [32m INFO[0m 
+[2m2026-07-27T22:27:25.923919Z[0m [32m INFO[0m 📊 Configuration:
+[2m2026-07-27T22:27:25.923921Z[0m [32m INFO[0m    • Export Path: "/mnt/volume"
+[2m2026-07-27T22:27:25.923925Z[0m [32m INFO[0m    • Volume ID:   pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c
+[2m2026-07-27T22:27:25.923927Z[0m [32m INFO[0m    • Bind Address: 0.0.0.0:2049
+[2m2026-07-27T22:27:25.923930Z[0m [32m INFO[0m 
+[2m2026-07-27T22:27:25.923932Z[0m [32m INFO[0m 🔧 Mount command (from client):
+[2m2026-07-27T22:27:25.923934Z[0m [32m INFO[0m    mount -t nfs -o vers=4.2,tcp <server-ip>:/ /mnt/point
+[2m2026-07-27T22:27:25.923936Z[0m [32m INFO[0m    OR: mount -t nfs -o vers=4.1,tcp <server-ip>:/ /mnt/point
+[2m2026-07-27T22:27:25.923938Z[0m [32m INFO[0m 
+[2m2026-07-27T22:27:25.923940Z[0m [32m INFO[0m ⚡ Server starting...
+[2m2026-07-27T22:27:25.923942Z[0m [32m INFO[0m 
+[2m2026-07-27T22:27:25.923964Z[0m [32m INFO[0m 🚀 Starting NFSv4.2 server on 0.0.0.0:2049
+[2m2026-07-27T22:27:25.923973Z[0m [32m INFO[0m 📂 Exporting: "/mnt/volume"
+[2m2026-07-27T22:27:25.923975Z[0m [32m INFO[0m 💾 Volume ID: pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c
+[2m2026-07-27T22:27:25.923978Z[0m [32m INFO[0m 
+[2m2026-07-27T22:27:25.923979Z[0m [32m INFO[0m 🔧 Mount command (from client):
+[2m2026-07-27T22:27:25.923982Z[0m [32m INFO[0m    mount -t nfs -o vers=4.2,tcp <server-ip>:/ /mnt/point
+[2m2026-07-27T22:27:25.923984Z[0m [32m INFO[0m 
+[2m2026-07-27T22:27:25.924149Z[0m [32m INFO[0m [FENCE] backing-store watchdog armed (F33) [3mdeadline_secs[0m[2m=[0m90 [3minterval_ms[0m[2m=[0m10000
+[2m2026-07-27T22:27:25.925298Z[0m [32m INFO[0m 📈 NFSv4 server instance #1 for this volume (persisted counter)
+[2m2026-07-27T22:27:25.925471Z[0m [32m INFO[0m ClientManager loaded 0 records from backend
+[2m2026-07-27T22:27:25.925490Z[0m [32m INFO[0m SessionManager observed 0 persisted sessions; bumped counter past max_id=0, dropped them so kernel re-CREATE_SESSIONs naturally on BADSESSION
+[2m2026-07-27T22:27:25.925501Z[0m [32m INFO[0m StateIdManager loaded 0 records from backend
+[2m2026-07-27T22:27:25.925513Z[0m [32m INFO[0m StateManager loaded 0 clients, 0 sessions, 0 stateids from backend
+[2m2026-07-27T22:27:25.925628Z[0m [32m INFO[0m ✅ NFSv4.2 TCP server listening on 0.0.0.0:2049
+[2m2026-07-27T22:27:25.925649Z[0m [32m INFO[0m 
+[2m2026-07-27T22:27:27.798134Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2m2026-07-27T22:27:27.798323Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #1 from 10.244.4.238:45842 (Active connections: 1)
+[2m2026-07-27T22:27:27.798329Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1785191247, tv_nsec: 798329227 }
+[2m2026-07-27T22:27:27.798335Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2m2026-07-27T22:27:27.798385Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #1 from 10.244.4.238:45842
+[2m2026-07-27T22:27:27.798401Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #1 handler started for 10.244.4.238:45842
+[2m2026-07-27T22:27:27.798411Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1785191247, tv_nsec: 798411022 }
+[2m2026-07-27T22:27:27.798472Z[0m [32m INFO[0m >>> NULL procedure
+[2m2026-07-27T22:27:27.798695Z[0m [32m INFO[0m EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 50, 32, 105, 112, 45, 49, 55, 50, 45, 51, 49, 45, 53, 45, 49, 55, 54, 46, 117, 115, 45, 119, 101, 115, 116, 45, 49, 46, 99, 111, 109, 112, 117, 116, 101, 46, 105, 110, 116, 101, 114, 110, 97, 108], verifier=1785191247680134299
+[2m2026-07-27T22:27:27.798735Z[0m [32m INFO[0m Lease created for client 1
+[2m2026-07-27T22:27:27.798738Z[0m [32m INFO[0m EXCHANGE_ID: new client 1 (no existing record)
+[2m2026-07-27T22:27:27.798741Z[0m [32m INFO[0m EXCHANGE_ID: new unconfirmed clientid 1
+[2m2026-07-27T22:27:27.798745Z[0m [32m INFO[0m EXCHANGE_ID response - server_owner="flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c", server_scope="flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c", flags=0x00010101
+[2m2026-07-27T22:27:27.798923Z[0m [32m INFO[0m EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 50, 32, 105, 112, 45, 49, 55, 50, 45, 51, 49, 45, 53, 45, 49, 55, 54, 46, 117, 115, 45, 119, 101, 115, 116, 45, 49, 46, 99, 111, 109, 112, 117, 116, 101, 46, 105, 110, 116, 101, 114, 110, 97, 108], verifier=1785191247680134299
+[2m2026-07-27T22:27:27.798940Z[0m [32m INFO[0m Lease removed for client 1
+[2m2026-07-27T22:27:27.798963Z[0m [32m INFO[0m Lease created for client 2
+[2m2026-07-27T22:27:27.798965Z[0m [32m INFO[0m EXCHANGE_ID: new unconfirmed clientid 2
+[2m2026-07-27T22:27:27.798968Z[0m [32m INFO[0m EXCHANGE_ID response - server_owner="flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c", server_scope="flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c", flags=0x00010101
+[2m2026-07-27T22:27:27.799099Z[0m [32m INFO[0m CREATE_SESSION: clientid=2, sequence=1
+[2m2026-07-27T22:27:27.799109Z[0m [32m INFO[0m CREATE_SESSION: Client requested - max_request=1049620, max_response=1049480, max_ops=8
+[2m2026-07-27T22:27:27.799116Z[0m [32m INFO[0m CREATE_SESSION: Negotiated: req=1048576, resp=1048576, ops=8
+[2m2026-07-27T22:27:27.799124Z[0m [32m INFO[0m Session created: client=2, session_id=SessionId([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2])
+[2m2026-07-27T22:27:27.799129Z[0m [32m INFO[0m CREATE_SESSION: Session SessionId([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]) created for client 2 with 1024KB buffers
+[2m2026-07-27T22:27:27.799138Z[0m [32m INFO[0m CREATE_SESSION: registered back-channel writer for session SessionId([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]) (CONN_BACK_CHAN requested)
+[2m2026-07-27T22:27:27.799303Z[0m [32m INFO[0m RECLAIM_COMPLETE: one_fs=false
+[2m2026-07-27T22:27:27.799319Z[0m [32m INFO[0m RECLAIM_COMPLETE: client 2 now exited grace mode
+[2m2026-07-27T22:32:31.353845Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2m2026-07-27T22:32:31.353859Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #2 from 10.244.2.189:56802 (Active connections: 2)
+[2m2026-07-27T22:32:31.353864Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1785191551, tv_nsec: 353864712 }
+[2m2026-07-27T22:32:31.353869Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2m2026-07-27T22:32:31.353899Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #2 from 10.244.2.189:56802
+[2m2026-07-27T22:32:31.353904Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #2 handler started for 10.244.2.189:56802
+[2m2026-07-27T22:32:31.353907Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1785191551, tv_nsec: 353906963 }
+[2m2026-07-27T22:32:31.354065Z[0m [32m INFO[0m >>> NULL procedure
+[2m2026-07-27T22:32:31.354519Z[0m [32m INFO[0m EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 50, 32, 105, 112, 45, 49, 55, 50, 45, 51, 49, 45, 52, 45, 51, 46, 117, 115, 45, 119, 101, 115, 116, 45, 49, 46, 99, 111, 109, 112, 117, 116, 101, 46, 105, 110, 116, 101, 114, 110, 97, 108], verifier=1785191551157078074
+[2m2026-07-27T22:32:31.354542Z[0m [32m INFO[0m Lease created for client 3
+[2m2026-07-27T22:32:31.354545Z[0m [32m INFO[0m EXCHANGE_ID: new client 3 (no existing record)
+[2m2026-07-27T22:32:31.354568Z[0m [32m INFO[0m EXCHANGE_ID: new unconfirmed clientid 3
+[2m2026-07-27T22:32:31.354572Z[0m [32m INFO[0m EXCHANGE_ID response - server_owner="flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c", server_scope="flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c", flags=0x00010101
+[2m2026-07-27T22:32:31.354909Z[0m [32m INFO[0m EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 50, 32, 105, 112, 45, 49, 55, 50, 45, 51, 49, 45, 52, 45, 51, 46, 117, 115, 45, 119, 101, 115, 116, 45, 49, 46, 99, 111, 109, 112, 117, 116, 101, 46, 105, 110, 116, 101, 114, 110, 97, 108], verifier=1785191551157078074
+[2m2026-07-27T22:32:31.354927Z[0m [32m INFO[0m Lease removed for client 3
+[2m2026-07-27T22:32:31.354932Z[0m [32m INFO[0m Lease created for client 4
+[2m2026-07-27T22:32:31.354935Z[0m [32m INFO[0m EXCHANGE_ID: new unconfirmed clientid 4
+[2m2026-07-27T22:32:31.354938Z[0m [32m INFO[0m EXCHANGE_ID response - server_owner="flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c", server_scope="flint-nfs-pvc-ed1543d4-f584-48d9-a32b-1c7dacdb7f2c", flags=0x00010101
+[2m2026-07-27T22:32:31.355201Z[0m [32m INFO[0m CREATE_SESSION: clientid=4, sequence=1
+[2m2026-07-27T22:32:31.355207Z[0m [32m INFO[0m CREATE_SESSION: Client requested - max_request=1049620, max_response=1049480, max_ops=8
+[2m2026-07-27T22:32:31.355214Z[0m [32m INFO[0m CREATE_SESSION: Negotiated: req=1048576, resp=1048576, ops=8
+[2m2026-07-27T22:32:31.355220Z[0m [32m INFO[0m Session created: client=4, session_id=SessionId([0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 4])
+[2m2026-07-27T22:32:31.355232Z[0m [32m INFO[0m CREATE_SESSION: Session SessionId([0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 4]) created for client 4 with 1024KB buffers
+[2m2026-07-27T22:32:31.355240Z[0m [32m INFO[0m CREATE_SESSION: registered back-channel writer for session SessionId([0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 4]) (CONN_BACK_CHAN requested)
+[2m2026-07-27T22:32:31.355696Z[0m [32m INFO[0m RECLAIM_COMPLETE: one_fs=false
+[2m2026-07-27T22:32:31.355707Z[0m [32m INFO[0m RECLAIM_COMPLETE: client 4 now exited grace mode
