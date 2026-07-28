@@ -693,30 +693,32 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
             // or concurrently-created E_f skeleton then failed the whole
             // admission. Probe instead of parsing the message: if the
             // subsystem exists now, creation is converged.
-            let exists = rpc
-                .spdk_rpc(src_node, &json!({ "method": "nvmf_get_subsystems" }))
-                .await
-                .ok()
-                .and_then(|resp| {
-                    resp.get("result").and_then(|r| r.as_array()).map(|subs| {
-                        subs.iter()
-                            .any(|s| s.get("nqn").and_then(|n| n.as_str()) == Some(nqn_ef.as_str()))
-                    })
-                })
-                .unwrap_or(false);
-            if !exists {
+            if get_subsystem(rpc, src_node, &nqn_ef).await.is_none() {
                 return Err(format!("E_f subsystem on {}: {}", src_node, e).into());
             }
         }
     }
+    let host_nqn = flint_host_nqn(dst_node);
     let host = json!({
         "method": "nvmf_subsystem_add_host",
-        "params": { "nqn": nqn_ef, "host": flint_host_nqn(dst_node) }
+        "params": { "nqn": nqn_ef, "host": host_nqn }
     });
     match rpc.spdk_rpc(src_node, &host).await {
         Ok(_) => {}
         Err(e) if is_already_exists(&e.to_string()) => {}
-        Err(e) => return Err(format!("E_f host fence on {}: {}", src_node, e).into()),
+        Err(e) => {
+            // F54 (runak 2.9): the same trap as F48, one RPC later. An
+            // attempt that unwinds AFTER prestage leaves the E_f skeleton
+            // behind with this host already fenced in; the retry's create
+            // is adopted by the probe above, and then add_host fails with
+            // a bare "-32603 Internal error" — SPDK says nothing about a
+            // duplicate host, so there is no text to match. Parsing cost
+            // the whole retry (~7min of backoff) for a subsystem that was
+            // already in the wanted state. Probe the host list instead.
+            if !subsystem_has_host(rpc, src_node, &nqn_ef, &host_nqn).await {
+                return Err(format!("E_f host fence on {}: {}", src_node, e).into());
+            }
+        }
     }
     let src_ip = rpc.node_ip(src_node).await?;
     let listener = json!({
@@ -729,7 +731,15 @@ async fn prestage(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<(), Rpc
     match rpc.spdk_rpc(src_node, &listener).await {
         Ok(_) => {}
         Err(e) if is_already_exists(&e.to_string()) => {}
-        Err(e) => return Err(format!("E_f listener on {}: {}", src_node, e).into()),
+        Err(e) => {
+            // Same residual-skeleton path as the host fence above: a
+            // leftover E_f carries its listener too. Whatever shape this
+            // SPDK reports a duplicate listen address in, an address that
+            // is already published is converged.
+            if !subsystem_has_listener(rpc, src_node, &nqn_ef, &src_ip, "4420").await {
+                return Err(format!("E_f listener on {}: {}", src_node, e).into());
+            }
+        }
     }
 
     // Pre-connect the rejoin target to the (still namespace-less) E_f
@@ -1144,14 +1154,21 @@ async fn prestage_inline(rpc: &dyn HotRejoinRpc, topo: &Topology<'_>) -> Result<
 
     // Re-admit the copy source (the converge above fenced to the consumer
     // only). Raw add_host: any later export converge removes it again.
+    let src_host_nqn = flint_host_nqn(src_node);
     let host = json!({
         "method": "nvmf_subsystem_add_host",
-        "params": { "nqn": nqn_replica, "host": flint_host_nqn(src_node) }
+        "params": { "nqn": nqn_replica, "host": src_host_nqn }
     });
     match rpc.spdk_rpc(dst_node, &host).await {
         Ok(_) => {}
         Err(e) if is_already_exists(&e.to_string()) => {}
-        Err(e) => return Err(format!("copy-source re-admit on {}: {}", dst_node, e).into()),
+        // F54: a retry re-admitting a host it already admitted is converged,
+        // and SPDK's duplicate is untextual — probe, do not parse.
+        Err(e) => {
+            if !subsystem_has_host(rpc, dst_node, &nqn_replica, &src_host_nqn).await {
+                return Err(format!("copy-source re-admit on {}: {}", dst_node, e).into());
+            }
+        }
     }
 
     // Source-side copy attachment (reuse the steady chase's if live).
@@ -1418,6 +1435,70 @@ async fn wait_bdev(
 
 fn is_busy(msg: &str) -> bool {
     msg.contains("EBUSY") || msg.contains("Code=-16") || msg.to_lowercase().contains("busy")
+}
+
+// --- converge probes (F48/F54) ---------------------------------------------
+//
+// SPDK reports "you already did this" for the nvmf subsystem builders in
+// shapes that carry no recognizable text: a duplicate create is "-32603
+// Unable to create subsystem", a duplicate host is a bare "-32603 Internal
+// error". Parsing those messages loses a whole admission retry to a target
+// that is already in the wanted state, so every builder in `prestage`
+// re-reads the subsystem instead. An unreachable node reads as "not
+// converged" and the caller fails — the honest direction.
+
+/// The subsystem record for `nqn` on `node`, or `None` when the RPC fails
+/// or the subsystem is absent.
+async fn get_subsystem(rpc: &dyn CatchupRpc, node: &str, nqn: &str) -> Option<serde_json::Value> {
+    rpc.spdk_rpc(node, &json!({ "method": "nvmf_get_subsystems" }))
+        .await
+        .ok()?
+        .get("result")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("nqn").and_then(|n| n.as_str()) == Some(nqn))
+        .cloned()
+}
+
+/// True when `host_nqn` is already in the subsystem's allowed-host list.
+async fn subsystem_has_host(
+    rpc: &dyn CatchupRpc,
+    node: &str,
+    nqn: &str,
+    host_nqn: &str,
+) -> bool {
+    get_subsystem(rpc, node, nqn)
+        .await
+        .as_ref()
+        .and_then(|s| s.get("hosts"))
+        .and_then(|h| h.as_array())
+        .is_some_and(|hosts| {
+            hosts
+                .iter()
+                .any(|h| h.get("nqn").and_then(|n| n.as_str()) == Some(host_nqn))
+        })
+}
+
+/// True when the subsystem already publishes `traddr:trsvcid`. Compared on
+/// address and port only — SPDK echoes adrfam/trtype back in its own case.
+async fn subsystem_has_listener(
+    rpc: &dyn CatchupRpc,
+    node: &str,
+    nqn: &str,
+    traddr: &str,
+    trsvcid: &str,
+) -> bool {
+    get_subsystem(rpc, node, nqn)
+        .await
+        .as_ref()
+        .and_then(|s| s.get("listen_addresses"))
+        .and_then(|l| l.as_array())
+        .is_some_and(|addrs| {
+            addrs.iter().any(|a| {
+                a.get("traddr").and_then(|t| t.as_str()) == Some(traddr)
+                    && a.get("trsvcid").and_then(|t| t.as_str()) == Some(trsvcid)
+            })
+        })
 }
 
 async fn subsystem_nsid(
@@ -3028,11 +3109,14 @@ mod tests {
                 "nvmf_subsystem_add_host" => {
                     let nqn = params["nqn"].as_str().unwrap().to_string();
                     let host = params["host"].as_str().unwrap().to_string();
-                    w.subsystems
-                        .entry((node_s.clone(), nqn))
-                        .or_default()
-                        .hosts
-                        .push(host);
+                    let sub = w.subsystems.entry((node_s.clone(), nqn)).or_default();
+                    // Faithful to SPDK (runak 2.9, F54): a duplicate host is
+                    // a BARE "-32603 Internal error" — no "already exists"
+                    // anywhere, and spdk-tgt logs nothing at all.
+                    if sub.hosts.contains(&host) {
+                        return Err("SPDK RPC error: Code=-32603 Msg=Internal error".into());
+                    }
+                    sub.hosts.push(host);
                     json!({ "result": true })
                 }
                 "nvmf_subsystem_remove_host" => {
@@ -3084,7 +3168,22 @@ mod tests {
                                 .iter()
                                 .map(|(id, b)| json!({ "nsid": id, "bdev_name": b }))
                                 .collect();
-                            json!({ "nqn": nqn, "namespaces": nss })
+                            // hosts + listen_addresses mirror the real RPC's
+                            // shape — the F54 converge probes read them.
+                            let hosts: Vec<Value> =
+                                s.hosts.iter().map(|h| json!({ "nqn": h })).collect();
+                            let listeners: Vec<Value> = if s.listener {
+                                vec![json!({
+                                    "traddr": format!("10.0.0.{}", node_s.len()),
+                                    "trsvcid": "4420", "trtype": "TCP", "adrfam": "IPv4"
+                                })]
+                            } else {
+                                vec![]
+                            };
+                            json!({
+                                "nqn": nqn, "namespaces": nss, "hosts": hosts,
+                                "listen_addresses": listeners
+                            })
                         })
                         .collect();
                     json!({ "result": subs })
@@ -3537,6 +3636,37 @@ mod tests {
         assert!(
             matches!(out, HotRejoinOutcome::Rejoined { .. }),
             "residual E_f skeleton must be adopted, not fail the admission: {:?}",
+            out
+        );
+    }
+
+    /// F54 (runak 2.9): the SAME trap one RPC later. The residual E_f
+    /// skeleton left by an unwound attempt already carries the host fence
+    /// and the listener; the retry's `nvmf_create_subsystem` is adopted by
+    /// the F48 probe, and then `nvmf_subsystem_add_host` fails with SPDK's
+    /// bare "-32603 Internal error" — no text to match, so the parse-only
+    /// arm failed the whole admission and cost a full backoff cycle. The
+    /// converge probes must adopt the fully-built residue.
+    #[tokio::test]
+    async fn residual_ef_with_host_and_listener_does_not_fail_the_admission() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        {
+            // Residue on the source survivor: E_f fully built — subsystem,
+            // host fence for the rejoin target, listener (the state attempt
+            // #1 leaves behind when it unwinds inside the window).
+            let mut w = rpc.world.lock().unwrap();
+            let sub = w.subsystems.entry(("node-a".into(), ef_export_nqn(VOL))).or_default();
+            sub.hosts.push(flint_host_nqn("node-b"));
+            sub.listener = true;
+        }
+        let store = FakeStore::new(stale_b_record());
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, HotRejoinOutcome::Rejoined { .. }),
+            "fully-built residual E_f (host already fenced) must be adopted: {:?}",
             out
         );
     }
