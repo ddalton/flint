@@ -1,0 +1,12 @@
+🩹 [CATCHUP] Replica catch-up orchestrator enabled (t_back: 120s, poll: 2s, full build: on)
+🔁 [CUTOVER] Reassembly cutover orchestrator enabled (cooldown: 900s, max lag: 1 epoch(s))
+♻️ [HOT_REJOIN] Hot-rejoin orchestrator enabled (max lag: 1 epoch(s), retry backoff: 300s, window target: 2000ms)
+2026-07-29T00:24:27.774460Z  INFO [CATCHUP] Replica catch-up orchestrator started t_back_secs=120 replace_enabled=true replace_after_secs=600
+2026-07-29T00:24:27.774499Z  INFO [CUTOVER] Reassembly cutover orchestrator started cooldown_secs=900 max_lag=1
+2026-07-29T00:24:27.774513Z  INFO [HOT_REJOIN] Hot-rejoin orchestrator started max_lag=1 retry_backoff_secs=300
+2026-07-29T00:42:27.954978Z  INFO [REPLACE] Replica identity swapped off lost node — full build queued volume_id="pvc-9cc24a62-5b23-4ab7-97b7-7bc0ce283465" index=1 from=runan-aws-2 to=runan-aws-4 new_uuid=160b7603-98fb-4f5d-99c5-ef49bad4580c
+2026-07-29T00:42:52.788654Z  INFO [CATCHUP] Replica caught up to warm standby volume_id="pvc-9cc24a62-5b23-4ab7-97b7-7bc0ce283465" node=runan-aws-4 base=empty through=epoch-pvc-9cc24a62-5b23-4ab7-97b7-7bc0ce283465-3
+2026-07-29T00:43:27.782081Z  INFO [CLAIMS] volume claimed by another operation — skipping this tick volume_id="pvc-9cc24a62-5b23-4ab7-97b7-7bc0ce283465" wanted_op="catch-up" held_by="hot-rejoin" held_secs=0
+2026-07-29T00:43:28.411322Z  INFO [HOT_REJOIN] Window committed volume_id="pvc-9cc24a62-5b23-4ab7-97b7-7bc0ce283465" node=runan-aws-4 window_ms=228
+2026-07-29T00:44:07.399859Z  INFO [HOT_REJOIN] Localization complete volume_id="pvc-9cc24a62-5b23-4ab7-97b7-7bc0ce283465" node=runan-aws-4 ef=epoch-pvc-9cc24a62-5b23-4ab7-97b7-7bc0ce283465-4
+2026-07-29T00:44:07.399981Z  INFO [HOT_REJOIN] Rejoin complete volume_id="pvc-9cc24a62-5b23-4ab7-97b7-7bc0ce283465" window_ms=228 localized=true

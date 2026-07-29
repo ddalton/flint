@@ -44,6 +44,14 @@
 #         acks stay fresh (no EIO), reap lines attributed in agent logs.
 #   3.11  v1.21.0 RWX online expansion under writes (controller-driven
 #         backing chain; backing PVC status is the fs-growth proof)
+#   3.12 ☠ S2 ACCEPTANCE (v1.22.0): the 3.6e vector with the OPPOSITE
+#         mechanism under test — in-place admission on the LIVE serving raid.
+#         A bounce is the FAILURE here; the gate is the quiesce span, the nfs
+#         pod's unchanged identity, and an absent CutoverStarted. Needs
+#         SC=flint-r2, FLINT_RWX_INPLACE_ADMISSION on, and a spare node.
+#   3.13  F55 live gate: bounce the server MID-CHECKPOINT (forced, not by
+#         luck) and assert zero postgres PANICs — the DrainGate contract.
+#         Consumes no nodes; ~3 minutes.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./lib.sh
@@ -61,6 +69,11 @@ nfs_pod() { # exact name is flint-nfs-<volumeHandle>
 }
 nfs_pod_uid()  { kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.metadata.uid}' 2>/dev/null; }
 nfs_node()     { kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.spec.nodeName}' 2>/dev/null; }
+nfs_restarts() { # summed across the pod's containers ("" if no pod)
+  kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" \
+    -o jsonpath='{.status.containerStatuses[*].restartCount}' 2>/dev/null \
+    | awk '{s=0; for(i=1;i<=NF;i++) s+=$i; print s}'
+}
 nfs_pod_count() { # pods for this volume (want exactly 1, always)
   local h; h=$(volume_handle)
   kubectl get pods -n "$DRIVER_NS" --no-headers 2>/dev/null | grep -c "^flint-nfs-$h " || true
@@ -133,6 +146,28 @@ writer_uuids()     { sync_record | jq -r '.writer_set.lvol_uuids[]?' 2>/dev/null
 leg_state()        { sync_record | jq -r --arg u "$1" '.replicas[]? | select(.lvol_uuid==$u) | .sync_state' 2>/dev/null; }
 pv_replicas_json() { kubectl get pv "$PV" -o json 2>/dev/null | jq -r '.spec.csi.volumeAttributes["flint.csi.storage.io/replicas"] // empty'; }
 risk_annotation()  { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/acked-tail-risk}' 2>/dev/null; }
+
+ctrl_log() { # <t0> — the CONTROLLER's log since t0, ANSI-stripped.
+  # The orchestrator block (catch-up, cutover, hot-rejoin window, claims)
+  # logs here, not in the csi-node containers driver_log_hits reads — the
+  # window's own markers ("Window committed", window_ms) are only visible
+  # from this pod.
+  kubectl logs -n "$DRIVER_NS" "$(controller_pod)" -c flint-csi-controller \
+    --since-time="$(rfc3339 "$1")" 2>/dev/null | deansi
+}
+
+inplace_admission_state() { # ON | OFF — the S2 kill switch as the fleet runs it
+  # Opt-out semantics, matching rwx_inplace_admission() in hot_rejoin.rs:
+  # only disabled|false|0 turn it off, and an unset var is ON.
+  local v
+  v=$(kubectl get deploy,ds -n "$DRIVER_NS" -o json 2>/dev/null \
+      | jq -r '.items[].spec.template.spec.containers[]?.env[]?
+               | select(.name=="FLINT_RWX_INPLACE_ADMISSION") | .value' 2>/dev/null | head -1)
+  case "$(printf '%s' "${v:-}" | tr 'A-Z' 'a-z')" in
+    disabled|false|0) echo OFF ;;
+    *)                echo ON  ;;
+  esac
+}
 
 driver_log_hits() { # <t0> <pattern> — hits across every csi-node driver log
   local t total=0 n p c; t=$(rfc3339 "$1")
@@ -727,8 +762,19 @@ case "$DRILL" in
     || fail "3.6e FAIL (F44/F46): the settle window did not hold — in_sync=${N_SYNC:-?}/2, nfs phase=${NFS_PHASE:-?} ready=${NFS_READY:-?}, assembly_blocked='${ASM_BLOCKED:-}' (record-only health = F46 shape; collapse = F44 shape, head_in_use_events=$HEADINUSE)"
   [ -z "$FOREIGN" ] \
     || fail "3.6e FAIL (F44-cousin): latent head pin — foreign controllers on$FOREIGN would deadlock the NEXT rebuild (chase-controller leak)"
-  [ "$T_CUTOVER" -ge 0 ] \
-    || note "3.6e ANOMALY: redundancy restored WITHOUT an nfs bounce — admitted by another path; confirm which before crediting the F43 fix"
+  # The bounce expectation is version-dependent as of v1.22.0. With S2's
+  # in-place admission ON (the default), a bounce-free landing is the DESIGN,
+  # not an anomaly — 3.12 is the drill that gates it, and 3.6e degrades to a
+  # convergence regression test. With the kill switch OFF this is still the
+  # F43 cell, and a missing bounce means something else admitted the leg.
+  if [ "$(inplace_admission_state)" = "ON" ]; then
+    [ "$T_CUTOVER" -lt 0 ] \
+      && ok "no nfs bounce — S2's in-place window owns RWX admission on this build (run 3.12 for the gate)" \
+      || note "3.6e: the nfs pod bounced at ${T_CUTOVER}s even though in-place admission is ON — cutover took an admission it was supposed to defer (3.12 fails on exactly this)"
+  else
+    [ "$T_CUTOVER" -ge 0 ] \
+      || note "3.6e ANOMALY: redundancy restored WITHOUT an nfs bounce — admitted by another path; confirm which before crediting the F43 fix"
+  fi
   note "fleet is one storage node down — replace via trove before further node-consuming drills"
   ;;
 
@@ -1057,6 +1103,374 @@ case "$DRILL" in
   witness_verdict "$T0"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=120 \
     NOTES="RWX online expand ${CUR}->${NEW} in ${T_DONE}s under writes; backing=$BST_RAW" verify
+  ;;
+
+3.12) # ☠ S2 ACCEPTANCE — BOUNCE-FREE RWX admission (the in-place window).
+      # Same vector as 3.6e — permanently TERMINATE a backing-LEG node that is
+      # NOT the nfs-server's node, so the server stays alive and writing and
+      # the replacement can only be admitted into the LIVE raid. What differs
+      # is the mechanism under test, and it is the opposite one.
+      #
+      # Through v1.21.0 that admission rode CUTOVER: bounce the NFS server,
+      # reassemble the raid from scratch with the new leg. It worked (F43),
+      # but it cost an outage window (~237s measured), opened the F48 two-head
+      # phase, re-proved fh identity on every pass (F52), and truncated
+      # in-flight replies (F55).
+      #
+      # S2 admits IN PLACE: quiesce the serving raid, take the fenced delta,
+      # grow the raid at the current incarnation, mark_in_sync, unquiesce.
+      # NFS state — filehandles, locks, delegations, sessions — is never
+      # touched, because the whole operation happens below the filesystem.
+      # The guest-visible cost collapses from a bounce to the quiesce span
+      # (RWO's window_ms measures in the low hundreds).
+      #
+      # So here A BOUNCE IS THE FAILURE. The verdicts assert absence: the nfs
+      # pod's uid and restart count must not move, no CutoverStarted may fire
+      # for this PV, and the ledger must show no admission-window stall beyond
+      # the quiesce budget. Formal backing: FlintReplication's
+      # AdmissionNotStarved — and its F43 mutation, which proves the landing
+      # needs claim PRIORITY, not fairness. Needs SC=flint-r2 + a v1.22.0
+      # driver and a spare storage node (consumes one).
+  pre_rwx
+  kubectl get pv "$PV" -o jsonpath='{.spec.storageClassName}' | grep -q "flint-r2" \
+    || fail "3.12 needs SC=flint-r2 (current: $(kubectl get pv "$PV" -o jsonpath='{.spec.storageClassName}')) — reset the harness"
+  S2=$(inplace_admission_state)
+  [ "$S2" = "ON" ] \
+    || fail "3.12 INVALID: FLINT_RWX_INPLACE_ADMISSION is $S2 in the deployed fleet — with the kill switch off, admission is the cutover bounce and this drill would be measuring 3.6e"
+  QBUDGET_MS=${S2_QUIESCE_BUDGET_MS:-10000}
+  SBUDGET=${S2_ADMIT_STALL_BUDGET:-10}
+  REPL=$(pv_replicas_json)
+  LEG_NODE=$(echo "$REPL" | jq -r '.[].node_name' | grep -v "^$NFS_NODE$" | head -1)
+  [ -n "$LEG_NODE" ] || fail "both legs live on the nfs node ($NFS_NODE) — 3.12 needs a REMOTE leg"
+  DEAD_UUID=$(echo "$REPL" | jq -r --arg n "$LEG_NODE" '.[] | select(.node_name==$n) | .lvol_uuid' | head -1)
+  [ "$LEG_NODE" != "$PRE_NODE" ] \
+    || note "CAVEAT: the leg node is also the pg client node — client loss is conflated with storage loss"
+  evict_load_from "$LEG_NODE"
+  OVR_PRE=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+  NFS_RESTARTS_PRE=$(nfs_restarts)
+  ACK_AT_KILL=$(last_ack_line)
+  note "acked tail at kill: $ACK_AT_KILL"
+  note "nfs pod ${NFS_POD} uid ${NFS_UID:0:8} restarts=${NFS_RESTARTS_PRE:-?} — the identity that must NOT move"
+  # Stream the server's log. Unlike 3.6e (where this is a race against the
+  # pod's deletion) the pod is expected to outlive the drill — the follow is
+  # simply the record of what the SERVING instance did across the admission.
+  ( kubectl logs -n "$DRIVER_NS" -f "$(nfs_pod)" > "$ARTIFACTS/312-nfs-server.log" 2>/dev/null ) &
+  NFSLOG_PID=$!
+  note "raid pre (on $NFS_NODE): $(raid_summary "$NFS_NODE" | head -2)"
+  IID=$(instance_id_for_node "$LEG_NODE")
+  [ -n "$IID" ] || fail "no instance id for $LEG_NODE"
+  aws ec2 terminate-instances --region "$AWS_REGION" --instance-ids "$IID" >/dev/null
+  note "TERMINATED $IID ($LEG_NODE) — remote leg ${DEAD_UUID:0:8}… permanently lost; the nfs server keeps writing"
+
+  # P4 decomposition, same watcher as 3.6e: the kill's detection stall is a
+  # different number from the admission's, precedes it, and (pre-P4) was an
+  # order of magnitude larger. Timestamping the degrade lets the two be
+  # reported apart instead of summed into one misleading figure.
+  DEGRADE_F=$(mktemp)
+  ( while :; do
+      B=$(raid_summary "$NFS_NODE" 2>/dev/null | grep -o 'base=[0-9]*/[0-9]*' | head -1)
+      if [ -n "$B" ] && [ "$B" != "base=2/2" ]; then echo $(( $(epoch) - T0 )) > "$DEGRADE_F"; exit 0; fi
+      [ $(( $(epoch) - T0 )) -ge 400 ] && exit 0
+      sleep 5
+    done ) &
+  DEGRADE_PID=$!
+  wait_node_notready "$LEG_NODE" 300
+  kubectl delete node "$LEG_NODE" >/dev/null 2>&1
+  T_NODEGONE=$(( $(epoch) - T0 ))
+  note "Node object deleted at ${T_NODEGONE}s — re-placement trigger armed"
+
+  # (a) P4 regression check (budget inherited from 3.6e — this is the same
+  # detection path, not a new one).
+  T_IO_BACK=0
+  if wait_acks_fresh 180; then
+    T_IO_BACK=$(epoch)
+    KILL_GAP=$(max_stall_since "$T0")
+    kill "$DEGRADE_PID" 2>/dev/null; wait "$DEGRADE_PID" 2>/dev/null
+    T_DEGRADE=$(cat "$DEGRADE_F" 2>/dev/null); rm -f "$DEGRADE_F"
+    [ -n "$T_DEGRADE" ] || T_DEGRADE=-1
+    P4_BUDGET=${P4_STALL_BUDGET:-60}
+    if [ "${KILL_GAP:-0}" -le "$P4_BUDGET" ]; then
+      ok "kill stall ${KILL_GAP}s ≤ ${P4_BUDGET}s (degrade at ${T_DEGRADE}s) — P4 held"
+    else
+      note "P4 BUDGET EXCEEDED: kill stall ${KILL_GAP}s > ${P4_BUDGET}s (degrade at ${T_DEGRADE}s)"
+    fi
+  else
+    kill "$DEGRADE_PID" 2>/dev/null; wait "$DEGRADE_PID" 2>/dev/null
+    T_DEGRADE=$(cat "$DEGRADE_F" 2>/dev/null || echo -1); rm -f "$DEGRADE_F"
+    T_IO_BACK=$(epoch)
+    note "acks went stale after the kill and never recovered in 180s — F42 REGRESSION?"
+  fi
+
+  # (b) F40: re-placement must dispatch (identity swap) — unchanged from 3.6e.
+  T_SWAP=-1; NEW_NODE=""
+  for i in $(seq 1 60); do
+    OVR=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.csi\.storage\.io/replicas-override}' 2>/dev/null)
+    if [ -n "$OVR" ] && [ "$OVR" != "$OVR_PRE" ]; then
+      T_SWAP=$(( $(epoch) - T0 ))
+      NEW_NODE=$(echo "$OVR" | jq -r '.[].node_name' | grep -v "^$NFS_NODE$" | head -1)
+      break
+    fi
+    sleep 10
+  done
+  [ "$T_SWAP" -ge 0 ] || fail "3.12 FAIL: replicas-override never appeared — RWX re-placement never dispatched (F40 regression)"
+  ok "identity swapped to ${NEW_NODE:-?} at ${T_SWAP}s"
+
+  # (c) ☠ THE S2 GATE — one convergence loop watching the replacement's
+  # sync_state and the nfs pod's uid together, exactly as 3.6e does. The
+  # assertions are inverted: in_sync must arrive, and the uid must NOT change
+  # while it does. A uid change here means cutover took the admission — the
+  # pre-S2 mechanism, which is now supposed to own relocation only.
+  T_STANDBY=-1; T_SYNC=-1; T_BOUNCE=-1; ST=""; NFS_UID_NEW=""
+  for i in $(seq 1 180); do        # 30 min budget
+    ST=$(leg_state_on "$NEW_NODE")
+    if [ "$T_STANDBY" -lt 0 ] && [ "$ST" = "standby" ]; then
+      T_STANDBY=$(( $(epoch) - T0 )); note "replacement reached standby at ${T_STANDBY}s — the warm claim-priority window opens here"
+    fi
+    U=$(nfs_pod_uid)
+    if [ "$T_BOUNCE" -lt 0 ] && [ -n "$U" ] && [ "$U" != "$NFS_UID" ]; then
+      T_BOUNCE=$(( $(epoch) - T0 )); NFS_UID_NEW=$U
+      note "☠ nfs pod BOUNCED at ${T_BOUNCE}s (uid ${NFS_UID:0:8} → ${U:0:8}) — cutover took the admission; S2 did not"
+    fi
+    [ "$ST" = "in_sync" ] && { T_SYNC=$(( $(epoch) - T0 )); break; }
+    sleep 10
+  done
+  [ "$T_SYNC" -ge 0 ] && ok "replacement leg in_sync at ${T_SYNC}s — RWX redundancy restored (2/2)" \
+    || note "replacement leg NOT in_sync after 30min (state=${ST:-unknown})"
+
+  # (d) THE HEADLINE NUMBER — the guest-visible cost of the admission,
+  # measured two ways that must agree:
+  #   window_ms  the driver's own quiesce span, from the window that committed
+  #   ADMIT_STALL the ledger's max ack gap from the moment I/O resumed after
+  #              the kill through in_sync — i.e. everything the admission
+  #              could possibly have cost the guest, detection excluded.
+  WIN_MS=$(ctrl_log "$T0" | grep "\[HOT_REJOIN\] Window committed" \
+           | grep -o 'window_ms=[0-9]*' | sed 's/.*=//' | sort -n | tail -1)
+  WIN_N=$(ctrl_log "$T0" | grep -c "\[HOT_REJOIN\] Window committed" || true)
+  ADMIT_STALL=-1
+  if [ "$T_SYNC" -ge 0 ] && [ "$T_IO_BACK" -gt 0 ]; then
+    ADMIT_STALL=$(max_stall_between "$(( T_IO_BACK + 5 ))" "$(( T0 + T_SYNC + 30 ))")
+  fi
+  note "windows committed since T0: ${WIN_N:-0} (max window_ms=${WIN_MS:-none})"
+  if [ "${ADMIT_STALL:-0}" -ge 0 ] && [ "${ADMIT_STALL:-0}" -le "$SBUDGET" ]; then
+    ok "admission cost the guest ${ADMIT_STALL}s ≤ ${SBUDGET}s (quiesce span, not a bounce)"
+  else
+    note "ADMISSION STALL ${ADMIT_STALL}s > ${SBUDGET}s — the window is not behaving like a quiesce"
+  fi
+
+  # (e) cutover must have DEFERRED, not merely lost a race. The planner says
+  # so in its own words when it yields the admission to the window; an
+  # ineffective/started cutover event for this PV means it tried anyway.
+  CUT_START=$(pv_events_since "$T0" CutoverStarted)
+  CUT_OK=$(pv_events_since "$T0" CutoverSucceeded)
+  CUT_INEFF=$(pv_events_since "$T0" CutoverIneffective)
+  DEFER_N=$(ctrl_log "$T0" | grep -c "in-place admission owns it" || true)
+  # These three are CONTROLLER-side markers — reading them through
+  # driver_log_hits (which greps only the csi-node containers) reports a
+  # confident 0 for every one of them. The positive evidence that arbitration
+  # ran is HELD_BY: catch-up's tick finding the volume already claimed by
+  # hot-rejoin is the yield, in the claims log's own words.
+  YIELDS=$(ctrl_log "$T0" | grep -c "resolver reserved the next claim" || true)
+  SEIZES=$(ctrl_log "$T0" | grep -c "claim SEIZED" || true)
+  HELD_BY=$(ctrl_log "$T0" | grep 'wanted_op="catch-up"' | grep -c 'held_by="hot-rejoin"' || true)
+  note "cutover events: started=$CUT_START succeeded=$CUT_OK ineffective=$CUT_INEFF; planner deferrals=${DEFER_N:-0}"
+  note "claim arbitration: catch-up ticks yielded to the window=${HELD_BY:-0}, resolver reservations=$YIELDS, lease seizures=$SEIZES (seizures should be 0)"
+
+  # (f) the client's view. In-place admission never touches the fs layer, so
+  # unlike a relocation there is no fh identity to re-prove — which makes ANY
+  # ESTALE or PANIC here a much stronger signal than it is in 3.6f. Both
+  # container instances, per the runai lesson (an eviction mid-drill erases
+  # the PANIC and mints a hollow db=PASS).
+  PG_RESTARTS_NOW=$(pg_restarts)
+  PGL_BOTH=$(printf '%s\n%s' \
+    "$(kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null || true)" \
+    "$(kubectl logs -n "$NS" $PG -c postgres --previous 2>/dev/null || true)")
+  ESTALE=$(printf '%s' "$PGL_BOTH" | grep -ci "stale file handle" || true)
+  PANIC=$(printf '%s' "$PGL_BOTH" | grep -c "PANIC" || true)
+  [ "${ESTALE:-0}" -eq 0 ] && [ "${PANIC:-0}" -eq 0 ] \
+    && ok "client saw ZERO ESTALE / ZERO PANIC across the admission" \
+    || note "CLIENT SIGNATURE: estale=$ESTALE panic=$PANIC in the postgres log"
+  [ "${PG_RESTARTS_NOW:-0}" = "${PRE_RESTARTS:-0}" ] \
+    && ok "pg-0 restarts unchanged at ${PG_RESTARTS_NOW:-0} — the database never noticed" \
+    || note "pg-0 restarted: ${PRE_RESTARTS:-0} → ${PG_RESTARTS_NOW:-0}"
+
+  # (g) the settle belt (F44/F46), inherited from 3.6e: in_sync at an instant
+  # is not the verdict; in_sync that survives the cooldown, with a live
+  # server, is.
+  T_SETTLED=-1; HEADINUSE=0; NFS_PHASE=""; NFS_READY=""; ASM_BLOCKED=""; N_SYNC=""
+  if [ "$T_SYNC" -ge 0 ]; then
+    note "settle window: re-asserting 2/2 at +360s (F44 signature: ReplicaHeadInUse + collapse)"
+    sleep 360
+    N_SYNC=$(sync_record | jq -r '[.replicas[]?|select(.sync_state=="in_sync")]|length' 2>/dev/null)
+    WS_N=$(writer_uuids | grep -c .)
+    HEADINUSE=$(pv_events_since "$T0" ReplicaHeadInUse)
+    NFS_PHASE=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.status.phase}' 2>/dev/null)
+    NFS_READY=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+    ASM_BLOCKED=$(kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/assembly-blocked}' 2>/dev/null)
+    if [ "$N_SYNC" = "2" ] && [ "$NFS_PHASE" = "Running" ] && [ "$NFS_READY" = "True" ] && [ -z "$ASM_BLOCKED" ]; then
+      T_SETTLED=$(( $(epoch) - T0 ))
+      ok "redundancy HELD through the settle window (2/2 in_sync, writer_set=$WS_N, head_in_use_events=$HEADINUSE, nfs Running/Ready)"
+    elif [ "$N_SYNC" = "2" ]; then
+      note "RECORD-ONLY health: 2/2 in_sync but nfs phase=$NFS_PHASE ready=$NFS_READY assembly_blocked='${ASM_BLOCKED:-}' (F46 shape)"
+    else
+      note "COLLAPSED in the settle window: in_sync=$N_SYNC writer_set=$WS_N head_in_use_events=$HEADINUSE (F44 shape)"
+    fi
+  fi
+
+  # (h) latent-pin sweep (F44-cousin) — a leaked controller off the server
+  # node pins the head for the NEXT rebuild even while 2/2 serves fine.
+  CUR_SRV=$(nfs_node)
+  FOREIGN=""
+  for n in $(worker_nodes); do
+    [ "$n" = "$CUR_SRV" ] && continue
+    C=$(spdk_rpc "$n" bdev_nvme_get_controllers 2>/dev/null | jq -r '[.[]?.name] | join(",")' 2>/dev/null | grep -o "${PV}" | head -1)
+    [ -n "$C" ] && FOREIGN="$FOREIGN $n"
+  done
+  [ -z "$FOREIGN" ] && ok "no foreign leg/copy controllers linger off the server node" \
+    || note "LATENT PIN: volume controllers still attached on non-server node(s):$FOREIGN"
+
+  NFS_RESTARTS_POST=$(nfs_restarts)
+  NFS_UID_POST=$(nfs_pod_uid)
+  note "raid post (on $CUR_SRV): $(raid_summary "$CUR_SRV" | head -2)"
+  T_WITNESS=$(wait_witness_fresh 420)
+  [ "$T_WITNESS" -ge 0 ] && ok "witness fresh at ${T_WITNESS}s (multi-node access intact)" \
+    || note "witness NOT fresh in 420s"
+  wait_acks_fresh 300 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
+  witness_verdict "$T0"
+  RISK=$(risk_annotation)
+  [ -z "$RISK" ] && ok "no acked-tail-risk raised (the serving raid never lost its writer)" \
+    || note "acked-tail-risk: $RISK"
+  kill "${NFSLOG_PID:-0}" 2>/dev/null || true
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
+    NOTES="S2 in-place RWX admission: node_gone=${T_NODEGONE}s degrade=${T_DEGRADE:--1}s swap=${T_SWAP}s standby=${T_STANDBY}s in_sync=${T_SYNC}s settled=${T_SETTLED}s window_ms=${WIN_MS:-none} admit_stall=${ADMIT_STALL}s kill_stall=${KILL_GAP:--1}s bounce=${T_BOUNCE} nfs_restarts=${NFS_RESTARTS_PRE:-?}->${NFS_RESTARTS_POST:-?} pg_restarts=${PRE_RESTARTS:-0}->${PG_RESTARTS_NOW:-0} cut_ev=$CUT_START/$CUT_OK/$CUT_INEFF defer=${DEFER_N:-0} held_by_window=${HELD_BY:-0} yields=$YIELDS seizes=$SEIZES estale=$ESTALE panic=$PANIC witness=${T_WITNESS}s new_node=${NEW_NODE:-?}" verify
+
+  # ---- verdicts. Redundancy first (it is still the point), then the four
+  # absences S2 exists to deliver.
+  [ "$T_SYNC" -ge 0 ] \
+    || fail "3.12 FAIL: replacement parked at '${ST:-unknown}' — admission never landed (check the claims log before blaming S2: a warm standby waiting behind a renewing maintainer claim is the F43 shape)"
+  [ "$T_BOUNCE" -lt 0 ] && [ "$NFS_UID_POST" = "$NFS_UID" ] \
+    || fail "3.12 FAIL (S2): the nfs server was BOUNCED at ${T_BOUNCE}s (uid ${NFS_UID:0:8} → ${NFS_UID_NEW:0:8}) — cutover admitted the replacement, so the guest paid a full reassembly. In-place admission did not own this"
+  [ "${NFS_RESTARTS_POST:-0}" = "${NFS_RESTARTS_PRE:-0}" ] \
+    || fail "3.12 FAIL (S2): the nfs server container restarted (${NFS_RESTARTS_PRE:-?} → ${NFS_RESTARTS_POST:-?}) — same outage as a bounce, just without a new pod"
+  [ "${CUT_START:-0}" = "0" ] \
+    || fail "3.12 FAIL (S2): $CUT_START CutoverStarted event(s) fired for $PV — cutover was supposed to defer to the window (planner deferrals=${DEFER_N:-0}), and relocation was not in play"
+  [ "${ADMIT_STALL:-999}" -le "$SBUDGET" ] \
+    || fail "3.12 FAIL (S2): the admission stalled the guest ${ADMIT_STALL}s > ${SBUDGET}s — the window is not bounded by its quiesce span (driver-reported window_ms=${WIN_MS:-none})"
+  if [ -n "${WIN_MS:-}" ] && [ "$WIN_MS" -gt "$QBUDGET_MS" ]; then
+    fail "3.12 FAIL (S2): the driver's own quiesce span was ${WIN_MS}ms > ${QBUDGET_MS}ms — the raid was held longer than the budget even if the ledger did not see it"
+  fi
+  [ "${ESTALE:-0}" -eq 0 ] && [ "${PANIC:-0}" -eq 0 ] \
+    || fail "3.12 FAIL: the client saw estale=$ESTALE panic=$PANIC — an operation entirely below the filesystem must be invisible above it"
+  [ "${PG_RESTARTS_NOW:-0}" = "${PRE_RESTARTS:-0}" ] \
+    || fail "3.12 FAIL: pg-0 restarted (${PRE_RESTARTS:-0} → ${PG_RESTARTS_NOW:-0}) across an admission that should have been invisible"
+  [ "$T_SETTLED" -ge 0 ] \
+    || fail "3.12 FAIL (F44/F46): the settle window did not hold — in_sync=${N_SYNC:-?}/2, nfs phase=${NFS_PHASE:-?} ready=${NFS_READY:-?}, assembly_blocked='${ASM_BLOCKED:-}'"
+  [ -z "$FOREIGN" ] \
+    || fail "3.12 FAIL (F44-cousin): latent head pin — foreign controllers on$FOREIGN would deadlock the NEXT rebuild"
+  [ "${WIN_N:-0}" -ge 1 ] \
+    || note "3.12 ANOMALY: redundancy restored with NO committed hot-rejoin window in the controller log — confirm which path admitted the leg before crediting S2"
+  note "fleet is one storage node down — replace via trove before further node-consuming drills"
+  ;;
+
+3.13) # F55 LIVE GATE — bounce a serving NFS pod MID-CHECKPOINT.
+      # runam 2026-07-28: the cutover bounce truncated in-flight NFS replies,
+      # the client took the half-frame as an I/O error, postgres' checkpointer
+      # PANICked on fsync EIO 4s after in_sync, and the abort wedged ~5min.
+      # Every prior "clean" bounce drill was checkpoint-phase luck: a 26s
+      # checkpoint on a 5-minute cadence rarely straddles the kill.
+      #
+      # The fix (a4902ef) is DrainGate: on SIGTERM the server stops accepting
+      # and drains in-flight replies frame-atomically before exiting, bounded
+      # so the F33b prompt-exit obligation still holds. This drill removes the
+      # luck — it forces a checkpoint to be in flight at the moment of the
+      # kill — and asserts zero PANICs. Consumes no nodes; ~3 minutes.
+  pre_rwx
+  # The cadence has to be short enough that a checkpoint is reliably in flight
+  # within the drill's patience. The harness manifest already starts postgres
+  # with `-c checkpoint_timeout=30s -c log_checkpoints=on`, and a command-line
+  # -c OUTRANKS ALTER SYSTEM — so read the effective value and only reach for
+  # ALTER SYSTEM when the harness did not already set it (a silent no-op here
+  # would leave the drill measuring luck again, which is the whole point).
+  CKPT=$(kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -Atqc 'SHOW checkpoint_timeout' 2>/dev/null | tr -d '[:space:]')
+  CKPT_S=$(printf '%s' "${CKPT:-0}" | sed 's/s$//; s/min$/*60/' | bc 2>/dev/null || echo 0)
+  if [ "${CKPT_S:-0}" -gt 60 ] || [ "${CKPT_S:-0}" -le 0 ]; then
+    note "checkpoint_timeout=${CKPT:-?} is too slack — tightening to 30s"
+    kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -Atqc \
+      "ALTER SYSTEM SET checkpoint_timeout='30s'; SELECT pg_reload_conf()" >/dev/null 2>&1
+    CKPT=$(kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -Atqc 'SHOW checkpoint_timeout' 2>/dev/null | tr -d '[:space:]')
+    [ "$CKPT" = "30s" ] \
+      || fail "checkpoint_timeout is still ${CKPT:-?} after ALTER SYSTEM — a command-line -c outranks it; fix the harness manifest instead of running a drill that can only catch the bug by luck"
+  fi
+  ok "checkpoint cadence ${CKPT} — a checkpoint will be in flight inside the drill's window"
+  [ "$(kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -Atqc 'SHOW log_checkpoints' 2>/dev/null | tr -d '[:space:]')" = "on" ] \
+    || fail "log_checkpoints is off — the drill's kill trigger reads 'checkpoint starting' from the log; without it this is blind"
+  warm_load 30
+
+  # Stream the OUTGOING instance's log from before the kill — its own words
+  # are the only witness to what it did while being torn down, and the pod's
+  # deletion erases them.
+  ( kubectl logs -n "$DRIVER_NS" -f "$(nfs_pod)" > "$ARTIFACTS/313-nfs-server-outgoing.log" 2>/dev/null ) &
+  NFSLOG_PID=$!
+
+  # Wait for a checkpoint to actually start, then kill inside its window.
+  # The postgres log is the trigger; a fixed sleep would re-introduce the luck.
+  T_CKPT=-1
+  for i in $(seq 1 24); do   # 24 x 5s = 2 min, i.e. ≥2 cadences
+    if kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null \
+       | grep -c "checkpoint starting" | grep -qv '^0$'; then
+      T_CKPT=$(( $(epoch) - T0 )); break
+    fi
+    sleep 5
+  done
+  [ "$T_CKPT" -ge 0 ] || fail "no 'checkpoint starting' in 2min at a ${CKPT} cadence — the trigger never armed"
+  ok "checkpoint in flight at ${T_CKPT}s — killing the server inside its window"
+  OLD_UID=$NFS_UID
+  kubectl delete pod -n "$DRIVER_NS" "$NFS_POD" --wait=false >/dev/null 2>&1
+  T_KILL=$(( $(epoch) - T0 ))
+
+  # The reconciler must bring it back (3.2's contract) and the client must
+  # ride through (F55's).
+  T_BACK=-1
+  for i in $(seq 1 60); do
+    U=$(nfs_pod_uid)
+    if [ -n "$U" ] && [ "$U" != "$OLD_UID" ]; then
+      PH=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" -o jsonpath='{.status.phase}' 2>/dev/null)
+      RD=$(kubectl get pod -n "$DRIVER_NS" "$(nfs_pod)" \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+      [ "$PH" = "Running" ] && [ "$RD" = "True" ] && { T_BACK=$(( $(epoch) - T0 )); break; }
+    fi
+    sleep 5
+  done
+  [ "$T_BACK" -ge 0 ] && ok "server back Running/Ready at ${T_BACK}s" \
+    || note "server NOT Ready 300s after the bounce"
+
+  wait_acks_fresh 300 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
+  witness_verdict "$T0"
+  kill "${NFSLOG_PID:-0}" 2>/dev/null || true
+
+  # The gate. A drained shutdown leaves the drain marker and no PANIC; a
+  # truncated one leaves the PANIC and (if the deadline blew) the warn.
+  DRAINED=$(grep -ac "drained in-flight replies" "$ARTIFACTS/313-nfs-server-outgoing.log" 2>/dev/null || echo 0)
+  DEADLINE=$(grep -ac "drain deadline expired" "$ARTIFACTS/313-nfs-server-outgoing.log" 2>/dev/null || echo 0)
+  PGL_BOTH=$(printf '%s\n%s' \
+    "$(kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null || true)" \
+    "$(kubectl logs -n "$NS" $PG -c postgres --previous 2>/dev/null || true)")
+  PANIC=$(printf '%s' "$PGL_BOTH" | grep -c "PANIC" || true)
+  EIO=$(printf '%s' "$PGL_BOTH" | grep -ci "Input/output error" || true)
+  PG_RESTARTS_NOW=$(pg_restarts)
+  note "outgoing server: drained=${DRAINED} drain_deadline_expired=${DEADLINE}"
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=180 \
+    NOTES="F55 bounce-mid-checkpoint: ckpt_at=${T_CKPT}s kill=${T_KILL}s back=${T_BACK}s io_resume=${T_RESUME}s drained=${DRAINED} deadline_expired=${DEADLINE} panic=${PANIC} eio=${EIO} pg_restarts=${PRE_RESTARTS:-0}->${PG_RESTARTS_NOW:-0}" verify
+
+  [ "${PANIC:-0}" -eq 0 ] \
+    || fail "3.13 FAIL (F55): postgres PANICked across a mid-checkpoint bounce (panic=$PANIC eio=$EIO) — the shutdown is still truncating replies (drained=$DRAINED, deadline_expired=$DEADLINE)"
+  [ "${DRAINED:-0}" -gt 0 ] \
+    || fail "3.13 INVALID: no drain marker in the outgoing server's log — the image predates the DrainGate fix, so a clean run proves only that the checkpoint missed the window"
+  [ "$T_BACK" -ge 0 ] \
+    || fail "3.13 FAIL: the liveness reconciler never brought the server back Ready (3.2 regression)"
+  [ "${PG_RESTARTS_NOW:-0}" = "${PRE_RESTARTS:-0}" ] \
+    || fail "3.13 FAIL: pg-0 restarted (${PRE_RESTARTS:-0} → ${PG_RESTARTS_NOW:-0}) — the bounce was not survivable even without a PANIC"
+  ok "F55 gate PASSED: a checkpoint was in flight, the server drained it, the client rode through"
   ;;
 
 *) fail "unknown drill '$DRILL'" ;;

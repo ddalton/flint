@@ -1,0 +1,7 @@
+flint-system/flint-csi-controller-57b8f6ccd4-nqghq flint-csi-controller dilipdalton/flint-driver:1.22.0-rc3 CSI_MODE=controller FLINT_ORCHESTRATORS=enabled FLINT_RWX_INPLACE_ADMISSION=<unset -> ON>
+flint-system/flint-csi-node-2w975 flint-csi-driver dilipdalton/flint-driver:1.22.0-rc3 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> FLINT_RWX_INPLACE_ADMISSION=<unset -> ON>
+flint-system/flint-csi-node-6njq5 flint-csi-driver dilipdalton/flint-driver:1.22.0-rc3 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> FLINT_RWX_INPLACE_ADMISSION=<unset -> ON>
+flint-system/flint-csi-node-76z8q flint-csi-driver dilipdalton/flint-driver:1.22.0-rc3 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> FLINT_RWX_INPLACE_ADMISSION=<unset -> ON>
+flint-system/flint-csi-node-v2vl5 flint-csi-driver dilipdalton/flint-driver:1.22.0-rc3 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> FLINT_RWX_INPLACE_ADMISSION=<unset -> ON>
+flint-system/flint-csi-node-xq896 flint-csi-driver dilipdalton/flint-driver:1.22.0-rc3 CSI_MODE=node FLINT_ORCHESTRATORS=<unset> FLINT_RWX_INPLACE_ADMISSION=<unset -> ON>
+flint-system/spdk-dashboard-859854d484-chdwl dashboard-backend dilipdalton/flint-driver:1.22.0-rc3 CSI_MODE=controller FLINT_ORCHESTRATORS=disabled FLINT_RWX_INPLACE_ADMISSION=<unset -> ON>

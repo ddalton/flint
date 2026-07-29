@@ -185,6 +185,22 @@ max_stall_since() { # <t0>
     | awk 'NR>1 { gap=$2-prev; if (gap>max) max=gap } { prev=$2 } END { print max+0 }'
 }
 
+# Max gap (s) between consecutive ledger acks inside a WINDOW. Same metric as
+# max_stall_since, bounded on both ends — the S2 gate needs the admission
+# window's stall measured apart from the kill's detection stall, which
+# precedes it and is an order of magnitude larger (3.12).
+max_stall_between() { # <t_start> <t_end>
+  local a=$1 b=$2
+  kubectl exec -n "$NS" "$(load_pod)" -- sh -c "awk -v a=$a -v b=$b '\$2>=a && \$2<=b' /acked/acked.log" 2>/dev/null \
+    | awk 'NR>1 { gap=$2-prev; if (gap>max) max=gap } { prev=$2 } END { print max+0 }'
+}
+
+# Strip the tracing crate's ANSI attributes. Load-bearing for any grep that
+# reads a FIELD (`window_ms=147`): the escape sequences sit BETWEEN the field
+# name and the `=`, so an un-stripped `grep -o 'window_ms=[0-9]*'` silently
+# matches nothing. Message greps are unaffected; field greps are not.
+deansi() { perl -pe 's/\e\[[0-9;]*[mK]//g'; }
+
 va_for_pv() { # <pv> — name of the VolumeAttachment for a PV ("" if none)
   kubectl get volumeattachments -o json \
     | jq -r --arg pv "$1" '.items[] | select(.spec.source.persistentVolumeName==$pv) | .metadata.name'
