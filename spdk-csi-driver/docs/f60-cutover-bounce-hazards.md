@@ -1,9 +1,35 @@
 # F60 (candidate family) — cutover bounce hazards: the unbelted planner, the double creator, and the churn loop
 
 **Status:** found 2026-07-29 by the cutover modeling tranche (`formal/`
-runs 11a–11e and 12a–12d) plus a code scout of `cutover.rs` / `rwx_nfs.rs`. **No code
-fix has landed yet.** The model half is committed and gated; this
-document is the code-owed half.
+runs 11a–11e and 12a–12e) plus a code scout of `cutover.rs` / `rwx_nfs.rs`.
+**FIXED IN CODE 2026-07-29** (and the belt's own liveness is now gated —
+runs 12f/12g, added after a code review found the unbounded-refusal bug
+the model structurally could not express: `BouncePreflight` is a guard,
+so a blocked bounce was merely a disabled action, and under a crash
+budget "transiently unavailable forever" is unreachable) — §1 (the commit-time preflight), §3 (BOTH
+halves of the double-creator fix), and §4 (persisted attempt bookkeeping
+with capped backoff, plus the orphaned-flag sweep). §4b was checked and
+deliberately NOT fixed: the shipped per-leg suppression already closes
+it. The mutation runs that found each defect are now its regression test,
+and the constants naming a belt (`BouncePreflight`, `ReconcilerBelt`,
+`DetachWaitHonored`) describe SHIPPED behaviour with `FALSE` as the
+pre-fix world. Owed: a live gate (drill 3.12/3.6e with the kill switch
+off, exercising the fallback bounce through the new belt).
+
+## What landed
+
+| Fix | Where |
+|---|---|
+| Commit-time preflight over every recorded writer; refuses while any is transiently unavailable, blind-fails-closed | `bounce_preflight` / `recorded_writers`, called at the top of `execute_cutover` |
+| Shares the gate's `node_gone_secs` threshold so a permanently-NotReady node cannot strand the volume | `CutoverConfig::gate` |
+| Time-bounded recreate claim taken before the delete, released on every exit path. The annotation stores an EXPIRY sized from the configured `detach_timeout` (+60s), not a fixed TTL — a fixed one would silently expire mid-wait whenever an operator raised `FLINT_CUTOVER_DETACH_TIMEOUT_SECS`, reopening the race with no signal. Boundedness is enforced by the READER (a 900s horizon cap), so a dead bouncer or a bad clock cannot disable the reconciler indefinitely | `BOUNCE_IN_FLIGHT_ANNOTATION`, `bounce_claim_deadline`, `bounce_claim_active`, `set_bounce_in_flight` |
+| The reconciler honours the claim | `nfs_reconcile_decision`'s new `bounce_in_flight` arm (`rwx_nfs.rs`) |
+| Detach timeout hands off instead of recreating into a staged volume | `execute_cutover`'s timeout branch + `CutoverDetachTimeout` event |
+| Persisted attempt counter with capped exponential backoff, charged on success AND failure, cleared on progress | `CUTOVER_ATTEMPTS_ANNOTATION`, `attempt_gate`, `attempt_backoff_secs` |
+| Orphaned data-path flags cleared when their flagging node is gone | the sweep in `cutover_tick` + `DataPathFlagOrphaned` event |
+
+12 new unit tests, including the polarity test (blind must refuse), the
+bounded-claim fail-open test, and the inverted detach-timeout contract.
 
 **Scope note up front, because it inverts the obvious worry.** The first
 thing to check about a bounce is whether it can strand an RWX volume:
@@ -147,13 +173,18 @@ still-staged volume rather than proceeding with a warning. 12b proves the
 first half holds and still converges; 12c proves the first half alone is
 insufficient.
 
-**One caveat 12b does not cover, and the shipped fix must:** the model
+**One caveat 12b does not cover, and the shipped fix honours:** the model
 gives `BounceRecreate` weak fairness, i.e. it assumes the bouncer always
 completes. It therefore never examines a bouncer that dies mid-window
 while its own belt holds off the only other actor able to rebuild the
-pod. The suppression must be **bounded** (a TTL or an expiring window),
-never unconditional — otherwise the fix reintroduces exactly the
-stranding hazard that §0 shows the reconciler exists to prevent.
+pod. The suppression is therefore **bounded and reader-enforced** — the
+claim carries an expiry, and `bounce_claim_active` rejects expired,
+unparseable, and absurdly-far-future values alike — never unconditional,
+which would reintroduce exactly the stranding hazard §0 shows the
+reconciler exists to prevent. That property is pinned by
+`recreate_claim_is_bounded_and_fails_open` and
+`claim_deadline_outlives_even_a_raised_detach_timeout`, not by the gate:
+a belt whose necessary property the model cannot express needs a test.
 
 ## 4. The churn loop the safety belt does NOT close
 
@@ -236,4 +267,5 @@ lands relative to the stage-time admission.
 | **The SHIPPED world already closes it** — no planner filter owed | `FlintReplicationBouncePlannerScoped.cfg` (strict, per-leg suppression + unfiltered planner) |
 | The hot-rejoin MARKER half of the same gap | **none** — lives in `FlintClaims`' window abstraction |
 | A bouncer that dies mid-window under its own belt | **none** — `WF(BounceRecreate)` assumes completion; why the suppression must be bounded |
+| The belt does not starve the remediation it guards | `FlintReplicationBounceStarve.cfg` must violate `RemediationNotStarved`; `FlintReplicationBounceBounded.cfg` (shipped bound) must hold |
 | The volume never lacks a serving NFS pod for N seconds | **drills only** — deliberately outside the model's abstraction |

@@ -948,11 +948,21 @@ pub enum NfsReconcileAction {
     Recreate,
 }
 
+///
+/// `bounce_in_flight` is the OTHER half of the double-creator fix (F60 §3):
+/// the cutover orchestrator claims this pod's recreate for the duration of a
+/// bounce, because its detach wait deliberately holds the pod ABSENT with
+/// client attachments intact — which is exactly the `Recreate` cell below.
+/// Rebuilding it there makes kubelet reuse the still-staged volume, so no
+/// NodeStage runs, no reassembly happens and the bounce is silently defeated
+/// (formal run `BouncePod`). The claim is TIME-BOUNDED by its caller, so a
+/// bouncer that dies mid-window cannot disable this reconciler for good.
 pub fn nfs_reconcile_decision(
     backend_is_emptydir: bool,
     pv_terminating: bool,
     attachment_count: usize,
     liveness: NfsPodLiveness,
+    bounce_in_flight: bool,
 ) -> NfsReconcileAction {
     if backend_is_emptydir {
         return NfsReconcileAction::Skip("emptydir backend — ephemeral by contract, recreation belongs to the next publish");
@@ -968,11 +978,18 @@ pub fn nfs_reconcile_decision(
         NfsPodLiveness::Terminating => {
             NfsReconcileAction::Skip("server pod terminating — recreate once it has exited")
         }
+        NfsPodLiveness::Absent if bounce_in_flight => NfsReconcileAction::Skip(
+            "bounce in flight — the cutover orchestrator owns this recreate (rebuilding now \
+             would reuse the staged volume and defeat the bounce)",
+        ),
         NfsPodLiveness::Absent => NfsReconcileAction::Recreate,
         // F35 (runz 2026-07-21): an EVICTED server pod sits in phase
         // Failed forever on a perfectly healthy node — nothing restarts
         // it and every publish waits on the corpse. The reconciler is
         // the actor that heals it without waiting for a new publish.
+        NfsPodLiveness::Dead if bounce_in_flight => NfsReconcileAction::Skip(
+            "bounce in flight — the cutover orchestrator owns this recreate",
+        ),
         NfsPodLiveness::Dead => NfsReconcileAction::Recreate,
     }
 }
@@ -1034,7 +1051,6 @@ pub async fn nfs_reconciler_pass(kube_client: &Client, source_node: &str) -> usi
             .unwrap_or(false);
         let pv_terminating = pv.metadata.deletion_timestamp.is_some();
         let n_attached = attachments.get(name).copied().unwrap_or(0);
-
         let liveness = match nfs_pod_liveness(kube_client.clone(), name).await {
             Ok(l) => l,
             Err(e) => {
@@ -1043,7 +1059,51 @@ pub async fn nfs_reconciler_pass(kube_client: &Client, source_node: &str) -> usi
             }
         };
 
-        match nfs_reconcile_decision(backend_is_emptydir, pv_terminating, n_attached, liveness) {
+        // The cutover orchestrator's recreate claim (F60 §3). The value is the
+        // claim's EXPIRY, sized by the bouncer from its own configurable detach
+        // timeout; expired, unparseable, and absurdly-far-future values all
+        // read as absent, so this can never strand a volume's server behind a
+        // dead bouncer's marker.
+        //
+        // RE-READ LIVE, not from the list snapshot: this pass lists PVs once and
+        // can then stall for up to 30s per volume inside delete_dead_nfs_pod
+        // (the F35 evicted-corpse path), so a claim taken AFTER the list would
+        // be invisible and the belt would be missed entirely — the very
+        // eight-state BouncePod race it exists to close. Only the decision
+        // inputs must share one instant, so the fresh GET is scoped to the
+        // branch that can actually recreate.
+        let bounce_in_flight = match liveness {
+            NfsPodLiveness::Absent | NfsPodLiveness::Dead => {
+                let fresh = pv_api
+                    .get_opt(name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|p| p.metadata.annotations.clone())
+                    .and_then(|a| {
+                        a.get(crate::cutover::BOUNCE_IN_FLIGHT_ANNOTATION).cloned()
+                    });
+                crate::cutover::bounce_claim_active(
+                    fresh.as_deref(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    crate::cutover::BOUNCE_CLAIM_MAX_HORIZON_SECS,
+                )
+            }
+            // No recreate is possible in the other states, so the claim is
+            // irrelevant and not worth an API call.
+            _ => false,
+        };
+
+        match nfs_reconcile_decision(
+            backend_is_emptydir,
+            pv_terminating,
+            n_attached,
+            liveness,
+            bounce_in_flight,
+        ) {
             NfsReconcileAction::Skip(_) => {}
             NfsReconcileAction::Recreate => {
                 println!(
@@ -1224,22 +1284,31 @@ mod tests {
         use NfsPodLiveness::*;
         use NfsReconcileAction::*;
         // The one Recreate cell.
-        assert_eq!(nfs_reconcile_decision(false, false, 2, Absent), Recreate);
-        assert_eq!(nfs_reconcile_decision(false, false, 1, Absent), Recreate);
+        assert_eq!(nfs_reconcile_decision(false, false, 2, Absent, false), Recreate);
+        assert_eq!(nfs_reconcile_decision(false, false, 1, Absent, false), Recreate);
         // F35: an evicted (Dead) server with live clients is recreated,
         // same as Absent — never waited on.
-        assert_eq!(nfs_reconcile_decision(false, false, 2, Dead), Recreate);
-        assert!(matches!(nfs_reconcile_decision(false, false, 0, Dead), Skip(_)));
-        assert!(matches!(nfs_reconcile_decision(true, false, 2, Dead), Skip(_)));
+        assert_eq!(nfs_reconcile_decision(false, false, 2, Dead, false), Recreate);
+        assert!(matches!(nfs_reconcile_decision(false, false, 0, Dead, false), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(true, false, 2, Dead, false), Skip(_)));
         // Liveness gates.
-        assert!(matches!(nfs_reconcile_decision(false, false, 2, Present), Skip(_)));
-        assert!(matches!(nfs_reconcile_decision(false, false, 2, Terminating), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(false, false, 2, Present, false), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(false, false, 2, Terminating, false), Skip(_)));
         // No clients — next publish owns creation.
-        assert!(matches!(nfs_reconcile_decision(false, false, 0, Absent), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(false, false, 0, Absent, false), Skip(_)));
+        // F60 §3: a live cutover recreate claim turns the two Recreate
+        // cells into Skips — rebuilding inside the bounce's detach wait
+        // makes kubelet reuse the staged volume and silently defeats the
+        // bounce. Everything else is unaffected.
+        assert!(matches!(nfs_reconcile_decision(false, false, 2, Absent, true), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(false, false, 2, Dead, true), Skip(_)));
+        // ...and the claim never MANUFACTURES a recreate.
+        assert!(matches!(nfs_reconcile_decision(false, false, 2, Present, true), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(false, false, 0, Absent, true), Skip(_)));
         // PV deleting — DeleteVolume owns teardown.
-        assert!(matches!(nfs_reconcile_decision(false, true, 2, Absent), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(false, true, 2, Absent, false), Skip(_)));
         // emptydir: never, regardless of everything else.
-        assert!(matches!(nfs_reconcile_decision(true, false, 5, Absent), Skip(_)));
+        assert!(matches!(nfs_reconcile_decision(true, false, 5, Absent, false), Skip(_)));
     }
 
     #[test]

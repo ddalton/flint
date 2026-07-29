@@ -102,6 +102,12 @@ impl GateConfig {
 impl LegAvailability {
     /// Transient = the fresher data is plausibly coming back: wait for it.
     /// Permanent = waiting protects nothing: serve and surface.
+    ///
+    /// Scoped to writers that FAILED TO ATTACH — `NodeReady` is transient here
+    /// ("wait, it is coming"), which is why the cutover bounce preflight
+    /// deliberately does NOT reuse this predicate: it asks whether a leg will
+    /// survive a teardown, where Ready is the best case. The two share only
+    /// `GateConfig::node_gone_secs`.
     fn is_transient(&self, cfg: &GateConfig) -> bool {
         match self {
             LegAvailability::ClaimBlocked | LegAvailability::NodeReady => true,

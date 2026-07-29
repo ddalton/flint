@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine, the snapshot protocol, and the multi-process claims layer
 
-Three modules, one gate (`scripts/check-tla.sh`, forty-eight TLC runs).
+Three modules, one gate (`scripts/check-tla.sh`, fifty TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -87,7 +87,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs forty-eight configs, ALL required:
+on first use).  It runs fifty configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -393,7 +393,10 @@ is its own action and the bounce's return path is modeled end to end.
 
 11a. `FlintReplicationBounce.cfg` — strict: the commit-time preflight
    ON, both planner arms, two failures, plus `AdmitAtStage`.  Every
-   invariant and the post-bounce liveness must hold.
+   invariant and the post-bounce liveness must hold.  **Since the code
+   wave of 2026-07-29 this is the SHIPPED configuration, not a proposal:**
+   `bounce_preflight` runs at the top of `execute_cutover`, and 11b/11c
+   are its regression tests rather than open findings.
 11b. `FlintReplicationBounceRisk.cfg` — `BouncePreflight = FALSE`, the
    SHIPPED planner, ONE bouncer, lease fully honored, no race of any
    kind: TLC **must find** `Inv_NoBounceInducedRisk` violated.  The
@@ -484,7 +487,10 @@ Different objects, so the client attachments never drop.)
    leadership change, no stale flag.
 12b. `FlintReplicationBouncePodFixed.cfg` — `ReconcilerBelt`: no
    recreate while a bounce window is open.  Strict, and the volume must
-   still converge.
+   still converge.  **Shipped 2026-07-29** as a TIME-BOUNDED claim (a
+   `bounce-in-flight` PV annotation carrying an expiry, which the
+   reconciler honours), because the boundedness is exactly what this run
+   cannot check — see the note below.
 12c. `FlintReplicationBounceTimeout.cfg` — **the second door, and the
    reason 12b's belt is not the whole fix.**  With the reconciler
    already belted, `DetachWaitHonored = FALSE` is the shipped timeout
@@ -531,9 +537,49 @@ checking that its precondition is reachable in the configured world.
 And **12b proves less than it looks**: `WF(BounceRecreate)` assumes the
 bouncer completes, so the model never examines a bouncer that dies
 mid-window while its belt has the only other creator held off.  The
-shipped fix must therefore be a *bounded* suppression, not an
-unconditional one — the model does not check that, and cannot without
-modeling bouncer death.
+shipped fix is therefore a *bounded* suppression — the claim carries an
+expiry sized from the configured detach timeout, and the reader rejects
+expired, unparseable and absurdly-far-future values alike — and the
+boundedness is pinned by unit tests
+(`recreate_claim_is_bounded_and_fails_open`), not by the gate.  A belt
+whose necessary property the model cannot express is a belt that needs a
+test; noting which is which is the point.
+
+**The belt's own liveness (2026-07-29, after the code review)** — the one
+gap in this model that a CODE review had to find instead of TLC, added
+here so the next belt's liveness is machine-checked rather than argued.
+`BouncePreflight` is a **guard**, so a blocked bounce is merely a
+*disabled action*, and nothing in the module asked whether the
+remediation it blocks ever happens.  The bounce is the escalation
+ladder's terminal rung and the data-path arm fires when the path is
+ALREADY dead, so refusing there lengthens an outage rather than
+preventing one — and `freshness_gate::evaluate` is deadline-bounded for
+exactly that reason ("Never hang").
+
+12f. `FlintReplicationBounceStarve.cfg` — `RefusalBounded = FALSE`: TLC
+   **must find** the `RemediationNotStarved` lasso, cycling
+   `LegBlackhole`/`LegRecover` with the belt refusing forever.
+12g. `FlintReplicationBounceBounded.cfg` — the shipped bound: strict,
+   **must hold**, and `InvCore` with it, so the liveness costs no safety.
+
+Getting this pair to mean anything took three corrections worth
+recording, because each was a way of shipping a green run that proved
+nothing.  **(1)** The first property said "the data-path flag eventually
+clears" — but clearing it needs the flagged leg re-admitted (catch-up,
+the claim, `Admit`), machinery the bounce does not own, so the lasso
+existed in BOTH worlds and could not isolate the belt.  Restated on what
+the belt actually blocks: the teardown.  **(2)** The bounded run then
+still failed, on `MaxBounces` exhaustion — a state-space budget, not the
+belt — so the property conditions on remaining budget, the same move the
+roll invariants make with `crashes = 0`.  **(3)** With both fixed, the
+STARVE run came back green, and the reason is the sharpest fact in this
+tranche: **under a crash budget, "transiently unavailable forever" is
+unrepresentable.** One blackhole either recovers (safe) or perishes into
+`deemedDead` (safe), both under weak fairness.  That is the structural
+reason this module was blind to an unbounded belt, and it took the
+`WriterLimbo` constant — a flapping node costs no failure budget,
+because a kubelet OOM loop is not a data-loss event — to make the world
+expressible at all.
 
 The mutation runs are the models' own regression tests; a model that
 cannot rediscover the bug classes it exists for proves nothing.

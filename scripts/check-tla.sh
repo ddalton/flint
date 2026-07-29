@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Forty-eight runs, ALL required.
+# Fifty runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -199,6 +199,18 @@
 #      admission is guaranteed to refuse.  Checked on its OWN ghost, not
 #      the shared churn canary — an A/B showed the canary fires with the
 #      filter ON as well as OFF, so it cannot test this fix.
+#   12f. FlintReplicationBounceStarve.cfg   THE BELT'S OWN LIVENESS, and the
+#      one gap in this model a CODE review had to find instead: because
+#      BouncePreflight is a GUARD, a blocked bounce is merely a disabled
+#      action, and nothing here asked whether the remediation it blocks ever
+#      happens.  WriterLimbo makes the missing world reachable (a flapping
+#      node costs no failure budget, so a writer can stay neither answering
+#      nor verifiably gone forever — under a budget it always resolves, which
+#      is precisely why the model was blind).  TLC must FIND the
+#      RemediationNotStarved lasso.
+#   12g. FlintReplicationBounceBounded.cfg RefusalBounded=TRUE (the shipped
+#      bound): strict, must HOLD — the remediation is never starved by its
+#      own belt, and buying that liveness costs no safety.
 #   12e. FlintReplicationBouncePlannerScoped.cfg the same with
 #      SuppressScoped=TRUE (the shipped per-leg marks) and the planner
 #      still unfiltered — strict, must HOLD.  The wave-2 per-leg fix
@@ -370,6 +382,12 @@ mutation_run FlintReplication FlintReplicationBounceTimeout.cfg "detach-timeout 
 mutation_run FlintReplication FlintReplicationBouncePlanner.cfg "two-planner disjointness, pre-fix world (plan_cutover honours none of plan_hot_rejoin's filters — a teardown whose purpose the stage admission will refuse)" "Inv_NoDoomedBounce"
 
 strict_run FlintReplication FlintReplicationBouncePlannerScoped.cfg "two-planner disjointness, SHIPPED world (per-leg suppression already closes it — the planner filter is NOT owed)"
+
+# The belt's own liveness — the gap a CODE review exposed that the model could
+# not express (WriterLimbo makes indefinite limbo reachable).
+liveness_mutation_run FlintReplication FlintReplicationBounceStarve.cfg "unbounded-belt starvation (RefusalBounded=FALSE: a flapping writer never becomes honestly excusable, so the safety belt starves the terminal remediation forever)"
+
+strict_run FlintReplication FlintReplicationBounceBounded.cfg "bounded-refusal strict (the shipped bound: the remediation is never starved by its own belt, at no cost in safety)"
 
 strict_run FlintClaims FlintClaims.cfg "claims strict (two processes, Lease + marker grace; F50/F53 layer)"
 

@@ -354,7 +354,11 @@ CONSTANTS
                \* AND lag gates entirely ("nothing to admit, only a data
                \* path to rebuild"), and its verification predicate is a
                \* flag ONLY the flagging node's agent may ever clear.
-  BouncePreflight, \* THE PROPOSED BELT (the DrainBelt analogue).
+  BouncePreflight, \* THE BELT — SHIPPED 2026-07-29 (the DrainBelt
+               \* analogue), `bounce_preflight` in cutover.rs, evaluated at
+               \* the top of execute_cutover so it re-reads node evidence as
+               \* late as possible.  FALSE is now the PRE-FIX world, kept as
+               \* the BounceRisk/BounceRace regression mutations.
                \* FALSE = SHIPPED: VolumeCutoverView carries no leg health,
                \* no serving membership and no writer set (cutover.rs:
                \* 271-289); plan_cutover reads only sync_state and
@@ -382,7 +386,18 @@ CONSTANTS
                \* is here now because the abstraction hid a race with no
                \* mutual exclusion anywhere in it.  FALSE = the atomic
                \* Bounce (every pre-existing cfg, including 11a-11e).
-  ReconcilerBelt, \* FALSE = SHIPPED: rwx_nfs.rs's liveness reconciler
+  ReconcilerBelt, \* TRUE = SHIPPED 2026-07-29: the bouncer takes a
+               \* TIME-BOUNDED recreate claim (the bounce-in-flight PV
+               \* annotation, carrying an EXPIRY sized from the configured
+               \* detach timeout — a fixed TTL would expire mid-wait once an
+               \* operator raised that timeout) and nfs_reconcile_decision
+               \* honours it.  Boundedness is reader-enforced, which is the
+               \* property THIS MODEL CANNOT CHECK: WF(BounceRecreate)
+               \* assumes the bouncer completes, so a bouncer dying under
+               \* its own belt is unrepresentable here and is covered by
+               \* unit tests instead.
+               \* FALSE = the PRE-FIX world, kept as the BouncePod
+               \* regression mutation: rwx_nfs.rs's liveness reconciler
                \* recreates an Absent server pod whenever the user PV has
                \* client attachments — and nfs_reconcile_decision's
                \* signature is (backend_is_emptydir, pv_terminating,
@@ -395,9 +410,12 @@ CONSTANTS
                \* sits inside the reconciler's one Recreate cell.
                \* TRUE = the proposed fix: no recreate while a bounce
                \* window is open (one creator, not two).
-  DetachWaitHonored, \* TRUE = the bouncer recreates only after the
-               \* unstage it waited for.  FALSE = SHIPPED on the timeout
-               \* path: await_detached returning false only WARNS and
+  DetachWaitHonored, \* TRUE = SHIPPED 2026-07-29: the bouncer
+               \* recreates only after the unstage it waited for, and on
+               \* timeout HANDS OFF to the reconciler (releasing the claim)
+               \* instead of recreating into a still-staged volume.
+               \* FALSE = the pre-fix timeout path, kept as the
+               \* BounceTimeout regression mutation: await_detached returning false only WARNS and
                \* execute_cutover recreates anyway ("a same-node reuse
                \* will surface as CutoverIneffective").  Split from
                \* ReconcilerBelt so the runs can say WHICH creator
@@ -408,6 +426,31 @@ CONSTANTS
                \* marker filter, so it can plan a bounce for a standby
                \* the stage admission will then refuse — a bounce whose
                \* predicate is unsatisfiable before it is even issued.
+  WriterLimbo, \* TRUE = a leg may go unresponsive WITHOUT spending crash
+               \* budget, so it can oscillate unavailable/available
+               \* indefinitely.  This models the one world the belt's liveness
+               \* bug needs and a budget forbids: a flapping kubelet (OOM
+               \* loop, flaky network) keeps resetting
+               \* Ready.lastTransitionTime so the node never crosses
+               \* node_gone_secs, and its Node object is never deleted so
+               \* NodeGone never fires either — a writer neither answering nor
+               \* verifiably gone, forever.  A flapping kubelet is not a
+               \* data-loss event, which is why it should not consume a
+               \* failure budget.  UNDER A BUDGET THIS IS UNREACHABLE: one
+               \* blackhole either recovers (safe) or perishes into deemedDead
+               \* (safe), both under weak fairness — the structural reason this
+               \* module could not see the unbounded belt until a CODE review
+               \* found it.  FALSE in every other cfg.
+  RefusalBounded, \* TRUE = SHIPPED 2026-07-29: a standing preflight refusal
+               \* is BOUNDED — after the gate's own defer bound the bounce
+               \* proceeds anyway and says so (CutoverPreflightOverridden).
+               \* FALSE = an unbounded belt, which is a LIVENESS BUG this
+               \* module could not previously express: BouncePreflight is a
+               \* GUARD, so a blocked bounce is merely a disabled action, and
+               \* nothing asked whether the lost data path is ever repaired.
+               \* The 2026-07-29 code review found it in the code before the
+               \* model could; these runs close that gap so the next belt's
+               \* liveness is machine-checked rather than argued.
   StageAdmit   \* TRUE = model admit_standbys_at_stage (driver.rs:1967 →
                \* catchup.rs:2301) as its own action.  Required for the
                \* bounce's RETURN path: Admit cannot represent it — Admit
@@ -770,9 +813,11 @@ LegDie(l) ==
 \* Silent unreachability: maybe a dying node, maybe a transient partition.
 LegBlackhole(l) ==
   /\ legUp[l] = "up"
-  /\ crashes < MaxCrashes
+  \* WriterLimbo: a flapping node is not a volume failure, so it does not
+  \* spend the budget — the only way to express indefinite limbo here.
+  /\ (WriterLimbo \/ crashes < MaxCrashes)
   /\ legUp' = [legUp EXCEPT ![l] = "blackhole"]
-  /\ crashes' = crashes + 1
+  /\ crashes' = IF WriterLimbo THEN crashes ELSE crashes + 1
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
@@ -1692,6 +1737,37 @@ Bounce ==
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
 
+\* THE REFUSAL BOUND (cutover.rs: `refusal_expired`).  freshness_gate::evaluate
+\* is deliberately deadline-bounded — "Never hang (the 2.4 obligation)" — and
+\* the belt above it must be too: on the data-path arm the volume is ALREADY
+\* down, so refusing lengthens an outage instead of preventing one, and a leg
+\* that oscillates unavailable/available never crosses the node_gone_secs line
+\* that would make it honestly excusable (the flapping-kubelet case).  This is
+\* Bounce WITHOUT BounceSafe, enabled only while a refusal would be standing.
+\* Weakly fair: the bound is a wall clock, and clocks advance.
+\* NOTE the guard is BouncePlannable alone, deliberately NOT
+\* `BouncePlannable /\ ~BounceSafe`.  That first draft made this action and
+\* Bounce ALTERNATE as the writer oscillated, so neither was ever
+\* CONTINUOUSLY enabled and weak fairness obligated neither — the run came
+\* back violated with the bound ON, which is the same WF ping-pong trap this
+\* module already documents for the Acquire/Release claim pair.  The bound in
+\* the code is a wall clock that does not consult the belt's current verdict
+\* either: once a refusal has stood long enough, the bounce proceeds.
+BounceOverride ==
+  /\ RefusalBounded
+  /\ ~PodLayer
+  /\ BouncePlannable
+  /\ consecutiveBounces < MaxBounces
+  /\ serving' = {}
+  /\ bounceWindow' = BounceRiskAtCommit    \* honestly "risky": we know it
+  /\ consecutiveBounces' = consecutiveBounces + 1
+  /\ bounceDoomed' = (bounceDoomed \/ BounceDoomedAtCommit)
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim,
+                 deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<bouncePlan, bounceRisk, dpFlag, everServed, podUp>>
+  /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
+
 \* The deposed-but-alive bouncer.  RoguePlanDrain's shape, and leaderMoved
 \* is SHARED with the roller on purpose: orchestrator_lease.rs is ONE lease
 \* across all six leader-gated sites, so one deposal deposes every
@@ -2029,6 +2105,7 @@ Next ==
   \/ PvGrow
   \/ DeferClockExpire
   \/ Bounce
+  \/ BounceOverride
   \/ RogueBouncePlan
   \/ RogueBounceCommit
   \/ BounceDelete
@@ -2133,6 +2210,17 @@ FairnessCore ==
   /\ WF_vars(BounceRecreate)
   /\ WF_vars(ReconcilerRecreate)
 
+\* The cutover orchestrator's own obligation, split out (the FairnessKubelet
+\* pattern) so it applies ONLY to the runs that ask about the belt's liveness.
+\* WF(Bounce) is the honest abstraction of a default-ON 60s timer-driven tick
+\* (the same correction the 2026-07-29 audit applied to HotRejoin): once a
+\* bounce is continuously plannable AND safe, the orchestrator eventually
+\* issues it.  WF(BounceOverride) is the wall clock behind the refusal bound.
+\* Deliberately NOT in FairnessCore: initiating a bounce is elsewhere treated
+\* as the orchestrator's choice, and adding an obligation there would change
+\* every existing bounce run's behaviour graph.
+FairnessBounce == WF_vars(Bounce) /\ WF_vars(BounceOverride)
+
 \* kubelet's obligation, split out (the P4-split pattern): the recreated
 \* pod eventually comes back.  The wedged-DS-roll history (runak/runaj)
 \* says this is NOT always true of the world — SpecWedgedKubelet drops
@@ -2179,6 +2267,11 @@ FairnessExpand ==
     /\ SF_vars(ExpandLeg(l))
 
 SpecExpand == Init /\ [][Next]_vars /\ Fairness /\ FairnessExpand
+
+\* The belt-liveness world: the orchestrator is a persistent retrier and the
+\* refusal bound's clock advances.  Used only by the two BounceStarve/
+\* BounceBounded runs.
+SpecBounceLive == Init /\ [][Next]_vars /\ Fairness /\ FairnessBounce
 
 \* The pre-P4 world: nothing bounds detection.  A blackholed serving leg
 \* may sit in the raid forever, stalling every write — the 150-177s
@@ -2362,6 +2455,42 @@ Inv_NoPointlessRebounce == consecutiveBounces <= 1
 (* only through this door.                                                 *)
 (***************************************************************************)
 Inv_NoDoomedBounce == ~bounceDoomed
+
+(***************************************************************************)
+(* THE BELT'S OWN LIVENESS — the property whose ABSENCE the 2026-07-29 code  *)
+(* review exposed.  BouncePreflight is a GUARD, so a blocked bounce is       *)
+(* merely a DISABLED ACTION, and nothing in this module ever asked whether   *)
+(* the remediation it blocks ever happens.  That is why an unbounded belt    *)
+(* was invisible here and had to be found by reading code.                   *)
+(*                                                                          *)
+(* NOTE WHAT THIS DOES **NOT** SAY, because the first draft said it and was  *)
+(* wrong: not "the data-path flag eventually clears".  Clearing it needs the *)
+(* flagged leg back in a serving assembly, which needs an ADMISSION          *)
+(* (catch-up, the claim, then Admit) — machinery the bounce does not own and *)
+(* whose own convergence is a separate theorem.  A flag-clearing property    *)
+(* therefore has a lasso in BOTH worlds and cannot isolate the belt, the     *)
+(* same defect the BouncePlanner canary had before it got its own ghost.     *)
+(*                                                                          *)
+(* What the belt actually blocks is the TEARDOWN, so that is what this       *)
+(* states: a flagged volume that is still serving eventually either gets its *)
+(* remediation attempted (serving driven to {}) or stops needing it.  With   *)
+(* an unbounded belt and a writer that oscillates unavailable/available —    *)
+(* LegRecover is the environment's choice and carries no fairness, so        *)
+(* WF(LegPerish) never obligates the leg to die and it never becomes         *)
+(* honestly excusable — BounceSafe is only INTERMITTENTLY true, which weak   *)
+(* fairness never obligates.  That is the flapping-kubelet case, faithfully. *)
+(***************************************************************************)
+\* The `consecutiveBounces < MaxBounces` conjunct is the BUDGET caveat, and it
+\* is load-bearing: MaxBounces bounds the state space (as GenBound bounds
+\* incarnations), so once it is spent NO bounce can fire and any "a bounce
+\* eventually happens" property is false by construction — the bounded run's
+\* first lasso was exactly that artifact, cycling HotRejoin/Acquire/Release
+\* with the budget exhausted.  Conditioning on remaining budget is the same
+\* move the roll invariants make with `crashes = 0`: the theorem is about the
+\* modeled world, and says so.
+RemediationNotStarved ==
+  (dpFlag # "none" /\ serving # {} /\ consecutiveBounces < MaxBounces)
+    ~> (serving = {} \/ dpFlag = "none")
 
 (***************************************************************************)
 (* THE DOUBLE-CREATOR THEOREM.  A bounce is never silently defeated: the   *)
