@@ -177,7 +177,14 @@ CONSTANTS
   MaintEnabled, \* TRUE = planned-roll actions exist (FALSE in legacy cfgs)
   MaintFence,  \* TRUE = drain-before-restart (never roll a serving leg's tgt)
   MaintBarrier,\* TRUE = next node waits for readmission, not pod-readiness
-  MaintLease   \* TRUE = a dead roller's suppression mark self-clears
+  MaintLease,  \* TRUE = a dead roller's suppression mark self-clears
+  BarrierRaidAware \* TRUE = the barrier reads GROUND TRUTH (raid membership
+               \* + responsiveness); FALSE = the record only (all replicas
+               \* insync) — the shortcut the implementation actually takes.
+               \* The record can lag the raid by one monitor tick, so the
+               \* weaker barrier can drain into a race with an undetected
+               \* failure; the RecordBarrier strict run verifies that costs
+               \* availability (an honest Defer), never safety.
 
 VARIABLES
   \* ---- data plane -------------------------------------------------------
@@ -727,6 +734,11 @@ ExpireClaim ==
 FullRedundancy ==
   \A m \in Legs : state[m] = "insync" /\ m \in serving /\ Responsive(m)
 
+\* What the implementation's barrier actually reads: the RECORD alone.
+\* Weaker than FullRedundancy exactly by the monitor-tick lag between a
+\* member failing and its stale-mark landing.
+RecordRedundancy == \A m \in Legs : state[m] = "insync"
+
 MaintDrain(l) ==
   /\ MaintEnabled /\ MaintFence
   /\ ~rollerDead
@@ -735,7 +747,16 @@ MaintDrain(l) ==
   /\ Responsive(l)
   /\ l \notin rolled                      \* one campaign, each node once
   /\ rolling = {} /\ suppress = {}        \* k8s pod-level serialization
-  /\ (MaintBarrier => FullRedundancy)     \* readmitted, not just pod-ready
+  \* DATA-PLANE BELT, unconditional: never drain the last serving member.
+  \* Found by the RecordBarrier run: with a record-only barrier, a
+  \* deconfigured-but-not-yet-stale-marked survivor makes the record lie
+  \* ("both insync") and a record-level last-leg check passes — the drain
+  \* then removes the SOLE serving leg holding the acked tail and prunes
+  \* it from the writer set: silent loss in 7 states.  The belt must read
+  \* GROUND TRUTH (the code probes the raid BEFORE the record round).
+  /\ serving \ {l} # {}
+  /\ (MaintBarrier =>                     \* readmitted, not just pod-ready
+        IF BarrierRaidAware THEN FullRedundancy ELSE RecordRedundancy)
   /\ serving' = serving \ {l}
   /\ raidGen' = raidGen + 1
   /\ legGen' = [m \in Legs |-> IF m \in serving \ {l} THEN raidGen + 1
@@ -859,14 +880,15 @@ FairnessCore ==
        /\ WF_vars(CatchUp(l))
        /\ WF_vars(Admit(l))
        \* Maintenance machinery: once a node is IN maintenance the DS
-       \* controller + kubelet drive it to completion (RollStart/RollFinish),
-       \* a live roller clears its mark (MaintClear), and the lease TTL
-       \* fires for a dead one (SuppressExpire).  Initiating each node's
-       \* DRAIN stays unfair — campaign pacing is the operator's choice,
-       \* so "the campaign completes" is deliberately NOT a theorem here;
-       \* MaintenanceEventuallyLifts is.
+       \* controller drives it (RollStart), a live roller clears its mark
+       \* (MaintClear), and the lease TTL fires for a dead one
+       \* (SuppressExpire).  Initiating each node's DRAIN stays unfair —
+       \* campaign pacing is the operator's choice, so "the campaign
+       \* completes" is deliberately NOT a theorem here;
+       \* MaintenanceEventuallyLifts is.  WF(RollFinish) — kubelet
+       \* completes restarts — lives in FairnessKubelet below so the
+       \* wedged-restart run can drop exactly that assumption.
        /\ WF_vars(RollStart(l))
-       /\ WF_vars(RollFinish(l))
        /\ WF_vars(MaintClear(l))
        /\ WF_vars(SuppressExpire(l))
   /\ WF_vars(Assemble)
@@ -875,12 +897,23 @@ FairnessCore ==
   /\ WF_vars(ReleaseCatchup)
   /\ WF_vars(AcquireAdmission)
 
+\* kubelet's obligation, split out (the P4-split pattern): the recreated
+\* pod eventually comes back.  The wedged-DS-roll history (runak/runaj)
+\* says this is NOT always true of the world — SpecWedgedKubelet drops
+\* it and the strict run verifies a never-returning pod degrades ONE
+\* leg's availability and nothing else (every invariant holds, the
+\* volume stays writable on the survivor; the parked mark is the honest
+\* operational state, so MaintenanceEventuallyLifts is deliberately NOT
+\* checked there).
+FairnessKubelet == \A l \in Legs : WF_vars(RollFinish(l))
+
 \* WF on RaidDeconfigure IS P4: the data plane detects a dead/silent
 \* member in bounded time (TCP_USER_TIMEOUT + command watchdog +
 \* fast_io_fail) and faults it out.  It is split from FairnessCore so
 \* the P4 mutation (SpecNoP4) can drop exactly this assumption.
 Fairness ==
   /\ FairnessCore
+  /\ FairnessKubelet
   /\ \A l \in Legs : WF_vars(RaidDeconfigure(l))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -889,7 +922,15 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* may sit in the raid forever, stalling every write — the 150-177s
 \* ledger stalls, unbounded.  FlintReplicationP4.cfg checks
 \* EventuallyWritable against THIS spec and must find the stall lasso.
-SpecNoP4 == Init /\ [][Next]_vars /\ FairnessCore
+SpecNoP4 == Init /\ [][Next]_vars /\ FairnessCore /\ FairnessKubelet
+
+\* The wedged-restart world: the DS pod deleted for the roll never comes
+\* back (image pull failure, crashloop — the runak/runaj wedge family).
+\* Detection fairness stays (P4 is real); only kubelet's completion
+\* obligation is dropped.
+SpecWedgedKubelet ==
+  Init /\ [][Next]_vars /\ FairnessCore
+       /\ \A l \in Legs : WF_vars(RaidDeconfigure(l))
 
 (***************************************************************************)
 (* Invariants                                                              *)
@@ -954,6 +995,19 @@ Inv_PlannedRollNeverCausesOutage ==
 \* the intersection stays empty — checked in the strict maintenance run.
 Inv_MaintFenceHolds ==
   MaintFence => serving \cap rolling = {}
+
+\* THE BARRIER'S NECESSITY, restated sharply.  The unconditional
+\* last-serving-member belt (in MaintDrain) already prevents the direct
+\* drain-to-outage, so at 2 legs a missing barrier only stalls the
+\* campaign.  What the barrier uniquely prevents shows at >= 3 legs:
+\* without it the roll ERODES redundancy — the previous node's leg is
+\* still stale (pod Ready, leg un-readmitted) when the next drain fires,
+\* and with zero real failures the volume walks down to a single serving
+\* leg, one failure away from outage.  With the barrier, planned
+\* maintenance never has more than ONE leg out of service.  The
+\* RollBarrier mutation must violate this at 3 legs.
+Inv_PlannedRollBoundedImpact ==
+  crashes = 0 => Cardinality(Legs \ serving) <= 1
 
 Inv == TypeOK /\ Inv_NoSilentLoss /\ Inv_InsyncServingIsCurrent
              /\ Inv_ServingCurrentGen /\ Inv_NoDivergentServing

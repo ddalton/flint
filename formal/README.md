@@ -126,16 +126,36 @@ It runs seventeen configs, ALL required:
    as a counterexample.
 5g. `FlintReplicationRollBarrier.cfg` — drain exists but the barrier is
    pod-readiness (`MaintBarrier = FALSE`, exactly what k8s
-   maxUnavailable=1 gives you): TLC **must find** the same invariant
-   violated by the subtler path — drain l1, roll, clear its mark (all
-   pods Ready), drain l2 while l1 is still stale. Proves fence and
-   barrier are separately necessary.
+   maxUnavailable=1 gives you): TLC **must find**
+   `Inv_PlannedRollBoundedImpact` violated at THREE legs. The
+   unconditional last-serving-member belt (below) stops the direct
+   drain-to-outage, so the barrier's necessity is redundancy EROSION:
+   drain l1, roll, clear (all pods Ready), drain l2 while l1 is still
+   stale — two legs out of service with zero real failures, one
+   failure from outage. Proves fence, belt and barrier are separately
+   necessary.
 5h. `FlintReplicationRollLease.cfg` — unleased maintenance mark
    (`MaintLease = FALSE`): TLC **must find** the temporal
    counterexample to `MaintenanceEventuallyLifts` — the roller dies
    after the drain, the leg stays live, nothing lifts the mark, and the
    volume parks at reduced redundancy forever: the F43 parked standby
    re-created by a maintenance flag.
+5i. `FlintReplicationRollRecordBarrier.cfg` — the barrier the
+   IMPLEMENTATION actually has (`BarrierRaidAware = FALSE`: the roller
+   reads the sync RECORD, not raid membership). Strict — must HOLD.
+   Its **first run found a real silent-loss composition** (see "What
+   the model already caught"), which forced the unconditional
+   last-serving-member belt into `MaintDrain` and probe-first into the
+   code. With the belt, the record-only shortcut costs availability in
+   the monitor-lag race, never safety — which is what licenses it.
+5j. `FlintReplicationRollWedged.cfg` — `SpecWedgedKubelet`: the roll's
+   pod never comes back (kubelet's `WF(RollFinish)` dropped — the
+   runak/runaj wedge family whose old workaround, deleting the Node
+   object, is the Resurrect mutation's false-evidence hazard). Strict —
+   every invariant plus writability on the survivor must HOLD: a wedged
+   restart degrades exactly one leg's availability. The parked mark is
+   the honest operational state, so the lifts property is deliberately
+   not checked here.
 6. `FlintSnapshots.cfg` — the shipped copy protocol (full ordered walk,
    blobstore relink): `Inv_SessionFaithful` holds. Action coverage
    verified — the based suffix walk contributes zero new distinct
@@ -228,6 +248,18 @@ cannot rediscover the bug classes it exists for proves nothing.
   reclaim mid-campaign, runab/runam). The model forced the design to
   state exactly *whose* marks must lift: live legs' marks, always;
   dead legs' marks, by `Replace`'s identity swap when a source exists.
+- The RecordBarrier run's first pass found a **silent-loss composition
+  in the implemented drain**, 7 states: a survivor blackholes, P4
+  deconfigures it, a write lands on the other leg alone, the survivor
+  RECOVERS before the monitor stale-marks it — the record now calls
+  both legs insync — and a drain armed on that record stale-marks and
+  writer-prunes the SOLE serving leg holding the acked tail; the next
+  assembly is gated by the pruned set and serves without it. Every
+  record-level check passes on the lying record, so the fix had to be
+  GROUND TRUTH: the unconditional `serving \ {l} # {}` belt in
+  `MaintDrain`, implemented as probe-the-raid-BEFORE-the-record-round
+  in `drain_leg` (and pinned by a unit test that replays the TLC
+  trace). Found the day the code shipped, before any cluster ran it.
 
 ## Deliberate scope limits
 

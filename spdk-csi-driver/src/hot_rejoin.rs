@@ -5861,6 +5861,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maint_drain_ground_truth_belt_beats_a_stale_record() {
+        // The RecordBarrier TLC counterexample as a unit test: leg A is
+        // already deconfigured from the serving raid, but the record
+        // still calls it insync (the monitor-tick lag). Every
+        // record-level check passes — the barrier AND the record's own
+        // last-insync belt — so only the ground-truth probe stands
+        // between the drain and stale-marking + writer-pruning the SOLE
+        // serving leg holding the acked tail. The probe must refuse
+        // BEFORE any record change.
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        {
+            let mut w = rpc.world.lock().unwrap();
+            if let Some(raids) = w.raids.get_mut("consumer") {
+                raids.clear();
+            }
+        }
+        rpc.seed_raid(
+            "consumer",
+            &format!("raid_{}", VOL),
+            "online",
+            &[
+                (&expected_remote_base_bdev(&sid(VOL), 0), false), // A: deconfigured
+                (&expected_remote_base_bdev(&sid(VOL), 1), true),  // B: sole serving
+            ],
+        );
+        let mut record = insync_record(); // the record lies: both insync
+        record.set_writer_set(&["uuid-a".into(), "uuid-b".into()], NOW);
+        let store = FakeStore::new(record);
+        let out =
+            crate::maint_roll::drain_leg(&rpc, &store, &drain_target_b(), T_MAINT_FUTURE).await;
+        assert!(out.is_err(), "must refuse to drain the last configured base");
+        let rec = store.record();
+        assert_eq!(rec.replicas[1].sync_state, SyncState::InSync, "record untouched");
+        assert!(rec.replicas[1].maint_drain.is_none(), "no mark stamped");
+        assert!(
+            rec.writer_uuids().contains(&"uuid-b".to_string()),
+            "writer set untouched — pruning the sole serving leg is the silent-loss vector"
+        );
+        assert!(rpc.calls_of("bdev_raid_remove_base_bdev").is_empty());
+    }
+
+    #[tokio::test]
     async fn catchup_and_rejoin_skip_a_live_maint_mark_until_it_expires() {
         // Live mark: the drained leg belongs to the roll — catch-up must
         // not rebuild it, hot rejoin must not admit it.

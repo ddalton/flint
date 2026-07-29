@@ -199,14 +199,27 @@ least one new F-number.
    > in 5 steps with zero failures on today's semantics), and a leased
    > suppression mark. P4 detection stays always-on by design.
    >
-   > **ORCHESTRATION HALF IMPLEMENTED + SIM-SWEPT same day** (945 lib
+   > **ORCHESTRATION HALF IMPLEMENTED + SIM-SWEPT same day** (947 lib
    > tests): `maint_roll.rs` roller behind chart flag
    > `maintenance.drainRoll.enabled` (default OFF) + `FLINT_MAINT_DRAIN`;
    > suppression mark as a record field (one-CAS drain); exclusion doors
    > in catch-up/hot-rejoin/intent; `OP_MAINT_DRAIN` Resolver claim;
-   > crash-sweep green. Owed: drill 3.14 (the live gate), the local
-   > half (ublk-recovery spike), and a guarded_destroy verdict for
-   > `bdev_raid_remove_base_bdev`.
+   > crash-sweep green.
+   >
+   > **MODEL-HARDENING PASS same day** (gate now 19 TLC runs): the new
+   > RecordBarrier run — modeling the barrier the code ACTUALLY has
+   > (record-only) — found a real silent-loss composition in the drain
+   > (7 states: drain armed on a record lagging the raid prunes the sole
+   > serving leg from the writer set). Fixed both sides: the
+   > unconditional last-serving-member belt in the model, probe-first in
+   > `drain_leg`, the TLC trace pinned as a unit test. Also: the
+   > half-drained-node pod-delete gap (multi-volume, invisible to the
+   > one-leg model) fixed in `plan_roll`; the wedged-restart strict run
+   > (kubelet never returns ⇒ one leg degraded, nothing else); the
+   > barrier's necessity restated as `Inv_PlannedRollBoundedImpact`
+   > (redundancy erosion at ≥3 legs). Owed: drill 3.14 (the live gate),
+   > the local half (ublk-recovery spike), and a guarded_destroy verdict
+   > for `bdev_raid_remove_base_bdev`.
 3. **F54 doc §3 residual:** prestage trusts consumer-side bdev *presence*
    over path liveness, so hot-rejoin's first window can lose one ~7-min
    backoff cycle to the F48 zombie racing its own sever (severable only

@@ -154,6 +154,16 @@ pub struct RollView {
     /// Nodes holding at least one LIVE suppression mark (expired marks
     /// read as absent — the lease).
     pub marked_nodes: Vec<String>,
+    /// Marked nodes that STILL have undrained serving legs (a prior
+    /// drain pass was cut short: claim skip, controller restart, a new
+    /// attach landing mid-campaign). The multi-volume gap the one-leg
+    /// formal model cannot express: "node drained" is per-volume in
+    /// code, and the pod delete must wait for ALL of them — deleting a
+    /// half-drained node's pod blackholes every leg the pass missed.
+    /// Volumes whose consumer IS the node (the local half) and
+    /// unattached volumes are deliberately excluded — the drain skips
+    /// them by design.
+    pub drain_incomplete: Vec<String>,
     /// The barrier input: every multi-replica volume fully redundant —
     /// all replicas in_sync, no hot-rejoin markers, no live marks.
     pub fully_redundant: bool,
@@ -198,6 +208,11 @@ pub fn plan_roll(view: &RollView) -> RollStep {
         let pod = view.pods.iter().find(|p| &p.node_name == node);
         return match pod {
             Some(p) if p.current_rev && p.ready => RollStep::ClearMarks { node: node.clone() },
+            // Half-drained (some volumes' legs still serving): finish
+            // the drain before the delete — the fence is per-volume.
+            Some(p) if !p.current_rev && view.drain_incomplete.iter().any(|n| n == node) => {
+                RollStep::Drain { node: node.clone() }
+            }
             Some(p) if !p.current_rev => RollStep::DeletePod {
                 pod: p.pod_name.clone(),
                 node: node.clone(),
@@ -375,25 +390,79 @@ pub struct DrainTarget {
     pub raid_name: String,
 }
 
-/// Gracefully remove `target`'s leg: ONE record round (stale-mark =
-/// writer-set exit + leased suppression mark), then
-/// `bdev_raid_remove_base_bdev` on the serving raid. Record-first is
-/// load-bearing (the mirror of assembly's record-before-writes): a crash
-/// between the two leaves a leg the record already excludes — safe, and
-/// the next tick re-drives the remove. The remove is idempotent: a base
-/// already absent from the raid is success.
+/// Gracefully remove `target`'s leg: PROBE the serving raid first (the
+/// data-plane belt), then ONE record round (stale-mark = writer-set exit
+/// + leased suppression mark), then `bdev_raid_remove_base_bdev`.
+///
+/// Probe-BEFORE-record is load-bearing, and the formal model found why
+/// (the RecordBarrier run): the record can lag the raid by one monitor
+/// tick, so a record-level check can read "both insync" while the OTHER
+/// leg is already deconfigured — a drain armed on that stale view
+/// stale-marks and writer-prunes the SOLE serving leg holding the acked
+/// tail, and the next assembly serves without it: silent loss in 7
+/// model states. Ground truth must refuse before any record change.
+/// Record-before-REMOVE stays (the mirror of assembly's
+/// record-before-writes): a crash between them leaves a leg the record
+/// already excludes — safe, and the next tick re-drives.
 pub async fn drain_leg(
     rpc: &dyn CatchupRpc,
     store: &dyn CatchupStore,
     target: &DrainTarget,
     deadline_rfc3339: &str,
 ) -> Result<(), RpcError> {
+    // Find the leg's configured base in the serving raid: by the
+    // deterministic remote base name (the canonical
+    // expected_remote_base_bdev) or by uuid (covers a local-alias base
+    // and post-revert heads — an lvol bdev's name is its uuid).
+    let sid = crate::identity::StorageId::of_handle(&target.volume_id);
+    let remote_base = replica_sync::expected_remote_base_bdev(&sid, target.replica_index);
+    let raids = crate::catchup::get_raids(rpc, &target.consumer).await?;
+    let Some(raid) = raids.iter().find(|r| {
+        r.get("name").and_then(|n| n.as_str()) == Some(target.raid_name.as_str())
+    }) else {
+        // No raid on the consumer: mid-transition or torn down. Ground
+        // truth is unprobeable — refuse rather than mutate the record
+        // on a view we cannot verify; the next tick re-observes.
+        return Err(format!(
+            "no serving raid {} on {} to drain from",
+            target.raid_name, target.consumer
+        )
+        .into());
+    };
+    let bases: Vec<&serde_json::Value> = raid
+        .get("base_bdevs_list")
+        .and_then(|b| b.as_array())
+        .map(|v| v.iter().collect())
+        .unwrap_or_default();
+    let is_target = |b: &&serde_json::Value| {
+        [b.get("name"), b.get("uuid")].iter().any(|v| {
+            v.and_then(|x| x.as_str())
+                .map(|s| s == remote_base || s == target.live_uuid)
+                .unwrap_or(false)
+        })
+    };
+    let configured = |b: &&serde_json::Value| {
+        b.get("is_configured").and_then(|c| c.as_bool()).unwrap_or(false)
+    };
+    let target_configured = bases.iter().any(|b| is_target(b) && configured(b));
+    // The unconditional last-serving-member belt, on GROUND TRUTH (the
+    // model's `serving \ {l} # {}` guard): never drain the raid's last
+    // configured base. A record-level check is not enough — the record
+    // may still call a deconfigured survivor "insync".
+    if target_configured && bases.iter().filter(|b| configured(b)).count() < 2 {
+        return Err(format!(
+            "refusing to drain the last configured base of {} on {}",
+            target.raid_name, target.consumer
+        )
+        .into());
+    }
+
     store
         .record_maint_drain(&target.volume_id, &target.replica_uuid, deadline_rfc3339)
         .await?;
     // Verify the record round actually ARMED the drain (the mutator
-    // refuses a leg mid hot-rejoin window and the last in-sync leg;
-    // record_maint_drain reports Ok either way). Removing a leg the
+    // refuses a leg mid hot-rejoin window and the last recorded in-sync
+    // leg; record_maint_drain reports Ok either way). Removing a leg the
     // record still counts as a writer is the exact ordering hazard
     // record-first exists to prevent — never outrun a refusing record.
     let armed = store
@@ -415,48 +484,13 @@ pub async fn drain_leg(
         )
         .into());
     }
-
-    // Find the leg's configured base in the serving raid: by the
-    // deterministic remote base name (the canonical
-    // expected_remote_base_bdev) or by uuid (covers a local-alias base
-    // and post-revert heads — an lvol bdev's name is its uuid).
-    let sid = crate::identity::StorageId::of_handle(&target.volume_id);
-    let remote_base = replica_sync::expected_remote_base_bdev(&sid, target.replica_index);
-    let raids = crate::catchup::get_raids(rpc, &target.consumer).await?;
-    let Some(raid) = raids.iter().find(|r| {
-        r.get("name").and_then(|n| n.as_str()) == Some(target.raid_name.as_str())
-    }) else {
-        // No raid on the consumer (already torn down / mid-transition):
-        // nothing to remove — the record round did the work.
-        return Ok(());
-    };
-    let bases: Vec<&serde_json::Value> = raid
-        .get("base_bdevs_list")
-        .and_then(|b| b.as_array())
-        .map(|v| v.iter().collect())
-        .unwrap_or_default();
-    let is_target = |b: &&serde_json::Value| {
-        [b.get("name"), b.get("uuid")].iter().any(|v| {
-            v.and_then(|x| x.as_str())
-                .map(|s| s == remote_base || s == target.live_uuid)
-                .unwrap_or(false)
-        })
-    };
-    let configured = |b: &&serde_json::Value| {
-        b.get("is_configured").and_then(|c| c.as_bool()).unwrap_or(false)
-    };
-    let Some(base) = bases.iter().find(|b| is_target(b) && configured(b)) else {
-        return Ok(()); // already out — idempotent re-drive
-    };
-    // Data-plane belt (mirrors drain_for_maintenance's record-level belt):
-    // never remove the last configured base.
-    if bases.iter().filter(|b| configured(b)).count() < 2 {
-        return Err(format!(
-            "refusing to remove the last configured base of {} on {}",
-            target.raid_name, target.consumer
-        )
-        .into());
+    if !target_configured {
+        return Ok(()); // already out — idempotent re-drive, lease refreshed
     }
+    let base = bases
+        .iter()
+        .find(|b| is_target(b) && configured(b))
+        .expect("target_configured implies a configured base");
     let base_name = base
         .get("name")
         .and_then(|n| n.as_str())
@@ -555,6 +589,20 @@ pub async fn maint_roll_tick(
         .collect();
     marked_nodes.sort();
     marked_nodes.dedup();
+    // A marked node still counts as UNDRAINED while any remote-consumer
+    // volume keeps an in-sync (unmarked) leg on it — a cut-short drain
+    // pass must finish before the pod delete (the per-volume fence).
+    let drain_incomplete: Vec<String> = marked_nodes
+        .iter()
+        .filter(|node| {
+            volumes.iter().any(|v| {
+                v.insync_by_node.contains_key(node.as_str())
+                    && v.consumer.as_deref().map(|c| c != node.as_str()).unwrap_or(false)
+                    && !v.marked.iter().any(|(_, mn)| mn == node.as_str())
+            })
+        })
+        .cloned()
+        .collect();
     let obstruction = volumes.iter().find_map(|v| {
         v.obstruction
             .as_ref()
@@ -564,6 +612,7 @@ pub async fn maint_roll_tick(
         on_delete: ds.on_delete,
         pods,
         marked_nodes,
+        drain_incomplete,
         fully_redundant: obstruction.is_none(),
         barrier_note: obstruction.unwrap_or_default(),
     };
@@ -823,9 +872,27 @@ mod tests {
             on_delete: true,
             pods,
             marked_nodes: marked.iter().map(|s| s.to_string()).collect(),
+            drain_incomplete: Vec::new(),
             fully_redundant: redundant,
             barrier_note: if redundant { String::new() } else { "vol1: replica x is stale".into() },
         }
+    }
+
+    #[test]
+    fn plan_roll_finishes_half_drained_node_before_pod_delete() {
+        // The multi-volume gap the one-leg formal model cannot see: marks
+        // exist (volume 1 drained) but volume 2's leg on the node is
+        // still serving — a pod delete now would blackhole it. The
+        // planner must drain again, not delete.
+        let mut v = view(vec![pod("a", false, true), pod("b", true, true)], &["a"], true);
+        v.drain_incomplete = vec!["a".to_string()];
+        assert_eq!(plan_roll(&v), RollStep::Drain { node: "a".into() });
+        // Once the residue is drained, the delete proceeds.
+        v.drain_incomplete.clear();
+        assert_eq!(
+            plan_roll(&v),
+            RollStep::DeletePod { pod: "flint-csi-node-a".into(), node: "a".into() }
+        );
     }
 
     #[test]

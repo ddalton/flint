@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Seventeen runs, ALL required.
+# Nineteen runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -37,12 +37,23 @@
 #      TLC must FIND Inv_PlannedRollNeverCausesOutage violated: a routine
 #      DS roll with ZERO real failures drives serving to {}.
 #   5g. FlintReplicationRollBarrier.cfg  MaintBarrier=FALSE (pod-ready is
-#      not readmitted) — TLC must FIND the same invariant violated by the
-#      other path: the next drain proceeds while the previous leg is
-#      still stale.
+#      not readmitted) — TLC must FIND Inv_PlannedRollBoundedImpact
+#      violated at 3 legs: with the last-serving-member belt stopping the
+#      direct outage, the barrier's necessity is redundancy EROSION (two
+#      legs out of service under planned maintenance alone).
 #   5h. FlintReplicationRollLease.cfg    MaintLease=FALSE — TLC must FIND
 #      the MaintenanceEventuallyLifts lasso: a dead roller's suppression
 #      mark parks the drained leg forever.
+#   5i. FlintReplicationRollRecordBarrier.cfg BarrierRaidAware=FALSE — the
+#      barrier the IMPLEMENTATION has (record-only). Strict: must HOLD.
+#      Its first run (no ground-truth belt) found a REAL silent-loss
+#      composition — drain armed on a record lagging the raid prunes the
+#      sole serving leg from the writer set — which forced the
+#      unconditional last-serving-member belt (probe-first in code).
+#   5j. FlintReplicationRollWedged.cfg   SpecWedgedKubelet (the roll's pod
+#      never comes back) — strict: every invariant + writability on the
+#      survivor must HOLD (a wedged restart degrades one leg, nothing
+#      else; the parked mark is the honest operational state).
 #
 # FlintSnapshots:
 #   6. FlintSnapshots.cfg           strict — every completed copy session
@@ -117,9 +128,12 @@ strict_run FlintReplication FlintReplicationMaint.cfg "maintenance strict breadt
 strict_run FlintReplication FlintReplicationMaintDeep.cfg "maintenance strict content depth (torn/scrub/zombie/roller-death across a roll)"
 
 mutation_run FlintReplication FlintReplicationRollUnfenced.cfg "roll-fence mutation (MaintFence=FALSE, the csi-node roll landmine)" "Inv_PlannedRollNeverCausesOutage"
-mutation_run FlintReplication FlintReplicationRollBarrier.cfg  "roll-barrier mutation (MaintBarrier=FALSE, pod-ready is not readmitted)" "Inv_PlannedRollNeverCausesOutage"
+mutation_run FlintReplication FlintReplicationRollBarrier.cfg  "roll-barrier mutation (MaintBarrier=FALSE, redundancy erosion at 3 legs)" "Inv_PlannedRollBoundedImpact"
 
 liveness_mutation_run FlintReplication FlintReplicationRollLease.cfg "roll-lease mutation (MaintLease=FALSE, the mark outlives its roller)"
+
+strict_run FlintReplication FlintReplicationRollRecordBarrier.cfg "record-only barrier strict (the implementation's barrier; belt holds safety)"
+strict_run FlintReplication FlintReplicationRollWedged.cfg "wedged-restart strict (kubelet never returns; survivor stays writable)"
 
 strict_run FlintSnapshots FlintSnapshots.cfg "snapshots strict (full ordered walk, blobstore relink)"
 
