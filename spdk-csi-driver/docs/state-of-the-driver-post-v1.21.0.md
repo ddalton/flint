@@ -131,9 +131,12 @@ least one new F-number.
 > **F55** (`docs/f55-bounce-truncated-reply-eio.md`): the cutover bounce
 > truncates in-flight RPC replies → client EIO → pg PANIC — deterministic
 > mid-checkpoint repro, quiesced bounces clean; fixed same day
-> (`DrainGate` frame-atomic shutdown, `a4902ef`); F55's own live gate
-> (bounce-mid-checkpoint on the fixed image, zero PANICs) is owed next
-> campaign. Evidence: `tests/chaos/artifacts/runam-p4-f55-gate/`.
+> (`DrainGate` frame-atomic shutdown, `a4902ef`); **F55's own live gate
+> PASSED 2026-07-29 on runan as new drill 3.13** — the checkpoint forced
+> into flight, then the kill: drained=1, deadline never expired, panic=0,
+> eio=0, pg restarts 0. P4 also reproduced on a second cluster: kill
+> stall 37s (runam 36s) vs the 150–177s class before the fix. Evidence:
+> `tests/chaos/artifacts/runam-p4-f55-gate/` and `runan-s2-gate/`.
 - **Evidence:** ledger stall 159s on runak's clean 3.6e, ~150s measured on
   runai — vs RWO 2.5 where writes never paused. fast_io_fail (20s) is not
   the bottleneck; *detection* dominates on the RWX path. Also S2's ~237s
@@ -151,8 +154,18 @@ least one new F-number.
 > reconcile family domain-routed; cutover admission arm deferred to the
 > window, bounce = relocation only; RWX consumer = backing PV's VA; 926
 > lib tests incl. the RWX-domain crash sweep; musl clean). Kill switch
-> `FLINT_RWX_INPLACE_ADMISSION` (default ON). Live gate owed: drill 3.12
-> next campaign.
+> `FLINT_RWX_INPLACE_ADMISSION` (default ON).
+> **LIVE GATE PASSED 2026-07-29 on runan (drill 3.12, first run):
+> window_ms=228 — 228 MILLISECONDS of quiesce replacing the ~237s bounce
+> — admit_stall 1s, nfs pod uid + restarts unmoved, zero CutoverStarted,
+> zero ESTALE/PANIC, pg-0 restarts 0, settle held 2/2, db PASS. The
+> claims log shows catch-up yielding (`held_by="hot-rejoin"`) — the F43
+> mutation's priority prediction observed on the wire. S2 is DONE; the
+> RWX availability headline is now the P4 detection number (37s), not
+> the admission. Evidence `tests/chaos/artifacts/runan-s2-gate/`.**
+> **F55's live gate PASSED the same day** (new drill 3.13,
+> bounce-mid-checkpoint forced rather than lucky: drained=1, zero
+> PANICs) — the last item owed out of runam.
 - **This is the availability headline number** for any database-on-RWX
   story; durability is already there.
 - **Gate:** 3.6e stall budget. Set an explicit target (e.g. ≤60s) rather

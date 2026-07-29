@@ -1,9 +1,35 @@
 # S2 — bounce-free RWX admission (model-first design)
 
-Status: **IMPLEMENTED 2026-07-28** (same day as the design; gates 1-2
-green, live drill 3.12 owed next campaign). The formal work landed ahead
-of the code on purpose: every design-level safety and liveness question
+Status: **LIVE-GATED 2026-07-29 — all four acceptance gates green.**
+Implemented 2026-07-28 (same day as the design); drill 3.12 PASSED on its
+first run on runan (`1.22.0-rc3`), evidence
+`tests/chaos/artifacts/runan-s2-gate/`. The formal work landed ahead of
+the code on purpose: every design-level safety and liveness question
 below is answered by a TLC run in `formal/`, not by prose.
+
+**The measured result — 228 ms of quiesce replacing a ~237 s bounce:**
+
+```
+window_ms=228   admit_stall=1s (budget 10)   kill_stall=37s (P4 budget 60)
+swap=141s  standby=162s  in_sync=237s  settled=+360s
+nfs pod uid UNCHANGED, restarts 0->0   pg-0 restarts 0->0   estale=0 panic=0
+cutover events 0/0/0                   db PASS (zero acked loss)
+```
+
+The controller's own trace shows the arbitration the F43 mutation
+predicted — catch-up yielding rather than renewing over the window:
+
+```
+[CATCHUP]    replica caught up to warm standby
+[CLAIMS]     wanted_op="catch-up" held_by="hot-rejoin"
+[HOT_REJOIN] Window committed   window_ms=228
+[HOT_REJOIN] Rejoin complete    localized=true
+```
+
+No `[CUTOVER]` line fires. One ordering note for future readers: the
+record flips to `in_sync` at localization, ~39 s AFTER the window
+commits, so a mid-flight check shows `standby` against a raid that is
+already 2/2. That is the ordering, not a gap.
 
 Implementation map (all behind `FLINT_RWX_INPLACE_ADMISSION`, default ON):
 
@@ -108,8 +134,21 @@ Run everything: `scripts/check-tla.sh` (ten TLC runs, ~30s).
    bounded by the quiesce span (budget: ≤10s), ledger zero acked loss,
    raid 2/2 in_sync, zero ESTALE, admission yields/seizures consistent
    with claim priority.
+   > **PASSED 2026-07-29 on runan, first run** — every criterion met;
+   > numbers above. The drill asserts the ABSENCES (unmoved pod identity,
+   > no CutoverStarted) because with S2 on, a bounce is the failure.
 4. Regression: 3.6e (relocation still bounces — DrainGate/F55 gate
    applies there), 2.9 canary.
+   > **F55's own gate PASSED same day** as new drill **3.13**: a bounce
+   > forced mid-checkpoint (not by luck — runam showed every prior clean
+   > bounce drill straddled the checkpoint by accident) drained cleanly,
+   > `drained=1`, deadline never expired, zero PANICs.
+   >
+   > 3.6e itself no longer exercises the bounce with the kill switch ON —
+   > its vector IS 3.12's, so it now reads the switch and flips its
+   > expectation. To regression-test the bounce path, run 3.6e with
+   > `FLINT_RWX_INPLACE_ADMISSION=disabled`; that (plus the 2.9 canary)
+   > is the remaining regression owed, and it consumes a storage node.
 
 ## Open questions folded in deliberately
 
