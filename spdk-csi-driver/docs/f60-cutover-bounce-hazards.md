@@ -1,7 +1,7 @@
 # F60 (candidate family) — cutover bounce hazards: the unbelted planner, the double creator, and the churn loop
 
 **Status:** found 2026-07-29 by the cutover modeling tranche (`formal/`
-runs 11a–11e) plus a code scout of `cutover.rs` / `rwx_nfs.rs`. **No code
+runs 11a–11e and 12a–12d) plus a code scout of `cutover.rs` / `rwx_nfs.rs`. **No code
 fix has landed yet.** The model half is committed and gated; this
 document is the code-owed half.
 
@@ -87,8 +87,33 @@ the gate ON**.
 
 ## 3. The liveness reconciler and the bounce are two creators of one bare pod
 
-Not modeled (the tranche abstracts the pod layer away), but found by the
-code scout and worth fixing on its own:
+**Now modeled** — runs 12a-12d. This was originally out of scope; the
+abstraction was wrong, and bringing the pod layer in produced an
+eight-state counterexample with nothing exotic in it (12a):
+
+1. A leg blackholes, is faulted out, recovers, and hot-rejoins as a warm
+   standby — the ordinary trigger the cutover exists to serve.
+2. The controller deletes the server pod. The window is `"clean"`: every
+   writer is healthy, no risk of any kind.
+3. The reconciler recreates the pod **while the volume is still staged**.
+4. Kubelet reuses the staged volume. No NodeStage, no reassembly, no
+   admission. The standby stays parked and clients ate an NFSv4
+   grace-window recovery for nothing.
+
+No partition, no zombie, no second failure, no leadership change, no
+stale flag. 12a runs with the bouncer *idealized* (it recreates only
+after the unstage it waited for), so the reconciler is isolated as the
+sole cause.
+
+**12c is the finding that changes the fix.** With the reconciler belted,
+the SHIPPED timeout path reaches the same violation on its own:
+`await_detached` returning false only WARNS and `execute_cutover`
+recreates anyway ("recreating anyway — a same-node reuse will surface as
+CutoverIneffective"). The bouncer defeats its own wait. **These are two
+independent doors to one harm, so belting the reconciler alone leaves the
+bug reachable.**
+
+The mechanism, from the scout:
 
 The detach wait exists to hold the pod down until kubelet unstages, so
 the replacement is forced to restage and reassemble the raid — the §6
@@ -115,10 +140,20 @@ judged — no `CutoverIneffective`, no cooldown, no eligibility
 bookkeeping. The escalation taint is the only damping, and it is
 explicitly best-effort.
 
-**Proposed fix:** make the reconciler bounce-aware (a short-lived
-per-volume suppression the bouncer sets and clears, or simply have the
-bounce hand the recreate to the reconciler and stop doing it itself —
-one creator instead of two).
+**Proposed fix, now shaped by 12b and 12c together:** make the
+reconciler bounce-aware (a per-volume suppression the bouncer sets and
+clears) **and** make the bouncer's timeout path refuse to recreate into a
+still-staged volume rather than proceeding with a warning. 12b proves the
+first half holds and still converges; 12c proves the first half alone is
+insufficient.
+
+**One caveat 12b does not cover, and the shipped fix must:** the model
+gives `BounceRecreate` weak fairness, i.e. it assumes the bouncer always
+completes. It therefore never examines a bouncer that dies mid-window
+while its own belt holds off the only other actor able to rebuild the
+pod. The suppression must be **bounded** (a TTL or an expiring window),
+never unconditional — otherwise the fix reintroduces exactly the
+stranding hazard that §0 shows the reconciler exists to prevent.
 
 ## 4. The churn loop the safety belt does NOT close
 
@@ -141,6 +176,28 @@ code facts:
 **Proposed fix:** an attempt counter with backoff, persisted on the PV
 (the taint's application time and the flag's `since` already are), plus
 an ownership-staleness sweep for orphaned flags.
+
+## 4b. Two-planner disjointness — checked, and NOT owed
+
+`plan_cutover` applies neither of `plan_hot_rejoin`'s admission filters,
+so on paper it can commit a full teardown whose only purpose — admitting
+a particular standby — the stage admission is guaranteed to refuse.
+
+**The model says do not fix this.** With the per-leg maintenance marks
+that landed in the wave-2 code wave (`SuppressScoped = TRUE`), a standby
+on an unaffected leg is still admissible, so a bounce planned for it is
+not doomed, and `Inv_NoDoomedBounce` holds with the planner left exactly
+as it ships. The door was open only in the pre-fix volume-wide world.
+The per-leg suppression fix closed a door nobody knew it was closing.
+
+Two caveats. The hot-rejoin **marker** half of the same gap is untested —
+markers live in `FlintClaims`' window abstraction, not here. And this
+conclusion is only trustworthy because the invariant is attributive: the
+run was first written against the shared pointless-rebounce canary, and
+an A/B showed that canary fires with the filter ON as well as OFF, which
+had briefly produced the opposite conclusion. A mutation run whose
+invariant is violable for reasons other than the mutation proves nothing
+about the mutation.
 
 ## 5. Open question booked, not answered: `AdmitAtStage` vs zombie fencing
 
@@ -172,5 +229,11 @@ lands relative to the stage-time admission.
 | The lease cannot close the two-bouncer race | `FlintReplicationBounceRace.cfg` must violate it with the gate ON |
 | The preflight ALONE carries bounce safety | `FlintReplicationBounceRaceFixed.cfg` (belt ON, no leader gate) must hold |
 | The belt does not close churn | `FlintReplicationBounceLoop.cfg` must violate `Inv_NoPointlessRebounce` |
-| §3 (double creator) | **none yet** — code-only, no model, no test |
+| §3 (double creator) — the reconciler defeats the detach wait | `FlintReplicationBouncePod.cfg` must violate `Inv_BounceNotSilentlyDefeated` (bouncer idealized, so the reconciler is isolated) |
+| The belt holds and the volume still converges | `FlintReplicationBouncePodFixed.cfg` (strict + liveness) |
+| §3 second door — the bouncer defeats its OWN wait on timeout | `FlintReplicationBounceTimeout.cfg` must violate it with the reconciler already belted |
+| A bounce planned for a standby the stage admission will refuse (pre-fix world) | `FlintReplicationBouncePlanner.cfg` must violate `Inv_NoDoomedBounce` |
+| **The SHIPPED world already closes it** — no planner filter owed | `FlintReplicationBouncePlannerScoped.cfg` (strict, per-leg suppression + unfiltered planner) |
+| The hot-rejoin MARKER half of the same gap | **none** — lives in `FlintClaims`' window abstraction |
+| A bouncer that dies mid-window under its own belt | **none** — `WF(BounceRecreate)` assumes completion; why the suppression must be bounded |
 | The volume never lacks a serving NFS pod for N seconds | **drills only** — deliberately outside the model's abstraction |

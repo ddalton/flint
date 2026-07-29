@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Forty-three runs, ALL required.
+# Forty-eight runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -173,6 +173,37 @@
 #      all — strict.  The sharp theorem: the preflight ALONE carries
 #      bounce safety; the lease buys pacing, not safety (a third instance
 #      of the FlintClaimsNoLeader / RollerRaceFixed verdict).
+#   12a. FlintReplicationBouncePod.cfg   the POD LAYER, brought in after
+#      the first tranche abstracted it away: the bare flint-nfs-<vol> pod
+#      has TWO independent creators (execute_cutover's recreate and
+#      rwx_nfs.rs's liveness reconciler) and nothing mutually excludes
+#      them.  With the bouncer IDEALIZED (it recreates only after the
+#      unstage it waited for), TLC must still FIND
+#      Inv_BounceNotSilentlyDefeated violated: the reconciler recreates
+#      the pod inside the detach wait, kubelet reuses the staged volume,
+#      no NodeStage runs, and the warm standby stays parked.  Eight
+#      states, no partition/zombie/second failure/leader change.
+#   12b. FlintReplicationBouncePodFixed.cfg ReconcilerBelt=TRUE (hold off
+#      while a window is open — one creator at a time): strict, and the
+#      volume must still converge.
+#   12c. FlintReplicationBounceTimeout.cfg the SECOND door, with the
+#      reconciler already belted: DetachWaitHonored=FALSE is the shipped
+#      timeout path where await_detached returning false only WARNS and
+#      execute_cutover recreates anyway.  TLC must FIND the same
+#      violation — the bouncer defeats its own wait, so the reconciler
+#      fix ALONE is insufficient.
+#   12d. FlintReplicationBouncePlanner.cfg plan_cutover applies NEITHER
+#      of plan_hot_rejoin's admission filters — TLC must FIND
+#      Inv_NoDoomedBounce violated (3 legs, pre-fix volume-wide
+#      suppression): a full teardown whose only purpose the stage
+#      admission is guaranteed to refuse.  Checked on its OWN ghost, not
+#      the shared churn canary — an A/B showed the canary fires with the
+#      filter ON as well as OFF, so it cannot test this fix.
+#   12e. FlintReplicationBouncePlannerScoped.cfg the same with
+#      SuppressScoped=TRUE (the shipped per-leg marks) and the planner
+#      still unfiltered — strict, must HOLD.  The wave-2 per-leg fix
+#      already closed this door, so plan_cutover needs no suppression
+#      filter: a tranche result that says DO NOT write the code.
 #   11e. FlintReplicationBounceLoop.cfg  the pointless-rebounce CANARY —
 #      with every individual bounce belted safe, TLC must still FIND
 #      Inv_NoPointlessRebounce violated: no attempt counter, no backoff,
@@ -327,6 +358,18 @@ mutation_run FlintReplication FlintReplicationBounceRace.cfg "two-bouncer race, 
 strict_run FlintReplication FlintReplicationBounceRaceFixed.cfg "bounce-preflight strict, no leader gate at all (the belt alone carries bounce safety)"
 
 mutation_run FlintReplication FlintReplicationBounceLoop.cfg "pointless-rebounce canary (a flag only a dead node could clear, no attempt counter anywhere — the belt does not close churn)" "Inv_NoPointlessRebounce"
+
+# Cutover pod layer (the double-creator race: two independent creators of
+# one bare pod, no mutual exclusion anywhere).
+mutation_run FlintReplication FlintReplicationBouncePod.cfg "double-creator race (the liveness reconciler recreates the server INSIDE the detach wait — the bounce is silently defeated, standby stays parked)" "Inv_BounceNotSilentlyDefeated"
+
+strict_run FlintReplication FlintReplicationBouncePodFixed.cfg "single-creator strict (ReconcilerBelt: no recreate while a bounce window is open; the volume still converges)"
+
+mutation_run FlintReplication FlintReplicationBounceTimeout.cfg "detach-timeout door (the bouncer defeats its OWN wait: await_detached only warns — so the reconciler fix alone is insufficient)" "Inv_BounceNotSilentlyDefeated"
+
+mutation_run FlintReplication FlintReplicationBouncePlanner.cfg "two-planner disjointness, pre-fix world (plan_cutover honours none of plan_hot_rejoin's filters — a teardown whose purpose the stage admission will refuse)" "Inv_NoDoomedBounce"
+
+strict_run FlintReplication FlintReplicationBouncePlannerScoped.cfg "two-planner disjointness, SHIPPED world (per-leg suppression already closes it — the planner filter is NOT owed)"
 
 strict_run FlintClaims FlintClaims.cfg "claims strict (two processes, Lease + marker grace; F50/F53 layer)"
 

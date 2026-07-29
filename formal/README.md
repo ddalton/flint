@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine, the snapshot protocol, and the multi-process claims layer
 
-Three modules, one gate (`scripts/check-tla.sh`, forty-three TLC runs).
+Three modules, one gate (`scripts/check-tla.sh`, forty-eight TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -87,7 +87,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs forty-three configs, ALL required:
+on first use).  It runs forty-eight configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -451,6 +451,90 @@ tail.  The core safety theorems (`Inv_NoSilentLoss` included) hold
 across it, so it is booked as an open question about the at-stage
 admission's fencing order, not as a bounce finding.
 
+**The pod layer (2026-07-29, same day)** — the cutover tranche above
+abstracted the pod object away and justified it by the verifier's
+finding that the *availability* question is closed in code.  That
+justification was sound and the abstraction was still wrong, because it
+hid a race that has nothing to do with availability: **the bare
+`flint-nfs-<vol>` pod has TWO independent creators and nothing mutually
+excludes them.**  `execute_cutover` deletes it, waits for the unstage
+(`await_detached`, ≤`detach_timeout`, 2s poll), then recreates it from a
+spec held in a local; `nfs_reconciler_pass` recreates it on a 30s tick
+whenever it is `Absent` with client attachments.  Both are
+`tokio::spawn`ed in the same process under the same lease.  The detach
+wait exists to hold the pod down until kubelet unstages so the
+replacement is *forced* to restage and reassemble — and for that entire
+wait the pod is `Absent` with attachments intact, which is exactly the
+reconciler's one `Recreate` cell.  (The cutover waits on the BACKING
+PV's VolumeAttachment; the reconciler counts VAs on the USER PV.
+Different objects, so the client attachments never drop.)
+
+12a. `FlintReplicationBouncePod.cfg` — the shipped world with the
+   **bouncer idealized** (`DetachWaitHonored = TRUE`: it recreates only
+   after the unstage it waited for), isolating the reconciler as the
+   sole cause.  TLC **must find** `Inv_BounceNotSilentlyDefeated`
+   violated in **eight states**, and the trace has nothing exotic in it:
+   a leg blackholes, recovers, and hot-rejoins as a warm standby — the
+   ordinary trigger cutover exists to serve — the controller deletes the
+   pod on a `"clean"` window with every writer healthy, and the
+   reconciler recreates it while the volume is still staged.  Kubelet
+   reuses the staged volume, no NodeStage runs, no reassembly happens,
+   the standby stays parked, and clients ate an NFSv4 grace-window
+   recovery for nothing.  No partition, no zombie, no second failure, no
+   leadership change, no stale flag.
+12b. `FlintReplicationBouncePodFixed.cfg` — `ReconcilerBelt`: no
+   recreate while a bounce window is open.  Strict, and the volume must
+   still converge.
+12c. `FlintReplicationBounceTimeout.cfg` — **the second door, and the
+   reason 12b's belt is not the whole fix.**  With the reconciler
+   already belted, `DetachWaitHonored = FALSE` is the shipped timeout
+   path: `await_detached` returning false only WARNS and
+   `execute_cutover` recreates anyway ("a same-node reuse will surface
+   as CutoverIneffective").  TLC **must find** the same violation — the
+   bouncer defeats its *own* wait.  Two independent doors to one harm,
+   so fixing the reconciler alone leaves the bug reachable.
+12d. `FlintReplicationBouncePlanner.cfg` — `plan_cutover` applies
+   NEITHER of `plan_hot_rejoin`'s admission filters, so it can commit a
+   full teardown whose only purpose the stage admission is guaranteed to
+   refuse.  TLC **must find** `Inv_NoDoomedBounce` violated at 3 legs in
+   the pre-fix volume-wide-suppression world.  (3 legs is required: at 2
+   the drain belt refuses to drain the last serving leg, so a standby
+   and a suppressed leg cannot coexist.)
+12e. `FlintReplicationBouncePlannerScoped.cfg` — **the run that says do
+   not write the fix.**  The same world with `SuppressScoped = TRUE`
+   (the per-leg marks from the wave-2 code wave) and the planner still
+   unfiltered exactly as `cutover.rs` ships it: strict, and it **holds**.
+   Per-leg suppression leaves a standby on an unaffected leg admissible,
+   so the bounce planned for it is not doomed — the wave-2 fix already
+   closed a door nobody knew it was closing, and no planner filter is
+   owed.  Scope: the hot-rejoin MARKER half of the same gap lives in
+   `FlintClaims`' window abstraction and is not tested here.
+
+`Inv_NoDoomedBounce` exists because of a methodological failure worth
+recording.  12d was first written against `Inv_NoPointlessRebounce`, the
+shared churn canary — and an A/B showed the canary fires with the
+planner filter ON as well as OFF, because `BounceLoop`'s three other
+doors reach it independently.  **A mutation run whose invariant is
+violable for reasons other than the mutation proves nothing about the
+mutation**, and it had briefly produced the opposite conclusion (that
+the door survives the shipped fix).  The ghost is violable only through
+this door, and flipping `PlannerDisjoint` alone flips the verdict.
+
+Two honest notes, both corrections to how this tranche was pitched.
+**The claim that the race needs no crash budget was wrong** — the *race*
+needs no failures, but the bounce TRIGGER does: a standby or a
+data-path flag requires a leg out of the raid, unreachable at
+`MaxCrashes = 0` with maintenance off, and the first 12a run came back
+green for exactly that reason.  Same class of error as the first
+tranche's two green runs: reasoning about a hazard in isolation without
+checking that its precondition is reachable in the configured world.
+And **12b proves less than it looks**: `WF(BounceRecreate)` assumes the
+bouncer completes, so the model never examines a bouncer that dies
+mid-window while its belt has the only other creator held off.  The
+shipped fix must therefore be a *bounded* suppression, not an
+unconditional one — the model does not check that, and cannot without
+modeling bouncer death.
+
 The mutation runs are the models' own regression tests; a model that
 cannot rediscover the bug classes it exists for proves nothing.
 
@@ -652,16 +736,17 @@ cannot rediscover the bug classes it exists for proves nothing.
   make Drop-during-walk unrepresentable, so the pin's cross-step safety
   burden is carried by unit tests, not TLC.  `cutover.rs` **was** the one protocol-shaped
   subsystem with no model at all; the cutover tranche (runs 11a-11e,
-  2026-07-29) closed that.  What stays out of scope there is the POD
-  OBJECT LAYER — no `nfsPod` state, no liveness reconciler as a second
-  actor, no delete-by-name-without-UID, no 409-against-a-Terminating-
-  corpse, no ControllerPublish as a third writer of the same pod name.
-  It is abstracted into `Bounce`'s `serving' = {}` and `Assemble`'s
-  return, on the verifier's finding that the availability question is
-  already closed in code (the reconciler rebuilds an Absent/Dead server
-  within ~one 30s tick).  Consequence to accept: **the model cannot
-  express "the volume had no serving NFS pod for N seconds"** — that
-  claim stays with the drills.  Node taints are out entirely (no node
+  2026-07-29) closed that.  The POD OBJECT LAYER was out of
+  scope and is now PARTLY in (runs 12a-12d): `podUp` plus the four-step
+  delete → unstage → recreate split models the two independent creators
+  of the bare server pod, because abstracting them away hid a real race.
+  What remains out even there: delete-by-name-without-UID,
+  409-against-a-Terminating-corpse, ControllerPublish as a third writer,
+  and pod PHASE (Terminating is not distinguished from gone).
+  Consequence still to accept: **the model cannot express "the volume
+  had no serving NFS pod for N seconds"** — that claim stays with the
+  drills, and the assumption that it never happens rests on
+  `rwx_nfs.rs`'s `nfs_reconcile_truth_table` unit test, not on the gate.  Node taints are out entirely (no node
   dimension), as are the volatile attempt record's TIMING content (at
   tick granularity a controller restart and the shipped unconditional
   re-arm are the same transition) and multi-volume effects

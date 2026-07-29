@@ -375,6 +375,39 @@ CONSTANTS
                \* the roller: orchestrator_lease.rs is ONE lease across all
                \* six leader-gated sites, so one deposal deposes every
                \* orchestrator at once).  FALSE = no leadership at all.
+  PodLayer,    \* TRUE = model the flint-nfs-<vol> POD OBJECT and its two
+               \* independent creators, splitting the atomic Bounce into
+               \* delete → unstage → recreate.  This is the layer the
+               \* first cutover tranche deliberately abstracted away; it
+               \* is here now because the abstraction hid a race with no
+               \* mutual exclusion anywhere in it.  FALSE = the atomic
+               \* Bounce (every pre-existing cfg, including 11a-11e).
+  ReconcilerBelt, \* FALSE = SHIPPED: rwx_nfs.rs's liveness reconciler
+               \* recreates an Absent server pod whenever the user PV has
+               \* client attachments — and nfs_reconcile_decision's
+               \* signature is (backend_is_emptydir, pv_terminating,
+               \* attachment_count, liveness), which CANNOT carry "a
+               \* bounce is in flight", so the absence of a guard is
+               \* provable from the type.  The cutover waits on the
+               \* BACKING PV's VolumeAttachment while the reconciler
+               \* counts VAs on the USER PV — different objects, so the
+               \* client attachments never drop and the whole detach wait
+               \* sits inside the reconciler's one Recreate cell.
+               \* TRUE = the proposed fix: no recreate while a bounce
+               \* window is open (one creator, not two).
+  DetachWaitHonored, \* TRUE = the bouncer recreates only after the
+               \* unstage it waited for.  FALSE = SHIPPED on the timeout
+               \* path: await_detached returning false only WARNS and
+               \* execute_cutover recreates anyway ("a same-node reuse
+               \* will surface as CutoverIneffective").  Split from
+               \* ReconcilerBelt so the runs can say WHICH creator
+               \* defeated the bounce.
+  PlannerDisjoint, \* TRUE = plan_cutover honours the admission filters
+               \* plan_hot_rejoin honours.  FALSE = SHIPPED: it applies
+               \* neither the maintenance-suppression nor the hot-rejoin
+               \* marker filter, so it can plan a bounce for a standby
+               \* the stage admission will then refuse — a bounce whose
+               \* predicate is unsatisfiable before it is even issued.
   StageAdmit   \* TRUE = model admit_standbys_at_stage (driver.rs:1967 →
                \* catchup.rs:2301) as its own action.  Required for the
                \* bounce's RETURN path: Admit cannot represent it — Admit
@@ -468,6 +501,16 @@ VARIABLES
                  \* "<node>|<since>".  ONLY the flagging leg's own agent
                  \* may clear it (node_agent.rs:5241-5247, flagged_by_me):
                  \* the CONFIRMED ownership trap.
+  podUp,         \* the flint-nfs-<vol> server pod exists (PodLayer worlds;
+                 \* pinned TRUE everywhere else).  A BARE pod: the bouncer
+                 \* deletes it holding the replacement spec in a local, and
+                 \* the liveness reconciler is a SECOND, independent creator
+                 \* of the same pod name.
+  bounceDoomed,  \* a bounce was COMMITTED whose only justification was a
+                 \* standby the stage admission will then refuse — the
+                 \* attributive ghost for PlannerDisjoint (the shared
+                 \* pointless-rebounce canary cannot distinguish this
+                 \* door from the three others, so it cannot test a fix)
   everServed     \* SUBSET Legs — legs that have served in their CURRENT
                  \* incarnation (Replace/Scrub wipe the payload and drop
                  \* membership).  The ghost that makes the admit-before-
@@ -485,7 +528,7 @@ vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
           deferExpired, deemedDead, falseRisk, crashes,
           rolling, rolled, suppress, rollerDead, legSize, raidSize, pvSize, wantNew,
           bounceWindow, bouncePlan, bounceRisk, consecutiveBounces, dpFlag,
-          everServed>>
+          everServed, podUp, bounceDoomed>>
 
 maintVars == <<rolling, rolled, suppress, rollerDead, stalePlan, leaderMoved>>
 
@@ -498,7 +541,7 @@ gateVars == <<deferExpired>>
 \* The cutover tranche's state (grouped like maintVars/expandVars so every
 \* untouched action carries exactly one extra UNCHANGED line).
 bounceVars == <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
-                dpFlag, everServed>>
+                dpFlag, everServed, podUp, bounceDoomed>>
 
 \* A forced-stale (StaleFloor) member keeps record-state "stale" while it
 \* serves — the only way a stale-state leg is ever in the serving set
@@ -544,6 +587,8 @@ TypeOK ==
   /\ consecutiveBounces \in 0..MaxBounces
   /\ dpFlag \in {"none"} \cup Legs
   /\ everServed \subseteq Legs
+  /\ podUp \in BOOLEAN
+  /\ bounceDoomed \in BOOLEAN
 
 \* A leg's data path answers: its node is up AND its tgt is not down for a
 \* planned restart.  The raid cannot tell the two apart — that symmetry is
@@ -638,6 +683,8 @@ Init ==
   /\ consecutiveBounces = 0
   /\ dpFlag = "none"
   /\ everServed = Legs                   \* Init serves every leg
+  /\ podUp = TRUE
+  /\ bounceDoomed = FALSE
 
 (***************************************************************************)
 (* Data plane                                                              *)
@@ -928,7 +975,7 @@ Replace(l) ==
   \* this one has not (the ghost behind Inv_WriterSetGrounded).
   /\ everServed' = everServed \ {l}
   /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
-                 dpFlag>>
+                 dpFlag, podUp, bounceDoomed>>
 
 \* hot_rejoin_volume: a stale leg on a LIVE node re-enters as a standby
 \* KEEPING its identity and payload (contrast Replace).  Whether the
@@ -977,7 +1024,7 @@ Scrub(l) ==
   \* to anything (same ghost bookkeeping as Replace).
   /\ everServed' = everServed \ {l}
   /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
-                 dpFlag>>
+                 dpFlag, podUp, bounceDoomed>>
 
 \* Catch-up: build to the last epoch cut from an in-sync source.  A block
 \* copy fills holes and never erases — union semantics — so the shared-base
@@ -1049,7 +1096,7 @@ Admit(l) ==
   \* pointless-rebounce counter exactly like the at-stage one.
   /\ consecutiveBounces' = 0
   /\ everServed' = everServed \cup {l}
-  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, dpFlag>>
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, dpFlag, podUp, bounceDoomed>>
 
 \* NodeStage reassembly: the F36c freshness gate over the ATTACHABLE
 \* in-sync legs A, then SPDK examine serves only A's newest generation
@@ -1064,6 +1111,8 @@ Admit(l) ==
 \* consumers BEFORE serving; unfenced, the zombie keeps writing.
 Assemble ==
   /\ serving = {}
+  \* A reassembly happens because a POD is scheduled and NodeStage runs.
+  /\ (PodLayer => podUp)
   \* StaleFloor (2026-07-29 audit): below 2 attached in-sync bases the
   \* shipped NodeStage AUTOMATICALLY admits record-Stale replicas (in
   \* replica-index order — TLC's free choice of A covers every order).
@@ -1153,7 +1202,7 @@ Assemble ==
                  deemedDead, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
-  /\ UNCHANGED <<bouncePlan, consecutiveBounces, dpFlag>>
+  /\ UNCHANGED <<bouncePlan, consecutiveBounces, dpFlag, podUp, bounceDoomed>>
 
 \* The stale-only-survivor LAST RESORT — the RUNBOOK step, not code: the
 \* code's gate correctly Defers (the Deferred liveness escape), and an
@@ -1192,7 +1241,7 @@ LastResortServe(l) ==
   \* (with riskSurfaced already stamped by the override itself).
   /\ bounceWindow' = "none"
   /\ everServed' = everServed \cup {l}
-  /\ UNCHANGED <<bouncePlan, bounceRisk, consecutiveBounces, dpFlag>>
+  /\ UNCHANGED <<bouncePlan, bounceRisk, consecutiveBounces, dpFlag, podUp, bounceDoomed>>
 
 (***************************************************************************)
 (* The R2 claim — the F43 machinery.  Catch-up work (builds, scrubs) and   *)
@@ -1574,8 +1623,15 @@ RogueDrainCommit ==
 \* at these leg counts, with at most one standby, that coincides with the
 \* existential.
 BounceDataPathArm  == DataPathArm  /\ dpFlag # "none"
-BounceAdmissionArm == AdmissionArm /\ \E l \in Legs : /\ state[l] = "standby"
-                                                     /\ epochCut \subseteq legData[l]
+BounceAdmissionArm == AdmissionArm /\ \E l \in Legs :
+                        /\ state[l] = "standby"
+                        /\ epochCut \subseteq legData[l]
+                        \* PlannerDisjoint: the shipped plan_cutover applies
+                        \* NEITHER of plan_hot_rejoin's filters, so it can
+                        \* plan a bounce for a standby the stage admission
+                        \* will then refuse — the predicate is unsatisfiable
+                        \* before the bounce is even issued.
+                        /\ (PlannerDisjoint => AdmissionOpen(l))
 
 \* The ONLY suppressor of a new plan in the shipped code is a LIVE ATTEMPT
 \* RECORD — a stack-local HashMap (cutover.rs:706).  Deliberately NOT
@@ -1589,6 +1645,19 @@ BouncePlannable ==
   /\ BounceEnabled
   /\ serving # {}                         \* something to tear down
   /\ (BounceDataPathArm \/ BounceAdmissionArm)
+
+\* Was this bounce doomed the moment it was issued?  TRUE when the ONLY
+\* justification was the admission arm and no standby the stage admission
+\* would actually accept exists — plan_cutover applies neither
+\* plan_hot_rejoin's maintenance-suppression filter nor its marker filter,
+\* so it can issue a teardown whose purpose is unachievable before it
+\* starts.  This is the attributive statement the shared churn canary
+\* cannot make.
+BounceDoomedAtCommit ==
+  /\ ~BounceDataPathArm
+  /\ ~\E l \in Legs : /\ state[l] = "standby"
+                      /\ epochCut \subseteq legData[l]
+                      /\ AdmissionOpen(l)
 
 \* THE PROPOSED COMMIT-TIME BELT.  FALSE = shipped (no term of any kind).
 BounceSafe ==
@@ -1607,16 +1676,18 @@ BounceRiskAtCommit ==
 \* GET/PATCH), so one step is the faithful abstraction; the CROSS-process
 \* gap is RogueBounce* below.
 Bounce ==
+  /\ ~PodLayer                            \* the pod-layer world splits this
   /\ BouncePlannable
   /\ BounceSafe
   /\ consecutiveBounces < MaxBounces
   /\ serving' = {}
   /\ bounceWindow' = BounceRiskAtCommit
+  /\ bounceDoomed' = (bounceDoomed \/ BounceDoomedAtCommit)
   /\ consecutiveBounces' = consecutiveBounces + 1
   /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim,
                  deemedDead, falseRisk, crashes>>
-  /\ UNCHANGED <<bouncePlan, bounceRisk, dpFlag, everServed>>
+  /\ UNCHANGED <<bouncePlan, bounceRisk, dpFlag, everServed, podUp>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
@@ -1626,7 +1697,7 @@ Bounce ==
 \* across all six leader-gated sites, so one deposal deposes every
 \* orchestrator at once.
 RogueBouncePlan ==
-  /\ BounceRace
+  /\ BounceRace /\ ~PodLayer
   /\ ~bouncePlan
   /\ (BounceLeaderGate => ~leaderMoved)
   /\ leaderMoved' = (leaderMoved \/ BounceLeaderGate)
@@ -1637,7 +1708,7 @@ RogueBouncePlan ==
                  epochCut, claim, deemedDead, falseRisk, crashes,
                  rolling, rolled, suppress, rollerDead, stalePlan>>
   /\ UNCHANGED <<bounceWindow, bounceRisk, consecutiveBounces, dpFlag,
-                 everServed>>
+                 everServed, podUp, bounceDoomed>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
 
@@ -1654,22 +1725,114 @@ RogueBouncePlan ==
 \* merge patch.  A commit-time preflight is the only belt this subsystem
 \* can host.
 RogueBounceCommit ==
-  /\ BounceRace
+  /\ BounceRace /\ ~PodLayer
   /\ bouncePlan
   /\ serving # {}
   /\ BounceSafe
   /\ consecutiveBounces < MaxBounces
   /\ serving' = {}
   /\ bounceWindow' = BounceRiskAtCommit
+  /\ bounceDoomed' = (bounceDoomed \/ BounceDoomedAtCommit)
   /\ consecutiveBounces' = consecutiveBounces + 1
   /\ bouncePlan' = FALSE
   /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim,
                  deemedDead, falseRisk, crashes>>
-  /\ UNCHANGED <<bounceRisk, dpFlag, everServed>>
+  /\ UNCHANGED <<bounceRisk, dpFlag, everServed, podUp>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+
+(***************************************************************************)
+(* THE POD LAYER — the bounce as the code actually performs it, in FOUR    *)
+(* steps instead of one, because two independent processes create the same *)
+(* bare pod and NOTHING mutually excludes them.                            *)
+(*                                                                         *)
+(*   execute_cutover:  get_pod (spec into a LOCAL) → taint → delete_pod    *)
+(*                     → await_detached(<= detach_timeout, 2s poll)        *)
+(*                     → recreate_pod                                      *)
+(*   nfs_reconciler_pass (30s tick, same process, same lease, separate     *)
+(*                     tokio task): liveness Absent + client attachments   *)
+(*                     >= 1  ⇒  Recreate.                                  *)
+(*                                                                         *)
+(* The detach wait exists to hold the pod down until kubelet UNSTAGES, so  *)
+(* the replacement is forced to restage and reassemble the raid (the §6    *)
+(* same-node race).  For that entire wait the pod is Absent with client    *)
+(* attachments intact — the cutover waits on the BACKING PV's              *)
+(* VolumeAttachment, the reconciler counts VAs on the USER PV — so the     *)
+(* wait sits precisely inside the reconciler's one Recreate cell.  If the  *)
+(* pod returns BEFORE the unstage, kubelet reuses the staged volume: no    *)
+(* NodeStage, no reassembly, no admission — the bounce is silently         *)
+(* defeated, clients ate a grace-window recovery for nothing, and (in the  *)
+(* code) the bouncer's own recreate then 409s into the taken name, takes   *)
+(* the Err arm, and records NO attempt at all.                             *)
+(***************************************************************************)
+
+\* delete_pod.  The volume is NOT unstaged yet — this is exactly the window
+\* await_detached spends polling.
+BounceDelete ==
+  /\ PodLayer
+  /\ podUp
+  /\ BouncePlannable
+  /\ BounceSafe
+  /\ consecutiveBounces < MaxBounces
+  /\ podUp' = FALSE
+  /\ bounceWindow' = BounceRiskAtCommit
+  /\ bounceDoomed' = (bounceDoomed \/ BounceDoomedAtCommit)
+  /\ consecutiveBounces' = consecutiveBounces + 1
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<bouncePlan, bounceRisk, dpFlag, everServed>>
+  /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
+
+\* kubelet's NodeUnstage, once the pod is really gone: the raid bdev and
+\* every per-replica controller are torn down.  THIS is what the detach
+\* wait is waiting for, and the only thing that makes the replacement
+\* restage.
+BounceUnstage ==
+  /\ PodLayer
+  /\ ~podUp
+  /\ serving # {}
+  /\ serving' = {}
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim,
+                 deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED bounceVars
+  /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
+
+\* The bouncer's own recreate.  DetachWaitHonored = TRUE is the idealized
+\* bouncer that recreates only after the unstage it waited for; FALSE is
+\* the shipped timeout path, where await_detached returning false merely
+\* WARNS and execute_cutover recreates anyway.
+BounceRecreate ==
+  /\ PodLayer
+  /\ ~podUp
+  /\ (DetachWaitHonored => serving = {})
+  /\ podUp' = TRUE
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
+                 dpFlag, everServed, bounceDoomed>>
+  /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
+
+\* THE SECOND CREATOR.  Enabled purely on "pod gone" — the shipped
+\* reconciler cannot see a bounce, and its decision function's signature
+\* proves it: nfs_reconcile_decision(backend_is_emptydir, pv_terminating,
+\* attachment_count, liveness) has no input that could carry one.
+\* ReconcilerBelt is the proposed fix (hold off while a window is open).
+ReconcilerRecreate ==
+  /\ PodLayer
+  /\ ~podUp
+  /\ (ReconcilerBelt => bounceWindow = "none")
+  /\ podUp' = TRUE
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
+                 dpFlag, everServed, bounceDoomed>>
+  /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
 
 (***************************************************************************)
 (* THE DATA-PATH-LOST ANNOTATION (node_agent.rs detect_lost_data_paths).   *)
@@ -1693,7 +1856,7 @@ AgentFlag(l) ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
-                 everServed>>
+                 everServed, podUp, bounceDoomed>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
@@ -1707,7 +1870,7 @@ AgentClear(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes>>
-  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, everServed>>
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, everServed, podUp, bounceDoomed>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
@@ -1728,6 +1891,7 @@ AgentClear(l) ==
 AdmitAtStage(l) ==
   /\ StageAdmit
   /\ serving = {}                         \* a stage is in progress
+  /\ (PodLayer => podUp)
   /\ state[l] = "standby"
   /\ Responsive(l)
   /\ AdmissionOpen(l)
@@ -1745,7 +1909,7 @@ AdmitAtStage(l) ==
   /\ UNCHANGED claim                      \* the correspondence point: unclaimed
   /\ UNCHANGED <<zombie, legUp, raidGen, legGen, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, deemedDead, falseRisk, crashes>>
-  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, dpFlag, everServed>>
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, dpFlag, everServed, podUp, bounceDoomed>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED <<raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
@@ -1867,6 +2031,10 @@ Next ==
   \/ Bounce
   \/ RogueBouncePlan
   \/ RogueBounceCommit
+  \/ BounceDelete
+  \/ BounceUnstage
+  \/ BounceRecreate
+  \/ ReconcilerRecreate
   \/ \E l \in Legs :
        \/ LegDie(l)
        \/ LegBlackhole(l)
@@ -1955,6 +2123,15 @@ FairnessCore ==
   \* deadline eventually passes (GateDeadline worlds only; the action is
   \* disabled elsewhere and WF of a disabled action obligates nothing).
   /\ WF_vars(DeferClockExpire)
+  \* Pod-layer obligations (PodLayer worlds only; WF of a permanently
+  \* disabled action obligates nothing).  Kubelet eventually unstages a
+  \* gone pod's volume; the bouncer eventually issues its recreate; the
+  \* reconciler is a 30s persistent retrier.  INITIATING a bounce stays
+  \* deliberately unfair — that is the orchestrator's choice, exactly as
+  \* MaintDrain's initiation is.
+  /\ WF_vars(BounceUnstage)
+  /\ WF_vars(BounceRecreate)
+  /\ WF_vars(ReconcilerRecreate)
 
 \* kubelet's obligation, split out (the P4-split pattern): the recreated
 \* pod eventually comes back.  The wedged-DS-roll history (runak/runaj)
@@ -2172,6 +2349,34 @@ Inv_WriterSetGrounded ==
 (* unsatisfiable.  Checked ONLY in the BounceLoop run.                     *)
 (***************************************************************************)
 Inv_NoPointlessRebounce == consecutiveBounces <= 1
+
+(***************************************************************************)
+(* THE TWO-PLANNER DISJOINTNESS THEOREM.  plan_cutover applies NEITHER of  *)
+(* plan_hot_rejoin's admission filters (maintenance suppression, hot-      *)
+(* rejoin marker), so it can commit a full teardown of a healthy data path *)
+(* whose only purpose — admitting a particular standby — the stage         *)
+(* admission is guaranteed to refuse.  Stated as its own ghost rather than *)
+(* on the shared churn canary DELIBERATELY: an A/B showed the canary is    *)
+(* violated with the filter ON as well as OFF (three other doors reach it, *)
+(* per BounceLoop), so it cannot test this fix.  This one is violable      *)
+(* only through this door.                                                 *)
+(***************************************************************************)
+Inv_NoDoomedBounce == ~bounceDoomed
+
+(***************************************************************************)
+(* THE DOUBLE-CREATOR THEOREM.  A bounce is never silently defeated: the   *)
+(* server pod never comes back while the volume it was supposed to force a *)
+(* restage of is STILL STAGED.  The state this forbids is exactly the      *)
+(* §6 same-node reuse the detach wait exists to prevent — pod present, an  *)
+(* open bounce window, and serving never went to {} — after which kubelet  *)
+(* reuses the staged volume, no NodeStage runs, no reassembly happens, the *)
+(* standby stays parked, and clients ate an NFSv4 grace-window recovery    *)
+(* for nothing.  Needs NO crash budget: it is a pure orchestration race    *)
+(* between two tokio tasks in one process holding one lease, with no       *)
+(* mutual exclusion between them.                                          *)
+(***************************************************************************)
+Inv_BounceNotSilentlyDefeated ==
+  ~(bounceWindow # "none" /\ podUp /\ serving # {})
 
 \* InvCore is everything except the evidence-purity theorem; Inv (every
 \* legacy cfg) adds Inv_NoFalseRisk, which only the GateDeadline = FALSE
