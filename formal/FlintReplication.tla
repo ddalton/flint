@@ -178,13 +178,30 @@ CONSTANTS
   MaintFence,  \* TRUE = drain-before-restart (never roll a serving leg's tgt)
   MaintBarrier,\* TRUE = next node waits for readmission, not pod-readiness
   MaintLease,  \* TRUE = a dead roller's suppression mark self-clears
-  BarrierRaidAware \* TRUE = the barrier reads GROUND TRUTH (raid membership
+  BarrierRaidAware, \* TRUE = the barrier reads GROUND TRUTH (raid membership
                \* + responsiveness); FALSE = the record only (all replicas
                \* insync) — the shortcut the implementation actually takes.
                \* The record can lag the raid by one monitor tick, so the
                \* weaker barrier can drain into a race with an undetected
                \* failure; the RecordBarrier strict run verifies that costs
                \* availability (an honest Defer), never safety.
+  \* ---- the expansion tranche (F56; docs/f56-expand-replacement-circular-wait.md)
+  ExpandEnabled, \* TRUE = the size dimension + expansion actions exist
+               \* (FALSE keeps every legacy cfg's behavior graph identical)
+  SizeGuard,   \* TRUE = the F43 item-#8 leg-size guards (admission refuses
+               \* a head shorter than its copy source; the construction
+               \* boundary refuses a short leg under a grown device; the
+               \* stage belt refuses short legs under a grown floor).
+               \* FALSE = the pre-guard world — the ExpandGuard mutation
+               \* must find the silent device shrink.
+  SizeHeal     \* TRUE = the F56 fix (align_dst_head_size): catch-up and
+               \* the admission session GROW an undersized head to its
+               \* copy source instead of deferring it.  FALSE = the
+               \* shipped-pre-fix world — the ExpandWedge mutation must
+               \* find the permanent livelock (guards individually
+               \* correct, jointly starving: belt blocks expand, guard
+               \* blocks admission, nothing resizes, the retention pin
+               \* holds the full-build escape shut).
 
 VARIABLES
   \* ---- data plane -------------------------------------------------------
@@ -210,13 +227,25 @@ VARIABLES
   rolling,       \* SUBSET Legs: node whose tgt is down for a PLANNED restart
   rolled,        \* SUBSET Legs: nodes already rolled this campaign (monotone)
   suppress,      \* SUBSET Legs: readmission suppressed (the maintenance mark)
-  rollerDead     \* TRUE once the roll orchestrator died mid-campaign
+  rollerDead,    \* TRUE once the roll orchestrator died mid-campaign
+  \* ---- expansion (the F56 size dimension) --------------------------------
+  legSize,       \* [Legs -> {"old", "new"}]: each leg's lvol size
+  raidSize,      \* {"old", "new"}: the consumer-visible device size — a
+                 \* HIGH-WATER mark (raid1 caps at the min of its bases and
+                 \* only grows once every base grew; a consumer that saw
+                 \* "new" must never be served "old" again — the silent
+                 \* shrink).  Also stands in for PV spec.capacity: both
+                 \* advance on the same trigger (every leg grown).
+  wantNew        \* an expansion request is outstanding (the resizer's
+                 \* retry loop; latched — one expansion per behavior)
 
 vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
           lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes,
-          rolling, rolled, suppress, rollerDead>>
+          rolling, rolled, suppress, rollerDead, legSize, raidSize, wantNew>>
 
 maintVars == <<rolling, rolled, suppress, rollerDead>>
+
+expandVars == <<legSize, raidSize, wantNew>>
 
 TypeOK ==
   /\ serving \subseteq Legs
@@ -240,6 +269,9 @@ TypeOK ==
   /\ rolled \subseteq Legs
   /\ suppress \subseteq Legs
   /\ rollerDead \in BOOLEAN
+  /\ legSize \in [Legs -> {"old", "new"}]
+  /\ raidSize \in {"old", "new"}
+  /\ wantNew \in BOOLEAN
 
 \* A leg's data path answers: its node is up AND its tgt is not down for a
 \* planned restart.  The raid cannot tell the two apart — that symmetry is
@@ -268,9 +300,18 @@ WarmWaiting ==
     /\ l \notin suppress
     /\ epochCut \subseteq legData[l]
     /\ serving # {}
+    \* Size-admissibility is part of "awaits admission": the real window
+    \* CLOSES on a size-guard refusal (StandbyAdmissionDeferred releases
+    \* the claim; the next reassembly re-opens) — so at tick granularity
+    \* a size-blocked standby neither holds the window open nor makes
+    \* catch-up yield to it.  Without this term the admission claim
+    \* wedges on a leg Admit can never accept — a model artifact the
+    \* ExpandWedge run surfaced (the code has no such hold-forever).
+    /\ (SizeGuard => (SizeHeal \/ raidSize = "old" \/ legSize[l] = "new"))
     /\ \E src \in serving :
          /\ Responsive(src)
          /\ (RejoinGuard => legData[l] \subseteq legData[src])
+         /\ (SizeGuard => (SizeHeal \/ legSize[src] = "old" \/ legSize[l] = "new"))
 
 Init ==
   /\ serving = Legs
@@ -294,6 +335,9 @@ Init ==
   /\ rolled = {}
   /\ suppress = {}
   /\ rollerDead = FALSE
+  /\ legSize = [l \in Legs |-> "old"]
+  /\ raidSize = "old"
+  /\ wantNew = FALSE
 
 (***************************************************************************)
 (* Data plane                                                              *)
@@ -315,6 +359,7 @@ Write ==
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, riskSurfaced,
                  state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* The head crashes between replicating a block and acking the client: the
 \* block lands on SOME serving legs, the client never hears.  Either outcome
@@ -336,6 +381,7 @@ WriteTorn ==
   /\ UNCHANGED <<zombie, legUp, raidGen, legGen, acked, lineage,
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* The F48 zombie: the partitioned old head still holds its leg
 \* connections and still acks client writes.  It writes OUTSIDE the
@@ -353,6 +399,7 @@ ZombieWrite ==
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, lineage,
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* Verified death straight away (terminated AND observed so).
 LegDie(l) ==
@@ -363,6 +410,7 @@ LegDie(l) ==
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* Silent unreachability: maybe a dying node, maybe a transient partition.
 LegBlackhole(l) ==
@@ -373,6 +421,7 @@ LegBlackhole(l) ==
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* The transient case: the leg returns, data intact, whatever the record
 \* now says about it.  (The F36c ingredient.)
@@ -382,6 +431,7 @@ LegRecover(l) ==
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* GROUND TRUTH: the silently-unreachable node actually dies (the cloud
 \* reaped it).  WF here is the axiom that a blackhole eventually RESOLVES
@@ -392,6 +442,7 @@ LegPerish(l) ==
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* EVIDENCE: the record accepts node_gone proof (Node object deleted /
 \* instance API says terminated).  With EvidenceStrict this only happens
@@ -409,6 +460,7 @@ DeemDead(l) ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* The data plane faults an unresponsive leg out; survivors continue at a
 \* NEW incarnation (their superblocks record the shrink).  WF on this
@@ -428,6 +480,7 @@ RaidDeconfigure(l) ==
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* The whole assembly dies cleanly (process gone, connections dropped).
 ServerCrash ==
@@ -438,6 +491,7 @@ ServerCrash ==
   /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* The F48 case: the head is PARTITIONED, not dead.  The record sees it
 \* gone; the process lives on with its leg connections — a zombie.  (One
@@ -452,6 +506,7 @@ ServerPartition ==
   /\ UNCHANGED <<legData, legUp, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 (***************************************************************************)
 (* Control plane — each action is one CAS round against the record         *)
@@ -470,16 +525,27 @@ MonitorMarkStale(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
-\* Epoch scheduler: cut a consistent snapshot of the served content.
+\* Epoch scheduler: cut a consistent snapshot of the served content.  The
+\* cut is what the serving legs actually HOLD in common (bdev_lvol_snapshot
+\* runs on the legs), NOT the acked ledger: after a ServeWithRisk assembly
+\* excused a lost writer, acked content exists that no live leg holds, and
+\* cutting `acked` would mint a GHOST epoch — an unsatisfiable chase
+\* target that parks every later standby cold forever.  (A pre-existing
+\* model bug, invisible to every content-shaped property — they all
+\* escape on riskSurfaced — and to AdmissionNotStarved — a cold standby
+\* is not WarmWaiting.  Found by ExpansionCompletes' first strict run,
+\* the module's first per-leg progress obligation.)
 EpochCut ==
   /\ serving # {}
   /\ \A l \in serving : Responsive(l)
-  /\ epochCut' = acked
+  /\ epochCut' = { b \in 1..MaxWrites : \A l \in serving : b \in legData[l] }
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet, claim,
                  deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* replica_replace + prune_writers_for_replacement: swap the identity of a
 \* stale leg whose node the record DEEMS dead (the C2 justification is
@@ -506,9 +572,14 @@ Replace(l) ==
   \* flags do not apply to it (and the fresh node has not been rolled).
   /\ rolled' = rolled \ {l}
   /\ suppress' = suppress \ {l}
+  \* The replacement placeholder lvol is sized from PV spec.capacity —
+  \* still the PRE-expand value until the fan-out succeeds (F56).  Safe
+  \* regardless: the leg is write-virgin, and the §9-5 full build
+  \* re-creates its head sized from the SOURCE (CatchUp's virgin arm).
+  /\ legSize' = [legSize EXCEPT ![l] = "old"]
   /\ UNCHANGED <<serving, zombie, raidGen, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, falseRisk, crashes,
-                 rolling, rollerDead>>
+                 rolling, rollerDead, raidSize, wantNew>>
 
 \* hot_rejoin_volume: a stale leg on a LIVE node re-enters as a standby
 \* KEEPING its identity and payload (contrast Replace).  Whether the
@@ -523,6 +594,7 @@ HotRejoin(l) ==
                  nextWrite, lineage, riskSurfaced, writerSet, epochCut,
                  claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* HotRejoinScrubbed: no usable shared history with ANY live in-sync
 \* source — wipe the payload and rebuild from scratch.  Requires a live
@@ -541,6 +613,7 @@ Scrub(l) ==
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, acked, nextWrite, lineage,
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* Catch-up: build to the last epoch cut from an in-sync source.  A block
 \* copy fills holes and never erases — union semantics — so the shared-base
@@ -553,10 +626,19 @@ CatchUp(l) ==
   /\ \E src \in UpInSync :
        /\ epochCut \subseteq legData[src]
        /\ (RejoinGuard => legData[l] \subseteq legData[src])
+       \* Size (F56): the §9-5 full build re-creates a VIRGIN head sized
+       \* from the source exactly (revert_head_to_empty) — true pre-fix
+       \* too, which is why replacement legs never wedged.  The §5 chase
+       \* keeps the leg's own (possibly pre-expand) size unless SizeHeal
+       \* — align_dst_head_size in the chase session.
+       /\ legSize' = [legSize EXCEPT ![l] =
+                        IF legData[l] = {} \/ SizeHeal THEN legSize[src]
+                                                       ELSE legSize[l]]
   /\ legData' = [legData EXCEPT ![l] = legData[l] \cup epochCut]
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED <<raidSize, wantNew>>
 
 \* Admission (hot-rejoin window / cutover reassembly) + mark_in_sync's
 \* writer-set add: quiesced delta copy from a healthy serving survivor,
@@ -573,7 +655,17 @@ Admit(l) ==
   /\ \E src \in serving :
        /\ Responsive(src)
        /\ (RejoinGuard => legData[l] \subseteq legData[src])
+       \* F43 item #8, the catch-up admission size guard: never record
+       \* in_sync for a head SHORTER than its copy source.  SizeHeal is
+       \* the F56 fix — align_dst_head_size in admit_one_standby grows
+       \* the head in the same session instead of deferring forever.
+       /\ (SizeGuard => (SizeHeal \/ legSize[src] = "old" \/ legSize[l] = "new"))
        /\ legData' = [legData EXCEPT ![l] = legData[l] \cup legData[src]]
+       /\ legSize' = [legSize EXCEPT ![l] =
+                        IF SizeHeal THEN legSize[src] ELSE legSize[l]]
+  \* The node-agent construction boundary (raid_add_size_verdict): a short
+  \* leg never joins a raid whose consumer-visible device already grew.
+  /\ (SizeGuard => (raidSize = "old" \/ legSize'[l] = "new"))
   /\ serving' = serving \cup {l}
   /\ legGen' = [legGen EXCEPT ![l] = raidGen]
   /\ state' = [state EXCEPT ![l] = "insync"]
@@ -582,6 +674,7 @@ Admit(l) ==
   /\ UNCHANGED <<zombie, legUp, raidGen, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED <<raidSize, wantNew>>
 
 \* NodeStage reassembly: the F36c freshness gate over the ATTACHABLE
 \* in-sync legs A, then SPDK examine serves only A's newest generation
@@ -609,6 +702,13 @@ Assemble ==
              /\ falseRisk' = (falseRisk \/ \E w \in writerSet \ A : legUp[w] # "dead")
           \/ /\ ~GateStrict
              /\ UNCHANGED <<riskSurfaced, falseRisk>>
+       \* The NodeStage leg-size belt (F43 #8): the floor is PV capacity,
+       \* which reached "new" on the same trigger as raidSize (every leg
+       \* grown) — a consumer whose device grew is never re-served short
+       \* legs.  The largest-cohort preference is abstracted away: TLC's
+       \* free choice of A covers every subset the belt could keep.
+       /\ (SizeGuard => (raidSize = "old"
+                          \/ \A m \in NewestOf(A) : legSize[m] = "new"))
        /\ serving' = NewestOf(A)
        /\ writerSet' = NewestOf(A)
        /\ lineage' = UNION {legData[m] : m \in NewestOf(A)}
@@ -619,6 +719,7 @@ Assemble ==
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, state, epochCut, claim,
                  deemedDead, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* The stale-only-survivor LAST RESORT — the RUNBOOK step, not code: the
 \* code's gate correctly Defers (the Deferred liveness escape), and an
@@ -635,6 +736,9 @@ LastResortServe(l) ==
   /\ l \notin suppress                   \* never serve a mid-maintenance leg
   /\ l \in NewestOf({m \in Legs : state[m] = "stale" /\ Responsive(m)
                                   /\ m \notin suppress})
+  \* Even the operator override stages through the leg-size belt: a
+  \* survivor shorter than the grown device would silently shrink it.
+  /\ (SizeGuard => (raidSize = "old" \/ legSize[l] = "new"))
   /\ serving' = {l}
   /\ writerSet' = {l}
   /\ lineage' = legData[l]
@@ -645,6 +749,7 @@ LastResortServe(l) ==
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 (***************************************************************************)
 (* The R2 claim — the F43 machinery.  Catch-up work (builds, scrubs) and   *)
@@ -659,6 +764,19 @@ LastResortServe(l) ==
 (* interrupted.                                                            *)
 (***************************************************************************)
 
+\* NOTE (the expand tranche's fairness finding): AcquireCatchup is
+\* deliberately NOT work-gated.  The code's tick claims on every firing
+\* — the probe runs UNDER the claim (contract R2), and the epoch
+\* scheduler's 30s timer is writes-independent — so the no-op claim
+\* cycle is real, and it is the ENGINE of the F43 lasso (work-gating
+\* these actions was tried and deleted the F43 mutation's
+\* counterexample outright).  The consequence: any contender needing
+\* claim = "none" is only intermittently enabled, which weak fairness
+\* never obligates.  The system's own answer for admission is ClaimArb
+\* (priority — the F43 fix); for the claim-holder's OWN dispatch work
+\* (CatchUp/Scrub) and for the external resizer's persistent retry
+\* (ExpandLeg), the honest abstraction is STRONG fairness — see the
+\* notes in FairnessCore.
 AcquireCatchup ==
   /\ claim = "none"
   /\ (ClaimArb => ~WarmWaiting)           \* the F43 yield rule
@@ -667,6 +785,7 @@ AcquireCatchup ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 ReleaseCatchup ==
   /\ claim = "catchup"
@@ -675,6 +794,7 @@ ReleaseCatchup ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 AcquireAdmission ==
   /\ claim = "none"
@@ -684,6 +804,29 @@ AcquireAdmission ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+
+\* The window's deferral arm: the world changed between the open and the
+\* flip — the leg de-warmed (a fresh epoch cut), died, was sized out, or
+\* its source vanished — and the admission can no longer proceed.  The
+\* real window RELEASES its claim on every deferral
+\* (StandbyAdmissionDeferred; the claim guard is RAII around the window
+\* task) and the next reassembly re-opens.  Without this the claim
+\* wedges at "admission" once the crash budget (ExpireClaim's fuel) is
+\* spent — a hold-forever the code does not have.  Found by the expand
+\* tranche's strict run: AcquireAdmission → EpochCut de-warms the
+\* standby → Admit disabled forever; every pre-expansion property was
+\* blind to it (AdmissionNotStarved is satisfied BECAUSE the de-warm
+\* falsifies WarmWaiting).
+ReleaseAdmission ==
+  /\ claim = "admission"
+  /\ ~WarmWaiting                         \* nothing admissible: defer + close
+  /\ claim' = "none"
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 \* Lease expiry: the claim holder died; the lease frees the claim.  A
 \* controller death is a failure event — budgeted — which is also what
@@ -697,6 +840,7 @@ ExpireClaim ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
 
 (***************************************************************************)
 (* Planned maintenance — the csi-node roll.  A DaemonSet roll restarts    *)
@@ -767,6 +911,7 @@ MaintDrain(l) ==
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, deemedDead, falseRisk,
                  crashes, rolling, rolled, rollerDead>>
+  /\ UNCHANGED expandVars
 
 RollStart(l) ==
   /\ MaintEnabled
@@ -779,6 +924,7 @@ RollStart(l) ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
                  rolled, suppress, rollerDead>>
+  /\ UNCHANGED expandVars
 
 \* kubelet completes the restart — weakly fair, roller-independent.
 RollFinish(l) ==
@@ -789,6 +935,7 @@ RollFinish(l) ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
                  suppress, rollerDead>>
+  /\ UNCHANGED expandVars
 
 MaintClear(l) ==
   /\ ~rollerDead
@@ -799,6 +946,7 @@ MaintClear(l) ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
                  rolling, rolled, rollerDead>>
+  /\ UNCHANGED expandVars
 
 \* The roll orchestrator dies mid-campaign while holding a mark — a
 \* budgeted failure event, like ExpireClaim.
@@ -813,6 +961,7 @@ RollerDie ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk,
                  rolling, rolled, suppress>>
+  /\ UNCHANGED expandVars
 
 \* The lease: a dead roller's suppression mark self-clears after TTL
 \* (never mid-restart — the TTL far exceeds a pod restart, and
@@ -828,6 +977,60 @@ SuppressExpire(l) ==
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
                  rolling, rolled, rollerDead>>
+  /\ UNCHANGED expandVars
+
+(***************************************************************************)
+(* Online expansion — the F56 size dimension                               *)
+(* (docs/f56-expand-replacement-circular-wait.md).  ExpandRequest is the  *)
+(* resizer's outstanding desire (latched; the retry loop is WF on         *)
+(* ExpandLeg).  ExpandLeg is ONE leg's resize landing — deliberately      *)
+(* non-atomic across legs: a leg lost between two ExpandLegs is exactly   *)
+(* the partial fan-out that manufactures the size divergence.  The C2     *)
+(* belt (every RECORDED leg in_sync) gates each step, and the fan-out     *)
+(* runs under the Maintainer claim (claim = "none" here: acquire +        *)
+(* resize + release folded into the action; resolvers preempt it in the  *)
+(* real registry, which only narrows its enabling).  RaidGrow is the     *)
+(* event-driven lvol→nvmf→bdev_nvme→raid1_resize chain: the consumer-    *)
+(* visible device grows only once EVERY serving base grew (min-capped),  *)
+(* and never shrinks back — raidSize is the high-water mark the size     *)
+(* guards defend.                                                        *)
+(***************************************************************************)
+
+ExpandRequest ==
+  /\ ExpandEnabled
+  /\ ~wantNew
+  /\ wantNew' = TRUE
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes,
+                 legSize, raidSize>>
+  /\ UNCHANGED maintVars
+
+ExpandLeg(l) ==
+  /\ ExpandEnabled
+  /\ wantNew
+  /\ claim = "none"                       \* the OP_EXPAND Maintainer claim
+  /\ legSize[l] = "old"
+  /\ Responsive(l)                        \* the node agent must answer
+  /\ \A m \in Legs : state[m] = "insync"  \* the C2 belt, read from the record
+  /\ legSize' = [legSize EXCEPT ![l] = "new"]
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes,
+                 raidSize, wantNew>>
+  /\ UNCHANGED maintVars
+
+RaidGrow ==
+  /\ ExpandEnabled
+  /\ raidSize = "old"
+  /\ serving # {}
+  /\ \A l \in serving : legSize[l] = "new"
+  /\ raidSize' = "new"
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes,
+                 legSize, wantNew>>
+  /\ UNCHANGED maintVars
 
 Next ==
   \/ Write
@@ -840,8 +1043,11 @@ Next ==
   \/ AcquireCatchup
   \/ ReleaseCatchup
   \/ AcquireAdmission
+  \/ ReleaseAdmission
   \/ ExpireClaim
   \/ RollerDie
+  \/ ExpandRequest
+  \/ RaidGrow
   \/ \E l \in Legs :
        \/ LegDie(l)
        \/ LegBlackhole(l)
@@ -861,6 +1067,7 @@ Next ==
        \/ RollFinish(l)
        \/ MaintClear(l)
        \/ SuppressExpire(l)
+       \/ ExpandLeg(l)
 
 \* Recovery actions are weakly fair.  WF(RaidDeconfigure) is P4;
 \* WF(LegPerish) is the axiom that a blackhole eventually resolves
@@ -891,11 +1098,17 @@ FairnessCore ==
        /\ WF_vars(RollStart(l))
        /\ WF_vars(MaintClear(l))
        /\ WF_vars(SuppressExpire(l))
+       /\ WF_vars(ExpandLeg(l))
   /\ WF_vars(Assemble)
   /\ WF_vars(EpochCut)
   /\ WF_vars(AcquireCatchup)
   /\ WF_vars(ReleaseCatchup)
   /\ WF_vars(AcquireAdmission)
+  \* Acquire needs WarmWaiting TRUE, release needs it FALSE — the pair
+  \* cannot ping-pong on unchanged state, so this WF is trap-safe.
+  /\ WF_vars(ReleaseAdmission)
+  \* WF(RaidGrow) is the SPDK resize-event chain: event-driven, no RPC.
+  /\ WF_vars(RaidGrow)
 
 \* kubelet's obligation, split out (the P4-split pattern): the recreated
 \* pod eventually comes back.  The wedged-DS-roll history (runak/runaj)
@@ -917,6 +1130,32 @@ Fairness ==
   /\ \A l \in Legs : WF_vars(RaidDeconfigure(l))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
+
+\* The expansion tranche's STRONG-fairness upgrades, split out (the
+\* FairnessKubelet pattern) because SF is expensive at 3-leg breadth and
+\* only the expansion cfgs' per-leg progress theorem needs it.  Why SF
+\* at all: the no-op claim cycle is real and cannot be work-gated away
+\* (it is the F43 lasso's engine — the 30s scheduler timer claims to
+\* probe), so any contender needing claim = "none" (ExpandLeg: the
+\* external resizer, a PERSISTENT whole-RPC retrier) and the claim-
+\* holder's own dispatch work (CatchUp/Scrub — the work runs INSIDE the
+\* hold, RAII; a schedule that cycles the claim without doing its work
+\* models a dispatch the code cannot be) are only intermittently
+\* enabled, which weak fairness never obligates.  SF is the tick-
+\* granularity encoding of "the persistent retrier eventually wins a
+\* free window" (probability-1 in reality) and "the holder performs its
+\* dispatch".  Deliberately NOT extended to admission — ClaimArb, the
+\* code's own arbitration, carries that.  The F56 wedge lasso survives
+\* SF: its ExpandLeg is belt-disabled outright and its CatchUp is a
+\* content no-op (SF of a never-enabled / never-state-changing action
+\* obligates nothing).
+FairnessExpand ==
+  \A l \in Legs :
+    /\ SF_vars(Scrub(l))
+    /\ SF_vars(CatchUp(l))
+    /\ SF_vars(ExpandLeg(l))
+
+SpecExpand == Init /\ [][Next]_vars /\ Fairness /\ FairnessExpand
 
 \* The pre-P4 world: nothing bounds detection.  A blackholed serving leg
 \* may sit in the raid forever, stalling every write — the 150-177s
@@ -1009,6 +1248,16 @@ Inv_MaintFenceHolds ==
 Inv_PlannedRollBoundedImpact ==
   crashes = 0 => Cardinality(Legs \ serving) <= 1
 
+\* THE SIZE-SAFETY THEOREM (F43 item #8's contract): once the
+\* consumer-visible device grew, no serving leg is ever shorter than it —
+\* a short leg under a grown device is a silent device shrink (reads
+\* beyond the short leg's end, resize2fs's world ripped out from under
+\* the fs).  The ExpandGuard mutation (SizeGuard = FALSE) must violate
+\* this: admit the returning pre-expand leg straight into the grown
+\* assembly.
+Inv_NoDeviceShrink ==
+  raidSize = "new" => \A l \in serving : legSize[l] = "new"
+
 Inv == TypeOK /\ Inv_NoSilentLoss /\ Inv_InsyncServingIsCurrent
              /\ Inv_ServingCurrentGen /\ Inv_NoDivergentServing
              /\ Inv_EvidenceSound /\ Inv_NoFalseRisk
@@ -1091,6 +1340,41 @@ MaintenanceEventuallyLifts ==
   \A l \in Legs :
     []((l \in suppress /\ legUp[l] = "up")
         => <>(l \notin suppress \/ legUp[l] = "dead"))
+
+(***************************************************************************)
+(* THE F56 THEOREM: an outstanding expansion reaches every leg.  Per-leg  *)
+(* and escape-hatched like the lifts property: a leg may instead die      *)
+(* (verified); or SOME leg may park stale — hot-rejoin initiation is the  *)
+(* orchestrator's choice (unfair, like the drain), and a parked stale     *)
+(* leg legitimately holds the C2 belt for everyone; or the volume may     *)
+(* honestly Defer (no assembly material).  The wedge does NONE of these:  *)
+(* every leg is alive, none is stale — the returning leg is a live,       *)
+(* chasing STANDBY, content-warm and size-old, whose admission the size   *)
+(* guard defers every tick while the C2 belt blocks the very fan-out      *)
+(* that would grow it and the retention pin holds the source-sized full   *)
+(* build shut.  With SizeHeal = FALSE (the shipped pre-fix code) the      *)
+(* ExpandWedge mutation must find exactly that lasso; with the fix the    *)
+(* property holds.                                                        *)
+(***************************************************************************)
+ExpansionCompletes ==
+  \A l \in Legs :
+    [](wantNew => <>(\/ legSize[l] = "new"
+                     \/ legUp[l] = "dead"
+                     \/ \E m \in Legs : state[m] = "stale"
+                     \* CANDIDATE F57, surfaced by this property's first
+                     \* strict run and confirmed against the code: a
+                     \* STANDBY whose node dies parks forever — the only
+                     \* standby->stale demotion is chase-source
+                     \* exhaustion (ReplicaChaseSourcesExhausted), the
+                     \* raid-health monitor marks only raid MEMBERS, and
+                     \* replica_replace filters on Stale — so nothing
+                     \* demotes or replaces a dead mid-rebuild standby
+                     \* and the volume sits at reduced redundancy until
+                     \* an operator intervenes.  Escaped HONESTLY here
+                     \* (the model models the implementation); the fix
+                     \* is a code change, not a model change.
+                     \/ \E m \in Legs : state[m] = "standby" /\ legUp[m] # "up"
+                     \/ Deferred))
 
 \* State-space bound for TLC (raidGen grows with deconfigures/assemblies,
 \* bounded by the crash budget plus the roll campaign — each node rolls

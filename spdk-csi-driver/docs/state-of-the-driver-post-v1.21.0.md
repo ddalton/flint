@@ -234,6 +234,23 @@ least one new F-number.
    > no-leader strict run HOLDS (safety never depended on the process
    > singleton; the Lease buys determinism and churn-freedom — the
    > runaj A/B, machine-checked).
+   >
+   > **THE EXPANSION TRANCHE 2026-07-28** (gate now 25 runs): evaluating
+   > "should expansion be modeled?" found **F56 by hand** — a leg lost
+   > mid-fan-out livelocks permanently (belt blocks expand, §5 revert
+   > keeps the old size, admission size-guard defers forever, the
+   > retention pin holds the source-sized full build shut). Fixed same
+   > day (`align_dst_head_size`, grow-only, both catch-up call sites;
+   > `docs/f56-expand-replacement-circular-wait.md`; sim composition
+   > test ran RED pre-fix; expand fan-out extracted from main.rs into
+   > `expand.rs` behind ExpandEnv — its zero-unit-test gap closed; 956
+   > lib tests). The size-dimension tranche then rediscovered the wedge
+   > as a required lasso, and its strict run — the module's first
+   > per-leg progress theorem — flushed out a ghost-epoch model bug,
+   > the missing admission release-on-deferral, the same-class-claimant
+   > WF trap, and **candidate F57**: a standby whose node dies parks
+   > forever (no demotion path, replacement filters on Stale) — fix
+   > owed in code. Live gate owed: drill 2.10 kill-mid-fan-out variant.
 3. **F54 doc §3 residual:** prestage trusts consumer-side bdev *presence*
    over path liveness, so hot-rejoin's first window can lose one ~7-min
    backoff cycle to the F48 zombie racing its own sever (severable only

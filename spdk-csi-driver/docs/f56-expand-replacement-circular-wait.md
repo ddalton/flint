@@ -95,9 +95,32 @@ and live-validated.
 - **Fan-out unit coverage** (`expand.rs`, extracted from `main.rs` for
   the sim tier): belt-before-any-resize, partial application pinned
   (the F56 precondition), live-uuid addressing, shrink/no-op guards.
-- **Formal**: FlintReplication size-dimension tranche — the pre-fix
-  world is a required liveness counterexample (the wedge lasso), the
-  fixed world verifies expansion convergence. See `formal/README.md`.
+- **Formal**: FlintReplication size-dimension tranche (`legSize` per
+  leg + `raidSize` device high-water mark behind `ExpandEnabled`; gate
+  runs 5n–5p). The ExpandWedge run (SizeHeal=FALSE, the shipped code)
+  independently rediscovered the wedge as a required liveness lasso —
+  blackhole mid-fan-out, belt passes on the lagging record, survivor
+  grows, device grows, hot-rejoin at old size, chase-defer forever. The
+  strict run proves the fixed world converges (`ExpansionCompletes`,
+  the module's first per-leg progress theorem) and the guard mutation
+  proves F43 item #8 is load-bearing (`Inv_NoDeviceShrink`). Building
+  the property also flushed out: a ghost-epoch model bug (EpochCut cut
+  the acked ledger, not held content), the missing release-on-deferral
+  of the admission claim, the same-class-claimant WF trap (the resizer
+  is now modeled with strong fairness — the persistent-retrier
+  abstraction), and **candidate F57** (below). See `formal/README.md`.
+
+## Candidate F57 (surfaced by the model, unfixed)
+
+The strict run's honest escape hatch documents a neighboring gap: a
+STANDBY whose node dies parks forever. The only standby→stale demotion
+is chase-source exhaustion (`ReplicaChaseSourcesExhausted`), the
+raid-health monitor marks only raid *members*, and `replica_replace`
+filters on `Stale` (and on `hot_rejoin.is_none()`), so a dead
+mid-rebuild standby is neither demoted nor replaced — the volume sits
+at reduced redundancy until an operator intervenes. Needs a sim repro
+and a fix (demote a standby on node-gone evidence, mirroring the
+stale path); tracked for the next cycle.
 
 ## Ops notes (pre-fix versions)
 

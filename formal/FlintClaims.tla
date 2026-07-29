@@ -170,7 +170,19 @@ WindowOpen(p) ==
   /\ claim[p] = "none"
   /\ legWarm
   /\ legState = "standby"
-  /\ window = "none"                       \* the record's one-window rule (CAS)
+  \* The record's one-window rule (CAS).  NOTE: at this module's tick
+  \* granularity the guard is REDUNDANT, machine-checked (deleting it
+  \* leaves all three gate verdicts identical): an open requires
+  \* legState = "standby" and the first open demotes to "stale", so a
+  \* second open is structurally impossible whatever this conjunct
+  \* says.  The CAS's unique contribution appears only under
+  \* read/write decomposition of the open (two processes both reading
+  \* "standby" before either writes) — deliberately out of scope here
+  \* (every action is one CAS round by construction).  Kept because the
+  \* code performs the check; there is no OneWindowCAS mutation run
+  \* because a mutation that cannot lose proves nothing — see
+  \* formal/README.md (the dropped run 5q).
+  /\ window = "none"
   /\ claim' = [claim EXCEPT ![p] = "admission"]
   /\ window' = "young"
   /\ winOwner' = p

@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine, the snapshot protocol, and the multi-process claims layer
 
-Three modules, one gate (`scripts/check-tla.sh`, twenty-two TLC runs).
+Three modules, one gate (`scripts/check-tla.sh`, twenty-five TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -74,7 +74,7 @@ Verification of snapshots is layered deliberately:
    what `Inv_SessionFaithful` licenses).
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar on first use).
-It runs twenty-two configs, ALL required:
+It runs twenty-five configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -180,6 +180,28 @@ It runs twenty-two configs, ALL required:
    restart degrades exactly one leg's availability. The parked mark is
    the honest operational state, so the lifts property is deliberately
    not checked here.
+5n. `FlintReplicationExpand.cfg` — the expansion tranche's strict run
+   (the F56 size dimension: `legSize` per leg, `raidSize` as the
+   consumer-visible high-water mark, `ExpandLeg` fan-out under the C2
+   belt, both F43-item-#8 guards, `SizeHeal` = the F56 fix): every core
+   invariant, `Inv_NoDeviceShrink`, `ExpansionCompletes` and
+   `AdmissionNotStarved` must hold. `ExpansionCompletes` is the
+   module's first per-leg PROGRESS obligation, and getting it to hold
+   honestly forced four finds of its own — see "What the model already
+   caught".
+5o. `FlintReplicationExpandWedge.cfg` — the shipped pre-F56 code
+   (`SizeHeal=FALSE`): TLC **must find** the F56 livelock as a lasso —
+   a leg blackholed mid-fan-out returns as a live, content-warm,
+   size-old standby; the admission size guard defers it every tick,
+   the C2 belt refuses the expand retry that would grow it, and the
+   chase's retention pin keeps the source-sized full build shut. Four
+   individually-correct mechanisms, jointly starving — the F43 shape,
+   rediscovered in the size dimension.
+5p. `FlintReplicationExpandGuard.cfg` — the pre-F43-item-#8 world
+   (`SizeGuard=FALSE`): TLC **must find** `Inv_NoDeviceShrink` violated
+   — the pre-expand leg admitted under the grown device, the silent
+   shrink (the §2.2a/C2-B hazard class). The shipped guard is
+   load-bearing, not decorative.
 5k. `FlintClaims.cfg` — the shipped multi-process stack (Lease + marker
    grace, two processes, deaths and spurious leadership moves in
    budget): `Inv_NoColdAdmission` plus both liveness properties must
@@ -199,6 +221,22 @@ It runs twenty-two configs, ALL required:
    process singleton — the record CAS carries one-window-at-a-time and
    the grace carries scrub-vs-live-window; the Lease buys ownership
    determinism and churn-freedom. The runaj A/B, machine-checked.
+
+   *(Run 5q — a one-window-CAS mutation — was investigated and
+   DROPPED: deleting the `window = "none"` guard from `WindowOpen`
+   leaves all three claims verdicts bit-identical, machine-checked.
+   At tick granularity the CAS is subsumed by the `legState` machine —
+   an open requires `standby` and the first open demotes to `stale`,
+   so a second open is structurally impossible whatever the window
+   guard says.  The CAS's unique contribution appears only under
+   read/write decomposition of the open — two processes both reading
+   `standby` before either writes — which this module deliberately
+   does not model (its actions are one-CAS-per-step by construction).
+   A mutation that cannot lose proves nothing, so per this gate's own
+   doctrine it is not a run.  The "record CAS carries
+   one-window-at-a-time" claim above is therefore an axiom of the
+   encoding, not a checked theorem — the honest statement of where
+   tick granularity draws the line.)*
 6. `FlintSnapshots.cfg` — the shipped copy protocol (full ordered walk,
    blobstore relink): `Inv_SessionFaithful` holds. Action coverage
    verified — the based suffix walk contributes zero new distinct
@@ -311,6 +349,32 @@ cannot rediscover the bug classes it exists for proves nothing.
   `MaintDrain`, implemented as probe-the-raid-BEFORE-the-record-round
   in `drain_leg` (and pinned by a unit test that replays the TLC
   trace). Found the day the code shipped, before any cluster ran it.
+- The expansion tranche rediscovered **F56 itself** (the ExpandWedge
+  lasso — found by hand in the code first, then independently by TLC,
+  including the record-lag belt bypass: the fan-out starts against a
+  doomed leg the record still calls insync). Getting its strict run to
+  hold then flushed out four more finds, each invisible to every
+  pre-existing property because none of them stated per-leg PROGRESS:
+  (1) the **ghost-epoch model bug** — `EpochCut` cut the acked ledger,
+  but after a ServeWithRisk assembly excused a lost writer, acked
+  content exists that no live leg holds, and the cut minted an
+  unsatisfiable chase target (the code snapshots what legs HOLD; the
+  model now does too); (2) the **missing release-on-deferral** — a
+  window whose standby de-warms (or is size-blocked) wedged the claim
+  at "admission" forever once the crash budget was spent
+  (`ReleaseAdmission` now models the code's RAII release, and
+  `WarmWaiting` carries the size terms so the window never opens for a
+  leg it cannot admit); (3) the **same-class-claimant WF trap** — the
+  no-op claim cycle is real (the 30s scheduler timer claims to probe;
+  it is the F43 lasso's engine, so it cannot be work-gated away), which
+  makes any contender needing `claim = "none"` only intermittently
+  enabled: the resizer's fan-out and the claim-holder's own dispatch
+  work (`CatchUp`/`Scrub`) are now STRONG-fair — the honest abstraction
+  of a persistent retrier and of work-runs-inside-the-hold; and (4)
+  **candidate F57** — a standby whose node dies parks forever (the only
+  standby→stale demotion is chase-source exhaustion; the raid monitor
+  marks only members; `replica_replace` filters on `Stale`), escaped
+  honestly in `ExpansionCompletes` with the fix owed in code.
 
 ## Deliberate scope limits
 

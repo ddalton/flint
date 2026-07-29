@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Twenty-two runs, ALL required.
+# Twenty-five runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -54,6 +54,28 @@
 #      never comes back) — strict: every invariant + writability on the
 #      survivor must HOLD (a wedged restart degrades one leg, nothing
 #      else; the parked mark is the honest operational state).
+#
+# Expansion tranche (the F56 size dimension):
+#   5n. FlintReplicationExpand.cfg      strict 2-leg (SizeGuard + SizeHeal
+#      ON, maintenance off) — every core invariant, Inv_NoDeviceShrink,
+#      ExpansionCompletes (the F56 theorem) and AdmissionNotStarved must
+#      HOLD.  This property is the module's first per-leg progress
+#      obligation, and its first runs found: the ghost-epoch model bug
+#      (EpochCut cutting acked instead of held content), the missing
+#      ReleaseAdmission (a deferral wedging the claim), the WF
+#      acquire/release trap for same-class claimants (ExpandLeg now SF —
+#      the persistent-retrier abstraction), and CANDIDATE F57 (a standby
+#      whose node dies parks forever: no demotion, no replacement —
+#      escaped honestly in the property, fix owed in code).
+#   5o. FlintReplicationExpandWedge.cfg SizeHeal=FALSE (the shipped
+#      pre-F56 code) — TLC must FIND the ExpansionCompletes lasso: leg
+#      lost mid-fan-out, survivors grown, device grown, the leg returns
+#      as a live content-warm size-old standby — admission size-guard
+#      defers it forever, the C2 belt refuses the expand retry, the
+#      retention pin holds the full-build escape shut.
+#   5p. FlintReplicationExpandGuard.cfg SizeGuard=FALSE (pre-F43-#8) —
+#      TLC must FIND Inv_NoDeviceShrink violated: the pre-expand leg
+#      admitted under the grown device — the silent shrink.
 #
 # FlintClaims (the multi-process claims/window layer — the F50/F53 axis):
 #   5k. FlintClaims.cfg          strict — Lease + marker grace ON, two
@@ -152,6 +174,12 @@ liveness_mutation_run FlintReplication FlintReplicationRollLease.cfg "roll-lease
 
 strict_run FlintReplication FlintReplicationRollRecordBarrier.cfg "record-only barrier strict (the implementation's barrier; belt holds safety)"
 strict_run FlintReplication FlintReplicationRollWedged.cfg "wedged-restart strict (kubelet never returns; survivor stays writable)"
+
+strict_run FlintReplication FlintReplicationExpand.cfg "expansion strict (SizeGuard+SizeHeal; the F56 theorem + no-device-shrink)"
+
+liveness_mutation_run FlintReplication FlintReplicationExpandWedge.cfg "F56 mutation (SizeHeal=FALSE: the expand x chase size livelock)"
+
+mutation_run FlintReplication FlintReplicationExpandGuard.cfg "size-guard mutation (SizeGuard=FALSE: silent device shrink)" "Inv_NoDeviceShrink"
 
 strict_run FlintClaims FlintClaims.cfg "claims strict (two processes, Lease + marker grace; F50/F53 layer)"
 
