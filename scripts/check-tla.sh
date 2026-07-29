@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Thirty-five runs, ALL required.
+# Thirty-eight runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -127,6 +127,29 @@
 #      record-only barrier under the deep 2-leg budget, full liveness.
 #      (10i/10j were first run green by the audit verifier; now gated.)
 #
+# Two-roller tranche (2026-07-29 — is the roller's lease safety-load-
+# bearing?  Answer, machine-checked: NO — the belt is, and it was
+# missing; constants RollerRace/RollerLeaderGate/DrainMarksBelt):
+#   10k. FlintReplicationRollerRace.cfg    gate ON, shipped mutator —
+#      TLC must FIND Inv_PlannedRollBoundedImpact violated at 3 legs
+#      with zero failures: a deposed-but-alive roller's in-flight drain
+#      lands after the new leader's drain marked a different node (F59
+#      candidate; one-node-at-a-time and the barrier are planner-only
+#      snapshot reads; the lease is checked before the work, not at the
+#      commit).
+#   10l. FlintReplicationRollerRaceUngated.cfg no leadership at all —
+#      TLC must FIND the same violation (the F50 split-process shape
+#      applied to the roller; the gate changes nothing the belt does
+#      not already decide).
+#   10m. FlintReplicationRollerRaceFixed.cfg DrainMarksBelt=TRUE with NO
+#      leader gate — strict, must HOLD: exclusivity AND record
+#      redundancy re-verified inside drain_for_maintenance (where the
+#      rv-guarded retry makes them race-proof) carry planned-maintenance
+#      safety ALONE.  Its first run beat a marks-only belt with the
+#      capture→drain→roll→clear→commit erosion — the barrier had to
+#      move into the mutation too.  The roller's lease buys pacing, not
+#      safety: the FlintClaimsNoLeader verdict, extended to the roller.
+#
 # FlintClaims (the multi-process claims/window layer — the F50/F53 axis):
 #   5k. FlintClaims.cfg          strict — Lease + marker grace ON, two
 #      processes, deaths + spurious leadership moves: Inv_NoColdAdmission
@@ -247,6 +270,11 @@ strict_run FlintReplication FlintReplicationRollRecordBarrier3.cfg "record-only 
 strict_run FlintReplication FlintReplicationRollRecordBarrierDeep.cfg "record-only barrier strict, deep liveness (audit 10j)"
 
 mutation_run FlintReplication FlintReplicationRollNoBelt.cfg "drain-belt mutation (DrainBelt=FALSE: the RecordBarrier silent loss, rediscoverable again)" "Inv_NoSilentLoss"
+
+mutation_run FlintReplication FlintReplicationRollerRace.cfg "two-roller race, gate ON (deposed roller's stale drain lands — the lease cannot close it; F59 candidate)" "Inv_PlannedRollBoundedImpact"
+mutation_run FlintReplication FlintReplicationRollerRaceUngated.cfg "two-roller race, no leadership (the split-process shape on the roller)" "Inv_PlannedRollBoundedImpact"
+
+strict_run FlintReplication FlintReplicationRollerRaceFixed.cfg "drain-mutation belts strict (exclusivity + record redundancy in the CAS; no leader gate at all)"
 
 liveness_mutation_run FlintReplication FlintReplicationMaintPark.cfg "volume-wide-parking mutation (SuppressScoped=FALSE + wedged roll: the parked standby, F43's third door)"
 

@@ -419,6 +419,30 @@ impl VolumeSyncRecord {
         if target.hot_rejoin.is_some() {
             return false;
         }
+        // The two-roller belts (2026-07-29; model runs
+        // FlintReplicationRollerRace / RollerRaceFixed — F59 candidate):
+        // one-node-at-a-time and the readmission barrier were PLANNER-only
+        // (gather-snapshot reads), so a deposed-but-alive roller's
+        // in-flight drain could land after the new leader's drain marked —
+        // or drained, rolled and CLEARED — a different node: two legs out
+        // of service under planned maintenance with zero real failures.
+        // The lease cannot close this (one in-process is_leader read per
+        // tick, while a tick's RPC work is unbounded vs a 15s lease); THIS
+        // mutation is where the checks are race-proof — update_sync_record's
+        // rv-guarded retry re-runs them against the fresh record.
+        // Marks-empty alone is insufficient (TLC found the
+        // capture→drain→roll→clear→commit erosion); all-others-insync
+        // alone has the stage-admission edge (admit_standbys_at_stage has
+        // no maintenance filter, so a marked leg can be record-InSync) —
+        // hence both conjuncts.  No legitimate drain is refused: the
+        // planner's own barrier already requires full record redundancy
+        // before it ever plans one.
+        if self.replicas.iter().any(|r| {
+            r.lvol_uuid != lvol_uuid
+                && (r.maint_drain_live(now_rfc3339) || r.sync_state != SyncState::InSync)
+        }) {
+            return false;
+        }
         if target.sync_state == SyncState::InSync {
             let other_insync = self
                 .replicas
@@ -2338,6 +2362,31 @@ mod tests {
         r.mark_stale("uuid-c", "leg failed", T_NOW);
         assert!(!r.drain_for_maintenance("uuid-a", T_FUTURE, T_NOW));
         assert_eq!(r.get("uuid-a").unwrap().sync_state, SyncState::InSync);
+    }
+
+    #[test]
+    fn drain_refuses_while_another_leg_is_marked_or_unhealed() {
+        // The two-roller belts (model runs FlintReplicationRollerRace /
+        // RollerRaceFixed — F59 candidate): a stale-snapshot drain from a
+        // deposed-but-alive roller must be refused by the MUTATION itself,
+        // where the rv-guarded retry re-runs it against the fresh record —
+        // the planner's one-node-at-a-time and barrier reads are snapshot-
+        // stale by construction.
+        let mut r = three_replica_record();
+        assert!(r.drain_for_maintenance("uuid-b", T_FUTURE, T_NOW));
+        // Another node's leg carries a live mark: refuse (exclusivity).
+        assert!(!r.drain_for_maintenance("uuid-a", T_FUTURE, T_NOW));
+        assert_eq!(r.get("uuid-a").unwrap().sync_state, SyncState::InSync);
+        assert!(r.get("uuid-a").unwrap().maint_drain.is_none());
+        // Mark cleared but the leg not yet readmitted (still Stale): the
+        // barrier half — TLC beat a marks-only belt with exactly this
+        // capture→drain→roll→clear→commit erosion.
+        assert!(r.set_maint_drain("uuid-b", None));
+        assert!(!r.drain_for_maintenance("uuid-a", T_FUTURE, T_NOW));
+        // Fully readmitted: the next node's drain is legitimate again.
+        r.replicas.iter_mut().find(|x| x.lvol_uuid == "uuid-b").unwrap().sync_state =
+            SyncState::InSync;
+        assert!(r.drain_for_maintenance("uuid-a", T_FUTURE, T_NOW));
     }
 
     #[test]

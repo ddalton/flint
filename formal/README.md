@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine, the snapshot protocol, and the multi-process claims layer
 
-Three modules, one gate (`scripts/check-tla.sh`, thirty-five TLC runs).
+Three modules, one gate (`scripts/check-tla.sh`, thirty-eight TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -334,6 +334,38 @@ and a run with teeth:
    (10i/10j were first run green by the audit's verifier agent, then
    gated.)
 
+**The two-roller tranche (2026-07-29)** — the audit asserted in prose
+that the maintenance roller's lease is safety-load-bearing; scouting
+the code showed one-node-at-a-time and the readmission barrier are
+PLANNER-only (gather-snapshot reads), the rv-guarded record CAS retries
+by re-running `drain_for_maintenance` on the fresh record (preventing
+lost updates, not concurrent drains), `is_leader()` is one in-process
+read per tick while a tick's RPC work is unbounded (300s HTTP timeouts
+vs a 15s lease), and `OP_MAINT_DRAIN` is process-local.  The machinery
+(`RoguePlanDrain` captures a valid plan; `RogueDrainCommit` lands it
+later applying only the commit-time guards) machine-checked the
+question — and the answer inverted the audit's prose:
+
+10k. `FlintReplicationRollerRace.cfg` — gate ON, shipped mutator: TLC
+   **must find** `Inv_PlannedRollBoundedImpact` violated at 3 legs with
+   ZERO failures — the deposed-but-alive roller's in-flight drain lands
+   after the new leader's drain marked a different node.  **The lease
+   cannot close the race it checks before the work** (F59 candidate).
+   2-leg volumes were only ever protected incidentally, by the
+   other-insync cardinality guard.
+10l. `FlintReplicationRollerRaceUngated.cfg` — no leadership at all:
+   TLC **must find** the same violation (the F50 split-process shape on
+   the roller; the gate changes nothing the belt does not decide).
+10m. `FlintReplicationRollerRaceFixed.cfg` — `DrainMarksBelt` with NO
+   leader gate: strict, **must hold**.  Exclusivity AND record
+   redundancy re-verified inside the mutation carry planned-maintenance
+   safety alone — **its first run beat a marks-only belt** with the
+   capture→drain→roll→clear→commit erosion (the barrier had to move
+   into the CAS too, and the code fix implements both conjuncts).  The
+   roller's lease buys pacing and churn-freedom, not safety — the
+   `FlintClaimsNoLeader` verdict, extended to the roller and now
+   machine-checked rather than asserted.
+
 The mutation runs are the models' own regression tests; a model that
 cannot rediscover the bug classes it exists for proves nothing.
 
@@ -475,6 +507,18 @@ cannot rediscover the bug classes it exists for proves nothing.
   F56 lasso in FIXED code — the ExpandWedge run doubles as that
   world), and each failed admission attempt leaks one epoch (the align
   runs after the final cut) — both owed to wave-2 code work.
+- **The two-roller tranche found F59 (candidate) and then sharpened its
+  own fix.**  The RollerRace run produced the double-drain WITH the
+  lease fully honored — machine-proof that a once-per-tick in-process
+  leadership check cannot close a race whose work outlives the lease —
+  and RollerRaceFixed's first run REFUTED the obvious fix: a marks-only
+  exclusivity belt loses to the capture→drain→roll→clear→commit
+  erosion, because the readmission barrier is planner-only too.  The
+  shipped fix (`drain_for_maintenance` refuses unless no other leg is
+  marked AND every other leg is record-InSync, re-run by the rv-guarded
+  retry) exists in its final form because TLC rejected the draft.  Net
+  verdict, inverting the audit's prose: the roller's lease was never
+  safety-load-bearing — the belt was missing.
 
 ## Deliberate scope limits
 

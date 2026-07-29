@@ -277,7 +277,7 @@ CONSTANTS
                \* indefinitely at reduced redundancy (the F43 shape by
                \* a third door; the MaintPark run must FIND the lasso).
                \* Catch-up/chase dispatch is per-leg in code either way.
-  DrainBelt    \* TRUE = MaintDrain's unconditional last-serving-member
+  DrainBelt,   \* TRUE = MaintDrain's unconditional last-serving-member
                \* belt reads GROUND TRUTH (the code probes the raid
                \* before the record round — the RecordBarrier fix).
                \* FALSE = the pre-fix record-level belt (another
@@ -285,6 +285,52 @@ CONSTANTS
                \* must FIND the silent loss the original RecordBarrier
                \* investigation hit, restoring this bug class's
                \* rediscoverability (the module's own mutation rule).
+  \* ---- the two-roller tranche (2026-07-29: is the roller's lease
+  \* safety-load-bearing?  The audit inverted NoLeader's verdict for the
+  \* roller in prose; these constants machine-check it) -------------------
+  RollerRace,  \* TRUE = the deposed-roller overlap machinery exists: a
+               \* roller instance may CAPTURE a drain plan from a valid
+               \* snapshot (RoguePlanDrain) and COMMIT it later against
+               \* changed state (RogueDrainCommit) with only the checks
+               \* the code re-runs at commit time.  Code facts (scouted
+               \* 2026-07-29): one-node-at-a-time is PLANNER-only (the
+               \* gather snapshot's marked_nodes); the rv-guarded record
+               \* CAS retries by re-running drain_for_maintenance on the
+               \* FRESH record — preventing lost updates, not concurrent
+               \* drains; is_leader() is one in-process atomic read per
+               \* tick while a tick's RPC work is unbounded (300s HTTP
+               \* timeouts × N volumes vs a 15s lease); OP_MAINT_DRAIN
+               \* is process-local.  FALSE in every pre-existing cfg
+               \* (state spaces preserved).
+  RollerLeaderGate, \* TRUE = the lease gates CAPTURING a plan (tick-top
+               \* is_leader): a stale plan then requires the one
+               \* budgeted deposal overlap (leaderMoved).  FALSE = no
+               \* leadership at all — a permanently split second roller.
+               \* THE POINT: RollerRace must FIND the double-drain EVEN
+               \* WITH the gate TRUE — the lease is checked before the
+               \* work, not at the commit, so it cannot close the race.
+  DrainMarksBelt \* TRUE = the fix: drain_for_maintenance refuses unless
+               \* NO other replica carries a live maintenance mark AND
+               \* every other replica is record-InSync — one-node-at-a-
+               \* time AND the readmission barrier both moved INTO the
+               \* mutation, where the rv-guarded retry makes them
+               \* race-proof.  (A marks-only belt is INSUFFICIENT —
+               \* RollerRaceFixed's first run proved it: capture a plan,
+               \* let the leader drain-roll-CLEAR another node, and the
+               \* stale plan commits while that leg is still
+               \* un-readmitted — the barrier is planner-only too, so
+               \* the erosion arrives through the second door.  The
+               \* all-others-insync form subsumes marks-empty except
+               \* for the stage-admission edge — admit_standbys_at_stage
+               \* has no maintenance filter, so a marked leg CAN be
+               \* record-InSync — hence both conjuncts.)  FALSE = the
+               \* shipped mutator (guards only: target exists, target
+               \* unmarked-for-rejoin, and if the target is InSync
+               \* another InSync leg remains — a cardinality check that
+               \* incidentally protects 2-leg volumes and nothing
+               \* else).  RollerRaceFixed (belt TRUE, gate FALSE) is
+               \* the sharp theorem: the belt alone carries bounded
+               \* impact — the lease buys pacing, not safety.
 
 VARIABLES
   \* ---- data plane -------------------------------------------------------
@@ -319,6 +365,13 @@ VARIABLES
   rolled,        \* SUBSET Legs: nodes already rolled this campaign (monotone)
   suppress,      \* SUBSET Legs: readmission suppressed (the maintenance mark)
   rollerDead,    \* TRUE once the roll orchestrator died mid-campaign
+  stalePlan,     \* SUBSET Legs (≤1): a second/deposed roller's captured
+                 \* drain plan — valid when captured, committed later
+                 \* against changed state (RollerRace)
+  leaderMoved,   \* the one budgeted spurious-deposal overlap was spent
+                 \* (RollerLeaderGate worlds; deposal is not a volume
+                 \* failure, so it deliberately costs NO crash budget —
+                 \* Inv_PlannedRollBoundedImpact conditions on crashes=0)
   \* ---- expansion (the F56 size dimension) --------------------------------
   legSize,       \* [Legs -> {"old", "new"}]: each leg's lvol size
   raidSize,      \* {"old", "new"}: the consumer-visible device size — a
@@ -345,7 +398,7 @@ vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
           deferExpired, deemedDead, falseRisk, crashes,
           rolling, rolled, suppress, rollerDead, legSize, raidSize, pvSize, wantNew>>
 
-maintVars == <<rolling, rolled, suppress, rollerDead>>
+maintVars == <<rolling, rolled, suppress, rollerDead, stalePlan, leaderMoved>>
 
 expandVars == <<legSize, raidSize, pvSize, wantNew>>
 
@@ -385,6 +438,8 @@ TypeOK ==
   /\ rolled \subseteq Legs
   /\ suppress \subseteq Legs
   /\ rollerDead \in BOOLEAN
+  /\ stalePlan \subseteq Legs /\ Cardinality(stalePlan) <= 1
+  /\ leaderMoved \in BOOLEAN
   /\ legSize \in [Legs -> {"old", "new"}]
   /\ raidSize \in {"old", "new"}
   /\ pvSize \in {"old", "new"}
@@ -471,6 +526,8 @@ Init ==
   /\ rolled = {}
   /\ suppress = {}
   /\ rollerDead = FALSE
+  /\ stalePlan = {}
+  /\ leaderMoved = FALSE
   /\ legSize = [l \in Legs |-> "old"]
   /\ raidSize = "old"
   /\ pvSize = "old"
@@ -745,7 +802,8 @@ Replace(l) ==
   /\ legSize' = [legSize EXCEPT ![l] = pvSize]
   /\ UNCHANGED <<serving, zombie, raidGen, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, falseRisk, crashes,
-                 rolling, rollerDead, raidSize, pvSize, wantNew>>
+                 rolling, rollerDead, stalePlan, leaderMoved,
+                 raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
 
 \* hot_rejoin_volume: a stale leg on a LIVE node re-enters as a standby
@@ -1155,7 +1213,7 @@ MaintDrain(l) ==
   /\ suppress' = suppress \cup {l}
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, deemedDead, falseRisk,
-                 crashes, rolling, rolled, rollerDead>>
+                 crashes, rolling, rolled, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
 
@@ -1169,7 +1227,7 @@ RollStart(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolled, suppress, rollerDead>>
+                 rolled, suppress, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
 
@@ -1181,7 +1239,7 @@ RollFinish(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 suppress, rollerDead>>
+                 suppress, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
 
@@ -1193,7 +1251,7 @@ MaintClear(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, rollerDead>>
+                 rolling, rolled, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
 
@@ -1209,7 +1267,7 @@ RollerDie ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk,
-                 rolling, rolled, suppress>>
+                 rolling, rolled, suppress, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
 
@@ -1226,7 +1284,95 @@ SuppressExpire(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, rollerDead>>
+                 rolling, rolled, rollerDead, stalePlan, leaderMoved>>
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+
+(***************************************************************************)
+(* THE TWO-ROLLER RACE (RollerRace; 2026-07-29).  The audit asserted in    *)
+(* prose that the roller's lease is safety-load-bearing; scouting the      *)
+(* code showed WHY the question is live: one-node-at-a-time is enforced    *)
+(* only in the PLANNER, from the tick's gather snapshot; the record CAS    *)
+(* retries by re-running drain_for_maintenance against the fresh record   *)
+(* (preventing lost updates, not concurrent drains — its only guards are  *)
+(* target-exists, target-not-rejoin-marked, and if-insync-another-insync- *)
+(* remains); the ground-truth probe refuses only the LAST configured      *)
+(* base; and is_leader() is one in-process atomic read at tick top while  *)
+(* the tick's RPC work is unbounded (300s HTTP timeouts × N volumes vs a  *)
+(* 15s lease).  So a deposed-but-alive roller's in-flight drain can land  *)
+(* AFTER the new leader's drain marked a different node.  RoguePlanDrain  *)
+(* captures a plan valid at capture time; RogueDrainCommit lands it later *)
+(* applying ONLY the commit-time guards.  The RollerRace run must FIND    *)
+(* Inv_PlannedRollBoundedImpact violated at 3 legs WITH the leader gate   *)
+(* ON — the lease cannot close a race it checks before the work — and     *)
+(* RollerRaceFixed (DrainMarksBelt, no gate at all) must HOLD: the        *)
+(* exclusivity belt inside the mutation carries safety alone.  2-leg      *)
+(* volumes were only ever protected incidentally, by the other-insync     *)
+(* cardinality guard.                                                      *)
+(***************************************************************************)
+
+RoguePlanDrain(l) ==
+  /\ RollerRace
+  /\ MaintEnabled /\ MaintFence
+  /\ ~rollerDead
+  /\ stalePlan = {}
+  \* With the gate, a stale plan requires the one budgeted deposal
+  \* overlap: the roller WAS leader at tick top, leadership moved after.
+  \* Deliberately NOT a crash-budget event — a deposal is not a volume
+  \* failure, and Inv_PlannedRollBoundedImpact conditions on crashes = 0.
+  /\ (RollerLeaderGate => ~leaderMoved)
+  /\ leaderMoved' = (leaderMoved \/ RollerLeaderGate)
+  \* plan_roll's planner-side checks, all valid RIGHT NOW (in code they
+  \* are snapshot reads: insync_by_node, marked_nodes empty, the barrier).
+  /\ l \in serving
+  /\ state[l] = "insync"
+  /\ Responsive(l)
+  /\ l \notin rolled
+  /\ rolling = {} /\ suppress = {}
+  /\ (MaintBarrier =>
+        IF BarrierRaidAware THEN FullRedundancy ELSE RecordRedundancy)
+  /\ stalePlan' = {l}
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes,
+                 rolling, rolled, suppress, rollerDead>>
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+
+\* The captured plan lands — possibly long after the world changed.  Only
+\* the guards the code re-runs at commit time apply: the fresh raid probe
+\* (raid exists; never remove the last configured base) and
+\* drain_for_maintenance's fresh-record guards (target insync => another
+\* insync leg remains).  Deliberately ABSENT, matching the shipped code:
+\* marked-set-empty, the barrier, rolling/rolled — planner-only snapshot
+\* reads.  DrainMarksBelt is the fix, where the rv-guarded retry makes it
+\* race-proof.
+RogueDrainCommit ==
+  /\ RollerRace
+  /\ ~rollerDead
+  /\ \E l \in stalePlan :
+       /\ state[l] = "insync"             \* an already-drained target no-ops
+       /\ serving # {}                    \* probe A: the raid exists
+       /\ (l \in serving => serving \ {l} # {})  \* probe B: last configured base
+       /\ \E m \in Legs \ {l} : state[m] = "insync"  \* other_insync, fresh record
+       \* THE FIX: exclusivity AND the readmission barrier re-verified in
+       \* the CAS — marks-empty alone loses to the capture→drain→clear→
+       \* commit erosion (RollerRaceFixed's first counterexample).
+       /\ (DrainMarksBelt => (suppress = {}
+                               /\ \A m \in Legs \ {l} : state[m] = "insync"))
+       /\ serving' = serving \ {l}
+       /\ IF l \in serving
+          THEN /\ raidGen' = raidGen + 1
+               /\ legGen' = [m \in Legs |-> IF m \in serving \ {l} THEN raidGen + 1
+                                                                   ELSE legGen[m]]
+          ELSE UNCHANGED <<raidGen, legGen>>
+       /\ state' = [state EXCEPT ![l] = "stale"]
+       /\ writerSet' = writerSet \ {l}
+       /\ suppress' = suppress \cup {l}
+  /\ stalePlan' = {}
+  /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
+                 riskSurfaced, epochCut, claim, deemedDead, falseRisk,
+                 crashes, rolling, rolled, rollerDead, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
 
@@ -1334,6 +1480,7 @@ Next ==
   \/ ReleaseAdmission
   \/ ExpireClaim
   \/ RollerDie
+  \/ RogueDrainCommit
   \/ ExpandRequest
   \/ RaidGrow
   \/ PvGrow
@@ -1357,6 +1504,7 @@ Next ==
        \/ RollFinish(l)
        \/ MaintClear(l)
        \/ SuppressExpire(l)
+       \/ RoguePlanDrain(l)
        \/ ExpandLeg(l)
 
 \* Recovery actions are weakly fair.  WF(RaidDeconfigure) is P4;
