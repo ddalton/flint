@@ -1,3 +1,3 @@
 2026-07-29T00:34:52Z,3,3.13,48,54,0,runan-aws-4,runan-aws-4,Y,Y,Y,PASS,Y,PASS,"F55 bounce-mid-checkpoint: ckpt_at=32s kill=32s back=46s io_resume=46s drained=1 deadline_expired=0
-0 panic=0 eio=0 pg_restarts=0->0"
 2026-07-29T00:40:11Z,3,3.12,611,37,0,runan-aws-4,runan-aws-4,Y,Y,Y,PASS,Y,PASS,"S2 in-place RWX admission: node_gone=89s degrade=77s swap=141s standby=162s in_sync=237s settled=604s window_ms=228 admit_stall=1s kill_stall=37s bounce=-1 nfs_restarts=0->0 pg_restarts=0->0 cut_ev=0/0/0 defer=0 yields=0 seizes=0 estale=0 panic=0 witness=609s new_node=runan-aws-4"
+2026-07-29T01:11:02Z,3,3.6e,574,59,0,runan-aws-1,runan-aws-1,Y,Y,Y,PASS,Y,PASS,"F43 r2-perm: node_gone=56s degrade=44s swap=98s standby=162s cutover=173s in_sync=205s settled=567s witness=572s io_resume=573s new_node=runan-aws-3 cut_ev=1/1/0 yields=0 seizes=0 head_in_use=0 risk=none"

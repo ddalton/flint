@@ -1,0 +1,8 @@
+runan-aws-1 nodefs=5.13/7.93GiB 64.8% imagefs=2.21/7.93GiB 27.9%
+  pod-ephemeral flint-system/flint-csi-node-76z8q 0.02GiB
+  pod-ephemeral kube-system/cilium-pftmv 0.0GiB
+  pod-ephemeral flint-system/flint-csi-controller-7f7f9c7d99-5dgdm 0.0GiB
+runan-aws-3 nodefs=5.36/7.93GiB 67.6% imagefs=2.39/7.93GiB 30.2%
+  pod-ephemeral flint-system/flint-csi-node-6njq5 0.01GiB
+  pod-ephemeral kube-system/cilium-nttch 0.0GiB
+  pod-ephemeral flint-system/snapshot-controller-75cc446f55-ll4pt 0.0GiB

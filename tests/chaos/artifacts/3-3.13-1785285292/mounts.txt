@@ -1,0 +1,4 @@
+runan-aws-1 globalmounts=1 orphans=''
+runan-aws-2 globalmounts=1 orphans=''
+runan-aws-3 globalmounts=0 orphans=''
+runan-aws-4 globalmounts=1 orphans=''

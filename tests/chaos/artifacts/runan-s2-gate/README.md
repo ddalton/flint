@@ -45,9 +45,40 @@ assembly, so the F48 two-head phase and the F52 fh-identity re-proof are
 removed structurally rather than guarded — and with no bounce there is no F55
 exposure on this path at all.
 
-**228 ms of quiesce replaces a ~237s bounce** — three orders of magnitude on
-the RWX availability number, with durability unchanged (zero acked loss, as on
-every drill to date).
+### The A/B, measured — and the number that is NOT ~237s
+
+3.6e was then re-run on this same cluster and image with
+`FLINT_RWX_INPLACE_ADMISSION=disabled`, which is the first live exercise of the
+kill switch (it had only unit coverage). Same vector, one env var apart, so the
+ledger gaps are directly comparable:
+
+| window (offset from T0) | 3.6e — switch OFF | 3.12 — switch ON |
+|---|---|---|
+| kill / detection `[0,120]` | 38s | 37s |
+| **admission** `[150,280]` | **59s** | **1s** |
+| admission mechanism | cutover bounce, uid `1dc9d694`→`036d45e8` @173s | in-place window, uid unchanged |
+| cutover events | 1/1/0 | 0/0/0 |
+| in_sync | 205s | 237s |
+
+**So the admission's guest-visible cost goes 59s → 1s (~59×), NOT the ~237s
+this doc's own design write-up quotes.** That ~237s is the runag-era
+measurement, taken before P4 (detection), F52 (fh prewarm) and F55/DrainGate
+each made the bounce cheaper. Quoting it as today's alternative overstates the
+win by roughly 4×. The honest claim: **one second instead of a minute**, plus
+the structural removal of the whole bounce hazard family.
+
+Two further honest reads:
+
+- **The bounce converges SOONER** (in_sync 205s vs 237s) — reassembly admits
+  both legs at once, while the in-place path pays a separate localization step
+  after the window. S2's win is not convergence speed; it is that the guest
+  never sees the outage.
+- **pg-0 rode the bounce with zero restarts**, which is the DrainGate fix
+  holding on the exact path that PANICked on runam — 3.13's result
+  corroborated a second time, by a drill that was not testing for it.
+
+Durability is unchanged and unremarkable on both paths: zero acked loss,
+db PASS, as on every drill to date.
 
 ### What the formal model predicted, and the drill confirmed
 

@@ -7,7 +7,15 @@ first run on runan (`1.22.0-rc3`), evidence
 the code on purpose: every design-level safety and liveness question
 below is answered by a TLC run in `formal/`, not by prose.
 
-**The measured result — 228 ms of quiesce replacing a ~237 s bounce:**
+**The measured result — the admission's guest cost goes 59 s → 1 s:**
+
+> **Correction to this doc's own "~237s bounce" figure.** That number is the
+> runag-era measurement, taken before P4 (detection), F52 (fh prewarm) and
+> F55/DrainGate each made the bounce cheaper. A same-cluster, same-image A/B on
+> runan (3.6e with the kill switch OFF vs 3.12 with it ON) measures the
+> admission window at **59 s bounced vs 1 s in place** — a ~59× win, not the
+> ~4× larger one the old figure implies. The Problem section below still quotes
+> ~237 s as history; it is not the alternative you get on a current build.
 
 ```
 window_ms=228   admit_stall=1s (budget 10)   kill_stall=37s (P4 budget 60)
@@ -62,9 +70,9 @@ RWX replacement/rejoin admission today rides the cutover machinery: the
 NFS server is bounced (teardown → NodeStage reassembly with the new leg →
 client reconnect + grace). Costs, all campaign-measured:
 
-- An outage window per admission (the ~237s bounce stall observed on the
-  runag-era drills; P4 fixed the *detection* side to ~36s, but the bounce
-  itself remains).
+- An outage window per admission. Historically ~237s (runag-era drills);
+  measured at **59s** on runan 2026-07-29 once P4, F52 prewarm and DrainGate
+  had each shortened it. Either way it is an outage, and in-place costs 1s.
 - The F55 class: a bounce truncates in-flight replies; DrainGate bounds
   it now, but not bouncing removes the exposure entirely.
 - The F52 fh-identity family: any restage-style path must re-prove fh

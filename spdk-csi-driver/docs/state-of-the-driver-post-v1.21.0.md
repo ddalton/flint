@@ -156,8 +156,12 @@ least one new F-number.
 > lib tests incl. the RWX-domain crash sweep; musl clean). Kill switch
 > `FLINT_RWX_INPLACE_ADMISSION` (default ON).
 > **LIVE GATE PASSED 2026-07-29 on runan (drill 3.12, first run):
-> window_ms=228 — 228 MILLISECONDS of quiesce replacing the ~237s bounce
-> — admit_stall 1s, nfs pod uid + restarts unmoved, zero CutoverStarted,
+> window_ms=228 (228 ms of quiesce), admit_stall 1s vs the bounce path's
+> 59s measured the same day on the same cluster by 3.6e with the kill
+> switch OFF — a ~59× win on the admission's guest cost. NOTE the doc's
+> older "~237s bounce" is the runag-era figure and overstates today's
+> alternative by ~4×: P4, F52 prewarm and DrainGate each shortened the
+> bounce. Also nfs pod uid + restarts unmoved, zero CutoverStarted,
 > zero ESTALE/PANIC, pg-0 restarts 0, settle held 2/2, db PASS. The
 > claims log shows catch-up yielding (`held_by="hot-rejoin"`) — the F43
 > mutation's priority prediction observed on the wire. S2 is DONE; the
