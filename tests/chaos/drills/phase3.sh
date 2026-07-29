@@ -144,7 +144,17 @@ SYNC_ANNO='flint\.csi\.storage\.io/replica-sync-state'
 sync_record()      { kubectl get pv "$PV" -o jsonpath="{.metadata.annotations.$SYNC_ANNO}" 2>/dev/null; }
 writer_uuids()     { sync_record | jq -r '.writer_set.lvol_uuids[]?' 2>/dev/null; }
 leg_state()        { sync_record | jq -r --arg u "$1" '.replicas[]? | select(.lvol_uuid==$u) | .sync_state' 2>/dev/null; }
-pv_replicas_json() { kubectl get pv "$PV" -o json 2>/dev/null | jq -r '.spec.csi.volumeAttributes["flint.csi.storage.io/replicas"] // empty'; }
+pv_replicas_json() {
+  # The override annotation is the LIVE placement; volumeAttributes is the
+  # placement at provision time and never changes. Read attributes alone and
+  # every drill run AFTER a replacement targets the node that already died —
+  # runan 2026-07-29: 3.6e picked the aws-2 that 3.12 had terminated, and only
+  # a missing instance-id stopped it. phase2's drills already prefer the
+  # override; this is the same rule.
+  kubectl get pv "$PV" -o json 2>/dev/null \
+    | jq -r '(.metadata.annotations["flint.csi.storage.io/replicas-override"]
+              // .spec.csi.volumeAttributes["flint.csi.storage.io/replicas"]) // empty'
+}
 risk_annotation()  { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/acked-tail-risk}' 2>/dev/null; }
 
 ctrl_log() { # <t0> — the CONTROLLER's log since t0, ANSI-stripped.
