@@ -113,7 +113,8 @@ move nodes). Admission never bounces.
 | The final delta delivers exactly the cut (content level) | `FlintSnapshots` `Inv_SessionFaithful` + its three mutations |
 | Epoch cuts may interleave with the window at record level | `EpochCut`/`Admit` interleave freely in all strict runs (the F48 epoch-race guard covers the code-level arm) |
 
-Run everything: `scripts/check-tla.sh` (ten TLC runs, ~30s).
+Run everything: `scripts/check-tla.sh` (seventeen TLC runs since the
+maintenance tranche, ~2min).
 
 ## Implementation sketch (next cycle)
 

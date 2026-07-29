@@ -135,8 +135,13 @@ The live drill gates the composed whole, not just the modeled half.
 | The F43 arbitration survives maintenance: suppressed legs are excluded from `WarmWaiting` (neither admittable nor yield-forcing), and `AdmissionNotStarved` still holds with rolls in the mix | both strict maintenance runs |
 | A mark on a truly DEAD leg is inert and exempt: the deep run's first counterexample (drain a leg, spot-reclaim its node AND every rebuild source) forced the per-leg, death-escaped statement of the lifts property — `Replace` clears marks with the identity swap when a source exists; when none exists the volume is Deferred and the mark gates nothing | `MaintenanceEventuallyLifts` as stated + the trace in this tranche's history |
 
-Run everything: `scripts/check-tla.sh` (seventeen TLC runs; the two
-strict maintenance runs are the slow ones, ~2min + ~1.5min).
+Run everything: `scripts/check-tla.sh` (seventeen TLC runs, ~2min
+total). The split is deliberate: TLC's temporal checking is
+near-sequential, so the 3-leg breadth run checks INVARIANTS only (853k
+states, ~7s) and all liveness lives in the 2-leg depth run (~40s) —
+every maintenance liveness corner is 2-leg-reachable. The first cut
+checked the per-leg lifts property at 3 legs and cost minutes for no
+additional coverage.
 
 ## Implementation sketch (next cycle)
 

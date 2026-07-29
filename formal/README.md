@@ -105,13 +105,18 @@ It runs seventeen configs, ALL required:
 5e. `FlintReplicationMaint.cfg` — the maintenance protocol
    (drain+barrier+lease all TRUE), rolls enabled, 3-leg breadth with a
    real failure budget alongside: every invariant — including
-   `Inv_PlannedRollNeverCausesOutage` and `Inv_MaintFenceHolds` — and
-   every liveness property, including `MaintenanceEventuallyLifts` and
-   `AdmissionNotStarved` across roll interleavings, must hold.
-5e'. `FlintReplicationMaintDeep.cfg` — the same protocol at 2-leg
-   content depth (torn writes, Scrub, zombie heads and roller death all
-   reachable across a roll campaign). Its **first run refuted the
-   unconditional lifts property** — see "What the model already caught".
+   `Inv_PlannedRollNeverCausesOutage` and `Inv_MaintFenceHolds` — must
+   hold. INVARIANTS ONLY, deliberately: temporal checking is
+   near-sequential and per-leg liveness at 3 legs costs minutes for no
+   new corners; this run's job is invariant arity, in parallel, in
+   seconds (853k states, ~7s).
+5e'. `FlintReplicationMaintDeep.cfg` — the tranche's LIVENESS home:
+   2-leg depth (torn writes, Scrub, zombie heads, roller death and the
+   dead-leg corner all reachable across a roll campaign), every
+   invariant plus ALL liveness — `MaintenanceEventuallyLifts` and
+   `AdmissionNotStarved` across maintenance interleavings (~40s). Its
+   **first run refuted the unconditional lifts property** — see "What
+   the model already caught".
 5f. `FlintReplicationRollUnfenced.cfg` — TODAY'S WORLD (`MaintFence =
    FALSE`, no drain protocol): TLC **must find**
    `Inv_PlannedRollNeverCausesOutage` violated — a routine DS roll with
