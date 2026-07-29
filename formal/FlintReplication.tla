@@ -123,9 +123,45 @@
 (* budgeted as a failure event).  The model does not track holder          *)
 (* identity — a real lease TTL guarantees what the conflation assumes.     *)
 (*                                                                         *)
+(* MAINTENANCE TRANCHE (the csi-node roll landmine, modeled ahead of the   *)
+(* fix): a DaemonSet roll restarts spdk-tgt on every node in sequence — a  *)
+(* PLANNED data-plane outage per node that the raid cannot distinguish     *)
+(* from a failure.  Today (no protocol) the roll blackholes each serving   *)
+(* leg in turn: P4 faults it out, the leg stale-marks, and rolling the     *)
+(* next node before readmission takes the volume to serving = {} with     *)
+(* ZERO real failures.  The modeled fix is three separately-necessary      *)
+(* guards:                                                                 *)
+(*   MaintFence   drain-before-restart: a node's tgt is never taken down   *)
+(*                while its leg is in the serving set (MaintDrain is a     *)
+(*                graceful remove+stale-mark, one CAS; the restart then    *)
+(*                touches only a non-serving leg).  P4 needs NO            *)
+(*                maintenance awareness — detection stays always-on,       *)
+(*                which is the design argument against the rejected       *)
+(*                alternative (suppressing dead-target detection during    *)
+(*                rolls: a reclaim mid-roll would then hide).              *)
+(*   MaintBarrier the next node waits for FULL readmission (in-sync +      *)
+(*                serving), not pod-readiness.  k8s maxUnavailable=1       *)
+(*                gives pod-level serialization unconditionally (modeled   *)
+(*                so); it knows nothing of raid membership — that gap IS   *)
+(*                the landmine's second half.                              *)
+(*   MaintLease   the suppression mark (readmission excluded while the     *)
+(*                node's tgt is fair game) is leased: a dead roller's      *)
+(*                mark self-clears.  Unleased, a roller death parks the    *)
+(*                drained leg at 1/2 redundancy forever — the F43 parked   *)
+(*                standby by another door.                                 *)
+(* Rolls are budgeted separately from failures (rolled is monotone — one   *)
+(* campaign, each node once); a planned roll costs no crash budget, so     *)
+(* Inv_PlannedRollNeverCausesOutage can condition on crashes = 0: with     *)
+(* zero REAL failures, maintenance alone never takes the volume down.      *)
+(* MaintEnabled = FALSE (every legacy cfg) disables all of it and leaves   *)
+(* the prior state spaces bit-identical in behavior.                       *)
+(*                                                                         *)
 (* Out of scope: esnap-window INTERNALS (crash inside catch-up/scrub is    *)
 (* the crash-sweep sim harness's job — here those steps are atomic);       *)
-(* identity domains (killed at compile time by the newtypes).              *)
+(* identity domains (killed at compile time by the newtypes); the LOCAL    *)
+(* half of the landmine (ublk device continuity for consumers co-located   *)
+(* with the rolled tgt — kernel-level, empirical, drill-gated; see        *)
+(* docs/maintenance-drain-csi-node-roll.md).                               *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -137,7 +173,11 @@ CONSTANTS
   RejoinGuard, \* TRUE = hot-rejoin shared-base ancestry check on
   FenceZombie, \* TRUE = assembly severs the previous head first (F48 fix)
   ClaimArb,    \* TRUE = admission-priority claim arbitration (F43 fix)
-  EvidenceStrict \* TRUE = node_gone evidence implies actual death
+  EvidenceStrict, \* TRUE = node_gone evidence implies actual death
+  MaintEnabled, \* TRUE = planned-roll actions exist (FALSE in legacy cfgs)
+  MaintFence,  \* TRUE = drain-before-restart (never roll a serving leg's tgt)
+  MaintBarrier,\* TRUE = next node waits for readmission, not pod-readiness
+  MaintLease   \* TRUE = a dead roller's suppression mark self-clears
 
 VARIABLES
   \* ---- data plane -------------------------------------------------------
@@ -158,10 +198,18 @@ VARIABLES
   writerSet,     \* SUBSET Legs — recorded serving-assembly membership
   epochCut,      \* SUBSET 1..MaxWrites — content captured at the last cut
   claim,         \* {"none", "catchup", "admission"} — the R2 volume claim
-  crashes        \* failure budget spent
+  crashes,       \* failure budget spent
+  \* ---- planned maintenance (the csi-node roll) ---------------------------
+  rolling,       \* SUBSET Legs: node whose tgt is down for a PLANNED restart
+  rolled,        \* SUBSET Legs: nodes already rolled this campaign (monotone)
+  suppress,      \* SUBSET Legs: readmission suppressed (the maintenance mark)
+  rollerDead     \* TRUE once the roll orchestrator died mid-campaign
 
 vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
-          lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
+          lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes,
+          rolling, rolled, suppress, rollerDead>>
+
+maintVars == <<rolling, rolled, suppress, rollerDead>>
 
 TypeOK ==
   /\ serving \subseteq Legs
@@ -181,8 +229,19 @@ TypeOK ==
   /\ epochCut \subseteq 1..MaxWrites
   /\ claim \in {"none", "catchup", "admission"}
   /\ crashes \in 0..MaxCrashes
+  /\ rolling \subseteq Legs
+  /\ rolled \subseteq Legs
+  /\ suppress \subseteq Legs
+  /\ rollerDead \in BOOLEAN
 
-UpInSync == {l \in Legs : state[l] = "insync" /\ legUp[l] = "up"}
+\* A leg's data path answers: its node is up AND its tgt is not down for a
+\* planned restart.  The raid cannot tell the two apart — that symmetry is
+\* the whole landmine, and every data-plane guard below uses this, not
+\* legUp alone.  With MaintEnabled = FALSE, rolling = {} always and this
+\* reduces to the old legUp = "up".
+Responsive(l) == legUp[l] = "up" /\ l \notin rolling
+
+UpInSync == {l \in Legs : state[l] = "insync" /\ Responsive(l)}
 
 \* SPDK examine over an attached set: only the newest generation serves.
 NewestOf(A) == {l \in A : \A m \in A : legGen[l] >= legGen[m]}
@@ -191,14 +250,19 @@ NewestOf(A) == {l \in A : \A m \in A : legGen[l] >= legGen[m]}
 \* source available, and (with the ancestry check on) actually admittable.
 \* This is the predicate the F43 arbitration pivots on — catch-up must
 \* yield exactly when this is true.
+\* A suppressed leg (maintenance mark) is excluded from admission planning
+\* entirely — it is neither admittable nor something catch-up must yield
+\* to.  The mark's LIVENESS obligation (it must eventually lift) is
+\* MaintenanceEventuallyLifts, not this predicate.
 WarmWaiting ==
   \E l \in Legs :
     /\ state[l] = "standby"
-    /\ legUp[l] = "up"
+    /\ Responsive(l)
+    /\ l \notin suppress
     /\ epochCut \subseteq legData[l]
     /\ serving # {}
     /\ \E src \in serving :
-         /\ legUp[src] = "up"
+         /\ Responsive(src)
          /\ (RejoinGuard => legData[l] \subseteq legData[src])
 
 Init ==
@@ -219,6 +283,10 @@ Init ==
   /\ epochCut = {}
   /\ claim = "none"
   /\ crashes = 0
+  /\ rolling = {}
+  /\ rolled = {}
+  /\ suppress = {}
+  /\ rollerDead = FALSE
 
 (***************************************************************************)
 (* Data plane                                                              *)
@@ -230,7 +298,7 @@ Init ==
 Write ==
   /\ serving # {}
   /\ nextWrite <= MaxWrites
-  /\ \A l \in serving : legUp[l] = "up"
+  /\ \A l \in serving : Responsive(l)
   /\ legData' = [l \in Legs |->
                    IF l \in serving THEN legData[l] \cup {nextWrite}
                                     ELSE legData[l]]
@@ -239,6 +307,7 @@ Write ==
   /\ nextWrite' = nextWrite + 1
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, riskSurfaced,
                  state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* The head crashes between replicating a block and acking the client: the
 \* block lands on SOME serving legs, the client never hears.  Either outcome
@@ -249,7 +318,7 @@ WriteTorn ==
   /\ serving # {}
   /\ nextWrite <= MaxWrites
   /\ crashes < MaxCrashes
-  /\ \A l \in serving : legUp[l] = "up"
+  /\ \A l \in serving : Responsive(l)
   /\ \E S \in (SUBSET serving) \ {{}} :
        legData' = [l \in Legs |->
                      IF l \in S THEN legData[l] \cup {nextWrite}
@@ -259,6 +328,7 @@ WriteTorn ==
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<zombie, legUp, raidGen, legGen, acked, lineage,
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
+  /\ UNCHANGED maintVars
 
 \* The F48 zombie: the partitioned old head still holds its leg
 \* connections and still acks client writes.  It writes OUTSIDE the
@@ -267,7 +337,7 @@ WriteTorn ==
 ZombieWrite ==
   /\ zombie # {}
   /\ nextWrite <= MaxWrites
-  /\ \A l \in zombie : legUp[l] = "up"
+  /\ \A l \in zombie : Responsive(l)
   /\ legData' = [l \in Legs |->
                    IF l \in zombie THEN legData[l] \cup {nextWrite}
                                    ELSE legData[l]]
@@ -275,6 +345,7 @@ ZombieWrite ==
   /\ nextWrite' = nextWrite + 1
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, lineage,
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* Verified death straight away (terminated AND observed so).
 LegDie(l) ==
@@ -284,6 +355,7 @@ LegDie(l) ==
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
+  /\ UNCHANGED maintVars
 
 \* Silent unreachability: maybe a dying node, maybe a transient partition.
 LegBlackhole(l) ==
@@ -293,6 +365,7 @@ LegBlackhole(l) ==
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
+  /\ UNCHANGED maintVars
 
 \* The transient case: the leg returns, data intact, whatever the record
 \* now says about it.  (The F36c ingredient.)
@@ -301,6 +374,7 @@ LegRecover(l) ==
   /\ legUp' = [legUp EXCEPT ![l] = "up"]
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* GROUND TRUTH: the silently-unreachable node actually dies (the cloud
 \* reaped it).  WF here is the axiom that a blackhole eventually RESOLVES
@@ -310,6 +384,7 @@ LegPerish(l) ==
   /\ legUp' = [legUp EXCEPT ![l] = "dead"]
   /\ UNCHANGED <<serving, zombie, legData, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* EVIDENCE: the record accepts node_gone proof (Node object deleted /
 \* instance API says terminated).  With EvidenceStrict this only happens
@@ -326,19 +401,26 @@ DeemDead(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* The data plane faults an unresponsive leg out; survivors continue at a
 \* NEW incarnation (their superblocks record the shrink).  WF on this
 \* action IS the P4 fix (TCP_USER_TIMEOUT + fast_io_fail bound detection).
+\* ~Responsive, not legUp: P4 cannot tell a PLANNED tgt restart from a
+\* failure — an unfenced roll of a serving leg gets faulted out exactly
+\* like a blackhole.  That symmetry is deliberate (detection stays
+\* always-on through maintenance); the fence keeps rolls out of its way
+\* by never rolling a serving leg's tgt in the first place.
 RaidDeconfigure(l) ==
   /\ l \in serving
-  /\ legUp[l] # "up"
+  /\ ~Responsive(l)
   /\ serving' = serving \ {l}
   /\ raidGen' = raidGen + 1
   /\ legGen' = [m \in Legs |-> IF m \in serving \ {l} THEN raidGen + 1
                                                       ELSE legGen[m]]
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* The whole assembly dies cleanly (process gone, connections dropped).
 ServerCrash ==
@@ -348,6 +430,7 @@ ServerCrash ==
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
+  /\ UNCHANGED maintVars
 
 \* The F48 case: the head is PARTITIONED, not dead.  The record sees it
 \* gone; the process lives on with its leg connections — a zombie.  (One
@@ -361,6 +444,7 @@ ServerPartition ==
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<legData, legUp, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
+  /\ UNCHANGED maintVars
 
 (***************************************************************************)
 (* Control plane — each action is one CAS round against the record         *)
@@ -378,15 +462,17 @@ MonitorMarkStale(l) ==
   /\ writerSet' = writerSet \ {l}
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* Epoch scheduler: cut a consistent snapshot of the served content.
 EpochCut ==
   /\ serving # {}
-  /\ \A l \in serving : legUp[l] = "up"
+  /\ \A l \in serving : Responsive(l)
   /\ epochCut' = acked
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet, claim,
                  deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* replica_replace + prune_writers_for_replacement: swap the identity of a
 \* stale leg whose node the record DEEMS dead (the C2 justification is
@@ -401,6 +487,7 @@ EpochCut ==
 Replace(l) ==
   /\ state[l] = "stale"
   /\ l \in deemedDead
+  /\ l \notin rolling                     \* no identity swap mid-restart
   /\ UpInSync # {}                        \* something to rebuild from
   /\ legUp' = [legUp EXCEPT ![l] = "up"]
   /\ legData' = [legData EXCEPT ![l] = {}]
@@ -408,8 +495,13 @@ Replace(l) ==
   /\ state' = [state EXCEPT ![l] = "standby"]
   /\ writerSet' = writerSet \ {l}
   /\ deemedDead' = deemedDead \ {l}
+  \* The slot's new identity lives on a FRESH node: the old node's roll
+  \* flags do not apply to it (and the fresh node has not been rolled).
+  /\ rolled' = rolled \ {l}
+  /\ suppress' = suppress \ {l}
   /\ UNCHANGED <<serving, zombie, raidGen, acked, nextWrite, lineage,
-                 riskSurfaced, epochCut, claim, falseRisk, crashes>>
+                 riskSurfaced, epochCut, claim, falseRisk, crashes,
+                 rolling, rollerDead>>
 
 \* hot_rejoin_volume: a stale leg on a LIVE node re-enters as a standby
 \* KEEPING its identity and payload (contrast Replace).  Whether the
@@ -417,11 +509,13 @@ Replace(l) ==
 \* check at catch-up/admission, or by Scrub when it diverges.
 HotRejoin(l) ==
   /\ state[l] = "stale"
-  /\ legUp[l] = "up"
+  /\ Responsive(l)
+  /\ l \notin suppress                    \* the maintenance mark: no re-entry
   /\ state' = [state EXCEPT ![l] = "standby"]
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, writerSet, epochCut,
                  claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* HotRejoinScrubbed: no usable shared history with ANY live in-sync
 \* source — wipe the payload and rebuild from scratch.  Requires a live
@@ -430,7 +524,8 @@ HotRejoin(l) ==
 Scrub(l) ==
   /\ claim = "catchup"                    \* reconciler work runs claimed
   /\ state[l] = "standby"
-  /\ legUp[l] = "up"
+  /\ Responsive(l)
+  /\ l \notin suppress
   /\ legData[l] # {}
   /\ UpInSync # {}
   /\ ~\E src \in UpInSync : legData[l] \subseteq legData[src]
@@ -438,6 +533,7 @@ Scrub(l) ==
   /\ legGen' = [legGen EXCEPT ![l] = 0]
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, acked, nextWrite, lineage,
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* Catch-up: build to the last epoch cut from an in-sync source.  A block
 \* copy fills holes and never erases — union semantics — so the shared-base
@@ -445,13 +541,15 @@ Scrub(l) ==
 CatchUp(l) ==
   /\ claim = "catchup"                    \* builds run under the R2 claim
   /\ state[l] = "standby"
-  /\ legUp[l] = "up"
+  /\ Responsive(l)
+  /\ l \notin suppress
   /\ \E src \in UpInSync :
        /\ epochCut \subseteq legData[src]
        /\ (RejoinGuard => legData[l] \subseteq legData[src])
   /\ legData' = [legData EXCEPT ![l] = legData[l] \cup epochCut]
   /\ UNCHANGED <<serving, zombie, legUp, raidGen, legGen, acked, nextWrite,
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* Admission (hot-rejoin window / cutover reassembly) + mark_in_sync's
 \* writer-set add: quiesced delta copy from a healthy serving survivor,
@@ -461,11 +559,12 @@ CatchUp(l) ==
 Admit(l) ==
   /\ claim = "admission"                  \* the window holds its claim
   /\ state[l] = "standby"
-  /\ legUp[l] = "up"
+  /\ Responsive(l)
+  /\ l \notin suppress                    \* the second door (mirrors RejoinGuard)
   /\ epochCut \subseteq legData[l]        \* warm standby (caught up)
   /\ serving # {}
   /\ \E src \in serving :
-       /\ legUp[src] = "up"
+       /\ Responsive(src)
        /\ (RejoinGuard => legData[l] \subseteq legData[src])
        /\ legData' = [legData EXCEPT ![l] = legData[l] \cup legData[src]]
   /\ serving' = serving \cup {l}
@@ -475,6 +574,7 @@ Admit(l) ==
   /\ claim' = "none"                      \* mark_in_sync closes the window
   /\ UNCHANGED <<zombie, legUp, raidGen, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* NodeStage reassembly: the F36c freshness gate over the ATTACHABLE
 \* in-sync legs A, then SPDK examine serves only A's newest generation
@@ -511,6 +611,7 @@ Assemble ==
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, state, epochCut, claim,
                  deemedDead, crashes>>
+  /\ UNCHANGED maintVars
 
 \* The stale-only-survivor LAST RESORT — the RUNBOOK step, not code: the
 \* code's gate correctly Defers (the Deferred liveness escape), and an
@@ -523,8 +624,10 @@ LastResortServe(l) ==
   /\ serving = {}
   /\ UpInSync = {}                       \* nothing the gate could use
   /\ state[l] = "stale"
-  /\ legUp[l] = "up"
-  /\ l \in NewestOf({m \in Legs : state[m] = "stale" /\ legUp[m] = "up"})
+  /\ Responsive(l)
+  /\ l \notin suppress                   \* never serve a mid-maintenance leg
+  /\ l \in NewestOf({m \in Legs : state[m] = "stale" /\ Responsive(m)
+                                  /\ m \notin suppress})
   /\ serving' = {l}
   /\ writerSet' = {l}
   /\ lineage' = legData[l]
@@ -534,6 +637,7 @@ LastResortServe(l) ==
   /\ state' = [state EXCEPT ![l] = "insync"]
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 (***************************************************************************)
 (* The R2 claim — the F43 machinery.  Catch-up work (builds, scrubs) and   *)
@@ -555,6 +659,7 @@ AcquireCatchup ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 ReleaseCatchup ==
   /\ claim = "catchup"
@@ -562,6 +667,7 @@ ReleaseCatchup ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 AcquireAdmission ==
   /\ claim = "none"
@@ -570,6 +676,7 @@ AcquireAdmission ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
 
 \* Lease expiry: the claim holder died; the lease frees the claim.  A
 \* controller death is a failure event — budgeted — which is also what
@@ -582,6 +689,124 @@ ExpireClaim ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, deemedDead, falseRisk>>
+  /\ UNCHANGED maintVars
+
+(***************************************************************************)
+(* Planned maintenance — the csi-node roll.  A DaemonSet roll restarts    *)
+(* spdk-tgt node by node; each restart is a planned data-plane outage on  *)
+(* that node.  The campaign is finite (rolled is monotone: one campaign,  *)
+(* each node once) and costs NO crash budget — which is exactly what      *)
+(* lets Inv_PlannedRollNeverCausesOutage condition on crashes = 0.        *)
+(*                                                                        *)
+(* MaintDrain is the fence's first half: one CAS that gracefully removes  *)
+(* the leg from the serving raid (survivors continue at a new             *)
+(* incarnation), stale-marks it, prunes the writer set, and stamps the    *)
+(* suppression mark.  No detection wait, no write stall: the raid never   *)
+(* sees a silent member.  With MaintBarrier the drain additionally waits  *)
+(* for FULL redundancy (every leg in-sync + serving + responsive) — the   *)
+(* readmission barrier.  Without it the guard is only what k8s            *)
+(* maxUnavailable=1 actually gives you: one node in maintenance at a      *)
+(* time, pod-level knowledge only — and TLC finds the outage where the    *)
+(* previous leg's pod is Ready but its leg is still un-readmitted.        *)
+(*                                                                        *)
+(* RollStart/RollFinish bracket the tgt restart itself (kubelet's work:   *)
+(* RollFinish is weakly fair — restarts complete — and fires whether the  *)
+(* roll ORCHESTRATOR lives or not).  Under the fence a serving leg's tgt  *)
+(* is never taken down (RollStart requires the suppression mark, which    *)
+(* only MaintDrain mints); unfenced, RollStart hits a serving leg and     *)
+(* the P4 machinery treats it exactly like a blackhole — the landmine.    *)
+(*                                                                        *)
+(* MaintClear lifts the suppression mark after the restart (a LIVE        *)
+(* roller's act).  RollerDie is the budgeted failure: the orchestrator    *)
+(* dies mid-campaign.  SuppressExpire is the lease: a dead roller's mark  *)
+(* self-clears (TTL).  Without it — MaintLease = FALSE — the mark         *)
+(* outlives its holder and the drained leg parks at reduced redundancy    *)
+(* forever: the F43 parked standby re-created by a maintenance flag.      *)
+(***************************************************************************)
+
+FullRedundancy ==
+  \A m \in Legs : state[m] = "insync" /\ m \in serving /\ Responsive(m)
+
+MaintDrain(l) ==
+  /\ MaintEnabled /\ MaintFence
+  /\ ~rollerDead
+  /\ l \in serving
+  /\ state[l] = "insync"
+  /\ Responsive(l)
+  /\ l \notin rolled                      \* one campaign, each node once
+  /\ rolling = {} /\ suppress = {}        \* k8s pod-level serialization
+  /\ (MaintBarrier => FullRedundancy)     \* readmitted, not just pod-ready
+  /\ serving' = serving \ {l}
+  /\ raidGen' = raidGen + 1
+  /\ legGen' = [m \in Legs |-> IF m \in serving \ {l} THEN raidGen + 1
+                                                      ELSE legGen[m]]
+  /\ state' = [state EXCEPT ![l] = "stale"]
+  /\ writerSet' = writerSet \ {l}
+  /\ suppress' = suppress \cup {l}
+  /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
+                 riskSurfaced, epochCut, claim, deemedDead, falseRisk,
+                 crashes, rolling, rolled, rollerDead>>
+
+RollStart(l) ==
+  /\ MaintEnabled
+  /\ ~rollerDead
+  /\ legUp[l] = "up"
+  /\ rolling = {} /\ l \notin rolled
+  /\ (MaintFence => l \in suppress)       \* drain first — the fence
+  /\ rolling' = {l}
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes,
+                 rolled, suppress, rollerDead>>
+
+\* kubelet completes the restart — weakly fair, roller-independent.
+RollFinish(l) ==
+  /\ rolling = {l}
+  /\ rolling' = {}
+  /\ rolled' = rolled \cup {l}
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes,
+                 suppress, rollerDead>>
+
+MaintClear(l) ==
+  /\ ~rollerDead
+  /\ l \in suppress
+  /\ l \in rolled                         \* restart done for this node
+  /\ suppress' = suppress \ {l}
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes,
+                 rolling, rolled, rollerDead>>
+
+\* The roll orchestrator dies mid-campaign while holding a mark — a
+\* budgeted failure event, like ExpireClaim.
+RollerDie ==
+  /\ MaintEnabled
+  /\ ~rollerDead
+  /\ suppress # {}
+  /\ crashes < MaxCrashes
+  /\ rollerDead' = TRUE
+  /\ crashes' = crashes + 1
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk,
+                 rolling, rolled, suppress>>
+
+\* The lease: a dead roller's suppression mark self-clears after TTL
+\* (never mid-restart — the TTL far exceeds a pod restart, and
+\* RollFinish is fair).  MaintLease = FALSE is the mutation: the mark
+\* outlives its holder forever.
+SuppressExpire(l) ==
+  /\ MaintLease
+  /\ rollerDead
+  /\ l \in suppress
+  /\ l \notin rolling
+  /\ suppress' = suppress \ {l}
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes,
+                 rolling, rolled, rollerDead>>
 
 Next ==
   \/ Write
@@ -595,6 +820,7 @@ Next ==
   \/ ReleaseCatchup
   \/ AcquireAdmission
   \/ ExpireClaim
+  \/ RollerDie
   \/ \E l \in Legs :
        \/ LegDie(l)
        \/ LegBlackhole(l)
@@ -609,6 +835,11 @@ Next ==
        \/ CatchUp(l)
        \/ Admit(l)
        \/ LastResortServe(l)
+       \/ MaintDrain(l)
+       \/ RollStart(l)
+       \/ RollFinish(l)
+       \/ MaintClear(l)
+       \/ SuppressExpire(l)
 
 \* Recovery actions are weakly fair.  WF(RaidDeconfigure) is P4;
 \* WF(LegPerish) is the axiom that a blackhole eventually resolves
@@ -627,6 +858,17 @@ FairnessCore ==
        /\ WF_vars(Scrub(l))
        /\ WF_vars(CatchUp(l))
        /\ WF_vars(Admit(l))
+       \* Maintenance machinery: once a node is IN maintenance the DS
+       \* controller + kubelet drive it to completion (RollStart/RollFinish),
+       \* a live roller clears its mark (MaintClear), and the lease TTL
+       \* fires for a dead one (SuppressExpire).  Initiating each node's
+       \* DRAIN stays unfair — campaign pacing is the operator's choice,
+       \* so "the campaign completes" is deliberately NOT a theorem here;
+       \* MaintenanceEventuallyLifts is.
+       /\ WF_vars(RollStart(l))
+       /\ WF_vars(RollFinish(l))
+       /\ WF_vars(MaintClear(l))
+       /\ WF_vars(SuppressExpire(l))
   /\ WF_vars(Assemble)
   /\ WF_vars(EpochCut)
   /\ WF_vars(AcquireCatchup)
@@ -692,6 +934,27 @@ Inv_EvidenceSound ==
 \* recovers — the tail was there all along.
 Inv_NoFalseRisk == ~falseRisk
 
+\* THE MAINTENANCE THEOREM: with zero REAL failures, a rolling restart
+\* alone never takes the volume down.  Rolls cost no crash budget, so
+\* crashes = 0 isolates the pure-maintenance world; the only way to
+\* serving = {} there is the roll itself.  Both roll mutations must
+\* violate this — by different paths: MaintFence = FALSE finds today's
+\* landmine (roll a serving leg's tgt → P4 faults it → roll the next
+\* node before readmission → the last leg deconfigures); MaintBarrier =
+\* FALSE finds the subtler half (drain exists, but the next drain
+\* proceeds on pod-readiness while the previous leg is still stale —
+\* the last serving leg is drained away).
+Inv_PlannedRollNeverCausesOutage ==
+  crashes = 0 => serving # {}
+
+\* The fence, as an invariant: a serving leg's tgt is never down for a
+\* planned restart.  Under MaintFence the suppression mark gates
+\* RollStart, a suppressed leg is out of serving (drained) and cannot
+\* re-enter (HotRejoin/Admit/Assemble/LastResortServe all refuse), so
+\* the intersection stays empty — checked in the strict maintenance run.
+Inv_MaintFenceHolds ==
+  MaintFence => serving \cap rolling = {}
+
 Inv == TypeOK /\ Inv_NoSilentLoss /\ Inv_InsyncServingIsCurrent
              /\ Inv_ServingCurrentGen /\ Inv_NoDivergentServing
              /\ Inv_EvidenceSound /\ Inv_NoFalseRisk
@@ -752,8 +1015,33 @@ EventuallyWritable ==
 (***************************************************************************)
 AdmissionNotStarved == [](WarmWaiting => <>(~WarmWaiting))
 
+(***************************************************************************)
+(* The maintenance-lease theorem: a suppression mark on a leg that can    *)
+(* still serve eventually lifts.  A live roller clears it (MaintClear,    *)
+(* fair); a dead roller's lease expires (SuppressExpire, fair,            *)
+(* MaintLease); the restart it waits on completes (RollFinish, fair,      *)
+(* roller-independent); a Replace moves the identity to a fresh node and  *)
+(* clears it.  The escape is the leg's own VERIFIED death: the first      *)
+(* deep run of this tranche found the honest counterexample to the       *)
+(* unconditional form — drain a leg, then the leg's node dies AND every   *)
+(* rebuild source dies too (spot reclaim mid-maintenance); no restart     *)
+(* can complete and no Replace has a source, so the mark stays.  A mark   *)
+(* on a truly dead leg is INERT — every action it gates already requires  *)
+(* responsiveness — so the per-leg, death-escaped statement is the        *)
+(* design truth, not a weakening of it.  With MaintLease = FALSE the      *)
+(* roll-lease mutation must still find the lasso: the roller dies after   *)
+(* the drain, the leg stays LIVE, and nothing lifts the mark — the F43    *)
+(* parked standby re-created by an unleased maintenance flag.             *)
+(***************************************************************************)
+MaintenanceEventuallyLifts ==
+  \A l \in Legs :
+    []((l \in suppress /\ legUp[l] = "up")
+        => <>(l \notin suppress \/ legUp[l] = "dead"))
+
 \* State-space bound for TLC (raidGen grows with deconfigures/assemblies,
-\* both bounded by the crash budget in any real trace).
-GenBound == raidGen <= (3 * MaxCrashes) + 3
+\* bounded by the crash budget plus the roll campaign — each node rolls
+\* at most once, and a roll adds at most a drain bump, a deconfigure
+\* bump (unfenced), and a reassembly bump).
+GenBound == raidGen <= (3 * MaxCrashes) + (3 * Cardinality(Legs)) + 3
 
 ================================================================================

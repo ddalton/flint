@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine and the snapshot protocol
 
-Two modules, one gate (`scripts/check-tla.sh`, twelve TLC runs).
+Two modules, one gate (`scripts/check-tla.sh`, seventeen TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -17,7 +17,17 @@ machinery): catch-up and admission run under a leased per-volume claim,
 with admission priority — `AdmissionNotStarved` is the theorem, and the
 F43 mutation must rediscover the starvation lasso. This is the formal
 half of the S2 bounce-free-RWX-admission design
-(`spdk-csi-driver/docs/s2-bounce-free-rwx-admission.md`).
+(`spdk-csi-driver/docs/s2-bounce-free-rwx-admission.md`). The
+**maintenance tranche** models the csi-node roll landmine ahead of its
+fix (`spdk-csi-driver/docs/maintenance-drain-csi-node-roll.md`): planned
+tgt restarts are indistinguishable from failures to the data plane
+(`Responsive`), and the fix is three separately-necessary guards —
+drain-before-restart (`MaintFence`), a readmission barrier
+(`MaintBarrier`; pod-readiness is NOT it), and a leased suppression mark
+(`MaintLease`). `Inv_PlannedRollNeverCausesOutage` (zero real failures ⇒
+a roll alone never downs the volume) and `MaintenanceEventuallyLifts`
+(no mark outlives its purpose on a live leg) are the theorems; three
+roll mutations must each rediscover their loss.
 
 `FlintSnapshots.tla` (tranche 3) models the **snapshot protocol** at
 block-content level — the layer where content is `[Blocks -> version]`
@@ -40,7 +50,7 @@ Verification of snapshots is layered deliberately:
    what `Inv_SessionFaithful` licenses).
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar on first use).
-It runs nine configs, ALL required:
+It runs seventeen configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -92,6 +102,35 @@ It runs nine configs, ALL required:
    content-shaped property (TLC verifies the old property HOLDS under
    `SpecNoP4`), so the tooth required stating `EventuallyWritable`, the
    property P4 actually guarantees; both strict runs now verify it.
+5e. `FlintReplicationMaint.cfg` — the maintenance protocol
+   (drain+barrier+lease all TRUE), rolls enabled, 3-leg breadth with a
+   real failure budget alongside: every invariant — including
+   `Inv_PlannedRollNeverCausesOutage` and `Inv_MaintFenceHolds` — and
+   every liveness property, including `MaintenanceEventuallyLifts` and
+   `AdmissionNotStarved` across roll interleavings, must hold.
+5e'. `FlintReplicationMaintDeep.cfg` — the same protocol at 2-leg
+   content depth (torn writes, Scrub, zombie heads and roller death all
+   reachable across a roll campaign). Its **first run refuted the
+   unconditional lifts property** — see "What the model already caught".
+5f. `FlintReplicationRollUnfenced.cfg` — TODAY'S WORLD (`MaintFence =
+   FALSE`, no drain protocol): TLC **must find**
+   `Inv_PlannedRollNeverCausesOutage` violated — a routine DS roll with
+   ZERO real failures blackholes a serving leg, P4 faults it out, the
+   next roll follows pod-readiness, and the last serving leg
+   deconfigures: `serving = {}` in 5 steps. The csi-node roll landmine
+   as a counterexample.
+5g. `FlintReplicationRollBarrier.cfg` — drain exists but the barrier is
+   pod-readiness (`MaintBarrier = FALSE`, exactly what k8s
+   maxUnavailable=1 gives you): TLC **must find** the same invariant
+   violated by the subtler path — drain l1, roll, clear its mark (all
+   pods Ready), drain l2 while l1 is still stale. Proves fence and
+   barrier are separately necessary.
+5h. `FlintReplicationRollLease.cfg` — unleased maintenance mark
+   (`MaintLease = FALSE`): TLC **must find** the temporal
+   counterexample to `MaintenanceEventuallyLifts` — the roller dies
+   after the drain, the leg stays live, nothing lifts the mark, and the
+   volume parks at reduced redundancy forever: the F43 parked standby
+   re-created by a maintenance flag.
 6. `FlintSnapshots.cfg` — the shipped copy protocol (full ordered walk,
    blobstore relink): `Inv_SessionFaithful` holds. Action coverage
    verified — the based suffix walk contributes zero new distinct
@@ -133,6 +172,13 @@ cannot rediscover the bug classes it exists for proves nothing.
 | `LastResortServe` | the stale-only-survivor RUNBOOK override (not code — the code Defers); risk surfaced, sb generations restart from the survivor |
 | `claim` / `AcquireCatchup` / `AcquireAdmission` / `ExpireClaim` | the R2 leased per-volume claim (F43); `WarmWaiting` is the yield predicate; expiry = holder death, budgeted |
 | `AdmissionNotStarved` | the F43 theorem: no warm standby waits forever; S2's liveness foundation |
+| `Responsive` (vs `legUp`) | the data plane cannot tell a planned tgt restart from a blackhole — the landmine's premise; every data-path guard uses it |
+| `MaintDrain` (one CAS: remove + stale-mark + prune + suppress) | the planned drain the fix will compose from `replica_sync.rs` primitives under a Resolver-class R2 claim |
+| `RollStart`/`RollFinish` | DS pod delete / kubelet restart completion (roller-independent, hence its own fairness) |
+| `suppress` + `MaintClear`/`SuppressExpire`/`RollerDie` | the leased suppression mark (readmission exclusion); TTL expiry vs live-roller clear; `Replace` clears it with the identity swap |
+| `FullRedundancy` barrier in `MaintDrain` | the raid-aware roll gate the DS controller cannot provide (pod-readiness ≠ readmitted) |
+| `Inv_PlannedRollNeverCausesOutage` | with zero real failures, a rolling restart alone never takes the volume down |
+| `MaintenanceEventuallyLifts` | no suppression mark outlives its purpose on a live leg (death-escaped, per-leg — see below) |
 | `Inv_NoSilentLoss` | PacificA's commit invariant; the ledger oracle's zero-loss check is its runtime shadow |
 | **FlintSnapshots** | |
 | `Cut` / `chain` | `apply_epoch_cut` / the blobstore snapshot chain (retained epochs) |
@@ -166,6 +212,17 @@ cannot rediscover the bug classes it exists for proves nothing.
   with the fence on, pre-sever zombie writes are safe *because* the
   strict gate forces the zombie's legs (still the recorded writers) into
   the next assembly; each belt alone is insufficient.
+- The maintenance tranche's first deep run refuted its own author's
+  property. The unconditional "every suppression mark eventually lifts"
+  fails honestly: drain a leg, then spot-reclaim its node AND every
+  rebuild source (three budget events) — no restart can complete, no
+  `Replace` has a source, the mark stays. But a mark on a truly dead
+  leg is INERT (every action it gates already requires responsiveness),
+  so the theorem is the per-leg, death-escaped form — and the
+  counterexample is a scenario the fleet has actually lived (spot
+  reclaim mid-campaign, runab/runam). The model forced the design to
+  state exactly *whose* marks must lift: live legs' marks, always;
+  dead legs' marks, by `Replace`'s identity swap when a source exists.
 
 ## Deliberate scope limits
 

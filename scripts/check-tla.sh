@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Nine runs, ALL required.
+# Seventeen runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -16,6 +16,33 @@
 #      Inv_NoDivergentServing violation (dead-lineage phantom served).
 #   5. FlintReplicationF48.cfg    FenceZombie=FALSE — TLC must FIND a
 #      zombie-head violation (silent loss or split-brain divergence).
+#   5b. FlintReplicationF43.cfg   ClaimArb=FALSE — TLC must FIND the
+#      admission-starvation lasso (the F43 parked standby).
+#   5c. FlintReplicationResurrect.cfg EvidenceStrict=FALSE — TLC must FIND
+#      an Inv_NoFalseRisk violation (hollow surfaced risk).
+#   5d. FlintReplicationP4.cfg    SpecNoP4 — TLC must FIND the unbounded
+#      write-stall lasso (pre-P4 detection).
+#
+# Maintenance tranche (the csi-node roll landmine):
+#   5e. FlintReplicationMaint.cfg        strict 3-leg breadth — drain+
+#      barrier+lease ON, rolls enabled: all invariants (incl. planned-
+#      roll-never-causes-outage, fence-holds) and all liveness (incl.
+#      maintenance-eventually-lifts) must HOLD.
+#   5e'. FlintReplicationMaintDeep.cfg   strict 2-leg content depth —
+#      torn writes, scrub, zombies and roller death reachable across a
+#      roll campaign; its first run found the dead-leg counterexample
+#      that forced the per-leg, death-escaped statement of the lifts
+#      property.  Must HOLD.
+#   5f. FlintReplicationRollUnfenced.cfg MaintFence=FALSE (today's world) —
+#      TLC must FIND Inv_PlannedRollNeverCausesOutage violated: a routine
+#      DS roll with ZERO real failures drives serving to {}.
+#   5g. FlintReplicationRollBarrier.cfg  MaintBarrier=FALSE (pod-ready is
+#      not readmitted) — TLC must FIND the same invariant violated by the
+#      other path: the next drain proceeds while the previous leg is
+#      still stale.
+#   5h. FlintReplicationRollLease.cfg    MaintLease=FALSE — TLC must FIND
+#      the MaintenanceEventuallyLifts lasso: a dead roller's suppression
+#      mark parks the drained leg forever.
 #
 # FlintSnapshots:
 #   6. FlintSnapshots.cfg           strict — every completed copy session
@@ -85,6 +112,14 @@ liveness_mutation_run FlintReplication FlintReplicationF43.cfg "F43 mutation (Cl
 mutation_run FlintReplication FlintReplicationResurrect.cfg "resurrection mutation (EvidenceStrict=FALSE, hollow risk)" "Inv_NoFalseRisk"
 
 liveness_mutation_run FlintReplication FlintReplicationP4.cfg "P4 mutation (SpecNoP4: unbounded detection, write stall)"
+
+strict_run FlintReplication FlintReplicationMaint.cfg "maintenance strict breadth (drain+barrier+lease, rolls enabled)"
+strict_run FlintReplication FlintReplicationMaintDeep.cfg "maintenance strict content depth (torn/scrub/zombie/roller-death across a roll)"
+
+mutation_run FlintReplication FlintReplicationRollUnfenced.cfg "roll-fence mutation (MaintFence=FALSE, the csi-node roll landmine)" "Inv_PlannedRollNeverCausesOutage"
+mutation_run FlintReplication FlintReplicationRollBarrier.cfg  "roll-barrier mutation (MaintBarrier=FALSE, pod-ready is not readmitted)" "Inv_PlannedRollNeverCausesOutage"
+
+liveness_mutation_run FlintReplication FlintReplicationRollLease.cfg "roll-lease mutation (MaintLease=FALSE, the mark outlives its roller)"
 
 strict_run FlintSnapshots FlintSnapshots.cfg "snapshots strict (full ordered walk, blobstore relink)"
 
