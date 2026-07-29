@@ -1,11 +1,60 @@
 # Maintenance drain — the csi-node roll landmine fix (model-first design)
 
-Status: **DESIGN + FORMAL GATE GREEN 2026-07-28 — implementation owed.**
-The formal work lands ahead of the code, deliberately, in the S2 pattern:
-every orchestration-level safety and liveness question below is answered
-by a TLC run in `formal/` (the maintenance tranche of
-`FlintReplication.tla`), not by prose. The kernel-level half (ublk
-continuity) is explicitly NOT modelable and is drill-gated instead.
+Status: **ORCHESTRATION HALF IMPLEMENTED + SIM-SWEPT 2026-07-28** (same
+day as the formal gate); live gate = drill 3.14, owed. The LOCAL half
+(staged-device continuity) remains design-only. The formal work landed
+ahead of the code, deliberately, in the S2 pattern: every
+orchestration-level safety and liveness question below is answered by a
+TLC run in `formal/` (the maintenance tranche of `FlintReplication.tla`),
+not by prose. The kernel-level half is explicitly NOT modelable and is
+drill-gated instead.
+
+## Implementation map (2026-07-28, 945 lib tests)
+
+- `maint_roll.rs` — the roller: `plan_roll` (pure planner mirroring the
+  model's actions one-to-one; the RollBarrier counterexample is a unit
+  test), `drain_leg` (record round → verify ARMED → graceful
+  `bdev_raid_remove_base_bdev`; never outruns a refusing record),
+  `maint_roll_tick` (level-triggered: one step per tick — Drain /
+  DeletePod / ClearMarks — resumable from observable state alone),
+  mark renewal each tick (the lease), `KubeRollOps` (DS updateStrategy +
+  ControllerRevision latest-hash vs pod `controller-revision-hash`).
+  Kill switch `FLINT_MAINT_DRAIN` (default ON, opt-out semantics; the
+  roller is additionally inert unless the DS runs OnDelete).
+- `replica_sync.rs` — the suppression mark REFINED from the design's
+  "leased annotation" to a per-replica record FIELD (`maint_drain`,
+  RFC3339 lease deadline): the record already lives in a PV annotation
+  behind a resourceVersion-guarded CAS, so `drain_for_maintenance`
+  (stale-mark = writer-set exit + mark, refusing window-claimed and
+  last-in-sync legs) is genuinely ONE record round — the atomicity the
+  model's MaintDrain assumes. `maint_drain_live` enforces TTL at the
+  READERS: expired or unparseable reads as absent (SuppressExpire —
+  fail toward readmission, never toward permanent suppression).
+- Exclusion doors, all reading the mark: catch-up's chase + rebuild
+  dispatch (`catchup.rs`), `resolve`'s target choice + `plan_hot_rejoin`
+  (`maint_suppressed` view field) in `hot_rejoin.rs`, and the
+  record-layer belt in `mark_hot_rejoin_intent` (one door for every
+  intent path).
+- `volume_claims.rs` — `OP_MAINT_DRAIN`, Resolver class (operator time
+  must not lose the reacquisition race to catch-up's timer — the F43
+  lasso shape).
+- Chart: `maintenance.drainRoll.enabled` (DEFAULT OFF until drill 3.14)
+  sets the DS `updateStrategy: OnDelete` + `FLINT_MAINT_DRAIN`; RBAC
+  adds read-only `apps/daemonsets` + `controllerrevisions`.
+- Tests: planner table, kill-switch parse, drain/lease/belt record
+  tests, catch-up + rejoin exclusion A/B (live vs expired mark), and
+  `sim_crash_sweep_maint_drain_roll_recovers` — acceptance gate 2:
+  crash at every RPC boundary of drain → clear, re-driven roller +
+  normal machinery converge to in_sync, no stranded marks/markers,
+  chains stay trees. The fake SPDK layer gained a faithful
+  `bdev_raid_remove_base_bdev` (slot NULLED, not shrunk — the F48
+  note's observed shape, which is also what makes the re-drive
+  idempotent).
+- Follow-up (deliberate): `bdev_raid_remove_base_bdev` is not yet in
+  `guarded_destroy`'s `GUARDED_METHODS`; the drain holds the record-level
+  belt (armed check) and the data-plane belt (never remove the last
+  configured base). Adding a boundary verdict is the consistent next
+  move once the drill validates the flow.
 
 ## Problem
 

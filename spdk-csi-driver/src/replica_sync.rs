@@ -128,6 +128,21 @@ pub struct ReplicaSyncRecord {
     /// as old (reconcile freely, the pre-F50 behavior).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hot_rejoin_at: Option<String>,
+    /// Maintenance-drain suppression mark (the csi-node roll fence,
+    /// docs/maintenance-drain-csi-node-roll.md): the RFC3339 lease
+    /// deadline until which this leg is excluded from readmission
+    /// planning — the catch-up chase and rebuild, hot-rejoin planning,
+    /// and the admission door all skip a live mark. Stamped in the SAME
+    /// record round as the drain's `mark_stale` (one CAS — the atomicity
+    /// the formal model's MaintDrain assumes). TTL is enforced by
+    /// READERS: an expired or unparseable deadline reads as absent —
+    /// that is the model's SuppressExpire, a dead roller's mark
+    /// self-clears, failing toward readmission and never toward
+    /// permanent suppression. A live roller renews the deadline each
+    /// tick and clears the mark (MaintClear) once the node's restart
+    /// completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maint_drain: Option<String>,
 }
 
 impl ReplicaSyncRecord {
@@ -144,6 +159,19 @@ impl ReplicaSyncRecord {
         self.hot_rejoin.as_ref()?;
         let at = chrono::DateTime::parse_from_rfc3339(self.hot_rejoin_at.as_deref()?).ok()?;
         Some(now - at.with_timezone(&chrono::Utc))
+    }
+
+    /// True while the maintenance-drain suppression mark is LIVE: present
+    /// and its lease deadline is still ahead of `now`. An absent, expired,
+    /// or unparseable mark reads as not-live — the lease expiry that lets
+    /// a dead roller's drain readmit (fail toward readmission, never
+    /// toward permanent suppression; the roll-lease TLC mutation is the
+    /// proof this direction matters).
+    pub fn maint_drain_live(&self, now_rfc3339: &str) -> bool {
+        match &self.maint_drain {
+            Some(deadline) => !crate::freshness_gate::deadline_passed(deadline, now_rfc3339),
+            None => false,
+        }
     }
 }
 
@@ -236,6 +264,7 @@ impl VolumeSyncRecord {
                     reverted_to: None,
                     hot_rejoin: None,
                     hot_rejoin_at: None,
+                    maint_drain: None,
                 })
                 .collect(),
         }
@@ -285,6 +314,7 @@ impl VolumeSyncRecord {
                         reverted_to: None,
                         hot_rejoin: None,
                         hot_rejoin_at: None,
+                        maint_drain: None,
                     })
             })
             .collect();
@@ -366,6 +396,60 @@ impl VolumeSyncRecord {
             }
         }
         transitioned
+    }
+
+    /// The maintenance drain's one record round (the formal model's
+    /// MaintDrain as a single CAS): stale-mark the leg — which is also the
+    /// writer-set exit, see `mark_stale` — and stamp the leased suppression
+    /// mark in the same write. Refuses a leg carrying a hot-rejoin marker
+    /// (it belongs to a window; the roll must wait) and a leg that is the
+    /// volume's only in-sync replica (never drain the last serving leg —
+    /// the barrier upstream should prevent reaching this, the refusal is
+    /// the belt). Idempotent: re-draining refreshes the lease deadline.
+    /// Returns true if anything changed.
+    pub fn drain_for_maintenance(
+        &mut self,
+        lvol_uuid: &str,
+        deadline_rfc3339: &str,
+        now_rfc3339: &str,
+    ) -> bool {
+        let Some(target) = self.replicas.iter().find(|r| r.lvol_uuid == lvol_uuid) else {
+            return false;
+        };
+        if target.hot_rejoin.is_some() {
+            return false;
+        }
+        if target.sync_state == SyncState::InSync {
+            let other_insync = self
+                .replicas
+                .iter()
+                .any(|r| r.lvol_uuid != lvol_uuid && r.sync_state == SyncState::InSync);
+            if !other_insync {
+                return false;
+            }
+        }
+        let mut changed = self.mark_stale(lvol_uuid, "maintenance drain (planned roll)", now_rfc3339);
+        if let Some(rec) = self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+            if rec.maint_drain.as_deref() != Some(deadline_rfc3339) {
+                rec.maint_drain = Some(deadline_rfc3339.to_string());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// MaintClear / lease renewal: clear the suppression mark (deadline =
+    /// None) or extend it. Touches only the mark — the leg's stale state
+    /// stays for the normal hot-rejoin machinery to pick up after the
+    /// clear. Returns true if anything changed.
+    pub fn set_maint_drain(&mut self, lvol_uuid: &str, deadline_rfc3339: Option<&str>) -> bool {
+        match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+            Some(rec) if rec.maint_drain.as_deref() != deadline_rfc3339 => {
+                rec.maint_drain = deadline_rfc3339.map(|s| s.to_string());
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Transition a replica to standby: caught up through `last_epoch` and
@@ -496,6 +580,16 @@ impl VolumeSyncRecord {
         ef_epoch: &str,
         now_rfc3339: &str,
     ) -> bool {
+        // Maintenance belt: a leg under a live drain mark belongs to the
+        // roll, not to a rejoin window — refuse at the record layer so
+        // every intent path (planner-driven or inline) hits one door.
+        if self
+            .replicas
+            .iter()
+            .any(|r| r.lvol_uuid == lvol_uuid && r.maint_drain_live(now_rfc3339))
+        {
+            return false;
+        }
         match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
             Some(rec) if rec.sync_state == SyncState::Standby && rec.hot_rejoin.is_none() => {
                 rec.sync_state = SyncState::Stale;
@@ -2207,5 +2301,97 @@ mod tests {
         let legacy = r#"{"replicas":[{"node_name":"n","node_uid":"u","lvol_uuid":"x","sync_state":"in_sync"}]}"#;
         let parsed = VolumeSyncRecord::from_annotation(legacy).expect("legacy parse");
         assert!(parsed.replicas[0].hot_rejoin.is_none());
+    }
+
+    // ── maintenance drain (the csi-node roll fence) ──────────────────────
+
+    const T_NOW: &str = "2026-07-01T00:00:00Z";
+    const T_FUTURE: &str = "2026-07-01T00:15:00Z";
+    const T_PAST: &str = "2026-06-30T23:00:00Z";
+
+    #[test]
+    fn drain_for_maintenance_is_one_record_round() {
+        let mut r = three_replica_record();
+        assert!(r.drain_for_maintenance("uuid-b", T_FUTURE, T_NOW));
+        let b = r.get("uuid-b").unwrap();
+        // Stale-mark (= writer-set exit) + suppression mark, one write.
+        assert_eq!(b.sync_state, SyncState::Stale);
+        assert_eq!(b.maint_drain.as_deref(), Some(T_FUTURE));
+        assert!(!r.writer_uuids().contains(&"uuid-b".to_string()));
+        // Idempotent re-drive only refreshes the lease.
+        assert!(!r.drain_for_maintenance("uuid-b", T_FUTURE, T_NOW));
+        let later = "2026-07-01T00:30:00Z";
+        assert!(r.drain_for_maintenance("uuid-b", later, T_NOW));
+        assert_eq!(r.get("uuid-b").unwrap().maint_drain.as_deref(), Some(later));
+    }
+
+    #[test]
+    fn drain_refuses_marked_and_last_insync_legs() {
+        let mut r = three_replica_record();
+        // A leg claimed by a hot-rejoin window belongs to the window.
+        r.mark_stale("uuid-b", "leg failed", T_NOW);
+        r.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-1", T_NOW);
+        assert!(!r.drain_for_maintenance("uuid-b", T_FUTURE, T_NOW));
+        assert!(r.get("uuid-b").unwrap().maint_drain.is_none());
+        // Never drain the volume's only in-sync leg (the belt behind the
+        // barrier — the model's last-serving-leg outage).
+        r.mark_stale("uuid-c", "leg failed", T_NOW);
+        assert!(!r.drain_for_maintenance("uuid-a", T_FUTURE, T_NOW));
+        assert_eq!(r.get("uuid-a").unwrap().sync_state, SyncState::InSync);
+    }
+
+    #[test]
+    fn maint_drain_lease_expires_toward_readmission() {
+        let mut r = three_replica_record();
+        r.drain_for_maintenance("uuid-b", T_FUTURE, T_NOW);
+        let b = r.get("uuid-b").unwrap();
+        assert!(b.maint_drain_live(T_NOW));
+        // Past the deadline: the mark reads as absent — SuppressExpire.
+        assert!(!b.maint_drain_live("2026-07-01T01:00:00Z"));
+        // Expired-at-write and garbage deadlines also read as absent
+        // (fail toward readmission, never toward permanent suppression).
+        let mut r2 = three_replica_record();
+        r2.drain_for_maintenance("uuid-b", T_PAST, T_NOW);
+        assert!(!r2.get("uuid-b").unwrap().maint_drain_live(T_NOW));
+        let mut r3 = three_replica_record();
+        r3.drain_for_maintenance("uuid-b", "not-a-timestamp", T_NOW);
+        assert!(!r3.get("uuid-b").unwrap().maint_drain_live(T_NOW));
+    }
+
+    #[test]
+    fn set_maint_drain_clears_and_renews_without_touching_state() {
+        let mut r = three_replica_record();
+        r.drain_for_maintenance("uuid-b", T_FUTURE, T_NOW);
+        assert!(r.set_maint_drain("uuid-b", None));
+        let b = r.get("uuid-b").unwrap();
+        assert!(b.maint_drain.is_none());
+        assert_eq!(b.sync_state, SyncState::Stale); // state untouched: hot rejoin owns readmission
+        assert!(!r.set_maint_drain("uuid-b", None)); // idempotent
+        assert!(r.set_maint_drain("uuid-b", Some(T_FUTURE)));
+    }
+
+    #[test]
+    fn live_maint_mark_refuses_hot_rejoin_intent() {
+        let mut r = three_replica_record();
+        r.drain_for_maintenance("uuid-b", T_FUTURE, T_NOW);
+        // The record-layer belt: a drained leg is the roll's, not a
+        // window target — whatever path tries to mark it.
+        assert!(!r.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-1", T_NOW));
+        assert!(r.get("uuid-b").unwrap().hot_rejoin.is_none());
+        // Once the lease expires, intent is allowed again.
+        assert!(r.mark_hot_rejoin_intent("uuid-b", "epoch-vol1-1", "2026-07-01T01:00:00Z"));
+    }
+
+    #[test]
+    fn maint_mark_survives_serde_and_legacy_records_read_unmarked() {
+        let mut record = three_replica_record();
+        record.drain_for_maintenance("uuid-b", T_FUTURE, T_NOW);
+        let round =
+            VolumeSyncRecord::from_annotation(&record.to_annotation()).expect("round trip");
+        assert_eq!(round, record);
+        let legacy = r#"{"replicas":[{"node_name":"n","node_uid":"u","lvol_uuid":"x","sync_state":"stale"}]}"#;
+        let parsed = VolumeSyncRecord::from_annotation(legacy).expect("legacy parse");
+        assert!(parsed.replicas[0].maint_drain.is_none());
+        assert!(!parsed.replicas[0].maint_drain_live(T_NOW));
     }
 }

@@ -10,6 +10,20 @@ metadata:
   name: flint-csi-node
   namespace: {{ .Release.Namespace }}
 spec:
+{{- if (.Values.maintenance).drainRoll }}
+{{- if eq (toString .Values.maintenance.drainRoll.enabled) "true" }}
+  # Maintenance drain roll (docs/maintenance-drain-csi-node-roll.md):
+  # OnDelete hands pod deletion to the controller's maintenance roller,
+  # which rolls node-by-node — drain the node's serving legs (fence),
+  # delete the pod, wait for FULL readmission (barrier, not pod-ready) —
+  # instead of the k8s RollingUpdate default whose pod-readiness gate the
+  # formal model refutes (a routine roll can take a volume fully down
+  # with zero real failures). Without the roller running, OnDelete means
+  # template changes do NOT restart node pods by themselves.
+  updateStrategy:
+    type: OnDelete
+{{- end }}
+{{- end }}
   selector:
     matchLabels:
       app: flint-csi-node

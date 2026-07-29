@@ -82,6 +82,16 @@ pub const OP_HOT_REJOIN_RECONCILE: &str = "hot-rejoin-reconcile";
 /// arbitration for a fourth claimant). Not wired yet — the expansion work
 /// registers it when ControllerExpandVolume grows a fan-out path.
 pub const OP_EXPAND: &str = "expand";
+/// The maintenance drain (docs/maintenance-drain-csi-node-roll.md): the
+/// roller's one record round + graceful leg removal before a planned
+/// csi-node restart. Resolver class: a roll campaign is operator time —
+/// it must not lose the reacquisition race to catch-up's timer renewal
+/// (the F43 lasso applies to any admission-shaped op), and it never
+/// duplicates maintainer work (the churn that keeps the marked reconcile
+/// maintainer-class does not arise). The barrier upstream guarantees the
+/// volume is fully redundant at drain time, so there is no live resolver
+/// for it to collide with.
+pub const OP_MAINT_DRAIN: &str = "maint-drain";
 
 /// True for both hot-rejoin ops — the epoch scheduler defers a volume's cut
 /// while EITHER holds: the Rejoin window's E_f cut is strict-fresh (EEXIST
@@ -107,7 +117,7 @@ pub enum ClaimClass {
 /// that forgets to register here must not silently gain preemption rights.
 pub fn class_of(op: &str) -> ClaimClass {
     match op {
-        OP_CUTOVER | OP_HOT_REJOIN => ClaimClass::Resolver,
+        OP_CUTOVER | OP_HOT_REJOIN | OP_MAINT_DRAIN => ClaimClass::Resolver,
         _ => ClaimClass::Maintainer,
     }
 }
@@ -534,6 +544,9 @@ mod tests {
         // Per-SITE classing: the marked-dispatch reconcile does catch-up's
         // work and must not preempt it.
         assert_eq!(class_of(OP_HOT_REJOIN_RECONCILE), ClaimClass::Maintainer);
+        // The maintenance drain is operator time — it must not lose the
+        // reacquisition race to catch-up's timer (the F43 lasso shape).
+        assert_eq!(class_of(OP_MAINT_DRAIN), ClaimClass::Resolver);
         // Unregistered ops never gain preemption rights.
         assert_eq!(class_of("mystery-op"), ClaimClass::Maintainer);
         // The epoch scheduler's cut deferral covers BOTH hot-rejoin sites.

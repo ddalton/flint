@@ -89,6 +89,15 @@ spec:
               value: {{ eq (.Values.replication.orchestrators.replicaReplaceEnabled | toString) "false" | ternary "disabled" "enabled" | quote }}
             - name: FLINT_REPLICA_REPLACE_AFTER_SECS
               value: {{ .Values.replication.orchestrators.replicaReplaceAfterSecs | default 600 | quote }}
+            # Maintenance roller (docs/maintenance-drain-csi-node-roll.md):
+            # drives node-by-node csi-node rolls when the DS runs
+            # updateStrategy: OnDelete (maintenance.drainRoll.enabled).
+            # Code default is ON and the roller is inert without OnDelete,
+            # so this env is the explicit record of the chart's choice.
+            # Tuning knobs are env-only: FLINT_MAINT_SUPPRESS_TTL_SECS
+            # (900), FLINT_MAINT_TICK_SECS (60), FLINT_MAINT_DS_NAME.
+            - name: FLINT_MAINT_DRAIN
+              value: {{ eq (toString ((.Values.maintenance).drainRoll).enabled) "true" | ternary "enabled" "disabled" | quote }}
             {{- end }}
             {{- if .Values.dashboard.enabled }}
             - name: ENABLE_DASHBOARD

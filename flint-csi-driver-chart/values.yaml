@@ -166,6 +166,23 @@ replication:
     replicaReplaceEnabled: true
     replicaReplaceAfterSecs: 600
 
+# Maintenance drain roll — the csi-node roll landmine fix
+# (docs/maintenance-drain-csi-node-roll.md). When enabled: the csi-node
+# DaemonSet switches to updateStrategy OnDelete and the controller's
+# maintenance roller drives every template change node-by-node — drain
+# the node's serving legs, delete the pod, wait for FULL readmission
+# (raid-aware barrier, not pod-readiness) — so a plain `helm upgrade`
+# no longer blackholes serving legs one node after another. Formally
+# gated (formal/FlintReplication*.cfg maintenance tranche) and
+# sim-swept; DEFAULT OFF until drill 3.14 validates it live. Note the
+# LOCAL half (consumers co-located with a rolled tgt) is not yet
+# covered — the roller warns per affected volume. Tuning knobs are
+# env-only: FLINT_MAINT_SUPPRESS_TTL_SECS (900), FLINT_MAINT_TICK_SECS
+# (60).
+maintenance:
+  drainRoll:
+    enabled: false
+
 # Storage class configuration
 storageClass:
   create: true

@@ -326,17 +326,27 @@ fn resolve<'a>(
     // class — Tier-1's chase already did the bulk copy, so localization
     // replays the least), else the first stale replica (manual/drill path;
     // its cold chain makes localization long but never incorrect).
+    // A leg under a LIVE maintenance-drain mark belongs to the roll: its
+    // node's tgt is fair game for a planned restart, so it is not a
+    // rejoin candidate until the roller clears the mark (or the mark's
+    // lease expires — an expired mark reads as absent).
+    let maint_now = crate::replica_sync::now_rfc3339();
     let rec = record
         .replicas
         .iter()
-        .filter(|r| r.sync_state == SyncState::Standby)
+        .filter(|r| r.sync_state == SyncState::Standby && !r.maint_drain_live(&maint_now))
         .max_by_key(|r| {
             r.last_epoch
                 .as_deref()
                 .and_then(|e| epoch_seq(volume_id, e))
                 .unwrap_or(0)
         })
-        .or_else(|| record.replicas.iter().find(|r| r.sync_state == SyncState::Stale))
+        .or_else(|| {
+            record
+                .replicas
+                .iter()
+                .find(|r| r.sync_state == SyncState::Stale && !r.maint_drain_live(&maint_now))
+        })
         .ok_or("no stale or standby replica to rejoin")?;
     let (idx, identity) = replicas
         .iter()
@@ -2461,6 +2471,12 @@ pub struct VolumeHotRejoinView {
     /// against it just churns claims every tick (found live on runab,
     /// 2026-07-23); the healer for this state is restage admission.
     pub degraded_direct: bool,
+    /// Some replica carries a LIVE maintenance-drain suppression mark
+    /// (the csi-node roll): the volume is mid-roll, its drained leg's tgt
+    /// is fair game for a planned restart. Precomputed by the tick (the
+    /// planner stays clock-free); an expired mark reads as absent there —
+    /// the lease expiry that un-parks a dead roller's drain.
+    pub maint_suppressed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2512,6 +2528,11 @@ pub fn plan_hot_rejoin(
     if view.rwo_bounce_enabled {
         return HotRejoinDecision::Wait(
             "volume opted into rejoin-bounce — the cutover planner owns it",
+        );
+    }
+    if view.maint_suppressed {
+        return HotRejoinDecision::Wait(
+            "maintenance drain in progress — the roller clears the mark after the node's restart",
         );
     }
     if view.record.replicas.iter().any(|r| r.hot_rejoin.is_some()) {
@@ -2683,6 +2704,10 @@ async fn hot_rejoin_tick(
                 .and_then(|a| a.get(HOT_REJOIN_ANNOTATION))
                 .map(|v| v.eq_ignore_ascii_case("disabled"))
                 .unwrap_or(false),
+            maint_suppressed: {
+                let now = crate::replica_sync::now_rfc3339();
+                record.replicas.iter().any(|r| r.maint_drain_live(&now))
+            },
             record,
         };
 
@@ -3064,6 +3089,35 @@ mod tests {
                                     .push(json!({ "name": base, "is_configured": true }));
                             }
                         }
+                    }
+                    json!({ "result": true })
+                }
+                // Graceful member removal (the maintenance drain). Faithful
+                // to SPDK's slot semantics: the slot is NULLED, not
+                // shrunk — the F48 note documents exactly this shape for
+                // departed members ("SPDK nulls a failed slot's name and
+                // uuid"), and the nulled slot is what makes the drain's
+                // re-drive idempotent (no configured target ⇒ success).
+                "bdev_raid_remove_base_bdev" => {
+                    let base = params["name"].as_str().unwrap().to_string();
+                    let mut found = false;
+                    if let Some(raids) = w.raids.get_mut(&node_s) {
+                        for r in raids.iter_mut() {
+                            for slot in r["base_bdevs_list"].as_array_mut().unwrap() {
+                                if slot["name"].as_str() == Some(base.as_str()) {
+                                    *slot = json!({ "name": Value::Null,
+                                                    "uuid": Value::Null,
+                                                    "is_configured": false });
+                                    found = true;
+                                }
+                            }
+                        }
+                    }
+                    if !found {
+                        return Err(format!(
+                            "bdev_raid_remove_base_bdev: {base}: No such device"
+                        )
+                        .into());
                     }
                     json!({ "result": true })
                 }
@@ -3538,6 +3592,32 @@ mod tests {
         }
         async fn pin_retention(&self, _v: &str, epoch: &str) -> Result<(), RpcError> {
             self.ops.lock().unwrap().push(format!("pin:{}", epoch));
+            Ok(())
+        }
+        async fn record_maint_drain(
+            &self,
+            _v: &str,
+            replica_uuid: &str,
+            deadline_rfc3339: &str,
+        ) -> Result<(), RpcError> {
+            self.ops.lock().unwrap().push(format!("maint-drain:{}", replica_uuid));
+            self.record
+                .lock()
+                .unwrap()
+                .drain_for_maintenance(replica_uuid, deadline_rfc3339, NOW);
+            Ok(())
+        }
+        async fn record_maint_mark(
+            &self,
+            _v: &str,
+            replica_uuid: &str,
+            deadline_rfc3339: Option<&str>,
+        ) -> Result<(), RpcError> {
+            self.ops
+                .lock()
+                .unwrap()
+                .push(format!("maint-mark:{}:{:?}", replica_uuid, deadline_rfc3339));
+            self.record.lock().unwrap().set_maint_drain(replica_uuid, deadline_rfc3339);
             Ok(())
         }
         async fn record_revert(
@@ -5469,6 +5549,7 @@ mod tests {
             rwo_bounce_enabled: false,
             hot_rejoin_disabled: false,
             degraded_direct: false,
+            maint_suppressed: false,
         }
     }
 
@@ -5676,5 +5757,262 @@ mod tests {
             plan_hot_rejoin(&hr_view(record), &cfg),
             HotRejoinDecision::Wait(r) if r.contains("unreadable")
         ));
+    }
+
+    // ── maintenance drain (the csi-node roll fence) ──────────────────────
+    //
+    // The orchestration half of docs/maintenance-drain-csi-node-roll.md,
+    // exercised against the same fakes as the rejoin machinery it must
+    // compose with. The formal model (maintenance tranche) gates the
+    // design; these gate the code.
+
+    const T_MAINT_FUTURE: &str = "2099-01-01T00:00:00Z"; // live vs real now
+    const T_MAINT_PAST: &str = "2000-01-01T00:00:00Z"; // expired vs real now
+
+    fn insync_record() -> VolumeSyncRecord {
+        let mut r = VolumeSyncRecord::initial(&replicas2());
+        r.apply_epoch_cut(&epoch_name(VOL, 1), &["uuid-a".into(), "uuid-b".into()], NOW);
+        r.apply_epoch_cut(&epoch_name(VOL, 2), &["uuid-a".into(), "uuid-b".into()], NOW);
+        r
+    }
+
+    /// staged_world with the serving raid 2/2 — the pre-drain state.
+    fn staged_world_both_legs(rpc: &FakeRpc) {
+        staged_world(rpc);
+        {
+            let mut w = rpc.world.lock().unwrap();
+            if let Some(raids) = w.raids.get_mut("consumer") {
+                raids.clear();
+            }
+        }
+        rpc.seed_raid(
+            "consumer",
+            &format!("raid_{}", VOL),
+            "online",
+            &[
+                (&expected_remote_base_bdev(&sid(VOL), 0), true),
+                (&expected_remote_base_bdev(&sid(VOL), 1), true),
+            ],
+        );
+    }
+
+    fn drain_target_b() -> crate::maint_roll::DrainTarget {
+        crate::maint_roll::DrainTarget {
+            volume_id: VOL.to_string(),
+            replica_uuid: "uuid-b".to_string(),
+            replica_index: 1,
+            live_uuid: "uuid-b".to_string(),
+            consumer: "consumer".to_string(),
+            raid_name: format!("raid_{}", VOL),
+        }
+    }
+
+    #[tokio::test]
+    async fn maint_drain_removes_the_leg_record_first_and_is_idempotent() {
+        let rpc = FakeRpc::new();
+        staged_world_both_legs(&rpc);
+        let store = FakeStore::new(insync_record());
+        crate::maint_roll::drain_leg(&rpc, &store, &drain_target_b(), T_MAINT_FUTURE)
+            .await
+            .unwrap();
+        let rec = store.record();
+        assert_eq!(rec.replicas[1].sync_state, SyncState::Stale);
+        assert!(rec.replicas[1].maint_drain_live(&crate::replica_sync::now_rfc3339()));
+        assert!(!rec.writer_uuids().contains(&"uuid-b".to_string()));
+        let removes = rpc.calls_of("bdev_raid_remove_base_bdev");
+        assert_eq!(removes.len(), 1, "exactly one graceful remove");
+        assert_eq!(removes[0].0, "consumer");
+        assert_eq!(
+            removes[0].1["name"].as_str().unwrap(),
+            expected_remote_base_bdev(&sid(VOL), 1)
+        );
+        // Re-drive (the level-triggered roller): slot already out —
+        // success without a second remove.
+        crate::maint_roll::drain_leg(&rpc, &store, &drain_target_b(), T_MAINT_FUTURE)
+            .await
+            .unwrap();
+        assert_eq!(rpc.calls_of("bdev_raid_remove_base_bdev").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn maint_drain_never_outruns_a_refusing_record() {
+        let rpc = FakeRpc::new();
+        staged_world_both_legs(&rpc);
+        // B mid hot-rejoin: the record refuses the drain — the raid must
+        // not lose the leg (the record-first ordering is load-bearing).
+        let mut rec = insync_record();
+        rec.mark_stale("uuid-b", "leg failed", NOW);
+        rec.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 2), NOW);
+        let store = FakeStore::new(rec);
+        let out =
+            crate::maint_roll::drain_leg(&rpc, &store, &drain_target_b(), T_MAINT_FUTURE).await;
+        assert!(out.is_err(), "drain must refuse a window-claimed leg");
+        assert!(rpc.calls_of("bdev_raid_remove_base_bdev").is_empty());
+        // Same for the last in-sync leg: the belt behind the barrier.
+        let rpc2 = FakeRpc::new();
+        staged_world_both_legs(&rpc2);
+        let mut rec2 = insync_record();
+        rec2.mark_stale("uuid-a", "leg failed", NOW);
+        let store2 = FakeStore::new(rec2);
+        let out2 =
+            crate::maint_roll::drain_leg(&rpc2, &store2, &drain_target_b(), T_MAINT_FUTURE).await;
+        assert!(out2.is_err(), "drain must refuse the last in-sync leg");
+        assert!(rpc2.calls_of("bdev_raid_remove_base_bdev").is_empty());
+    }
+
+    #[tokio::test]
+    async fn catchup_and_rejoin_skip_a_live_maint_mark_until_it_expires() {
+        // Live mark: the drained leg belongs to the roll — catch-up must
+        // not rebuild it, hot rejoin must not admit it.
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        let mut rec = stale_b_record();
+        rec.set_maint_drain("uuid-b", Some(T_MAINT_FUTURE));
+        let store = FakeStore::new(rec);
+        crate::catchup::run_catchup_for_volume(
+            &rpc, &store, VOL, &replicas2(), Some("consumer"), &sim_catchup_cfg(),
+        )
+        .await
+        .unwrap();
+        let ops = store.ops.lock().unwrap().clone();
+        assert!(
+            ops.iter().all(|o| {
+                !o.starts_with("pin:") && !o.starts_with("revert:") && !o.starts_with("standby:")
+            }),
+            "catch-up dispatched a mark-suppressed leg: {ops:?}"
+        );
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(
+            matches!(&out, HotRejoinOutcome::NotEligible(r) if r.contains("no stale or standby")),
+            "rejoin must not target a suppressed leg, got {out:?}"
+        );
+
+        // Expired mark (a dead roller): the lease — the leg is dispatch-
+        // able again. Catch-up's pin is the dispatch evidence (a single
+        // tick in this world converges via the rejoin path, not the
+        // revert), and the rejoin now finds its target.
+        let rpc2 = FakeRpc::new();
+        staged_world(&rpc2);
+        let mut rec2 = stale_b_record();
+        rec2.set_maint_drain("uuid-b", Some(T_MAINT_PAST));
+        let store2 = FakeStore::new(rec2);
+        crate::catchup::run_catchup_for_volume(
+            &rpc2, &store2, VOL, &replicas2(), Some("consumer"), &sim_catchup_cfg(),
+        )
+        .await
+        .unwrap();
+        let ops2 = store2.ops.lock().unwrap().clone();
+        assert!(
+            ops2.iter().any(|o| o.starts_with("pin:")),
+            "an expired mark must read as absent — catch-up never dispatched the leg: {ops2:?}"
+        );
+        let out2 = hot_rejoin_volume(&rpc2, &store2, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(
+            !matches!(&out2, HotRejoinOutcome::NotEligible(r) if r.contains("no stale or standby")),
+            "an expired mark must not hide the rejoin target, got {out2:?}"
+        );
+    }
+
+    #[test]
+    fn plan_waits_under_maintenance_suppression() {
+        let mut view = hr_view(standby_b_record());
+        view.maint_suppressed = true;
+        assert!(matches!(
+            plan_hot_rejoin(&view, &trigger_cfg()),
+            HotRejoinDecision::Wait(r) if r.contains("maintenance")
+        ));
+    }
+
+    /// Acceptance gate 2 of the maintenance-drain design: crash at every
+    /// RPC boundary of the drain flow (drain -> restart -> clear), then a
+    /// re-driven roller plus the normal readmission machinery — every
+    /// boundary converges back to in_sync with no stranded suppression
+    /// mark, no stranded rejoin marker, and tree-shaped chains.
+    #[tokio::test(start_paused = true)]
+    async fn sim_crash_sweep_maint_drain_roll_recovers() {
+        let mut crash_points = 0usize;
+        for k in 0..500i64 {
+            let rpc = FakeRpc::new();
+            staged_world_both_legs(&rpc);
+            let store = FakeStore::new(insync_record());
+            let crash = CrashRpc {
+                inner: &rpc,
+                budget: std::sync::atomic::AtomicI64::new(k),
+            };
+            let flow = async {
+                crate::maint_roll::drain_leg(&crash, &store, &drain_target_b(), T_MAINT_FUTURE)
+                    .await?;
+                // The node's tgt restart is invisible to the fake; then
+                // the roller lifts the mark (MaintClear).
+                store.record_maint_mark(VOL, "uuid-b", None).await?;
+                Ok::<(), crate::catchup::RpcError>(())
+            };
+            let completed = matches!(
+                tokio::time::timeout(Duration::from_secs(600), flow).await,
+                Ok(Ok(()))
+            );
+            if !completed {
+                crash_points += 1;
+            }
+
+            // Recovery: the level-triggered roller re-drives (drain and
+            // clear are both idempotent), then the normal machinery
+            // readmits, unbudgeted — the same ticks the controller runs.
+            let _ = crate::maint_roll::drain_leg(&rpc, &store, &drain_target_b(), T_MAINT_FUTURE)
+                .await;
+            let _ = store.record_maint_mark(VOL, "uuid-b", None).await;
+            let mech = cfg();
+            let rec_cfg = sim_catchup_cfg();
+            for _tick in 0..4 {
+                let record = store.record();
+                reconcile_marked(
+                    &rpc, &store, VOL, &record, &replicas2(), Some("consumer"), &rec_cfg,
+                )
+                .await;
+                let _ = crate::catchup::run_catchup_for_volume(
+                    &rpc, &store, VOL, &replicas2(), Some("consumer"), &rec_cfg,
+                )
+                .await;
+                let _ =
+                    hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &mech).await;
+                let rec = store.record();
+                if rec.replicas[1].sync_state == SyncState::InSync
+                    && rec.replicas.iter().all(|r| r.hot_rejoin.is_none())
+                {
+                    break;
+                }
+            }
+
+            let rec = store.record();
+            assert_eq!(
+                rec.replicas[1].sync_state,
+                SyncState::InSync,
+                "crash at RPC boundary {k}: leg never readmitted (reason {:?})",
+                rec.replicas[1].reason,
+            );
+            assert!(
+                rec.replicas.iter().all(|r| r.hot_rejoin.is_none()),
+                "crash at RPC boundary {k}: stranded hot-rejoin marker",
+            );
+            assert!(
+                rec.replicas.iter().all(|r| r.maint_drain.is_none()),
+                "crash at RPC boundary {k}: stranded maintenance mark",
+            );
+            assert_chains_are_trees(&rpc, &format!("crash at RPC boundary {k}"));
+
+            if completed {
+                assert!(
+                    crash_points >= 2,
+                    "sweep covered only {crash_points} crash points before natural \
+                     completion — the flow shrank or the wrapper miscounts"
+                );
+                return;
+            }
+        }
+        panic!("flow never completed naturally within 500 RPC boundaries");
     }
 }

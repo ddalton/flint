@@ -80,6 +80,13 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "watch", "list", "delete", "update", "create"]
+  # Maintenance roller (docs/maintenance-drain-csi-node-roll.md): reads
+  # the csi-node DaemonSet's updateStrategy and its ControllerRevisions
+  # to tell which pods still run the old template (pod deletion itself is
+  # covered by the pods rule above). Read-only on purpose.
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "controllerrevisions"]
+    verbs: ["get", "list", "watch"]
   # Removed SPDK CRD permissions - no longer needed in minimal state architecture
   # The CSI driver now queries SPDK directly via node agent HTTP APIs
 

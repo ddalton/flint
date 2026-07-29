@@ -191,15 +191,22 @@ least one new F-number.
    covers single-node events; a full roll still needs the
    reset choreography. An upgrade story that survives a plain
    `helm upgrade` remains unshipped.
-   > **DESIGN + FORMAL GATE 2026-07-28** (implementation owed):
+   > **DESIGN + FORMAL GATE 2026-07-28**:
    > `docs/maintenance-drain-csi-node-roll.md` — the maintenance
    > tranche of `FlintReplication.tla`. Three guards, each proven
    > separately necessary by mutation: drain-before-restart, a
    > readmission barrier (pod-ready is NOT it — TLC downs the volume
    > in 5 steps with zero failures on today's semantics), and a leased
-   > suppression mark. P4 detection stays always-on by design. The
-   > un-modelable half (local ublk continuity) is the ublk-recovery
-   > spike + drill 3.14, both owed with the implementation.
+   > suppression mark. P4 detection stays always-on by design.
+   >
+   > **ORCHESTRATION HALF IMPLEMENTED + SIM-SWEPT same day** (945 lib
+   > tests): `maint_roll.rs` roller behind chart flag
+   > `maintenance.drainRoll.enabled` (default OFF) + `FLINT_MAINT_DRAIN`;
+   > suppression mark as a record field (one-CAS drain); exclusion doors
+   > in catch-up/hot-rejoin/intent; `OP_MAINT_DRAIN` Resolver claim;
+   > crash-sweep green. Owed: drill 3.14 (the live gate), the local
+   > half (ublk-recovery spike), and a guarded_destroy verdict for
+   > `bdev_raid_remove_base_bdev`.
 3. **F54 doc §3 residual:** prestage trusts consumer-side bdev *presence*
    over path liveness, so hot-rejoin's first window can lose one ~7-min
    backoff cycle to the F48 zombie racing its own sever (severable only

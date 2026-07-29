@@ -359,6 +359,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Maintenance roller — controller role (the csi-node roll landmine
+    // fix, docs/maintenance-drain-csi-node-roll.md). Inert unless the
+    // csi-node DS runs updateStrategy: OnDelete (the chart's
+    // maintenance.drainRoll.enabled); with it, a template change (helm
+    // upgrade) is rolled node-by-node: drain the node's serving legs
+    // (fence), delete the pod, wait for full readmission (barrier), all
+    // under leased suppression marks (lease). FLINT_MAINT_DRAIN=disabled
+    // to opt out.
+    if run_orchestrators {
+        let mr_cfg = spdk_csi_driver::maint_roll::MaintRollConfig::from_env();
+        if mr_cfg.enabled {
+            let mr_driver = driver.clone();
+            tokio::spawn(async move {
+                spdk_csi_driver::maint_roll::run_maint_roll_orchestrator(mr_driver, mr_cfg).await;
+            });
+        } else {
+            println!("ℹ️ [MAINT] Maintenance roller disabled by FLINT_MAINT_DRAIN=disabled (csi-node rolls fall back to raw DS semantics)");
+        }
+    }
+
     // NFS server-pod liveness reconciler — controller role. Closes the
     // contract's recorded open item: a bare server-pod death used to wait
     // for the next client publish or a cutover trigger; stable clients

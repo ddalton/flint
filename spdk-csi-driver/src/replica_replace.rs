@@ -345,6 +345,7 @@ pub async fn maybe_replace_for_volume(
         reverted_to: None,
         hot_rejoin: None,
         hot_rejoin_at: None,
+        maint_drain: None,
     };
 
     if let Err(e) = swap_identity_on_pv(
@@ -525,6 +526,7 @@ mod tests {
             reverted_to: None,
             hot_rejoin: None,
             hot_rejoin_at: None,
+            maint_drain: None,
         };
         let swapped = build_swapped_record(&record, "u2", new_rec, &new_replicas).unwrap();
         assert_eq!(swapped.replicas.len(), 2);
@@ -553,6 +555,7 @@ mod tests {
             reverted_to: None,
             hot_rejoin: None,
             hot_rejoin_at: None,
+            maint_drain: None,
         };
         assert!(build_swapped_record(&record, "nope", new_rec, &old).is_none());
     }

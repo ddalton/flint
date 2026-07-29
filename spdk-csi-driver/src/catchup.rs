@@ -254,6 +254,34 @@ pub trait CatchupStore: Sync {
         )
         .into())
     }
+    /// Maintenance drain's ONE record round (the formal model's MaintDrain
+    /// as a single CAS): stale-mark the leg — which is also its writer-set
+    /// exit — and stamp the leased suppression mark. Default refuses
+    /// loudly; test fakes implement what they exercise.
+    async fn record_maint_drain(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        deadline_rfc3339: &str,
+    ) -> Result<(), RpcError> {
+        Err(format!(
+            "record_maint_drain({volume_id}, {replica_uuid}, {deadline_rfc3339}): not implemented by this store"
+        )
+        .into())
+    }
+    /// MaintClear / lease renewal: set (`Some` = renew to the new deadline)
+    /// or clear (`None`) a leg's suppression mark, touching nothing else.
+    async fn record_maint_mark(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        deadline_rfc3339: Option<&str>,
+    ) -> Result<(), RpcError> {
+        Err(format!(
+            "record_maint_mark({volume_id}, {replica_uuid}, {deadline_rfc3339:?}): not implemented by this store"
+        )
+        .into())
+    }
     /// Record a common epoch cut on exactly `cut_uuids` (phase-4 final
     /// delta; identity uuids). Appends the epoch, advances current_epoch,
     /// stamps last_epoch on the cut replicas.
@@ -421,6 +449,36 @@ impl CatchupStore for KubeStore {
         let now = replica_sync::now_rfc3339();
         replica_sync::update_sync_record(&self.client, volume_id, |r| {
             r.mark_stale(&uuid, &reason, &now);
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_maint_drain(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        deadline_rfc3339: &str,
+    ) -> Result<(), RpcError> {
+        let (uuid, deadline) = (replica_uuid.to_string(), deadline_rfc3339.to_string());
+        let now = replica_sync::now_rfc3339();
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.drain_for_maintenance(&uuid, &deadline, &now);
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_maint_mark(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        deadline_rfc3339: Option<&str>,
+    ) -> Result<(), RpcError> {
+        let uuid = replica_uuid.to_string();
+        let deadline = deadline_rfc3339.map(|s| s.to_string());
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.set_maint_drain(&uuid, deadline.as_deref());
         })
         .await?;
         Ok(())
@@ -2583,11 +2641,18 @@ pub async fn run_catchup_for_volume(
         record
     };
 
-    for rec in record
-        .replicas
-        .iter()
-        .filter(|r| r.sync_state == SyncState::Standby && r.hot_rejoin.is_none())
-    {
+    // Maintenance drain (the csi-node roll): a leg under a LIVE suppression
+    // mark is mid-roll — its node's tgt is about to go down or is down.
+    // Excluded from the chase and the rebuild until the roller clears the
+    // mark (or its lease expires: an expired mark reads as absent, which
+    // is what lets a dead roller's drain readmit).
+    let maint_now = crate::replica_sync::now_rfc3339();
+
+    for rec in record.replicas.iter().filter(|r| {
+        r.sync_state == SyncState::Standby
+            && r.hot_rejoin.is_none()
+            && !r.maint_drain_live(&maint_now)
+    }) {
         if let Err(e) = chase_standby(
             rpc, store, volume_id, &record, rec, replicas, consumer_node, &raid_name, cfg,
         )
@@ -2605,11 +2670,11 @@ pub async fn run_catchup_for_volume(
         }
     }
 
-    if let Some(rec) = record
-        .replicas
-        .iter()
-        .find(|r| r.sync_state == SyncState::Stale && r.hot_rejoin.is_none())
-    {
+    if let Some(rec) = record.replicas.iter().find(|r| {
+        r.sync_state == SyncState::Stale
+            && r.hot_rejoin.is_none()
+            && !r.maint_drain_live(&maint_now)
+    }) {
         if let Err(e) = catchup_stale(
             rpc, store, volume_id, &record, rec, replicas, consumer_node, &raid_name, cfg,
         )
