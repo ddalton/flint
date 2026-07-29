@@ -193,6 +193,31 @@ impl std::fmt::Display for StagedHandle {
     }
 }
 
+/// Which staging domain a volume's SERVING raid was assembled under — the
+/// per-volume decision S2's in-place RWX admission makes explicit. An RWX
+/// volume's raid assembles under the BACKING handle on the NFS server's
+/// node (`raid_nfs-server-<id>`); an RWO volume's under the user handle on
+/// its consumer (`raid_<id>`). Carried by the admission/reconcile configs
+/// (default `User`, so every existing RWO path is unchanged) instead of a
+/// parameter on every call, and converted to a handle in exactly one
+/// place ([`StagedDomain::handle_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StagedDomain {
+    #[default]
+    User,
+    NfsBacking,
+}
+
+impl StagedDomain {
+    /// The staged handle of this domain for a volume.
+    pub fn handle_for(&self, sid: &StorageId) -> StagedHandle {
+        match self {
+            StagedDomain::User => StagedHandle::user(sid),
+            StagedDomain::NfsBacking => StagedHandle::backing_for(sid),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Role + VolumeRef
 // ---------------------------------------------------------------------------

@@ -189,6 +189,12 @@ pub struct CutoverConfig {
     /// unstage so even a same-node landing restages).
     pub escalation: bool,
     pub taint_ttl: Duration,
+    /// S2: converged-standby ADMISSION on RWX volumes belongs to the
+    /// in-place hot-rejoin window, not the bounce — this planner keeps
+    /// only the data-path-lost (relocation) arm for them. Mirrors
+    /// FLINT_RWX_INPLACE_ADMISSION (default ON); with the kill switch
+    /// off, the admission bounce returns.
+    pub rwx_inplace: bool,
 }
 
 impl Default for CutoverConfig {
@@ -200,6 +206,7 @@ impl Default for CutoverConfig {
             detach_timeout: Duration::from_secs(120),
             escalation: true,
             taint_ttl: Duration::from_secs(120),
+            rwx_inplace: true,
         }
     }
 }
@@ -237,6 +244,10 @@ impl CutoverConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(d.taint_ttl),
+            // One env var, one parse — both planners must read the same
+            // switch or admissions race (both are Resolver-class claims,
+            // first-come between them).
+            rwx_inplace: crate::hot_rejoin::rwx_inplace_admission_enabled(),
         }
     }
 }
@@ -346,6 +357,15 @@ pub fn plan_cutover(view: &VolumeCutoverView, cfg: &CutoverConfig) -> CutoverDec
     if let Some(nfs) = &view.nfs_pod {
         if !nfs.pvc_backed {
             return CutoverDecision::Wait("NFS pod is not PVC-backed — nothing to reassemble");
+        }
+        // S2: admission of a converged standby is the in-place window's
+        // job (hot_rejoin, on the NFS server's node) — the bounce here
+        // survives only for relocation (the data_path_lost arm above)
+        // and as the kill-switch fallback.
+        if cfg.rwx_inplace {
+            return CutoverDecision::Wait(
+                "converged standby on an RWX volume — in-place admission owns it (FLINT_RWX_INPLACE_ADMISSION)",
+            );
         }
         return CutoverDecision::BounceNfsPod;
     }
@@ -1209,6 +1229,7 @@ mod tests {
             detach_timeout: Duration::from_secs(120),
             escalation: true,
             taint_ttl: Duration::from_secs(120),
+            rwx_inplace: true,
         }
     }
 
@@ -1283,13 +1304,28 @@ mod tests {
     }
 
     #[test]
-    fn plan_bounces_pvc_backed_nfs_pod() {
-        assert_eq!(plan_cutover(&nfs_view(ready_record()), &cfg()), CutoverDecision::BounceNfsPod);
+    fn plan_defers_rwx_admission_to_the_inplace_window() {
+        // S2: a converged standby on an RWX volume is the in-place
+        // hot-rejoin window's job — this planner keeps only the
+        // data-path-lost (relocation) arm and the kill-switch fallback.
+        assert!(matches!(
+            plan_cutover(&nfs_view(ready_record()), &cfg()),
+            CutoverDecision::Wait(r) if r.contains("in-place admission")
+        ));
+    }
+
+    #[test]
+    fn plan_bounces_pvc_backed_nfs_pod_when_inplace_disabled() {
+        // The FLINT_RWX_INPLACE_ADMISSION kill switch restores the
+        // pre-S2 Tier-1 admission bounce.
+        let mut c = cfg();
+        c.rwx_inplace = false;
+        assert_eq!(plan_cutover(&nfs_view(ready_record()), &c), CutoverDecision::BounceNfsPod);
 
         // emptyDir-backed NFS pod has no raid to reassemble.
         let mut view = nfs_view(ready_record());
         view.nfs_pod.as_mut().unwrap().pvc_backed = false;
-        assert!(matches!(plan_cutover(&view, &cfg()), CutoverDecision::Wait(_)));
+        assert!(matches!(plan_cutover(&view, &c), CutoverDecision::Wait(_)));
     }
 
     #[test]

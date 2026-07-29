@@ -147,8 +147,12 @@ least one new F-number.
 > claim arbitration is now formally verified (`formal/`,
 > `AdmissionNotStarved`; the F43 mutation rediscovers the starvation
 > lasso and proves the fix had to be priority, not fairness).
-> Implementation + drill 3.12 next cycle; kill switch
-> `FLINT_RWX_INPLACE_ADMISSION`.
+> **IMPLEMENTED same day** (StagedDomain in identity.rs; window +
+> reconcile family domain-routed; cutover admission arm deferred to the
+> window, bounce = relocation only; RWX consumer = backing PV's VA; 926
+> lib tests incl. the RWX-domain crash sweep; musl clean). Kill switch
+> `FLINT_RWX_INPLACE_ADMISSION` (default ON). Live gate owed: drill 3.12
+> next campaign.
 - **This is the availability headline number** for any database-on-RWX
   story; durability is already there.
 - **Gate:** 3.6e stall budget. Set an explicit target (e.g. ≤60s) rather

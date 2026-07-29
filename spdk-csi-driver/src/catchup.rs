@@ -571,6 +571,12 @@ pub struct CatchupConfig {
     /// retry back-off: by then the owning process has committed, unwound,
     /// or died).
     pub reconcile_grace: Duration,
+    /// Which staging domain the volume's SERVING raid lives under (S2):
+    /// `User` for RWO (default — every existing path unchanged),
+    /// `NfsBacking` for an RWX volume's raid on its NFS server node. Set
+    /// per volume by the orchestrator ticks; not an env knob. Consumed by
+    /// the hot-rejoin reconcile family (adopt/scrub/orphaned-quiesce).
+    pub staged_domain: crate::identity::StagedDomain,
 }
 
 impl Default for CatchupConfig {
@@ -581,6 +587,7 @@ impl Default for CatchupConfig {
             poll_interval: Duration::from_secs(2),
             full_build: true,
             reconcile_grace: Duration::from_secs(300),
+            staged_domain: crate::identity::StagedDomain::User,
         }
     }
 }
@@ -618,6 +625,7 @@ impl CatchupConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(d.reconcile_grace),
+            staged_domain: d.staged_domain,
         }
     }
 }
@@ -2713,9 +2721,20 @@ async fn orchestrator_tick(
             continue;
         };
         let driver = driver.clone();
-        let cfg = cfg.clone();
+        let mut cfg = cfg.clone();
         let replace_cfg = replace_cfg.clone();
-        let consumer = consumers.get(&volume_id).cloned();
+        // The data-path node: the record-home PV's own VA for RWO; for
+        // RWX the raid serves under the synthetic backing PV on the NFS
+        // server's node (the parent PV's VA is the NFS *client*). Used
+        // for fencing-aware source selection and — S2 — the hot-rejoin
+        // reconcile family's raid operations.
+        let consumer = if replica_sync::is_rwx_pv(&pv) {
+            cfg.staged_domain = crate::identity::StagedDomain::NfsBacking;
+            let sid = crate::identity::StorageId::of_handle(&volume_id);
+            consumers.get(&crate::identity::backing_pv_name(sid.as_str())).cloned()
+        } else {
+            consumers.get(&volume_id).cloned()
+        };
         // F39 boundedness: this task carries NO wall-clock watchdog by
         // design. Every await inside is individually bounded (SPDK RPC
         // deadlines, kube client timeouts, HTTP client timeouts) and the one

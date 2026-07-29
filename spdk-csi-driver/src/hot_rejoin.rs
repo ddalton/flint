@@ -110,6 +110,12 @@ pub struct HotRejoinConfig {
     /// FLINT_HOT_REJOIN_INLINE_DELTA_MAX_MIB, default 64; 0 disables the
     /// inline path entirely.
     pub inline_delta_max: u64,
+    /// Which staging domain the volume's SERVING raid lives under (S2):
+    /// `User` for RWO (the default — every existing path unchanged),
+    /// `NfsBacking` for an RWX volume's raid on its NFS server node
+    /// (`raid_nfs-server-<id>`). Set per volume by the orchestrator tick;
+    /// not an env knob.
+    pub staged_domain: crate::identity::StagedDomain,
 }
 
 impl Default for HotRejoinConfig {
@@ -122,6 +128,7 @@ impl Default for HotRejoinConfig {
             poll_interval: Duration::from_millis(500),
             window_target: Duration::from_secs(2),
             inline_delta_max: 64 * 1024 * 1024,
+            staged_domain: crate::identity::StagedDomain::User,
         }
     }
 }
@@ -151,8 +158,26 @@ impl HotRejoinConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(|mib| mib * 1024 * 1024)
                 .unwrap_or(d.inline_delta_max),
+            staged_domain: d.staged_domain,
         }
     }
+}
+
+/// S2 kill switch — pure core (the F43 lesson: env-free logic + a thin
+/// wrapper, so tests never mutate process env). Default ON: only an
+/// explicit disabled/false/0 turns in-place RWX admission off and returns
+/// admission to the Tier-1 NFS bounce.
+pub fn rwx_inplace_admission(setting: Option<&str>) -> bool {
+    !setting
+        .map(|v| {
+            v.eq_ignore_ascii_case("disabled") || v.eq_ignore_ascii_case("false") || v == "0"
+        })
+        .unwrap_or(false)
+}
+
+/// Thin env wrapper over [`rwx_inplace_admission`].
+pub fn rwx_inplace_admission_enabled() -> bool {
+    rwx_inplace_admission(std::env::var("FLINT_RWX_INPLACE_ADMISSION").ok().as_deref())
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +314,7 @@ fn resolve<'a>(
     record: &'a VolumeSyncRecord,
     replicas: &'a [ReplicaInfo],
     consumer: &'a str,
+    staged_domain: crate::identity::StagedDomain,
 ) -> Result<Topology<'a>, &'static str> {
     // One rejoin per volume at a time: the E_f export NQN is per-VOLUME, so
     // a second concurrent window would collide with the first's transport
@@ -335,7 +361,10 @@ fn resolve<'a>(
     let sid = StorageId::of_handle(volume_id);
     Ok(Topology {
         volume_id,
-        raid_name: crate::identity::raid_name(&crate::identity::StagedHandle::user(&sid)),
+        // The serving raid's name comes from the domain it was STAGED
+        // under — the user handle for RWO, the backing handle for an RWX
+        // volume's raid on its NFS server node (S2 in-place admission).
+        raid_name: crate::identity::raid_name(&staged_domain.handle_for(&sid)),
         sid,
         consumer,
         rec,
@@ -371,7 +400,7 @@ pub async fn hot_rejoin_volume(
         // problems than a fast rejoin.
         return Ok(HotRejoinOutcome::NotEligible("no epoch history"));
     }
-    let topo = match resolve(volume_id, &record, replicas, consumer) {
+    let topo = match resolve(volume_id, &record, replicas, consumer, cfg.staged_domain) {
         Ok(t) => t,
         Err(why) => return Ok(HotRejoinOutcome::NotEligible(why)),
     };
@@ -1588,8 +1617,11 @@ pub async fn reconcile_marked(
     cfg: &CatchupConfig,
 ) {
     // The one wrapper→inner conversion for the whole reconcile family —
-    // callers (the two orchestrator ticks) hold the k8s PV name.
+    // callers (the two orchestrator ticks) hold the k8s PV name. The
+    // serving raid's staged domain rides in on the config (S2: backing
+    // for RWX, user for RWO).
     let sid = StorageId::of_handle(volume_id);
+    let staged = cfg.staged_domain.handle_for(&sid);
     for rec in record.replicas.iter().filter(|r| r.hot_rejoin.is_some()) {
         // F50: a marker younger than the grace may belong to a LIVE window
         // in ANOTHER controller process (helm rolling-upgrade overlap; the
@@ -1615,11 +1647,14 @@ pub async fn reconcile_marked(
         }
         let outcome = match rec.sync_state {
             SyncState::Stale => {
-                adopt_or_scrub(rpc, store, &sid, record, rec, replicas, consumer_node).await
+                adopt_or_scrub(rpc, store, &sid, &staged, record, rec, replicas, consumer_node)
+                    .await
             }
             SyncState::Standby => {
-                resume_standby(rpc, store, &sid, record, rec, replicas, consumer_node, cfg)
-                    .await
+                resume_standby(
+                    rpc, store, &sid, &staged, record, rec, replicas, consumer_node, cfg,
+                )
+                .await
             }
             // mark_in_sync clears the marker — an in_sync marked replica is
             // a record written by a newer build or a partial CAS; clear it.
@@ -1653,9 +1688,11 @@ pub async fn reconcile_marked(
 
 /// Is the rejoined head configured in the consumer's raid, and does it
 /// belong to this replica's `_hr` head lvol?
+#[allow(clippy::too_many_arguments)]
 async fn live_head_leg(
     rpc: &dyn CatchupRpc,
     volume_id: &StorageId,
+    staged: &crate::identity::StagedHandle,
     idx: usize,
     identity: &ReplicaInfo,
     consumer: Option<&str>,
@@ -1663,7 +1700,7 @@ async fn live_head_leg(
 ) -> Result<Option<String>, RpcError> {
     let Some(consumer) = consumer else { return Ok(None) };
     let expected = expected_remote_base_bdev(volume_id, idx);
-    let raid_name = crate::identity::raid_name(&crate::identity::StagedHandle::user(volume_id));
+    let raid_name = crate::identity::raid_name(staged);
     let leg_configured = get_raids(rpc, consumer).await?.iter().any(|r| {
         r.get("name").and_then(|n| n.as_str()) == Some(raid_name.as_str())
             && r.get("base_bdevs_list")
@@ -1740,10 +1777,11 @@ async fn live_head_leg(
 async fn release_orphaned_quiesce(
     rpc: &dyn CatchupRpc,
     volume_id: &StorageId,
+    staged: &crate::identity::StagedHandle,
     consumer_node: Option<&str>,
 ) {
     let Some(consumer) = consumer_node else { return };
-    let raid_name = crate::identity::raid_name(&crate::identity::StagedHandle::user(volume_id));
+    let raid_name = crate::identity::raid_name(staged);
     match rpc
         .spdk_rpc(
             consumer,
@@ -1765,10 +1803,12 @@ async fn release_orphaned_quiesce(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn adopt_or_scrub(
     rpc: &dyn CatchupRpc,
     store: &dyn CatchupStore,
     volume_id: &StorageId,
+    staged: &crate::identity::StagedHandle,
     record: &VolumeSyncRecord,
     rec: &ReplicaSyncRecord,
     replicas: &[ReplicaInfo],
@@ -1777,7 +1817,7 @@ async fn adopt_or_scrub(
     // First move, before any inspection: if the window died inside its
     // quiesced span, every second of decode work is a second of guest
     // write stall.
-    release_orphaned_quiesce(rpc, volume_id, consumer_node).await;
+    release_orphaned_quiesce(rpc, volume_id, staged, consumer_node).await;
 
     let ef = rec.hot_rejoin.clone().expect("caller filters on marker");
     let Some((idx, identity)) = replicas
@@ -1791,7 +1831,7 @@ async fn adopt_or_scrub(
     };
 
     if let Some(head_uuid) =
-        live_head_leg(rpc, volume_id, idx, identity, consumer_node, &ef).await?
+        live_head_leg(rpc, volume_id, staged, idx, identity, consumer_node, &ef).await?
     {
         let cut_uuids: Vec<String> = record
             .replicas
@@ -1907,6 +1947,7 @@ async fn resume_standby(
     rpc: &dyn CatchupRpc,
     store: &dyn CatchupStore,
     volume_id: &StorageId,
+    staged: &crate::identity::StagedHandle,
     record: &VolumeSyncRecord,
     rec: &ReplicaSyncRecord,
     replicas: &[ReplicaInfo],
@@ -1924,12 +1965,13 @@ async fn resume_standby(
             .await;
     };
 
-    if live_head_leg(rpc, volume_id, idx, identity, consumer_node, &ef)
+    if live_head_leg(rpc, volume_id, staged, idx, identity, consumer_node, &ef)
         .await?
         .is_some()
     {
         let hr_cfg = HotRejoinConfig {
             poll_interval: cfg.poll_interval,
+            staged_domain: cfg.staged_domain,
             ..HotRejoinConfig::default()
         };
         return localize(
@@ -2350,6 +2392,11 @@ pub struct HotRejoinTriggerConfig {
     /// volume is retried — every attempt costs the consumer a quiesce.
     /// FLINT_HOT_REJOIN_RETRY_SECS, default 300.
     pub retry_backoff: Duration,
+    /// S2: RWX volumes admit their caught-up standbys IN PLACE via the
+    /// hot-rejoin window on the NFS server's node — no Tier-1 pod bounce.
+    /// FLINT_RWX_INPLACE_ADMISSION, default ON; disabling returns RWX
+    /// admission to the cutover planner's bounce.
+    pub rwx_inplace: bool,
 }
 
 impl Default for HotRejoinTriggerConfig {
@@ -2358,6 +2405,7 @@ impl Default for HotRejoinTriggerConfig {
             enabled: true,
             max_lag: 1,
             retry_backoff: Duration::from_secs(300),
+            rwx_inplace: true,
         }
     }
 }
@@ -2384,6 +2432,7 @@ impl HotRejoinTriggerConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(d.retry_backoff),
+            rwx_inplace: rwx_inplace_admission_enabled(),
         }
     }
 }
@@ -2442,11 +2491,17 @@ pub fn plan_hot_rejoin(
     let vol = &view.volume_id;
     if view.nfs_backing {
         return HotRejoinDecision::Wait(
-            "synthetic RWX backing PV — the cutover planner owns its bounce",
+            "synthetic RWX backing PV — the record-home (parent) PV owns admission",
         );
     }
-    if view.rwx {
-        return HotRejoinDecision::Wait("RWX volume — the Tier-1 NFS bounce owns reassembly");
+    // S2: with in-place admission ON (the default), RWX volumes admit via
+    // the window on the NFS server's node like any RWO consumer — no
+    // bounce, no fh-identity churn, no F48 two-head phase. The kill
+    // switch returns them to the cutover planner's Tier-1 bounce.
+    if view.rwx && !cfg.rwx_inplace {
+        return HotRejoinDecision::Wait(
+            "RWX volume — in-place admission disabled (FLINT_RWX_INPLACE_ADMISSION); the Tier-1 NFS bounce owns reassembly",
+        );
     }
     if view.degraded_direct {
         return HotRejoinDecision::Wait("direct-serve (no raid layer): the caught-up standby admits at the next restage (final-delta admission), not via hot-rejoin");
@@ -2601,10 +2656,21 @@ async fn hot_rejoin_tick(
         };
 
         let annotations = pv.metadata.annotations.as_ref();
+        let rwx = crate::replica_sync::is_rwx_pv(&pv);
+        // The node holding the SERVING raid: the record-home PV's own VA
+        // for RWO; for RWX the raid lives under the synthetic backing PV
+        // on the NFS server's node — the parent PV's VA is the NFS
+        // *client*, the wrong node for every window operation (S2).
+        let consumer = if rwx {
+            let sid = crate::identity::StorageId::of_handle(&volume_id);
+            consumers.get(&crate::identity::backing_pv_name(sid.as_str())).cloned()
+        } else {
+            consumers.get(&volume_id).cloned()
+        };
         let view = VolumeHotRejoinView {
             volume_id: volume_id.clone(),
-            consumer: consumers.get(&volume_id).cloned(),
-            rwx: crate::replica_sync::is_rwx_pv(&pv),
+            consumer,
+            rwx,
             nfs_backing: crate::replica_sync::nfs_backing_parent(&pv).is_some(),
             degraded_direct: annotations
                 .and_then(|a| a.get("flint.io/degraded-direct"))
@@ -2649,6 +2715,10 @@ async fn hot_rejoin_tick(
             tokio::spawn(async move {
                 let _claim = claim;
                 let store = crate::catchup::KubeStore { client: driver.kube_client.clone() };
+                let mut rec_cfg = CatchupConfig::from_env();
+                if view.rwx {
+                    rec_cfg.staged_domain = crate::identity::StagedDomain::NfsBacking;
+                }
                 reconcile_marked(
                     driver.as_ref(),
                     &store,
@@ -2656,7 +2726,7 @@ async fn hot_rejoin_tick(
                     &view.record,
                     &replicas,
                     view.consumer.as_deref(),
-                    &CatchupConfig::from_env(),
+                    &rec_cfg,
                 )
                 .await;
             });
@@ -2706,6 +2776,9 @@ async fn hot_rejoin_tick(
                 let backoff = backoff.clone();
                 let inline_deny = inline_deny.clone();
                 let mut mech_cfg = HotRejoinConfig::from_env();
+                if view.rwx {
+                    mech_cfg.staged_domain = crate::identity::StagedDomain::NfsBacking;
+                }
                 let inline_denied = inline_deny
                     .lock()
                     .expect("hot-rejoin inline-deny lock poisoned")
@@ -3634,6 +3707,7 @@ mod tests {
             // Existing tests exercise the esnap window; the inline tests
             // opt in explicitly.
             inline_delta_max: 0,
+            staged_domain: crate::identity::StagedDomain::User,
         }
     }
 
@@ -3679,6 +3753,28 @@ mod tests {
         rpc.seed_raid(
             "consumer",
             &format!("raid_{}", VOL),
+            "online",
+            &[(&expected_remote_base_bdev(&sid(VOL), 0), true)],
+        );
+    }
+
+    /// The S2 world: identical replicas/epochs, but the SERVING raid is the
+    /// RWX volume's — staged under the BACKING handle on the NFS server's
+    /// node ("consumer" here plays that node).
+    fn staged_world_rwx(rpc: &FakeRpc) {
+        staged_world(rpc);
+        let backing =
+            crate::identity::raid_name(&crate::identity::StagedHandle::backing_for(&sid(VOL)));
+        {
+            let mut w = rpc.world.lock().unwrap();
+            if let Some(raids) = w.raids.get_mut("consumer") {
+                let user = format!("raid_{}", VOL);
+                raids.retain(|r| r.get("name").and_then(|n| n.as_str()) != Some(user.as_str()));
+            }
+        }
+        rpc.seed_raid(
+            "consumer",
+            &backing,
             "online",
             &[(&expected_remote_base_bdev(&sid(VOL), 0), true)],
         );
@@ -4002,18 +4098,42 @@ mod tests {
     /// did its exact stated job: bounding a corrupted fake of reality.
     #[tokio::test(start_paused = true)]
     async fn sim_crash_sweep_every_rpc_boundary_recovers() {
+        crash_sweep_body(staged_world, cfg(), sim_catchup_cfg()).await
+    }
+
+    /// S2 acceptance gate 2: the SAME sweep over the in-place RWX
+    /// admission flow — the serving raid lives under the BACKING domain
+    /// (`raid_nfs-server-<id>`) on the NFS server's node, and both the
+    /// window and the recovery ticks route through `staged_domain =
+    /// NfsBacking`. Every RPC boundary must recover exactly as the RWO
+    /// sweep does; a domain leak anywhere in the window/reconcile family
+    /// shows up here as "raid not online on consumer" or a stranded
+    /// marker.
+    #[tokio::test(start_paused = true)]
+    async fn sim_crash_sweep_rwx_backing_domain_recovers() {
+        let mut mech = cfg();
+        mech.staged_domain = crate::identity::StagedDomain::NfsBacking;
+        let mut rec_cfg = sim_catchup_cfg();
+        rec_cfg.staged_domain = crate::identity::StagedDomain::NfsBacking;
+        crash_sweep_body(staged_world_rwx, mech, rec_cfg).await
+    }
+
+    async fn crash_sweep_body(
+        seed: fn(&FakeRpc),
+        mech_cfg: HotRejoinConfig,
+        rec_cfg: crate::catchup::CatchupConfig,
+    ) {
         let mut crash_points = 0usize;
         for k in 0..500i64 {
             let rpc = FakeRpc::new();
-            staged_world(&rpc);
+            seed(&rpc);
             let store = FakeStore::new(stale_b_record());
             let crash = CrashRpc {
                 inner: &rpc,
                 budget: std::sync::atomic::AtomicI64::new(k),
             };
             let replicas = replicas2();
-            let hcfg = cfg();
-            let flow = hot_rejoin_volume(&crash, &store, VOL, &replicas, "consumer", &hcfg);
+            let flow = hot_rejoin_volume(&crash, &store, VOL, &replicas, "consumer", &mech_cfg);
             let completed =
                 tokio::time::timeout(Duration::from_secs(600), flow).await.is_ok();
             if !completed {
@@ -4030,17 +4150,16 @@ mod tests {
             for _tick in 0..4 {
                 let record = store.record();
                 reconcile_marked(
-                    &rpc, &store, VOL, &record, &replicas2(), Some("consumer"),
-                    &sim_catchup_cfg(),
+                    &rpc, &store, VOL, &record, &replicas2(), Some("consumer"), &rec_cfg,
                 )
                 .await;
                 let _ = crate::catchup::run_catchup_for_volume(
-                    &rpc, &store, VOL, &replicas2(), Some("consumer"),
-                    &sim_catchup_cfg(),
+                    &rpc, &store, VOL, &replicas2(), Some("consumer"), &rec_cfg,
                 )
                 .await;
                 if let Ok(HotRejoinOutcome::Rejoined { .. }) =
-                    hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg()).await
+                    hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &mech_cfg)
+                        .await
                 {
                     rejoined = true;
                 }
@@ -4076,6 +4195,74 @@ mod tests {
             }
         }
         panic!("flow never completed naturally within 500 RPC boundaries");
+    }
+
+    /// S2: the window admits into the BACKING-domain raid when told the
+    /// volume serves under it — and the domain is load-bearing in BOTH
+    /// directions: a user-domain window against the same world must fall
+    /// out at the raid-online gate, never touch the raid, and a
+    /// backing-domain window against an RWO world likewise. A silent
+    /// domain leak anywhere in resolve/window would break one of these.
+    #[tokio::test]
+    async fn rwx_inplace_window_admits_on_the_backing_raid() {
+        let rpc = FakeRpc::new();
+        staged_world_rwx(&rpc);
+        let store = FakeStore::new(stale_b_record());
+
+        // Wrong domain (RWO default) against the RWX world: no raid.
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, HotRejoinOutcome::NotEligible(r) if r.contains("raid not online")),
+            "user-domain window must not find the backing raid, got {:?}",
+            out
+        );
+        assert!(rpc.calls_of("bdev_raid_quiesce").is_empty(), "no quiesce without a raid");
+
+        // Right domain: full window, flip, localize — on the backing raid.
+        let mut mech = cfg();
+        mech.staged_domain = crate::identity::StagedDomain::NfsBacking;
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &mech)
+            .await
+            .unwrap();
+        match out {
+            HotRejoinOutcome::Rejoined { localized, .. } => assert!(localized),
+            other => panic!("expected Rejoined, got {:?}", other),
+        }
+        let backing =
+            crate::identity::raid_name(&crate::identity::StagedHandle::backing_for(&sid(VOL)));
+        let quiesced: Vec<_> = rpc
+            .calls_of("bdev_raid_quiesce")
+            .into_iter()
+            .filter_map(|(_, p)| p.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(
+            !quiesced.is_empty() && quiesced.iter().all(|n| n == &backing),
+            "every quiesce must target the backing raid, got {:?}",
+            quiesced
+        );
+        let adds: Vec<_> = rpc
+            .calls_of("bdev_raid_add_base_bdev")
+            .into_iter()
+            .filter_map(|(_, p)| p.get("raid_bdev").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        assert!(
+            !adds.is_empty() && adds.iter().all(|n| n == &backing),
+            "the add must target the backing raid, got {:?}",
+            adds
+        );
+    }
+
+    /// S2 kill switch: default ON, opt-out semantics only.
+    #[test]
+    fn rwx_inplace_kill_switch_defaults_on_opt_out_semantics() {
+        assert!(rwx_inplace_admission(None));
+        assert!(rwx_inplace_admission(Some("enabled")));
+        assert!(rwx_inplace_admission(Some("anything")));
+        assert!(!rwx_inplace_admission(Some("disabled")));
+        assert!(!rwx_inplace_admission(Some("FALSE")));
+        assert!(!rwx_inplace_admission(Some("0")));
     }
 
     /// P3: one layer below the name check, `spdk_bdev_nvme_create` reports
@@ -4461,7 +4648,15 @@ mod tests {
         let store = FakeStore::new(record.clone());
 
         resume_standby(
-            &rpc, &store, &sid(VOL), &record, &rec, &replicas2(), Some("consumer"), &catchup_cfg(),
+            &rpc,
+            &store,
+            &sid(VOL),
+            &crate::identity::StagedHandle::user(&sid(VOL)),
+            &record,
+            &rec,
+            &replicas2(),
+            Some("consumer"),
+            &catchup_cfg(),
         )
         .await
         .unwrap();
@@ -5260,6 +5455,7 @@ mod tests {
             enabled: true,
             max_lag: 1,
             retry_backoff: Duration::from_secs(300),
+            rwx_inplace: true,
         }
     }
 
@@ -5377,7 +5573,9 @@ mod tests {
         record.mark_stale("uuid-c", "leg failed", NOW);
         record.mark_standby("uuid-c", &epoch_name(VOL, 3), "chased", NOW);
 
-        let topo = resolve(VOL, &record, &replicas, "consumer").expect("resolves");
+        let topo =
+            resolve(VOL, &record, &replicas, "consumer", crate::identity::StagedDomain::User)
+                .expect("resolves");
         assert_eq!(topo.rec.lvol_uuid, "uuid-c");
         assert_eq!(topo.idx, 2);
     }
@@ -5400,15 +5598,23 @@ mod tests {
             HotRejoinDecision::Wait(r) if r.contains("direct-serve")
         ));
 
-        // Synthetic RWX backing PV: cutover owns its bounce.
+        // Synthetic RWX backing PV: never a rejoin target — the parent
+        // (record-home) PV owns admission.
         let mut v = hr_view(standby_b_record());
         v.nfs_backing = true;
         assert!(matches!(plan_hot_rejoin(&v, &cfg), HotRejoinDecision::Wait(r) if r.contains("backing")));
 
-        // RWX parent: Tier-1 NFS bounce.
+        // RWX parent, S2 default: in-place admission — the window runs on
+        // the NFS server's node like any consumer.
         let mut v = hr_view(standby_b_record());
         v.rwx = true;
-        assert!(matches!(plan_hot_rejoin(&v, &cfg), HotRejoinDecision::Wait(r) if r.contains("RWX")));
+        assert_eq!(plan_hot_rejoin(&v, &cfg), HotRejoinDecision::Rejoin);
+
+        // The FLINT_RWX_INPLACE_ADMISSION kill switch returns RWX to the
+        // Tier-1 bounce.
+        let mut off = cfg.clone();
+        off.rwx_inplace = false;
+        assert!(matches!(plan_hot_rejoin(&v, &off), HotRejoinDecision::Wait(r) if r.contains("RWX")));
 
         // The surgical opt-out.
         let mut v = hr_view(standby_b_record());

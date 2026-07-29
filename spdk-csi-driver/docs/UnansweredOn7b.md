@@ -69,6 +69,15 @@ until an operator turns the mechanism on cluster-wide.
   near-transparent) and volumes that opted into the disruptive bounce stay
   on Tier-1; everything else — the databases that can't restart and won't
   reschedule — gets synchronous redundancy back with zero per-volume config.
+  > **Superseded for RWX (S2, 2026-07-28):** the "Tier-1 bounce is
+  > near-transparent" premise did not survive the campaigns — the bounce
+  > costs a ~237s admission stall, carries the F55 truncated-reply class
+  > (bounded by DrainGate, not removed), and opens the F48 two-head
+  > phase. RWX now admits IN PLACE via the hot-rejoin window on the NFS
+  > server's node (`docs/s2-bounce-free-rwx-admission.md`, kill switch
+  > `FLINT_RWX_INPLACE_ADMISSION`); the bounce survives for relocation
+  > (data-path-lost) only. The (B) exclusion below reflects the pre-S2
+  > world.
   Note this deliberately *inverts* `rejoin-bounce`: the annotation opts into
   the disruptive path, its absence opts into the non-disruptive one. Also
   note it steps into the exact case `cutover.rs` currently answers with

@@ -1,9 +1,34 @@
 # S2 — bounce-free RWX admission (model-first design)
 
-Status: **designed + formally verified, 2026-07-28; implementation next
-cycle.** The formal work landed ahead of the code on purpose: every
-design-level safety and liveness question below is answered by a TLC run
-in `formal/`, not by prose.
+Status: **IMPLEMENTED 2026-07-28** (same day as the design; gates 1-2
+green, live drill 3.12 owed next campaign). The formal work landed ahead
+of the code on purpose: every design-level safety and liveness question
+below is answered by a TLC run in `formal/`, not by prose.
+
+Implementation map (all behind `FLINT_RWX_INPLACE_ADMISSION`, default ON):
+
+- `identity.rs` — `StagedDomain` (`User`/`NfsBacking`): the per-volume
+  staging-domain decision as a type; converted to a handle in one place.
+- `hot_rejoin.rs` — `resolve` derives the raid name from the domain
+  (`raid_nfs-server-<id>` for RWX); the reconcile family
+  (`live_head_leg`, `release_orphaned_quiesce`, adopt/scrub/resume)
+  threads the staged handle; the planner's RWX exclusion became the
+  kill-switch arm; the tick resolves the RWX consumer from the BACKING
+  PV's VolumeAttachment (the parent PV's VA is the NFS client — the
+  wrong node for every window op).
+- `catchup.rs` — `CatchupConfig.staged_domain`; the orchestrator tick
+  routes the RWX consumer/domain the same way (the marker reconciler is
+  reachable from both ticks).
+- `cutover.rs` — `plan_cutover`'s converged-standby arm defers to the
+  in-place window; the bounce survives for data-path-lost (relocation)
+  and as the kill-switch fallback. This also removes the
+  resolver-vs-resolver first-come race the two planners would otherwise
+  have (both take Resolver-class claims).
+- Tests: `sim_crash_sweep_rwx_backing_domain_recovers` (gate 2 — every
+  RPC boundary of the RWX flow recovers, chains stay trees),
+  `rwx_inplace_window_admits_on_the_backing_raid` (domain routing
+  load-bearing in both directions), planner/cutover flips, kill-switch
+  parse. 926 lib tests.
 
 ## Problem
 
