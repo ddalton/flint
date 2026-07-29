@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine, the snapshot protocol, and the multi-process claims layer
 
-Three modules, one gate (`scripts/check-tla.sh`, twenty-five TLC runs).
+Three modules, one gate (`scripts/check-tla.sh`, thirty-five TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -10,8 +10,20 @@ since tranche 2: **hot rejoin** (kept-payload readmission, the shared-base
 ancestry check, the Scrub demotion), **torn writes** (crash between
 replica write and client ack), and the **F48 zombie head** (a partitioned
 server still acking writes until admission severs it) — and since
-tranche 3: **LastResortServe**, the stale-only-survivor runbook step
-(operator override, risk surfaced; the code itself Defers). The S2
+tranche 3: **LastResortServe**, the stale-only-survivor runbook override
+(operator, risk surfaced).  **2026-07-29 audit correction:** the claim
+that stood here — "the code itself Defers" — was FALSE.  The shipped
+NodeStage has two AUTOMATIC availability arms, now modeled behind
+constants with their own teeth runs: the freshness gate's 180s defer
+deadline (`GateDeadline`: serve-with-risk on transient evidence — so
+`Inv_NoFalseRisk` is a theorem only of the idealization) and the
+2-base-floor forced-stale admission (`StaleFloor`: a record-Stale leg
+auto-admitted, serving reads, `StaleReplicaAdmitted` event only).  The
+same audit exposed that the "SPDK raid1 examine" generation belt was
+fiction — flint creates raids `superblock:false` — so `NewestOf` is now
+documented as the `MonitorCurrent` TIMING AXIOM (the monitor's
+stale-mark lands before a reassembly reads the record), with the
+`MonitorLag` run proving what its absence costs. The S2
 model-first tranche added the **R2 claim arbitration** (the F43
 machinery): catch-up and admission run under a leased per-volume claim,
 with admission priority — `AdmissionNotStarved` is the theorem, and the
@@ -73,8 +85,9 @@ Verification of snapshots is layered deliberately:
    `FlintReplication.tla` (its atomic `CatchUp`/`Admit` steps are exactly
    what `Inv_SessionFaithful` licenses).
 
-Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar on first use).
-It runs twenty-five configs, ALL required:
+Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
+v1.7.4, the version the pass/fail phrase-greps were validated against —
+on first use).  It runs thirty-five configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -201,7 +214,11 @@ It runs twenty-five configs, ALL required:
    (`SizeGuard=FALSE`): TLC **must find** `Inv_NoDeviceShrink` violated
    — the pre-expand leg admitted under the grown device, the silent
    shrink (the §2.2a/C2-B hazard class). The shipped guard is
-   load-bearing, not decorative.
+   load-bearing, not decorative.  *Single-flag since 2026-07-29: the
+   audit's verifier proved the guard individually load-bearing
+   (`SizeHeal=TRUE` and the violation is still found), so the earlier
+   `SizeHeal=FALSE` here was a double mutation proving a weaker joint
+   statement than this entry claimed.*
 5k. `FlintClaims.cfg` — the shipped multi-process stack (Lease + marker
    grace, two processes, deaths and spurious leadership moves in
    budget): `Inv_NoColdAdmission` plus both liveness properties must
@@ -252,6 +269,70 @@ It runs twenty-five configs, ALL required:
    (`RelinkOnDelete=FALSE`): the **finding #1 class** at content level —
    exactly what the sim harness's fake `bdev_lvol_delete` used to do.
    TLC **must find** a full build missing absorbed clusters.
+
+**The 2026-07-29 audit tranche** — a 15-agent model↔code conformance
+audit found four checked theorems that did not hold of the shipped code,
+all one family: the model idealized the code's deliberate
+availability-over-evidence arms while claiming correspondence.  Each arm
+is now modeled behind a constant, with the idealization stated honestly
+and a run with teeth:
+
+10a. `FlintReplicationGateReal.cfg` — strict: BOTH shipped arms ON
+   (`GateDeadline` + `StaleFloor`), deep 2-leg budget.  `InvCore`
+   (everything except `Inv_NoFalseRisk`, which only the idealization
+   satisfies) + post-storm liveness must HOLD over the mixed
+   insync+stale serving states.  Its first run found a real modeling
+   seam: `Replace` needed an `l ∉ serving` guard, reachable only once a
+   forced-stale member could serve (P4's 20s fault-out orders before
+   the 60s replace sweep at tick granularity).
+10b. `FlintReplicationGateRealHollow.cfg` — the deadline arm's teeth:
+   TLC **must find** `Inv_NoFalseRisk` violated with sound evidence —
+   a merely-blackholed (recoverable) writer excused after the 180s
+   deadline ("Never hang", drill 2.4's obligation).  The audit's
+   finding #1, as a counterexample.
+10c. `FlintReplicationGateRealStale.cfg` — the forced-stale floor's
+   teeth: TLC **must find** `Inv_NoStaleServe` violated — a
+   record-Stale leg auto-admitted beside the in-sync survivor, gate
+   reads Proceed, NO risk marker (only the `StaleReplicaAdmitted`
+   event).  The audit's finding #2, and the reachability proof for the
+   per-leg `StaleServed` exemptions in the content invariants.
+10d. `FlintReplicationMonitorLag.cfg` — the record-currency axiom's
+   teeth (`MonitorCurrent=FALSE`): TLC **must find** the
+   one-monitor-tick silent stale-read — a deconfigured, not-yet-marked
+   leg recovers into a fresh `superblock:false` raid content-behind,
+   gate reads Proceed.  A NEW finding (F58 candidate): no data-plane
+   generation belt exists at NodeStage; the strict runs' `NewestOf` is
+   a timing axiom, the same instrument class as FlintClaims' grace.
+10e. `FlintReplicationExpandShrinkReal.cfg` — the shipped size-belt
+   floor (`DeviceFloor=FALSE`: PV capacity only): TLC **must find**
+   `Inv_NoDeviceShrink` violated — PV capacity lags the device after a
+   partial fan-out and a lone pre-expand leg passes the old floor (the
+   volumeMode:Block silent shrink; Filesystem mode is shielded by
+   NodeExpandVolume's ordering).  The audit's finding #3;
+   `DeviceFloor=TRUE` in the strict expand cfg is the wave-2 fix.
+10f. `FlintReplicationMaintPark.cfg` — the shipped volume-wide
+   admission parking (`SuppressScoped=FALSE`) under a wedged roll at 3
+   legs: TLC **must find** the `StandbyAdmissionNotParked` lasso — a
+   warm standby on an UNMARKED node parks forever behind another
+   node's forever-renewed mark (900s TTL vs 60s tick, no wedge
+   timeout).  The audit's finding #4: the F43 parked standby through a
+   third door.
+10g. `FlintReplicationMaintParkFixed.cfg` — per-leg suppression
+   (`SuppressScoped=TRUE`, the design semantics — the wave-2 fix):
+   same wedged world, `StandbyAdmissionNotParked` must HOLD.  Also the
+   module's first 3-leg LIVENESS coverage.
+10h. `FlintReplicationRollNoBelt.cfg` — `DrainBelt=FALSE`, the pre-fix
+   record-level last-serving-member check: TLC **must find** the
+   RecordBarrier silent loss.  Restores that bug class's
+   rediscoverability — the fix had erased the pre-fix world from the
+   configuration space, violating this gate's own doctrine.
+10i. `FlintReplicationRollRecordBarrier3.cfg` — strict: the record-only
+   barrier the implementation SHIPS, at 3-leg arity (invariants only;
+   ~1.9M states).
+10j. `FlintReplicationRollRecordBarrierDeep.cfg` — strict: the
+   record-only barrier under the deep 2-leg budget, full liveness.
+   (10i/10j were first run green by the audit's verifier agent, then
+   gated.)
 
 The mutation runs are the models' own regression tests; a model that
 cannot rediscover the bug classes it exists for proves nothing.
@@ -375,6 +456,25 @@ cannot rediscover the bug classes it exists for proves nothing.
   standby→stale demotion is chase-source exhaustion; the raid monitor
   marks only members; `replica_replace` filters on `Stale`), escaped
   honestly in `ExpansionCompletes` with the fix owed in code.
+- **The 2026-07-29 conformance audit** (15 agents, 7 areas, every
+  finding adversarially verified; 107 model↔code correspondences
+  verified faithful) found the four idealizations now behind
+  `GateDeadline`/`StaleFloor`/`MonitorCurrent`/`DeviceFloor`/
+  `SuppressScoped` (runs 10a-10j), plus corrections absorbed silently:
+  `Replace` mints the swapped-in record as STALE (the code's
+  `sync_state: Stale`; standby only after the full build — narrowing
+  candidate F57 to the post-`record_standby` class), `ExpandGuard` is
+  single-flag (the guard is individually load-bearing,
+  verifier-proven), and `ExpansionCompletes` dropped its global
+  `∃m stale` escape (hot-rejoin is a default-ON 60s retrier —
+  `WF(HotRejoin)` is the honest abstraction; the escape now covers only
+  a stale leg that CANNOT rejoin: unresponsive, or pinned serving by
+  the stale floor).  The audit also stamped two residuals the model
+  states but cannot discharge: `SizeHeal=TRUE` assumes the align grow
+  eventually succeeds (a deterministic resize failure reproduces the
+  F56 lasso in FIXED code — the ExpandWedge run doubles as that
+  world), and each failed admission attempt leaks one epoch (the align
+  runs after the final cut) — both owed to wave-2 code work.
 
 ## Deliberate scope limits
 
@@ -388,10 +488,45 @@ cannot rediscover the bug classes it exists for proves nothing.
   axiom territory: audited by citation, shadowed at runtime.
 - Cross-module composition (a replication-level `CatchUp` step driving a
   snapshots-level session as one refined machine) — a possible tranche 4
-  if a bug class ever demands it.
+  if a bug class ever demands it.  (The 2026-07-29 audit noted F56's
+  actual mechanism — the revert re-creating a head as a clone of the
+  base-epoch snapshot at its pre-grow size — spans both modules and is
+  checkable in neither; it is covered by the sim composition test.)
 - Identity domains (killed at compile time by the newtypes).
+- **Stated by the 2026-07-29 audit** (previously silent): the
+  retention-pin machinery (`pin_retention`/`advance_retention_pin`/
+  `retire_epochs`) has no `FlintSnapshots` counterpart — atomic sessions
+  make Drop-during-walk unrepresentable, so the pin's cross-step safety
+  burden is carried by unit tests, not TLC.  `cutover.rs` (the RWX
+  bounce admission: plan→bounce→verify→judge under OP_CUTOVER, leader-
+  gated) is the one protocol-shaped subsystem with no model at all —
+  the strongest next-tranche candidate; `FlintReplication`'s
+  `claim = "admission"` covers only the hot-rejoin/at-stage half.  The
+  leader-gate census is SIX sites (hot_rejoin, catchup, epoch_scheduler,
+  cutover, maint_roll, rwx_nfs), and for the maintenance ROLLER the
+  lease is safety-load-bearing (read-then-act on shared record state) —
+  the NoLeader run's "operability, not safety" verdict is scoped to the
+  modeled actions only.  `ClaimArb` models ABSOLUTE admission priority;
+  the shipped arbitration is reservation-based and deliberately lapses
+  (900s max + 120s backoff, `volume_claims.rs`) — `AdmissionNotStarved`
+  certifies the design principle, not the shipped starvation bound.
+  The ack/reply layer above raid1 (where F55 lived) is another
+  instrument's job (drills), as is everything kernel-side.
 
 ## Data-plane axioms — verified against SPDK source (v26.05.1-pre, ~/github/spdk)
+
+**2026-07-29 audit correction — read this section with one fact in
+front of it:** flint creates every NodeStage raid with
+`superblock:false` and deletes phantom raids spawned by leftover sbs
+(`driver.rs ensure_raid1_bdev` / `clear_sb`).  The examine/generation
+axioms below are TRUE OF SPDK but are NOT a belt flint's stage path
+uses — no sb arbitration happens at assembly, every supplied base joins
+as a full member, and a forced-stale or monitor-lagged leg serves reads
+with no rebuild.  In the model this is now explicit: `NewestOf` encodes
+the `MonitorCurrent` timing axiom (record currency), not examine; the
+`MonitorLag` run shows what its absence costs.  The axioms remain
+relevant to the hot-rejoin path's `skip_rebuild` adds and to the
+phantom-raid hazard class.
 
 The model's data-plane rules are *claims about SPDK raid1*, so they were
 audited against the actual module (P4 exists because an unverified

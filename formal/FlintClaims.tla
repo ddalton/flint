@@ -61,6 +61,17 @@
 (* grant itself (configuration, not protocol — CSI_MODE conflation is     *)
 (* killed by orchestrator_role.rs, not by a model); content/lineage        *)
 (* (FlintReplication).                                                     *)
+(*                                                                         *)
+(* 2026-07-29 audit census: the leader-gated actors number SIX             *)
+(* (hot_rejoin, catchup, epoch_scheduler, cutover, maint_roll, rwx_nfs)   *)
+(* — this module's two processes model the claims/window layer only.  The *)
+(* epoch scheduler's cut-deferral consults the process-LOCAL registry     *)
+(* (volume_claims OP_HOT_REJOIN visibility), so a foreign process's       *)
+(* scheduler can drop a cut inside a live window — churn-only (the EEXIST *)
+(* unwind is the safe direction), fenced by the Lease alone.  For the     *)
+(* maintenance ROLLER the Lease is SAFETY-load-bearing (read-then-act on  *)
+(* shared record state): the NoLeader run's "operability, not safety"     *)
+(* verdict is scoped to the actions modeled HERE, not to those actors.    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 

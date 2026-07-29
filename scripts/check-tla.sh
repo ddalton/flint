@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Twenty-five runs, ALL required.
+# Thirty-five runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -77,6 +77,56 @@
 #      TLC must FIND Inv_NoDeviceShrink violated: the pre-expand leg
 #      admitted under the grown device — the silent shrink.
 #
+# Availability-envelope tranche (2026-07-29 conformance audit — the
+# automatic arms the model previously idealized away while claiming
+# correspondence; constants GateDeadline/StaleFloor/MonitorCurrent):
+#   10a. FlintReplicationGateReal.cfg    strict — BOTH shipped arms ON
+#      (the gate's 180s defer deadline + the 2-base-floor forced-stale
+#      admission): InvCore (everything except Inv_NoFalseRisk, which
+#      only the idealization satisfies) + post-storm liveness must HOLD
+#      over the mixed insync+stale serving states.
+#   10b. FlintReplicationGateRealHollow.cfg GateDeadline teeth — TLC must
+#      FIND Inv_NoFalseRisk violated: the deadline arm excuses a merely
+#      BLACKHOLED (recoverable) writer — the hollow risk the code
+#      deliberately trades for "Never hang" (drill 2.4).
+#   10c. FlintReplicationGateRealStale.cfg StaleFloor teeth — TLC must
+#      FIND Inv_NoStaleServe violated: a record-Stale leg auto-admitted
+#      beside the in-sync survivor, gate reads Proceed, NO risk marker
+#      (only the StaleReplicaAdmitted event).
+#   10d. FlintReplicationMonitorLag.cfg   MonitorCurrent=FALSE teeth —
+#      TLC must FIND the one-monitor-tick silent stale-read: a
+#      deconfigured-not-yet-marked leg recovers and re-enters a fresh
+#      superblock:false raid content-behind (no SPDK examine belt
+#      exists; the strict runs' NewestOf is a TIMING AXIOM, not code).
+#
+# Expansion (audit continuation):
+#   10e. FlintReplicationExpandShrinkReal.cfg DeviceFloor=FALSE (the
+#      shipped PV-capacity-only belt floor) — TLC must FIND
+#      Inv_NoDeviceShrink violated: PV capacity lags the device after a
+#      partial fan-out and a lone pre-expand leg passes the old floor —
+#      the volumeMode:Block silent shrink.  DeviceFloor=TRUE in the
+#      Expand strict cfg is the wave-2 fix.
+#
+# Maintenance (audit continuation):
+#   10f. FlintReplicationMaintPark.cfg    SuppressScoped=FALSE (the
+#      shipped volume-wide plan_hot_rejoin gate) + wedged roll at 3 legs
+#      — TLC must FIND the StandbyAdmissionNotParked lasso: a warm
+#      standby on an UNMARKED node parks forever behind another node's
+#      forever-renewed mark.
+#   10g. FlintReplicationMaintParkFixed.cfg SuppressScoped=TRUE (per-leg
+#      marks, the design semantics — the wave-2 fix): the same world
+#      must HOLD StandbyAdmissionNotParked; also the tranche's first
+#      3-leg liveness coverage.
+#   10h. FlintReplicationRollNoBelt.cfg   DrainBelt=FALSE (the pre-fix
+#      record-level last-serving-member check) — TLC must FIND the
+#      RecordBarrier silent loss, restoring that bug class's mutation
+#      (the fix had erased the pre-fix world from the config space).
+#   10i. FlintReplicationRollRecordBarrier3.cfg strict — the record-only
+#      barrier the implementation SHIPS, at 3-leg arity (invariants).
+#   10j. FlintReplicationRollRecordBarrierDeep.cfg strict — the
+#      record-only barrier under the deep 2-leg budget, full liveness.
+#      (10i/10j were first run green by the audit verifier; now gated.)
+#
 # FlintClaims (the multi-process claims/window layer — the F50/F53 axis):
 #   5k. FlintClaims.cfg          strict — Lease + marker grace ON, two
 #      processes, deaths + spurious leadership moves: Inv_NoColdAdmission
@@ -112,8 +162,12 @@ cd "$(dirname "$0")/../formal"
 JAR=${TLA_TOOLS_JAR:-.tla2tools.jar}
 if [ ! -f "$JAR" ]; then
   echo "fetching tla2tools.jar..."
+  # Pinned (2026-07-29 audit): the pass/fail greps below match TLC's exact
+  # output phrases, which are version-sensitive — "releases/latest" could
+  # silently change them and turn every mutation run vacuous.  v1.7.4 is
+  # the version this gate was validated against.
   curl -fsSL -o "$JAR" \
-    https://github.com/tlaplus/tlaplus/releases/latest/download/tla2tools.jar
+    https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 fi
 
 run_tlc() { # <module> <cfg>
@@ -124,20 +178,28 @@ run_tlc() { # <module> <cfg>
     -metadir "states/${2%.cfg}" -config "$2" "$1.tla" 2>&1
 }
 
+# Pass/fail checks use bash substring/regex matching on the captured
+# output — NOT `echo | grep -q` pipelines: grep -q exits at first match,
+# and under `set -o pipefail` the writer's SIGPIPE turns a PASSING run
+# into a spurious red (the harness SIGPIPE class that bit two chaos
+# checks on runaj).  The failure-path `tail -30` pipes are safe (tail
+# consumes all input).
+
 strict_run() { # <module> <cfg> <label>
   echo "== $3 ($2): invariants must hold =="
   local OUT
   OUT=$(run_tlc "$1" "$2") || { echo "$OUT" | tail -30; echo "FAIL: $3 errored"; exit 1; }
-  echo "$OUT" | grep -q "Model checking completed. No error has been found." \
+  [[ "$OUT" == *"Model checking completed. No error has been found."* ]] \
     || { echo "$OUT" | tail -30; echo "FAIL: $3 did not verify"; exit 1; }
-  echo "$OUT" | grep -E "distinct states|depth" | head -2
+  awk '/distinct states|depth/ && c < 2 { print; ++c }' <<<"$OUT"
 }
 
 mutation_run() { # <module> <cfg> <label> <expected-violation-regex>
   echo "== $3 ($2): TLC must FIND the loss =="
-  local MOUT
+  local MOUT PAT
   MOUT=$(run_tlc "$1" "$2" || true)
-  echo "$MOUT" | grep -Eq "Invariant $4 is violated" \
+  PAT="Invariant $4 is violated"
+  [[ "$MOUT" =~ $PAT ]] \
     || { echo "$MOUT" | tail -30; echo "FAIL: $3 did NOT find the loss — the model lost its teeth"; exit 1; }
   echo "counterexample found (as required)"
 }
@@ -146,7 +208,7 @@ liveness_mutation_run() { # <module> <cfg> <label>
   echo "== $3 ($2): TLC must FIND the starvation lasso =="
   local MOUT
   MOUT=$(run_tlc "$1" "$2" || true)
-  echo "$MOUT" | grep -q "Temporal properties were violated" \
+  [[ "$MOUT" == *"Temporal properties were violated"* ]] \
     || { echo "$MOUT" | tail -30; echo "FAIL: $3 did NOT find the starvation — the model lost its teeth"; exit 1; }
   echo "temporal counterexample found (as required)"
 }
@@ -164,6 +226,12 @@ mutation_run FlintReplication FlintReplicationResurrect.cfg "resurrection mutati
 
 liveness_mutation_run FlintReplication FlintReplicationP4.cfg "P4 mutation (SpecNoP4: unbounded detection, write stall)"
 
+strict_run FlintReplication FlintReplicationGateReal.cfg "availability envelope strict (GateDeadline+StaleFloor: the shipped NodeStage arms)"
+
+mutation_run FlintReplication FlintReplicationGateRealHollow.cfg "deadline-arm teeth (GateDeadline: hollow risk excused on transient evidence)" "Inv_NoFalseRisk"
+mutation_run FlintReplication FlintReplicationGateRealStale.cfg "forced-stale teeth (StaleFloor: stale leg served beside a survivor, no marker)" "Inv_NoStaleServe"
+mutation_run FlintReplication FlintReplicationMonitorLag.cfg "record-currency-axiom teeth (MonitorCurrent=FALSE: the one-tick stale-read window)" "Inv_NoSilentLoss"
+
 strict_run FlintReplication FlintReplicationMaint.cfg "maintenance strict breadth (drain+barrier+lease, rolls enabled)"
 strict_run FlintReplication FlintReplicationMaintDeep.cfg "maintenance strict content depth (torn/scrub/zombie/roller-death across a roll)"
 
@@ -175,11 +243,22 @@ liveness_mutation_run FlintReplication FlintReplicationRollLease.cfg "roll-lease
 strict_run FlintReplication FlintReplicationRollRecordBarrier.cfg "record-only barrier strict (the implementation's barrier; belt holds safety)"
 strict_run FlintReplication FlintReplicationRollWedged.cfg "wedged-restart strict (kubelet never returns; survivor stays writable)"
 
+strict_run FlintReplication FlintReplicationRollRecordBarrier3.cfg "record-only barrier strict, 3-leg arity (audit 10i)"
+strict_run FlintReplication FlintReplicationRollRecordBarrierDeep.cfg "record-only barrier strict, deep liveness (audit 10j)"
+
+mutation_run FlintReplication FlintReplicationRollNoBelt.cfg "drain-belt mutation (DrainBelt=FALSE: the RecordBarrier silent loss, rediscoverable again)" "Inv_NoSilentLoss"
+
+liveness_mutation_run FlintReplication FlintReplicationMaintPark.cfg "volume-wide-parking mutation (SuppressScoped=FALSE + wedged roll: the parked standby, F43's third door)"
+
+strict_run FlintReplication FlintReplicationMaintParkFixed.cfg "per-leg suppression strict (the parking fix; first 3-leg liveness run)"
+
 strict_run FlintReplication FlintReplicationExpand.cfg "expansion strict (SizeGuard+SizeHeal; the F56 theorem + no-device-shrink)"
 
 liveness_mutation_run FlintReplication FlintReplicationExpandWedge.cfg "F56 mutation (SizeHeal=FALSE: the expand x chase size livelock)"
 
 mutation_run FlintReplication FlintReplicationExpandGuard.cfg "size-guard mutation (SizeGuard=FALSE: silent device shrink)" "Inv_NoDeviceShrink"
+
+mutation_run FlintReplication FlintReplicationExpandShrinkReal.cfg "shipped-floor mutation (DeviceFloor=FALSE: PV-capacity belt lags the device — Block-mode shrink)" "Inv_NoDeviceShrink"
 
 strict_run FlintClaims FlintClaims.cfg "claims strict (two processes, Lease + marker grace; F50/F53 layer)"
 
