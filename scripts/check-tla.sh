@@ -95,8 +95,11 @@ if [ ! -f "$JAR" ]; then
 fi
 
 run_tlc() { # <module> <cfg>
+  # Per-cfg -metadir: TLC's default scratch dir is named by wall-clock
+  # second, so two fast runs starting within the same second collide and
+  # the later one aborts before checking anything.
   java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto \
-    -config "$2" "$1.tla" 2>&1
+    -metadir "states/${2%.cfg}" -config "$2" "$1.tla" 2>&1
 }
 
 strict_run() { # <module> <cfg> <label>
