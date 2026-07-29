@@ -2471,12 +2471,18 @@ pub struct VolumeHotRejoinView {
     /// against it just churns claims every tick (found live on runab,
     /// 2026-07-23); the healer for this state is restage admission.
     pub degraded_direct: bool,
-    /// Some replica carries a LIVE maintenance-drain suppression mark
-    /// (the csi-node roll): the volume is mid-roll, its drained leg's tgt
-    /// is fair game for a planned restart. Precomputed by the tick (the
+    /// The lvol_uuids of replicas carrying a LIVE maintenance-drain
+    /// suppression mark (the csi-node roll).  PER-LEG since 2026-07-29
+    /// (the model's SuppressScoped fix, MaintPark run): the old boolean
+    /// parked the WHOLE volume's admission planning while ANY replica was
+    /// marked — under a wedged roll (marks renewed forever, no wedge
+    /// timeout) a warm standby on an UNAFFECTED node parked indefinitely
+    /// at reduced redundancy, the F43 shape through a third door.  A
+    /// marked leg is simply not a candidate, mirroring `resolve`'s own
+    /// per-leg `maint_drain_live` filter.  Precomputed by the tick (the
     /// planner stays clock-free); an expired mark reads as absent there —
     /// the lease expiry that un-parks a dead roller's drain.
-    pub maint_suppressed: bool,
+    pub maint_suppressed_uuids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2530,11 +2536,6 @@ pub fn plan_hot_rejoin(
             "volume opted into rejoin-bounce — the cutover planner owns it",
         );
     }
-    if view.maint_suppressed {
-        return HotRejoinDecision::Wait(
-            "maintenance drain in progress — the roller clears the mark after the node's restart",
-        );
-    }
     if view.record.replicas.iter().any(|r| r.hot_rejoin.is_some()) {
         return HotRejoinDecision::Wait("hot rejoin in progress — the reconciler owns it");
     }
@@ -2548,12 +2549,17 @@ pub fn plan_hot_rejoin(
         return HotRejoinDecision::Wait("no epoch history");
     }
     // Mirror resolve()'s target choice so the decision and the mechanism
-    // agree on which replica a Rejoin means.
+    // agree on which replica a Rejoin means — including its per-leg
+    // maintenance filter: a marked leg is not a candidate, but it never
+    // parks the OTHER legs' admission (the SuppressScoped fix; model run
+    // FlintReplicationMaintPark found the volume-wide parking lasso).
+    let suppressed =
+        |uuid: &str| view.maint_suppressed_uuids.iter().any(|u| u == uuid);
     let standby = view
         .record
         .replicas
         .iter()
-        .filter(|r| r.sync_state == SyncState::Standby)
+        .filter(|r| r.sync_state == SyncState::Standby && !suppressed(&r.lvol_uuid))
         .max_by_key(|r| {
             r.last_epoch
                 .as_deref()
@@ -2573,9 +2579,26 @@ pub fn plan_hot_rejoin(
             HotRejoinDecision::Rejoin
         }
         None => {
-            if view.record.replicas.iter().any(|r| r.sync_state == SyncState::Stale) {
+            if view.record.replicas.iter().any(|r| r.sync_state == SyncState::Standby) {
+                // Standbys exist but every one carries a live mark: the
+                // per-volume Wait is honest only in this all-marked case.
+                return HotRejoinDecision::Wait(
+                    "maintenance drain in progress — the roller clears the mark after the node's restart",
+                );
+            }
+            if view
+                .record
+                .replicas
+                .iter()
+                .any(|r| r.sync_state == SyncState::Stale && !suppressed(&r.lvol_uuid))
+            {
                 return HotRejoinDecision::Wait(
                     "stale replica awaits the Tier-1 catch-up to standby (FLINT_CATCHUP)",
+                );
+            }
+            if view.record.replicas.iter().any(|r| r.sync_state == SyncState::Stale) {
+                return HotRejoinDecision::Wait(
+                    "maintenance drain in progress — the roller clears the mark after the node's restart",
                 );
             }
             HotRejoinDecision::Wait("no standby replica to rejoin")
@@ -2583,10 +2606,12 @@ pub fn plan_hot_rejoin(
     }
 }
 
-/// Background trigger loop (controller role, default-disabled). Each
-/// volume's rejoin (or marker reconcile) runs as its own task under the
-/// shared per-volume claim — a long localization on one volume must not
-/// stall another's two-second window.
+/// Background trigger loop (controller role, DEFAULT-ON since v1.19.0 —
+/// 076985d flipped it after runad's parked standby; opt out with
+/// FLINT_HOT_REJOIN=disabled). Each volume's rejoin (or marker
+/// reconcile) runs as its own task under the shared per-volume claim — a
+/// long localization on one volume must not stall another's two-second
+/// window.
 pub async fn run_hot_rejoin_orchestrator(
     driver: std::sync::Arc<SpdkCsiDriver>,
     cfg: HotRejoinTriggerConfig,
@@ -2704,9 +2729,17 @@ async fn hot_rejoin_tick(
                 .and_then(|a| a.get(HOT_REJOIN_ANNOTATION))
                 .map(|v| v.eq_ignore_ascii_case("disabled"))
                 .unwrap_or(false),
-            maint_suppressed: {
+            maint_suppressed_uuids: {
+                // Per-leg (the SuppressScoped fix): only the marked legs
+                // are excluded from candidacy — a mark never parks the
+                // other legs' admission.
                 let now = crate::replica_sync::now_rfc3339();
-                record.replicas.iter().any(|r| r.maint_drain_live(&now))
+                record
+                    .replicas
+                    .iter()
+                    .filter(|r| r.maint_drain_live(&now))
+                    .map(|r| r.lvol_uuid.clone())
+                    .collect()
             },
             record,
         };
@@ -5549,7 +5582,7 @@ mod tests {
             rwo_bounce_enabled: false,
             hot_rejoin_disabled: false,
             degraded_direct: false,
-            maint_suppressed: false,
+            maint_suppressed_uuids: Vec::new(),
         }
     }
 
@@ -5962,12 +5995,34 @@ mod tests {
 
     #[test]
     fn plan_waits_under_maintenance_suppression() {
+        // ALL-marked: every candidate carries a live mark — the one case
+        // where the volume-level maintenance Wait is honest.
         let mut view = hr_view(standby_b_record());
-        view.maint_suppressed = true;
+        view.maint_suppressed_uuids =
+            view.record.replicas.iter().map(|r| r.lvol_uuid.clone()).collect();
         assert!(matches!(
             plan_hot_rejoin(&view, &trigger_cfg()),
             HotRejoinDecision::Wait(r) if r.contains("maintenance")
         ));
+    }
+
+    #[test]
+    fn plan_admits_unmarked_standby_while_another_leg_is_marked() {
+        // The SuppressScoped fix (model run FlintReplicationMaintPark —
+        // the wedged-roll parked-standby lasso, F43's third door): a mark
+        // on one leg must not park the whole volume's admission planning;
+        // the unmarked warm standby still rejoins.
+        let mut view = hr_view(standby_b_record());
+        let marked: Vec<String> = view
+            .record
+            .replicas
+            .iter()
+            .filter(|r| r.sync_state != SyncState::Standby)
+            .map(|r| r.lvol_uuid.clone())
+            .collect();
+        assert!(!marked.is_empty(), "fixture needs a non-standby leg to mark");
+        view.maint_suppressed_uuids = marked;
+        assert!(matches!(plan_hot_rejoin(&view, &trigger_cfg()), HotRejoinDecision::Rejoin));
     }
 
     /// Acceptance gate 2 of the maintenance-drain design: crash at every

@@ -34,7 +34,8 @@
 //
 // A bounce is only planned when every standby is READY: lag ≤ max_lag
 // epochs (chase converged), so the NodeStage final delta is small and the
-// admission will not blow its budget. Default-disabled via FLINT_CUTOVER.
+// admission will not blow its budget. DEFAULT ON since wave 2 (contract
+// R4; see CutoverConfig::enabled) — disable with FLINT_CUTOVER=disabled.
 
 use std::collections::HashMap;
 use std::sync::Arc;

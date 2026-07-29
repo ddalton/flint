@@ -1791,6 +1791,15 @@ impl SpdkCsiDriver {
     /// size" lives nowhere else today). None on any failure: the floor is
     /// belt-and-suspenders on top of the member comparison, so a transient
     /// PV read must degrade the check, never brick the stage.
+    /// The stage's leg-size floor: PV `spec.capacity` merged with the
+    /// expansion high-water annotation (`leg_size_guard::APPLIED_SIZE_KEY`)
+    /// from the SAME PV read.  Capacity alone LAGS the device after a
+    /// partial expand fan-out — the resizer patches it only on full
+    /// success, while the device grows once every serving base grew — so
+    /// a lone pre-expand leg could pass a capacity-only floor after the
+    /// device already served the grown size (the volumeMode:Block silent
+    /// shrink; model run FlintReplicationExpandShrinkReal found it,
+    /// FlintReplicationExpand's DeviceFloor=TRUE is this fix).
     async fn pv_capacity_bytes(&self, pv_name: &str) -> Option<u64> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         let pvs: kube::Api<PersistentVolume> = kube::Api::all(self.kube_client.clone());
@@ -1802,7 +1811,7 @@ impl SpdkCsiDriver {
                     .and_then(|s| s.capacity.as_ref())
                     .and_then(|c| c.get("storage"))
                     .cloned();
-                match quantity {
+                let capacity = match quantity {
                     Some(q) => match Self::parse_quantity(&q.0) {
                         Ok(b) => Some(b),
                         Err(e) => {
@@ -1818,7 +1827,14 @@ impl SpdkCsiDriver {
                         }
                     },
                     None => None,
-                }
+                };
+                let applied = pv
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get(crate::leg_size_guard::APPLIED_SIZE_KEY))
+                    .map(|s| s.as_str());
+                crate::leg_size_guard::merge_floor(capacity, applied)
             }
             Err(e) => {
                 println!(
@@ -2319,6 +2335,23 @@ impl SpdkCsiDriver {
             for (i, replica) in &excluded_stale {
                 if base_bdevs.len() >= 2 {
                     break;
+                }
+                // Audit 2026-07-29 (the model's StaleFloor pool guards):
+                // never force-admit a mid-flight hot-rejoin artifact — the
+                // exclusion phase's own rule ("never admit it directly,
+                // whatever its sync_state") which this loop previously
+                // bypassed — or a leg under a LIVE maintenance-drain mark
+                // (its tgt is about to restart; the roller owns it).
+                if let Some(rec) = record.as_ref().and_then(|r| r.get(&replica.lvol_uuid)) {
+                    let now = crate::replica_sync::now_rfc3339();
+                    if rec.hot_rejoin.is_some() || rec.maint_drain_live(&now) {
+                        println!(
+                            "   ⤷ {} skipped for forced-stale admission (hot-rejoin marker \
+                             or live maintenance mark)",
+                            replica.lvol_uuid
+                        );
+                        continue;
+                    }
                 }
                 let live_uuid = record
                     .as_ref()

@@ -1313,14 +1313,21 @@ pub(crate) async fn align_dst_head_size(
         "method": "bdev_lvol_resize",
         "params": { "name": head_alias, "size_in_mib": size_mib }
     });
-    rpc.spdk_rpc(dst_node, &resize).await.map_err(|e| -> RpcError {
-        format!(
+    if let Err(e) = rpc.spdk_rpc(dst_node, &resize).await {
+        let msg = format!(
             "standby head {} on {} is {}B but its copy source is {}B and the grow \
              failed: {}",
             head_alias, dst_node, dst_bytes, src_bytes, e
-        )
-        .into()
-    })?;
+        );
+        // 2026-07-29 audit residual: a DETERMINISTICALLY failing resize
+        // reproduces the F56 wedge in FIXED code — the session defers,
+        // the admission guard holds, and nothing else ever resizes this
+        // head (the ExpandWedge model run doubles as this world).  A
+        // distinct Warning separates that loop from ordinary catch-up
+        // churn in `kubectl describe pv`.
+        store.emit(volume_id, "Warning", "StandbyHeadGrowFailed", &msg).await;
+        return Err(msg.into());
+    }
     info!(
         volume_id, node = %dst_node, head = %head_alias, dst_bytes, src_bytes,
         "[CATCHUP] Standby head grown to match its copy source (F56 size alignment)"
@@ -2493,6 +2500,19 @@ async fn admit_one_standby(
         }
     };
 
+    // F56 belt, BEFORE the final cut (2026-07-29 audit: the align used to
+    // run after it, so every deterministic-grow-failure deferral leaked
+    // one epoch into the record per attempt): a head chased by a
+    // pre-alignment session (or an interrupted one) can still carry the
+    // pre-expansion size — grow it here, before anything durable happens,
+    // so a failed grow defers cleanly and the size guard below goes back
+    // to being unreachable for the expansion case instead of a permanent
+    // deferral.
+    let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
+    let live_uuid = rec.live_lvol_uuid().to_string();
+    align_dst_head_size(rpc, store, volume_id, &record, src, &identity.node_name, &head_alias)
+        .await?;
+
     // Final common epoch on exactly the attached in-sync replicas. With all
     // of them fenced to this node and the raid not yet created, no writer
     // exists: the cut equals each head, and skew is zero.
@@ -2540,15 +2560,8 @@ async fn admit_one_standby(
     record.apply_epoch_cut(&final_epoch, &cut_uuids, &replica_sync::now_rfc3339());
 
     // One more chase session: base-inclusive from the standby's mark through
-    // the final epoch, from the coverage-probed source selected above.
-    let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
-    let live_uuid = rec.live_lvol_uuid().to_string();
-    // F56 belt: a head chased by a pre-alignment session (or an interrupted
-    // one) can still carry the pre-expansion size — grow it here, before
-    // the attach, so the size guard below goes back to being unreachable
-    // for the expansion case instead of a permanent deferral.
-    align_dst_head_size(rpc, store, volume_id, &record, src, &identity.node_name, &head_alias)
-        .await?;
+    // the final epoch, from the coverage-probed source selected above (the
+    // head was already size-aligned before the cut).
     let dst_bdev = ensure_dst_attached(
         rpc, volume_id, index, identity, &head_alias, &live_uuid, &src.node_name, raid_name,
     )

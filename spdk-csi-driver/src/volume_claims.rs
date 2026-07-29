@@ -10,7 +10,8 @@
 // operation per volume across ALL planners.
 //
 // "Whoever claims first" was the v1.19 rule, and it is exactly F43: the
-// epoch scheduler advances on a writes-independent 30s timer, each new epoch
+// epoch scheduler advances on a writes-independent timer (60s tick, 300s
+// cut default), each new epoch
 // drops a converged standby back to lag=1, so catch-up (the maintenance
 // loop) re-acquired the claim every tick and permanently out-raced cutover
 // (the resolution loop) — the RWX standby parked forever at raid 1/2. Two
@@ -556,7 +557,7 @@ mod tests {
     }
 
     /// THE F43 regression: catch-up re-claims every tick (the epoch
-    /// scheduler's 30s timer resets standby lag, so it always has work);
+    /// scheduler's timer resets standby lag, so it always has work);
     /// under first-come rules cutover loses the race forever. With
     /// arbitration, cutover must win within two ticks.
     #[test]

@@ -614,6 +614,13 @@ impl spdk_csi_driver::csi::identity_server::Identity for MinimalIdentityService 
 /// PV events. Everything decision-shaped stays in the core.
 struct KubeExpandEnv<'a> {
     driver: &'a SpdkCsiDriver,
+    /// The record-home PV — carried so `resize_leg` can stamp the
+    /// expansion high-water annotation (`leg_size_guard::APPLIED_SIZE_KEY`)
+    /// on each successful grow: PV capacity lags the device after a
+    /// partial fan-out, and the stage floor reads max(capacity, applied)
+    /// so a lone pre-expand leg never serves under a possibly-grown
+    /// device (the DeviceFloor fix; model run ExpandShrinkReal).
+    record_home: &'a str,
 }
 
 #[async_trait::async_trait]
@@ -658,7 +665,42 @@ impl spdk_csi_driver::expand::ExpandEnv for KubeExpandEnv<'_> {
             .call_node_agent(node, "/api/volumes/resize_lvol", &payload)
             .await
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // The grow LANDED: record it durably before anything else can
+        // observe the grown leg.  A failed stamp is loud but non-fatal —
+        // the annotation is a belt over the PV-capacity floor, and the
+        // next successful fan-out attempt re-stamps it.
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let prev = match pvs.get(self.record_home).await {
+            Ok(pv) => pv
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(spdk_csi_driver::leg_size_guard::APPLIED_SIZE_KEY))
+                .cloned(),
+            Err(e) => {
+                println!(
+                    "⚠️ [CONTROLLER] applied-size read failed for {} ({}); stamping fresh",
+                    self.record_home, e
+                );
+                None
+            }
+        };
+        let value = spdk_csi_driver::leg_size_guard::encode_applied(
+            prev.as_deref(),
+            new_size_bytes,
+            lvol_uuid,
+        );
+        self.driver
+            .set_pv_annotation(
+                self.record_home,
+                spdk_csi_driver::leg_size_guard::APPLIED_SIZE_KEY,
+                Some(&value),
+            )
+            .await;
+        Ok(())
     }
 
     async fn emit(&self, record_home: &str, type_: &str, reason: &str, msg: &str) {
@@ -1195,7 +1237,7 @@ impl MinimalControllerService {
         // record-home PV; this wrapper only maps its outcome onto the CSI
         // surface.
         match spdk_csi_driver::expand::expand_replicated(
-            &KubeExpandEnv { driver: &self.driver },
+            &KubeExpandEnv { driver: &self.driver, record_home },
             record_home,
             &replicas,
             new_size_bytes,

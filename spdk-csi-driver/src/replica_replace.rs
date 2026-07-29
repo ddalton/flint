@@ -8,9 +8,16 @@
 //!
 //! Flow (a pre-pass of the per-volume catch-up task, under the same
 //! volume claim):
-//!   1. Candidate: a Stale, un-hot-rejoin-marked replica whose Node object
-//!      is deleted, or NotReady for longer than
+//!   1. Candidate: a Stale OR Standby, un-hot-rejoin-marked replica whose
+//!      Node object is deleted, or NotReady for longer than
 //!      FLINT_REPLICA_REPLACE_AFTER_SECS. One replacement per volume/tick.
+//!      (Standby since 2026-07-29 — the F57 fix: a standby whose node
+//!      dies had NO exit — the only standby→stale demotion is
+//!      chase-source exhaustion, the raid monitor marks members only,
+//!      and this filter skipped Standby — so a dead mid-rebuild standby
+//!      parked the volume at reduced redundancy until an operator
+//!      intervened.  The swap itself is the demotion: the swapped-in
+//!      record is minted STALE and the full build re-promotes it.)
 //!   2. Guards: an in_sync source exists, epoch history exists (the full
 //!      build needs a target), the PV is not RWX (its synthetic backing PV
 //!      mirrors identity attributes — swap choreography is future work),
@@ -103,6 +110,26 @@ pub fn node_gone(presence: &NodePresence, after: Duration, now_epoch_s: i64) -> 
         }
         NodePresence::Present { ready: false, not_ready_since_epoch_s: None } => false,
     }
+}
+
+/// Replacement candidacy — F57-widened (2026-07-29): Stale was always a
+/// candidate; STANDBY is now too, because a standby whose node dies has
+/// no other exit (the only standby→stale demotion is chase-source
+/// exhaustion — which needs the node back; the raid-health monitor marks
+/// only raid MEMBERS; and the pre-fix filter here skipped Standby), so a
+/// dead mid-rebuild standby parked the volume at reduced redundancy
+/// forever.  The swap needs no explicit demotion: the swapped-in record
+/// is minted STALE (`swapped_record_enters_stale_and_drops_old_identity`
+/// pins it) and the full build re-promotes.  `hot_rejoin.is_none()`
+/// stays load-bearing for BOTH states — a marked leg mid-window is owned
+/// by `hot_rejoin::resume_standby` (a MARKED standby on a dead node
+/// therefore still parks: the tracked F57 residual, needing a
+/// window-unwind, not a swap).  Retention note: swapping a standby out
+/// drops its `last_epoch` retention need; the replacement's own
+/// `catchup_stale` re-pins before its build, so no retained epoch is
+/// exposed in between (`pin_retention` precedes the revert).
+pub fn is_replace_candidate(rec: &ReplicaSyncRecord) -> bool {
+    matches!(rec.sync_state, SyncState::Stale | SyncState::Standby) && rec.hot_rejoin.is_none()
 }
 
 /// Pure: pick the max-free candidate not hosting an existing leg.
@@ -210,14 +237,11 @@ pub async fn maybe_replace_for_volume(
         return Ok(None); // nothing to rebuild from — never touch identities
     }
 
-    // Candidate: first stale, unmarked replica whose node is gone.
+    // Candidate: first stale-or-standby, unmarked replica whose node is
+    // gone (see is_replace_candidate for the F57 widening).
     let now_epoch_s = k8s_openapi::jiff::Timestamp::now().as_second();
     let mut candidate: Option<(usize, &ReplicaInfo, &ReplicaSyncRecord)> = None;
-    for rec in record
-        .replicas
-        .iter()
-        .filter(|r| r.sync_state == SyncState::Stale && r.hot_rejoin.is_none())
-    {
+    for rec in record.replicas.iter().filter(|r| is_replace_candidate(r)) {
         let Some((index, identity)) = replicas
             .iter()
             .enumerate()
@@ -497,6 +521,28 @@ mod tests {
     fn notready_without_transition_time_never_condemns() {
         let p = NodePresence::Present { ready: false, not_ready_since_epoch_s: None };
         assert!(!node_gone(&p, Duration::from_secs(0), i64::MAX));
+    }
+
+    #[test]
+    fn candidacy_covers_stale_and_standby_but_never_marked_or_insync() {
+        // The F57 fix: a STANDBY on a gone node is re-placeable (pre-fix
+        // it parked forever — no demotion path, no replacement); a
+        // hot-rejoin-marked leg of EITHER state stays owned by
+        // resume_standby (the marked-standby-on-dead-node park is the
+        // tracked residual); InSync is never a candidate.
+        let mk = |state: SyncState, marked: bool| {
+            let mut rec = crate::replica_sync::VolumeSyncRecord::initial(&[replica("n1", "u1")])
+                .replicas
+                .remove(0);
+            rec.sync_state = state;
+            rec.hot_rejoin = marked.then(|| "epoch-vol-3".to_string());
+            rec
+        };
+        assert!(is_replace_candidate(&mk(SyncState::Stale, false)));
+        assert!(is_replace_candidate(&mk(SyncState::Standby, false)));
+        assert!(!is_replace_candidate(&mk(SyncState::Stale, true)));
+        assert!(!is_replace_candidate(&mk(SyncState::Standby, true)));
+        assert!(!is_replace_candidate(&mk(SyncState::InSync, false)));
     }
 
     #[test]

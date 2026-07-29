@@ -110,17 +110,42 @@ and live-validated.
   is now modeled with strong fairness — the persistent-retrier
   abstraction), and **candidate F57** (below). See `formal/README.md`.
 
-## Candidate F57 (surfaced by the model, unfixed)
+## F57 (surfaced by the model; scoped by the 2026-07-29 audit; FIXED)
 
-The strict run's honest escape hatch documents a neighboring gap: a
+The strict run's honest escape hatch documented a neighboring gap: a
 STANDBY whose node dies parks forever. The only standby→stale demotion
 is chase-source exhaustion (`ReplicaChaseSourcesExhausted`), the
 raid-health monitor marks only raid *members*, and `replica_replace`
-filters on `Stale` (and on `hot_rejoin.is_none()`), so a dead
-mid-rebuild standby is neither demoted nor replaced — the volume sits
-at reduced redundancy until an operator intervenes. Needs a sim repro
-and a fix (demote a standby on node-gone evidence, mirroring the
-stale path); tracked for the next cycle.
+filtered on `Stale` (and on `hot_rejoin.is_none()`), so a dead
+mid-rebuild standby was neither demoted nor replaced — the volume sat
+at reduced redundancy until an operator intervened.
+
+**Audit scope correction:** the class is narrower than first stated —
+a *replacement* leg enters record-STALE (`replica_replace` mints
+`sync_state: Stale`; standby only after `record_standby`), so a
+replacement that dies pre-standby was always re-replaceable. Real F57 =
+a leg that REACHED record-Standby, then lost its node.
+
+**Fix (2026-07-29):** `replica_replace::is_replace_candidate` widened to
+`(Stale | Standby) && hot_rejoin.is_none()` — the swap itself is the
+demotion (the swapped-in record is minted Stale; the full build
+re-promotes). The `hot_rejoin.is_none()` exclusion stays load-bearing:
+a MARKED standby on a dead node still parks (owned by
+`resume_standby`, which errors against the dead node) — that sibling
+needs a window-unwind, not a swap, and remains tracked.
+
+**Audit residuals stamped into the model** (`FlintReplicationExpandWedge`
+now documents both): a DETERMINISTICALLY failing `bdev_lvol_resize`
+reproduces this wedge in FIXED code (the align defers by design —
+`SizeHeal=TRUE` is an explicit heal-eventually-succeeds assumption); a
+distinct `StandbyHeadGrowFailed` Warning now separates that loop from
+ordinary catch-up churn, and the align was moved BEFORE the final cut in
+`admit_one_standby` so each failed attempt no longer leaks an epoch.
+Separately, the audit's `ExpandShrinkReal` run machine-confirmed the
+PV-capacity-only belt floor is code-violable after a partial fan-out
+(volumeMode:Block); the fix is the `flint.io/leg-size-applied`
+high-water annotation folded into the stage floor
+(`leg_size_guard::merge_floor`).
 
 ## Ops notes (pre-fix versions)
 

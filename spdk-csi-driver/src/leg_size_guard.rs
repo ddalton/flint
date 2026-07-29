@@ -53,6 +53,59 @@ pub fn enabled() -> bool {
     !std::env::var("FLINT_LEG_SIZE_GUARD").is_ok_and(|v| v.eq_ignore_ascii_case("disabled"))
 }
 
+/// The expansion high-water annotation (the DeviceFloor fix — audit run
+/// FlintReplicationExpandShrinkReal): PV `spec.capacity` LAGS the
+/// consumer-visible device after a partial expand fan-out — the external
+/// resizer patches capacity only when the WHOLE fan-out succeeded, while
+/// the device grows once every SERVING base grew.  Each successful
+/// per-leg grow is therefore recorded here durably ("<bytes>|uuid,uuid"),
+/// and the stage floor is the max of PV capacity and this value: a lone
+/// pre-expand leg must never serve under a possibly-grown device (the
+/// volumeMode:Block silent shrink; Filesystem mode was always shielded
+/// by NodeExpandVolume's ordering).  Deliberately an OVER-approximation
+/// of device growth (any applied grow raises the floor): the cost is an
+/// honest defer/exclusion of short legs — which heal via the align path
+/// — never a silent shrink.  The annotation goes stale-harmless once PV
+/// capacity catches up (max() makes it a no-op) and the next expansion
+/// overwrites it.
+pub const APPLIED_SIZE_KEY: &str = "flint.io/leg-size-applied";
+
+/// Encode a successful per-leg grow into the annotation value, merging
+/// with the previous value (max bytes; union of uuids, sorted).
+pub fn encode_applied(prev: Option<&str>, bytes: u64, lvol_uuid: &str) -> String {
+    let (mut max_b, mut uuids) = prev.and_then(decode_applied).unwrap_or((0, Vec::new()));
+    max_b = max_b.max(bytes);
+    if !uuids.iter().any(|u| u == lvol_uuid) {
+        uuids.push(lvol_uuid.to_string());
+    }
+    uuids.sort();
+    format!("{}|{}", max_b, uuids.join(","))
+}
+
+/// Decode the annotation; None on any malformed value (treated as
+/// absent — the PV-capacity floor still stands).
+pub fn decode_applied(v: &str) -> Option<(u64, Vec<String>)> {
+    let (b, us) = v.split_once('|')?;
+    let bytes = b.parse::<u64>().ok()?;
+    let uuids = us
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    Some((bytes, uuids))
+}
+
+/// The stage floor: max of PV capacity and the applied high-water.
+pub fn merge_floor(pv_capacity: Option<u64>, applied: Option<&str>) -> Option<u64> {
+    let applied_b = applied.and_then(decode_applied).map(|(b, _)| b);
+    match (pv_capacity, applied_b) {
+        (Some(p), Some(a)) => Some(p.max(a)),
+        (Some(p), None) => Some(p),
+        (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
 /// Byte size of a `bdev_get_bdevs` row; None when the row carries no
 /// usable size (treated as unknown, never as a mismatch).
 pub fn bytes_of(bdev: &Value) -> Option<u64> {
@@ -140,6 +193,33 @@ mod tests {
         );
         assert_eq!(bytes_of(&json!({ "num_blocks": 262144 })), None);
         assert_eq!(bytes_of(&json!({})), None);
+    }
+
+    #[test]
+    fn applied_annotation_round_trips_and_merges() {
+        let v1 = encode_applied(None, 200, "uuid-b");
+        assert_eq!(v1, "200|uuid-b");
+        let v2 = encode_applied(Some(&v1), 150, "uuid-a");
+        assert_eq!(v2, "200|uuid-a,uuid-b"); // max bytes win; uuids union, sorted
+        let v3 = encode_applied(Some(&v2), 300, "uuid-b");
+        assert_eq!(v3, "300|uuid-a,uuid-b"); // dedup
+        assert_eq!(decode_applied(&v3), Some((300, vec!["uuid-a".into(), "uuid-b".into()])));
+        assert_eq!(decode_applied("garbage"), None);
+        assert_eq!(decode_applied("x|u"), None);
+    }
+
+    #[test]
+    fn merge_floor_takes_the_max_and_survives_absence() {
+        // The ExpandShrinkReal shape: PV capacity still old (100), one leg
+        // grew to 200 — the floor must be 200 so a lone old leg is refused.
+        assert_eq!(merge_floor(Some(100), Some("200|u1")), Some(200));
+        // PV caught up: annotation is a harmless no-op.
+        assert_eq!(merge_floor(Some(200), Some("200|u1")), Some(200));
+        assert_eq!(merge_floor(Some(100), None), Some(100));
+        assert_eq!(merge_floor(None, Some("200|u1")), Some(200));
+        assert_eq!(merge_floor(None, None), None);
+        // Malformed annotation = absent, PV floor stands.
+        assert_eq!(merge_floor(Some(100), Some("bad")), Some(100));
     }
 
     #[test]
