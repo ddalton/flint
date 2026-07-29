@@ -1271,6 +1271,75 @@ pub(crate) async fn revert_head_to_empty(
         .ok_or_else(|| format!("bdev_lvol_create of {} returned no uuid", lvol_name).into())
 }
 
+/// F56 size alignment: grow an undersized standby head to its copy source
+/// before the dst is exported/attached. The §5 revert clones the head from
+/// the replica's OWN base-epoch snapshot, so a leg that went stale across a
+/// partially-applied expansion comes back at the pre-expand size — and
+/// without this step it stays there FOREVER: the admission size guard
+/// defers it (correctly — a short leg admitted would shrink the device),
+/// the C2 expansion belt refuses the fan-out that would grow it while any
+/// leg lags, resize_lvol has no other caller, and the chase's own retention
+/// pin keeps the base epoch alive so the source-sized full build never
+/// takes over (docs/f56-expand-replacement-circular-wait.md). Grow-only by
+/// construction (dst < src only; a longer leg is capped by SPDK at the
+/// raid's data size), and pre-attach so the copy attachment never races the
+/// nvmf resize AEN. Unknown sizes pass through untouched — the admission
+/// guard remains the belt, exactly as before.
+pub(crate) async fn align_dst_head_size(
+    rpc: &dyn CatchupRpc,
+    store: &dyn CatchupStore,
+    volume_id: &str,
+    record: &VolumeSyncRecord,
+    src: &ReplicaInfo,
+    dst_node: &str,
+    head_alias: &str,
+) -> Result<(), RpcError> {
+    if !crate::leg_size_guard::enabled() {
+        return Ok(());
+    }
+    let src_row = source_head_bdev(rpc, src, source_live_uuid(record, src)).await?;
+    let Some(src_bytes) = crate::leg_size_guard::bytes_of(&src_row) else {
+        return Ok(());
+    };
+    let dst_row = get_bdev(rpc, dst_node, head_alias).await?;
+    let Some(dst_bytes) = dst_row.as_ref().and_then(crate::leg_size_guard::bytes_of) else {
+        return Ok(());
+    };
+    if dst_bytes >= src_bytes {
+        return Ok(());
+    }
+    let size_mib = src_bytes.div_ceil(1024 * 1024);
+    let resize = json!({
+        "method": "bdev_lvol_resize",
+        "params": { "name": head_alias, "size_in_mib": size_mib }
+    });
+    rpc.spdk_rpc(dst_node, &resize).await.map_err(|e| -> RpcError {
+        format!(
+            "standby head {} on {} is {}B but its copy source is {}B and the grow \
+             failed: {}",
+            head_alias, dst_node, dst_bytes, src_bytes, e
+        )
+        .into()
+    })?;
+    info!(
+        volume_id, node = %dst_node, head = %head_alias, dst_bytes, src_bytes,
+        "[CATCHUP] Standby head grown to match its copy source (F56 size alignment)"
+    );
+    store
+        .emit(
+            volume_id,
+            "Normal",
+            "StandbyHeadGrown",
+            &format!(
+                "Standby head on {} grown {}B → {}B to match its copy source on {} \
+                 (post-expansion catch-up)",
+                dst_node, dst_bytes, src_bytes, src.node_name
+            ),
+        )
+        .await;
+    Ok(())
+}
+
 /// §3 discipline on the replica node before export: the head inherits a
 /// valid raid superblock through its clone parent (and a resumed head may
 /// carry one copied from R_src), so force examine, let the phantom raid
@@ -2021,6 +2090,14 @@ async fn catchup_stale(
         new_uuid
     };
 
+    // F56: a §5 revert (or a resumed write-virgin head) carries the
+    // replica's own pre-expansion size — align it to the copy source
+    // BEFORE the export/attach, or the admission size guard defers this
+    // leg forever while the C2 belt refuses the expansion that would have
+    // grown it.
+    align_dst_head_size(rpc, store, volume_id, record, src, &identity.node_name, &head_alias)
+        .await?;
+
     let dst_bdev = ensure_dst_attached(
         rpc, volume_id, index, identity, &head_alias, &live_uuid, &src.node_name, raid_name,
     )
@@ -2466,6 +2543,12 @@ async fn admit_one_standby(
     // the final epoch, from the coverage-probed source selected above.
     let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
     let live_uuid = rec.live_lvol_uuid().to_string();
+    // F56 belt: a head chased by a pre-alignment session (or an interrupted
+    // one) can still carry the pre-expansion size — grow it here, before
+    // the attach, so the size guard below goes back to being unreachable
+    // for the expansion case instead of a permanent deferral.
+    align_dst_head_size(rpc, store, volume_id, &record, src, &identity.node_name, &head_alias)
+        .await?;
     let dst_bdev = ensure_dst_attached(
         rpc, volume_id, index, identity, &head_alias, &live_uuid, &src.node_name, raid_name,
     )
@@ -3030,6 +3113,30 @@ mod tests {
                         json!({ "name": bdev, "uuid": self.attach_uuid }),
                     );
                     Ok(json!({ "result": [bdev] }))
+                }
+                "bdev_lvol_resize" => {
+                    let name = payload["params"]["name"].as_str().unwrap_or("");
+                    let size_mib = payload["params"]["size_in_mib"].as_u64().unwrap_or(0);
+                    let mut bdevs = self.bdevs.lock().unwrap();
+                    // Resolve the target's uuid: rows are keyed by (node,
+                    // name-or-alias); a resize by uuid hits rows whose uuid
+                    // field matches.
+                    let uuid = bdevs
+                        .get(&(node.to_string(), name.to_string()))
+                        .and_then(|b| b["uuid"].as_str().map(String::from))
+                        .unwrap_or_else(|| name.to_string());
+                    // The lvol grows, then the nvmf AEN → bdev_nvme
+                    // re-identify chain grows every remote attachment of the
+                    // same namespace — modeled as immediate: every row
+                    // sharing the uuid, on any node under any key.
+                    for row in bdevs.values_mut() {
+                        if row["uuid"].as_str() == Some(uuid.as_str()) {
+                            let bs = row["block_size"].as_u64().unwrap_or(512);
+                            row["num_blocks"] = json!(size_mib * 1024 * 1024 / bs);
+                            row["block_size"] = json!(bs);
+                        }
+                    }
+                    Ok(json!({ "result": true }))
                 }
                 "bdev_lvol_start_shallow_copy" => {
                     let mut op = self.next_op.lock().unwrap();
@@ -4727,6 +4834,278 @@ mod tests {
         assert_eq!(
             store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
             SyncState::InSync
+        );
+    }
+
+    // ---- F56: the expand × catch-up × admission composition -------------
+
+    /// The expand core's environment realized over the catch-up fakes, so
+    /// one shared world (record + bdev sizes) serves both machines. The
+    /// capacity is pinned OLD for the whole composition — exactly what the
+    /// external-resizer does while ControllerExpandVolume keeps refusing.
+    struct ExpandOverFakes<'a> {
+        rpc: &'a FakeRpc,
+        store: &'a FakeStore,
+        capacity_bytes: u64,
+        /// nodes whose agent is unreachable (the mid-fan-out failure)
+        dead_agents: Mutex<HashSet<String>>,
+    }
+
+    #[async_trait]
+    impl crate::expand::ExpandEnv for ExpandOverFakes<'_> {
+        async fn record_home_state(
+            &self,
+            _record_home: &str,
+        ) -> Result<(Option<u64>, Option<VolumeSyncRecord>), String> {
+            Ok((Some(self.capacity_bytes), Some(self.store.record.lock().unwrap().clone())))
+        }
+
+        async fn resize_leg(
+            &self,
+            node: &str,
+            lvol_uuid: &str,
+            new_size_bytes: u64,
+        ) -> Result<(), String> {
+            if self.dead_agents.lock().unwrap().contains(node) {
+                return Err("connection refused".to_string());
+            }
+            let size_mib = new_size_bytes.div_ceil(1024 * 1024);
+            self.rpc
+                .spdk_rpc(
+                    node,
+                    &json!({
+                        "method": "bdev_lvol_resize",
+                        "params": { "name": lvol_uuid, "size_in_mib": size_mib }
+                    }),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
+        async fn emit(&self, _record_home: &str, type_: &str, reason: &str, _msg: &str) {
+            self.store.events.lock().unwrap().push((reason.to_string(), type_.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn f56_partial_expand_then_stale_leg_converges_end_to_end() {
+        // The F56 composition (docs/f56-expand-replacement-circular-wait.md):
+        //   1. expand fan-out lands on leg a while leg b's node agent is
+        //      unreachable — partial application (survivor NEW, b OLD),
+        //      ExpandReplicaFanoutIncomplete, PV capacity stays OLD;
+        //   2. b is marked stale; the resizer's retry hits the C2 belt;
+        //   3. b returns with its base epoch intact — the §5 chase path.
+        //      WITHOUT the size alignment this livelocks permanently: the
+        //      revert clones b's own OLD-size base, the admission size
+        //      guard defers the short head, the belt keeps refusing the
+        //      expand that would grow it, and the chase's own retention
+        //      pin keeps the base epoch alive so the source-sized full
+        //      build never takes over;
+        //   4. with the alignment (StandbyHeadGrown) admission passes and
+        //      the expand retry completes on every leg.
+        const OLD_BLOCKS: u64 = 2048; // × 512 = 1 MiB
+        const NEW_BYTES: u64 = 2 * 1024 * 1024; // 4096 blocks
+
+        let replicas = vec![replica("node-a", "uuid-a"), replica("node-b", "uuid-b")];
+        let mut record = VolumeSyncRecord::initial(&replicas);
+        let all: Vec<String> = vec!["uuid-a".to_string(), "uuid-b".to_string()];
+        record.apply_epoch_cut(&epoch("vol1", 3), &all, "2026-06-11T10:00:00Z");
+        record.apply_epoch_cut(&epoch("vol1", 4), &all, "2026-06-11T10:05:00Z");
+        let store = FakeStore::new(record);
+
+        let mut rpc = FakeRpc::new("uuid-b-v2");
+        // Source chain on node-a covering base epoch 4; head 2048×512.
+        // Epoch 6 is the FINAL epoch admission will cut — pre-installed
+        // because the fake's snapshot RPC doesn't create bdev rows (the
+        // same convention as the admission size-guard tests).
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+        // The same source head addressable by leg a's identity uuid (the
+        // expand fan-out resizes by uuid; SPDK resolves both names to one
+        // bdev — two keys, one uuid, kept coherent by the resize handler).
+        let src_head_by_uuid = rpc
+            .bdevs
+            .lock()
+            .unwrap()
+            .get(&("node-a".to_string(), "lvs0/lvol-uuid-a".to_string()))
+            .cloned()
+            .unwrap();
+        rpc.bdevs
+            .lock()
+            .unwrap()
+            .insert(("node-a".to_string(), "uuid-a".to_string()), src_head_by_uuid);
+        // Leg b's OLD-size head on its own node, and its (short) attachment
+        // on the source node from an earlier session — same namespace uuid.
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-b".to_string(), "lvs0/lvol-uuid-b".to_string()),
+            json!({
+                "name": "lvol-uuid-b",
+                "uuid": "uuid-b-v2",
+                "num_blocks": OLD_BLOCKS,
+                "block_size": 512
+            }),
+        );
+        let expected =
+            expected_remote_base_bdev(&crate::identity::StorageId::of_handle("vol1"), 1);
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-a".to_string(), expected.clone()),
+            json!({
+                "name": expected,
+                "uuid": "uuid-b-v2",
+                "num_blocks": OLD_BLOCKS,
+                "block_size": 512
+            }),
+        );
+        // b's local epochs (reachability probe + base presence).
+        rpc.lvols.insert(
+            "node-b".to_string(),
+            vec![(epoch("vol1", 3), "e3".to_string()), (epoch("vol1", 4), "e4".to_string())],
+        );
+
+        let env = ExpandOverFakes {
+            rpc: &rpc,
+            store: &store,
+            capacity_bytes: 1024 * 1024,
+            dead_agents: Mutex::new(HashSet::from(["node-b".to_string()])),
+        };
+
+        // 1. Partial fan-out: a grows, b unreachable.
+        let err = crate::expand::expand_replicated(&env, "vol1", &replicas, NEW_BYTES)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::expand::ExpandRefusal::Unavailable(ref m) if m.contains("1/2 legs")),
+            "expected partial fan-out refusal"
+        );
+        assert_eq!(
+            rpc.bdevs.lock().unwrap()[&("node-a".to_string(), "lvs0/lvol-uuid-a".to_string())]
+                ["num_blocks"],
+            json!(4096),
+            "the survivor's head grew — the F56 divergence exists"
+        );
+
+        // 2. b goes stale; epoch 5 is cut on the survivor; the retry hits
+        //    the belt.
+        {
+            let mut rec = store.record.lock().unwrap();
+            rec.mark_stale("uuid-b", "leg failed", "2026-06-11T10:20:00Z");
+            rec.apply_epoch_cut(&epoch("vol1", 5), &["uuid-a".to_string()], "2026-06-11T10:25:00Z");
+        }
+        env.dead_agents.lock().unwrap().clear(); // the node returns
+        let err = crate::expand::expand_replicated(&env, "vol1", &replicas, NEW_BYTES)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::expand::ExpandRefusal::Unavailable(ref m) if m.contains("replicas lag")),
+            "the C2 belt holds while b lags"
+        );
+
+        // 3. The §5 chase: revert to b's own base epoch, size-align to the
+        //    source, chase to the newest epoch.
+        let record = store.record.lock().unwrap().clone();
+        catchup_stale(
+            &rpc, &store, "vol1", &record,
+            record.get("uuid-b").unwrap(),
+            &replicas, None, "raid_vol1", &cfg(),
+        )
+        .await
+        .unwrap();
+        let ops = store.ops.lock().unwrap().clone();
+        assert!(
+            ops.iter().any(|o| o.starts_with(&format!("revert:{}", epoch("vol1", 4)))),
+            "the §5 delta path ran (not the full build): {:?}",
+            ops
+        );
+
+        // 4. Admission at reassembly: the head must be admitted in_sync —
+        //    NOT deferred by the size guard forever (the F56 livelock).
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas, "node-a",
+            &vec!["uuid-a".to_string()], &stage_cfg(),
+        )
+        .await;
+        assert_eq!(
+            admitted.len(),
+            1,
+            "the returning leg must admit (size-aligned), not defer forever; events: {:?}",
+            store.events.lock().unwrap()
+        );
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::InSync
+        );
+
+        // 5. The expand retry now completes on every leg, addressed by the
+        //    live (post-revert) uuid.
+        let done = crate::expand::expand_replicated(&env, "vol1", &replicas, NEW_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(done.capacity_bytes, NEW_BYTES);
+        assert!(done.node_expansion_required);
+        let resizes = rpc.calls_of("bdev_lvol_resize");
+        assert!(
+            resizes.iter().any(|(n, p)| n == "node-b"
+                && p["params"]["name"].as_str() == Some("uuid-b-v2")),
+            "b's post-revert head resized by its live uuid: {:?}",
+            resizes
+        );
+        assert_eq!(
+            rpc.bdevs.lock().unwrap()
+                [&("node-b".to_string(), "lvs0/lvol-uuid-b".to_string())]["num_blocks"],
+            json!(4096),
+            "every leg converged to the new size"
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_still_defers_when_the_size_alignment_grow_fails() {
+        // F56 belt integrity: the alignment is a HEAL, not a bypass — when
+        // the grow RPC fails, the leg defers exactly as pre-fix (a short
+        // head must never admit; the resizer/chase retry converges later).
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+        // Short dst head KNOWN on its own node → the alignment engages…
+        rpc.bdevs.lock().unwrap().insert(
+            ("node-b".to_string(), "lvs0/lvol-uuid-b".to_string()),
+            json!({
+                "name": "lvol-uuid-b",
+                "uuid": "uuid-b-v2",
+                "num_blocks": 1024,
+                "block_size": 512
+            }),
+        );
+        // …but the resize fails (agent up, RPC erroring).
+        let mut rpc = rpc;
+        rpc.fail.insert(
+            ("node-b".to_string(), "bdev_lvol_resize".to_string()),
+            "Invalid parameters".to_string(),
+        );
+        let store = FakeStore::new(standby_b_record());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert!(admitted.is_empty(), "failed grow must defer, never admit short");
+        assert!(
+            !rpc.calls_of("bdev_lvol_resize").is_empty(),
+            "the alignment was attempted before deferring"
+        );
+        let ops = store.ops.lock().unwrap().clone();
+        assert!(ops.iter().all(|o| !o.starts_with("in_sync")), "ops: {:?}", ops);
+        let events = store.events.lock().unwrap().clone();
+        assert!(
+            events.iter().any(|(r, _)| r == "StandbyAdmissionDeferred"),
+            "events: {:?}",
+            events
         );
     }
 

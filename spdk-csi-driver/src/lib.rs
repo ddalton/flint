@@ -26,6 +26,7 @@ pub mod controller_reap;  // Dead NVMe-oF controller reaping (Tier-2 7b-0 spike 
 pub mod hot_rejoin;  // Tier-2 7b-1/7b-2: hot rejoin into a live raid (skip_rebuild window + localization + trigger loop)
 pub mod volume_claims;  // Tier-2 7b-2: per-volume single-operation claim shared by catch-up/cutover/hot-rejoin
 pub mod maint_roll;  // The csi-node roll landmine fix: drain-before-restart roller (docs/maintenance-drain-csi-node-roll.md; formal maintenance tranche)
+pub mod expand;  // Replicated volume expansion fan-out core (v1.21.0; extracted for the F56 sim tier)
 pub mod orchestrator_role;  // F53: which PROCESS may run the orchestrators (volume_claims is in-process, so two that do serialize nothing)
 pub mod orchestrator_lease; // the MECHANISM behind that decision: kube-Lease leader election among the granted candidates
 pub mod freshness_gate;  // F36c: last-writer-set degraded-assembly gate (docs/f36c-assembly-freshness-gate.md)

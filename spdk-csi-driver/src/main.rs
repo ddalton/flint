@@ -609,7 +609,72 @@ impl spdk_csi_driver::csi::identity_server::Identity for MinimalIdentityService 
     }
 }
 
-/// Minimal Controller Service Implementation  
+/// The Kubernetes/node-agent surface behind the extracted expand core
+/// (expand.rs): record-home PV reads, per-leg resize via the node agent,
+/// PV events. Everything decision-shaped stays in the core.
+struct KubeExpandEnv<'a> {
+    driver: &'a SpdkCsiDriver,
+}
+
+#[async_trait::async_trait]
+impl spdk_csi_driver::expand::ExpandEnv for KubeExpandEnv<'_> {
+    async fn record_home_state(
+        &self,
+        record_home: &str,
+    ) -> Result<(Option<u64>, Option<spdk_csi_driver::replica_sync::VolumeSyncRecord>), String>
+    {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
+        let record_pv = pvs.get(record_home).await.map_err(|e| e.to_string())?;
+        let current_bytes = record_pv
+            .spec
+            .as_ref()
+            .and_then(|s| s.capacity.as_ref())
+            .and_then(|c| c.get("storage"))
+            .and_then(|q| SpdkCsiDriver::parse_quantity(&q.0).ok());
+        let record = record_pv
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(spdk_csi_driver::replica_sync::SYNC_STATE_ANNOTATION))
+            .and_then(|s| {
+                spdk_csi_driver::replica_sync::VolumeSyncRecord::from_annotation(s).ok()
+            });
+        Ok((current_bytes, record))
+    }
+
+    async fn resize_leg(
+        &self,
+        node: &str,
+        lvol_uuid: &str,
+        new_size_bytes: u64,
+    ) -> Result<(), String> {
+        let payload = serde_json::json!({
+            "lvol_uuid": lvol_uuid,
+            "new_size_bytes": new_size_bytes
+        });
+        self.driver
+            .call_node_agent(node, "/api/volumes/resize_lvol", &payload)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn emit(&self, record_home: &str, type_: &str, reason: &str, msg: &str) {
+        spdk_csi_driver::replica_sync::emit_pv_event(
+            &self.driver.kube_client,
+            "flint-controller",
+            record_home,
+            type_,
+            reason,
+            msg,
+        )
+        .await;
+    }
+}
+
+/// Minimal Controller Service Implementation
 struct MinimalControllerService {
     driver: Arc<SpdkCsiDriver>,
     /// pNFS MDS shard set. `Some` only when
@@ -1047,6 +1112,9 @@ impl MinimalControllerService {
     /// (`raid1_resize` is event-driven; there is no raid-resize RPC and none
     /// is needed — doc §2.1), and the kernel-exposure device is verified
     /// grown by NodeExpandVolume's device-size guard before any fs resize.
+    /// The replicated core lives in expand.rs (extracted for the F56 sim
+    /// tier); this impl and KubeExpandEnv own only the Kubernetes/
+    /// node-agent surface plus the legacy single-replica arm.
     ///
     /// `handle` is the volumeHandle whose PV carries the replica identity
     /// list (user handle for RWO, backing handle for RWX); `record_home` is
@@ -1122,159 +1190,31 @@ impl MinimalControllerService {
             ));
         };
 
-        // Replicated volume: shrink/no-op guard + sync belt read from the
-        // record-home PV, then fan the lvol resize out across every leg.
-        use k8s_openapi::api::core::v1::PersistentVolume;
-        use kube::Api;
-        let pvs: Api<PersistentVolume> = Api::all(self.driver.kube_client.clone());
-        let record_pv = pvs.get(record_home).await.map_err(|e| {
-            tonic::Status::unavailable(format!(
-                "record PV {} unreadable (retried automatically): {}",
-                record_home, e
-            ))
-        })?;
-
-        let current_bytes = record_pv
-            .spec
-            .as_ref()
-            .and_then(|s| s.capacity.as_ref())
-            .and_then(|c| c.get("storage"))
-            .and_then(|q| SpdkCsiDriver::parse_quantity(&q.0).ok());
-        match current_bytes {
-            Some(cur) if new_size_bytes <= cur => {
-                println!(
-                    "ℹ️ [CONTROLLER] New size {} <= current size {}, no expansion needed",
-                    new_size_bytes, cur
-                );
-                return Ok(tonic::Response::new(
-                    spdk_csi_driver::csi::ControllerExpandVolumeResponse {
-                        capacity_bytes: cur as i64,
-                        node_expansion_required: false,
-                    },
-                ));
-            }
-            Some(_) => {}
-            // bdev_lvol_resize would happily SHRINK; without a readable
-            // current size the shrink guard cannot run — refuse.
-            None => {
-                return Err(tonic::Status::failed_precondition(format!(
-                    "Volume {}: PV capacity unreadable — refusing a resize whose shrink \
-                     guard cannot run",
-                    record_home
-                )))
-            }
-        }
-
-        let record = record_pv
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get(spdk_csi_driver::replica_sync::SYNC_STATE_ANNOTATION))
-            .and_then(|s| {
-                spdk_csi_driver::replica_sync::VolumeSyncRecord::from_annotation(s).ok()
-            });
-
-        // The belt (F43 ordering constraint, C2): never grow while a leg
-        // lags — the raid grows on the serving legs only and the lagging
-        // leg returns undersized (the leg-size guard then refuses it loudly,
-        // but the volume is left needing re-placement). One leg with no
-        // record to prove anything: same refusal — absence of evidence.
-        if replicas.len() > 1 {
-            let Some(record) = record.as_ref() else {
-                return Err(tonic::Status::unavailable(format!(
-                    "Volume {}: no replica sync record — cannot prove every leg holds the \
-                     acknowledged history; expansion retries automatically",
-                    record_home
-                )));
-            };
-            let lagging =
-                spdk_csi_driver::replica_sync::replicas_not_in_sync(record, &replicas);
-            if !lagging.is_empty() {
-                let msg = format!(
-                    "expansion refused while replicas lag: {}",
-                    lagging.join("; ")
-                );
-                println!("📏 [CONTROLLER] {}: {}", record_home, msg);
-                spdk_csi_driver::replica_sync::emit_pv_event(
-                    &self.driver.kube_client,
-                    "flint-controller",
-                    record_home,
-                    "Warning",
-                    "ExpandRefusedReplicasNotInSync",
-                    &msg,
-                )
-                .await;
-                return Err(tonic::Status::unavailable(format!(
-                    "Volume {}: {} — expansion retries automatically once all replicas \
-                     are in_sync",
-                    record_home, msg
-                )));
-            }
-        }
-
-        // Fan-out. Addressed by the LIVE lvol uuid: after a catch-up revert
-        // the head is a re-created clone under a new uuid
-        // (`active_lvol_uuid`) — resizing the identity uuid would target a
-        // dead lvol. Same-size resize is a blobstore no-op, so the
-        // external-resizer's retry safely re-drives a partial failure.
-        let mut failures: Vec<String> = Vec::new();
-        for r in &replicas {
-            let live_uuid = record
-                .as_ref()
-                .and_then(|rec| rec.get(&r.lvol_uuid))
-                .map(|rec| rec.live_lvol_uuid().to_string())
-                .unwrap_or_else(|| r.lvol_uuid.clone());
-            let payload = serde_json::json!({
-                "lvol_uuid": live_uuid,
-                "new_size_bytes": new_size_bytes
-            });
-            match self
-                .driver
-                .call_node_agent(&r.node_name, "/api/volumes/resize_lvol", &payload)
-                .await
-            {
-                Ok(_) => println!(
-                    "✅ [CONTROLLER] Resized leg {} on {} to {} bytes",
-                    live_uuid, r.node_name, new_size_bytes
-                ),
-                Err(e) => failures.push(format!("{} on {}: {}", live_uuid, r.node_name, e)),
-            }
-        }
-        if !failures.is_empty() {
-            let msg = format!(
-                "resize applied to {}/{} legs; failed: {}",
-                replicas.len() - failures.len(),
-                replicas.len(),
-                failures.join("; ")
-            );
-            spdk_csi_driver::replica_sync::emit_pv_event(
-                &self.driver.kube_client,
-                "flint-controller",
-                record_home,
-                "Warning",
-                "ExpandReplicaFanoutIncomplete",
-                &msg,
-            )
-            .await;
-            return Err(tonic::Status::unavailable(format!(
-                "Volume {}: {} — retried automatically (lvol resize is idempotent)",
-                record_home, msg
-            )));
-        }
-
-        println!(
-            "✅ [CONTROLLER] Volume {} expanded to {} bytes on all {} replicas \
-             (raid + namespace growth propagate via SPDK resize events)",
-            handle,
+        // Replicated volume: the extracted core (expand.rs) runs the
+        // shrink/no-op guard + C2 sync belt + live-uuid fan-out against the
+        // record-home PV; this wrapper only maps its outcome onto the CSI
+        // surface.
+        match spdk_csi_driver::expand::expand_replicated(
+            &KubeExpandEnv { driver: &self.driver },
+            record_home,
+            &replicas,
             new_size_bytes,
-            replicas.len()
-        );
-        Ok(tonic::Response::new(
-            spdk_csi_driver::csi::ControllerExpandVolumeResponse {
-                capacity_bytes: new_size_bytes as i64,
-                node_expansion_required: true,
-            },
-        ))
+        )
+        .await
+        {
+            Ok(done) => Ok(tonic::Response::new(
+                spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                    capacity_bytes: done.capacity_bytes as i64,
+                    node_expansion_required: done.node_expansion_required,
+                },
+            )),
+            Err(spdk_csi_driver::expand::ExpandRefusal::FailedPrecondition(m)) => {
+                Err(tonic::Status::failed_precondition(m))
+            }
+            Err(spdk_csi_driver::expand::ExpandRefusal::Unavailable(m)) => {
+                Err(tonic::Status::unavailable(m))
+            }
+        }
     }
 
     /// RWX expand orchestration (v1.21.0, doc §3): grow the backing chain,
