@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Nineteen runs, ALL required.
+# Twenty-two runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -54,6 +54,21 @@
 #      never comes back) — strict: every invariant + writability on the
 #      survivor must HOLD (a wedged restart degrades one leg, nothing
 #      else; the parked mark is the honest operational state).
+#
+# FlintClaims (the multi-process claims/window layer — the F50/F53 axis):
+#   5k. FlintClaims.cfg          strict — Lease + marker grace ON, two
+#      processes, deaths + spurious leadership moves: Inv_NoColdAdmission
+#      and both liveness properties (window resolves; eventually serves,
+#      incl. the owner-dies-mid-window recovery story) must HOLD.
+#   5l. FlintClaimsNoGrace.cfg   MarkerGrace=FALSE (pre-F50), Lease still
+#      ON — TLC must FIND the cold-admission loss: a deposed-but-alive
+#      leader's in-flight dispatch scrubs the new leader's young window
+#      and the blind flip commits a cold leg. Proves grace and Lease are
+#      complementary layers (the Lease gates ticks, not in-flight ops).
+#   5m. FlintClaimsNoLeader.cfg  LeaderGate=FALSE (the F53 world, grace
+#      ON) — strict, must HOLD: safety never depended on the process
+#      singleton (the record CAS + grace carry it); the Lease buys
+#      ownership determinism and churn-freedom, not safety.
 #
 # FlintSnapshots:
 #   6. FlintSnapshots.cfg           strict — every completed copy session
@@ -134,6 +149,12 @@ liveness_mutation_run FlintReplication FlintReplicationRollLease.cfg "roll-lease
 
 strict_run FlintReplication FlintReplicationRollRecordBarrier.cfg "record-only barrier strict (the implementation's barrier; belt holds safety)"
 strict_run FlintReplication FlintReplicationRollWedged.cfg "wedged-restart strict (kubelet never returns; survivor stays writable)"
+
+strict_run FlintClaims FlintClaims.cfg "claims strict (two processes, Lease + marker grace; F50/F53 layer)"
+
+mutation_run FlintClaims FlintClaimsNoGrace.cfg "F50 mutation (MarkerGrace=FALSE: scrub under a live window, cold admission)" "Inv_NoColdAdmission"
+
+strict_run FlintClaims FlintClaimsNoLeader.cfg "no-leader strict (F53 world: safety never depended on the singleton)"
 
 strict_run FlintSnapshots FlintSnapshots.cfg "snapshots strict (full ordered walk, blobstore relink)"
 

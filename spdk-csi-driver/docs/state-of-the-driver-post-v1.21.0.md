@@ -220,6 +220,20 @@ least one new F-number.
    > (redundancy erosion at ≥3 legs). Owed: drill 3.14 (the live gate),
    > the local half (ublk-recovery spike), and a guarded_destroy verdict
    > for `bdev_raid_remove_base_bdev`.
+   >
+   > **THE CLAIMS TRANCHE same day** (gate now 22 runs, third module
+   > `formal/FlintClaims.tla`): the F50/F53 multi-process axis — chosen
+   > over a multi-volume restructure after a full defect-catalog
+   > classification found ZERO historical F-numbers requiring two
+   > volumes, while the two-process family had two live finds. The
+   > window decomposed open/commit; the marker grace stated as an
+   > ordering axiom; the Lease with honest tick-granularity semantics.
+   > Results: the grace's mutation rediscovers F50's E_f-scrub collision
+   > in 7 states WITH the Lease on (deposed-but-alive leader's in-flight
+   > dispatch — grace and Lease are complementary layers), and the
+   > no-leader strict run HOLDS (safety never depended on the process
+   > singleton; the Lease buys determinism and churn-freedom — the
+   > runaj A/B, machine-checked).
 3. **F54 doc §3 residual:** prestage trusts consumer-side bdev *presence*
    over path liveness, so hot-rejoin's first window can lose one ~7-min
    backoff cycle to the F48 zombie racing its own sever (severable only

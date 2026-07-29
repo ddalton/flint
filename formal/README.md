@@ -1,6 +1,6 @@
-# Formal models — the replica-lifecycle machine and the snapshot protocol
+# Formal models — the replica-lifecycle machine, the snapshot protocol, and the multi-process claims layer
 
-Two modules, one gate (`scripts/check-tla.sh`, seventeen TLC runs).
+Three modules, one gate (`scripts/check-tla.sh`, twenty-two TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -29,6 +29,30 @@ a roll alone never downs the volume) and `MaintenanceEventuallyLifts`
 (no mark outlives its purpose on a live leg) are the theorems; three
 roll mutations must each rediscover their loss.
 
+`FlintClaims.tla` models the **multi-process claims/window layer** — the
+F50/F53 axis, which `FlintReplication`'s single `claim` variable
+deliberately assumes away (it IS the single-process assumption).
+`volume_claims.rs` is in-process: two controller-shaped processes (a
+helm rolling-upgrade overlap, the vestigial operator pod — F50; the
+dashboard backend — F53) each have a private registry, and neither can
+see the other's in-flight work. The module decomposes the hot-rejoin
+window into open/commit — an atomic `Admit` cannot be raced, and the
+F50 loss lives BETWEEN intent and flip — and models the two PROTOCOL
+layers of the fix stack: the marker grace (as an ordering axiom: a
+marker outlives the grace only once no live window owns it — the
+quantitative content of the 300s) and the P1 kube-Lease (with honest
+tick-granularity semantics: it gates starting ops, never in-flight
+ones, and can spuriously depose a live holder). `Inv_NoColdAdmission`
+is the theorem. The mutation and the no-leader strict run together
+state the layering exactly: the grace carries scrub-vs-live-window
+safety (its mutation finds F50's E_f-scrub collision WITH the Lease
+on, via a deposed-but-alive leader's in-flight dispatch); the Lease
+carries ownership determinism and churn-freedom, NOT safety (the
+no-leader run holds — which is what the runaj A/B showed live: the
+dashboard's window was correct, just unowned). The role grant itself
+(F53's CSI_MODE conflation) is configuration, killed by
+`orchestrator_role.rs`, not modeled.
+
 `FlintSnapshots.tla` (tranche 3) models the **snapshot protocol** at
 block-content level — the layer where content is `[Blocks -> version]`
 and the hazards are about which version survives a chain walk, which the
@@ -50,7 +74,7 @@ Verification of snapshots is layered deliberately:
    what `Inv_SessionFaithful` licenses).
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar on first use).
-It runs seventeen configs, ALL required:
+It runs twenty-two configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -156,6 +180,25 @@ It runs seventeen configs, ALL required:
    restart degrades exactly one leg's availability. The parked mark is
    the honest operational state, so the lifts property is deliberately
    not checked here.
+5k. `FlintClaims.cfg` — the shipped multi-process stack (Lease + marker
+   grace, two processes, deaths and spurious leadership moves in
+   budget): `Inv_NoColdAdmission` plus both liveness properties must
+   hold — including the owner-dies-mid-window recovery story (marker
+   ages, the survivor takes the lease, scrubs, re-warms, re-opens,
+   commits).
+5l. `FlintClaimsNoGrace.cfg` — the pre-F50 world (`MarkerGrace=FALSE`,
+   Lease still ON): TLC **must find** the cold-admission loss in 7
+   states — a renewal hiccup deposes a live leader whose in-flight
+   catch-up dispatch keeps running (tick granularity), the new leader
+   opens a window, the deposed dispatch reads stale+marker (exactly
+   what a live pre-flip window looks like) and scrubs the payload, and
+   the blind flip commits a cold leg. Machine-checked proof the grace
+   and the Lease are complementary layers, not redundant ones.
+5m. `FlintClaimsNoLeader.cfg` — the F53 world (`LeaderGate=FALSE`,
+   grace ON): strict, **must hold**. Safety never depended on the
+   process singleton — the record CAS carries one-window-at-a-time and
+   the grace carries scrub-vs-live-window; the Lease buys ownership
+   determinism and churn-freedom. The runaj A/B, machine-checked.
 6. `FlintSnapshots.cfg` — the shipped copy protocol (full ordered walk,
    blobstore relink): `Inv_SessionFaithful` holds. Action coverage
    verified — the based suffix walk contributes zero new distinct
@@ -205,6 +248,14 @@ cannot rediscover the bug classes it exists for proves nothing.
 | `Inv_PlannedRollNeverCausesOutage` | with zero real failures, a rolling restart alone never takes the volume down |
 | `MaintenanceEventuallyLifts` | no suppression mark outlives its purpose on a live leg (death-escaped, per-leg — see below) |
 | `Inv_NoSilentLoss` | PacificA's commit invariant; the ledger oracle's zero-loss check is its runtime shadow |
+| **FlintClaims** | |
+| `claim` as a per-process function | `volume_claims::global()` — one in-memory registry PER PROCESS, mutually invisible (the F50 premise) |
+| `WindowOpen` / `WindowCommit` (open does NOT re-verify at commit) | `mark_hot_rejoin_intent` + prestage vs the flip (`mark_hot_rejoined`) — the F50 loss lives between them |
+| `window` with no owner field; `winOwner` as in-memory-only state | a young stale+marker is indistinguishable from a live window by record state (the F50 doc's exact wording) |
+| `ScrubMarked` under the CATCH-UP claim | catch-up's marked-dispatch performing hot-rejoin maintenance — "mutual exclusion between claim holders is not mutual exclusion between the operations that touch E_f" |
+| `MarkerAge` gated on `winOwner = "none"` | the grace's quantitative content (300s >> window span) stated as ordering — `FLINT_HOT_REJOIN_RECONCILE_GRACE_SECS` |
+| `LeaderGate` on acquire/open only; `SpuriousChange` deposing a live holder | P1's kube-Lease tick-granularity gating ("an in-flight op is never interrupted") |
+| `Inv_NoColdAdmission` | the flip only ever lands the payload its open verified — F50's theorem |
 | **FlintSnapshots** | |
 | `Cut` / `chain` | `apply_epoch_cut` / the blobstore snapshot chain (retained epochs) |
 | `Alloc(i)` / `ApplyWalk` oldest-first | per-epoch shallow copy; `lineage_chain` collects, `chain.reverse()` orders |
