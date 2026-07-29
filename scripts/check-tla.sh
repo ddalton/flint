@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Thirty-eight runs, ALL required.
+# Forty-three runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -150,6 +150,35 @@
 #      move into the mutation too.  The roller's lease buys pacing, not
 #      safety: the FlintClaimsNoLeader verdict, extended to the roller.
 #
+# Cutover tranche (the RWX bounce — cutover.rs, the one protocol-shaped
+# subsystem that had no model at all until 2026-07-29):
+#   11a. FlintReplicationBounce.cfg     strict — the controller-initiated
+#      ZERO-FAILURE teardown with the PROPOSED commit-time preflight ON,
+#      plus admit_standbys_at_stage (the bounce's return path, which the
+#      existing Admit cannot represent: it runs in the NODE process, under
+#      no claim, and grows the writer set BEFORE the gate rules).  Must
+#      HOLD, with the post-bounce liveness.
+#   11b. FlintReplicationBounceRisk.cfg BouncePreflight=FALSE (the SHIPPED
+#      planner: VolumeCutoverView carries no leg health, no serving
+#      membership, no writer set) — TLC must FIND Inv_NoBounceInducedRisk
+#      violated: ONE bouncer, lease honored, no race, tears down a volume
+#      on a STALE data-path flag and the reassembly has to excuse an acked
+#      tail that was recoverable all along.  Cutover has no DrainBelt.
+#   11c. FlintReplicationBounceRace.cfg the same with a deposed-but-alive
+#      second bouncer and the leader gate ON — TLC must FIND it again:
+#      is_leader() is read once per tick (the single occurrence in 1548
+#      lines) while the tick's work is unbounded.  Unlike the roller,
+#      cutover has NO CAS anywhere to move a belt into.
+#   11d. FlintReplicationBounceRaceFixed.cfg belt ON, NO leader gate at
+#      all — strict.  The sharp theorem: the preflight ALONE carries
+#      bounce safety; the lease buys pacing, not safety (a third instance
+#      of the FlintClaimsNoLeader / RollerRaceFixed verdict).
+#   11e. FlintReplicationBounceLoop.cfg  the pointless-rebounce CANARY —
+#      with every individual bounce belted safe, TLC must still FIND
+#      Inv_NoPointlessRebounce violated: no attempt counter, no backoff,
+#      and a data-path flag only its (possibly dead) flagging node may
+#      clear.  The fix is owed in CODE, not in the model.
+#
 # FlintClaims (the multi-process claims/window layer — the F50/F53 axis):
 #   5k. FlintClaims.cfg          strict — Lease + marker grace ON, two
 #      processes, deaths + spurious leadership moves: Inv_NoColdAdmission
@@ -287,6 +316,17 @@ liveness_mutation_run FlintReplication FlintReplicationExpandWedge.cfg "F56 muta
 mutation_run FlintReplication FlintReplicationExpandGuard.cfg "size-guard mutation (SizeGuard=FALSE: silent device shrink)" "Inv_NoDeviceShrink"
 
 mutation_run FlintReplication FlintReplicationExpandShrinkReal.cfg "shipped-floor mutation (DeviceFloor=FALSE: PV-capacity belt lags the device — Block-mode shrink)" "Inv_NoDeviceShrink"
+
+# Cutover tranche (the RWX bounce: cutover.rs plan→bounce→verify→judge).
+strict_run FlintReplication FlintReplicationBounce.cfg "bounce strict (commit-time preflight + the at-stage admission; both planner arms, two failures)"
+
+mutation_run FlintReplication FlintReplicationBounceRisk.cfg "bounce-preflight mutation (BouncePreflight=FALSE: the shipped planner reads no leg health — the manufactured outage and its hollow risk)" "Inv_NoBounceInducedRisk"
+
+mutation_run FlintReplication FlintReplicationBounceRace.cfg "two-bouncer race, gate ON (deposed bouncer's captured plan lands; cutover has NO CAS to belt — F59's shape without F59's remedy)" "Inv_NoBounceInducedRisk"
+
+strict_run FlintReplication FlintReplicationBounceRaceFixed.cfg "bounce-preflight strict, no leader gate at all (the belt alone carries bounce safety)"
+
+mutation_run FlintReplication FlintReplicationBounceLoop.cfg "pointless-rebounce canary (a flag only a dead node could clear, no attempt counter anywhere — the belt does not close churn)" "Inv_NoPointlessRebounce"
 
 strict_run FlintClaims FlintClaims.cfg "claims strict (two processes, Lease + marker grace; F50/F53 layer)"
 

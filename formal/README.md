@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine, the snapshot protocol, and the multi-process claims layer
 
-Three modules, one gate (`scripts/check-tla.sh`, thirty-eight TLC runs).
+Three modules, one gate (`scripts/check-tla.sh`, forty-three TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -87,7 +87,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs thirty-five configs, ALL required:
+on first use).  It runs forty-three configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -366,6 +366,91 @@ question — and the answer inverted the audit's prose:
    `FlintClaimsNoLeader` verdict, extended to the roller and now
    machine-checked rather than asserted.
 
+**The cutover tranche (2026-07-29)** — `cutover.rs` was the last
+protocol-shaped subsystem with no model at all (the audit critic's
+nomination).  A six-area scout plus adversarial verifiers settled two
+things before any modeling: the *availability* fear is unfounded — a
+controller that dies between `delete_pod` and `recreate_pod` does NOT
+strand an RWX volume, because `rwx_nfs.rs`'s liveness reconciler
+recreates an `Absent`/`Dead` server pod within about one 30s tick
+(`nfs_reconcile_decision`, counting attachment INTENT) — and the
+*planner* is where the real exposure lives: `VolumeCutoverView`
+(cutover.rs:271-289) carries no leg health, no serving membership and
+no writer set, and `plan_cutover` (305-385) reads only `sync_state` and
+`last_epoch`.  **A bounce is a controller-initiated, zero-failure
+teardown of a healthy serving data path issued without one term of
+health in its guard.**  That makes it genuinely new reachable state:
+nothing else in this module can take a volume down at `crashes = 0`
+with maintenance off — `ServerCrash`/`ServerPartition` are
+crash-budgeted, `RaidDeconfigure` needs `~Responsive`, and `MaintDrain`
+is belted by `serving \ {l} # {}`.  The tranche also had to close a
+correspondence gap first: `admit_standbys_at_stage` — the admission the
+bounce exists to trigger — runs in the NODE process, under NO claim,
+with the raid not yet created, and commits `record_in_sync` (writer-set
+growth) BEFORE the freshness gate rules.  `Admit` cannot represent that
+(it requires `claim = "admission"` and `serving # {}`), so `AdmitAtStage`
+is its own action and the bounce's return path is modeled end to end.
+
+11a. `FlintReplicationBounce.cfg` — strict: the commit-time preflight
+   ON, both planner arms, two failures, plus `AdmitAtStage`.  Every
+   invariant and the post-bounce liveness must hold.
+11b. `FlintReplicationBounceRisk.cfg` — `BouncePreflight = FALSE`, the
+   SHIPPED planner, ONE bouncer, lease fully honored, no race of any
+   kind: TLC **must find** `Inv_NoBounceInducedRisk` violated.  The
+   trace is the whole finding — a leg is flagged data-path-lost while
+   out of the raid, the volume reassembles and the leg comes back
+   *serving*, the flag has not yet been cleared, a second leg dies, and
+   the controller tears the volume down **on the stale flag**; the
+   reassembly can only return by excusing an acked tail on a writer
+   that was never verifiably dead.  Without the bounce that death was
+   an ordinary fault-out on a two-writer volume.  **Cutover has no
+   `DrainBelt`.**
+11c. `FlintReplicationBounceRace.cfg` — the same with a deposed-but-
+   alive second bouncer and the leader gate ON: TLC **must find** it
+   again.  `is_leader()` is read once per tick (cutover.rs:714 — the
+   single occurrence in 1548 lines) while the tick walks every flint PV
+   with a blocking `await_detached` bounded only by `detach_timeout`
+   (120s) *per bouncing volume*, against a 15s lease.  The decisive
+   asymmetry with the roller: `drain_for_maintenance` had an rv-guarded
+   record CAS to move `DrainMarksBelt` into — **cutover has no CAS
+   anywhere** (`DeleteParams::default()`, a bare `create`, whole-array
+   merge patches), so a commit-time preflight is the only belt this
+   subsystem can host.
+11d. `FlintReplicationBounceRaceFixed.cfg` — belt ON, **no leader gate
+   at all**: strict, at the same two-failure budget as 11b/11c, so the
+   belt is proven exactly where the counterexample lives.  The sharp
+   theorem: the preflight ALONE carries bounce safety.  A third
+   machine-checked instance of the `FlintClaimsNoLeader` verdict — the
+   lease buys pacing, not safety.
+11e. `FlintReplicationBounceLoop.cfg` — the pointless-rebounce CANARY.
+   With every individual bounce belted safe, TLC **must still find**
+   `Inv_NoPointlessRebounce` violated: there is no attempt counter, no
+   backoff and no negative caching anywhere in `cutover.rs`; the `Err`
+   arm records no attempt at all so the documented 900s minimum never
+   applies on any failure path; and the data-path arm's verification
+   predicate is a flag only the flagging node's agent may clear
+   (`node_agent.rs:5241-5247`), permanently unsatisfiable once that node
+   is gone.  Stated as a canary, not a theorem — **the fix is owed in
+   code**, and the belt deliberately does not close churn.
+
+Two honest notes on this tranche.  The bounce cfgs run under
+`BounceBound`, a tighter raid-incarnation constraint than `GenBound`:
+the manufactured-outage window needs failure BREADTH (two independent
+failures — one to eject a leg from the raid, which is what creates the
+bounce trigger, and one to take a surviving writer out during the
+window) but not deep incarnation churn, and at `MaxCrashes = 2` the
+generic budget puts the strict runs into tens of millions of states.
+Both mutation runs were re-verified to still find their counterexamples
+under it.  And `Inv_WriterSetGrounded` — the machine-check of the
+audit verifier's prose rebuttal that admit-before-gate is the safe
+direction — is stated with a `zombie = {}` guard, because its first run
+found a composition that is NOT about the bounce: `AdmitAtStage` grows
+the writer set while a partitioned old head can still be acking writes,
+leaving a recorded writer that never served and does not hold the acked
+tail.  The core safety theorems (`Inv_NoSilentLoss` included) hold
+across it, so it is booked as an open question about the at-stage
+admission's fencing order, not as a bounce finding.
+
 The mutation runs are the models' own regression tests; a model that
 cannot rediscover the bug classes it exists for proves nothing.
 
@@ -399,6 +484,13 @@ cannot rediscover the bug classes it exists for proves nothing.
 | `Inv_PlannedRollNeverCausesOutage` | with zero real failures, a rolling restart alone never takes the volume down |
 | `MaintenanceEventuallyLifts` | no suppression mark outlives its purpose on a live leg (death-escaped, per-leg — see below) |
 | `Inv_NoSilentLoss` | PacificA's commit invariant; the ledger oracle's zero-loss check is its runtime shadow |
+| `Bounce` (`serving' = {}`, record UNCHANGED) | `execute_cutover`'s NFS-pod bounce → NodeUnstage's `teardown_volume_spdk_state`: the raid bdev and every per-replica controller are deleted and NO record field is touched — no stale marks, no writer-set prune |
+| `BouncePlannable`'s two arms, with no health term | `plan_cutover` (cutover.rs:305-385) reading only `sync_state`/`last_epoch` off a `VolumeCutoverView` that carries no leg health, no serving membership, no writer set |
+| `BouncePreflight` | THE PROPOSED BELT — re-verify at commit that every recorded writer is responsive-or-verifiably-dead (the `drain_leg` probe-first discipline, which cutover does not have) |
+| `RogueBouncePlan`/`RogueBounceCommit` | the tick-top `is_leader()` read (cutover.rs:714, the file's only one) vs a tick whose per-volume `await_detached` runs to `detach_timeout`; no CAS exists anywhere to belt the commit |
+| `dpFlag` + `AgentFlag`/`AgentClear` | `flint.csi.storage.io/data-path-lost` — written by a leg's own agent, clearable ONLY by the flagging node (`node_agent.rs:5241-5247`, `flagged_by_me`) |
+| `AdmitAtStage` (unclaimed, `serving = {}`, writer set grows before the gate) | `admit_standbys_at_stage` (driver.rs:1967 → catchup.rs:2301) committing `record_in_sync` BEFORE `freshness_gate::evaluate` (driver.rs:2089) |
+| `consecutiveBounces` / `Inv_NoPointlessRebounce` | the attempt counter `cutover.rs` does NOT have — the ghost that makes its absence checkable |
 | **FlintClaims** | |
 | `claim` as a per-process function | `volume_claims::global()` — one in-memory registry PER PROCESS, mutually invisible (the F50 premise) |
 | `WindowOpen` / `WindowCommit` (open does NOT re-verify at commit) | `mark_hot_rejoin_intent` + prestage vs the flip (`mark_hot_rejoined`) — the F50 loss lives between them |
@@ -519,6 +611,23 @@ cannot rediscover the bug classes it exists for proves nothing.
   retry) exists in its final form because TLC rejected the draft.  Net
   verdict, inverting the audit's prose: the roller's lease was never
   safety-load-bearing — the belt was missing.
+- **The cutover tranche corrected its own premise twice before it found
+  anything.**  The scout was sent to confirm an availability fear — the
+  NFS server is a bare pod that nothing else recreates — and the code
+  refuted it (`rwx_nfs.rs`'s liveness reconciler rebuilds an
+  `Absent`/`Dead` server within about one 30s tick).  Then the first
+  `BounceRisk` run came back GREEN, and the reason was not the one the
+  design predicted (`MonitorCurrent`'s missing lag) but leg-arity and
+  BUDGET: the manufactured-outage window needs TWO independent failures
+  — one to eject a leg from the raid, which is what creates the bounce
+  trigger in the first place, and one to take a surviving writer out
+  during the window — and it is reachable only through the `DataPathArm`,
+  the arm that is actually live under shipped RWX defaults.  With both
+  corrected the counterexample is sharp, and its shape is the finding:
+  the controller tears a healthy volume down **on a stale data-path
+  flag** and can only come back by excusing an acked tail that was
+  recoverable all along.  A green run is a claim about the config, not
+  about the code — both times the config was wrong.
 
 ## Deliberate scope limits
 
@@ -541,10 +650,24 @@ cannot rediscover the bug classes it exists for proves nothing.
   retention-pin machinery (`pin_retention`/`advance_retention_pin`/
   `retire_epochs`) has no `FlintSnapshots` counterpart — atomic sessions
   make Drop-during-walk unrepresentable, so the pin's cross-step safety
-  burden is carried by unit tests, not TLC.  `cutover.rs` (the RWX
-  bounce admission: plan→bounce→verify→judge under OP_CUTOVER, leader-
-  gated) is the one protocol-shaped subsystem with no model at all —
-  the strongest next-tranche candidate; `FlintReplication`'s
+  burden is carried by unit tests, not TLC.  `cutover.rs` **was** the one protocol-shaped
+  subsystem with no model at all; the cutover tranche (runs 11a-11e,
+  2026-07-29) closed that.  What stays out of scope there is the POD
+  OBJECT LAYER — no `nfsPod` state, no liveness reconciler as a second
+  actor, no delete-by-name-without-UID, no 409-against-a-Terminating-
+  corpse, no ControllerPublish as a third writer of the same pod name.
+  It is abstracted into `Bounce`'s `serving' = {}` and `Assemble`'s
+  return, on the verifier's finding that the availability question is
+  already closed in code (the reconciler rebuilds an Absent/Dead server
+  within ~one 30s tick).  Consequence to accept: **the model cannot
+  express "the volume had no serving NFS pod for N seconds"** — that
+  claim stays with the drills.  Node taints are out entirely (no node
+  dimension), as are the volatile attempt record's TIMING content (at
+  tick granularity a controller restart and the shipped unconditional
+  re-arm are the same transition) and multi-volume effects
+  (head-of-line blocking, fleet-wide bounce concurrency).
+  `FlintReplication`'s `claim = "admission"` still covers only the
+  hot-rejoin/at-stage half; `FlintReplication`'s
   `claim = "admission"` covers only the hot-rejoin/at-stage half.  The
   leader-gate census is SIX sites (hot_rejoin, catchup, epoch_scheduler,
   cutover, maint_roll, rwx_nfs), and for the maintenance ROLLER the

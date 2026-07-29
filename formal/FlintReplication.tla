@@ -309,7 +309,7 @@ CONSTANTS
                \* THE POINT: RollerRace must FIND the double-drain EVEN
                \* WITH the gate TRUE — the lease is checked before the
                \* work, not at the commit, so it cannot close the race.
-  DrainMarksBelt \* TRUE = the fix: drain_for_maintenance refuses unless
+  DrainMarksBelt, \* TRUE = the fix: drain_for_maintenance refuses unless
                \* NO other replica carries a live maintenance mark AND
                \* every other replica is record-InSync — one-node-at-a-
                \* time AND the readmission barrier both moved INTO the
@@ -331,6 +331,59 @@ CONSTANTS
                \* else).  RollerRaceFixed (belt TRUE, gate FALSE) is
                \* the sharp theorem: the belt alone carries bounded
                \* impact — the lease buys pacing, not safety.
+  \* ---- the cutover tranche (cutover.rs: plan→bounce→verify→judge) -------
+  BounceEnabled, \* TRUE = the controller-initiated TEARDOWN of a healthy
+               \* serving data path exists (execute_cutover).  This is a
+               \* genuinely new door: at crashes = 0 with MaintEnabled =
+               \* FALSE nothing else in this module can take a healthy
+               \* volume down — ServerCrash/ServerPartition are crash-
+               \* budgeted, RaidDeconfigure needs ~Responsive, MaintDrain
+               \* is belted by serving \ {l} # {}.  FALSE in every
+               \* pre-existing cfg (legacy behavior graphs stay identical).
+  MaxBounces,  \* bound on bounces-since-last-progress; 0 in every legacy
+               \* cfg, which also leaves GenBound numerically unchanged.
+  AdmissionArm,\* TRUE = plan_cutover's converged-standby arm can fire
+               \* (cutover.rs:336-383).  INERT under shipped RWX defaults —
+               \* cfg.rwx_inplace defaults true and the planner returns
+               \* Wait (366-370) — so this arm corresponds to
+               \* FLINT_RWX_INPLACE_ADMISSION=disabled (S2's fallback rung)
+               \* or the RWO flint.csi.storage.io/rejoin-bounce opt-in.
+               \* Behind its own flag so each theorem names its world.
+  DataPathArm, \* TRUE = plan_cutover's data_path_lost arm (312-334) and
+               \* the annotation machinery exist.  It bypasses the standby
+               \* AND lag gates entirely ("nothing to admit, only a data
+               \* path to rebuild"), and its verification predicate is a
+               \* flag ONLY the flagging node's agent may ever clear.
+  BouncePreflight, \* THE PROPOSED BELT (the DrainBelt analogue).
+               \* FALSE = SHIPPED: VolumeCutoverView carries no leg health,
+               \* no serving membership and no writer set (cutover.rs:
+               \* 271-289); plan_cutover reads only sync_state and
+               \* last_epoch (305-385).  The precondition "this teardown
+               \* will not cost availability" is ASSUMED, never checked —
+               \* contrast drain_leg, which probes the raid BEFORE the
+               \* record round.  TRUE = re-verify AT COMMIT that the
+               \* volume can come back whole: every recorded writer
+               \* responsive or verifiably dead.
+  BounceRace,  \* TRUE = the two-bouncer machinery (RogueBouncePlan
+               \* captures a plan valid at capture time; RogueBounceCommit
+               \* lands it later under only the guards the code re-runs at
+               \* commit — which is get_pod, and nothing else).
+  BounceLeaderGate, \* TRUE = the lease gates CAPTURING a plan (the
+               \* tick-top is_leader read at cutover.rs:714 — the SINGLE
+               \* occurrence in 1548 lines); a stale plan then costs the
+               \* one budgeted deposal overlap (leaderMoved, SHARED with
+               \* the roller: orchestrator_lease.rs is ONE lease across all
+               \* six leader-gated sites, so one deposal deposes every
+               \* orchestrator at once).  FALSE = no leadership at all.
+  StageAdmit   \* TRUE = model admit_standbys_at_stage (driver.rs:1967 →
+               \* catchup.rs:2301) as its own action.  Required for the
+               \* bounce's RETURN path: Admit cannot represent it — Admit
+               \* demands claim = "admission" and serving # {}, while the
+               \* at-stage admission runs in the NODE process, under NO
+               \* volume claim, with the raid not yet created, and commits
+               \* record_in_sync (writer-set GROWTH) BEFORE the freshness
+               \* gate rules (driver.rs:2089).  The code's order is
+               \* admit→gate; this module's has been gate→admit.
 
 VARIABLES
   \* ---- data plane -------------------------------------------------------
@@ -390,13 +443,49 @@ VARIABLES
                  \* assembly belts floor on THIS (leg_size_guard reads the
                  \* PV), which is what makes Inv_NoDeviceShrink violable
                  \* with DeviceFloor = FALSE.
-  wantNew        \* an expansion request is outstanding (the resizer's
+  wantNew,       \* an expansion request is outstanding (the resizer's
                  \* retry loop; latched — one expansion per behavior)
+  \* ---- the cutover bounce (cutover.rs) -----------------------------------
+  bounceWindow,  \* {"none","clean","risky"} — an OPEN bounce window and
+                 \* what the RECORDED writer set looked like when the
+                 \* controller opened it.  "risky" = a writer was already
+                 \* unavailable at commit time (the manufactured outage);
+                 \* "clean" = every writer was responsive-or-deemed-dead,
+                 \* so any later loss is an ordinary failure inside the
+                 \* window that no preflight could have predicted.
+                 \* Cleared by the assembly that brings the volume back.
+  bouncePlan,    \* a second/deposed bouncer captured a plan, valid when
+                 \* captured, committed later (the RogueDrain shape)
+  bounceRisk,    \* the harm ghost: a ServeWithRisk assembly fired to come
+                 \* back from a window the CONTROLLER opened on an already-
+                 \* broken writer set
+  consecutiveBounces, \* 0..MaxBounces — bounces since one accomplished
+                 \* anything.  Reset by Admit/AdmitAtStage (a standby got
+                 \* in) and AgentClear (the data path came back).  There is
+                 \* NO attempt counter anywhere in cutover.rs; this ghost
+                 \* is what makes its absence checkable.
+  dpFlag,        \* {"none"} \cup Legs — the data-path-lost annotation,
+                 \* "<node>|<since>".  ONLY the flagging leg's own agent
+                 \* may clear it (node_agent.rs:5241-5247, flagged_by_me):
+                 \* the CONFIRMED ownership trap.
+  everServed     \* SUBSET Legs — legs that have served in their CURRENT
+                 \* incarnation (Replace/Scrub wipe the payload and drop
+                 \* membership).  The ghost that makes the admit-before-
+                 \* gate theorem non-vacuous.
 
+\* NOTE the bounce variables ARE in this tuple, deliberately: AgentFlag and
+\* AgentClear change nothing else, so with them omitted <<AgentClear(l)>>_vars
+\* would never hold and the weak fairness below would obligate NOTHING —
+\* a silently vacuous liveness assumption.  (stalePlan/leaderMoved remain
+\* outside it, as before: no action carrying them is fair, so the same
+\* trap cannot bite there, and adding them would perturb the existing
+\* roll-lease lasso runs.)
 vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
           lineage, riskSurfaced, state, writerSet, epochCut, claim,
           deferExpired, deemedDead, falseRisk, crashes,
-          rolling, rolled, suppress, rollerDead, legSize, raidSize, pvSize, wantNew>>
+          rolling, rolled, suppress, rollerDead, legSize, raidSize, pvSize, wantNew,
+          bounceWindow, bouncePlan, bounceRisk, consecutiveBounces, dpFlag,
+          everServed>>
 
 maintVars == <<rolling, rolled, suppress, rollerDead, stalePlan, leaderMoved>>
 
@@ -405,6 +494,11 @@ expandVars == <<legSize, raidSize, pvSize, wantNew>>
 \* The audit tranche's one new piece of persistent state: the per-volume
 \* f36c-defer deadline flag (grouped for the UNCHANGED lists).
 gateVars == <<deferExpired>>
+
+\* The cutover tranche's state (grouped like maintVars/expandVars so every
+\* untouched action carries exactly one extra UNCHANGED line).
+bounceVars == <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
+                dpFlag, everServed>>
 
 \* A forced-stale (StaleFloor) member keeps record-state "stale" while it
 \* serves — the only way a stale-state leg is ever in the serving set
@@ -444,6 +538,12 @@ TypeOK ==
   /\ raidSize \in {"old", "new"}
   /\ pvSize \in {"old", "new"}
   /\ wantNew \in BOOLEAN
+  /\ bounceWindow \in {"none", "clean", "risky"}
+  /\ bouncePlan \in BOOLEAN
+  /\ bounceRisk \in BOOLEAN
+  /\ consecutiveBounces \in 0..MaxBounces
+  /\ dpFlag \in {"none"} \cup Legs
+  /\ everServed \subseteq Legs
 
 \* A leg's data path answers: its node is up AND its tgt is not down for a
 \* planned restart.  The raid cannot tell the two apart — that symmetry is
@@ -532,6 +632,12 @@ Init ==
   /\ raidSize = "old"
   /\ pvSize = "old"
   /\ wantNew = FALSE
+  /\ bounceWindow = "none"
+  /\ bouncePlan = FALSE
+  /\ bounceRisk = FALSE
+  /\ consecutiveBounces = 0
+  /\ dpFlag = "none"
+  /\ everServed = Legs                   \* Init serves every leg
 
 (***************************************************************************)
 (* Data plane                                                              *)
@@ -555,6 +661,7 @@ Write ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The head crashes between replicating a block and acking the client: the
 \* block lands on SOME serving legs, the client never hears.  Either outcome
@@ -578,6 +685,7 @@ WriteTorn ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The F48 zombie: the partitioned old head still holds its leg
 \* connections and still acks client writes.  It writes OUTSIDE the
@@ -597,6 +705,7 @@ ZombieWrite ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* Verified death straight away (terminated AND observed so).
 LegDie(l) ==
@@ -609,6 +718,7 @@ LegDie(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* Silent unreachability: maybe a dying node, maybe a transient partition.
 LegBlackhole(l) ==
@@ -621,6 +731,7 @@ LegBlackhole(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The transient case: the leg returns, data intact, whatever the record
 \* now says about it.  (The F36c ingredient.)
@@ -632,6 +743,7 @@ LegRecover(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* GROUND TRUTH: the silently-unreachable node actually dies (the cloud
 \* reaped it).  WF here is the axiom that a blackhole eventually RESOLVES
@@ -644,6 +756,7 @@ LegPerish(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* EVIDENCE: the record accepts node_gone proof (Node object deleted /
 \* instance API says terminated).  With EvidenceStrict this only happens
@@ -663,6 +776,7 @@ DeemDead(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The data plane faults an unresponsive leg out; survivors continue at a
 \* NEW incarnation (their superblocks record the shrink).  WF on this
@@ -684,6 +798,7 @@ RaidDeconfigure(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The whole assembly dies cleanly (process gone, connections dropped).
 ServerCrash ==
@@ -696,6 +811,7 @@ ServerCrash ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The F48 case: the head is PARTITIONED, not dead.  The record sees it
 \* gone; the process lives on with its leg connections — a zombie.  (One
@@ -712,6 +828,7 @@ ServerPartition ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 (***************************************************************************)
 (* Control plane — each action is one CAS round against the record         *)
@@ -732,6 +849,7 @@ MonitorMarkStale(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* Epoch scheduler: cut a consistent snapshot of the served content.  The
 \* cut is what the serving legs actually HOLD in common (bdev_lvol_snapshot
@@ -753,6 +871,7 @@ EpochCut ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* replica_replace + prune_writers_for_replacement: swap the identity of a
 \* stale leg whose node the record DEEMS dead (the C2 justification is
@@ -805,6 +924,11 @@ Replace(l) ==
                  rolling, rollerDead, stalePlan, leaderMoved,
                  raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
+  \* A swapped-in identity is a FRESH lvol: whatever the old one served,
+  \* this one has not (the ghost behind Inv_WriterSetGrounded).
+  /\ everServed' = everServed \ {l}
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
+                 dpFlag>>
 
 \* hot_rejoin_volume: a stale leg on a LIVE node re-enters as a standby
 \* KEEPING its identity and payload (contrast Replace).  Whether the
@@ -828,6 +952,7 @@ HotRejoin(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* HotRejoinScrubbed: no usable shared history with ANY live in-sync
 \* source — wipe the payload and rebuild from scratch.  Requires a live
@@ -848,6 +973,11 @@ Scrub(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  \* The payload is wiped: a scrubbed leg's history no longer entitles it
+  \* to anything (same ghost bookkeeping as Replace).
+  /\ everServed' = everServed \ {l}
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
+                 dpFlag>>
 
 \* Catch-up: build to the last epoch cut from an in-sync source.  A block
 \* copy fills holes and never erases — union semantics — so the shared-base
@@ -874,6 +1004,7 @@ CatchUp(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED <<raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* Admission (hot-rejoin window / cutover reassembly) + mark_in_sync's
 \* writer-set add: quiesced delta copy from a healthy serving survivor,
@@ -913,6 +1044,12 @@ Admit(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED <<raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
+  \* An in-place admission is progress too — and it is precisely the S2
+  \* door the bounce was supposed to be replaced by, so it resets the
+  \* pointless-rebounce counter exactly like the at-stage one.
+  /\ consecutiveBounces' = 0
+  /\ everServed' = everServed \cup {l}
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, dpFlag>>
 
 \* NodeStage reassembly: the F36c freshness gate over the ATTACHABLE
 \* in-sync legs A, then SPDK examine serves only A's newest generation
@@ -956,7 +1093,7 @@ Assemble ==
        \* are short of 2, and never past 2 bases.
        /\ (ASt # {} => (Cardinality(AIn) < 2 /\ Cardinality(A) <= 2))
        /\ \/ /\ writerSet \subseteq A
-             /\ UNCHANGED <<riskSurfaced, falseRisk>>
+             /\ UNCHANGED <<riskSurfaced, falseRisk, bounceRisk>>
           \/ /\ GateStrict
              /\ writerSet \ A # {}
              /\ \/ \A w \in writerSet \ A : w \in deemedDead
@@ -972,8 +1109,13 @@ Assemble ==
              \* dead makes the surfaced risk hollow — the acked tail was
              \* recoverable all along.
              /\ falseRisk' = (falseRisk \/ \E w \in writerSet \ A : legUp[w] # "dead")
+             \* THE BOUNCE HARM GHOST: this excusal was needed only
+             \* because the CONTROLLER tore a volume down whose recorded
+             \* writer set was already not whole.  A writer lost DURING
+             \* the window is an ordinary failure and does not stamp it.
+             /\ bounceRisk' = (bounceRisk \/ bounceWindow = "risky")
           \/ /\ ~GateStrict
-             /\ UNCHANGED <<riskSurfaced, falseRisk>>
+             /\ UNCHANGED <<riskSurfaced, falseRisk, bounceRisk>>
        \* The NodeStage leg-size belt (F43 #8).  2026-07-29 audit: the
        \* shipped floor is PV spec.capacity (leg_size_guard reads the
        \* PV) — pvSize, which LAGS the device after a partial fan-out.
@@ -997,7 +1139,11 @@ Assemble ==
                                                        ELSE AIn)}
        /\ legGen' = [m \in Legs |-> IF m \in Kept THEN raidGen + 1
                                                   ELSE legGen[m]]
+       /\ everServed' = everServed \cup Kept
   /\ raidGen' = raidGen + 1
+  \* The volume is back: any open bounce window closes here (the judge's
+  \* "did it come back" half, and the only place bounceWindow clears).
+  /\ bounceWindow' = "none"
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
   \* Both code clear-sites for flint.io/f36c-defer are assembly-tick
   \* decisions (missing-empty and ServeWithRisk): the deadline re-arms
@@ -1007,6 +1153,7 @@ Assemble ==
                  deemedDead, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED <<bouncePlan, consecutiveBounces, dpFlag>>
 
 \* The stale-only-survivor LAST RESORT — the RUNBOOK step, not code: the
 \* code's gate correctly Defers (the Deferred liveness escape), and an
@@ -1041,6 +1188,11 @@ LastResortServe(l) ==
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  \* The override brings the volume back, so any open bounce window closes
+  \* (with riskSurfaced already stamped by the override itself).
+  /\ bounceWindow' = "none"
+  /\ everServed' = everServed \cup {l}
+  /\ UNCHANGED <<bouncePlan, bounceRisk, consecutiveBounces, dpFlag>>
 
 (***************************************************************************)
 (* The R2 claim — the F43 machinery.  Catch-up work (builds, scrubs) and   *)
@@ -1078,6 +1230,7 @@ AcquireCatchup ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 ReleaseCatchup ==
   /\ claim = "catchup"
@@ -1088,6 +1241,7 @@ ReleaseCatchup ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 AcquireAdmission ==
   /\ claim = "none"
@@ -1099,6 +1253,7 @@ AcquireAdmission ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The window's deferral arm: the world changed between the open and the
 \* flip — the leg de-warmed (a fresh epoch cut), died, was sized out, or
@@ -1122,6 +1277,7 @@ ReleaseAdmission ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* Lease expiry: the claim holder died; the lease frees the claim.  A
 \* controller death is a failure event — budgeted — which is also what
@@ -1137,6 +1293,7 @@ ExpireClaim ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 (***************************************************************************)
 (* Planned maintenance — the csi-node roll.  A DaemonSet roll restarts    *)
@@ -1216,6 +1373,7 @@ MaintDrain(l) ==
                  crashes, rolling, rolled, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 RollStart(l) ==
   /\ MaintEnabled
@@ -1230,6 +1388,7 @@ RollStart(l) ==
                  rolled, suppress, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* kubelet completes the restart — weakly fair, roller-independent.
 RollFinish(l) ==
@@ -1242,6 +1401,7 @@ RollFinish(l) ==
                  suppress, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 MaintClear(l) ==
   /\ ~rollerDead
@@ -1254,6 +1414,7 @@ MaintClear(l) ==
                  rolling, rolled, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The roll orchestrator dies mid-campaign while holding a mark — a
 \* budgeted failure event, like ExpireClaim.
@@ -1270,6 +1431,7 @@ RollerDie ==
                  rolling, rolled, suppress, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The lease: a dead roller's suppression mark self-clears after TTL
 \* (never mid-restart — the TTL far exceeds a pod restart, and
@@ -1287,6 +1449,7 @@ SuppressExpire(l) ==
                  rolling, rolled, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 (***************************************************************************)
 (* THE TWO-ROLLER RACE (RollerRace; 2026-07-29).  The audit asserted in    *)
@@ -1338,6 +1501,7 @@ RoguePlanDrain(l) ==
                  rolling, rolled, suppress, rollerDead>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The captured plan lands — possibly long after the world changed.  Only
 \* the guards the code re-runs at commit time apply: the fresh raid probe
@@ -1375,6 +1539,216 @@ RogueDrainCommit ==
                  crashes, rolling, rolled, rollerDead, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+(***************************************************************************)
+(* THE CUTOVER BOUNCE (cutover.rs).  A controller-initiated, ZERO-FAILURE  *)
+(* teardown of a serving data path, issued so that the ordinary NodeStage  *)
+(* reassembly runs and picks up a warm standby (or rebuilds a lost data    *)
+(* path).  NodeUnstage's teardown_volume_spdk_state deletes the raid bdev  *)
+(* and every per-replica controller and touches NO record field — no       *)
+(* stale marks, no writer-set prune — so this is serving := {} with state, *)
+(* writerSet, legData, legGen and epochCut all UNCHANGED.  Like the roll   *)
+(* it costs NO crash budget: it is planned work, not a failure.            *)
+(*                                                                         *)
+(* NOTE what the guard does NOT mention: any leg health variable, serving  *)
+(* membership, or writerSet.  That is not an abstraction — it is the       *)
+(* shipped planner.  VolumeCutoverView (cutover.rs:271-289) carries none   *)
+(* of them and plan_cutover (305-385) reads only sync_state and            *)
+(* last_epoch.  BouncePreflight is the only place this module puts them    *)
+(* back, which is the tranche's whole point.                               *)
+(*                                                                         *)
+(* The pod layer is deliberately abstracted away (delete → detach-wait →   *)
+(* recreate, the liveness reconciler as a second creator, delete-by-name   *)
+(* with no UID precondition).  Justification: the audit's verifier closed  *)
+(* the AVAILABILITY question — rwx_nfs.rs's reconciler recreates an        *)
+(* Absent/Dead server counting attachment INTENT, so the volume comes      *)
+(* back within about one 30s tick — and the residuals it leaves (a         *)
+(* spurious CutoverFailed, one stalled detach) are not durability facts.   *)
+(* Same move by which atomic Assemble stands for six code hops.            *)
+(***************************************************************************)
+
+\* plan_cutover's two DISJOINT arms.  The data-path arm short-circuits
+\* everything (cutover.rs:312-334); the standby arm needs a CONVERGED
+\* standby (336-356).  The code's per-standby loop is an ALL-quantifier;
+\* at these leg counts, with at most one standby, that coincides with the
+\* existential.
+BounceDataPathArm  == DataPathArm  /\ dpFlag # "none"
+BounceAdmissionArm == AdmissionArm /\ \E l \in Legs : /\ state[l] = "standby"
+                                                     /\ epochCut \subseteq legData[l]
+
+\* The ONLY suppressor of a new plan in the shipped code is a LIVE ATTEMPT
+\* RECORD — a stack-local HashMap (cutover.rs:706).  Deliberately NOT
+\* modeled: at tick granularity the judge's unconditional re-arm at the
+\* cooldown, the Err arm that records nothing at all (1058-1067), and the
+\* standby-success branch's missing `continue` (912 — the one branch
+\* without it, so planning re-runs in the SAME tick) all collapse to
+\* "eligibility returns".  Modeling the record would only REMOVE behaviors
+\* the code demonstrably has.
+BouncePlannable ==
+  /\ BounceEnabled
+  /\ serving # {}                         \* something to tear down
+  /\ (BounceDataPathArm \/ BounceAdmissionArm)
+
+\* THE PROPOSED COMMIT-TIME BELT.  FALSE = shipped (no term of any kind).
+BounceSafe ==
+  \/ ~BouncePreflight
+  \/ \A w \in writerSet : Responsive(w) \/ w \in deemedDead
+
+\* Was the recorded writer set ALREADY broken when the controller tore the
+\* volume down?  The discriminator between "the bounce manufactured it"
+\* and "a failure landed inside the window".
+BounceRiskAtCommit ==
+  IF \A w \in writerSet : Responsive(w) \/ w \in deemedDead
+  THEN "clean" ELSE "risky"
+
+\* The in-process bounce: plan and execute in one tick.  The plan→execute
+\* gap inside one process is a few API round trips (try_claim + one node
+\* GET/PATCH), so one step is the faithful abstraction; the CROSS-process
+\* gap is RogueBounce* below.
+Bounce ==
+  /\ BouncePlannable
+  /\ BounceSafe
+  /\ consecutiveBounces < MaxBounces
+  /\ serving' = {}
+  /\ bounceWindow' = BounceRiskAtCommit
+  /\ consecutiveBounces' = consecutiveBounces + 1
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim,
+                 deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<bouncePlan, bounceRisk, dpFlag, everServed>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+
+\* The deposed-but-alive bouncer.  RoguePlanDrain's shape, and leaderMoved
+\* is SHARED with the roller on purpose: orchestrator_lease.rs is ONE lease
+\* across all six leader-gated sites, so one deposal deposes every
+\* orchestrator at once.
+RogueBouncePlan ==
+  /\ BounceRace
+  /\ ~bouncePlan
+  /\ (BounceLeaderGate => ~leaderMoved)
+  /\ leaderMoved' = (leaderMoved \/ BounceLeaderGate)
+  /\ BouncePlannable                      \* every planner term, valid NOW
+  /\ bouncePlan' = TRUE
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes,
+                 rolling, rolled, suppress, rollerDead, stalePlan>>
+  /\ UNCHANGED <<bounceWindow, bounceRisk, consecutiveBounces, dpFlag,
+                 everServed>>
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+
+\* The captured plan lands, possibly long after the world changed.  ONLY
+\* the guards the code RE-RUNS at commit time apply — and there is exactly
+\* one: execute_cutover's get_pod (cutover.rs:465), i.e. "the thing is
+\* still there".  Deliberately ABSENT, matching the shipped code: the
+\* other process's attempt record (volume_claims::global() is a per-process
+\* OnceLock and `bounces` is a stack local — mutually invisible), the arms'
+\* own guards, leadership.  THE DECISIVE ASYMMETRY WITH THE ROLLER: where
+\* drain_for_maintenance had an rv-guarded record CAS to move DrainMarksBelt
+\* INTO, cutover has NO CAS anywhere — delete_pod uses DeleteParams::
+\* default(), recreate_pod is a bare create, taint_node is a whole-array
+\* merge patch.  A commit-time preflight is the only belt this subsystem
+\* can host.
+RogueBounceCommit ==
+  /\ BounceRace
+  /\ bouncePlan
+  /\ serving # {}
+  /\ BounceSafe
+  /\ consecutiveBounces < MaxBounces
+  /\ serving' = {}
+  /\ bounceWindow' = BounceRiskAtCommit
+  /\ consecutiveBounces' = consecutiveBounces + 1
+  /\ bouncePlan' = FALSE
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim,
+                 deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<bounceRisk, dpFlag, everServed>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+
+(***************************************************************************)
+(* THE DATA-PATH-LOST ANNOTATION (node_agent.rs detect_lost_data_paths).   *)
+(* Written by a leg's OWN agent after consecutive raid-missing strikes     *)
+(* under a live attachment.  The value is "<node>|<since>", and            *)
+(* DataPathAction::Clear fires ONLY when flagged_by_me — the value's node  *)
+(* prefix equals this agent's node (node_agent.rs:5241-5247).  A           *)
+(* permanently-gone flagger therefore leaves a flag NOTHING can clear:     *)
+(* the only controller-side sweep is gated on is_rwx && own_flag           *)
+(* (cutover.rs:834-851), never a backing PV and never an RWO PV.  This is  *)
+(* the CONFIRMED ownership trap behind the pointless-rebounce canary.      *)
+(***************************************************************************)
+AgentFlag(l) ==
+  /\ BounceEnabled /\ DataPathArm
+  /\ dpFlag = "none"
+  /\ Responsive(l)                        \* a LIVE agent writes it
+  /\ l \notin serving                     \* "the raid bdev is missing here"
+  /\ state[l] = "insync"                  \* "...but the record calls it a writer"
+  /\ dpFlag' = l
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
+                 everServed>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+
+AgentClear(l) ==
+  /\ dpFlag = l
+  /\ Responsive(l)                        \* ONLY the flagging node's agent
+  /\ l \in serving                        \* the restage put ITS raid back
+  /\ dpFlag' = "none"
+  /\ consecutiveBounces' = 0              \* the bounce accomplished its job
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, everServed>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+
+(***************************************************************************)
+(* admit_standbys_at_stage — THE ADMISSION THE BOUNCE EXISTS TO TRIGGER,   *)
+(* and the one Admit cannot represent.  It runs in the NODE process        *)
+(* (driver.rs:1967, from NodeStage), under NO volume claim (cutover's      *)
+(* claim was dropped when execute_cutover returned), with the raid NOT YET *)
+(* CREATED, and it commits record_in_sync — which GROWS the writer set —   *)
+(* BEFORE the freshness gate rules (driver.rs:2089).  The copy source is   *)
+(* the attaching in-sync set, all fenced to this node with no writer live, *)
+(* which is why the code can call the skew zero (catchup.rs:2516-2518).    *)
+(* The epoch-chain half of this hop (the persisted cut, and the one leaked *)
+(* epoch per failed attempt the audit booked) is NOT modeled: epochCut is  *)
+(* a single set here, not a chain — a pre-existing scope limit.            *)
+(***************************************************************************)
+AdmitAtStage(l) ==
+  /\ StageAdmit
+  /\ serving = {}                         \* a stage is in progress
+  /\ state[l] = "standby"
+  /\ Responsive(l)
+  /\ AdmissionOpen(l)
+  /\ epochCut \subseteq legData[l]        \* the warm/lag re-check
+  /\ \E src \in {m \in Legs : state[m] = "insync" /\ Responsive(m)} :
+       /\ (RejoinGuard => legData[l] \subseteq legData[src])
+       /\ (SizeGuard => (SizeHeal \/ legSize[src] = "old" \/ legSize[l] = "new"))
+       /\ legData' = [legData EXCEPT ![l] = legData[l] \cup legData[src]]
+       /\ legSize' = [legSize EXCEPT ![l] =
+                        IF SizeHeal THEN legSize[src] ELSE legSize[l]]
+  /\ state'     = [state EXCEPT ![l] = "insync"]
+  /\ writerSet' = writerSet \cup {l}      \* mark_in_sync's DURABLE growth...
+  /\ consecutiveBounces' = 0
+  /\ UNCHANGED serving                    \* ...and the gate has NOT ruled yet
+  /\ UNCHANGED claim                      \* the correspondence point: unclaimed
+  /\ UNCHANGED <<zombie, legUp, raidGen, legGen, acked, nextWrite, lineage,
+                 riskSurfaced, epochCut, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, dpFlag, everServed>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED <<raidSize, pvSize, wantNew>>
+  /\ UNCHANGED gateVars
 
 (***************************************************************************)
 (* Online expansion — the F56 size dimension                               *)
@@ -1403,6 +1777,7 @@ ExpandRequest ==
                  legSize, raidSize, pvSize>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 ExpandLeg(l) ==
   /\ ExpandEnabled
@@ -1418,6 +1793,7 @@ ExpandLeg(l) ==
                  raidSize, pvSize, wantNew>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 RaidGrow ==
   /\ ExpandEnabled
@@ -1431,6 +1807,7 @@ RaidGrow ==
                  legSize, pvSize, wantNew>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* The external resizer's success path: ControllerExpandVolume returns
 \* Done only when EVERY replica grew (expand_replicated's all-or-
@@ -1450,6 +1827,7 @@ PvGrow ==
                  legSize, raidSize, wantNew>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
 
 \* Wall-clock passage on a deferring volume: the persisted
 \* flint.io/f36c-defer deadline (default 180s) elapses.  WF — time
@@ -1465,6 +1843,7 @@ DeferClockExpire ==
                  epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED bounceVars
 
 Next ==
   \/ Write
@@ -1485,6 +1864,9 @@ Next ==
   \/ RaidGrow
   \/ PvGrow
   \/ DeferClockExpire
+  \/ Bounce
+  \/ RogueBouncePlan
+  \/ RogueBounceCommit
   \/ \E l \in Legs :
        \/ LegDie(l)
        \/ LegBlackhole(l)
@@ -1506,6 +1888,9 @@ Next ==
        \/ SuppressExpire(l)
        \/ RoguePlanDrain(l)
        \/ ExpandLeg(l)
+       \/ AgentFlag(l)
+       \/ AgentClear(l)
+       \/ AdmitAtStage(l)
 
 \* Recovery actions are weakly fair.  WF(RaidDeconfigure) is P4;
 \* WF(LegPerish) is the axiom that a blackhole eventually resolves
@@ -1544,6 +1929,15 @@ FairnessCore ==
        /\ WF_vars(MaintClear(l))
        /\ WF_vars(SuppressExpire(l))
        /\ WF_vars(ExpandLeg(l))
+       \* The bounce's RETURN path: NodeStage always runs its standby
+       \* admission (it is not orchestrator-paced work — it is on the
+       \* stage path itself), and a LIVE flagging agent eventually clears
+       \* its own data-path flag once its raid is back.  Both are gated by
+       \* constants FALSE in every legacy cfg, and WF of a permanently
+       \* disabled action obligates nothing — the same treatment
+       \* WF_vars(ExpandLeg(l)) already gets under ExpandEnabled = FALSE.
+       /\ WF_vars(AdmitAtStage(l))
+       /\ WF_vars(AgentClear(l))
   /\ WF_vars(Assemble)
   /\ WF_vars(EpochCut)
   /\ WF_vars(AcquireCatchup)
@@ -1727,6 +2121,58 @@ Inv_PlannedRollBoundedImpact ==
 Inv_NoDeviceShrink ==
   raidSize = "new" => \A l \in serving : legSize[l] = "new"
 
+(***************************************************************************)
+(* THE BOUNCE-SAFETY THEOREM.  A bounce is never the REASON an acked tail  *)
+(* had to be excused.  bounceRisk is stamped when the gate's ServeWithRisk *)
+(* arm fires to come back from a window the CONTROLLER opened on a volume  *)
+(* whose recorded writer set was ALREADY not whole.  A writer lost DURING  *)
+(* the window is an ordinary failure no preflight could predict and does   *)
+(* not stamp it; a writer already gone at commit time is the manufactured  *)
+(* outage — and the shipped planner, which reads no leg health at all,     *)
+(* cannot see it.  Fixed by BouncePreflight: BounceRisk must FIND this     *)
+(* with the belt off, BounceRaceFixed must HOLD it with the belt on and    *)
+(* NO leadership whatsoever.                                              *)
+(***************************************************************************)
+Inv_NoBounceInducedRisk == ~bounceRisk
+
+
+(***************************************************************************)
+(* THE ADMIT-BEFORE-GATE THEOREM.  admit_standbys_at_stage commits         *)
+(* mark_in_sync — writer-set GROWTH — before the freshness gate rules, so  *)
+(* a Defer can leave a leg recorded in_sync and in the writer set for an   *)
+(* assembly that never happened, and the NEXT gate will wait on it.  The   *)
+(* audit's verifier argued this is the SAFE direction (the admission is    *)
+(* real: fenced, chased through the cut, size-checked before the in_sync   *)
+(* write).  This MACHINE-CHECKS that rebuttal instead of trusting it: a    *)
+(* writer-set member either has served in its current incarnation or       *)
+(* holds the acked tail that entitled it.  The everServed disjunct is      *)
+(* required — between a leg's deconfigure and its stale-mark the ordinary  *)
+(* monitor lag leaves a served leg in writerSet without the tail, which is *)
+(* not this residue.                                                      *)
+(***************************************************************************)
+Inv_WriterSetGrounded ==
+  (~riskSurfaced /\ zombie = {}) =>
+    \A l \in writerSet : l \in everServed \/ acked \subseteq legData[l]
+
+(***************************************************************************)
+(* THE POINTLESS-REBOUNCE CANARY.  A volume never eats two bounces in a    *)
+(* row without one of them accomplishing something.  THIS IS FALSE OF THE  *)
+(* SHIPPED DESIGN and is stated as a canary, not a theorem — the same      *)
+(* instrument as Inv_NoStaleServe: its violation trace is the              *)
+(* reachability proof and the fix is owed in CODE.  Three separately-      *)
+(* sufficient shipped mechanisms violate it: (1) the Err arm emits         *)
+(* CutoverFailed and records NO attempt (cutover.rs:1058-1067), so the     *)
+(* documented 900s minimum between attempts is never applied on any error  *)
+(* path — including the 409 the liveness reconciler causes by recreating   *)
+(* the server INSIDE the detach wait; (2) the CutoverIneffective verdict   *)
+(* removes the attempt and declares the volume eligible again with no      *)
+(* counter, no backoff and no negative caching anywhere in the file; (3)   *)
+(* the data-path arm's verification predicate is a flag only the flagging  *)
+(* node's agent may clear, so a dead flagger makes it permanently          *)
+(* unsatisfiable.  Checked ONLY in the BounceLoop run.                     *)
+(***************************************************************************)
+Inv_NoPointlessRebounce == consecutiveBounces <= 1
+
 \* InvCore is everything except the evidence-purity theorem; Inv (every
 \* legacy cfg) adds Inv_NoFalseRisk, which only the GateDeadline = FALSE
 \* idealization satisfies.  The GateReal strict run checks InvCore.
@@ -1902,6 +2348,22 @@ ExpansionCompletes ==
 \* bounded by the crash budget plus the roll campaign — each node rolls
 \* at most once, and a roll adds at most a drain bump, a deconfigure
 \* bump (unfenced), and a reassembly bump).
+\* One extra assembly per bounce (the return path); MaxBounces = 0 in every
+\* legacy cfg leaves this numerically identical.
 GenBound == raidGen <= (3 * MaxCrashes) + (3 * Cardinality(Legs)) + 3
+                       + (2 * MaxBounces)
+
+\* The bounce runs need failure BREADTH — the manufactured-outage window
+\* requires TWO independent failures, one to eject a leg from the raid
+\* (which is what creates the bounce trigger in the first place) and one to
+\* take a surviving writer out during the window — but they do NOT need
+\* deep raid-incarnation churn on top of it.  GenBound's generic budget at
+\* MaxCrashes = 2 makes the strict runs explore tens of millions of states
+\* for behaviors that are all tail-churn; every bounce counterexample here
+\* lands within a handful of incarnations.  STATED AS THE TRADE IT IS: the
+\* bounce strict runs are theorems about the model UNDER this bound, and
+\* the two mutation runs are re-verified to still find their counter-
+\* examples with it applied.
+BounceBound == raidGen <= (2 * MaxCrashes) + Cardinality(Legs) + 2
 
 ================================================================================

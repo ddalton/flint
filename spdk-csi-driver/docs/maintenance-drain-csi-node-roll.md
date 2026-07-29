@@ -188,8 +188,8 @@ The live drill gates the composed whole, not just the modeled half.
 | The barrier's necessity, stated sharply: with the belt stopping the direct outage, a pod-ready barrier still ERODES redundancy at ≥3 legs (two legs out of service, zero failures — one failure from outage). Planned maintenance with the real barrier never has more than ONE leg out | `Inv_PlannedRollBoundedImpact` in the strict runs; the RollBarrier mutation must violate it at 3 legs |
 | **The two-roller race (2026-07-29, F59 candidate): one-node-at-a-time and the barrier were PLANNER-only (gather-snapshot reads), so a deposed-but-alive roller's in-flight drain — the lease is one in-process check per tick, while a tick's RPC work is unbounded vs a 15s lease — landed after the new leader's drain marked (or drained-rolled-CLEARED) a different node: two legs out with zero failures.  The fix moves BOTH rules into `drain_for_maintenance`, where the rv-guarded retry re-runs them race-proof: refuse unless no other leg carries a live mark AND every other leg is record-InSync.  A marks-only belt provably loses (TLC found the clear-then-commit erosion).  The roller's lease buys pacing, not safety** | `FlintReplicationRollerRace.cfg` (gate ON, must violate `Inv_PlannedRollBoundedImpact`), `RollerRaceUngated.cfg` (same, no leadership), `RollerRaceFixed.cfg` (belt ON, NO gate — strict, must hold) + `drain_refuses_while_another_leg_is_marked_or_unhealed` (the belts as a unit test) |
 
-Run everything: `scripts/check-tla.sh` (thirty-eight TLC runs as of
-2026-07-29, ~4min total). The split is deliberate: TLC's temporal checking is
+Run everything: `scripts/check-tla.sh` (forty-three TLC runs as of
+2026-07-29, ~11min total — the cutover tranche's two-failure budget is the bulk of it). The split is deliberate: TLC's temporal checking is
 near-sequential, so the 3-leg breadth run checks INVARIANTS only (853k
 states, ~7s) and all liveness lives in the 2-leg depth run (~40s) —
 every maintenance liveness corner is 2-leg-reachable. The first cut
