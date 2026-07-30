@@ -3247,6 +3247,41 @@ impl NodeAgent {
                 // ~3.4min; seeded, the detector's repair path takes it in
                 // seconds). Serving disks backfill by raid-bdev match;
                 // missing ones seed the expected pair for rebuild.
+                // F62a: seed the COLLAPSE detector too, on the same
+                // predicate and for the same reason. The neighbouring seed
+                // above dates from 2u/2.2b — "csi-node pod delete on the
+                // RAID host left the volume dead" — and it fixed the ublk
+                // half of that while `data_path_raid_seen` was left a fresh
+                // empty HashSet. That set is the ONLY thing standing between
+                // a vanished raid and CollapseEvent::Lost (cutover.rs
+                // raid_collapse_verdict wants `previously_seen`), so a raid
+                // destroyed BY the restart can never be reported by the
+                // process that comes back: the guard is disabled exactly
+                // when the hazard fires. Found live on runao 2026-07-30 —
+                // the raid gone on both nodes, 9 lvol bdevs alive, the sync
+                // record still reading 2/2 in_sync, and nothing self-healing
+                // for the >5 minutes we watched.
+                //
+                // Seeding is what makes the escalation ladder reachable at
+                // all: strike → flag → the controller's data-path arm →
+                // BounceNfsPod → NodeStage → a rebuilt raid. Note the ublk
+                // seed alone CANNOT recover this case, which is why runao
+                // stayed down: it maps an id to a raid bdev that no longer
+                // exists, and no code re-creates the raid.
+                //
+                // Ground truth, deliberately NOT live SPDK. Seeding from the
+                // raid list would read empty in precisely the situation that
+                // matters and be a no-op exactly when needed — the same
+                // lesson F8 already learned for exports ("a pod-level
+                // restart leaves BOTH the registry and the target empty").
+                // The VA-attached-to-me predicate is the one this function
+                // already trusts for detector state one line below.
+                if va_map.get(&pv_name) == Some(&self.node_name) {
+                    if self.data_path_raid_seen.lock().await.insert(pv_name.clone()) {
+                        debug!(volume_id = %pv_name,
+                               "[REHYDRATE] seeded raid-collapse detector (a raid is owed on this node)");
+                    }
+                }
                 if is_ublk {
                     if va_map.get(&pv_name) == Some(&self.node_name) {
                         let raid_bdev = crate::identity::raid_name(&crate::identity::StagedHandle::new(csi.volume_handle.clone()));

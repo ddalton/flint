@@ -1582,7 +1582,7 @@ case "$DRILL" in
 
   # Wait for the campaign: every node pod on a single NEW revision hash.
   ROLL_BUDGET=${ROLL_BUDGET:-900}
-  T_DONE=-1
+  T_DONE=-1; ROLL_END=""
   for i in $(seq 1 $(( ROLL_BUDGET / 10 )) ); do
     H=$(kubectl get pods -n "$DRIVER_NS" -l app=flint-csi-node \
         -o jsonpath='{range .items[*]}{.metadata.labels.controller-revision-hash}{"\n"}{end}' | sort -u)
@@ -1590,8 +1590,22 @@ case "$DRILL" in
     READY=$(kubectl get pods -n "$DRIVER_NS" -l app=flint-csi-node --no-headers 2>/dev/null \
             | awk '{split($2,a,"/"); if(a[1]==a[2]) c++} END{print c+0}')
     TOT=$(kubectl get pods -n "$DRIVER_NS" -l app=flint-csi-node --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    # F62 fix B changed what "converged" means, and the drill has to change
+    # with it. A node that CONSUMES one of its own volumes hosts that
+    # volume's raid inside its own tgt, so the roller REFUSES it: its pod
+    # keeps the old revision on purpose, forever, and waiting for one
+    # revision hash would hang for the whole budget on a correct campaign.
+    # Two honest terminal states now:
+    #   full      — one new revision, every pod Ready (no local consumer)
+    #   refused   — the roller announced its refusals and everything else
+    #               converged (Ready), the rest of the fleet on the new rev
+    REFUSED_EV=$(kubectl get events -A --field-selector reason=MaintenanceNodeRefused \
+                 -o name 2>/dev/null | wc -l | tr -d ' ')
     if [ "$NH" = "1" ] && [ "$H" != "$PRE_HASHES" ] && [ "$READY" = "$TOT" ]; then
-      T_DONE=$(( $(epoch) - T0 )); break
+      T_DONE=$(( $(epoch) - T0 )); ROLL_END="full"; break
+    fi
+    if [ "${REFUSED_EV:-0}" -gt 0 ] && [ "$READY" = "$TOT" ] && [ "$H" != "$PRE_HASHES" ]; then
+      T_DONE=$(( $(epoch) - T0 )); ROLL_END="refused"; break
     fi
     sleep 10
   done
@@ -1608,6 +1622,22 @@ case "$DRILL" in
     -o jsonpath='{range .items[*]}{.involvedObject.name}{" "}{end}' 2>/dev/null | wc -w | tr -d ' ')
   [ "$LOCALWARN" = "0" ] && LOCALWARN=$(kubectl get events -A --field-selector reason=MaintenanceLocalConsumer \
     -o jsonpath='{range .items[*]}{.involvedObject.name}{" "}{end}' 2>/dev/null | wc -w | tr -d ' ')
+  # F62 fix B: the refusal, and the pod delete it must have prevented.
+  REFUSEDN=$(kubectl get events -A --field-selector reason=MaintenanceNodeRefused \
+    -o name 2>/dev/null | wc -l | tr -d ' ')
+  REFUSED_LOG=$(grep -c "roll campaign complete except" "$CLOG" || true)
+  # Did the roller delete the pod on the node hosting the composition? That
+  # single line IS F62 — every other symptom is downstream of it.
+  ROLLED_CONSUMER=$(grep "node drained — deleting csi-node pod" "$CLOG" \
+    | grep -c "$CONSUMER_NODE" || true)
+  # GROUND TRUTH, the check the barrier itself now performs (fix C): does the
+  # serving composition still exist on the consumer, with a configured base?
+  # SPDK raid1's floor is 1 (raid1.c:622), so one base is degraded-but-serving
+  # and only zero is death (raid_bdev_deconfigure, bdev_raid.c:2069-2074).
+  POST_RAID_BASES=$(agent_spdk_rpc "$CONSUMER_NODE" \
+      '{"method":"bdev_raid_get_bdevs","params":{"category":"all"}}' \
+    | jq '[.result[]?.base_bdevs_list[]? | select(.is_configured==true)] | length' 2>/dev/null)
+  POST_RAID_BASES=${POST_RAID_BASES:-0}
 
   # UNFENCED DEGRADE: any sample at reduced base with ZERO live maint marks.
   # That is the raid discovering a member went silent — exactly what the
@@ -1642,8 +1672,35 @@ case "$DRILL" in
   ok "$NSAMP samples across the campaign"
 
   [ "$T_DONE" -ge 0 ] \
-    || fail "3.14 FAIL (campaign): the roll never reached one new revision with all node pods Ready inside ${ROLL_BUDGET}s — a roller that cannot finish is the wedge the design set out to retire (blocked=$BLOCKED)"
-  ok "campaign completed at ${T_DONE}s — every node pod on one new revision"
+    || fail "3.14 FAIL (campaign): the roll reached neither full convergence nor an announced refusal inside ${ROLL_BUDGET}s — a roller that can do neither is the wedge the design set out to retire (blocked=$BLOCKED refused_events=${REFUSEDN:-0})"
+  case "${ROLL_END:-}" in
+    full)    ok "campaign completed at ${T_DONE}s — every node pod on one new revision" ;;
+    refused) ok "campaign completed at ${T_DONE}s — converged except for ${REFUSEDN} announced refusal(s) (F62 fix B: nodes hosting a composition are skipped, not rolled)" ;;
+  esac
+
+  # ---- F62: the roll must not destroy the composition it runs under ------
+  # This is the gate the pre-fix code failed on runao 2026-07-30: the pod
+  # delete landed on the node hosting the serving raid, the tgt restarted,
+  # the raid was gone and nothing re-created it (kubelet still believed the
+  # volume staged, so NodeStage never ran again). Both legs stayed healthy on
+  # disk and the record still read 2/2 in_sync, which is why the barrier
+  # waved the campaign on one tick later.
+  [ "${ROLLED_CONSUMER:-0}" -eq 0 ] \
+    || fail "3.14 FAIL (F62): the roller deleted the csi-node pod on $CONSUMER_NODE, which HOSTS this volume's serving raid — that restart destroys the composition with every replica healthy and nothing re-creates it. Fix B (RollStep::Refused) did not hold."
+  ok "F62 fence: the composition's host node was never rolled"
+
+  [ "${POST_RAID_BASES:-0}" -ge 1 ] \
+    || fail "3.14 FAIL (F62): no configured raid base on the consumer $CONSUMER_NODE after the campaign — the serving composition is gone (SPDK deconfigures the raid below one operational base). The record may still read every replica in_sync; it has no term for the raid."
+  ok "composition intact on $CONSUMER_NODE: $POST_RAID_BASES configured base(s)"
+
+  # The refusal must be VISIBLE. A silent skip is F61's livelock with better
+  # manners, which is exactly why the planner has a Refused step rather than
+  # a quiet `continue`.
+  if [ "${ROLL_END:-}" = "refused" ]; then
+    [ "${REFUSEDN:-0}" -ge 1 ] && [ "${REFUSED_LOG:-0}" -ge 1 ] \
+      || fail "3.14 FAIL (F62): the campaign stopped short without both a MaintenanceNodeRefused event (${REFUSEDN:-0}) and the roller's own log line (${REFUSED_LOG:-0}) — an operator cannot act on a refusal nobody reports"
+    ok "refusal surfaced: ${REFUSEDN} event(s) + roller log line"
+  fi
 
   NFENCED=$(printf '%s\n' ${FENCED_NODES} | grep -c . || true)
   [ "$DRAINS" -ge "$NFENCED" ] \
@@ -1670,14 +1727,17 @@ case "$DRILL" in
     || fail "3.14 FAIL (barrier): in_sync legs hit $MIN_SYNC — the roll took the last serving leg, which is precisely RollUnfenced's counterexample"
   ok "barrier held: never fewer than $MIN_SYNC in_sync leg(s) at any sample"
 
-  # The local half is a KNOWN gap, not a failure. Report it loudly so a green
-  # 3.14 is never mistaken for "the whole landmine is closed".
-  if [ "${LOCALWARN:-0}" -gt 0 ]; then
-    note "LOCAL HALF EXERCISED: $LOCALWARN MaintenanceLocalConsumer warning(s) — the tgt under the serving raid on $CONSUMER_NODE was restarted WITHOUT a drain (staged-device continuity, design-only). Guest cost above is the honest measure of that gap; it is NOT covered by this gate."
+  # The local half is a KNOWN gap. Before F62 this drill only REPORTED it;
+  # now the gap is refused rather than walked into, so the note records which
+  # of the two shapes this run exercised.
+  if [ "${LOCALWARN:-0}" -gt 0 ] && [ "${ROLL_END:-}" != "refused" ]; then
+    note "LOCAL HALF: $LOCALWARN MaintenanceLocalConsumer warning(s) — the drain was skipped on $CONSUMER_NODE (expected: the composition is local), and the roller did NOT roll that node. Staged-device continuity remains design-only; refusal is the current answer, not coverage."
+  elif [ "${ROLL_END:-}" = "refused" ]; then
+    note "LOCAL HALF REFUSED: $CONSUMER_NODE hosts the serving composition and was skipped with ${REFUSEDN} operator-facing event(s). To roll it, move the consumer off the node and re-run. A2 (agent re-creates the composition on boot) is modelled and deferred — see docs/f62-local-half-outage-and-blind-barrier.md."
   else
-    note "no MaintenanceLocalConsumer warning — the consumer node was not rolled, so this run gates the fenced path only"
+    note "no local-consumer node in this topology — this run gates the fenced path only, and the F62 refusal path was NOT exercised"
   fi
-  ok "3.14 PASSED (orchestration half): fence + barrier + lease proven live under load"
+  ok "3.14 PASSED (orchestration half): fence + barrier + lease + F62 refusal proven live under load"
   ;;
 
 *) fail "unknown drill '$DRILL'" ;;

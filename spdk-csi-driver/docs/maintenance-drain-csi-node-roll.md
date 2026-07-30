@@ -17,9 +17,24 @@ runao — the three guards PASSED live, and it found F61.**
 > a healthy record. On a larger fleet that composes into the same
 > node-by-node total outage TLC rejected for the unfenced roll.
 > F61's wedge was accidentally PROTECTIVE: it was the only thing keeping
-> the un-implemented local half from being exercised. Do not enable the
-> flag until both are closed; the immediate move is to make the roller
-> REFUSE local-consumer nodes (and report them) rather than roll them.
+> the un-implemented local half from being exercised.
+>
+> **FIXES LANDED 2026-07-29 (986 lib tests, gate 52 → 59 runs).** The raid
+> composition is now a first-class object in the model — `raidHost`,
+> `staged`, `raidSeen`, behind `RaidLifetimeArm` so no pre-F62 run moves —
+> and `FlintReplicationRaidLifetime.cfg` reproduces the outage in **four
+> states** from the very cfg that blessed the F61 fix. Three code fixes:
+> **(A1)** `data_path_raid_seen` seeded from ground truth so the escalation
+> ladder is reachable after a restart — it sits in the same block as an
+> `expected_ublk` seed whose own comment already says "csi-node pod delete
+> on the RAID host left the volume dead", fixed for ublk and never for this
+> set; **(B)** the roller REFUSES local-consumer nodes via the new terminal
+> `RollStep::Refused`, converging every other node and emitting
+> `MaintenanceNodeRefused` rather than reporting `Idle`; **(C)** the barrier
+> probes `bdev_raid_get_bdevs` on the CONSUMER and requires ≥ 1 configured
+> base (SPDK raid1's own floor — `raid1.c:622`; at zero,
+> `raid_bdev_deconfigure` destroys the bdev, `bdev_raid.c:2069-2074`).
+> The flag stays **OFF** pending a drill-3.14 live gate of all three.
 >
 > **F61 (fixed in rc5, keep the fix).** `docs/f61-maint-roll-wedges-on-undrainable-node.md`:
 > `plan_roll` reaches `DeletePod` only via `marked_nodes`, but the drain

@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Fifty-two runs, ALL required.
+# Fifty-nine runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -237,6 +237,59 @@
 #      singleton (the record CAS + grace carry it); the Lease buys
 #      ownership determinism and churn-freedom, not safety.
 #
+# Raid-composition lifetime tranche (F62, found LIVE on runao 2026-07-30 in
+# the very roll the F61 fix enabled).  The module had only `serving`, whose
+# own comment admitted the conflation — "{} = down" folding together "the
+# members left" and "the composition does not exist".  Those have different
+# LIFETIMES: the lvols live for the life of the PV, the volume is staged for
+# as long as a consumer wants it, and the raid lives exactly as long as ONE
+# spdk-tgt process on the node hosting the consumer — the most-restarted
+# component in the system.  Nothing else in the model had that lifetime, so
+# nothing else could express the composition being gone while every leg is
+# healthy, on disk, and recorded in_sync.  Three destroyers, and the
+# discriminator is whether kubelet still believes the volume STAGED:
+#   consumer pod deleted -> NodeUnstage -> bdev_raid_delete: staged clears,
+#     so the next attach re-creates it.  PAIRED.
+#   node destroyed -> consumer relocates -> NodeStage on the new host:
+#     staged clears.  PAIRED (and the host is mobile).
+#   csi-node tgt dies, node and consumer stay put: no RPC, staged untouched,
+#     NodeStage never called again.  UNPAIRED — and that is all of F62.
+#   13a. FlintReplicationRaidLifetime.cfg  RaidLifetimeArm=TRUE on the
+#      F61-FIXED world — TLC must FIND Inv_PlannedRollNeverCausesOutage
+#      violated in 4 states.  The single most uncomfortable run here: the
+#      cfg it mutates is green and blessed the F61 fix.  F61's livelock was
+#      LOAD-BEARING — the only thing keeping the un-implemented local half
+#      from being exercised.
+#   13b. FlintReplicationRaidLost.cfg      the same world, liveness — TLC
+#      must FIND RaidEventuallyReassembled violated: Assemble is the only
+#      creator and kubelet stages only what it believes unstaged, so the
+#      one creator is disabled while the one thing it creates is missing.
+#      Nothing but a liveness claim could have caught this; the state trips
+#      no safety invariant forever-after and every other property is
+#      satisfied by a volume that is merely quiet.
+#   13c. FlintReplicationRaidFenceAB.cfg   the A/B bug side — TLC must FIND
+#      Inv_MaintFenceStrict violated.  Exists because the first draft of
+#      that invariant was conditioned on the very arm it evaluates, making
+#      it vacuous on the bug side: a tooth that could never fail.
+#   13d. FlintReplicationRaidRefuse.cfg    fix B strict — refuse the
+#      local-consumer node and SURFACE it (maintSkipped).  Prevention, not
+#      repair; the campaign still converges; and the fence recovers FULL
+#      strength, with no LocalLegs carve-out.
+#   13e. FlintReplicationRaidReconcile.cfg repair A2 strict — the agent
+#      re-creates the composition on boot from the record.  NOT a
+#      superblock: flint passes "superblock": false on purpose (the
+#      phantom-assembly class, and the 1 MiB payload shift that silently
+#      formatted restored snapshots on 2026-06-12).  Deliberately does NOT
+#      carry the outage invariant — a repair cannot prevent the outage, and
+#      that asymmetry is why fix B is needed as well.
+#   13f/g. FlintReplicationRaidSeenBlind/Fixed.cfg  the trigger A/B.  The
+#      repair path is not missing, it is UNREACHABLE: CollapseEvent::Lost
+#      needs data_path_raid_seen.contains(pv) and that HashSet dies with
+#      the process that took the composition.  Rehydrate it from the
+#      STAGED set — not from live SPDK, which reads empty in exactly the
+#      situation that matters — and the shipped bounce-and-restage chain
+#      suffices.  That is what makes A1 the first thing to code.
+#
 # FlintSnapshots:
 #   6. FlintSnapshots.cfg           strict — every completed copy session
 #      delivers exactly the cut (Inv_SessionFaithful) — must HOLD.
@@ -265,13 +318,46 @@ if [ ! -f "$JAR" ]; then
     https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 fi
 
+# Per-run wall-clock profile. The gate's cost grows with every tranche and
+# the cost is NOT evenly spread — a couple of runs dominate. Recorded for
+# every run whether it passes or fails (a failing run's cost matters too),
+# and summarised at the end, sorted. Override the location with
+# TLA_PROFILE_FILE; set TLA_PROFILE=0 to skip the summary.
+PROFILE_FILE=${TLA_PROFILE_FILE:-$(mktemp -t tlaprofile)}
+export PROFILE_FILE
+: > "$PROFILE_FILE"
+
 run_tlc() { # <module> <cfg>
   # Per-cfg -metadir: TLC's default scratch dir is named by wall-clock
   # second, so two fast runs starting within the same second collide and
   # the later one aborts before checking anything.
+  local t0 rc=0
+  t0=$(date +%s)
   java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto \
-    -metadir "states/${2%.cfg}" -config "$2" "$1.tla" 2>&1
+    -metadir "states/${2%.cfg}" -config "$2" "$1.tla" 2>&1 || rc=$?
+  # stdout is CAPTURED by the callers, so the timing goes to a file, never
+  # to stdout — printing it here would corrupt every pass/fail match below.
+  printf '%s\t%s\n' "$(( $(date +%s) - t0 ))" "$2" >> "$PROFILE_FILE"
+  return $rc
 }
+
+# Called on the way out (success or failure) so a red gate still profiles.
+print_profile() {
+  [ "${TLA_PROFILE:-1}" = "0" ] && return 0
+  [ -s "$PROFILE_FILE" ] || return 0
+  local total n
+  total=$(awk -F'\t' '{s+=$1} END{print s+0}' "$PROFILE_FILE")
+  n=$(wc -l < "$PROFILE_FILE" | tr -d ' ')
+  echo ""
+  echo "── gate profile: ${n} runs, ${total}s of TLC (wall clock, sequential) ──"
+  sort -rn -k1,1 "$PROFILE_FILE" | awk -F'\t' -v tot="$total" '
+    { c++ }
+    c<=12 { printf "  %6ds  %5.1f%%  %s\n", $1, ($1/tot)*100, $2; shown+=$1 }
+    END { if (c>12) printf "  (%d further runs, %ds total)\n", c-12, tot-shown }'
+  # Cheap-run tail: how much of the gate is runs that cost ~nothing.
+  awk -F'\t' '$1<=2 {c++; s+=$1} END{ if (c) printf "  %d runs at <=2s (%ds total) — the cheap tail\n", c, s }' "$PROFILE_FILE"
+}
+trap print_profile EXIT
 
 # Pass/fail checks use bash substring/regex matching on the captured
 # output — NOT `echo | grep -q` pipelines: grep -q exits at first match,
@@ -345,6 +431,25 @@ liveness_mutation_run FlintReplication FlintReplicationRollLease.cfg "roll-lease
 # finish". RollProcessedNodeRolls obligates the ROLLER instead.
 liveness_mutation_run FlintReplication FlintReplicationRollWedge.cfg "roll-progress mutation (MaintProcessedGate=FALSE: the shipped predicate gates the pod delete on a MARK, so a node whose drain legitimately marks nothing — the local half, unattached, or no legs — can never be rolled: F61's livelock)"
 strict_run FlintReplication FlintReplicationRollProcessed.cfg "roll-progress strict (the F61 fix: eligibility = the drain PASS ran AND the leg is out of the raid, or is a local-half leg with a survivor behind it)"
+
+# ---------------------------------------------------------------------------
+# F62 — the raid-composition lifetime tranche.  Read the first run's label
+# twice: the world it mutates is not the shipped code, it is the code AS
+# FIXED BY F61.  The composition became an object with its own lifetime, and
+# that alone turned the run directly above (green, and the one that blessed
+# the F61 fix) into a permanent outage.  F61's bug was load-bearing.
+# ---------------------------------------------------------------------------
+mutation_run FlintReplication FlintReplicationRaidLifetime.cfg "raid-lifetime mutation (F61-fixed code + RaidLifetimeArm: the roll deletes the pod hosting the composition, the tgt dies with it, and zero real failures produce a permanent outage with both legs healthy and recorded in_sync)" "Inv_PlannedRollNeverCausesOutage"
+liveness_mutation_run FlintReplication FlintReplicationRaidLost.cfg "raid-lifetime liveness (nothing re-creates it: Assemble is the only creator, kubelet stages only what it believes UNSTAGED, and a tgt death clears nothing)"
+mutation_run FlintReplication FlintReplicationRaidFenceAB.cfg "strict-fence A/B, bug side (the post-F61 roller restarts a local half's tgt while it serves — why Inv_MaintFenceHolds needs its LocalLegs carve-out)" "Inv_MaintFenceStrict"
+strict_run FlintReplication FlintReplicationRaidRefuse.cfg "F62 fix B strict (refuse + surface the local-consumer node: the outage is PREVENTED not repaired, the campaign still converges, and the fence recovers full strength with no carve-out)"
+strict_run FlintReplication FlintReplicationRaidReconcile.cfg "F62 repair A2 strict (agent re-creates the composition on boot from the record — no superblock; deliberately does NOT carry the outage invariant, because a repair recovers the volume and cannot prevent the outage)"
+
+# The trigger half, A/B.  The repair path is not missing, it is UNREACHABLE:
+# CollapseEvent::Lost needs data_path_raid_seen.contains(pv), and that HashSet
+# dies with the same process that takes the composition.
+liveness_mutation_run FlintReplication FlintReplicationRaidSeenBlind.cfg "F62a trigger mutation (shipped detector: whole repair chain armed and willing, blinded by one un-rehydrated HashSet)"
+strict_run FlintReplication FlintReplicationRaidSeenFixed.cfg "F62a repair A1 strict (rehydrate data_path_raid_seen from the STAGED set — not from live SPDK, which reads empty exactly when it matters — and the shipped bounce-and-restage chain suffices)"
 
 strict_run FlintReplication FlintReplicationRollRecordBarrier.cfg "record-only barrier strict (the implementation's barrier; belt holds safety)"
 strict_run FlintReplication FlintReplicationRollWedged.cfg "wedged-restart strict (kubelet never returns; survivor stays writable)"

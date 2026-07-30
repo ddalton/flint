@@ -186,6 +186,25 @@ pub struct RollView {
     /// the pod delete through. Per-node, so it can never be evaluated
     /// against a different node than the one being rolled.
     pub local_last_serving: Vec<String>,
+    /// F62: nodes that CONSUME one of their own volumes. Such a node hosts
+    /// that volume's raid composition inside its own spdk-tgt, so deleting
+    /// its csi-node pod kills the tgt and the composition dies with it —
+    /// no RPC, no base removal, no leg fault, and every leg left healthy on
+    /// disk and recorded in_sync. Worse, kubelet's bookkeeping still says
+    /// STAGED, so NodeStage is never called again and nothing re-creates it:
+    /// a permanent outage from a planned, failure-free operation.
+    ///
+    /// Strictly narrower than `nothing_to_drain`, and the distinction is the
+    /// point: that set also holds nodes with unattached volumes or no legs
+    /// at all, where there is no composition here to lose and rolling is
+    /// both safe and REQUIRED for the DaemonSet to converge. Refusing all of
+    /// `nothing_to_drain` would rebuild F61's livelock; refusing none of it
+    /// is F62.
+    ///
+    /// Note the predicate does not ask whether this node holds a leg. A node
+    /// consuming a volume whose legs are all remote still hosts the raid —
+    /// over NVMe-oF — and rolling it destroys that composition just the same.
+    pub local_consumer_nodes: Vec<String>,
     /// The barrier input: every multi-replica volume fully redundant —
     /// all replicas in_sync, no hot-rejoin markers, no live marks.
     pub fully_redundant: bool,
@@ -211,6 +230,14 @@ pub enum RollStep {
     /// Blocked, with the reason (barrier not satisfied, pod mid-recreate,
     /// strategy not OnDelete). The campaign resumes when the world moves.
     Blocked { reason: String },
+    /// F62: every node this roller CAN roll has been rolled, and these are
+    /// the ones it will not touch — each hosts a raid composition in its own
+    /// tgt, which the pod delete would destroy with nothing left to rebuild
+    /// it. A terminal outcome, deliberately distinct from `Idle`: reporting
+    /// "done" with nodes still on the old revision is the silent give-up
+    /// that F61 was, wearing better manners. The operator drains these by
+    /// moving the consumer, then re-runs the campaign.
+    Refused { nodes: Vec<String> },
 }
 
 /// Decide this tick's single step. Pure — the tick owns observation and
@@ -249,9 +276,33 @@ pub fn plan_roll(view: &RollView) -> RollStep {
     }
     // No marks: pick the next pending node (stale revision), behind the
     // barrier. Sorted for a deterministic campaign order.
-    let mut pending: Vec<&RollPodView> = view.pods.iter().filter(|p| !p.current_rev).collect();
+    //
+    // F62: local-consumer nodes are REFUSED, not queued. Skipping them here
+    // (rather than blocking on them) is what keeps the campaign converging
+    // for every other node — the same requirement that made the model's
+    // one-node-in-flight gate count maintSkipped alongside rolled.
+    let mut pending: Vec<&RollPodView> = view
+        .pods
+        .iter()
+        .filter(|p| !p.current_rev)
+        .filter(|p| !view.local_consumer_nodes.iter().any(|n| n == &p.node_name))
+        .collect();
     pending.sort_by(|a, b| a.node_name.cmp(&b.node_name));
     let Some(next) = pending.first() else {
+        // Nothing left that we may roll. If refusals are what remain, SAY SO
+        // — an Idle here would read as a converged campaign.
+        let mut refused: Vec<String> = view
+            .pods
+            .iter()
+            .filter(|p| !p.current_rev)
+            .filter(|p| view.local_consumer_nodes.iter().any(|n| n == &p.node_name))
+            .map(|p| p.node_name.clone())
+            .collect();
+        refused.sort();
+        refused.dedup();
+        if !refused.is_empty() {
+            return RollStep::Refused { nodes: refused };
+        }
         return RollStep::Idle;
     };
     if !view.fully_redundant {
@@ -676,6 +727,20 @@ pub async fn maint_roll_tick(
         })
         .cloned()
         .collect();
+    // F62: pending nodes that consume one of their own volumes, and so hold
+    // that volume's raid composition in their own tgt. Recomputed every tick
+    // from the same gather, like its neighbours, so the roller stays
+    // resumable from observable state alone.
+    let local_consumer_nodes: Vec<String> = pods
+        .iter()
+        .filter(|p| !p.current_rev)
+        .filter(|p| {
+            volumes
+                .iter()
+                .any(|v| v.consumer.as_deref() == Some(p.node_name.as_str()))
+        })
+        .map(|p| p.node_name.clone())
+        .collect();
     let obstruction = volumes.iter().find_map(|v| {
         v.obstruction
             .as_ref()
@@ -688,6 +753,7 @@ pub async fn maint_roll_tick(
         drain_incomplete,
         nothing_to_drain,
         local_last_serving,
+        local_consumer_nodes,
         fully_redundant: obstruction.is_none(),
         barrier_note: obstruction.unwrap_or_default(),
     };
@@ -724,6 +790,40 @@ pub async fn maint_roll_tick(
             info!(pod = %pod, node = %node, "[MAINT] node drained — deleting csi-node pod (RollStart)");
             renew_marks(store, &volumes, cfg, &now).await;
             ops.delete_pod(pod).await?;
+        }
+        // F62: the campaign is as far as it can get on its own. Surface the
+        // refusals on every affected volume — a refusal nobody can see is
+        // just a wedge with better manners, which is the whole reason this
+        // is a distinct step and not a silent `continue` in the planner.
+        RollStep::Refused { nodes } => {
+            warn!(
+                nodes = %nodes.join(","),
+                "[MAINT] roll campaign complete except for nodes that consume their own volumes — \
+                 their csi-node pod hosts the raid composition, so deleting it would take the \
+                 volume down permanently (nothing re-creates a raid under a still-staged volume). \
+                 Move the consumer off each node, then re-run the campaign."
+            );
+            for v in &volumes {
+                let Some(consumer) = v.consumer.as_deref() else { continue };
+                if !nodes.iter().any(|n| n == consumer) {
+                    continue;
+                }
+                store
+                    .emit(
+                        &v.volume_id,
+                        "Warning",
+                        "MaintenanceNodeRefused",
+                        &format!(
+                            "csi-node roll skipped {consumer}: this volume is consumed on that \
+                             node, so its raid bdev lives in that node's spdk-tgt. Rolling the pod \
+                             would destroy the raid with every replica healthy, and no restage \
+                             follows (kubelet still considers the volume staged). Reschedule the \
+                             consumer, then re-run the roll."
+                        ),
+                    )
+                    .await;
+            }
+            renew_marks(store, &volumes, cfg, &now).await;
         }
         RollStep::Drain { node } => {
             let deadline =
@@ -907,6 +1007,76 @@ async fn gather_volume_maint(driver: &SpdkCsiDriver) -> Result<Vec<VolumeMaint>,
                 }
             }
         }
+        // F62b: THE BARRIER READS GROUND TRUTH, not just the record.
+        //
+        // On runao 2026-07-30 the roll of a local-consumer node destroyed the
+        // serving composition, and one tick later the roller advanced to the
+        // next node — because every record-level check passed. The record was
+        // not even lying: it correctly described two healthy in_sync LEGS. It
+        // simply has no term for the raid, and the raid was what died. On a
+        // larger fleet that composes exactly like the unfenced roll TLC
+        // rejected: each node's roll destroys one more composition while the
+        // barrier waves the campaign through on perfect records.
+        //
+        // Same lesson as the 2026-07-28 RecordBarrier pass ("every
+        // record-level check passes on the lying record") and the same remedy
+        // drain_leg already applies: probe before trusting. One configured
+        // base is enough — SPDK raid1 carries
+        // CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL = 1 (raid1.c:622), so a
+        // single surviving base is a degraded-but-serving raid, and only at
+        // ZERO does raid_bdev_deconfigure destroy the bdev
+        // (bdev_raid.c:2069-2074). An unprobeable consumer is treated as an
+        // obstruction, exactly as drain_leg refuses on a view it cannot
+        // verify: blocking a campaign is recoverable, destroying a volume is
+        // not.
+        if obstruction.is_none() {
+            if let Some(c) = consumer.as_deref() {
+                match crate::catchup::get_raids(driver, c).await {
+                    Ok(raids) => {
+                        let configured = raids
+                            .iter()
+                            .find(|r| {
+                                r.get("name").and_then(|n| n.as_str())
+                                    == Some(raid_name.as_str())
+                            })
+                            .map(|r| {
+                                r.get("base_bdevs_list")
+                                    .and_then(|b| b.as_array())
+                                    .map(|bs| {
+                                        bs.iter()
+                                            .filter(|b| {
+                                                b.get("is_configured")
+                                                    .and_then(|c| c.as_bool())
+                                                    .unwrap_or(false)
+                                            })
+                                            .count()
+                                    })
+                                    .unwrap_or(0)
+                            });
+                        match configured {
+                            None => {
+                                obstruction = Some(format!(
+                                    "serving raid {raid_name} is ABSENT on consumer {c} \
+                                     (every replica reads in_sync — the record has no term \
+                                     for the composition)"
+                                ))
+                            }
+                            Some(0) => {
+                                obstruction = Some(format!(
+                                    "serving raid {raid_name} on {c} has no configured base"
+                                ))
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                    Err(e) => {
+                        obstruction = Some(format!(
+                            "cannot probe the serving raid on consumer {c}: {e}"
+                        ))
+                    }
+                }
+            }
+        }
         out.push(VolumeMaint {
             volume_id,
             marked,
@@ -950,6 +1120,7 @@ mod tests {
             drain_incomplete: Vec::new(),
             nothing_to_drain: Vec::new(),
             local_last_serving: Vec::new(),
+            local_consumer_nodes: Vec::new(),
             fully_redundant: redundant,
             barrier_note: if redundant { String::new() } else { "vol1: replica x is stale".into() },
         }
@@ -1030,6 +1201,95 @@ mod tests {
             }
             other => panic!("expected Blocked, got {other:?}"),
         }
+    }
+
+    // ---- F62: refuse the node that hosts the raid composition ------------
+
+    #[test]
+    fn plan_roll_refuses_a_local_consumer_node_instead_of_rolling_it() {
+        // F62, found LIVE on runao 2026-07-30 in the very roll the F61 fix
+        // enabled, and reproduced in TLC as FlintReplicationRaidLifetime.cfg.
+        // Deleting this node's csi-node pod kills its spdk-tgt, and the raid
+        // composition dies with the process: no RPC, no base removal, no leg
+        // fault, both legs left healthy on disk and recorded 2/2 in_sync —
+        // and kubelet still believes the volume STAGED, so NodeStage never
+        // runs again and nothing re-creates it. Permanent outage from a
+        // planned, failure-free operation.
+        //
+        // Note the previous test one above: with nothing_to_drain alone the
+        // planner DELETES this pod. That was the F61 fix, and on its own it
+        // is strictly worse than the F61 bug it fixed — the livelock was the
+        // only thing keeping the un-implemented local half unexercised.
+        let mut v = view(vec![pod("a", false, true)], &[], true);
+        v.nothing_to_drain = vec!["a".to_string()];
+        v.local_consumer_nodes = vec!["a".to_string()];
+        assert_eq!(
+            plan_roll(&v),
+            RollStep::Refused {
+                nodes: vec!["a".to_string()]
+            },
+            "a node hosting the composition must be refused and NAMED, never rolled"
+        );
+    }
+
+    #[test]
+    fn plan_roll_refusal_does_not_stall_the_other_nodes() {
+        // The refusal must not rebuild F61's livelock: "b" still converges
+        // while "a" is refused. This is the code half of the model's
+        // one-node-in-flight gate counting maintSkipped alongside rolled.
+        let mut v = view(vec![pod("a", false, true), pod("b", false, true)], &[], true);
+        v.local_consumer_nodes = vec!["a".to_string()];
+        assert_eq!(
+            plan_roll(&v),
+            RollStep::Drain { node: "b".into() },
+            "the refused node must be skipped, not block the campaign"
+        );
+    }
+
+    #[test]
+    fn plan_roll_never_reports_idle_while_a_refused_node_is_stale() {
+        // Idle means "converged". Returning it with a node still on the old
+        // revision is the silent give-up F61 was, in better clothes — so the
+        // terminal state must name the refusals instead.
+        let mut v = view(vec![pod("a", false, true), pod("b", true, true)], &[], true);
+        v.local_consumer_nodes = vec!["a".to_string()];
+        let step = plan_roll(&v);
+        assert_ne!(step, RollStep::Idle, "a stale refused node is not convergence");
+        assert_eq!(
+            step,
+            RollStep::Refused {
+                nodes: vec!["a".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn plan_roll_is_idle_only_when_everything_current() {
+        // The companion to the test above: with no stale pods at all, Idle
+        // is the honest answer and Refused must NOT be manufactured.
+        let mut v = view(vec![pod("a", true, true), pod("b", true, true)], &[], true);
+        v.local_consumer_nodes = vec!["a".to_string()];
+        assert_eq!(plan_roll(&v), RollStep::Idle);
+    }
+
+    #[test]
+    fn plan_roll_still_rolls_a_nothing_to_drain_node_that_hosts_no_composition() {
+        // The distinction fix B turns on. nothing_to_drain also holds nodes
+        // whose volumes are unattached, or which host no legs at all: there
+        // is no composition there to lose, and rolling them is REQUIRED for
+        // the DaemonSet to converge. Refusing all of nothing_to_drain would
+        // be F61 again.
+        let mut v = view(vec![pod("a", false, true)], &[], true);
+        v.nothing_to_drain = vec!["a".to_string()];
+        v.local_consumer_nodes = Vec::new();
+        assert_eq!(
+            plan_roll(&v),
+            RollStep::DeletePod {
+                pod: "flint-csi-node-a".into(),
+                node: "a".into()
+            },
+            "no composition here — this node must still roll"
+        );
     }
 
     #[test]

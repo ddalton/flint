@@ -206,6 +206,40 @@ CONSTANTS
                \* weaker barrier can drain into a race with an undetected
                \* failure; the RecordBarrier strict run verifies that costs
                \* availability (an honest Defer), never safety.
+  \* ---- the raid-lifetime tranche (F62, found LIVE on runao 2026-07-30 in
+  \* the very roll the F61 fix enabled; docs/f62-local-half-outage-and-blind-
+  \* barrier.md).  Ordered by dependency: the ARM makes the composition a
+  \* real object, the REFUSAL is the orchestration fix, the two REPAIR arms
+  \* are rival answers to "and what puts it back?" ------------------------
+  RaidLifetimeArm, \* TRUE = raidHost/staged/raidSeen are live state and the
+               \* composition has its own lifetime.  FALSE pins them inert,
+               \* so every pre-F62 cfg keeps its exact behavior graph (and
+               \* its gate cost) — the same discipline ExpandEnabled and
+               \* DataPathArm used when they landed.
+  MaintLocalRefuse, \* TRUE = the F62 fix: the roller REFUSES a local-consumer
+               \* node, records it in maintSkipped for the operator, and
+               \* keeps converging every other node.  FALSE = the shipped
+               \* post-F61 behavior: roll it, which destroys the serving
+               \* composition with ZERO real failures.  Note the polarity
+               \* of this pair — F61's fix WITHOUT this one is strictly
+               \* worse than F61's bug, because the livelock was the only
+               \* thing preventing the outage.  TLC must show exactly that.
+  RaidReconcileArm, \* Repair A2: the node agent re-creates the composition
+               \* for volumes staged on its node when its tgt comes back
+               \* (the v1.10.0 note's option 1).  Does NOT need a superblock
+               \* — flint passes "superblock": false ON PURPOSE (driver.rs
+               \* 3159; the §3 phantom-assembly class, and the 1 MiB payload
+               \* shift that silently formatted restored snapshots on
+               \* 2026-06-12).  Re-creation is from the RECORD, as NodeStage
+               \* already does.
+  DpSeenRehydrate, \* Repair A1: data_path_raid_seen is rehydrated from the
+               \* STAGED-volume set when the agent starts.  Note it must be
+               \* the staged set and NOT live SPDK: seeding from SPDK reads
+               \* the raid list, which is empty in precisely the situation
+               \* that matters, so that seed would be a no-op exactly when
+               \* needed.  FALSE = shipped, where the set is a fresh empty
+               \* HashSet and CollapseEvent::Lost's `seen.contains` can
+               \* never hold for a raid that died with the previous process.
   \* ---- the expansion tranche (F56; docs/f56-expand-replacement-circular-wait.md)
   ExpandEnabled, \* TRUE = the size dimension + expansion actions exist
                \* (FALSE keeps every legacy cfg's behavior graph identical)
@@ -478,6 +512,61 @@ CONSTANTS
 VARIABLES
   \* ---- data plane -------------------------------------------------------
   serving,       \* SUBSET Legs: legs configured in the serving raid; {} = down
+  \* ---- the raid COMPOSITION, as an object in its own right (F62) ---------
+  \* Until F62 this module had only `serving`, whose comment above admits the
+  \* conflation: "{} = down" folds together "the members left" and "the
+  \* composition does not exist".  Those have DIFFERENT LIFETIMES, and the
+  \* difference is the bug:
+  \*
+  \*   the lvols    live on disk, for the life of the PV — days/weeks
+  \*   the volume   is staged for as long as a consumer wants it
+  \*   the raid     lives exactly as long as ONE spdk-tgt process, on the one
+  \*                node hosting the consumer — the most-restarted component
+  \*                in the system
+  \*
+  \* Nothing else in the model has the raid's lifetime, so nothing else could
+  \* express F62's state: the composition gone while every leg is healthy, on
+  \* disk, and recorded in_sync.  It is NOT derivable from `serving` — its
+  \* whole point is to gate the RESTORE actions.  Admit/HotRejoin add a member
+  \* to an existing raid; with only `serving` they could lift the volume out of
+  \* {} unconditionally, which is exactly why TLC believed every outage was
+  \* recoverable and blessed the F61 fix that breaks live.
+  raidHost,      \* Legs \cup {"remote", "none"} — whose tgt process holds the
+                 \* composition.  "none" = it does not exist anywhere.  The
+                 \* host is MOBILE: node loss relocates it with the consumer
+                 \* (the F42/drill-2.5 self-heal family).
+  staged,        \* BOOLEAN — kubelet believes the volume is staged on that
+                 \* node.  THE DISCRIMINATOR between the three destroyers,
+                 \* because only a destroyer that also clears it has an
+                 \* INVERSE (kubelet will call NodeStage again):
+                 \*
+                 \*  1. consumer pod deleted -> node_unstage_volume ->
+                 \*     teardown_volume_spdk_state step 2 -> bdev_raid_delete
+                 \*     (driver.rs:3494).            staged' = FALSE — paired.
+                 \*  2. node destroyed -> consumer relocates -> NodeStage on
+                 \*     the NEW host re-creates it.  staged' = FALSE — paired.
+                 \*     (1 and 2 are one equivalence class from the volume's
+                 \*     point of view, which is why modelling F62 needs no
+                 \*     mobile-consumer dimension.)
+                 \*  3. the csi-node pod's tgt dies while node and consumer
+                 \*     stay put: NO RPC, and kubelet still believes the
+                 \*     volume staged.  staged UNCHANGED = TRUE — UNPAIRED.
+                 \*     Nothing calls NodeStage, so nothing re-creates it.
+                 \*     That is F62, and it is the whole of F62.
+  raidSeen,      \* BOOLEAN — the host agent's data_path_raid_seen entry for
+                 \* this volume.  PROCESS-SCOPED: a HashSet in the node agent,
+                 \* emptied by the very restart that destroys the composition.
+                 \* CollapseEvent::Lost needs it, so the detector is disabled
+                 \* EXACTLY when the hazard fires (F62a).  The third instance
+                 \* this cycle of "a guard silently disables progress and no
+                 \* property asks" — so a property asks now.
+  raidLostOnce,  \* GHOST (BOOLEAN): a class-3 destroyer has fired at least
+                 \* once — the composition died with a tgt process while the
+                 \* volume stayed staged.  Exists to turn "can the volume
+                 \* EVER come back?" into a reachability question TLC answers
+                 \* with a trace, instead of a liveness question that a
+                 \* flapping environment and a finite bounce budget can
+                 \* defeat for reasons unrelated to the fix under test.
   zombie,        \* SUBSET Legs: a partitioned old head's assembly view (F48)
   legData,       \* [Legs -> SUBSET 1..MaxWrites]
   legUp,         \* [Legs -> {"up", "blackhole", "dead"}] — GROUND TRUTH
@@ -517,6 +606,11 @@ VARIABLES
                  \* volume is skipped (consumer == node, unattached, no
                  \* legs) finishes a pass having marked nothing — and the
                  \* planner, keyed on marks, then never reaches DeletePod.
+  maintSkipped,  \* SUBSET Legs: nodes the roller REFUSED to roll and SURFACED
+                 \* as an operator-actionable condition (F62 fix B).  A
+                 \* refusal is only honest if it is visible, so the refused
+                 \* set is state the campaign-progress property can name —
+                 \* the alternative is F61's silent wedge wearing a new hat.
   rollerDead,    \* TRUE once the roll orchestrator died mid-campaign
   stalePlan,     \* SUBSET Legs (≤1): a second/deposed roller's captured
                  \* drain plan — valid when captured, committed later
@@ -593,12 +687,19 @@ VARIABLES
 vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
           lineage, riskSurfaced, state, writerSet, epochCut, claim,
           deferExpired, deemedDead, falseRisk, crashes,
-          rolling, rolled, suppress, processed, rollerDead, legSize, raidSize, pvSize, wantNew,
+          rolling, rolled, suppress, processed, maintSkipped, rollerDead,
+          legSize, raidSize, pvSize, wantNew,
+          raidHost, staged, raidSeen, raidLostOnce,
           bounceWindow, bouncePlan, bounceRisk, consecutiveBounces, dpFlag,
           everServed, podUp, bounceDoomed>>
 
-maintVars == <<rolling, rolled, suppress, processed, rollerDead, stalePlan,
-               leaderMoved>>
+maintVars == <<rolling, rolled, suppress, processed, maintSkipped, rollerDead,
+               stalePlan, leaderMoved>>
+
+\* The F62 tranche's state, grouped like maintVars so every untouched action
+\* carries exactly one extra UNCHANGED line.  Pinned inert when
+\* RaidLifetimeArm = FALSE, which is why the 50 pre-F62 runs are unperturbed.
+raidVars == <<raidHost, staged, raidSeen, raidLostOnce>>
 
 expandVars == <<legSize, raidSize, pvSize, wantNew>>
 
@@ -619,6 +720,41 @@ bounceVars == <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
 \* leg actually serves; the moment it deconfigures or a reassembly
 \* excludes it, the theorems re-arm.
 StaleServed == \E l \in serving : state[l] = "stale"
+
+(***************************************************************************)
+(* THE RAID COMPOSITION (F62).  Where the composition lives when it        *)
+(* exists: co-located with the local half if there is one, else on a node  *)
+(* owning no leg at all — the ordinary RWX shape, where the raid reaches    *)
+(* BOTH legs over NVMe-oF.  A base may be local or remote; the composition  *)
+(* does not care, which is why "remote" is a legal host and not an error.   *)
+(***************************************************************************)
+RaidHostInit == IF LocalLegs = {} THEN "remote" ELSE CHOOSE l \in LocalLegs : TRUE
+
+RaidPresent == raidHost # "none"
+
+(***************************************************************************)
+(* A raid bdev by itself means NOTHING — it needs at least one healthy base *)
+(* lvol attached, local or remote — and a healthy lvol with no composition *)
+(* over it is just bytes on a disk.  So SERVICE is the conjunction, and the *)
+(* two halves have different lifetimes.  Confirmed against SPDK            *)
+(* v26.05.1-pre: raid1 carries                                             *)
+(*   .base_bdevs_constraint = {CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL, 1}   *)
+(* (raid1.c:622), so at ONE surviving base a raid1 stays a raid1, degraded  *)
+(* and serving — there is no demotion to a direct lvol, SPDK has no such    *)
+(* mechanism.  At ZERO, raid_bdev_remove_base_bdev_done decrements past the *)
+(* floor and calls raid_bdev_deconfigure (bdev_raid.c:2069-2074): the raid  *)
+(* bdev DESTROYS ITSELF.                                                   *)
+(*                                                                         *)
+(* SCOPE LIMIT, recorded rather than papered over: that last rule means     *)
+(* serving = {} FORCES the composition gone, so Admit/HotRejoin lifting     *)
+(* serving out of {} — which this module has always allowed — is optimistic *)
+(* for every path, not just F62's.  Making it exact is a whole-model        *)
+(* rework; this tranche checks the safe direction globally                  *)
+(* (Inv_RaidCompositionCoupled) and gates the restore actions only under    *)
+(* RaidLifetimeArm, so the arm-on runs answer the question and the 50       *)
+(* pre-F62 runs keep their behavior graphs.                                 *)
+(***************************************************************************)
+VolumeUp == RaidPresent /\ serving # {}
 
 TypeOK ==
   /\ serving \subseteq Legs
@@ -643,6 +779,11 @@ TypeOK ==
   /\ rolled \subseteq Legs
   /\ suppress \subseteq Legs
   /\ processed \subseteq Legs
+  /\ maintSkipped \subseteq Legs
+  /\ raidHost \in Legs \cup {"remote", "none"}
+  /\ staged \in BOOLEAN
+  /\ raidSeen \in BOOLEAN
+  /\ raidLostOnce \in BOOLEAN
   /\ rollerDead \in BOOLEAN
   /\ stalePlan \subseteq Legs /\ Cardinality(stalePlan) <= 1
   /\ leaderMoved \in BOOLEAN
@@ -739,6 +880,16 @@ Init ==
   /\ rolling = {}
   /\ rolled = {}
   /\ processed = {}
+  /\ maintSkipped = {}
+  \* The composition exists at Init, hosted where the consumer is: co-located
+  \* with the local half when there is one, otherwise on a node outside Legs
+  \* (the ordinary RWX shape — the NFS server's own node).  staged is what
+  \* kubelet believes; raidSeen is TRUE because the agent has been running
+  \* and has observed its own raid.
+  /\ raidHost = RaidHostInit
+  /\ staged = TRUE
+  /\ raidSeen = TRUE
+  /\ raidLostOnce = FALSE
   /\ suppress = {}
   /\ rollerDead = FALSE
   /\ stalePlan = {}
@@ -777,6 +928,7 @@ Write ==
                  state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -801,6 +953,7 @@ WriteTorn ==
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -821,6 +974,7 @@ ZombieWrite ==
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -834,6 +988,7 @@ LegDie(l) ==
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -849,6 +1004,7 @@ LegBlackhole(l) ==
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -861,6 +1017,7 @@ LegRecover(l) ==
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -874,6 +1031,7 @@ LegPerish(l) ==
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -894,6 +1052,7 @@ DeemDead(l) ==
                  epochCut, claim, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -916,6 +1075,7 @@ RaidDeconfigure(l) ==
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -929,6 +1089,7 @@ ServerCrash ==
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -946,6 +1107,7 @@ ServerPartition ==
                  lineage, riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -967,6 +1129,7 @@ MonitorMarkStale(l) ==
                  nextWrite, lineage, riskSurfaced, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -989,6 +1152,7 @@ EpochCut ==
                  deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1040,9 +1204,10 @@ Replace(l) ==
   /\ legSize' = [legSize EXCEPT ![l] = pvSize]
   /\ UNCHANGED <<serving, zombie, raidGen, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, falseRisk, crashes,
-                 rolling, processed, rollerDead, stalePlan, leaderMoved,
+                 rolling, processed, maintSkipped, rollerDead, stalePlan, leaderMoved,
                  raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
   \* A swapped-in identity is a FRESH lvol: whatever the old one served,
   \* this one has not (the ghost behind Inv_WriterSetGrounded).
   /\ everServed' = everServed \ {l}
@@ -1056,6 +1221,10 @@ Replace(l) ==
 HotRejoin(l) ==
   /\ state[l] = "stale"
   /\ Responsive(l)
+  \* A base cannot join a composition that no longer exists (F62).  Every
+  \* restore action in this module could lift `serving` out of {} regardless
+  \* — the optimism that let TLC call every outage recoverable.
+  /\ (RaidLifetimeArm => RaidPresent)
   \* A forced-stale SERVING leg cannot promote: catchup_stale defers with
   \* ReplicaHeadInUse while a consumer holds the head (StaleFloor states).
   /\ l \notin serving
@@ -1070,6 +1239,7 @@ HotRejoin(l) ==
                  claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1091,6 +1261,7 @@ Scrub(l) ==
                  riskSurfaced, state, writerSet, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   \* The payload is wiped: a scrubbed leg's history no longer entitles it
   \* to anything (same ghost bookkeeping as Replace).
@@ -1123,6 +1294,7 @@ CatchUp(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED <<raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED bounceVars
 
 \* Admission (hot-rejoin window / cutover reassembly) + mark_in_sync's
@@ -1134,6 +1306,7 @@ Admit(l) ==
   /\ claim = "admission"                  \* the window holds its claim
   /\ state[l] = "standby"
   /\ Responsive(l)
+  /\ (RaidLifetimeArm => RaidPresent)     \* nothing to admit INTO (F62)
   /\ AdmissionOpen(l)                     \* the second door — volume-wide
                                           \* when SuppressScoped = FALSE
                                           \* (the shipped plan_hot_rejoin)
@@ -1163,6 +1336,7 @@ Admit(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED <<raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
   \* An in-place admission is progress too — and it is precisely the S2
   \* door the bounce was supposed to be replaced by, so it resets the
   \* pointless-rebounce counter exactly like the at-stage one.
@@ -1185,6 +1359,16 @@ Assemble ==
   /\ serving = {}
   \* A reassembly happens because a POD is scheduled and NodeStage runs.
   /\ (PodLayer => podUp)
+  \* ...AND NodeStage runs only for a volume kubelet believes UNSTAGED.  This
+  \* one conjunct is the whole of F62a.  Class-1 and class-2 destroyers (see
+  \* `staged`) clear the flag, so this action is their inverse and the volume
+  \* comes back.  A tgt that dies under a still-staged volume clears nothing,
+  \* so the sole creator of the composition is DISABLED exactly when the
+  \* composition is missing — a permanent outage with every leg healthy, on
+  \* disk, and recorded in_sync.  RaidReconcileArm is repair A2: the node
+  \* agent re-creates the composition for volumes ITS OWN records say are
+  \* staged here, needing no stage event and no superblock.
+  /\ (RaidLifetimeArm => (~staged \/ RaidReconcileArm))
   \* StaleFloor (2026-07-29 audit): below 2 attached in-sync bases the
   \* shipped NodeStage AUTOMATICALLY admits record-Stale replicas (in
   \* replica-index order — TLC's free choice of A covers every order).
@@ -1270,6 +1454,15 @@ Assemble ==
   \* decisions (missing-empty and ServeWithRisk): the deadline re-arms
   \* fresh on the next deferral.
   /\ deferExpired' = FALSE
+  \* THE CREATOR.  All three assignments are no-ops in arm-off worlds (Init
+  \* pins exactly these values there), so the 50 pre-F62 runs are untouched.
+  \* raidSeen' = TRUE because the process that just built the raid has, by
+  \* construction, observed it — the honest way for data_path_raid_seen to
+  \* become populated.
+  /\ raidHost' = RaidHostInit
+  /\ staged' = TRUE
+  /\ raidSeen' = TRUE
+  /\ UNCHANGED raidLostOnce
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, state, epochCut, claim,
                  deemedDead, crashes>>
   /\ UNCHANGED maintVars
@@ -1309,6 +1502,15 @@ LastResortServe(l) ==
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  \* A CREATOR, like Assemble — the runbook stages the survivor, so a
+  \* composition exists again.  Deliberately NOT gated on ~staged: the
+  \* operator works outside kubelet's bookkeeping, which is the whole point
+  \* of a runbook step.  It cannot mask F62 regardless, because it requires
+  \* UpInSync = {} and F62 leaves every leg recorded in_sync.
+  /\ raidHost' = RaidHostInit
+  /\ staged' = TRUE
+  /\ raidSeen' = TRUE
+  /\ UNCHANGED raidLostOnce
   \* The override brings the volume back, so any open bounce window closes
   \* (with riskSurfaced already stamped by the override itself).
   /\ bounceWindow' = "none"
@@ -1350,6 +1552,7 @@ AcquireCatchup ==
                  epochCut, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1361,6 +1564,7 @@ ReleaseCatchup ==
                  epochCut, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1373,6 +1577,7 @@ AcquireAdmission ==
                  epochCut, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1397,6 +1602,7 @@ ReleaseAdmission ==
                  epochCut, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1413,6 +1619,7 @@ ExpireClaim ==
                  epochCut, deemedDead, falseRisk>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1470,7 +1677,9 @@ MaintDrain(l) ==
   \* that node before starting the next, so a node cannot be processed while
   \* an earlier processed node is still unrolled. Without this the model
   \* interleaves two in-flight nodes — a state plan_roll cannot produce.
-  /\ processed \subseteq rolled
+  \* F62: ...or REFUSED (fix B).  Without maintSkipped here a refused node
+  \* would block every later node — F61's livelock rebuilt out of its own fix.
+  /\ processed \subseteq (rolled \cup maintSkipped)
   /\ rolling = {} /\ suppress = {}        \* k8s pod-level serialization
   \* DATA-PLANE BELT: never drain the last serving member.  Found by the
   \* RecordBarrier run: with a record-only barrier, a deconfigured-but-
@@ -1499,8 +1708,9 @@ MaintDrain(l) ==
   /\ processed' = processed \cup {l}     \* the pass completed AND marked
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, deemedDead, falseRisk,
-                 crashes, rolling, rolled, rollerDead, stalePlan, leaderMoved>>
+                 crashes, rolling, rolled, maintSkipped, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1524,16 +1734,27 @@ MaintDrainSkip(l) ==
   \* that node before starting the next, so a node cannot be processed while
   \* an earlier processed node is still unrolled. Without this the model
   \* interleaves two in-flight nodes — a state plan_roll cannot produce.
-  /\ processed \subseteq rolled
+  \* F62: ...or REFUSED (fix B).  Without maintSkipped here a refused node
+  \* would block every later node — F61's livelock rebuilt out of its own fix.
+  /\ processed \subseteq (rolled \cup maintSkipped)
   /\ rolling = {} /\ suppress = {}
   /\ (MaintBarrier =>
         IF BarrierRaidAware THEN FullRedundancy ELSE RecordRedundancy)
   /\ processed' = processed \cup {l}
+  \* F62 FIX B.  The pass ran and marked nothing — but the ROLL is what
+  \* would break this volume, not the drain.  So refuse the node, record it
+  \* for the operator ("N nodes host serving compositions and need manual
+  \* handling"), and keep converging every other node.  Strictly better than
+  \* both alternatives: better than F61's silent wedge, and better than
+  \* F61's-fix-alone, which converts the wedge into a silent OUTAGE.
+  /\ maintSkipped' = IF MaintLocalRefuse THEN maintSkipped \cup {l}
+                                         ELSE maintSkipped
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes, rolling,
                  rolled, suppress, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1567,11 +1788,41 @@ RollStart(l) ==
                \/ /\ l \in LocalLegs
                   /\ serving \ {l} # {}
           ELSE l \in suppress)
+  \* F62 FIX B: a refused node is never rolled.  The refusal has to be
+  \* visible to be honest, which is what maintSkipped is for — a silent
+  \* refusal is F61's wedge wearing a new hat.
+  /\ (MaintLocalRefuse => l \notin maintSkipped)
   /\ rolling' = {l}
-  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+  \* ===================================================================
+  \* THE F62 DESTROYER (class 3).  Deleting this node's csi-node pod kills
+  \* its spdk-tgt, and if that process is the one holding the composition,
+  \* the composition dies with it.  Note what is NOT here: no RPC, no
+  \* base-bdev removal, no leg fault, no record write.  The lvols are fine
+  \* — 9 bdevs still present on runao — and `state` still reads every leg
+  \* in_sync, which is why F62b's record-only barrier waved the campaign
+  \* on one tick later.  Above all, `staged` is UNTOUCHED: kubelet still
+  \* believes the volume staged, so Assemble — the only creator — stays
+  \* disabled forever.  THAT is the difference between this destroyer and
+  \* the other two, and it is the entire bug.
+  \* ===================================================================
+  /\ IF RaidLifetimeArm /\ raidHost = l
+       THEN /\ raidHost' = "none"
+            \* SPDK's own rule, not an extra assumption: with the composition
+            \* gone there is nothing for a base to be a member of
+            \* (raid_bdev_deconfigure, bdev_raid.c:2069-2074).
+            /\ serving' = {}
+            \* The detector's HashSet dies with the process.  Rehydrating it
+            \* from the STAGED set (repair A1) is what lets the fresh process
+            \* know a raid is owed; seeding it from live SPDK would read an
+            \* empty raid list and be a no-op exactly here.
+            /\ raidSeen' = DpSeenRehydrate
+            /\ raidLostOnce' = TRUE
+            /\ UNCHANGED staged
+       ELSE UNCHANGED <<serving, raidHost, staged, raidSeen, raidLostOnce>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolled, suppress, processed, rollerDead, stalePlan, leaderMoved>>
+                 rolled, suppress, processed, maintSkipped, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
@@ -1584,8 +1835,9 @@ RollFinish(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 suppress, processed, rollerDead, stalePlan, leaderMoved>>
+                 suppress, processed, maintSkipped, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1597,8 +1849,9 @@ MaintClear(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, processed, rollerDead, stalePlan, leaderMoved>>
+                 rolling, rolled, processed, maintSkipped, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1614,9 +1867,10 @@ RollerDie ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk,
-                 rolling, rolled, suppress, processed, stalePlan,
+                 rolling, rolled, suppress, processed, maintSkipped, stalePlan,
                  leaderMoved>>
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1633,8 +1887,9 @@ SuppressExpire(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, processed, rollerDead, stalePlan, leaderMoved>>
+                 rolling, rolled, processed, maintSkipped, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1685,8 +1940,9 @@ RoguePlanDrain(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, suppress, processed, rollerDead>>
+                 rolling, rolled, suppress, processed, maintSkipped, rollerDead>>
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1723,8 +1979,9 @@ RogueDrainCommit ==
   /\ stalePlan' = {}
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, deemedDead, falseRisk,
-                 crashes, rolling, rolled, processed, rollerDead, leaderMoved>>
+                 crashes, rolling, rolled, processed, maintSkipped, rollerDead, leaderMoved>>
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
 
@@ -1781,8 +2038,27 @@ BounceAdmissionArm == AdmissionArm /\ \E l \in Legs :
 \* the code demonstrably has.
 BouncePlannable ==
   /\ BounceEnabled
-  /\ serving # {}                         \* something to tear down
-  /\ (BounceDataPathArm \/ BounceAdmissionArm)
+  \* F62 CORRECTION, and it was the old conflation biting again.  This read
+  \*     /\ serving # {}                  \* something to tear down
+  \*     /\ (BounceDataPathArm \/ BounceAdmissionArm)
+  \* which is right for the ADMISSION arm — cutting a standby in needs a
+  \* live assembly to cut over from — and exactly backwards for the
+  \* DATA-PATH arm, which fires BECAUSE the data path is gone.  The code has
+  \* no raid-membership term there at all: plan_cutover's first branch
+  \* returns BounceNfsPod on the strength of a pvc_backed NFS pod alone, and
+  \* says so — "The bounce IS the remediation — a restage rebuilds the raid
+  \* from the in-sync replicas — so the standby/lag gates below do not apply
+  \* (there is nothing to admit, only a data path to rebuild)"
+  \* (cutover.rs:485-489).  `serving # {}` only looked correct while
+  \* `serving` doubled as "the volume is up"; once the composition became
+  \* its own object the guard disabled the remediation in precisely the
+  \* state it exists to remediate.  Found by the A1 run failing for the
+  \* WRONG REASON — the repair chain was armed, willing, and modelled shut.
+  /\ IF RaidLifetimeArm
+       THEN \/ (BounceDataPathArm /\ staged)
+            \/ (BounceAdmissionArm /\ serving # {})
+       ELSE /\ serving # {}
+            /\ (BounceDataPathArm \/ BounceAdmissionArm)
 
 \* Was this bounce doomed the moment it was issued?  TRUE when the ONLY
 \* justification was the admission arm and no standby the stage admission
@@ -1828,6 +2104,17 @@ Bounce ==
   /\ UNCHANGED <<bouncePlan, bounceRisk, dpFlag, everServed, podUp>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  \* CLASS-1/2 DESTROYER: the server pod goes away, so NodeUnstage runs
+  \* (teardown_volume_spdk_state step 2 deletes the raid, driver.rs:3494)
+  \* and kubelet's bookkeeping flips to NOT-staged.  Because it does, this
+  \* destroyer HAS an inverse: Assemble is enabled and the volume comes
+  \* back.  Contrast RollStart's class-3 destroyer, which leaves `staged`
+  \* alone and therefore has none.  All three assignments are no-ops when
+  \* RaidLifetimeArm is FALSE.
+  /\ raidHost' = IF RaidLifetimeArm THEN "none" ELSE raidHost
+  /\ staged'   = ~RaidLifetimeArm
+  /\ raidSeen' = IF RaidLifetimeArm THEN DpSeenRehydrate ELSE raidSeen
+  /\ UNCHANGED raidLostOnce
   /\ UNCHANGED gateVars
 
 \* THE REFUSAL BOUND (cutover.rs: `refusal_expired`).  freshness_gate::evaluate
@@ -1860,6 +2147,17 @@ BounceOverride ==
                  deemedDead, falseRisk, crashes>>
   /\ UNCHANGED <<bouncePlan, bounceRisk, dpFlag, everServed, podUp>>
   /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
+  \* CLASS-1/2 DESTROYER: the server pod goes away, so NodeUnstage runs
+  \* (teardown_volume_spdk_state step 2 deletes the raid, driver.rs:3494)
+  \* and kubelet's bookkeeping flips to NOT-staged.  Because it does, this
+  \* destroyer HAS an inverse: Assemble is enabled and the volume comes
+  \* back.  Contrast RollStart's class-3 destroyer, which leaves `staged`
+  \* alone and therefore has none.  All three assignments are no-ops when
+  \* RaidLifetimeArm is FALSE.
+  /\ raidHost' = IF RaidLifetimeArm THEN "none" ELSE raidHost
+  /\ staged'   = ~RaidLifetimeArm
+  /\ raidSeen' = IF RaidLifetimeArm THEN DpSeenRehydrate ELSE raidSeen
+  /\ UNCHANGED raidLostOnce
 
 \* The deposed-but-alive bouncer.  RoguePlanDrain's shape, and leaderMoved
 \* is SHARED with the roller on purpose: orchestrator_lease.rs is ONE lease
@@ -1875,10 +2173,11 @@ RogueBouncePlan ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, suppress, processed, rollerDead, stalePlan>>
+                 rolling, rolled, suppress, processed, maintSkipped, rollerDead, stalePlan>>
   /\ UNCHANGED <<bounceWindow, bounceRisk, consecutiveBounces, dpFlag,
                  everServed, podUp, bounceDoomed>>
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
 
 \* The captured plan lands, possibly long after the world changed.  ONLY
@@ -1910,6 +2209,17 @@ RogueBounceCommit ==
   /\ UNCHANGED <<bounceRisk, dpFlag, everServed, podUp>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  \* CLASS-1/2 DESTROYER: the server pod goes away, so NodeUnstage runs
+  \* (teardown_volume_spdk_state step 2 deletes the raid, driver.rs:3494)
+  \* and kubelet's bookkeeping flips to NOT-staged.  Because it does, this
+  \* destroyer HAS an inverse: Assemble is enabled and the volume comes
+  \* back.  Contrast RollStart's class-3 destroyer, which leaves `staged`
+  \* alone and therefore has none.  All three assignments are no-ops when
+  \* RaidLifetimeArm is FALSE.
+  /\ raidHost' = IF RaidLifetimeArm THEN "none" ELSE raidHost
+  /\ staged'   = ~RaidLifetimeArm
+  /\ raidSeen' = IF RaidLifetimeArm THEN DpSeenRehydrate ELSE raidSeen
+  /\ UNCHANGED raidLostOnce
   /\ UNCHANGED gateVars
 
 (***************************************************************************)
@@ -1954,6 +2264,7 @@ BounceDelete ==
                  epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED <<bouncePlan, bounceRisk, dpFlag, everServed>>
   /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
 
 \* kubelet's NodeUnstage, once the pod is really gone: the raid bdev and
 \* every per-replica controller are torn down.  THIS is what the detach
@@ -1969,6 +2280,17 @@ BounceUnstage ==
                  deemedDead, falseRisk, crashes>>
   /\ UNCHANGED bounceVars
   /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
+  \* CLASS-1/2 DESTROYER: the server pod goes away, so NodeUnstage runs
+  \* (teardown_volume_spdk_state step 2 deletes the raid, driver.rs:3494)
+  \* and kubelet's bookkeeping flips to NOT-staged.  Because it does, this
+  \* destroyer HAS an inverse: Assemble is enabled and the volume comes
+  \* back.  Contrast RollStart's class-3 destroyer, which leaves `staged`
+  \* alone and therefore has none.  All three assignments are no-ops when
+  \* RaidLifetimeArm is FALSE.
+  /\ raidHost' = IF RaidLifetimeArm THEN "none" ELSE raidHost
+  /\ staged'   = ~RaidLifetimeArm
+  /\ raidSeen' = IF RaidLifetimeArm THEN DpSeenRehydrate ELSE raidSeen
+  /\ UNCHANGED raidLostOnce
 
 \* The bouncer's own recreate.  DetachWaitHonored = TRUE is the idealized
 \* bouncer that recreates only after the unstage it waited for; FALSE is
@@ -1985,6 +2307,7 @@ BounceRecreate ==
   /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
                  dpFlag, everServed, bounceDoomed>>
   /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
 
 \* THE SECOND CREATOR.  Enabled purely on "pod gone" — the shipped
 \* reconciler cannot see a bounce, and its decision function's signature
@@ -2002,6 +2325,7 @@ ReconcilerRecreate ==
   /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
                  dpFlag, everServed, bounceDoomed>>
   /\ UNCHANGED maintVars /\ UNCHANGED expandVars /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
 
 (***************************************************************************)
 (* THE DATA-PATH-LOST ANNOTATION (node_agent.rs detect_lost_data_paths).   *)
@@ -2020,6 +2344,16 @@ AgentFlag(l) ==
   /\ Responsive(l)                        \* a LIVE agent writes it
   /\ l \notin serving                     \* "the raid bdev is missing here"
   /\ state[l] = "insync"                  \* "...but the record calls it a writer"
+  \* F62a.  CollapseEvent::Lost requires data_path_raid_seen.contains(pv) —
+  \* "I saw this raid, and now it is gone".  The set is a plain HashSet in
+  \* the agent PROCESS, so the restart that destroys the composition also
+  \* empties the evidence that it ever existed, and the detector is disabled
+  \* EXACTLY when the hazard fires.  Unlike its neighbours (exported_targets
+  \* is seeded from live SPDK at startup, expected_ublk is backfilled by
+  \* ground-truth rehydration) this one is never rehydrated at all.  The
+  \* third time this cycle a guard has silently disabled progress with no
+  \* property asking — so RaidEventuallyReassembled asks.
+  /\ (RaidLifetimeArm => raidSeen)
   /\ dpFlag' = l
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
@@ -2028,6 +2362,7 @@ AgentFlag(l) ==
                  everServed, podUp, bounceDoomed>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
 
 AgentClear(l) ==
@@ -2042,6 +2377,7 @@ AgentClear(l) ==
   /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, everServed, podUp, bounceDoomed>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED gateVars
 
 (***************************************************************************)
@@ -2082,6 +2418,7 @@ AdmitAtStage(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED <<raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
 
 (***************************************************************************)
 (* Online expansion — the F56 size dimension                               *)
@@ -2110,6 +2447,7 @@ ExpandRequest ==
                  legSize, raidSize, pvSize>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED bounceVars
 
 ExpandLeg(l) ==
@@ -2126,6 +2464,7 @@ ExpandLeg(l) ==
                  raidSize, pvSize, wantNew>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED bounceVars
 
 RaidGrow ==
@@ -2140,6 +2479,7 @@ RaidGrow ==
                  legSize, pvSize, wantNew>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED bounceVars
 
 \* The external resizer's success path: ControllerExpandVolume returns
@@ -2160,6 +2500,7 @@ PvGrow ==
                  legSize, raidSize, wantNew>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED gateVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED bounceVars
 
 \* Wall-clock passage on a deferring volume: the persisted
@@ -2176,6 +2517,7 @@ DeferClockExpire ==
                  epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED bounceVars
 
 Next ==
@@ -2320,6 +2662,41 @@ FairnessCore ==
 \* every existing bounce run's behaviour graph.
 FairnessBounce == WF_vars(Bounce) /\ WF_vars(BounceOverride)
 
+(***************************************************************************)
+(* THE DETECTOR'S OWN OBLIGATION (F62a), and its absence was a hole in the  *)
+(* module rather than a modelling choice.  AgentClear has had weak fairness *)
+(* since the bounce tranche landed; AgentFlag never did.  So TLC was always *)
+(* free to simply decline to flag, which means NO run in this module could  *)
+(* ever have concluded that the data-path repair chain works — its liveness *)
+(* was unfalsifiable in both directions.  The F62a A1 run failed for that   *)
+(* reason before failing for a real one, which is how it was noticed.       *)
+(*                                                                         *)
+(* WF is the right strength and matches the code: detect_lost_data_paths is *)
+(* a periodic node-agent loop that flags after CONSECUTIVE raid-missing     *)
+(* strikes under a live attachment — eventual, not immediate — the same     *)
+(* honest abstraction of a default-ON timer the 2026-07-29 audit applied to *)
+(* HotRejoin and Bounce.  Split out rather than added to FairnessCore so    *)
+(* the 52 pre-F62 runs keep their exact behavior graphs.                    *)
+(***************************************************************************)
+(* STRONG fairness, and the reason is worth recording because WF was tried  *)
+(* first and failed for a fake reason.  Per-leg WF obligates only a leg      *)
+(* CONTINUOUSLY enabled, so an environment that alternates which leg is      *)
+(* blackholed leaves neither leg continuously flaggable and both WF          *)
+(* conjuncts vacuous — TLC returned exactly that lasso (l1 up/l2 blackhole,  *)
+(* flapping, composition gone, dpFlag never set).  Nothing about that trace  *)
+(* is a reason the repair fails; it is the per-leg WF idiom being defeated   *)
+(* by an adversary.  A periodic poller does fire against a flapping          *)
+(* environment, which is what SF says: enabled infinitely often => occurs.   *)
+(* Same justification the expansion tranche's SF upgrade carries.            *)
+(*                                                                         *)
+(* Residual scope limit, honestly: the flag is written by the agent on the   *)
+(* RAID HOST, whose liveness is not any leg's Responsive() — and once the    *)
+(* composition is destroyed raidHost is "none", so the model no longer names *)
+(* the node whose agent is alive and looking.  AgentFlag stays per-leg (its  *)
+(* shipped shape: dpFlag is "<node>|<since>") and SF stands in for "some     *)
+(* live agent eventually looks".                                            *)
+FairnessAgent == \A l \in Legs : SF_vars(AgentFlag(l))
+
 \* kubelet's obligation, split out (the P4-split pattern): the recreated
 \* pod eventually comes back.  The wedged-DS-roll history (runak/runaj)
 \* says this is NOT always true of the world — SpecWedgedKubelet drops
@@ -2371,6 +2748,14 @@ SpecExpand == Init /\ [][Next]_vars /\ Fairness /\ FairnessExpand
 \* refusal bound's clock advances.  Used only by the two BounceStarve/
 \* BounceBounded runs.
 SpecBounceLive == Init /\ [][Next]_vars /\ Fairness /\ FairnessBounce
+
+\* The F62a repair world: the orchestrator bounces when a bounce is
+\* continuously plannable AND the node agent's detector eventually fires.
+\* Both halves are needed to ask "does repair A1 recover the composition?" —
+\* without the detector's obligation the answer is always no, for a reason
+\* that has nothing to do with the fix under test.
+SpecRaidRepair ==
+  Init /\ [][Next]_vars /\ Fairness /\ FairnessBounce /\ FairnessAgent
 
 \* The pre-P4 world: nothing bounds detection.  A blackholed serving leg
 \* may sit in the raid forever, stalling every write — the 150-177s
@@ -2456,8 +2841,60 @@ Inv_NoStaleServe == ~StaleServed
 \* FALSE finds the subtler half (drain exists, but the next drain
 \* proceeds on pod-readiness while the previous leg is still stale —
 \* the last serving leg is drained away).
+\* F62 strengthening: read SERVICE, not membership.  In every arm-off world
+\* RaidPresent is invariantly TRUE, so this is literally the old theorem
+\* there; under RaidLifetimeArm it additionally catches a roll that leaves
+\* the members healthy and takes the composition — which is the shape the
+\* old statement would have missed had the composition been destroyed with
+\* `serving` left populated.  Cheap, and it removes the reliance on the two
+\* halves happening to fall together.
 Inv_PlannedRollNeverCausesOutage ==
-  crashes = 0 => serving # {}
+  crashes = 0 => VolumeUp
+
+\* SPDK's own coupling, as a checkable claim: with no composition there is
+\* nothing for a base to be a member of (raid_bdev_deconfigure below the
+\* operational floor, bdev_raid.c:2069-2074).  Only this direction is a
+\* global theorem — see the VolumeUp comment for why the converse is a
+\* recorded scope limit rather than an invariant.
+Inv_RaidCompositionCoupled ==
+  ~RaidPresent => serving = {}
+
+(***************************************************************************)
+(* IS THE REPAIR PATH REACHABLE AT ALL?  Deliberately an invariant whose    *)
+(* VIOLATION is the good news — the Inv_NoStaleServe idiom, where the       *)
+(* counterexample trace is the proof of reachability.                       *)
+(*                                                                         *)
+(* Asked this way on purpose, after three failed attempts to ask it as      *)
+(* liveness.  "The composition always comes back" is genuinely FALSE in a   *)
+(* world with real leg deaths, a flapping environment and a finite bounce   *)
+(* budget, and each round of weakening the antecedent to dodge that noise   *)
+(* moved the property closer to vacuous while answering nothing.  What      *)
+(* actually distinguishes the shipped code from the fix is not how often    *)
+(* recovery happens but whether it is POSSIBLE: with an empty              *)
+(* data_path_raid_seen the detector cannot fire, so no interleaving         *)
+(* whatsoever reaches a recovered state, and this invariant HOLDS —         *)
+(* the bug, stated as unreachability.  Rehydrate the set and TLC returns a  *)
+(* trace ending in a rebuilt composition: VIOLATED, which is repair A1      *)
+(* working.  Immune to every fairness argument, because reachability does   *)
+(* not depend on fairness at all.                                          *)
+(***************************************************************************)
+Inv_RaidRecoveryUnreachable ==
+  ~(raidLostOnce /\ RaidPresent)
+
+\* WHAT FIX B BUYS: the fence with NO carve-out.  Inv_MaintFenceHolds has to
+\* exclude LocalLegs from its scope, because the post-F61 roller restarts a
+\* local half's tgt while that leg is serving — the fence provably cannot
+\* hold for those legs.  Refusing them instead restores full strength, and
+\* this is the statement that can tell the two apart.
+\*
+\* Stated UNCONDITIONALLY on purpose.  The first draft read
+\*   (MaintFence /\ MaintLocalRefuse) => serving \cap rolling = {}
+\* which is worthless: conditioning an invariant on the very arm it is
+\* meant to evaluate makes it vacuous on the bug side, so it could never
+\* fail and would have looked like a passing tooth forever.  The same trap
+\* as a canary that only fires with the fix on.
+Inv_MaintFenceStrict ==
+  MaintFence => serving \cap rolling = {}
 
 \* The fence, as an invariant: a serving leg's tgt is never down for a
 \* planned restart.  Under MaintFence the suppression mark gates
@@ -2742,8 +3179,56 @@ MaintenanceEventuallyLifts ==
 (* Run with MaxCrashes = 0 — RollStart needs legUp = "up", so a real       *)
 (* failure legitimately stalls a roll and would mask the bug.              *)
 (***************************************************************************)
+(* F62 amendment.  A REFUSAL is a legitimate terminal outcome — but only     *)
+(* because it is recorded where an operator can act on it.  If maintSkipped  *)
+(* were dropped from this disjunction the property would still pass, and     *)
+(* would then be blind to a roller that silently gave up: F61's livelock     *)
+(* with better manners.  The disjunct is the whole reason the variable       *)
+(* exists rather than the refusal being a bare guard.                        *)
 RollProcessedNodeRolls ==
-  \A l \in Legs : [](l \in processed => <>(l \in rolled))
+  \A l \in Legs : [](l \in processed => <>(l \in rolled \/ l \in maintSkipped))
+
+(***************************************************************************)
+(* THE COMPOSITION-LIFETIME THEOREM (F62).  A volume kubelet believes       *)
+(* STAGED eventually has a raid composition again.  This is the property    *)
+(* whose absence made F62 invisible: the F62 state trips no safety          *)
+(* invariant forever-after (serving = {} is reachable in a dozen benign     *)
+(* ways) and every other liveness property is satisfied by a volume that    *)
+(* is merely quiet.  What is wrong is specifically that the ONE creator is  *)
+(* disabled while the ONE thing it creates is missing — a liveness claim,   *)
+(* and nothing but a liveness claim can catch it.                           *)
+(*                                                                         *)
+(* Under RaidLifetimeArm with neither repair armed, TLC must FIND the       *)
+(* violation.  With DpSeenRehydrate (repair A1: the detector's HashSet      *)
+(* rehydrated from the staged set, so the existing data-path-lost -> bounce *)
+(* -> restage chain fires) or RaidReconcileArm (repair A2: the agent        *)
+(* re-creates it directly on boot) it must HOLD.  Which of the two          *)
+(* suffices, and under which world, is exactly what this tranche is for —   *)
+(* A1 reuses shipped machinery but routes through an outage-shaped bounce   *)
+(* and a controller sweep gated on is_rwx, while A2 needs new code but is   *)
+(* local, quiet and works for RWO.                                         *)
+(***************************************************************************)
+\* The DEATH ESCAPE, the same one MaintenanceEventuallyLifts carries.  The
+\* first draft omitted it and TLC produced a perfectly fair counterexample
+\* that had nothing to do with F62: the only in-sync leg dead, the only live
+\* leg stale.  No re-creation path can assemble a composition out of that —
+\* only the LastResortServe runbook can, and that is an operator step by
+\* design.  UpInSync # {} says "there is live, in-sync material to build
+\* from", which is precisely the precondition every repair assumes.
+\* ...and the FRESHNESS-GATE escape, for the same reason.  The second draft
+\* still failed on a trace where the repair chain worked perfectly — the
+\* bounce fired, staged cleared — and then Assemble was held by the F36c gate
+\* because a RECORDED writer was missing with no evidence of its death.  That
+\* Defer is correct behavior, the module's documented "Deferred liveness
+\* escape", and a re-creation path is not entitled to override it.
+\* writerSet \subseteq UpInSync is exactly the condition under which the
+\* gate's own first disjunct passes, so the antecedent now says: when nothing
+\* LEGITIMATELY blocks a reassembly, the composition must come back.  The F62
+\* state satisfies it fully — every leg alive, in-sync, and in the writer set
+\* — so the teeth are untouched.
+RaidEventuallyReassembled ==
+  [](staged /\ ~RaidPresent /\ UpInSync # {} /\ writerSet \subseteq UpInSync
+       => <>RaidPresent)
 
 (***************************************************************************)
 (* THE PARKING THEOREM (2026-07-29 audit).  A warm, responsive standby    *)
