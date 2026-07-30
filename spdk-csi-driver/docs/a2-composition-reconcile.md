@@ -418,35 +418,65 @@ Two failure modes pull in opposite directions:
 So the grace must be a **deadline, not a condition**, and the fall-through must
 be *exactly* today's behaviour rather than a refusal.
 
-### The design
+### The design — ⚠️ SUPERSEDED 2026-07-30, the same day it was written
 
-`FLINT_A2_PEER_GRACE_SECS`, default **120** — deliberately the debounce it
-replaces, so fleet-wide behaviour at the default is unchanged.
+**A new knob was the wrong answer, and the grace is not missing.** The F36c
+freshness gate already *is* this grace, and it is already shipped:
 
-Measured **from process start**, not per-volume and not per-attempt. Per-attempt
-would let a volume with many peers reset its deadline indefinitely; per-volume
-would multiply the wait by volume count on exactly the nodes that can least
-afford it.
+- it runs **inside `create_raid_from_replicas`** (`freshness_gate.rs`), on the
+  same function, *before* `min_required = 1` and before the direct-serve branch;
+- its own module doc states the decision as *"given the recorded last-writer set
+  and evidence about each missing writer's availability, decide whether to
+  **assemble, defer this tick, or serve**"*;
+- it classifies a missing writer on a Ready node as transient
+  (`LegAvailability::NodeReady`) and defers on a **180 s** deadline
+  (`FLINT_F36C_DEFER_SECS`) — *longer* than the 120 s proposed below;
+- it states this section's own principle back at it: *"a PERMANENTLY lost writer
+  must never manufacture an outage."*
+- and `repair_data_path` inherits all of it, because it reassembles *"exactly as
+  NodeStage would."*
 
-At A2 time, for each volume this node owes:
+So `FLINT_A2_PEER_GRACE_SECS` would install a **second, weaker, independent
+deadline for a question F36c already owns** — precisely the setter/reader
+asymmetry this codebase congratulates itself on having structurally eliminated
+elsewhere. Nothing shipped (`grep -rn 'PEER_GRACE' src/` = 0 hits), so nothing
+has to be un-shipped. **Drop it.**
 
-1. Resolve the expected replica set from the PV, as assembly already does.
-2. **All expected legs' exports reachable → assemble now.** The common case, and
-   the fast one: it does not wait out the grace, it merely requires the peers to
-   be present.
-3. **Some missing, `now < start + grace` → hold this volume.** Do not assemble;
-   re-evaluate next pass. Holding is safe — the ublk device is quiesced under
-   `USER_RECOVERY`, so the consumer is *blocked*, not failing.
-4. **Some missing, grace expired → fall through** to the existing path,
-   degraded-direct included. A late peer then heals via hot-rejoin + catch-up
-   exactly as it does today.
+### What is actually unguarded
 
-Step 2 is the whole point: the grace is a **ceiling on waiting, not a floor**.
-A rolling upgrade whose peers were never down assembles immediately, and A2
-keeps its entire latency win.
+The hazard is real; the diagnosis was one layer off. F36c fails **open** in
+three places, none of which has any concurrency content — they are missing
+branches, not missing orderings:
 
-Only the multi-replica case holds — `total_replicas == 1` has no peer to wait
-for and must assemble immediately.
+1. **The record-load error** — `driver.rs:1877` logs *"staging without it"* and
+   continues with `record = None`, which empties the writer set, empties
+   `missing`, and returns `Proceed`. One inconsistent read silently disables the
+   entire gate.
+2. **An absent `writer_set`** — same path to `Proceed` with no evidence
+   consulted at all.
+3. **The ratchet, and it is the worst of the three.** `mark_stale`
+   (`replica_sync.rs:391-397`) prunes the leg from the writer set, and its own
+   comment names it: *"the ONLY writer-set removal path besides the wholesale
+   assembly stamp (a too-small set is the F36c loss vector)."* So the 180 s
+   defer is spendable **once per loss** — the leg it would have deferred for is
+   no longer in the set to defer on. A rolling upgrade spends it.
+
+### The fix, relocated
+
+Put the guard **at the branch**, not inside A2: at `driver.rs:2511`, where
+`base_bdevs.len() == 1 && total_replicas > 1` is about to become a direct serve,
+probe each `unavailable_replicas` entry (live there, carrying `node_name`)
+against **live** node availability and defer if any is transient.
+
+Keyed on live state rather than the persisted writer set, it survives all three
+fail-open paths *and* the ratchet, and — because it sits at the branch — it is
+inherited by **all three callers** of the reassembly path rather than by A2
+alone. That designs the race out instead of verifying it.
+
+The retained principles, which were right: a **deadline, not a condition** (or a
+dead peer blocks recovery forever — the F61 livelock class by another road), a
+**ceiling, not a floor** (all peers present assembles immediately), and
+`total_replicas == 1` never waits.
 
 ### What the model must gain before this can be verified
 
@@ -477,28 +507,114 @@ Inv_A2NoEarlyDegrade ==
 with a paired mutation (`A2PeerGraceArm = FALSE`) that must FIND the
 degraded-direct assembly — without it the strict run proves nothing.
 
-Whether that extension is worth building is a separate decision, under
-investigation now.
+**This claim survived the 2026-07-30 audit, and it was tested rather than
+assumed.** The tempting cheap route — "no new variables needed, `rolling` is
+already the per-leg *tgt down, exports gone* bit that `Responsive()` reads" — is
+refuted by its own world. In the configuration that corresponds to the shipped
+default path (`MaintEnabled = FALSE`, so `rolling` is permanently `{}`), a probe
+for the degraded repair returns **no error over a complete 162-state graph**:
+the model would report the hand-found hazard as *impossible*. `rolling`'s only
+non-empty writer is `RollStart`, which requires `MaintEnabled` — the
+off-by-default roller. Any counterexample obtained that way would be a true
+statement about the OnDelete path offered as evidence about the RollingUpdate
+one.
 
-## Implementation sketch
+**And one fidelity defect must be fixed first, or the extension produces a void
+RED — the mirror of the void green this doc now records.** `StrikeRepair` and
+`AgentBootReconcile` both commit `serving' = UpInSync` with `writerSet`,
+`raidGen`, `legGen` and the gate variables all `UNCHANGED`. They carry **no F36c
+conjunct at all**, while the shipped `repair_data_path` runs the whole gate by
+calling `create_raid_from_replicas`. So the model's repairs are strictly more
+permissive than the code's, and the first counterexample the extension produced
+could be a counterexample to the model's shortcut rather than to flint.
 
-In `rehydrate_exports_from_ground_truth` (`node_agent.rs`), the
+**Decision, 2026-07-30: not building this now.** The extension is only worth its
+cost if A2 ships, and A2 has been retired as the next fix (below). The guard
+moved to `driver.rs:2511` instead, where it needs no model because it removes
+the branch rather than reasoning about the interleaving.
+
+## Implementation sketch — NOT SCHEDULED (A2 retired 2026-07-30, see below)
+
+Kept because the shape is right if A2 is ever revived. In
+`rehydrate_exports_from_ground_truth` (`node_agent.rs`), the
 `replica_count > 1` branch currently only seeds detectors (A1). Extend it:
 
 1. Guard on `va_map.get(&pv_name) == Some(&self.node_name)` — already there.
 2. **Add the belt**: this node's kubelet-level staging still names the volume.
    Local, observable without the API server, nothing remembered.
-3. **Apply the peer-availability grace** (above): if any expected leg's export is
-   not yet reachable and the grace has not expired, hold this volume for a later
-   pass. Never assemble a proper subset while waiting is still on the table.
+3. ~~Apply the peer-availability grace.~~ **Superseded** — the grace belongs at
+   `driver.rs:2511`, not here, and F36c already owns the deadline. A2 gets it
+   for free by reassembling through `create_raid_from_replicas`.
 4. Attach legs (local lvol + remote NVMe-oF), then `bdev_raid_create` with
    `"superblock": false` — never a superblock; that trades this outage for the
    §3 phantom-assembly class plus the 1 MiB payload shift that silently
    formatted restored snapshots (2026-06-12).
 5. Serve only what the records vouch for as `in_sync` — assembling a leg the
-   records do not vouch for is the phantom class by another route
-   (`Inv_A2NeverServesUnvouched` is in the gate waiting for it).
+   records do not vouch for is the phantom class by another route.
+   ⚠️ This doc previously said `Inv_A2NeverServesUnvouched` "is in the gate
+   waiting for it". **It is not**: defined once in the module, present in **0 of
+   74 cfgs**. Never checked, and asserting a safety net that does not exist is
+   how a void green gets cited as a proof.
 6. Re-create the ublk chain, as the single-replica path already does.
+
+## ⚠️ THE A2 RUNS WERE VOID, AND A2 IS RETIRED AS THE NEXT FIX
+
+**2026-07-30.** The runs this document cited did not exercise A2 at all.
+
+`FlintReplicationA2Staging.cfg` — headed *"THE DELIVERABLE"* — never fires
+`AgentBootReconcile`, over its complete state graph (7,375,538 generated /
+1,261,953 distinct / **0 left on queue**). Verified directly: `ProbeA2Fires ==
+a2Created = {}` HOLDS, and `a2Created` has exactly one writer.
+`FlintReplicationA2AdoptBelted.cfg` is the same, and worse: neither
+`AgentBootReconcile` nor `AssembleAdopt` fires, so both adopt theorems were
+green on a state space containing no A2 composition to adopt.
+
+**One cause for both.** A2 answers a class-3 destroyer, which by definition
+leaves kubelet's `staged` belief SET, and the belt requires exactly that. Both
+cfgs pin `UncontrolledTgtDeath = FALSE`, leaving only destroyers that CLEAR
+staging. Belt precondition and reachable destroyers were mutually exclusive:
+**unsatisfiable by construction**, not merely unexercised.
+
+**And a probe built to catch precisely this missed it.** `ProbeA2WouldHaveFired`
+asks whether the *situation* arises — whether the naive guard becomes
+satisfiable. It never asks whether the *belted action fires*. Those diverge
+exactly where it matters, because the naive guard wants `vaNode # VaTruth` and
+the belt refuses precisely that. **A non-vacuity probe must name the ACTION, not
+the SITUATION.**
+
+**Third occurrence in this workstream.** Two creators of the nfs pod; a scalar
+`raidHost` making A2's hazard unrepresentable; and now an action unreachable in
+the runs that cite it. Different mechanisms, identical symptom — a green read as
+a proof.
+
+**What replaces them.** `FlintReplicationA2Armed.cfg` flips the one constant,
+sets `MaintEnabled = FALSE` (the shipped default path has no roller, which also
+makes the roll theorems vacuous rather than suppressed), and is paired with
+`FlintA2ProbeArmed.cfg`, which the gate **requires TLC to violate**. The belt
+holds over the complete graph and the probe fires in three states: `Init →
+TgtDie → AgentBootReconcile`. Same for the adopt. **The belt is, at last,
+genuinely validated — and only now.**
+
+**Still confounded, deliberately left with a warning rather than fixed.**
+`FlintReplicationUncontrolledA2.cfg`'s required violation is produced by
+`Assemble`, not by A2 (`Init → TgtDie → Assemble`). `FlintReplication.tla:1633`
+reads `(RaidLifetimeArm => (~staged \/ RaidReconcileArm))`, so the A2 constant
+*also* relaxes ordinary NodeStage on a still-staged volume and the A/B moves two
+things at once. De-confounding needs a separate constant and a 74-cfg edit;
+since A2 is retired, the run carries an explicit DO-NOT-CITE label instead.
+
+**Why A2 is retired.** Not refuted — *unvalidated*, and its value collapsed
+independently:
+
+- `repair_data_path` already carries the `is_staged_here` belt A2 was designed
+  around. **A2 differs only in its trigger.**
+- The starvation fix cut the latency gap to ~120 s. A2 was competing with "many
+  minutes"; now it competes with two ticks.
+- The peer-availability finding **inverts** the remainder: A2's whole benefit is
+  firing sooner, and firing sooner is what walks into degraded-direct.
+
+It was ranked first on the strength of `UncontrolledA2` — the confounded run.
+Remove that and nothing puts it at the top.
 
 ## What this does NOT establish
 
@@ -512,11 +628,21 @@ Recorded so it is not cited as covered:
   subset of the expected membership, **no A2 run can say anything about the
   grace**, and any run that appears to would be void.
 - **The belt is verified in the model, not on a cluster.** No drill has run
-  A2, because A2 does not exist. A live gate belongs with the code.
+  A2, because A2 does not exist. A live gate belongs with the code. (And until
+  2026-07-30 it was not verified in the model either — see the void section.)
 - ~~**`ensure_raid1_bdev`'s adopt path is analysed but not modelled.**~~
   **Closed** — `AssembleAdopt` / `AssembleValidate` and the three-run matrix
   above. It overturned the requirement this list previously recorded: the
   validating fix flaps, so the belt is the fix and validation is optional.
+  ⚠️ **Partially reopened:** the adopt theorems are now gated on
+  `A2AdoptArmed`, but its probe witnesses only that *A2* fires. A dedicated
+  "`AssembleAdopt` fired" probe needs a ghost the module lacks — `adoptedA2`
+  cannot serve, being false both when the adopt never runs and when it runs on
+  a non-A2 composition, so probing it would be probing
+  `Inv_NoAdoptOfA2Composition` itself. **Treat the adopt theorems as PARTIALLY
+  gated.**
+- **`Inv_A2NeverServesUnvouched` is in 0 of 74 cfgs.** Defined, never checked.
+  Listed here because this document previously asserted the opposite.
 - **Bounce arms are not combined with A2.** The four bounce destroyers clear
   `raidHosts` wholesale, which in an A2-armed cfg could tidy away a phantom
   and mask it; the model says so at the site. Narrow those to
