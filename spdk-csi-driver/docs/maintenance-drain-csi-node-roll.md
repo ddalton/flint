@@ -83,10 +83,36 @@ runao — the three guards PASSED live, and it found F61.**
 >    by the same door and none can be refused. `TgtDie` now models this;
 >    unrepaired, `Inv_RaidRecoveryUnreachable` HOLDS — permanently down.
 >
-> **A1 (shipped) is what holds that line today**, which is itself an argument
-> for leaving this flag off rather than rushing it on:
-> `FlintReplicationUncontrolledA1.cfg` recovers the volume where
-> `UncontrolledBlind` cannot.
+> **CORRECTED 2026-07-30.** This block first read "A1 (shipped) is what holds
+> that line today," citing `UncontrolledBlind`'s green. That was an
+> overstatement from a model carrying only one trigger. `data_path_raid_seen`
+> gates the COLLAPSE EVENT; the **layer-2 in-place repair needs no seeded state**
+> — `strikes >= threshold` on live observations, then `repair_data_path`.
+> `FlintReplicationUncontrolledStrike.cfg` recovers the volume with A1 off, A2
+> off and zero bounces. Two independent triggers, not one.
+>
+> **But the latency was real, and hid a defect.** `detect_lost_data_paths` was
+> pass 7 of 9 in one 60s task, each bounded at 300s, behind two cross-node
+> passes whose own RPC timeout is also 300s — and `interval` cannot make the
+> loop reentrant, so **strike cadence was the whole loop's duration**. A ~3min
+> repair became tens of minutes behind stalled peers, which makes runao's
+> ">5 minutes, no self-heal" expected rather than surprising. Fixed: own task,
+> split pass budgets (cross-node 300s / local 30s), repair threshold 2 vs flag
+> 3 (`cutover::repair_due`, 989 tests).
+>
+> **Consumer continuity across a pod roll is already engineered.** ublk mode
+> SIGKILLs spdk_tgt on purpose (node.yaml:114-129) — a graceful fini would
+> `STOP_DEV` the disks and delete the gendisks under live mounts — so devices
+> quiesce under `UBLK_F_USER_RECOVERY` and are recovered in place, mounts
+> intact. Corollary: **never `--force` delete a csi-node pod during a roll**;
+> that converts the safe quiesce into the DEAD case and costs the mount.
+>
+> And the belt this tranche derived for A2 turns out to be **already shipped**:
+> `repair_data_path` refuses unless `is_staged_here` — kubelet's own staging
+> directory — with a comment naming the same hazard ("VA lingering
+> mid-detach?"). So A2 differs from the shipped repair only in its TRIGGER, and
+> its benefit is latency plus predicate simplicity, not making recovery
+> possible.
 >
 > The previous note here — "A2 is modelled only as a one-conjunct relaxation of
 > Assemble's stage guard" — understated it. A2's hazard is a SECOND CREATOR,

@@ -171,28 +171,42 @@ kubelet's bookkeeping and cannot alter it. An earlier draft had A2 write
 previous action — self-justifying bookkeeping, the same defect as F63's two,
 caught here by reading a counterexample rather than by a property failing.
 
-### Finding 4 — in the default configuration, A1 is the only thing holding
+### Finding 4 — what actually recovers an uncontrolled tgt death
 
-Three runs over `TgtDie`, no roller involved:
+Four runs over `TgtDie`, no roller involved:
 
-| cfg | repair | result | meaning |
+| cfg | trigger | result | meaning |
 |---|---|---|---|
-| `UncontrolledBlind` | none | `Inv_RaidRecoveryUnreachable` **holds** | no interleaving recovers the volume — **permanently down** |
-| `UncontrolledA1` | A1 | **violated** | the seeded detector's ladder recovers it |
-| `UncontrolledA2` | A2, `MaxBounces = 0` | **violated** | recovered with no bounce, no pod delete, no unstage |
+| `UncontrolledBlind` | collapse-event detector only | `Inv_RaidRecoveryUnreachable` **holds** | **scoped**: with that as the only trigger, nothing recovers |
+| `UncontrolledA1` | A1's seeded detector | **violated** | the collapse-event path recovers it |
+| `UncontrolledStrike` | shipped periodic repair | **violated** | recovers with A1 off, A2 off, **zero bounces** |
+| `UncontrolledA2` | A2 at boot, `MaxBounces = 0` | **violated** | recovers with no bounce, pod delete or unstage |
 
-The green one is the indictment (non-vacuity: `FlintA2ProbeDeath.cfg` must
-violate `ProbeTgtDeathReachable`, so the death really happens).
+Non-vacuity: `FlintA2ProbeDeath.cfg` must violate `ProbeTgtDeathReachable`, so
+the death really happens in the green run.
 
-**A1 has already shipped, and this says it is doing far more than "supporting"
-work** — in the default configuration it is the only thing standing between a
-routine `helm upgrade` and a permanent outage. That is the load-bearing result
-for disposition, and it is an argument for leaving the drain-roll flag off
-rather than rushing it on.
+**A correction, because this document originally got it wrong.** The first
+version of this section read "A1 is the only thing standing between a routine
+`helm upgrade` and a permanent outage," citing `UncontrolledBlind`'s green.
+That was an overstatement produced by a model carrying only one of the two
+triggers. `data_path_raid_seen` gates the **collapse event**
+(`raid_collapse_verdict`'s `previously_seen`); the **layer-2 in-place repair**
+needs no seeded state at all — its gate is `strikes >= threshold` on live
+observations, and it calls `repair_data_path`, which reassembles exactly as
+NodeStage would. `UncontrolledStrike` is the run that says so.
 
-A2's row is the one that never disrupts the consumer: A1's path is a repair
-(strike → flag → controller data-path arm → `BounceNfsPod` → NodeStage), so
-the volume goes down and comes back. A2 re-creates in place.
+So `UncontrolledBlind`'s green scopes to the collapse-detector path and must
+not be cited as "the shipped code cannot recover."
+
+**What the correction does *not* soften is latency**, and that turned out to
+hide a real defect — see the starvation section below.
+
+**The belt was already shipped.** `repair_data_path` refuses unless
+`is_staged_here(volume_handle)` reads kubelet's own staging directory. That is
+*exactly* the predicate this tranche derived for A2 from first principles,
+already written on the adjacent path, with a comment naming the same hazard:
+*"VA lingering mid-detach?"*. So the shipped repair is already the safe shape,
+and **A2 differs from it only in its trigger.**
 
 ## Correcting the harm analysis
 
@@ -276,6 +290,196 @@ a time — which is what these traces do, but it means "no reachable trace"
 should be read with that scope. Per-host serving would be the honest
 generalisation and is a larger refactor.
 
+## The starvation defect, and what A2 is actually worth
+
+Step 0 of the plan was to verify two premises before writing A2. Both moved.
+
+### USER_RECOVERY: consumer continuity is already engineered
+
+In ublk mode spdk_tgt is **deliberately SIGKILLed** on pod stop
+(`templates/node.yaml:114-129`): a graceful SIGTERM fini `STOP_DEV`s every ublk
+disk, *deleting the kernel gendisks live mounts sit on* (drill 1u/1.9b). Run as
+a child of a shell PID 1 whose TERM trap kills it, the devices **quiesce** under
+`UBLK_F_USER_RECOVERY` and the next agent recovers them in place, mounts intact.
+
+So the missing piece was never the consumer — it is only that the raid *beneath*
+the quiesced device gets rebuilt, since `ublk_recover_disk` needs its
+`bdev_name` to exist.
+
+**Operational corollary: never `--force` delete a csi-node pod during a roll.**
+That converts the safe quiesce into the DEAD case (`is_dead_ublk_device_error`,
+seen on runy2 under a wedged containerd and on runz after an in-flight-roll
+force delete), which costs the mount.
+
+### The repair was starved by pass ordering — during exactly the failure it repairs
+
+`detect_lost_data_paths` was the **seventh of nine sequential passes** in one
+60s task, each bounded at 300s, and its repair needs several consecutive ticks
+of strikes. Two things compound:
+
+1. The two heaviest passes ahead of it (`reconcile_replica_targets`,
+   `rehydrate_exports_from_ground_truth`) make cross-node RPCs whose own client
+   timeout is **also 300s** — so they stall longest exactly when a peer's tgt is
+   dead or mid-roll.
+2. `interval` cannot make the loop reentrant: the next tick cannot start until
+   all nine passes return. **Strike cadence was the whole loop's duration, not
+   60s** — so moving the pass earlier in the chain would not have fixed it.
+
+A nominal ~3-minute repair becomes tens of minutes behind a couple of stalled
+peers. That is a plausible explanation for runao's observed ">5 minutes, no
+self-heal" — unproven, since that cluster is gone, but it makes the observation
+expected rather than surprising, and it is a defect either way.
+
+**Fixed 2026-07-30** (989 lib tests): the detector runs in **its own task** on
+its own interval; the monitor's pass budget is **split** into cross-node (300s,
+unchanged) and local (30s, since 300s on a unix-socket RPC is not a bound but
+300s of the tick handed to a hung local call); and the **repair threshold is 2
+while the flag stays 3** — the repair is idempotent, lock-serialised and
+staged-here-gated, whereas flagging can end in a pod bounce. The asymmetry is
+pinned by `cutover::repair_due` and the test
+`repair_fires_a_tick_before_the_flag`.
+
+The global `FLINT_NODE_AGENT_HTTP_TIMEOUT_SECS` was deliberately **not** lowered:
+that client also serves CSI provisioning, where a timeout turns a slow operation
+into a failed one.
+
+### So what does A2 buy?
+
+Not "recovery becomes possible" — that was the overstatement. What it changes:
+
+- **Latency: strikes × cadence → zero.** The agent knows at boot which volumes
+  it owes a composition; it does not have to *observe* the absence N times.
+- **A far simpler predicate.** The detector *infers* "a raid is owed here" from
+  `attached && !raid_present`, which needs the VA present and attached, the PV
+  list, a correct raid-name derivation, and to survive four separate `continue`
+  guards (RWX user PV, single-replica, single-survivor direct serve, degraded
+  direct homes). A2 reads one local file.
+- **It lands inside the consumer's patience window**, so the quiesced device is
+  recovered before the mount's tolerance is spent — continuity by design rather
+  than by the repair happening to be prompt.
+- **It is what lets fix B be relaxed** from "refuse" to "proceed", which is the
+  only route to convergence on a saturated fleet.
+
+What it does not buy: nothing for a raid lost while the agent stays up (that is
+the detector, now responsive), and nothing for a mount that already landed DEAD.
+
+## The peer-availability grace — A2 must not assemble degraded
+
+Found 2026-07-30, by hand, while working out what an all-at-once upgrade costs.
+It is a hazard A2 *introduces*, so it belongs in the design rather than in the
+residual list.
+
+### The strike delay is doing a second job nobody designed it for
+
+`create_raid_from_replicas` sets `min_required = 1` (`driver.rs:2437`).
+Assembly does not wait for full membership — whatever attaches is what serves.
+And when exactly one leg attaches on a multi-replica volume it does not build a
+raid at all:
+
+```
+base_bdevs.len() == 1 && total_replicas > 1
+  → "SINGLE-SURVIVOR DIRECT SERVE ... (no raid layer)"
+  → stamps flint.io/degraded-direct              driver.rs:2511-2530
+```
+
+Redundancy is gone, writes resume on one leg, and the leg that was merely *late*
+is now genuinely divergent — it needs catch-up, or a full rebuild if no shared
+epoch survives retention (`catchup.rs:1801`).
+
+Whether that fires is a race between two independent agents: node A's repair
+against node B's `rehydrate_exports_from_ground_truth`. Today A loses only if B
+is more than ~120s late, because the 2-strike debounce holds A back. **That is
+an accident.** The strikes exist to avoid repairing an in-flight stage — the
+comment at the site says exactly that — not to wait for peers.
+
+A2 fires at boot with no strikes. In a rolling upgrade that is harmless: peers
+were never down. In an **all-at-once** upgrade — the correct procedure for a
+version-incompatible change, since it is the only one with no mixed-version
+window — every agent boots at once and every A2 races every peer's export
+rehydration simultaneously.
+
+Note the perversity. All-at-once is the *correctness-safest* path: simultaneous
+death means no leg takes writes another misses, so nothing goes `Stale` and full
+membership is guaranteed available. It is also the path on which A2 would most
+reliably throw that membership away.
+
+### The requirement
+
+> A2 must never assemble a membership smaller than the one that would have been
+> available had it waited — unless waiting has already been given up on.
+
+Two failure modes pull in opposite directions:
+
+- assemble too early → degraded-direct storm (**safety**: silent redundancy loss)
+- wait for full membership unconditionally → a genuinely dead peer blocks
+  recovery forever, which is the F61 livelock class rebuilt by another road
+  (**liveness**)
+
+So the grace must be a **deadline, not a condition**, and the fall-through must
+be *exactly* today's behaviour rather than a refusal.
+
+### The design
+
+`FLINT_A2_PEER_GRACE_SECS`, default **120** — deliberately the debounce it
+replaces, so fleet-wide behaviour at the default is unchanged.
+
+Measured **from process start**, not per-volume and not per-attempt. Per-attempt
+would let a volume with many peers reset its deadline indefinitely; per-volume
+would multiply the wait by volume count on exactly the nodes that can least
+afford it.
+
+At A2 time, for each volume this node owes:
+
+1. Resolve the expected replica set from the PV, as assembly already does.
+2. **All expected legs' exports reachable → assemble now.** The common case, and
+   the fast one: it does not wait out the grace, it merely requires the peers to
+   be present.
+3. **Some missing, `now < start + grace` → hold this volume.** Do not assemble;
+   re-evaluate next pass. Holding is safe — the ublk device is quiesced under
+   `USER_RECOVERY`, so the consumer is *blocked*, not failing.
+4. **Some missing, grace expired → fall through** to the existing path,
+   degraded-direct included. A late peer then heals via hot-rejoin + catch-up
+   exactly as it does today.
+
+Step 2 is the whole point: the grace is a **ceiling on waiting, not a floor**.
+A rolling upgrade whose peers were never down assembles immediately, and A2
+keeps its entire latency win.
+
+Only the multi-replica case holds — `total_replicas == 1` has no peer to wait
+for and must assemble immediately.
+
+### What the model must gain before this can be verified
+
+The grace is **not representable in the module as it stands**, and that is the
+load-bearing sentence here.
+
+`FlintReplication.tla` models a leg as live-or-not. It has no notion of a leg
+that is *alive but not yet exported* — which is the entire window this design is
+about. Assembly is all-or-nothing over `UpInSync`, so partial membership is not
+a state the model can occupy: degraded-direct has no representation, and neither
+does the choice to hold rather than take it.
+
+By this project's own rule — a scalar is an assertion; the abstraction was the
+bug, twice — **modelling the grace against the current abstraction would produce
+a green that means nothing**, because the hazard it excludes cannot be reached.
+Two additions are the minimum: a per-leg `exported` flag, and an assembly able to
+produce a proper subset of the expected membership.
+
+The invariant, stated so it does not condition on the arm it evaluates:
+
+```tla
+Inv_A2NoEarlyDegrade ==
+  A2Arm =>
+    \A h \in raidHosts :
+      (servedMembership[h] # ExpectedMembership) => graceExpired
+```
+
+with a paired mutation (`A2PeerGraceArm = FALSE`) that must FIND the
+degraded-direct assembly — without it the strict run proves nothing.
+
+Whether that extension is worth building is a separate decision, under
+investigation now.
+
 ## Implementation sketch
 
 In `rehydrate_exports_from_ground_truth` (`node_agent.rs`), the
@@ -284,21 +488,29 @@ In `rehydrate_exports_from_ground_truth` (`node_agent.rs`), the
 1. Guard on `va_map.get(&pv_name) == Some(&self.node_name)` — already there.
 2. **Add the belt**: this node's kubelet-level staging still names the volume.
    Local, observable without the API server, nothing remembered.
-3. Attach legs (local lvol + remote NVMe-oF), then `bdev_raid_create` with
+3. **Apply the peer-availability grace** (above): if any expected leg's export is
+   not yet reachable and the grace has not expired, hold this volume for a later
+   pass. Never assemble a proper subset while waiting is still on the table.
+4. Attach legs (local lvol + remote NVMe-oF), then `bdev_raid_create` with
    `"superblock": false` — never a superblock; that trades this outage for the
    §3 phantom-assembly class plus the 1 MiB payload shift that silently
    formatted restored snapshots (2026-06-12).
-4. Serve only what the records vouch for as `in_sync` — assembling a leg the
+5. Serve only what the records vouch for as `in_sync` — assembling a leg the
    records do not vouch for is the phantom class by another route
    (`Inv_A2NeverServesUnvouched` is in the gate waiting for it).
-5. Re-create the ublk chain, as the single-replica path already does.
+6. Re-create the ublk chain, as the single-replica path already does.
 
 ## What this does NOT establish
 
 Recorded so it is not cited as covered:
 
-- **No export layer.** The reassembly race — leg exports arriving relative to
-  the raid create — is unmodelled. Live on runap we got the good side of it.
+- **No export layer — and this is now a known requirement, not a residual.**
+  The reassembly race (leg exports arriving relative to the raid create) is
+  unmodelled, and the peer-availability grace above is precisely a design that
+  turns on it. Live on runap we got the good side of the race. Until the module
+  gains a per-leg `exported` flag and an assembly that can produce a proper
+  subset of the expected membership, **no A2 run can say anything about the
+  grace**, and any run that appears to would be void.
 - **The belt is verified in the model, not on a cluster.** No drill has run
   A2, because A2 does not exist. A live gate belongs with the code.
 - ~~**`ensure_raid1_bdev`'s adopt path is analysed but not modelled.**~~
