@@ -211,6 +211,32 @@ CONSTANTS
   \* barrier.md).  Ordered by dependency: the ARM makes the composition a
   \* real object, the REFUSAL is the orchestration fix, the two REPAIR arms
   \* are rival answers to "and what puts it back?" ------------------------
+  \* ---- consumer mobility (2026-07-29, forced by the runap live gate) ----
+  \* The F62 tranche treated LocalLegs as a CONSTANT: a leg's consumer never
+  \* moved, so "this node hosts the composition" was a fact of the world
+  \* rather than a fact of the moment.  That was defensible for the SAFETY
+  \* question (does the roll destroy the volume?) and wrong for the
+  \* OPERATIONAL one, which the live gate raised immediately: a refused node
+  \* sits on an old revision until something changes, and what changes is the
+  \* CONSUMER MOVING.  Measured on runap: 14s after the NFS server left the
+  \* refused node, the roller rolled it unprompted — because the shipped
+  \* predicate is recomputed every tick from live state.  Nothing in this
+  \* module demanded that, and RollProcessedNodeRolls actively permitted the
+  \* opposite by treating maintSkipped as a TERMINAL outcome.  So the model
+  \* was WEAKER than the code here, which is the direction that lets a
+  \* regression land unnoticed.
+  RefusalSticky, \* TRUE = the BUG: fix B's eligibility gate reads the
+               \* remembered `maintSkipped` set instead of the live
+               \* condition, so a refusal is permanent even after the
+               \* consumer leaves.  FALSE = shipped (maint_roll.rs rebuilds
+               \* local_consumer_nodes from the gather every tick).  Exists
+               \* so Inv_RefusalNeverClears has a bug side; without one, a
+               \* green fix side proves nothing.
+  ConsumerMobile, \* TRUE = the consumer can relocate (localLegs is live
+               \* state and RelocateConsumer exists).  FALSE pins localLegs
+               \* to the LocalLegs constant forever, so every pre-mobility
+               \* run keeps its exact behavior graph — the RaidLifetimeArm
+               \* discipline again.
   RaidLifetimeArm, \* TRUE = raidHost/staged/raidSeen are live state and the
                \* composition has its own lifetime.  FALSE pins them inert,
                \* so every pre-F62 cfg keeps its exact behavior graph (and
@@ -225,13 +251,74 @@ CONSTANTS
                \* worse than F61's bug, because the livelock was the only
                \* thing preventing the outage.  TLC must show exactly that.
   RaidReconcileArm, \* Repair A2: the node agent re-creates the composition
-               \* for volumes staged on its node when its tgt comes back
-               \* (the v1.10.0 note's option 1).  Does NOT need a superblock
-               \* — flint passes "superblock": false ON PURPOSE (driver.rs
-               \* 3159; the §3 phantom-assembly class, and the 1 MiB payload
-               \* shift that silently formatted restored snapshots on
-               \* 2026-06-12).  Re-creation is from the RECORD, as NodeStage
-               \* already does.
+               \* for volumes the VA says are attached to its node when its
+               \* tgt comes back (the v1.10.0 note's option 1).  Does NOT
+               \* need a superblock — flint passes "superblock": false ON
+               \* PURPOSE (driver.rs 3159; the §3 phantom-assembly class, and
+               \* the 1 MiB payload shift that silently formatted restored
+               \* snapshots on 2026-06-12).
+               \*
+               \* THROUGH THE F62 TRANCHE THIS ARM WAS A LIE, and the honest
+               \* record of it belongs here.  It did one thing: relax
+               \* Assemble's `~staged` guard.  That answered "would a repair
+               \* of this SHAPE restore the volume?" — yes — and was then
+               \* cited as "A2 is modelled green", which it never was.  A
+               \* relaxed guard on the existing creator cannot exhibit A2's
+               \* actual hazard, because the hazard is a SECOND creator, and
+               \* the state it produces was unrepresentable while raidHost
+               \* was a scalar.  The arm now drives AgentBootReconcile, a
+               \* real action with its own guard and its own inputs.
+  VaCanLag,    \* TRUE = the attached VolumeAttachment may still name the OLD
+               \* host after the consumer has moved, closed later by
+               \* VaCatchUp.  This is not a pessimisation invented for the
+               \* model: node_agent.rs:3219 documents the ublk reaper's
+               \* reason for existing as "the local disk a STALE VA made us
+               \* rebuild after the consumer moved away".  FALSE = an
+               \* instantaneous attacher, which is the world where A2 looks
+               \* safe and is therefore the wrong world to gate it in.
+  NodeStageValidatesBases, \* TRUE = the candidate fix to ensure_raid1_bdev
+               \* (driver.rs:3105): when NodeStage finds a raid of this name
+               \* already ONLINE it VALIDATES the base set before reusing it,
+               \* deleting and re-creating on a mismatch.  FALSE = shipped,
+               \* which reuses unconditionally — "already ONLINE (N base(s)
+               \* configured) — reusing", where the count it reads reaches the
+               \* log line and nothing else.
+               \*
+               \* Harmless TODAY: the only creator is NodeStage, so an online
+               \* raid of that name means a previous NodeStage finished and its
+               \* base set came from the same PV replica record.  It becomes a
+               \* hazard the moment A2 adds a SECOND creator whose base set was
+               \* chosen at a different time.  That is why this arm belongs to
+               \* the A2 tranche and not to a bug report.
+  A2LocalStagingBelt, \* TRUE = A2 assembles only where kubelet still
+               \* believes the volume staged (stagedAt = vaNode).  The
+               \* candidate that discriminates a class-3 death (staged left
+               \* alone) from a relocation (staged cleared) using LOCAL
+               \* ground truth alone.  FALSE = A2 trusts the VA by itself.
+  A2SoleOwnershipBelt, \* TRUE = A2 refuses to assemble while ANY other host
+               \* holds a composition over these lvols — a cluster-wide
+               \* probe, not a local record.  Implementable with machinery
+               \* that already shipped: fix C's `bdev_raid_get_bdevs` on
+               \* another node (maint_roll.rs gather_volume_maint) is exactly
+               \* this call.  FALSE = the naive A2, which trusts its one
+               \* local predicate.
+  UncontrolledTgtDeath, \* TRUE = TgtDie(l) exists: a csi-node tgt dies with
+               \* node and consumer in place, with NO roller involved.
+               \* THE DEFAULT PATH, and the model could not express it until
+               \* now — class-3 destruction lived only inside RollStart, an
+               \* action gated on the roller's own arms.  So every F62/F63
+               \* run has been asking "can flint's roller cause this?" when
+               \* the operative question is "can a plain helm upgrade?"
+               \* It can: maintenance.drainRoll.enabled defaults FALSE, the
+               \* chart only sets updateStrategy: OnDelete inside that
+               \* conditional (node.yaml:13-24), so the DaemonSet takes
+               \* k8s's RollingUpdate default and rolls every node pod on a
+               \* template change — and plan_roll stands down anyway when
+               \* !on_delete (maint_roll.rs:248).  OOM kills, kubelet
+               \* restarts, evictions and node-image upgrades land here too.
+               \* Fixes B and B' cannot reach ANY of it; they govern only a
+               \* roller that is off by default and refuses to act in this
+               \* configuration.
   DpSeenRehydrate, \* Repair A1: data_path_raid_seen is rehydrated from the
                \* STAGED-volume set when the agent starts.  Note it must be
                \* the staged set and NOT live SPDK: seeding from SPDK reads
@@ -531,10 +618,26 @@ VARIABLES
   \* to an existing raid; with only `serving` they could lift the volume out of
   \* {} unconditionally, which is exactly why TLC believed every outage was
   \* recoverable and blessed the F61 fix that breaks live.
-  raidHost,      \* Legs \cup {"remote", "none"} — whose tgt process holds the
-                 \* composition.  "none" = it does not exist anywhere.  The
-                 \* host is MOBILE: node loss relocates it with the consumer
-                 \* (the F42/drill-2.5 self-heal family).
+  raidHosts,     \* SUBSET (Legs \cup {"remote"}) — the set of tgt processes
+                 \* holding a composition over these lvols.  {} = it does not
+                 \* exist anywhere.  The host is MOBILE: node loss relocates
+                 \* it with the consumer (the F42/drill-2.5 self-heal family).
+                 \*
+                 \* A SET, not a name, and that is the whole point of the A2
+                 \* tranche.  Through the F62/F63 tranches this was a scalar
+                 \* `raidHost`, which silently asserted the property A2 is
+                 \* most likely to break: that at most one composition can
+                 \* exist.  A scalar cannot represent two, so TLC could never
+                 \* refute it, and `FlintReplicationRaidReconcile.cfg` went
+                 \* green on a hazard it was structurally unable to see.
+                 \* That is the pod-layer tranche's lesson a second time —
+                 \* THE ABSTRACTION WAS THE BUG, two independent creators of
+                 \* one object — and here the two creators are NodeStage
+                 \* (Assemble) and the agent's own boot reconcile (A2).
+                 \*
+                 \* Every OTHER creator assigns a singleton, so cardinality
+                 \* 2 is reachable through A2 and nothing else: the invariant
+                 \* Inv_SingleComposition is a test of A2 specifically.
   staged,        \* BOOLEAN — kubelet believes the volume is staged on that
                  \* node.  THE DISCRIMINATOR between the three destroyers,
                  \* because only a destroyer that also clears it has an
@@ -567,6 +670,99 @@ VARIABLES
                  \* with a trace, instead of a liveness question that a
                  \* flapping environment and a finite bounce budget can
                  \* defeat for reasons unrelated to the fix under test.
+  relocating,    \* GHOST (BOOLEAN): a consumer relocation is in flight — the
+                 \* volume is legitimately down between the old host's
+                 \* NodeUnstage and the new host's NodeStage.  Exists so the
+                 \* maintenance theorem can keep its teeth: "a planned roll
+                 \* never takes the volume down" must not be defeated by an
+                 \* external pod reschedule, and must not be quietly widened
+                 \* to excuse one either.  Cleared by the assembly that ends
+                 \* the window, and RelocationWindowCloses obligates that it
+                 \* ends.  THE B'-vs-A2 DISCRIMINATOR: if the ROLLER triggers
+                 \* the relocation (fix B', ~95s of guest stall measured on
+                 \* runap) then the outage IS maintenance-caused and this
+                 \* exemption is what would be hiding it — which is the whole
+                 \* argument for A2, where no window opens at all.
+  localLegs,     \* SUBSET Legs — legs whose node currently hosts the
+                 \* consumer, i.e. whose drain is a no-op and whose ROLL
+                 \* destroys the composition.  A VARIABLE, not the constant,
+                 \* because the consumer moves: the refused set is a fact of
+                 \* the moment.  Pinned to LocalLegs when ~ConsumerMobile.
+  stagedAt,      \* Legs \cup {"remote", "none"} — WHICH node kubelet believes
+                 \* the volume is staged on.  `staged` is the same fact with
+                 \* the location thrown away, kept because many guards read it
+                 \* (Inv_StagedAgrees ties them together).
+                 \*
+                 \* Added for A2, and it turns out to be the answer rather
+                 \* than more scenery.  The F62 doc already named `staged` THE
+                 \* DISCRIMINATOR between the three destroyers — only one that
+                 \* clears it has an inverse — and A2's whole problem is
+                 \* telling "the composition died under me and is owed here"
+                 \* apart from "the consumer left and the attacher has not
+                 \* noticed".  The VA cannot tell those apart.  This can:
+                 \*
+                 \*   class-3 death   stagedAt = me   (kubelet still believes
+                 \*                                    it staged HERE)
+                 \*   relocation      stagedAt # me   (NodeUnstage ran, and
+                 \*                                    the new host restaged)
+                 \*
+                 \* And it is LOCAL ground truth — the node's own staging
+                 \* state, observable without asking the API server and
+                 \* without remembering anything, which is the property F63's
+                 \* two fidelity bugs were both about not having.
+  vaNode,        \* Legs \cup {"remote", "none"} — the node named by the
+                 \* attached VolumeAttachment.  A2's ONLY input in its naive
+                 \* form, so it is modelled separately from localLegs (the
+                 \* truth) rather than derived from it.
+                 \*
+                 \* This is the API-server view, and it is the RIGHT input:
+                 \* it survives the agent's death (a local HashSet does not),
+                 \* which is F8's lesson and the same predicate A1's seed
+                 \* already trusts — `va_map.get(&pv_name) ==
+                 \* Some(&self.node_name)` at node_agent.rs:3279.
+                 \*
+                 \* But it LAGS, and the implementation says so in its own
+                 \* words.  node_agent.rs:3219 explains the ublk reaper's
+                 \* existence: "a disk that is attributable but not desired
+                 \* is a leak — e.g. the local disk a STALE VA made us
+                 \* rebuild after the consumer moved away — and the fast
+                 \* detector would otherwise resurrect it forever."  So
+                 \* rebuild-from-a-stale-VA is not a hypothesis; it is an
+                 \* observed behaviour with a garbage collector already
+                 \* written for it.
+                 \*
+                 \* The asymmetry that earns A2 its own tranche: for the
+                 \* single-replica path that comment describes, a stale-VA
+                 \* rebuild leaks a ublk disk — recoverable, and reaped.  For
+                 \* a RAID over lvols that another host may also have
+                 \* assembled, the same staleness produces a SECOND WRITER
+                 \* over the same bytes.  Same trigger, one class worse
+                 \* outcome, and no reaper can undo a write.
+                 \* Free to track truth atomically when ~VaCanLag.
+  a2Created,     \* SUBSET (Legs \cup {"remote"}) — PROVENANCE: hosts whose
+                 \* composition was built by A2 rather than by NodeStage.
+                 \* The adopt hazard is entirely about WHO created the object
+                 \* NodeStage later finds, which is also why the shipped
+                 \* unconditional reuse is correct TODAY: with NodeStage the
+                 \* only creator, this set is always empty.
+  adoptedA2,     \* GHOST (BOOLEAN): NodeStage short-circuited onto a
+                 \* composition A2 had built.  Stamped only by AssembleAdopt,
+                 \* so Inv_NoAdoptOfA2Composition is attributable to that door
+                 \* alone — the pod-layer tranche's rule about mutation runs
+                 \* whose invariant is violable by other means.
+  validateRemoved, \* SUBSET (Legs \cup {"remote"}) — hosts where the
+                 \* VALIDATING NodeStage has deleted a composition.  Monotone,
+                 \* like raidLostOnce: it is the memory a reachability ghost
+                 \* needs, not live state.
+  flapped,       \* GHOST (BOOLEAN): A2 rebuilt a composition at a host the
+                 \* validating NodeStage had just deleted one from.  THE LOOP,
+                 \* and it has to be stated as an ORDER rather than a count.
+                 \* My first attempt was ~(a2Builds >= 2 /\ validateDeletes >=
+                 \* 1) and TLC answered it with build, build, delete — two
+                 \* builds and a delete, no cycle.  Violable for a reason other
+                 \* than the mechanism, which the pod-layer tranche's rule says
+                 \* proves nothing about the mechanism.  This ghost is stamped
+                 \* only when A2 puts back what validation removed.
   zombie,        \* SUBSET Legs: a partitioned old head's assembly view (F48)
   legData,       \* [Legs -> SUBSET 1..MaxWrites]
   legUp,         \* [Legs -> {"up", "blackhole", "dead"}] — GROUND TRUTH
@@ -689,7 +885,8 @@ vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
           deferExpired, deemedDead, falseRisk, crashes,
           rolling, rolled, suppress, processed, maintSkipped, rollerDead,
           legSize, raidSize, pvSize, wantNew,
-          raidHost, staged, raidSeen, raidLostOnce,
+          raidHosts, staged, stagedAt, raidSeen, raidLostOnce, localLegs,
+          relocating, vaNode, a2Created, adoptedA2, validateRemoved, flapped,
           bounceWindow, bouncePlan, bounceRisk, consecutiveBounces, dpFlag,
           everServed, podUp, bounceDoomed>>
 
@@ -699,7 +896,9 @@ maintVars == <<rolling, rolled, suppress, processed, maintSkipped, rollerDead,
 \* The F62 tranche's state, grouped like maintVars so every untouched action
 \* carries exactly one extra UNCHANGED line.  Pinned inert when
 \* RaidLifetimeArm = FALSE, which is why the 50 pre-F62 runs are unperturbed.
-raidVars == <<raidHost, staged, raidSeen, raidLostOnce>>
+raidVars == <<raidHosts, staged, stagedAt, raidSeen, raidLostOnce, localLegs,
+              relocating, vaNode, a2Created, adoptedA2, validateRemoved,
+              flapped>>
 
 expandVars == <<legSize, raidSize, pvSize, wantNew>>
 
@@ -730,7 +929,27 @@ StaleServed == \E l \in serving : state[l] = "stale"
 (***************************************************************************)
 RaidHostInit == IF LocalLegs = {} THEN "remote" ELSE CHOOSE l \in LocalLegs : TRUE
 
-RaidPresent == raidHost # "none"
+\* Where a re-created composition lands: wherever the consumer is NOW.  The
+\* F62 tranche used RaidHostInit here, which could only ever rebuild the raid
+\* where it already was — fine while the consumer was immobile, and wrong the
+\* moment it moves.  Live on runap the composition died on aws-1 and was
+\* re-created on aws-2.
+HostFor(LL) == IF LL = {} THEN "remote" ELSE CHOOSE l \in LL : TRUE
+
+RaidPresent == raidHosts # {}
+
+\* Where the composition is, when the model needs to name ONE — only ever
+\* used for display and for the single-host predicates inherited from the
+\* scalar era.  Safe because every creator other than A2 assigns a
+\* singleton; when A2 has produced two, that is precisely the state
+\* Inv_SingleComposition reports, so nothing downstream should be trusting
+\* a single name in it.
+PrimaryHost == IF raidHosts = {} THEN "none" ELSE CHOOSE h \in raidHosts : TRUE
+
+\* The VA's view of where the consumer is, as the truth would have it.  A2
+\* reads vaNode; this is what vaNode would be if the attacher were
+\* instantaneous.  The gap between them is the whole hazard.
+VaTruth == HostFor(localLegs)
 
 (***************************************************************************)
 (* A raid bdev by itself means NOTHING — it needs at least one healthy base *)
@@ -780,10 +999,18 @@ TypeOK ==
   /\ suppress \subseteq Legs
   /\ processed \subseteq Legs
   /\ maintSkipped \subseteq Legs
-  /\ raidHost \in Legs \cup {"remote", "none"}
+  /\ raidHosts \subseteq (Legs \cup {"remote"})
+  /\ vaNode \in Legs \cup {"remote", "none"}
+  /\ stagedAt \in Legs \cup {"remote", "none"}
+  /\ a2Created \subseteq (Legs \cup {"remote"})
+  /\ adoptedA2 \in BOOLEAN
+  /\ validateRemoved \subseteq (Legs \cup {"remote"})
+  /\ flapped \in BOOLEAN
   /\ staged \in BOOLEAN
   /\ raidSeen \in BOOLEAN
   /\ raidLostOnce \in BOOLEAN
+  /\ localLegs \subseteq Legs
+  /\ relocating \in BOOLEAN
   /\ rollerDead \in BOOLEAN
   /\ stalePlan \subseteq Legs /\ Cardinality(stalePlan) <= 1
   /\ leaderMoved \in BOOLEAN
@@ -886,10 +1113,19 @@ Init ==
   \* (the ordinary RWX shape — the NFS server's own node).  staged is what
   \* kubelet believes; raidSeen is TRUE because the agent has been running
   \* and has observed its own raid.
-  /\ raidHost = RaidHostInit
+  /\ raidHosts = {RaidHostInit}
+  \* The attacher agrees with reality at Init; only VaCanLag can separate them.
+  /\ vaNode = RaidHostInit
+  /\ stagedAt = RaidHostInit
+  /\ a2Created = {}      \* no composition here was built by A2
+  /\ adoptedA2 = FALSE
+  /\ validateRemoved = {}
+  /\ flapped = FALSE
   /\ staged = TRUE
   /\ raidSeen = TRUE
   /\ raidLostOnce = FALSE
+  /\ localLegs = LocalLegs
+  /\ relocating = FALSE
   /\ suppress = {}
   /\ rollerDead = FALSE
   /\ stalePlan = {}
@@ -1459,10 +1695,22 @@ Assemble ==
   \* raidSeen' = TRUE because the process that just built the raid has, by
   \* construction, observed it — the honest way for data_path_raid_seen to
   \* become populated.
-  /\ raidHost' = RaidHostInit
+  \* UNION, not assignment.  NodeStage creates a composition on ITS node and
+  \* has no idea what any other tgt holds — so it must not be the thing that
+  \* tidies away a phantom A2 left elsewhere.  Assigning a singleton here
+  \* would let the legitimate creator silently repair the illegitimate one,
+  \* masking exactly the bug this tranche exists to find.  In the A2-off
+  \* world the two forms are equivalent (no state has two hosts).
+  /\ raidHosts' = raidHosts \cup {HostFor(localLegs)}
+  /\ vaNode' = IF VaCanLag THEN vaNode ELSE HostFor(localLegs)
+  /\ relocating' = FALSE   \* the assembly ENDS the window
   /\ staged' = TRUE
+  /\ stagedAt' = HostFor(localLegs)   \* kubelet staged it HERE
   /\ raidSeen' = TRUE
-  /\ UNCHANGED raidLostOnce
+  \* THIS host's composition is now NodeStage's work, not A2's.
+  /\ a2Created' = a2Created \ {HostFor(localLegs)}
+  /\ UNCHANGED <<raidLostOnce, localLegs, adoptedA2, validateRemoved,
+                 flapped>>
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, state, epochCut, claim,
                  deemedDead, crashes>>
   /\ UNCHANGED maintVars
@@ -1507,10 +1755,16 @@ LastResortServe(l) ==
   \* operator works outside kubelet's bookkeeping, which is the whole point
   \* of a runbook step.  It cannot mask F62 regardless, because it requires
   \* UpInSync = {} and F62 leaves every leg recorded in_sync.
-  /\ raidHost' = RaidHostInit
+  /\ raidHosts' = raidHosts \cup {HostFor(localLegs)}   \* union: see Assemble
+  /\ vaNode' = IF VaCanLag THEN vaNode ELSE HostFor(localLegs)
+  /\ relocating' = FALSE   \* the assembly ENDS the window
   /\ staged' = TRUE
+  /\ stagedAt' = HostFor(localLegs)
   /\ raidSeen' = TRUE
-  /\ UNCHANGED raidLostOnce
+  \* THIS host's composition is now NodeStage's work, not A2's.
+  /\ a2Created' = a2Created \ {HostFor(localLegs)}
+  /\ UNCHANGED <<raidLostOnce, localLegs, adoptedA2, validateRemoved,
+                 flapped>>
   \* The override brings the volume back, so any open bounce window closes
   \* (with riskSurfaced already stamped by the override itself).
   /\ bounceWindow' = "none"
@@ -1671,7 +1925,7 @@ MaintDrain(l) ==
   /\ state[l] = "insync"
   /\ Responsive(l)
   /\ l \notin rolled                      \* one campaign, each node once
-  /\ l \notin LocalLegs                   \* F61: a local-half leg's drain
+  /\ l \notin localLegs                   \* F61: a local-half leg's drain
                                           \* is a NO-OP (MaintDrainSkip)
   \* F61: ONE node in flight. The roller takes pending.first() and finishes
   \* that node before starting the next, so a node cannot be processed while
@@ -1715,6 +1969,363 @@ MaintDrain(l) ==
   /\ UNCHANGED bounceVars
 
 (***************************************************************************)
+(* THE CONSUMER MOVES (2026-07-29).  The class-2 destroyer, as an action    *)
+(* rather than a comment: the consumer pod is rescheduled onto another      *)
+(* node, so NodeUnstage runs on the old host (composition deleted, `staged` *)
+(* cleared — PAIRED, so Assemble is its inverse) and the set of legs whose  *)
+(* node hosts the consumer CHANGES.                                        *)
+(*                                                                         *)
+(* This is what the F62 tranche could not say, and the omission mattered in *)
+(* the operational direction rather than the safety one: with LocalLegs a   *)
+(* constant, a refused node was refused in every reachable state, so no     *)
+(* property could distinguish a roller that re-examines the condition every *)
+(* tick (what the code does — maint_roll.rs recomputes local_consumer_nodes *)
+(* from the gather) from one that gives up permanently.  The live gate      *)
+(* settled it in 14 seconds; this action is how TLC gets to check it.       *)
+(*                                                                         *)
+(* Modelled as EXTERNAL — the operator's or the scheduler's act, not the    *)
+(* roller's.  A roller that relocates consumers ITSELF (fix B', measured at *)
+(* ~95s of guest stall per node on runap) would be a different action, and  *)
+(* would have to answer for the outage it causes: the relocation window     *)
+(* takes the volume down, which is exactly why it is not free and why A2    *)
+(* (re-create the composition on boot) remains the better answer.           *)
+(***************************************************************************)
+RelocateConsumer(dest) ==
+  /\ ConsumerMobile
+  /\ RaidLifetimeArm            \* meaningless without a composition to move
+  /\ dest \in Legs \cup {"remote"}
+  /\ HostFor(localLegs) # dest  \* an actual move
+  \* The consumer cannot land on a node whose tgt is mid-restart: kubelet
+  \* would not schedule onto it, and the stage would fail if it did.
+  /\ rolling = {}
+  /\ localLegs' = IF dest = "remote" THEN {} ELSE {dest}
+  \* Class-2 destroyer: unstage on the old host, and kubelet KNOWS, which is
+  \* the whole difference from the roll's class-3 destroyer.
+  \* HOST-SCOPED, not a wholesale clear.  NodeUnstage runs on the host the
+  \* consumer is LEAVING and destroys the raid in THAT tgt; it cannot reach a
+  \* composition in another process.  Written as `= {}` before the adopt
+  \* tranche, which would have let this destroyer tidy away a phantom on the
+  \* node the consumer is moving TO — masking the very hazard the tranche
+  \* exists to find, the same trap as Assemble's union.
+  \* In the A2-off world the composition always sits at the consumer, so the
+  \* two forms coincide and no legacy graph moves.
+  /\ raidHosts' = raidHosts \ {HostFor(localLegs)}
+  \* Likewise: `serving` is global (one composition at a time is exact in the
+  \* adopt cfgs), so it empties only when the DEPARTING host is the one that
+  \* held the raid.  A surviving phantom keeps its members, which is what the
+  \* later NodeStage inherits.
+  /\ serving' = IF HostFor(localLegs) \in raidHosts THEN {} ELSE serving
+  /\ a2Created' = a2Created \ {HostFor(localLegs)}
+  \* THE LAG.  With VaCanLag the attached VolumeAttachment still names the OLD
+  \* host across this transition, and VaCatchUp closes it later.  That window
+  \* is what node_agent.rs:3219's reaper exists to clean up on the
+  \* single-replica path, and it is where A2 can assemble a second writer.
+  /\ vaNode' = IF VaCanLag THEN vaNode ELSE (IF dest = "remote" THEN "remote" ELSE dest)
+  /\ staged' = FALSE
+  /\ stagedAt' = "none"   \* NodeUnstage RAN — kubelet knows
+  /\ raidSeen' = DpSeenRehydrate
+  /\ relocating' = TRUE         \* the window OPENS here
+  /\ UNCHANGED raidLostOnce     \* this destroyer has an inverse; not the F62 ghost
+  /\ UNCHANGED <<adoptedA2, validateRemoved, flapped>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim,
+                 deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
+                 dpFlag, everServed, podUp, bounceDoomed>>
+
+(***************************************************************************)
+(* THE A2 TRANCHE (2026-07-29).  Three actions: the destroyer nobody can   *)
+(* refuse, the attacher's lag, and the repair itself.                      *)
+(***************************************************************************)
+
+(***************************************************************************)
+(* THE DESTROYER OUTSIDE THE ROLLER.  Identical in effect to RollStart's    *)
+(* class-3 branch, and deliberately NOT gated on any maintenance state:     *)
+(* no `rolling`, no marks, no lease, no barrier, no refusal.  A tgt dies    *)
+(* with node and consumer in place and nothing asked the roller's opinion.  *)
+(*                                                                         *)
+(* This is the gap the whole F62/F63 pair was measured inside of.  Class-3  *)
+(* destruction existed ONLY inside RollStart, so every run so far has been  *)
+(* answering "can flint's roller destroy a composition?" — a question about *)
+(* a feature that is OFF BY DEFAULT and which, in that default             *)
+(* configuration, refuses to act at all (plan_roll returns Blocked when     *)
+(* !on_delete, maint_roll.rs:248).  The operative question is whether a     *)
+(* routine `helm upgrade` can, and the chart answers it: updateStrategy:    *)
+(* OnDelete is emitted only inside the drainRoll.enabled conditional        *)
+(* (node.yaml:13-24), so the shipped default DaemonSet takes k8s's          *)
+(* RollingUpdate and rolls every node pod on a template change.  Add OOM    *)
+(* kills, kubelet restarts, evictions, node-image upgrades and GitOps       *)
+(* syncs, none of which consult flint at all.                              *)
+(*                                                                         *)
+(* Hence the ranking this tranche exists to test: fix B refuses, and fix    *)
+(* B' relocates, but BOTH are properties of a roller that is not in this    *)
+(* path.  Only a repair on the agent side has an inverse for THIS.          *)
+(***************************************************************************)
+TgtDie(l) ==
+  /\ UncontrolledTgtDeath
+  /\ RaidLifetimeArm
+  /\ l \in raidHosts          \* it held the composition; nothing else to kill
+  /\ raidHosts' = raidHosts \ {l}
+  \* SPDK's own rule: with the composition gone there is nothing for a base
+  \* to be a member of (raid_bdev_deconfigure, bdev_raid.c:2069-2074).
+  /\ serving' = {}
+  \* The detector's HashSet died with the process; A1 is what rehydrates it.
+  /\ raidSeen' = DpSeenRehydrate
+  /\ raidLostOnce' = TRUE
+  \* UNPAIRED, and this is the whole point: `staged` untouched, so kubelet
+  \* never calls NodeStage again, and `vaNode` untouched, because the volume
+  \* really is still attached here.  No orchestrator was involved, so there
+  \* is no orchestrator-side fix that could have declined it.
+  /\ a2Created' = a2Created \ {l}   \* provenance dies with the composition
+  /\ UNCHANGED <<adoptedA2, validateRemoved, flapped>>
+  /\ UNCHANGED <<staged, stagedAt, vaNode, localLegs, relocating>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+(***************************************************************************)
+(* THE ADOPT — what NodeStage does when it finds a raid of this name        *)
+(* already there.  `ensure_raid1_bdev` (driver.rs:3105) is create-OR-       *)
+(* CONVERGE, and its converge branch has two arms:                         *)
+(*                                                                         *)
+(*   state == "online"  -> REUSE IT AND RETURN.  "already ONLINE (N        *)
+(*                         base(s) configured) — reusing".  The base set    *)
+(*                         is never compared to the one NodeStage intended; *)
+(*                         that count reaches the log line and nowhere else.*)
+(*   anything else       -> delete (clear_sb when available) and create.    *)
+(*                                                                         *)
+(* Ordinary `Assemble` cannot represent the first arm, because it requires  *)
+(* serving = {} — an online raid has at least one configured base (SPDK's   *)
+(* raid1 floor is 1), so Assemble is DISABLED in exactly the state the      *)
+(* adopt describes.  Hence a separate action for the short-circuit.         *)
+(*                                                                         *)
+(* Note this is NOT a bug report against shipped code.  With NodeStage the  *)
+(* sole creator, an online raid of that name is one NodeStage itself built  *)
+(* from the same PV replica record, so reuse is a correct idempotent        *)
+(* restage.  It becomes a hazard only once A2 is a second creator whose     *)
+(* base set was chosen at a different time — which is why the arm lives in  *)
+(* this tranche.                                                           *)
+(***************************************************************************)
+AssembleAdopt ==
+  /\ RaidLifetimeArm
+  /\ ~NodeStageValidatesBases        \* the shipped reuse-unconditionally arm
+  \* NodeStage runs, on the same terms as Assemble: a pod is scheduled and
+  \* kubelet believes the volume UNSTAGED.
+  /\ (PodLayer => podUp)
+  /\ ~staged
+  \* ...and finds a raid of this name ONLINE in this node's tgt.  `serving`
+  \* non-empty IS "online" here: raid1's operational floor is one configured
+  \* base (raid1.c:622), and at zero the bdev deconfigures itself.
+  /\ HostFor(localLegs) \in raidHosts
+  /\ serving # {}
+  \* THE SHORT-CIRCUIT.  It returns early, so the composition and its member
+  \* set are INHERITED WHOLE — serving, writerSet, lineage and legGen all
+  \* untouched.  That is the defect in one line: whatever the previous
+  \* creator chose is now what this consumer gets.
+  /\ adoptedA2' = (adoptedA2 \/ HostFor(localLegs) \in a2Created)
+  /\ staged' = TRUE
+  /\ stagedAt' = HostFor(localLegs)
+  /\ relocating' = FALSE
+  /\ raidSeen' = TRUE
+  /\ UNCHANGED <<serving, raidHosts, raidLostOnce, localLegs, vaNode,
+                 a2Created, validateRemoved, flapped>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+(***************************************************************************)
+(* THE CANDIDATE FIX, MODELLED HONESTLY — INCLUDING THAT IT DELETES.       *)
+(*                                                                         *)
+(* With NodeStageValidatesBases the converge branch stops trusting `online` *)
+(* and takes the delete-then-create path instead, which is the shape the    *)
+(* code already has for a CONFIGURING phantom.  The point of modelling it   *)
+(* rather than asserting it: a fix whose remedy is to DESTROY the other     *)
+(* creator's object invites the two creators to undo each other, and        *)
+(* `validateRemoved` + `flapped` are here so TLC can say whether they do. *)
+(* A remedy that swaps a phantom for a create/delete loop is not a remedy;  *)
+(* it is the MaintPark lasso wearing a different hat.                      *)
+(***************************************************************************)
+AssembleValidate ==
+  /\ RaidLifetimeArm
+  /\ NodeStageValidatesBases
+  /\ (PodLayer => podUp)
+  /\ ~staged
+  /\ HostFor(localLegs) \in raidHosts
+  /\ serving # {}
+  \* Delete it.  Ordinary Assemble is then enabled (serving = {}) and builds
+  \* from the set NodeStage actually intended — two steps, as in the code.
+  /\ raidHosts' = raidHosts \ {HostFor(localLegs)}
+  /\ serving' = {}
+  /\ a2Created' = a2Created \ {HostFor(localLegs)}
+  /\ validateRemoved' = validateRemoved \cup {HostFor(localLegs)}
+  /\ UNCHANGED <<staged, stagedAt, raidSeen, raidLostOnce, localLegs,
+                 relocating, vaNode, adoptedA2, flapped>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+(***************************************************************************)
+(* THE ATTACHER'S LAG CLOSING.  The VA catches up with where the consumer   *)
+(* actually is.  Exists so VaCanLag is a WINDOW and not a permanent lie —   *)
+(* without this action a stale VA would never converge and every liveness   *)
+(* property would fail for a reason that has nothing to do with A2.         *)
+(***************************************************************************)
+VaCatchUp ==
+  /\ VaCanLag
+  /\ RaidLifetimeArm
+  /\ vaNode # VaTruth
+  /\ vaNode' = VaTruth
+  /\ UNCHANGED <<a2Created, adoptedA2, validateRemoved, flapped,
+                 serving, raidHosts, staged, stagedAt, raidSeen, raidLostOnce,
+                 localLegs, relocating>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+(***************************************************************************)
+(* REPAIR A2 ITSELF.  The agent's boot pass re-creates the composition for  *)
+(* a volume the VA says is attached to it.  Modelled on the function that   *)
+(* would host it — rehydrate_exports_from_ground_truth — which already      *)
+(* does exactly this shape for the SINGLE-REPLICA path                      *)
+(* (ensure_ublk_disk / ensure_export_for rebuilt from VA + PV), and which   *)
+(* for replica_count > 1 currently only seeds detectors (A1).  So A2 is     *)
+(* "extend the existing pass to the replica case", and its guard is the     *)
+(* predicate that pass already trusts: node_agent.rs:3279's                 *)
+(* `va_map.get(&pv_name) == Some(&self.node_name)`.                         *)
+(*                                                                         *)
+(* NOTE WHAT IS *NOT* IN THE GUARD: `staged`.  A2 does not consult kubelet  *)
+(* — it cannot, it is a node agent reading the API server — and that is     *)
+(* precisely why it can invert a class-3 death that left `staged` TRUE.     *)
+(* The same blindness is the hazard: nothing in this guard distinguishes    *)
+(* "the composition died under me and is owed here" from "the consumer      *)
+(* left and the attacher has not caught up".                                *)
+(***************************************************************************)
+AgentBootReconcile ==
+  /\ RaidReconcileArm
+  /\ RaidLifetimeArm
+  /\ vaNode \in Legs \cup {"remote"}
+  /\ vaNode \notin raidHosts        \* nothing assembled here yet
+  \* A raid needs at least one healthy base recorded in_sync — the lvols
+  \* outlive everything, but a composition over nothing is not a repair.
+  /\ UpInSync # {}
+  \* CANDIDATE BELT 1 — sole ownership.  A cluster-wide "does anyone else
+  \* already hold a composition over these lvols?" probe, using the same live
+  \* call fix C already ships (bdev_raid_get_bdevs against another node,
+  \* maint_roll.rs gather_volume_maint).
+  \*
+  \* Expected to be INSUFFICIENT, which is why it is armed separately from
+  \* belt 2 rather than bundled with it.  It is check-then-act: it can only
+  \* see a composition that already exists, so A2 defeats it by going FIRST —
+  \* assemble on the stale node while raidHosts = {}, and the legitimate
+  \* NodeStage (which has no such belt, and should not need one) supplies the
+  \* second host afterwards.  If TLC agrees, the A/B says so out loud instead
+  \* of this being a paragraph of my reasoning.
+  /\ (A2SoleOwnershipBelt => raidHosts = {})
+  \* CANDIDATE BELT 2 — local staging.  Assemble only where kubelet ALSO
+  \* still believes the volume staged.  This is the discriminator the F62
+  \* analysis already identified and then did not use: the class-3 destroyer
+  \* is defined by leaving `staged` alone, and a relocation is defined by
+  \* clearing it.  So this admits exactly the case A2 exists for and refuses
+  \* exactly the case that produces a phantom — without a cluster-wide probe,
+  \* without a lease, and without remembering anything.
+  /\ (A2LocalStagingBelt => stagedAt = vaNode)
+  /\ raidHosts' = raidHosts \cup {vaNode}
+  \* The repair serves from what is recorded in_sync.  It deliberately does
+  \* NOT readmit a leg the records do not vouch for: assembling a stale leg
+  \* under a live consumer is the phantom-assembly class that
+  \* "superblock": false exists to avoid, and A2 must not reintroduce it by
+  \* another route.
+  /\ serving' = UpInSync
+  /\ raidSeen' = TRUE               \* the process that built it has seen it
+  /\ relocating' = FALSE            \* an assembly ends the window
+  \* `staged`/`stagedAt` UNTOUCHED, and this is not an oversight — it is the
+  \* difference between A2 and NodeStage.  A2 is a node agent re-creating an
+  \* SPDK object; it does not participate in kubelet's staging bookkeeping and
+  \* cannot alter it.  Which is exactly why it can invert a class-3 death
+  \* (staged was left TRUE, so nothing needs changing) and exactly why it must
+  \* not be allowed to CLAIM it: the first draft here wrote stagedAt' = vaNode,
+  \* which would let A2 satisfy the local-staging belt with its own previous
+  \* action.  Self-justifying bookkeeping — the same defect as F63's two
+  \* fidelity bugs, for the third time in this module, and this time caught
+  \* while reading a counterexample rather than by a property failing.
+  \* PROVENANCE: this host's composition was built by A2, not by NodeStage.
+  \* Needed because the adopt hazard is entirely about WHO created the object
+  \* NodeStage later finds — and today, with NodeStage the only creator, an
+  \* online raid of that name is one NodeStage itself made, which is why
+  \* reusing it unconditionally is correct in the shipped world.
+  /\ a2Created' = a2Created \cup {vaNode}
+  \* THE LOOP, stamped only when A2 puts back exactly what the validating
+  \* NodeStage removed.  An order, not a count — see the `flapped` comment.
+  /\ flapped' = (flapped \/ vaNode \in validateRemoved)
+  /\ UNCHANGED <<staged, stagedAt, raidLostOnce, localLegs, vaNode,
+                 adoptedA2, validateRemoved>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+(***************************************************************************)
+(* THE REFUSAL, SURFACED FROM THE LIVE CONDITION (2026-07-29).  Mirrors     *)
+(* plan_roll's terminal `RollStep::Refused`, whose node list is derived      *)
+(* every tick from `pods.filter(!current_rev).filter(local_consumer_nodes)`  *)
+(* — NOT from whoever happened to take the skip path.                       *)
+(*                                                                         *)
+(* Found by RefusalEventuallyClears, and it is the SAME mistake as the       *)
+(* eligibility gate one screen up, made twice in one tranche: bookkeeping    *)
+(* keyed on a remembered event instead of the live condition.  Trace: l1 is  *)
+(* drained while remotely consumed, so it enters `processed`; the consumer   *)
+(* then RELOCATES ONTO l1, so it becomes refusable — but MaintDrainSkip      *)
+(* requires l \notin processed and can never record it, so `maintSkipped`    *)
+(* never contains l1, the one-node-in-flight gate                           *)
+(* processed \subseteq (rolled \cup maintSkipped) is poisoned forever, and   *)
+(* NO further node can drain.  A campaign killed by its own bookkeeping.     *)
+(*                                                                         *)
+(* The code is not exposed to this: it keeps no `processed` set at all and   *)
+(* re-derives every list from the gather, which is why the live gate saw a   *)
+(* refusal clear in 14 seconds.  `processed` is a model construct added for  *)
+(* F61 fidelity, so this repair belongs in the model.                       *)
+(***************************************************************************)
+MaintRefuse(l) ==
+  /\ MaintEnabled /\ MaintLocalRefuse
+  /\ ~rollerDead
+  /\ l \in localLegs                      \* hosts the composition RIGHT NOW
+  /\ l \notin rolled                      \* still pending
+  /\ l \notin maintSkipped                \* not already surfaced
+  /\ rolling = {}
+  /\ maintSkipped' = maintSkipped \cup {l}
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes, rolling,
+                 rolled, suppress, processed, rollerDead, stalePlan,
+                 leaderMoved>>
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+(***************************************************************************)
 (* F61: the drain pass that legitimately drains NOTHING.  maint_roll.rs    *)
 (* iterates the node's volumes and `continue`s on each one whose consumer  *)
 (* IS this node (emitting MaintenanceLocalConsumer), so the pass completes *)
@@ -1727,7 +2338,7 @@ MaintDrain(l) ==
 MaintDrainSkip(l) ==
   /\ MaintEnabled /\ MaintFence
   /\ ~rollerDead
-  /\ l \in LocalLegs
+  /\ l \in localLegs
   /\ l \notin rolled
   /\ l \notin processed
   \* F61: ONE node in flight. The roller takes pending.first() and finishes
@@ -1785,13 +2396,23 @@ RollStart(l) ==
                \* design) but never as the last serving member, or the roll
                \* manufactures an outage with zero real failures — TLC found
                \* that too, via Inv_PlannedRollNeverCausesOutage.
-               \/ /\ l \in LocalLegs
+               \/ /\ l \in localLegs
                   /\ serving \ {l} # {}
           ELSE l \in suppress)
-  \* F62 FIX B: a refused node is never rolled.  The refusal has to be
-  \* visible to be honest, which is what maintSkipped is for — a silent
-  \* refusal is F61's wedge wearing a new hat.
-  /\ (MaintLocalRefuse => l \notin maintSkipped)
+  \* F62 FIX B: a node hosting the composition is never rolled.
+  \*
+  \* Gated on the LIVE condition, not on the remembered `maintSkipped` set —
+  \* and the first draft got this wrong in a way only RefusalEventuallyClears
+  \* could catch.  Reading `l \notin maintSkipped` here makes a refusal
+  \* PERMANENT: the set is monotone, so a node refused once could never roll
+  \* even after its consumer left.  The shipped code does the opposite —
+  \* maint_roll.rs rebuilds local_consumer_nodes from the gather every tick,
+  \* which is why runap rolled the refused node 14s after the NFS server
+  \* moved off it.  maintSkipped is an OBSERVABILITY record (what was
+  \* surfaced to the operator), never an eligibility gate.
+  /\ (MaintLocalRefuse =>
+        IF RefusalSticky THEN l \notin maintSkipped   \* the bug
+                         ELSE l \notin localLegs)     \* shipped
   /\ rolling' = {l}
   \* ===================================================================
   \* THE F62 DESTROYER (class 3).  Deleting this node's csi-node pod kills
@@ -1805,8 +2426,8 @@ RollStart(l) ==
   \* disabled forever.  THAT is the difference between this destroyer and
   \* the other two, and it is the entire bug.
   \* ===================================================================
-  /\ IF RaidLifetimeArm /\ raidHost = l
-       THEN /\ raidHost' = "none"
+  /\ IF RaidLifetimeArm /\ l \in raidHosts
+       THEN /\ raidHosts' = raidHosts \ {l}
             \* SPDK's own rule, not an extra assumption: with the composition
             \* gone there is nothing for a base to be a member of
             \* (raid_bdev_deconfigure, bdev_raid.c:2069-2074).
@@ -1817,8 +2438,20 @@ RollStart(l) ==
             \* empty raid list and be a no-op exactly here.
             /\ raidSeen' = DpSeenRehydrate
             /\ raidLostOnce' = TRUE
-            /\ UNCHANGED staged
-       ELSE UNCHANGED <<serving, raidHost, staged, raidSeen, raidLostOnce>>
+            \* The VA is UNTOUCHED — it still names this node, because the
+            \* volume really is still attached here.  That is what makes A2
+            \* fire on exactly the right node in the ordinary case, and it is
+            \* also why A2's guard alone cannot tell this apart from a stale
+            \* VA left by a relocation.
+            /\ a2Created' = a2Created \ {l}   \* provenance dies with the composition
+            /\ UNCHANGED <<adoptedA2, validateRemoved, flapped>>
+            /\ UNCHANGED <<staged, stagedAt, localLegs, relocating, vaNode>>
+       ELSE UNCHANGED <<a2Created, adoptedA2, validateRemoved, flapped,
+                        serving, raidHosts, staged, stagedAt, raidSeen,
+                        raidLostOnce, relocating, localLegs, vaNode>>
+       \* localLegs is the consumer's business, never the roller's — the
+       \* roller only ever READS it, which is precisely why fix B must gate
+       \* on it live rather than on a set it remembers.
   /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
@@ -1844,7 +2477,17 @@ RollFinish(l) ==
 MaintClear(l) ==
   /\ ~rollerDead
   /\ l \in suppress
-  /\ l \in rolled                         \* restart done for this node
+  \* F63: the mark lifts on EITHER the restart completing, or the node having
+  \* become un-rollable under the refusal.  The second disjunct is not a
+  \* convenience — without it a node drained-and-marked while remotely
+  \* consumed, onto which the consumer then relocates, is refused by fix B
+  \* while its mark is renewed by the live roller every tick: its leg parks at
+  \* reduced redundancy FOREVER (MaintenanceEventuallyLifts, the MaintPark
+  \* lasso re-created by the refusal).  Deleting the pod instead would be F62.
+  \* Abandoning the node — lift the suppression, let hot-rejoin readmit, let
+  \* the standing refusal report name it — is the only step that is neither.
+  \* maint_roll.rs's marked-node branch returns ClearMarks for exactly this.
+  /\ (l \in rolled \/ (MaintLocalRefuse /\ l \in localLegs))
   /\ suppress' = suppress \ {l}
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
@@ -2111,10 +2754,18 @@ Bounce ==
   \* back.  Contrast RollStart's class-3 destroyer, which leaves `staged`
   \* alone and therefore has none.  All three assignments are no-ops when
   \* RaidLifetimeArm is FALSE.
-  /\ raidHost' = IF RaidLifetimeArm THEN "none" ELSE raidHost
+  \* Consumer-scoped teardown, written as a clear because in every cfg that
+  \* enables a bounce arm raidHosts is a singleton (A2 is the only source of
+  \* a second host, and no bounce cfg arms it).  Combining the bounce tranche
+  \* with A2Arm would need this narrowed to \ {HostFor(localLegs)} first, or
+  \* an unstage here could tidy away a phantom and mask it.
+  /\ raidHosts' = IF RaidLifetimeArm THEN {} ELSE raidHosts
   /\ staged'   = ~RaidLifetimeArm
+  /\ stagedAt' = IF RaidLifetimeArm THEN "none" ELSE stagedAt
   /\ raidSeen' = IF RaidLifetimeArm THEN DpSeenRehydrate ELSE raidSeen
-  /\ UNCHANGED raidLostOnce
+  /\ a2Created' = IF RaidLifetimeArm THEN {} ELSE a2Created
+  /\ UNCHANGED <<raidLostOnce, localLegs, relocating, vaNode,
+                 adoptedA2, validateRemoved, flapped>>
   /\ UNCHANGED gateVars
 
 \* THE REFUSAL BOUND (cutover.rs: `refusal_expired`).  freshness_gate::evaluate
@@ -2154,10 +2805,18 @@ BounceOverride ==
   \* back.  Contrast RollStart's class-3 destroyer, which leaves `staged`
   \* alone and therefore has none.  All three assignments are no-ops when
   \* RaidLifetimeArm is FALSE.
-  /\ raidHost' = IF RaidLifetimeArm THEN "none" ELSE raidHost
+  \* Consumer-scoped teardown, written as a clear because in every cfg that
+  \* enables a bounce arm raidHosts is a singleton (A2 is the only source of
+  \* a second host, and no bounce cfg arms it).  Combining the bounce tranche
+  \* with A2Arm would need this narrowed to \ {HostFor(localLegs)} first, or
+  \* an unstage here could tidy away a phantom and mask it.
+  /\ raidHosts' = IF RaidLifetimeArm THEN {} ELSE raidHosts
   /\ staged'   = ~RaidLifetimeArm
+  /\ stagedAt' = IF RaidLifetimeArm THEN "none" ELSE stagedAt
   /\ raidSeen' = IF RaidLifetimeArm THEN DpSeenRehydrate ELSE raidSeen
-  /\ UNCHANGED raidLostOnce
+  /\ a2Created' = IF RaidLifetimeArm THEN {} ELSE a2Created
+  /\ UNCHANGED <<raidLostOnce, localLegs, relocating, vaNode,
+                 adoptedA2, validateRemoved, flapped>>
 
 \* The deposed-but-alive bouncer.  RoguePlanDrain's shape, and leaderMoved
 \* is SHARED with the roller on purpose: orchestrator_lease.rs is ONE lease
@@ -2216,10 +2875,18 @@ RogueBounceCommit ==
   \* back.  Contrast RollStart's class-3 destroyer, which leaves `staged`
   \* alone and therefore has none.  All three assignments are no-ops when
   \* RaidLifetimeArm is FALSE.
-  /\ raidHost' = IF RaidLifetimeArm THEN "none" ELSE raidHost
+  \* Consumer-scoped teardown, written as a clear because in every cfg that
+  \* enables a bounce arm raidHosts is a singleton (A2 is the only source of
+  \* a second host, and no bounce cfg arms it).  Combining the bounce tranche
+  \* with A2Arm would need this narrowed to \ {HostFor(localLegs)} first, or
+  \* an unstage here could tidy away a phantom and mask it.
+  /\ raidHosts' = IF RaidLifetimeArm THEN {} ELSE raidHosts
   /\ staged'   = ~RaidLifetimeArm
+  /\ stagedAt' = IF RaidLifetimeArm THEN "none" ELSE stagedAt
   /\ raidSeen' = IF RaidLifetimeArm THEN DpSeenRehydrate ELSE raidSeen
-  /\ UNCHANGED raidLostOnce
+  /\ a2Created' = IF RaidLifetimeArm THEN {} ELSE a2Created
+  /\ UNCHANGED <<raidLostOnce, localLegs, relocating, vaNode,
+                 adoptedA2, validateRemoved, flapped>>
   /\ UNCHANGED gateVars
 
 (***************************************************************************)
@@ -2287,10 +2954,18 @@ BounceUnstage ==
   \* back.  Contrast RollStart's class-3 destroyer, which leaves `staged`
   \* alone and therefore has none.  All three assignments are no-ops when
   \* RaidLifetimeArm is FALSE.
-  /\ raidHost' = IF RaidLifetimeArm THEN "none" ELSE raidHost
+  \* Consumer-scoped teardown, written as a clear because in every cfg that
+  \* enables a bounce arm raidHosts is a singleton (A2 is the only source of
+  \* a second host, and no bounce cfg arms it).  Combining the bounce tranche
+  \* with A2Arm would need this narrowed to \ {HostFor(localLegs)} first, or
+  \* an unstage here could tidy away a phantom and mask it.
+  /\ raidHosts' = IF RaidLifetimeArm THEN {} ELSE raidHosts
   /\ staged'   = ~RaidLifetimeArm
+  /\ stagedAt' = IF RaidLifetimeArm THEN "none" ELSE stagedAt
   /\ raidSeen' = IF RaidLifetimeArm THEN DpSeenRehydrate ELSE raidSeen
-  /\ UNCHANGED raidLostOnce
+  /\ a2Created' = IF RaidLifetimeArm THEN {} ELSE a2Created
+  /\ UNCHANGED <<raidLostOnce, localLegs, relocating, vaNode,
+                 adoptedA2, validateRemoved, flapped>>
 
 \* The bouncer's own recreate.  DetachWaitHonored = TRUE is the idealized
 \* bouncer that recreates only after the unstage it waited for; FALSE is
@@ -2521,6 +3196,9 @@ DeferClockExpire ==
   /\ UNCHANGED bounceVars
 
 Next ==
+  \* The consumer relocating to a node that owns NO leg — the ordinary RWX
+  \* shape, and unreachable from the per-leg quantifier below.
+  \/ RelocateConsumer("remote")
   \/ Write
   \/ WriteTorn
   \/ ZombieWrite
@@ -2547,6 +3225,13 @@ Next ==
   \/ BounceUnstage
   \/ BounceRecreate
   \/ ReconcilerRecreate
+  \* ---- the A2 tranche.  AgentBootReconcile and VaCatchUp are not
+  \* per-leg: A2 acts on whatever node the VA names, which may be
+  \* "remote" (a node owning no leg — the ordinary RWX shape).
+  \/ AgentBootReconcile
+  \/ AssembleAdopt
+  \/ AssembleValidate
+  \/ VaCatchUp
   \/ \E l \in Legs :
        \/ LegDie(l)
        \/ LegBlackhole(l)
@@ -2563,6 +3248,11 @@ Next ==
        \/ LastResortServe(l)
        \/ MaintDrain(l)
        \/ MaintDrainSkip(l)
+       \/ MaintRefuse(l)
+       \* The consumer relocating TO l (and to "remote" below, outside the
+       \* per-leg quantifier's reach only in name — dest ranges over both).
+       \/ RelocateConsumer(l)
+       \/ TgtDie(l)
        \/ RollStart(l)
        \/ RollFinish(l)
        \/ MaintClear(l)
@@ -2611,6 +3301,10 @@ FairnessCore ==
        \* so the FIXED run actually reaches the interesting world rather
        \* than satisfying RollProcessedNodeRolls vacuously.
        /\ WF_vars(MaintDrainSkip(l))
+       \* Surfacing a refusal is not optional: an operator cannot act on a
+       \* refusal nobody reports, which is the whole reason maintSkipped
+       \* exists rather than the refusal being a bare guard.
+       /\ WF_vars(MaintRefuse(l))
        /\ WF_vars(RollStart(l))
        /\ WF_vars(MaintClear(l))
        /\ WF_vars(SuppressExpire(l))
@@ -2697,6 +3391,25 @@ FairnessBounce == WF_vars(Bounce) /\ WF_vars(BounceOverride)
 (* live agent eventually looks".                                            *)
 FairnessAgent == \A l \in Legs : SF_vars(AgentFlag(l))
 
+(***************************************************************************)
+(* THE ROLLER FINISHES WHAT IT STARTED.  WF on the drain itself, split out  *)
+(* so only the mobility run carries it and no legacy behavior graph moves.  *)
+(*                                                                         *)
+(* The module has deliberately withheld this, on the grounds that "STARTING *)
+(* each node's drain is operator-paced".  That argument is about the        *)
+(* operator triggering a CAMPAIGN — the helm upgrade — and it silently      *)
+(* widened into "the roller may abandon a node mid-campaign", which is not  *)
+(* what the code does and not what runap did: with pods pending, the roller *)
+(* drained one node per 60s tick with no human in the loop at any point.    *)
+(*                                                                         *)
+(* Needed here because RefusalEventuallyClears asks whether a node whose    *)
+(* refusal LIFTED eventually rolls, and such a node is serving again, so it *)
+(* must be drained before RollStart can fire.  Without drain fairness TLC   *)
+(* answers by simply declining to drain — true of the spec, and nothing to  *)
+(* do with the question.                                                   *)
+(***************************************************************************)
+FairnessMaintDrain == \A l \in Legs : WF_vars(MaintDrain(l))
+
 \* kubelet's obligation, split out (the P4-split pattern): the recreated
 \* pod eventually comes back.  The wedged-DS-roll history (runak/runaj)
 \* says this is NOT always true of the world — SpecWedgedKubelet drops
@@ -2756,6 +3469,13 @@ SpecBounceLive == Init /\ [][Next]_vars /\ Fairness /\ FairnessBounce
 \* that has nothing to do with the fix under test.
 SpecRaidRepair ==
   Init /\ [][Next]_vars /\ Fairness /\ FairnessBounce /\ FairnessAgent
+
+\* The consumer-mobility world: the roller finishes nodes it has started, so
+\* "does a lifted refusal actually roll?" is answerable.  See
+\* FairnessMaintDrain for why that obligation is faithful rather than
+\* generous.
+SpecConsumerMobile ==
+  Init /\ [][Next]_vars /\ Fairness /\ FairnessMaintDrain
 
 \* The pre-P4 world: nothing bounds detection.  A blackholed serving leg
 \* may sit in the raid forever, stalling every write — the 150-177s
@@ -2849,7 +3569,7 @@ Inv_NoStaleServe == ~StaleServed
 \* `serving` left populated.  Cheap, and it removes the reliance on the two
 \* halves happening to fall together.
 Inv_PlannedRollNeverCausesOutage ==
-  crashes = 0 => VolumeUp
+  (crashes = 0 /\ ~relocating) => VolumeUp
 
 \* SPDK's own coupling, as a checkable claim: with no composition there is
 \* nothing for a base to be a member of (raid_bdev_deconfigure below the
@@ -2858,6 +3578,131 @@ Inv_PlannedRollNeverCausesOutage ==
 \* recorded scope limit rather than an invariant.
 Inv_RaidCompositionCoupled ==
   ~RaidPresent => serving = {}
+
+(***************************************************************************)
+(* THE A2 THEOREM.  At most one composition over these lvols exists,        *)
+(* anywhere in the cluster, ever.                                          *)
+(*                                                                         *)
+(* This is the statement that was UNCHECKABLE for the whole F62/F63 cycle,  *)
+(* because `raidHost` was a scalar and two hosts could not be written down. *)
+(* `FlintReplicationRaidReconcile.cfg` went green against A2 with this      *)
+(* hazard structurally invisible, and that green was then cited as "A2 is   *)
+(* modelled" — which is the failure mode this codebase has now hit three    *)
+(* times (the pod layer's two creators of the nfs pod; F62a's detector       *)
+(* disabled exactly when it was needed; and this).                         *)
+(*                                                                         *)
+(* WHY CARDINALITY 2 IS HARMFUL, stated carefully, because the obvious     *)
+(* claim is wrong.  It is NOT "two guests write the same lvols and          *)
+(* diverge": at the moment A2 creates a phantom, that node has no consumer  *)
+(* issuing I/O — the pod left, which is why the VA was stale — and a raid1  *)
+(* with no opener is passive.  I wrote the divergence version here first    *)
+(* and it does not survive reading the code.                               *)
+(*                                                                         *)
+(* The two harms that DO survive it:                                       *)
+(*                                                                         *)
+(*  1. THE PHANTOM IS A CONTROL-PLANE LIE, and it lies to the belt this     *)
+(*     very cycle installed.  Fix C's barrier probes bdev_raid_get_bdevs    *)
+(*     on the consumer and requires configured bases >= 1 (maint_roll.rs    *)
+(*     gather_volume_maint).  A phantom answers that probe exactly like a   *)
+(*     healthy composition.                                                *)
+(*                                                                         *)
+(*  2. A LATER NodeStage ADOPTS IT WITHOUT VALIDATION.  ensure_raid1_bdev   *)
+(*     (driver.rs:3105) reuses any raid of that name in state "online" —    *)
+(*     "already ONLINE (N base(s) configured) — reusing" — and compares     *)
+(*     nothing against the base set NodeStage intended; the count it reads  *)
+(*     goes into the log line and nowhere else.  raid_name derives from the *)
+(*     volume handle alone, so the phantom is NAME-IDENTICAL to the raid    *)
+(*     the real host needs.  If the consumer ever returns to that node it   *)
+(*     inherits a composition whose members were chosen by a boot-time      *)
+(*     snapshot of UpInSync taken while the volume was somebody else's.     *)
+(*     The adopt-or-mint family (F44/F46) reached by a new road.            *)
+(*                                                                         *)
+(* So this is worth holding for control-plane integrity and a blind adopt,  *)
+(* not for a simultaneous-writer story.  A concrete consequence for the     *)
+(* implementation: if A2 lands, ensure_raid1_bdev's ONLINE-reuse must       *)
+(* validate the base set first, or A2 must never leave a raid NodeStage     *)
+(* could adopt.                                                            *)
+(*                                                                         *)
+(* Every creator other than A2 assigns a singleton, so a violation here is  *)
+(* attributable to A2 by construction.                                     *)
+(***************************************************************************)
+Inv_SingleComposition ==
+  Cardinality(raidHosts) <= 1
+
+\* The sharper form, and the one that fails FIRST: no composition anywhere
+\* except where the consumer actually is.
+\*
+\* The first draft of this read
+\*   \A h \in raidHosts : h = vaNode \/ h = VaTruth
+\* which is worthless — it admits exactly the split-brain state it was meant
+\* to catch (the phantom satisfies h = vaNode, the real one satisfies
+\* h = VaTruth, and the conjunction is happy).  The same shape of mistake as
+\* Inv_MaintFenceHoldsUnderRefusal one tranche ago: an invariant written to
+\* accommodate the situation instead of to judge it.
+\*
+\* Stated against truth alone, it catches a state Inv_SingleComposition
+\* cannot: A2 assembling on a node the consumer has LEFT, while no other
+\* composition exists yet.  Cardinality is 1 there, so the theorem above is
+\* satisfied, and yet a raid is now open over these lvols on a node with no
+\* consumer — waiting for the real host to stage and make it two.
+Inv_A2AssemblesOnlyAtTruth ==
+  RaidLifetimeArm => (\A h \in raidHosts : h = VaTruth)
+
+(***************************************************************************)
+(* THE ADOPT THEOREM.  NodeStage never inherits a composition that A2       *)
+(* built.                                                                  *)
+(*                                                                         *)
+(* Attributable by construction: the ghost is stamped only by              *)
+(* AssembleAdopt, and only when the object it short-circuits onto carries   *)
+(* A2's provenance.  That matters because of the pod-layer tranche's rule — *)
+(* a mutation run whose invariant is violable for reasons other than the    *)
+(* mutation proves nothing about the mutation — and the harm-shaped         *)
+(* alternatives here (a serving member the record does not vouch for) are   *)
+(* all violable through doors this module already has.                     *)
+(***************************************************************************)
+Inv_NoAdoptOfA2Composition ==
+  ~adoptedA2
+
+(***************************************************************************)
+(* THE ANTI-FLAP THEOREM, and the reason the validating fix is not simply   *)
+(* "the safe option".                                                      *)
+(*                                                                         *)
+(* Its remedy is to DELETE the other creator's object. So the two creators  *)
+(* can undo each other: A2 builds, NodeStage validates and deletes,        *)
+(* NodeStage builds, the consumer moves away, A2 builds again on the same   *)
+(* stale VA — a create/delete cycle that costs a real raid teardown on a    *)
+(* node that then hosts a consumer, every time round.                      *)
+(*                                                                         *)
+(* Stated as REACHABILITY (violation = flapping is possible), because that  *)
+(* is the form this module has learned to trust: no fairness argument, no   *)
+(* environment noise, and the counterexample is the loop itself. A liveness *)
+(* "the composition eventually stabilises" would have been defeated four    *)
+(* times over by a flapping leg and an oscillating consumer, exactly as     *)
+(* RefusalEventuallyClears was.                                            *)
+(*                                                                         *)
+(* A2 having built TWICE with at least one validate-delete in between is    *)
+(* the signature: the second build cannot be the original one, and the      *)
+(* delete is what made room for it.                                        *)
+(***************************************************************************)
+Inv_NoValidateFlap ==
+  ~flapped
+
+\* Consistency tooth for the pair of staging variables: `staged` is exactly
+\* "kubelet believes this volume is staged SOMEWHERE".  Cheap, and it keeps a
+\* later edit from letting the two drift apart silently — which is how the
+\* scalar raidHost went unexamined for two tranches.
+Inv_StagedAgrees ==
+  staged <=> stagedAt # "none"
+
+\* A2 must not become a second route into the phantom-assembly class that
+\* "superblock": false exists to keep shut: it serves only what the records
+\* vouch for, never a leg whose state is stale or unknown.  Holds on both
+\* arms — it is a property of how AgentBootReconcile computes `serving'`,
+\* not of the belt — and it is here so that a later, looser A2 (one that
+\* assembles every RECORDED leg rather than every in_sync one) cannot land
+\* without a tooth already in the gate waiting for it.
+Inv_A2NeverServesUnvouched ==
+  RaidReconcileArm => serving \subseteq (UpInSync \cup {l \in Legs : state[l] = "insync"})
 
 (***************************************************************************)
 (* IS THE REPAIR PATH REACHABLE AT ALL?  Deliberately an invariant whose    *)
@@ -2880,6 +3725,24 @@ Inv_RaidCompositionCoupled ==
 (***************************************************************************)
 Inv_RaidRecoveryUnreachable ==
   ~(raidLostOnce /\ RaidPresent)
+
+(***************************************************************************)
+(* IS THE REFUSAL STICKY?  The Inv_NoStaleServe idiom again — a VIOLATION   *)
+(* is the good news, and the counterexample trace is the proof that a node  *)
+(* whose refusal lifted can actually roll.                                 *)
+(*                                                                         *)
+(* With the shipped gate (RefusalSticky = FALSE) TLC must FIND a state       *)
+(* where a node that was refused, and whose consumer has since left, has    *)
+(* rolled — the 14-second behaviour measured on runap.  With the remembered *)
+(* gate (RefusalSticky = TRUE) no interleaving reaches it and this HOLDS:    *)
+(* the refusal is permanent, the node keeps an old driver forever, and the   *)
+(* operator's only recourse is to disable the feature.                      *)
+(*                                                                         *)
+(* Reachability, so it is immune to every fairness argument — which is the   *)
+(* whole reason it replaced the liveness form.                              *)
+(***************************************************************************)
+Inv_RefusalNeverClears ==
+  ~(\E l \in Legs : l \in maintSkipped /\ l \notin localLegs /\ l \in rolled)
 
 \* WHAT FIX B BUYS: the fence with NO carve-out.  Inv_MaintFenceHolds has to
 \* exclude LocalLegs from its scope, because the post-F61 roller restarts a
@@ -2918,7 +3781,7 @@ Inv_MaintFenceStrict ==
 \* LocalLegs keeps the invariant's TEETH for every remotely-consumed leg,
 \* which is where the fence is the whole point.
 Inv_MaintFenceHolds ==
-  MaintFence => (serving \ LocalLegs) \cap rolling = {}
+  MaintFence => (serving \ localLegs) \cap rolling = {}
 
 \* THE BARRIER'S NECESSITY, restated sharply.  The unconditional
 \* last-serving-member belt (in MaintDrain) already prevents the direct
@@ -2930,8 +3793,15 @@ Inv_MaintFenceHolds ==
 \* leg, one failure away from outage.  With the barrier, planned
 \* maintenance never has more than ONE leg out of service.  The
 \* RollBarrier mutation must violate this at 3 legs.
+\* Same `~relocating` exemption as the outage theorem above, for the same
+\* reason: this bounds what MAINTENANCE costs, and a consumer reschedule is
+\* an external event that legitimately takes every leg out of service at once
+\* (the composition is gone until the new host stages).  Without the
+\* exemption the invariant fires on state 2 of any mobility run and says
+\* nothing about the roll.  RelocationWindowCloses carries the obligation the
+\* exemption would otherwise drop.
 Inv_PlannedRollBoundedImpact ==
-  crashes = 0 => Cardinality(Legs \ serving) <= 1
+  (crashes = 0 /\ ~relocating) => Cardinality(Legs \ serving) <= 1
 
 \* THE SIZE-SAFETY THEOREM (F43 item #8's contract): once the
 \* consumer-visible device grew, no serving leg is ever shorter than it —
@@ -3187,6 +4057,66 @@ MaintenanceEventuallyLifts ==
 (* exists rather than the refusal being a bare guard.                        *)
 RollProcessedNodeRolls ==
   \A l \in Legs : [](l \in processed => <>(l \in rolled \/ l \in maintSkipped))
+
+(***************************************************************************)
+(* THE REFUSAL IS NOT TERMINAL (2026-07-29).  The property the F62 tranche  *)
+(* should have carried and did not.                                        *)
+(*                                                                         *)
+(* RollProcessedNodeRolls above accepts `maintSkipped` as a final answer,   *)
+(* which was fine as a statement that the campaign converges and useless as *)
+(* a statement about what happens NEXT.  With LocalLegs constant it could   *)
+(* not have been otherwise: a refused node was refused in every reachable   *)
+(* state, so "refuses forever" and "re-examines every tick" were            *)
+(* indistinguishable — and the shipped code does the second while the model *)
+(* only demanded the first.  A model weaker than its implementation is the  *)
+(* direction that lets a regression land silently: someone could replace    *)
+(* the per-tick recompute with a remembered set and every run would stay    *)
+(* green.                                                                  *)
+(*                                                                         *)
+(* Live evidence for the claim: 14 seconds after the NFS server left the    *)
+(* refused node on runap, the roller rolled it, unprompted, because         *)
+(* local_consumer_nodes is rebuilt from the gather on every tick.  The      *)
+(* obligation below is exactly that, and nothing more: a node refused for a *)
+(* reason that has since GONE AWAY must eventually roll.  It says nothing   *)
+(* about a node whose consumer never moves — that one legitimately waits.   *)
+(***************************************************************************)
+\* Stated as eventually-ALWAYS, not as "whenever".  The `whenever` form
+\* ([](refused /\ not-local => <>rolled)) is too strong and TLC says so with a
+\* fair counterexample that has nothing to do with the roller: the consumer
+\* OSCILLATES, leaving a node just long enough for the obligation to attach and
+\* returning before the roll can finish, forever.  RelocateConsumer carries no
+\* fairness — correctly, it is the environment — so no implementation can win
+\* that race, and demanding it would be demanding the impossible.
+\*
+\* What is actually claimed, and what runap demonstrated in 14 seconds: if the
+\* consumer eventually stays off a node for good, that node eventually rolls.
+\* A node the consumer never leaves is legitimately never rolled, which is the
+\* refusal doing its job.
+\* NOT GATED BY ANY CFG, and kept only as a record of what was tried.  Every
+\* form of this liveness statement measures the ENVIRONMENT rather than the
+\* roller, because progress here can be blocked by things the roller must
+\* respect: a dead leg, the freshness gate's correct Defer, a consumer that
+\* oscillates (RelocateConsumer is unfair, correctly — it is the world), and
+\* finally the drain belt refusing to drain the LAST serving member while the
+\* other leg is a standby.  Each dodge widened the antecedent toward vacuity.
+\* The third time that happened in one session was enough: the question is not
+\* "does it always roll" but "CAN a cleared refusal ever roll", which is
+\* reachability, needs no fairness at all, and is stated below.
+RefusalEventuallyClears ==
+  \A l \in Legs :
+    <>[](l \notin localLegs /\ legUp[l] = "up") => <>(l \in rolled)
+
+(***************************************************************************)
+(* THE RELOCATION WINDOW IS BOUNDED.  The other half of exempting           *)
+(* `relocating` from the maintenance theorem — an exemption with no          *)
+(* obligation attached would be a licence for the window to stay open        *)
+(* forever, which is F62 again in a costume (a volume down with every leg    *)
+(* healthy).  Same death/gate escapes as RaidEventuallyReassembled, for the  *)
+(* same reasons: no assembly can be demanded out of dead or stale-only       *)
+(* material, and the freshness gate's Defer is correct behavior.             *)
+(***************************************************************************)
+RelocationWindowCloses ==
+  [](relocating /\ UpInSync # {} /\ writerSet \subseteq UpInSync => <>VolumeUp)
 
 (***************************************************************************)
 (* THE COMPOSITION-LIFETIME THEOREM (F62).  A volume kubelet believes       *)

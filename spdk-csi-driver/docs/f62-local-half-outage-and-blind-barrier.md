@@ -147,6 +147,12 @@ first-class object — `raidHost`, `staged`, `raidSeen` — gated behind
 `RaidLifetimeArm` so all 52 pre-F62 runs keep their exact behavior graphs and
 their gate cost.
 
+> **Renamed since.** `raidHost` is now the SET `raidHosts`, and `staged` is
+> joined by `stagedAt`. The A2 tranche found that a scalar here silently
+> asserted the one property A2 is most likely to break — that at most one
+> composition can exist — so the A2 run's green was against a hazard TLC could
+> not express. See `docs/a2-composition-reconcile.md`.
+
 | run | arm | verdict |
 |---|---|---|
 | `RaidLifetime` | F61-fixed code + arm | `Inv_PlannedRollNeverCausesOutage` **violated in 4 states** |

@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Fifty-nine runs, ALL required.
+# Seventy-one runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -289,6 +289,72 @@
 #      STAGED set — not from live SPDK, which reads empty in exactly the
 #      situation that matters — and the shipped bounce-and-restage chain
 #      suffices.  That is what makes A1 the first thing to code.
+#   13h. FlintReplicationA2Naive.cfg  THE A2 TRANCHE.  A2 modelled as a
+#      MECHANISM instead of as a relaxed guard on somebody else's action.
+#      Through 13e this arm did exactly one thing — drop Assemble's ~staged
+#      conjunct — which answers "would a repair of this SHAPE restore the
+#      volume?" and was then cited as "A2 is modelled green".  It never was:
+#      A2's hazard is a SECOND CREATOR, and while raidHost was a SCALAR the
+#      state "two compositions exist" could not be written down, so TLC was
+#      structurally unable to refute the one property A2 is most likely to
+#      break.  Third instance of the pod layer's lesson — the abstraction
+#      was the bug — and the creators here are NodeStage and the agent's own
+#      boot pass.  raidHosts is now a SET; every other creator assigns a
+#      singleton, so a cardinality violation is attributable to A2.
+#      TLC must FIND, in 4 states, A2 assembling on a node the consumer has
+#      LEFT: the VA still names it (VaCanLag), nothing is assembled there,
+#      so the guard the implementation actually has is satisfied.  Not an
+#      invented pessimism — node_agent.rs:3219 gives the ublk reaper's
+#      reason for existing as cleaning up "the local disk a STALE VA made us
+#      rebuild after the consumer moved away".  On that single-replica path
+#      staleness leaks a disk and the reaper takes it; over a raid on shared
+#      lvols the same trigger is a SECOND WRITER, and no reaper undoes a
+#      write.
+#   13i. FlintReplicationA2SoleOwner.cfg  the belt everyone reaches for
+#      first, REFUTED.  "Refuse to assemble if any other host already holds
+#      one" is check-then-act: A2 defeats it by going FIRST, and the
+#      legitimate NodeStage — which has no such belt and should not need one
+#      — supplies the second host afterwards.  TLC must still FIND the
+#      violation.  Kept as a run so the refutation is standing evidence
+#      rather than a paragraph of reasoning in a design note.
+#   13j. FlintReplicationA2Staging.cfg  THE DELIVERABLE, strict.  A2
+#      assembles only where kubelet ALSO still believes the volume staged.
+#      That is the discriminator the F62 analysis named and then did not
+#      use: a class-3 destroyer is DEFINED by leaving `staged` alone and a
+#      relocation is DEFINED by clearing it, so this admits exactly the case
+#      A2 exists for and refuses exactly the case that manufactures a
+#      phantom — no cluster-wide probe, no lease, no superblock, nothing
+#      remembered across the restart.  A2 leaves staged/stagedAt UNTOUCHED
+#      (a node agent re-creating an SPDK object does not participate in
+#      kubelet's bookkeeping); an earlier draft had it write stagedAt' =
+#      vaNode, which would let A2 satisfy this very belt with its own
+#      previous action.  NON-VACUITY: FlintA2ProbeFires.cfg must VIOLATE
+#      ProbeA2WouldHaveFired, proving the dangerous situation is reachable
+#      and the belt is what refuses it.
+#   13k-m. FlintReplicationUncontrolled{Blind,A1,A2}.cfg  THE DESTROYER
+#      NOBODY CAN REFUSE.  Until now class-3 destruction lived ONLY inside
+#      RollStart, gated on the roller's own arms — so every F62/F63 run was
+#      asking "can flint's roller destroy a composition?" about a feature
+#      that is OFF BY DEFAULT and which, in that default configuration,
+#      declines to act at all (plan_roll returns Blocked when !on_delete,
+#      maint_roll.rs:248).  The chart emits updateStrategy: OnDelete only
+#      inside the maintenance.drainRoll.enabled conditional
+#      (node.yaml:13-24), so the shipped DaemonSet takes k8s's RollingUpdate
+#      default and a routine `helm upgrade` rolls every node pod, killing
+#      tgts under live consumers — with OOM kills, kubelet restarts,
+#      evictions, node-image upgrades and GitOps syncs arriving by the same
+#      door.  Fixes B and B' cannot reach ANY of it.
+#      Blind: green, and the green IS the indictment — no interleaving
+#      recovers the volume (non-vacuity: FlintA2ProbeDeath.cfg must VIOLATE
+#      ProbeTgtDeathReachable, so the death really happens).
+#      A1: must FIND the recovery — A1 has ALREADY SHIPPED and is, in the
+#      default configuration, the only thing between a routine upgrade and a
+#      permanent outage.  That is the load-bearing result for disposition.
+#      A2: must FIND the recovery with MaxBounces=0 — no bounce, no pod
+#      delete, no unstage, so the consumer is never disrupted, and the cost
+#      is one tgt restart per NODE regardless of how many consumers that
+#      node hosts.  Contrast B', whose cost is one relocation per CONSUMER
+#      POD, with re-relocation as the campaign advances.
 #
 # FlintSnapshots:
 #   6. FlintSnapshots.cfg           strict — every completed copy session
@@ -443,13 +509,83 @@ mutation_run FlintReplication FlintReplicationRaidLifetime.cfg "raid-lifetime mu
 liveness_mutation_run FlintReplication FlintReplicationRaidLost.cfg "raid-lifetime liveness (nothing re-creates it: Assemble is the only creator, kubelet stages only what it believes UNSTAGED, and a tgt death clears nothing)"
 mutation_run FlintReplication FlintReplicationRaidFenceAB.cfg "strict-fence A/B, bug side (the post-F61 roller restarts a local half's tgt while it serves — why Inv_MaintFenceHolds needs its LocalLegs carve-out)" "Inv_MaintFenceStrict"
 strict_run FlintReplication FlintReplicationRaidRefuse.cfg "F62 fix B strict (refuse + surface the local-consumer node: the outage is PREVENTED not repaired, the campaign still converges, and the fence recovers full strength with no carve-out)"
-strict_run FlintReplication FlintReplicationRaidReconcile.cfg "F62 repair A2 strict (agent re-creates the composition on boot from the record — no superblock; deliberately does NOT carry the outage invariant, because a repair recovers the volume and cannot prevent the outage)"
+strict_run FlintReplication FlintReplicationRaidReconcile.cfg "F62 repair A2 with an INSTANTANEOUS attacher (VaCanLag=FALSE — the world where A2 looks safe, kept as the diagnostic that attributes the A2 tranche's hazard to the attacher's LAG and not to A2 itself; establishes recovery only, never safety)"
 
 # The trigger half, A/B.  The repair path is not missing, it is UNREACHABLE:
 # CollapseEvent::Lost needs data_path_raid_seen.contains(pv), and that HashSet
 # dies with the same process that takes the composition.
 liveness_mutation_run FlintReplication FlintReplicationRaidSeenBlind.cfg "F62a trigger mutation (shipped detector: whole repair chain armed and willing, blinded by one un-rehydrated HashSet)"
 strict_run FlintReplication FlintReplicationRaidSeenFixed.cfg "F62a repair A1 strict (rehydrate data_path_raid_seen from the STAGED set — not from live SPDK, which reads empty exactly when it matters — and the shipped bounce-and-restage chain suffices)"
+
+# ---------------------------------------------------------------------------
+# Consumer mobility (2026-07-29) — forced by the runap live gate, not by the
+# model.  The F62 tranche held LocalLegs CONSTANT, so a refused node was
+# refused in every reachable state and "refuses forever" was
+# indistinguishable from "re-examines every tick".  The shipped code does the
+# second; the model only demanded the first.  A model WEAKER than its
+# implementation is the direction that lets a regression land green.
+#
+# Making the consumer mobile also found F63 — a hole in fix B's own fix: fix B
+# filtered the pending-SELECTION path and left the marked-node COMPLETION path
+# untouched, so a consumer relocating in the one-tick window between a drain
+# and its pod delete got the pod deleted anyway, destroying the composition.
+# ---------------------------------------------------------------------------
+mutation_run FlintReplication FlintReplicationRefusalClears.cfg "refusal-clears reachability (shipped gate reads the LIVE condition: TLC must FIND a node that was refused, whose consumer then left, and which then ROLLED — the 14s behaviour measured on runap)" "Inv_RefusalNeverClears"
+strict_run FlintReplication FlintReplicationRefusalSticky.cfg "refusal-sticky A/B, bug side (gate reads the REMEMBERED maintSkipped set: the refusal is permanent, the node keeps an old driver forever, and Inv_RefusalNeverClears HOLDS — that green is the bug)"
+strict_run FlintReplication FlintReplicationMobileStrict.cfg "mobile-consumer strict (the roller acts DURING a relocation — the unattached window I had only ASSERTED was harmless; full state space, every roll invariant armed, and the roll-while-relocating state verified REACHABLE so the green is not vacuous)"
+
+# ---------------------------------------------------------------------------
+# THE A2 TRANCHE (2026-07-29).  Two findings, and the first one is about this
+# file rather than about the code.
+#
+# 1. `raidHost` was a SCALAR for the whole F62/F63 cycle, so "two compositions
+#    exist" was UNREPRESENTABLE, so FlintReplicationRaidReconcile.cfg went
+#    green against A2 on a hazard it was structurally unable to see — and that
+#    green was cited as "A2 is modelled".  The pod-layer tranche's lesson for
+#    the third time: THE ABSTRACTION WAS THE BUG, two independent creators of
+#    one object.  Here they are NodeStage and the agent's own boot pass.
+#
+# 2. Class-3 destruction existed ONLY inside RollStart, an action gated on the
+#    roller's arms.  So every F62/F63 run asked "can flint's roller destroy a
+#    composition?" — about a feature that is OFF BY DEFAULT and which, in that
+#    default configuration, refuses to act at all (plan_roll returns Blocked
+#    when !on_delete).  The chart emits updateStrategy: OnDelete only inside
+#    the drainRoll.enabled conditional, so the shipped DaemonSet takes k8s's
+#    RollingUpdate default: a routine `helm upgrade` rolls every node pod and
+#    kills tgts under live consumers, with OOM kills, kubelet restarts and
+#    evictions arriving by the same door.  Fixes B and B' cannot reach ANY of
+#    it.  UncontrolledTgtDeath makes that path expressible.
+# ---------------------------------------------------------------------------
+mutation_run FlintReplication FlintReplicationA2Naive.cfg "A2 naive (the only input the implementation has is the VA, and node_agent.rs:3219 documents the ublk reaper's reason for existing as cleaning up what a STALE VA made it rebuild — here the same staleness assembles a raid on a node the consumer has left, in 4 states)" "Inv_A2AssemblesOnlyAtTruth"
+mutation_run FlintReplication FlintReplicationA2SoleOwner.cfg "A2 + sole-ownership belt (the belt everyone reaches for first, REFUTED: it is check-then-act, so A2 defeats it by going FIRST and the legitimate NodeStage supplies the second host afterwards)" "Inv_A2AssemblesOnlyAtTruth"
+strict_run FlintReplication FlintReplicationA2Staging.cfg "A2 + local-staging belt strict — THE DELIVERABLE (assemble only where kubelet still believes the volume staged: admits exactly the class-3 death A2 exists for, refuses exactly the relocation that manufactures a phantom, with no cluster-wide probe and nothing remembered; the dangerous situation verified REACHABLE via FlintA2ProbeFires.cfg so the belt is doing real work)"
+
+# The destroyer nobody can refuse, A/B/C.  The green run is the indictment.
+strict_run FlintReplication FlintReplicationUncontrolledBlind.cfg "uncontrolled tgt death, UNREPAIRED (a routine helm upgrade in the DEFAULT configuration; Inv_RaidRecoveryUnreachable HOLDS = the volume can never come back, and the tgt death is verified REACHABLE via FlintA2ProbeDeath.cfg so the green is a real permanent outage and not a vacuous one)"
+mutation_run FlintReplication FlintReplicationUncontrolledA1.cfg "uncontrolled tgt death repaired by A1 (ALREADY SHIPPED, and in the default configuration the only thing standing between a routine helm upgrade and a permanent outage — fixes B and B' cannot reach this path)" "Inv_RaidRecoveryUnreachable"
+mutation_run FlintReplication FlintReplicationUncontrolledA2.cfg "uncontrolled tgt death repaired by A2 with MaxBounces=0 (no bounce, no pod delete, no unstage: the consumer is never disrupted, and the cost is one tgt restart per NODE regardless of consumer density — where B' costs one relocation per CONSUMER POD)" "Inv_RaidRecoveryUnreachable"
+
+# ---------------------------------------------------------------------------
+# THE ADOPT (2026-07-29, added on the question "does the fix cause flapping?").
+# `ensure_raid1_bdev` (driver.rs:3105) REUSES any raid of this name in state
+# "online" without comparing its base set to the one NodeStage intended. That
+# is correct today — NodeStage is the only creator, so the object it finds is
+# one it built from the same PV replica record — and becomes a hazard the
+# moment A2 is a second creator. Three runs decide the code:
+#   blind      -> the adopt happens (NodeStage inherits A2's object whole)
+#   validated  -> the adopt is closed and the two creators FIGHT: A2 rebuilds
+#                 what validation deleted, NodeStage's own create then hits
+#                 EEXIST and its 3-attempt retry gives up — "RAID bdev did not
+#                 converge after 3 attempts (phantom kept re-appearing)", a
+#                 string the code already has. A remedy that DELETES the other
+#                 creator's object can be undone by that creator.
+#   belted     -> the local-staging belt closes it by REFUSING instead, so
+#                 there is no object to fight over and no cycle to enter.
+# Verdict: the ensure_raid1_bdev change is defence in depth, NOT a prerequisite.
+# ---------------------------------------------------------------------------
+mutation_run FlintReplication FlintReplicationA2AdoptBlind.cfg "A2 adopt, unguarded (NodeStage short-circuits onto A2's composition and inherits serving/writerSet/lineage whole — members chosen by a boot-time snapshot taken while the volume was somebody else's; the F44/F46 adopt-or-mint family by a new road)" "Inv_NoAdoptOfA2Composition"
+mutation_run FlintReplication FlintReplicationA2AdoptValidated.cfg "the VALIDATING fix FLAPS (its remedy is to DELETE the other creator's object, so A2 puts it back and NodeStage's create hits EEXIST — stated as an ORDER not a count, because the count form was answered with build/build/delete and proved nothing)" "Inv_NoValidateFlap"
+strict_run FlintReplication FlintReplicationA2AdoptBelted.cfg "A2 adopt + local-staging belt strict — BOTH theorems armed (the belt closes the adopt by REFUSING rather than deleting, so it cannot buy safety at the price of a create/delete loop; this is the run that had to show that)"
 
 strict_run FlintReplication FlintReplicationRollRecordBarrier.cfg "record-only barrier strict (the implementation's barrier; belt holds safety)"
 strict_run FlintReplication FlintReplicationRollWedged.cfg "wedged-restart strict (kubelet never returns; survivor stays writable)"

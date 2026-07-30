@@ -20,8 +20,9 @@ runao — the three guards PASSED live, and it found F61.**
 > the un-implemented local half from being exercised.
 >
 > **FIXES LANDED 2026-07-29 (986 lib tests, gate 52 → 59 runs).** The raid
-> composition is now a first-class object in the model — `raidHost`,
-> `staged`, `raidSeen`, behind `RaidLifetimeArm` so no pre-F62 run moves —
+> composition is now a first-class object in the model — `raidHost` (since
+> renamed to the SET `raidHosts`; see the A2 note below), `staged`,
+> `raidSeen`, behind `RaidLifetimeArm` so no pre-F62 run moves —
 > and `FlintReplicationRaidLifetime.cfg` reproduces the outage in **four
 > states** from the very cfg that blessed the F61 fix. Three code fixes:
 > **(A1)** `data_path_raid_seen` seeded from ground truth so the escalation
@@ -34,7 +35,67 @@ runao — the three guards PASSED live, and it found F61.**
 > probes `bdev_raid_get_bdevs` on the CONSUMER and requires ≥ 1 configured
 > base (SPDK raid1's own floor — `raid1.c:622`; at zero,
 > `raid_bdev_deconfigure` destroys the bdev, `bdev_raid.c:2069-2074`).
-> The flag stays **OFF** pending a drill-3.14 live gate of all three.
+>
+> **LIVE-GATED 2026-07-29 on runap — drill 3.14 PASSED** with a real
+> `helm upgrade` as the trigger: campaign 646s, converged except one announced
+> refusal, composition intact on the consumer (2 configured bases), refusal
+> surfaced in BOTH an event and the roller log, fence 1 drain, lease 1
+> MaintClear, zero unfenced degrades, 137 samples, db PASS, guest stall **1s**,
+> pg-0 **0 restarts**. Fix B held across three consecutive campaigns on two
+> different consumer nodes. The refusal also **self-clears**: 14s after the
+> consumer left the refused node the roller rolled it unprompted, reaching zero
+> version skew (~95s of write stall for the relocation — no EIO, no PANIC, no
+> restart), which quantifies the B′ interim below.
+>
+> **F63 (found by TLC, fixed same session).**
+> `docs/f63-refusal-hole-marked-node-completion-path.md`: fix B guarded
+> `plan_roll`'s pending-SELECTION path and left the marked-node COMPLETION path
+> untouched, so a consumer relocating in the one-tick window between a node's
+> drain and its pod delete got the pod deleted anyway — F62 through the hole in
+> its own fix. Now `ClearMarks`: not `DeletePod` (that is F62) and not holding
+> the marks (a live roller renews them, parking the drained leg at reduced
+> redundancy forever — the MaintPark lasso re-created by the refusal).
+>
+> **THE FLAG STILL STAYS OFF.** F62 and F63 are closed and live-gated, but a
+> node hosting a consumer still needs manual intervention to roll, so an
+> operator's `helm upgrade` does not fully converge unattended.
+>
+> **A2 IS THE NEXT FIX, NOT B′ — the earlier ranking here was wrong.** See
+> `docs/a2-composition-reconcile.md` (A2 tranche, gate 62 → 68 runs,
+> 2026-07-29). Two reasons, and the second is the serious one:
+>
+> 1. **B′'s cost scales with consumer density.** `local_consumer_nodes` is
+>    node-granular (`.any()`, maint_roll.rs:762-771), so B′ must relocate
+>    EVERY consumer off a node to clear one refusal — N × ~95s sequentially,
+>    or N apps stalling at once in parallel, neither of which is the ≤1
+>    degraded leg `Inv_PlannedRollBoundedImpact` promises. Relocation also
+>    amplifies: the roller advances name-sorted, so a pod evicted off an early
+>    node can land on a later pending one and be evicted again. A2 costs one
+>    tgt restart per NODE regardless of density.
+> 2. **B and B′ cannot reach the path that matters.** Both are properties of a
+>    roller that is OFF BY DEFAULT and which declines to act in that
+>    configuration (`plan_roll` returns `Blocked` when `!on_delete`,
+>    maint_roll.rs:248). The chart emits `updateStrategy: OnDelete` only inside
+>    the `drainRoll.enabled` conditional (node.yaml:13-24), so the shipped
+>    DaemonSet takes k8s's RollingUpdate default: a routine `helm upgrade`
+>    rolls every node pod and kills tgts under live consumers. OOM kills,
+>    kubelet restarts, evictions, node-image upgrades and GitOps syncs arrive
+>    by the same door and none can be refused. `TgtDie` now models this;
+>    unrepaired, `Inv_RaidRecoveryUnreachable` HOLDS — permanently down.
+>
+> **A1 (shipped) is what holds that line today**, which is itself an argument
+> for leaving this flag off rather than rushing it on:
+> `FlintReplicationUncontrolledA1.cfg` recovers the volume where
+> `UncontrolledBlind` cannot.
+>
+> The previous note here — "A2 is modelled only as a one-conjunct relaxation of
+> Assemble's stage guard" — understated it. A2's hazard is a SECOND CREATOR,
+> and while `raidHost` was a scalar that state was unrepresentable, so
+> `RaidReconcile.cfg`'s green was against a hazard TLC could not see. A2 is now
+> a real action with `raidHosts` a SET, and the tranche found that the obvious
+> sole-ownership belt is REFUTED (check-then-act — A2 wins by going first)
+> while the belt that works is the discriminator this doc already named:
+> assemble only where kubelet still believes the volume staged.
 >
 > **F61 (fixed in rc5, keep the fix).** `docs/f61-maint-roll-wedges-on-undrainable-node.md`:
 > `plan_roll` reaches `DeletePod` only via `marked_nodes`, but the drain
