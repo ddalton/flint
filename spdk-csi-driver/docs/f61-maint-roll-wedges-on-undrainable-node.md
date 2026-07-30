@@ -83,6 +83,29 @@ of the nfs pod; here it is a node whose drain legitimately does nothing.
 - The DS never converges: an operator's `helm upgrade` silently never
   finishes on the affected nodes. `kubectl rollout status` is not even
   available as a signal, because OnDelete rolls do not report progress.
+- **It is not "the affected node", it is the WHOLE FLEET** — measured on
+  runap 2026-07-29, which reproduced F61 independently on rc4 with a
+  sharper signature than runao's. `plan_roll` picks `pending.first()` from
+  a name-sorted list and returns `Drain` for it forever, so one
+  undrainable node starves every node behind it in the campaign order:
+
+  ```
+  03:23:19  [MAINT] Maintenance roller started
+  03:23:19  [MAINT] drain pass complete … node=runap-aws-1 drained=0
+  03:24:19  [MAINT] drain pass complete … node=runap-aws-1 drained=0
+  …8 consecutive ticks, one per 60s, same node, zero pods rolled…
+  ```
+
+  All five csi-node pods sat on the previous revision for the whole
+  window while the template said otherwise. `runap-aws-1` happened to be
+  both the alphabetically-first node and the volume's consumer, which is
+  what makes the trace so legible — but the ordering is incidental and
+  any undrainable node blocks everything after it.
+
+  This is also the sharpest argument for the SHAPE of the F62 fix: the
+  refusal must SKIP the node (`RollStep::Refused` + the planner filtering
+  it out of `pending`) rather than block on it. A refusal that blocked
+  would reproduce exactly the trace above with better manners.
 - It is the **wedge the design claimed to retire**. The doc's argument
   against the "delete the Node object to unblock a wedged roll" recipe
   was that "a roll protocol that cannot wedge retires that recipe". This

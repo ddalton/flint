@@ -262,6 +262,34 @@ pub fn plan_roll(view: &RollView) -> RollStep {
             Some(p) if !p.current_rev && view.drain_incomplete.iter().any(|n| n == node) => {
                 RollStep::Drain { node: node.clone() }
             }
+            // F63: the consumer can arrive DURING the roll. This node was
+            // drained and marked while its legs were remotely consumed, and
+            // in the tick since then the consumer relocated ONTO it — so it
+            // now hosts the composition and deleting its pod would destroy
+            // the volume. F62 through the hole in F62's own fix: fix B
+            // filtered the pending-SELECTION path and left this
+            // COMPLETION path untouched, which is reachable in the one-tick
+            // window between a drain and its delete (a spot reclaim,
+            // eviction or reschedule is enough).
+            //
+            // Clearing the marks is the right answer, and the only one.
+            // Deleting the pod is F62. Holding the marks is worse than it
+            // looks: `renew_marks` runs on the blocked/refused paths, so a
+            // LIVE roller would renew this node's suppression forever and
+            // park its already-drained leg at reduced redundancy
+            // permanently — the MaintPark lasso, re-created by the refusal.
+            // So: lift the suppression, let hot-rejoin readmit the leg, and
+            // let the standing Refused report name the node (it is pending
+            // and local, so it appears there on a later tick).
+            //
+            // Found by TLC (FlintReplicationRefusalClears.cfg) within the
+            // hour of fix B being live-gated, via MaintenanceEventuallyLifts
+            // — the exact converse of how F62 was found.
+            Some(p) if !p.current_rev
+                    && view.local_consumer_nodes.iter().any(|n| n == node) =>
+            {
+                RollStep::ClearMarks { node: node.clone() }
+            }
             Some(p) if !p.current_rev => RollStep::DeletePod {
                 pod: p.pod_name.clone(),
                 node: node.clone(),
@@ -1204,6 +1232,44 @@ mod tests {
     }
 
     // ---- F62: refuse the node that hosts the raid composition ------------
+
+    #[test]
+    fn plan_roll_abandons_a_marked_node_the_consumer_moved_onto() {
+        // F63, found by TLC (FlintReplicationRefusalClears.cfg) via
+        // MaintenanceEventuallyLifts, within the hour of fix B being
+        // live-gated. Fix B filtered the pending-SELECTION path; this is the
+        // COMPLETION path, reachable in the one-tick window between a drain
+        // and its pod delete if the consumer relocates onto the node.
+        //
+        // Deleting the pod here is F62 (the composition dies with the tgt).
+        // Holding the marks is the MaintPark lasso (renew_marks runs on the
+        // refused path, so a LIVE roller would suppress this already-drained
+        // leg forever and park the volume at reduced redundancy). The only
+        // correct step is to lift the suppression so hot-rejoin readmits it.
+        let mut v = view(vec![pod("a", false, true)], &["a"], true);
+        v.local_consumer_nodes = vec!["a".to_string()];
+        assert_eq!(
+            plan_roll(&v),
+            RollStep::ClearMarks { node: "a".into() },
+            "a marked node the consumer moved onto must be abandoned (marks lifted), \
+             neither rolled (F62) nor left suppressed forever (parked leg)"
+        );
+    }
+
+    #[test]
+    fn plan_roll_still_deletes_a_marked_node_with_no_consumer_on_it() {
+        // The companion: without the consumer, the marked node completes its
+        // roll exactly as before. Without this the fix above could be a
+        // blanket "never delete a marked pod", which would wedge every roll.
+        let v = view(vec![pod("a", false, true)], &["a"], true);
+        assert_eq!(
+            plan_roll(&v),
+            RollStep::DeletePod {
+                pod: "flint-csi-node-a".into(),
+                node: "a".into()
+            }
+        );
+    }
 
     #[test]
     fn plan_roll_refuses_a_local_consumer_node_instead_of_rolling_it() {

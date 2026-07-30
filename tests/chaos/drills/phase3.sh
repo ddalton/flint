@@ -1573,12 +1573,32 @@ case "$DRILL" in
     done ) &
   SAMP_PID=$!
 
-  # TRIGGER: a benign pod-template change. Under OnDelete k8s will NOT act on
-  # it, so every pod restart from here is the roller's deliberate act.
-  kubectl patch ds -n "$DRIVER_NS" flint-csi-node --type=merge \
-    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"flint.io/drill-314\":\"$T0\"}}}}}" >/dev/null \
-    || fail "3.14: could not patch the DS pod template (the roll trigger)"
-  note "DS pod template patched at 0s — new revision pending; OnDelete means only the roller can act"
+  # TRIGGER. Under OnDelete k8s will NOT act on a template change, so every
+  # pod restart from here is the roller's deliberate act either way.
+  #
+  # Set MAINT_ROLL_UPGRADE=<image-tag> to trigger with a REAL `helm upgrade`,
+  # which is strictly the better gate and the one an operator actually runs.
+  # It adds four things the annotation patch cannot: a real image change; a
+  # CONTROLLER RESTART mid-campaign (the controller Deployment is
+  # RollingUpdate, so the roller dies and must resume driving the DS from
+  # observable state alone — the level-triggered resumability claim, otherwise
+  # never exercised); convergence from a possibly MIXED fleet; and it is the
+  # exact operation that has tripped this landmine since v1.10.0, so a pass
+  # means something outside the harness. MAINT_ROLL_CHART must point at the
+  # chart to upgrade from (the published 1.21.0 predates the drainRoll flag).
+  if [ -n "${MAINT_ROLL_UPGRADE:-}" ]; then
+    : "${MAINT_ROLL_CHART:?3.14: MAINT_ROLL_UPGRADE needs MAINT_ROLL_CHART=<path-or-oci-ref>}"
+    note "trigger = REAL helm upgrade to image tag ${MAINT_ROLL_UPGRADE} (chart ${MAINT_ROLL_CHART})"
+    helm upgrade flint-csi "$MAINT_ROLL_CHART" -n "$DRIVER_NS" --reuse-values \
+      --set "images.flintCsiDriver.tag=${MAINT_ROLL_UPGRADE}" --wait --timeout 5m >/dev/null 2>&1 \
+      || fail "3.14: helm upgrade to ${MAINT_ROLL_UPGRADE} failed (the roll trigger)"
+    note "helm upgrade landed at $(( $(epoch) - T0 ))s — new DS revision pending; OnDelete means only the roller can act"
+  else
+    kubectl patch ds -n "$DRIVER_NS" flint-csi-node --type=merge \
+      -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"flint.io/drill-314\":\"$T0\"}}}}}" >/dev/null \
+      || fail "3.14: could not patch the DS pod template (the roll trigger)"
+    note "DS pod template patched at 0s — new revision pending; OnDelete means only the roller can act"
+  fi
 
   # Wait for the campaign: every node pod on a single NEW revision hash.
   ROLL_BUDGET=${ROLL_BUDGET:-900}
@@ -1599,8 +1619,16 @@ case "$DRILL" in
     #   full      — one new revision, every pod Ready (no local consumer)
     #   refused   — the roller announced its refusals and everything else
     #               converged (Ready), the rest of the fleet on the new rev
-    REFUSED_EV=$(kubectl get events -A --field-selector reason=MaintenanceNodeRefused \
-                 -o name 2>/dev/null | wc -l | tr -d ' ')
+    # WINDOWED to this run. An unwindowed count is a trap: k8s keeps events
+    # for an hour, so a second 3.14 on the same cluster sees the FIRST run's
+    # refusals, fires this condition on iteration 1, and declares the campaign
+    # complete at ~2 minutes while it is still rolling. That is exactly what
+    # runap's run 2 did — the same species of bug as the UNFENCED predicate
+    # above: stale state from a previous run leaking into the measurement.
+    REFUSED_EV=$(kubectl get events -A --field-selector reason=MaintenanceNodeRefused -o json 2>/dev/null \
+                 | jq --arg t "$(rfc3339 "$T0")" '[.items[]
+                     | select(((.lastTimestamp // .eventTime // "") >= $t))] | length' 2>/dev/null)
+    REFUSED_EV=${REFUSED_EV:-0}
     if [ "$NH" = "1" ] && [ "$H" != "$PRE_HASHES" ] && [ "$READY" = "$TOT" ]; then
       T_DONE=$(( $(epoch) - T0 )); ROLL_END="full"; break
     fi
@@ -1623,8 +1651,11 @@ case "$DRILL" in
   [ "$LOCALWARN" = "0" ] && LOCALWARN=$(kubectl get events -A --field-selector reason=MaintenanceLocalConsumer \
     -o jsonpath='{range .items[*]}{.involvedObject.name}{" "}{end}' 2>/dev/null | wc -w | tr -d ' ')
   # F62 fix B: the refusal, and the pod delete it must have prevented.
-  REFUSEDN=$(kubectl get events -A --field-selector reason=MaintenanceNodeRefused \
-    -o name 2>/dev/null | wc -l | tr -d ' ')
+  # Windowed for the same reason as the completion check above.
+  REFUSEDN=$(kubectl get events -A --field-selector reason=MaintenanceNodeRefused -o json 2>/dev/null \
+    | jq --arg t "$(rfc3339 "$T0")" '[.items[]
+        | select(((.lastTimestamp // .eventTime // "") >= $t))] | length' 2>/dev/null)
+  REFUSEDN=${REFUSEDN:-0}
   REFUSED_LOG=$(grep -c "roll campaign complete except" "$CLOG" || true)
   # Did the roller delete the pod on the node hosting the composition? That
   # single line IS F62 — every other symptom is downstream of it.
@@ -1639,10 +1670,26 @@ case "$DRILL" in
     | jq '[.result[]?.base_bdevs_list[]? | select(.is_configured==true)] | length' 2>/dev/null)
   POST_RAID_BASES=${POST_RAID_BASES:-0}
 
-  # UNFENCED DEGRADE: any sample at reduced base with ZERO live maint marks.
-  # That is the raid discovering a member went silent — exactly what the
-  # fence must make impossible on the nodes it covers.
-  UNFENCED=$(awk -F'\t' 'NR>1 && $2!="base=2/2" && $2!="none" && $3=="0"' "$SAMP" | wc -l | tr -d ' ')
+  # UNFENCED DEGRADE: the raid short a base while the RECORD claims every leg
+  # in_sync and no live mark explains it. That is the raid discovering a member
+  # went silent — what the fence must make impossible on the nodes it covers.
+  #
+  # The `$4=="2"` term is load-bearing and was missing on runap's first run,
+  # which reported 40 "unfenced" samples that were all legitimate. A drain
+  # lifts its mark at pod-Ready (MaintClear exists precisely so readmission
+  # CAN proceed), but readmission itself takes a catch-up plus a rejoin window
+  # — 222s here. Every sample in that gap is reduced-base with no mark, and
+  # every one of them is CORRECT: the record said in_sync=1 throughout, so the
+  # missing base was fully accounted for.
+  #
+  # Worth recording why runao's runs passed the looser predicate: there the
+  # roll DESTROYED the raid, so the sampler recorded `base=none`, which this
+  # check excludes. The pre-fix bug was masking the harness bug — the check
+  # only became reachable once the volume started surviving the campaign.
+  #
+  # Comparing ground truth against the record, rather than against a mark, is
+  # the same discipline F62b forced on the barrier itself.
+  UNFENCED=$(awk -F'\t' 'NR>1 && $2!="base=2/2" && $2!="none" && $3=="0" && $4=="2"' "$SAMP" | wc -l | tr -d ' ')
   MARKED_MAX=$(awk -F'\t' 'NR>1 && $3>m {m=$3} END{print m+0}' "$SAMP")
   MIN_SYNC=$(awk -F'\t' 'NR>1 && $4!="" {if(n==0||$4<m){m=$4}; n++} END{print (n?m:-1)}' "$SAMP")
 

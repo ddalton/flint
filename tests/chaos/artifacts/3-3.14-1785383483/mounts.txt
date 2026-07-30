@@ -1,0 +1,4 @@
+runap-aws-1 globalmounts=0 orphans=''
+runap-aws-2 globalmounts=1 orphans=''
+runap-aws-3 globalmounts=1 orphans=''
+runap-aws-4 globalmounts=1 orphans=''
