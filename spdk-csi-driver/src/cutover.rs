@@ -284,6 +284,31 @@ pub fn data_path_verdict(
     DataPathAction::Hold
 }
 
+/// Is the IN-PLACE repair due this tick? Pure companion to
+/// `data_path_verdict`, and deliberately a SEPARATE threshold from it.
+///
+/// The two actions cost different things, so they should not share a
+/// confirmation count:
+///
+///   repair (this) — rebuild the raid chain in place. Idempotent, no consumer
+///     disruption, serialised against NodeStage/NodeUnstage by the per-volume
+///     lock, and refused outright unless kubelet still has the volume staged
+///     on this node. Cheap enough to attempt one tick sooner.
+///   flag (`data_path_verdict`) — hand the volume to the controller's
+///     data-path arm, which can end in a pod bounce. Keeps the extra tick.
+///
+/// Not zero-threshold: at one strike this is the in-flight-stage race (the VA
+/// legitimately precedes the raid). The lock makes that safe rather than
+/// corrupting, but the repair would be pointless work, so hold one tick.
+pub fn repair_due(
+    attached_here: bool,
+    raid_present: bool,
+    strikes_with_this: u32,
+    threshold: u32,
+) -> bool {
+    attached_here && !raid_present && strikes_with_this >= threshold
+}
+
 /// First-observation visibility for a total data-path collapse (7b-3 P1).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CollapseEvent {
@@ -1961,6 +1986,34 @@ mod tests {
         assert_eq!(data_path_verdict(true, false, false, 3, 3), DataPathAction::Flag);
         // Already flagged by us: nothing to re-do.
         assert_eq!(data_path_verdict(true, false, true, 5, 3), DataPathAction::Hold);
+    }
+
+    #[test]
+    fn repair_fires_a_tick_before_the_flag() {
+        // THE ASYMMETRY, pinned (2026-07-30). The in-place repair and the
+        // controller-side flag must NOT share a confirmation count: the repair
+        // is idempotent, lock-serialised and staged-here-gated, while the flag
+        // can end in a pod bounce. Shipped thresholds are 2 and 3.
+        const REPAIR: u32 = 2;
+        const FLAG: u32 = 3;
+        assert!(REPAIR < FLAG, "the cheap action must not wait on the expensive one");
+
+        // One strike is the in-flight-stage race — neither acts.
+        assert!(!repair_due(true, false, 1, REPAIR));
+        assert_eq!(data_path_verdict(true, false, false, 1, FLAG), DataPathAction::Hold);
+
+        // Two strikes: repair, and DO NOT flag. This is the whole point — the
+        // volume gets its raid back without the controller bouncing anything.
+        assert!(repair_due(true, false, 2, REPAIR));
+        assert_eq!(data_path_verdict(true, false, false, 2, FLAG), DataPathAction::Hold);
+
+        // Three: the repair evidently did not stick, so escalate as well.
+        assert!(repair_due(true, false, 3, REPAIR));
+        assert_eq!(data_path_verdict(true, false, false, 3, FLAG), DataPathAction::Flag);
+
+        // Healed, or not ours: never repair.
+        assert!(!repair_due(true, true, 9, REPAIR), "raid present — nothing to rebuild");
+        assert!(!repair_due(false, false, 9, REPAIR), "not attached here — not ours");
     }
 
     #[test]

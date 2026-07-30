@@ -313,10 +313,15 @@ impl NodeAgent {
             let mut monitor_interval = interval(Duration::from_secs(60));
             // Contract R5: each sub-pass runs under its own budget so one
             // wedged pass (a hung bdev_wait_for_examine, a stuck repair)
-            // skips THIS tick instead of stalling the other eight passes and
+            // skips THIS tick instead of stalling the other passes and
             // every future tick — the 60s tier used to be a single stall
-            // point. Default is generous (detect_lost_data_paths drives a
-            // legitimate ~3min inline nvmeof repair); bounded beats tight.
+            // point.
+            //
+            // The generous default is sized for the CROSS-NODE passes, whose
+            // per-call ceiling is the node-agent HTTP timeout
+            // (FLINT_NODE_AGENT_HTTP_TIMEOUT_SECS, also 300s): one
+            // unreachable peer can legitimately consume most of a pass, and
+            // the pass is idempotent, so it retries next tick.
             let pass_budget = Duration::from_secs(
                 std::env::var("FLINT_MONITOR_PASS_TIMEOUT_SECS")
                     .ok()
@@ -324,17 +329,39 @@ impl NodeAgent {
                     .filter(|&s| s > 0)
                     .unwrap_or(300),
             );
-            macro_rules! bounded_pass {
-                ($name:literal, $fut:expr) => {
-                    match tokio::time::timeout(pass_budget, $fut).await {
+            // ...but the purely-LOCAL passes talk only to this node's
+            // spdk-tgt over its unix socket, so 300s there is not a bound at
+            // all — it is 300s of the tick handed to a hung local RPC. And a
+            // hung local spdk-tgt is precisely the condition these ticks
+            // matter in. Tight budget, same skip-and-retry semantics.
+            let local_budget = Duration::from_secs(
+                std::env::var("FLINT_MONITOR_LOCAL_PASS_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|&s| s > 0)
+                    .unwrap_or(30),
+            );
+            macro_rules! bounded_pass_with {
+                ($budget:expr, $name:literal, $fut:expr) => {
+                    match tokio::time::timeout($budget, $fut).await {
                         Err(_) => warn!(
                             pass = $name,
-                            budget_secs = pass_budget.as_secs(),
+                            budget_secs = $budget.as_secs(),
                             "[MONITOR] Sub-pass exceeded its budget — skipped this tick, next tick retries"
                         ),
                         Ok(Err(e)) => warn!(error = %e, pass = $name, "[MONITOR] Sub-pass failed (non-fatal)"),
                         Ok(Ok(())) => {}
                     }
+                };
+            }
+            macro_rules! bounded_pass {
+                ($name:literal, $fut:expr) => {
+                    bounded_pass_with!(pass_budget, $name, $fut)
+                };
+            }
+            macro_rules! bounded_local_pass {
+                ($name:literal, $fut:expr) => {
+                    bounded_pass_with!(local_budget, $name, $fut)
                 };
             }
             // F11 store-loss strikes: lvs_name → consecutive missing ticks.
@@ -345,14 +372,89 @@ impl NodeAgent {
             loop {
                 monitor_interval.tick().await;
                 bounded_pass!("reconcile_replica_targets", monitor_agent.reconcile_replica_targets());
-                bounded_pass!("check_store_health", monitor_agent.check_store_health(&mut store_strikes));
+                bounded_local_pass!("check_store_health", monitor_agent.check_store_health(&mut store_strikes));
                 bounded_pass!("rehydrate_exports", monitor_agent.rehydrate_exports_from_ground_truth());
-                bounded_pass!("monitor_raid_health", monitor_agent.monitor_raid_health());
+                bounded_local_pass!("monitor_raid_health", monitor_agent.monitor_raid_health());
                 bounded_pass!("orphan_sweep", monitor_agent.orphan_sweep());
                 bounded_pass!("sweep_orphan_nfs_mounts", monitor_agent.sweep_orphan_nfs_mounts());
-                bounded_pass!("detect_lost_data_paths", monitor_agent.detect_lost_data_paths());
+                // NOTE: detect_lost_data_paths deliberately does NOT run here
+                // any more — it has its own task below.  See that comment for
+                // why sharing this chain starved it.
                 bounded_pass!("reap_dead_controllers", monitor_agent.reap_dead_controllers());
                 bounded_pass!("reap_orphan_initiator_sessions", monitor_agent.reap_orphan_initiator_sessions());
+            }
+        });
+
+        // ===================================================================
+        // THE DATA-PATH DETECTOR GETS ITS OWN TASK, and the reason is a
+        // starvation path found while auditing why F62 did not self-heal on
+        // runao (2026-07-30).
+        //
+        // It used to be the SEVENTH of nine sequential passes in the loop
+        // above, and its in-place repair needs THREE consecutive ticks of
+        // strikes before it fires.  Two things compound there:
+        //
+        //   1. Everything ahead of it had the same 300s budget, and the two
+        //      heaviest (reconcile_replica_targets, rehydrate_exports) make
+        //      CROSS-NODE RPCs whose own client timeout is also 300s — so
+        //      they stall longest exactly when a peer's tgt is dead or
+        //      mid-roll, which is exactly when a data path needs repairing.
+        //   2. `interval` cannot make the loop reentrant: the next tick
+        //      cannot start until all nine passes return.  So the STRIKE
+        //      CADENCE was the whole loop's duration, not 60s — and moving
+        //      the pass earlier in the chain would not have fixed that.
+        //      Three strikes is nominally ~3 minutes; behind a couple of
+        //      stalled cross-node passes it is tens of minutes.
+        //
+        // On its own interval, strike cadence is 60s regardless of what the
+        // rest of the agent is doing.  Concurrency is safe on the same terms
+        // the HTTP handlers already rely on: `repair_data_path` takes the
+        // per-volume lock (`node_volume_locks::acquire`), so it serialises
+        // against NodeStage/NodeUnstage rather than racing them, and it
+        // refuses outright unless kubelet still has the volume staged here
+        // (`is_staged_here`).
+        //
+        // This does not make the volume-count scaling free: the pass is still
+        // serial across volumes within a tick. It removes the coupling to
+        // UNRELATED work, which is what was pushing the repair past the point
+        // of being useful.
+        // ===================================================================
+        let detector_agent = Arc::new(self.clone());
+        let detector_task = tokio::spawn(async move {
+            let mut detector_interval = interval(Duration::from_secs(
+                std::env::var("FLINT_DATA_PATH_DETECT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|&s| s > 0)
+                    .unwrap_or(60),
+            ));
+            // A repair is allowed to take a while — the inline nvmeof path is
+            // legitimately ~3min — but it must not become an unbounded stall
+            // point now that nothing else shares this task.
+            let detect_budget = Duration::from_secs(
+                std::env::var("FLINT_MONITOR_PASS_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|&s| s > 0)
+                    .unwrap_or(300),
+            );
+            // The startup rehydrate below seeds the collapse detector; skip
+            // the immediate tick so the first real pass sees a seeded set.
+            detector_interval.tick().await;
+            loop {
+                detector_interval.tick().await;
+                match tokio::time::timeout(detect_budget, detector_agent.detect_lost_data_paths())
+                    .await
+                {
+                    Err(_) => warn!(
+                        budget_secs = detect_budget.as_secs(),
+                        "[DATA_PATH] detector exceeded its budget — skipped this tick, next tick retries"
+                    ),
+                    Ok(Err(e)) => {
+                        warn!(error = %e, "[DATA_PATH] detector pass failed (non-fatal)")
+                    }
+                    Ok(Ok(())) => {}
+                }
             }
         });
 
@@ -433,6 +535,9 @@ impl NodeAgent {
             }
             _ = monitor_task => {
                 info!("[NODE_AGENT] Monitor task stopped");
+            }
+            _ = detector_task => {
+                info!("[NODE_AGENT] Data-path detector task stopped");
             }
             _ = loss_task => {
                 info!("[NODE_AGENT] Export loss-detector task stopped");
@@ -5360,7 +5465,33 @@ impl NodeAgent {
             let repair_enabled = !std::env::var("FLINT_DATA_PATH_REPAIR")
                 .map(|v| v.eq_ignore_ascii_case("disabled"))
                 .unwrap_or(false);
-            if repair_enabled && attached && !raid_present && strikes_with_this >= 3 {
+            // REPAIR threshold is deliberately LOWER than the FLAG threshold
+            // below (2 vs 3), because the two actions cost different things.
+            // This one rebuilds the raid chain in place: idempotent, no
+            // consumer disruption, serialised against NodeStage/NodeUnstage by
+            // the per-volume lock inside repair_data_path, and refused
+            // outright unless kubelet still has the volume staged here
+            // (is_staged_here — which is what makes a lingering mid-detach VA
+            // safe). Flagging, by contrast, hands the volume to the
+            // controller's data-path arm and can end in a pod bounce, so it
+            // keeps the extra confirmation tick.
+            //
+            // One strike would be the in-flight-stage race (raid not created
+            // yet); the lock makes that safe rather than corrupting, but the
+            // repair would be pointless work, so hold one tick.
+            let repair_strikes: u32 = std::env::var("FLINT_DATA_PATH_REPAIR_STRIKES")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&s| s > 0)
+                .unwrap_or(2);
+            if repair_enabled
+                && crate::cutover::repair_due(
+                    attached,
+                    raid_present,
+                    strikes_with_this,
+                    repair_strikes,
+                )
+            {
                 match self.repair_data_path(&pv, &csi.volume_handle).await {
                     Ok(()) => {
                         info!(volume_id = %pv_name, "[DATA_PATH] In-place repair succeeded — raid rebuilt, export restored, kernel reattaches");
