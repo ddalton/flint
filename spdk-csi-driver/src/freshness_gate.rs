@@ -119,6 +119,26 @@ impl LegAvailability {
     }
 }
 
+/// Is this assembly headed for the single-survivor DIRECT SERVE branch —
+/// `min_required = 1`, no raid layer, `flint.io/degraded-direct` stamped?
+///
+/// Pure so the arithmetic is pinned by test rather than read off a 700-line
+/// async function. `rescuable_stale` is the count of record-Stale legs the
+/// forced-stale admission further down could still admit, so a volume that
+/// will be rescued does not buy a defer it does not need.
+///
+/// When this holds, driver.rs corroborates the unavailable legs as writers
+/// whatever the sync record says — the record cannot be trusted for this
+/// question, because `mark_stale` prunes a leg from the writer set and after
+/// one loss the gate has nothing left to defer FOR.
+pub fn headed_for_direct_serve(
+    total_replicas: usize,
+    attached_bases: usize,
+    rescuable_stale: usize,
+) -> bool {
+    total_replicas > 1 && attached_bases + rescuable_stale < 2
+}
+
 /// The gate. `missing` is the set of recorded/corroborated writer legs that
 /// did not attach this tick; `deadline_passed` is the persisted wall-clock
 /// defer bound (driver.rs owns the annotation).
@@ -430,5 +450,51 @@ mod tests {
         // Corrupt deadline reads as passed — bounded, never an indefinite
         // outage.
         assert!(deadline_passed("not-a-time", "2026-07-21T10:00:00Z"));
+    }
+
+    #[test]
+    fn direct_serve_predicate_fires_only_where_the_degrade_would() {
+        // 2 of 2 attached: the healthy case, no corroboration wanted.
+        assert!(!headed_for_direct_serve(2, 2, 0));
+        // 1 of 2 attached and nothing to rescue it: THIS is the degrade —
+        // min_required = 1, no raid layer, flint.io/degraded-direct.
+        assert!(headed_for_direct_serve(2, 1, 0));
+        // 1 attached but a record-Stale leg the forced-stale admission can
+        // still admit: it reaches 2 bases, so buying a defer here would be a
+        // pure availability cost for no safety.
+        assert!(!headed_for_direct_serve(2, 1, 1));
+        // Single-replica volumes have no peer to wait for and no redundancy
+        // to lose — never corroborate, never defer.
+        assert!(!headed_for_direct_serve(1, 1, 0));
+        assert!(!headed_for_direct_serve(1, 0, 0));
+        // Three legs down to one, nothing rescuable: still the degrade.
+        assert!(headed_for_direct_serve(3, 1, 0));
+        assert!(!headed_for_direct_serve(3, 2, 0));
+    }
+
+    #[test]
+    fn corroborated_writer_on_a_ready_node_defers_rather_than_degrading() {
+        // The end-to-end shape of the 2026-07-30 fix: a leg whose absence
+        // would force the direct serve is corroborated as a writer, and its
+        // node being Ready is TRANSIENT — so the gate defers instead of
+        // silently serving one leg with no raid layer.
+        let cfg = GateConfig::default();
+        let missing = vec![MissingWriter {
+            lvol_uuid: "uuid-b".into(),
+            node_name: "node-b".into(),
+            availability: LegAvailability::NodeReady,
+        }];
+        assert_eq!(evaluate(&missing, false, &cfg), GateDecision::Defer);
+        // Bound expired: serve, with the risk surfaced. A transient absence
+        // must never become an unbounded outage — that is the F61 livelock
+        // class by another road.
+        assert_eq!(evaluate(&missing, true, &cfg), GateDecision::ServeWithRisk);
+        // Genuinely gone: no wait at all, serve and surface.
+        let gone = vec![MissingWriter {
+            lvol_uuid: "uuid-b".into(),
+            node_name: "node-b".into(),
+            availability: LegAvailability::NodeGone,
+        }];
+        assert_eq!(evaluate(&gone, false, &cfg), GateDecision::ServeWithRisk);
     }
 }

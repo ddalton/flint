@@ -1873,14 +1873,28 @@ impl SpdkCsiDriver {
         // heal an excluded replica, so legacy behavior (attach everything,
         // warn on stale admission) is the lesser hazard.
         let store = catchup::KubeStore { client: self.kube_client.clone() };
+        // FAIL CLOSED on a load ERROR, best-effort only on ABSENCE (2026-07-30).
+        // These were collapsed to `None` together, and they are not the same
+        // thing. No record is a legitimate legacy/no-epoch volume — proceed.
+        // An UNREADABLE record is an API blip, and treating it as "no record"
+        // empties `writer_uuids`, which empties `missing`, which returns
+        // GateDecision::Proceed with no evidence consulted at all — one
+        // inconsistent read silently disabling the whole F36c gate, straight
+        // through to `min_required = 1` and a single-survivor direct serve.
+        //
+        // The neighbouring marker fetch already fails closed for exactly this
+        // reason ("an API blip must not read as 'no marker'", C5); this is the
+        // same hazard one read earlier, and was the only one of the pair left
+        // open.
         let record = match store.load(&record_volume_id).await {
             Ok(r) => r,
             Err(e) => {
-                println!(
-                    "⚠️ [DRIVER] Cannot load replica sync record for {} (staging without it): {}",
-                    record_volume_id, e
-                );
-                None
+                return Err(format!(
+                    "replica sync record for {record_volume_id} unreadable ({e}) — refusing to \
+                     assemble rather than proceed with the freshness gate silently disabled; \
+                     kubelet retries"
+                )
+                .into());
             }
         };
         let enforce = record.as_ref().map(|r| !r.epochs.is_empty()).unwrap_or(false);
@@ -2100,6 +2114,53 @@ impl SpdkCsiDriver {
             for (r, reason) in &unavailable_replicas {
                 if gate::is_claim_blocked(reason) && !writer_uuids.contains(&r.lvol_uuid) {
                     writer_uuids.push(r.lvol_uuid.clone());
+                }
+            }
+
+            // DEGRADED-DIRECT CORROBORATION (2026-07-30). Same idiom, second
+            // reason: this assembly is headed for the single-survivor DIRECT
+            // SERVE branch below — `min_required = 1`, no raid layer at all,
+            // `flint.io/degraded-direct` stamped, redundancy gone and the
+            // absent leg genuinely divergent from the next write on. That is
+            // the exact outcome F36c exists to prevent, so a leg whose absence
+            // would CAUSE it is corroborated as a writer whatever the record
+            // says.
+            //
+            // Why the record cannot be trusted here specifically: `mark_stale`
+            // prunes the leg from the writer set (replica_sync.rs), and its own
+            // comment names it as the only such path besides the wholesale
+            // assembly stamp. So after one loss the leg is gone from the set,
+            // and the gate has nothing left to defer FOR — it proceeds with an
+            // empty `missing` straight into the degrade. During a rolling
+            // upgrade the second node can arrive before any re-assembly
+            // re-stamps the set.
+            //
+            // Deliberately NOT a new deadline: this feeds the EXISTING gate, so
+            // the 180s bound, the re-arm-only-on-strict-progress rule and the
+            // oscillation carry are the ones already there. A second timer for
+            // a question F36c owns would be the setter/reader asymmetry this
+            // file congratulates itself on having eliminated.
+            //
+            // Predicate is the honest one: below two bases even AFTER the
+            // forced-stale admission further down could rescue us (it admits
+            // from `excluded_stale`). A permanently-gone leg still reaches
+            // ServeWithRisk and serves — this buys a bounded wait for a
+            // TRANSIENTLY absent one, and surfaces the risk either way.
+            let headed_for_direct_serve = gate::headed_for_direct_serve(
+                replicas.len(),
+                base_bdevs.len(),
+                excluded_stale.len(),
+            );
+            if headed_for_direct_serve {
+                for (r, _) in &unavailable_replicas {
+                    if !writer_uuids.contains(&r.lvol_uuid) {
+                        println!(
+                            "🔎 [DRIVER] F36c: corroborating {} on {} as a writer — its absence \
+                             would force a single-survivor direct serve",
+                            r.lvol_uuid, r.node_name
+                        );
+                        writer_uuids.push(r.lvol_uuid.clone());
+                    }
                 }
             }
 
