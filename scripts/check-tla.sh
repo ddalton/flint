@@ -317,20 +317,37 @@
 #      — supplies the second host afterwards.  TLC must still FIND the
 #      violation.  Kept as a run so the refutation is standing evidence
 #      rather than a paragraph of reasoning in a design note.
-#   13j. FlintReplicationA2Staging.cfg  THE DELIVERABLE, strict.  A2
-#      assembles only where kubelet ALSO still believes the volume staged.
-#      That is the discriminator the F62 analysis named and then did not
-#      use: a class-3 destroyer is DEFINED by leaving `staged` alone and a
-#      relocation is DEFINED by clearing it, so this admits exactly the case
-#      A2 exists for and refuses exactly the case that manufactures a
-#      phantom — no cluster-wide probe, no lease, no superblock, nothing
-#      remembered across the restart.  A2 leaves staged/stagedAt UNTOUCHED
-#      (a node agent re-creating an SPDK object does not participate in
-#      kubelet's bookkeeping); an earlier draft had it write stagedAt' =
-#      vaNode, which would let A2 satisfy this very belt with its own
-#      previous action.  NON-VACUITY: FlintA2ProbeFires.cfg must VIOLATE
-#      ProbeA2WouldHaveFired, proving the dangerous situation is reachable
-#      and the belt is what refuses it.
+#   13j. FlintReplicationA2Staging.cfg  ⚠️ RELABELLED 2026-07-30 — NOT a
+#      test of A2.  It was headed THE DELIVERABLE and cited for the
+#      local-staging belt.  AgentBootReconcile fires ZERO times in it, over
+#      the COMPLETE state graph (7,375,538 generated / 1,261,953 distinct /
+#      0 left on queue).  Verified directly: ProbeA2Fires == a2Created = {}
+#      HOLDS, and a2Created has exactly one writer.
+#        WHY: A2 answers a CLASS-3 destroyer, which by definition leaves
+#      kubelet's `staged` belief SET, and the belt requires exactly that.
+#      This cfg pins UncontrolledTgtDeath = FALSE, so the only reachable
+#      destroyers are the ones that CLEAR staging.  Belt precondition and
+#      available destroyers were mutually exclusive: unsatisfiable by
+#      construction, not merely unexercised.
+#        HOW IT GOT PAST A PROBE THAT EXISTED FOR THIS: the old probe
+#      (ProbeA2WouldHaveFired) tests whether the NAIVE guard becomes
+#      satisfiable, i.e. whether the SITUATION arises.  It does not test
+#      whether the BELTED ACTION fires.  Those differ exactly where it
+#      matters, because the naive guard wants vaNode # VaTruth and the belt
+#      refuses precisely that.  A non-vacuity probe must name the ACTION.
+#        What this run still honestly proves: the four roll theorems hold
+#      under a roller with the A2 constant set.  A statement about the
+#      ROLLER, not about A2.
+#   13j'. FlintReplicationA2Armed.cfg + FlintA2ProbeArmed.cfg  THE PAIR THAT
+#      REPLACES IT.  One constant differs (UncontrolledTgtDeath = TRUE) and
+#      MaintEnabled = FALSE, which is the SHIPPED DEFAULT path — OnDelete is
+#      emitted only inside the drainRoll conditional, default false — and
+#      which makes the roll theorems vacuous rather than suppressed.  The
+#      belt HOLDS over the complete graph and the probe VIOLATES in three
+#      states (Init -> TgtDie -> AgentBootReconcile).
+#        THE STANDING RULE: no cfg may claim to exercise A2 without a paired
+#      ProbeA2Fires run the gate requires TLC to VIOLATE.  A green safety
+#      run and its non-vacuity probe prove nothing apart.
 #   13k-m. FlintReplicationUncontrolled{Blind,A1,A2}.cfg  THE DESTROYER
 #      NOBODY CAN REFUSE.  Until now class-3 destruction lived ONLY inside
 #      RollStart, gated on the roller's own arms — so every F62/F63 run was
@@ -562,12 +579,14 @@ strict_run FlintReplication FlintReplicationMobileStrict.cfg "mobile-consumer st
 # ---------------------------------------------------------------------------
 mutation_run FlintReplication FlintReplicationA2Naive.cfg "A2 naive (the only input the implementation has is the VA, and node_agent.rs:3219 documents the ublk reaper's reason for existing as cleaning up what a STALE VA made it rebuild — here the same staleness assembles a raid on a node the consumer has left, in 4 states)" "Inv_A2AssemblesOnlyAtTruth"
 mutation_run FlintReplication FlintReplicationA2SoleOwner.cfg "A2 + sole-ownership belt (the belt everyone reaches for first, REFUTED: it is check-then-act, so A2 defeats it by going FIRST and the legitimate NodeStage supplies the second host afterwards)" "Inv_A2AssemblesOnlyAtTruth"
-strict_run FlintReplication FlintReplicationA2Staging.cfg "A2 + local-staging belt strict — THE DELIVERABLE (assemble only where kubelet still believes the volume staged: admits exactly the class-3 death A2 exists for, refuses exactly the relocation that manufactures a phantom, with no cluster-wide probe and nothing remembered; the dangerous situation verified REACHABLE via FlintA2ProbeFires.cfg so the belt is doing real work)"
+strict_run FlintReplication FlintReplicationA2Staging.cfg "the roll theorems with the A2 arm set — NOT a test of A2 (RELABELLED 2026-07-30: this run was headed THE DELIVERABLE and cited for the local-staging belt, but AgentBootReconcile fires ZERO times in it over the complete 1,261,953-state graph — UncontrolledTgtDeath=FALSE leaves only destroyers that CLEAR staging, while the belt requires staging SET, so the guard is unsatisfiable by construction. What it still honestly proves is that the four roll theorems hold under a roller with the A2 constant set)"
+strict_run FlintReplication FlintReplicationA2Armed.cfg "A2 + local-staging belt strict, ACTUALLY EXERCISED — the run A2Staging was supposed to be (UncontrolledTgtDeath=TRUE arms the class-3 death the belt exists to admit; MaintEnabled=FALSE because the SHIPPED DEFAULT path has no roller, which also makes the roll theorems vacuous rather than suppressed. Safety only: the two liveness properties are dropped, one vacuous without a roller and temporal checking being ~94% of the flagship run's cost)"
+mutation_run FlintA2Probe FlintA2ProbeArmed.cfg "A2-fires non-vacuity probe for A2Armed (a2Created has exactly ONE writer, so a violation is a witness that AgentBootReconcile really executes: Init -> TgtDie -> AgentBootReconcile. THE STANDING RULE — no cfg may claim to exercise A2 without this pairing, because a green safety run and its non-vacuity probe prove nothing apart)" "ProbeA2Fires"
 
 # The destroyer nobody can refuse, A/B/C.  The green run is the indictment.
 strict_run FlintReplication FlintReplicationUncontrolledBlind.cfg "uncontrolled tgt death, UNREPAIRED (a routine helm upgrade in the DEFAULT configuration; Inv_RaidRecoveryUnreachable HOLDS = the volume can never come back, and the tgt death is verified REACHABLE via FlintA2ProbeDeath.cfg so the green is a real permanent outage and not a vacuous one)"
 mutation_run FlintReplication FlintReplicationUncontrolledA1.cfg "uncontrolled tgt death repaired by A1 (ALREADY SHIPPED, and in the default configuration the only thing standing between a routine helm upgrade and a permanent outage — fixes B and B' cannot reach this path)" "Inv_RaidRecoveryUnreachable"
-mutation_run FlintReplication FlintReplicationUncontrolledA2.cfg "uncontrolled tgt death repaired by A2 with MaxBounces=0 (no bounce, no pod delete, no unstage: the consumer is never disrupted, and the cost is one tgt restart per NODE regardless of consumer density — where B' costs one relocation per CONSUMER POD)" "Inv_RaidRecoveryUnreachable"
+mutation_run FlintReplication FlintReplicationUncontrolledA2.cfg "uncontrolled tgt death recovered with the A2 arm set — ⚠️ CONFOUNDED A/B, DO NOT CITE AS 'A2 RECOVERS' (2026-07-30: the required violation is produced by Assemble, not AgentBootReconcile — trace Init -> TgtDie -> Assemble. FlintReplication.tla:1633 is (RaidLifetimeArm => (~staged \\/ RaidReconcileArm)), so the A2 constant ALSO relaxes ordinary NodeStage on a still-staged volume and the A/B against UncontrolledBlind moves two things at once. The credited recoverer is the stronger, UNBELTED one. De-confounding this needs a separate constant for the staged-reassemble relaxation — owed, tracked in the A2 doc)" "Inv_RaidRecoveryUnreachable"
 mutation_run FlintReplication FlintReplicationUncontrolledStrike.cfg "the SHIPPED periodic repair suffices — the run that corrected this tranche (A1 off, A2 off, zero bounces: detect_lost_data_paths -> repair_data_path needs NO seeded state, so UncontrolledBlind's green scopes to the COLLAPSE-DETECTOR path only and never to the shipped world; note repair_data_path already carries the is_staged_here belt this tranche derived for A2 from first principles)" "Inv_RaidRecoveryUnreachable"
 
 # ---------------------------------------------------------------------------
@@ -590,7 +609,9 @@ mutation_run FlintReplication FlintReplicationUncontrolledStrike.cfg "the SHIPPE
 # ---------------------------------------------------------------------------
 mutation_run FlintReplication FlintReplicationA2AdoptBlind.cfg "A2 adopt, unguarded (NodeStage short-circuits onto A2's composition and inherits serving/writerSet/lineage whole — members chosen by a boot-time snapshot taken while the volume was somebody else's; the F44/F46 adopt-or-mint family by a new road)" "Inv_NoAdoptOfA2Composition"
 mutation_run FlintReplication FlintReplicationA2AdoptValidated.cfg "the VALIDATING fix FLAPS (its remedy is to DELETE the other creator's object, so A2 puts it back and NodeStage's create hits EEXIST — stated as an ORDER not a count, because the count form was answered with build/build/delete and proved nothing)" "Inv_NoValidateFlap"
-strict_run FlintReplication FlintReplicationA2AdoptBelted.cfg "A2 adopt + local-staging belt strict — BOTH theorems armed (the belt closes the adopt by REFUSING rather than deleting, so it cannot buy safety at the price of a create/delete loop; this is the run that had to show that)"
+strict_run FlintReplication FlintReplicationA2AdoptBelted.cfg "A2 adopt + local-staging belt strict, ARM SET BUT UNREACHED (RELABELLED 2026-07-30: same single cause as A2Staging — UncontrolledTgtDeath=FALSE, so over the complete graph NEITHER AgentBootReconcile NOR AssembleAdopt fires and both adopt theorems were green on a state space with no A2 composition to adopt)"
+strict_run FlintReplication FlintReplicationA2AdoptArmed.cfg "A2 adopt + local-staging belt strict, ACTUALLY EXERCISED (class-3 death armed; the belt closes the adopt by REFUSING rather than deleting, so it cannot buy safety at the price of a create/delete loop — this is the run that had to show that, and now does)"
+mutation_run FlintA2Probe FlintA2ProbeAdoptArmed.cfg "A2-fires non-vacuity probe for A2AdoptArmed (NECESSARY, NOT SUFFICIENT and deliberately recorded as such: it witnesses A2 firing, but a dedicated AssembleAdopt-fired probe needs a ghost this module lacks — adoptedA2 cannot serve, being false both when the adopt never runs and when it runs on a non-A2 composition, so probing it would be probing Inv_NoAdoptOfA2Composition itself. The adopt theorems are PARTIALLY gated until that ghost exists)" "ProbeA2Fires"
 
 strict_run FlintReplication FlintReplicationRollRecordBarrier.cfg "record-only barrier strict (the implementation's barrier; belt holds safety)"
 strict_run FlintReplication FlintReplicationRollWedged.cfg "wedged-restart strict (kubelet never returns; survivor stays writable)"
