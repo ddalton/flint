@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Seventy-one runs, ALL required.
+# Seventy-two runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -344,12 +344,16 @@
 #      tgts under live consumers — with OOM kills, kubelet restarts,
 #      evictions, node-image upgrades and GitOps syncs arriving by the same
 #      door.  Fixes B and B' cannot reach ANY of it.
-#      Blind: green, and the green IS the indictment — no interleaving
-#      recovers the volume (non-vacuity: FlintA2ProbeDeath.cfg must VIOLATE
+#      Blind: green, but SCOPED — with the collapse-event detector as the
+#      ONLY trigger nothing recovers. NOT a statement about the shipped
+#      world: the layer-2 repair needs no seeded state, and
+#      UncontrolledStrike.cfg shows it recovering with A1 off, A2 off and no
+#      bounces. (non-vacuity: FlintA2ProbeDeath.cfg must VIOLATE
 #      ProbeTgtDeathReachable, so the death really happens).
-#      A1: must FIND the recovery — A1 has ALREADY SHIPPED and is, in the
-#      default configuration, the only thing between a routine upgrade and a
-#      permanent outage.  That is the load-bearing result for disposition.
+#      A1: must FIND the recovery. A1 has ALREADY SHIPPED; it makes the
+#      COLLAPSE-EVENT path reachable, which is a second independent trigger
+#      alongside the strike-based repair — not, as first written here, the
+#      only one.
 #      A2: must FIND the recovery with MaxBounces=0 — no bounce, no pod
 #      delete, no unstage, so the consumer is never disrupted, and the cost
 #      is one tgt restart per NODE regardless of how many consumers that
@@ -564,6 +568,7 @@ strict_run FlintReplication FlintReplicationA2Staging.cfg "A2 + local-staging be
 strict_run FlintReplication FlintReplicationUncontrolledBlind.cfg "uncontrolled tgt death, UNREPAIRED (a routine helm upgrade in the DEFAULT configuration; Inv_RaidRecoveryUnreachable HOLDS = the volume can never come back, and the tgt death is verified REACHABLE via FlintA2ProbeDeath.cfg so the green is a real permanent outage and not a vacuous one)"
 mutation_run FlintReplication FlintReplicationUncontrolledA1.cfg "uncontrolled tgt death repaired by A1 (ALREADY SHIPPED, and in the default configuration the only thing standing between a routine helm upgrade and a permanent outage — fixes B and B' cannot reach this path)" "Inv_RaidRecoveryUnreachable"
 mutation_run FlintReplication FlintReplicationUncontrolledA2.cfg "uncontrolled tgt death repaired by A2 with MaxBounces=0 (no bounce, no pod delete, no unstage: the consumer is never disrupted, and the cost is one tgt restart per NODE regardless of consumer density — where B' costs one relocation per CONSUMER POD)" "Inv_RaidRecoveryUnreachable"
+mutation_run FlintReplication FlintReplicationUncontrolledStrike.cfg "the SHIPPED periodic repair suffices — the run that corrected this tranche (A1 off, A2 off, zero bounces: detect_lost_data_paths -> repair_data_path needs NO seeded state, so UncontrolledBlind's green scopes to the COLLAPSE-DETECTOR path only and never to the shipped world; note repair_data_path already carries the is_staged_here belt this tranche derived for A2 from first principles)" "Inv_RaidRecoveryUnreachable"
 
 # ---------------------------------------------------------------------------
 # THE ADOPT (2026-07-29, added on the question "does the fix cause flapping?").

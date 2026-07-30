@@ -290,6 +290,32 @@ CONSTANTS
                \* hazard the moment A2 adds a SECOND creator whose base set was
                \* chosen at a different time.  That is why this arm belongs to
                \* the A2 tranche and not to a bug report.
+  StrikeRepairArm, \* TRUE = the SHIPPED periodic in-place repair exists:
+               \* detect_lost_data_paths counts consecutive
+               \* attached-here-but-no-raid observations and, at its threshold,
+               \* calls repair_data_path (node_agent.rs).
+               \*
+               \* Added 2026-07-30 to correct an OVERSTATEMENT in this
+               \* tranche.  FlintReplicationUncontrolledBlind.cfg was green —
+               \* "no interleaving recovers the volume" — and was read as "the
+               \* shipped code cannot recover an uncontrolled tgt death".  That
+               \* is wrong: the model had only A1's trigger, which needs
+               \* data_path_raid_seen (the COLLAPSE-EVENT path,
+               \* raid_collapse_verdict's `previously_seen`), and the layer-2
+               \* repair needs no seeded state at all — its gate is
+               \* strikes >= threshold on live observations.
+               \*
+               \* Note what this action already carries: repair_data_path
+               \* refuses unless `is_staged_here(volume_handle)` — kubelet's own
+               \* staging directory. That is EXACTLY the belt this tranche
+               \* derived for A2 from first principles, already shipped, on the
+               \* adjacent repair. So the shipped repair is already the SAFE
+               \* shape, and A2 differs from it only in its TRIGGER.
+               \*
+               \* The strike COUNT is abstracted away deliberately: it is a
+               \* debounce against an in-flight NodeStage, not a safety guard,
+               \* and every question asked here is about reachability or safety
+               \* rather than latency.
   A2LocalStagingBelt, \* TRUE = A2 assembles only where kubelet still
                \* believes the volume staged (stagedAt = vaNode).  The
                \* candidate that discriminates a class-3 death (staged left
@@ -2091,6 +2117,65 @@ TgtDie(l) ==
   /\ UNCHANGED bounceVars
 
 (***************************************************************************)
+(* THE SHIPPED PERIODIC REPAIR (layer 2), modelled 2026-07-30 to correct an *)
+(* overstatement this tranche had made.                                     *)
+(*                                                                         *)
+(* `detect_lost_data_paths` counts consecutive attached-here-but-no-raid     *)
+(* observations and, at its threshold, calls `repair_data_path`, which       *)
+(* reassembles "exactly as NodeStage would (sync-record-aware)".  It needs   *)
+(* NO seeded state: `data_path_raid_seen` gates the COLLAPSE EVENT           *)
+(* (raid_collapse_verdict's `previously_seen`), not this.  So                *)
+(* FlintReplicationUncontrolledBlind.cfg's green establishes only that the   *)
+(* COLLAPSE-DETECTOR path is unreachable without A1 — never that the         *)
+(* shipped code cannot recover.  With this armed it can, and                 *)
+(* FlintReplicationUncontrolledStrike.cfg is the run that says so.           *)
+(*                                                                         *)
+(* THE BELT IS ALREADY HERE, and that is the finding worth keeping:          *)
+(* `repair_data_path` refuses unless `is_staged_here(volume_handle)` —       *)
+(* kubelet's own staging directory, read locally, nothing remembered.  This  *)
+(* tranche derived exactly that predicate for A2 from first principles       *)
+(* before noticing the implementer had already reached for it on the         *)
+(* adjacent path.  So it is UNCONDITIONAL here, not behind                   *)
+(* A2LocalStagingBelt: the shipped repair has no unbelted variant to model.  *)
+(* A2 differs from this action only in its TRIGGER (boot, versus N ticks of  *)
+(* strikes), which is why A2's benefit is latency and predicate simplicity   *)
+(* rather than making recovery possible.                                     *)
+(*                                                                         *)
+(* The strike COUNT is abstracted away on purpose — a debounce against an    *)
+(* in-flight NodeStage, not a safety guard.                                  *)
+(***************************************************************************)
+StrikeRepair ==
+  /\ StrikeRepairArm
+  /\ RaidLifetimeArm
+  \* attached_here: the VA names this node (`attached_here.contains(pv)`).
+  /\ vaNode \in Legs \cup {"remote"}
+  \* !raid_present, for the raid name derived from this volume's handle.
+  /\ vaNode \notin raidHosts
+  \* is_staged_here — the belt, unconditional in the shipped code.
+  /\ stagedAt = vaNode
+  \* Something the records vouch for to rebuild from.
+  /\ UpInSync # {}
+  /\ raidHosts' = raidHosts \cup {vaNode}
+  /\ serving' = UpInSync
+  /\ raidSeen' = TRUE
+  /\ relocating' = FALSE
+  \* Provenance stamped like A2's: this is a non-NodeStage creator, so if the
+  \* belt above were ever removed the adopt theorem would catch it here too.
+  \* It cannot fire falsely as things stand — the belt implies `staged`, and
+  \* AssembleAdopt requires ~staged.
+  /\ a2Created' = a2Created \cup {vaNode}
+  /\ flapped' = (flapped \/ vaNode \in validateRemoved)
+  /\ UNCHANGED <<staged, stagedAt, raidLostOnce, localLegs, vaNode,
+                 adoptedA2, validateRemoved>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+(***************************************************************************)
 (* THE ADOPT — what NodeStage does when it finds a raid of this name        *)
 (* already there.  `ensure_raid1_bdev` (driver.rs:3105) is create-OR-       *)
 (* CONVERGE, and its converge branch has two arms:                         *)
@@ -3229,6 +3314,7 @@ Next ==
   \* per-leg: A2 acts on whatever node the VA names, which may be
   \* "remote" (a node owning no leg — the ordinary RWX shape).
   \/ AgentBootReconcile
+  \/ StrikeRepair
   \/ AssembleAdopt
   \/ AssembleValidate
   \/ VaCatchUp
