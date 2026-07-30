@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Fifty runs, ALL required.
+# Fifty-two runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -334,6 +334,17 @@ mutation_run FlintReplication FlintReplicationRollUnfenced.cfg "roll-fence mutat
 mutation_run FlintReplication FlintReplicationRollBarrier.cfg  "roll-barrier mutation (MaintBarrier=FALSE, redundancy erosion at 3 legs)" "Inv_PlannedRollBoundedImpact"
 
 liveness_mutation_run FlintReplication FlintReplicationRollLease.cfg "roll-lease mutation (MaintLease=FALSE, the mark outlives its roller)"
+
+# F61, found LIVE on runao 2026-07-30 (drill 3.14's first ever run) because no
+# property in this module could fail on it: a wedged roll leaves the volume
+# perfectly healthy, so the four maintenance properties all held — and
+# MaintenanceEventuallyLifts held VACUOUSLY, since the wedge never mints a
+# mark. The fairness comment declined "the campaign completes" as a theorem
+# on the grounds that STARTING a drain is operator-paced; correct about
+# pacing, but it also erased any way to tell "not started" from "cannot
+# finish". RollProcessedNodeRolls obligates the ROLLER instead.
+liveness_mutation_run FlintReplication FlintReplicationRollWedge.cfg "roll-progress mutation (MaintProcessedGate=FALSE: the shipped predicate gates the pod delete on a MARK, so a node whose drain legitimately marks nothing — the local half, unattached, or no legs — can never be rolled: F61's livelock)"
+strict_run FlintReplication FlintReplicationRollProcessed.cfg "roll-progress strict (the F61 fix: eligibility = the drain PASS ran AND the leg is out of the raid, or is a local-half leg with a survivor behind it)"
 
 strict_run FlintReplication FlintReplicationRollRecordBarrier.cfg "record-only barrier strict (the implementation's barrier; belt holds safety)"
 strict_run FlintReplication FlintReplicationRollWedged.cfg "wedged-restart strict (kubelet never returns; survivor stays writable)"

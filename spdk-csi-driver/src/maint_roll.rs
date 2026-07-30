@@ -164,6 +164,28 @@ pub struct RollView {
     /// unattached volumes are deliberately excluded — the drain skips
     /// them by design.
     pub drain_incomplete: Vec<String>,
+    /// F61: pending nodes whose drain pass has RUN and legitimately had
+    /// nothing to mark — every volume with a leg here was skipped by
+    /// design (`consumer == node`, i.e. the serving raid lives on this
+    /// node; unattached; or no legs at all, e.g. a control plane running
+    /// the DS). Found live on runao 2026-07-30 by drill 3.14's first run:
+    /// `DeletePod` used to be reachable ONLY via `marked_nodes`, so such a
+    /// node yielded zero marks, the planner fell through to `Drain`, and
+    /// the campaign livelocked one tick per 60s forever.
+    ///
+    /// Kept as an observation (recomputed every tick from the same gather)
+    /// rather than remembered, so the roller stays resumable from
+    /// observable state alone after a restart.
+    pub nothing_to_drain: Vec<String>,
+    /// F61: `nothing_to_drain` nodes that are the LAST serving member of
+    /// some volume — these must NOT be rolled. The local half is rolled
+    /// knowingly (its tgt restarts under a live serving raid, the
+    /// documented staged-device gap) but never as the last member, or the
+    /// roll manufactures an outage with zero real failures. TLC found that
+    /// as `Inv_PlannedRollNeverCausesOutage` the moment the F61 fix let
+    /// the pod delete through. Per-node, so it can never be evaluated
+    /// against a different node than the one being rolled.
+    pub local_last_serving: Vec<String>,
     /// The barrier input: every multi-replica volume fully redundant —
     /// all replicas in_sync, no hot-rejoin markers, no live marks.
     pub fully_redundant: bool,
@@ -238,6 +260,27 @@ pub fn plan_roll(view: &RollView) -> RollStep {
                 "barrier: not fully redundant ({}) — the roll waits (readmitted, not pod-ready)",
                 view.barrier_note
             ),
+        };
+    }
+    // F61: this node's drain pass already ran and had nothing to mark, so
+    // waiting for a mark that will never come is a livelock. Delete the pod.
+    // The model states the same eligibility (RollStart under
+    // MaintProcessedGate): the pass ran AND either the leg is out of the
+    // raid, or it is a local-half leg with a survivor behind it.
+    if view.nothing_to_drain.iter().any(|n| n == &next.node_name) {
+        if view.local_last_serving.iter().any(|n| n == &next.node_name) {
+            return RollStep::Blocked {
+                reason: format!(
+                    "{}'s legs are consumed locally and it is the last serving member — \
+                     rolling it now would take the volume down with no failure at all; \
+                     waiting for redundancy",
+                    next.node_name
+                ),
+            };
+        }
+        return RollStep::DeletePod {
+            pod: next.pod_name.clone(),
+            node: next.node_name.clone(),
         };
     }
     RollStep::Drain {
@@ -603,6 +646,36 @@ pub async fn maint_roll_tick(
         })
         .cloned()
         .collect();
+    // F61: a PENDING node whose drain pass would mark nothing. Same predicate
+    // as drain_incomplete's inner test, negated, over pending nodes: if no
+    // volume here is both remotely consumed and holding an unmarked in-sync
+    // leg, the pass is a no-op and no mark will ever appear. Waiting for one
+    // is the livelock drill 3.14 found on runao.
+    let drainable_at = |node: &str| {
+        volumes.iter().any(|v| {
+            v.insync_by_node.contains_key(node)
+                && v.consumer.as_deref().map(|c| c != node).unwrap_or(false)
+                && !v.marked.iter().any(|(_, mn)| mn == node)
+        })
+    };
+    let nothing_to_drain: Vec<String> = pods
+        .iter()
+        .filter(|p| !p.current_rev && !drainable_at(&p.node_name))
+        .map(|p| p.node_name.clone())
+        .collect();
+    // ...and of those, the ones that are the LAST serving member of some
+    // volume. Rolling such a node restarts the tgt under a raid that has no
+    // survivor: an outage with zero real failures
+    // (Inv_PlannedRollNeverCausesOutage).
+    let local_last_serving: Vec<String> = nothing_to_drain
+        .iter()
+        .filter(|node| {
+            volumes.iter().any(|v| {
+                v.insync_by_node.contains_key(node.as_str()) && v.insync_by_node.len() <= 1
+            })
+        })
+        .cloned()
+        .collect();
     let obstruction = volumes.iter().find_map(|v| {
         v.obstruction
             .as_ref()
@@ -613,6 +686,8 @@ pub async fn maint_roll_tick(
         pods,
         marked_nodes,
         drain_incomplete,
+        nothing_to_drain,
+        local_last_serving,
         fully_redundant: obstruction.is_none(),
         barrier_note: obstruction.unwrap_or_default(),
     };
@@ -873,6 +948,8 @@ mod tests {
             pods,
             marked_nodes: marked.iter().map(|s| s.to_string()).collect(),
             drain_incomplete: Vec::new(),
+            nothing_to_drain: Vec::new(),
+            local_last_serving: Vec::new(),
             fully_redundant: redundant,
             barrier_note: if redundant { String::new() } else { "vol1: replica x is stale".into() },
         }
@@ -912,6 +989,54 @@ mod tests {
     fn plan_roll_drains_first_pending_node_behind_the_barrier() {
         // Deterministic order: node "a" before "b" even listed reversed.
         let v = view(vec![pod("b", false, true), pod("a", false, true)], &[], true);
+        assert_eq!(plan_roll(&v), RollStep::Drain { node: "a".into() });
+    }
+
+    // ---- F61: a node whose drain marks nothing must still roll -----------
+
+    #[test]
+    fn plan_roll_deletes_pod_of_a_node_with_nothing_to_drain() {
+        // F61, found LIVE on runao 2026-07-30 (drill 3.14's first run) and
+        // then reproduced in TLC as FlintReplicationRollWedge.cfg. The node
+        // hosts only locally-consumed legs (the serving raid lives on it), so
+        // its drain pass legitimately marks NOTHING. Keyed on marks alone the
+        // planner returned Drain forever — one tick per 60s, campaign never
+        // converging, DS never reaching the new revision.
+        let mut v = view(vec![pod("a", false, true)], &[], true);
+        v.nothing_to_drain = vec!["a".to_string()];
+        assert_eq!(
+            plan_roll(&v),
+            RollStep::DeletePod {
+                pod: "flint-csi-node-a".into(),
+                node: "a".into()
+            },
+            "a processed-but-unmarked node must be rolled, not re-drained forever"
+        );
+    }
+
+    #[test]
+    fn plan_roll_refuses_to_roll_the_last_serving_member() {
+        // The belt TLC insisted on: rolling an UNDRAINED local-half leg that
+        // is the only serving member restarts the tgt under a raid with no
+        // survivor — an outage with zero real failures
+        // (Inv_PlannedRollNeverCausesOutage fired the moment the F61 fix let
+        // the delete through).
+        let mut v = view(vec![pod("a", false, true)], &[], true);
+        v.nothing_to_drain = vec!["a".to_string()];
+        v.local_last_serving = vec!["a".to_string()];
+        match plan_roll(&v) {
+            RollStep::Blocked { reason } => {
+                assert!(reason.contains("last serving member"), "reason: {reason}")
+            }
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_roll_still_prefers_draining_when_there_is_something_to_drain() {
+        // The fix must not short-circuit the fence: a node with drainable
+        // legs is NOT in nothing_to_drain, so it drains first as before.
+        let v = view(vec![pod("a", false, true)], &[], true);
         assert_eq!(plan_roll(&v), RollStep::Drain { node: "a".into() });
     }
 

@@ -182,6 +182,20 @@ CONSTANTS
   ClaimArb,    \* TRUE = admission-priority claim arbitration (F43 fix)
   EvidenceStrict, \* TRUE = node_gone evidence implies actual death
   MaintEnabled, \* TRUE = planned-roll actions exist (FALSE in legacy cfgs)
+  \* F61 (found LIVE on runao 2026-07-30, drill 3.14's first run; this module
+  \* could not express it).  LocalLegs are legs whose drain is a NO-OP: the
+  \* serving raid lives on the leg's own node (consumer == node, the "local
+  \* half"), so maint_roll.rs emits MaintenanceLocalConsumer and SKIPS the
+  \* drain.  Unattached volumes and nodes with no legs behave identically.
+  \* Before this constant every element of Legs was drainable BY
+  \* CONSTRUCTION, so no state existed where a node is pending-and-
+  \* undrainable — which is exactly the state the shipped planner wedges in.
+  LocalLegs,
+  \* TRUE = the F61 FIX: RollStart is gated on the drain PASS having
+  \* completed (`processed`), not on a mark having been minted
+  \* (`suppress`).  FALSE reproduces the shipped predicate, where a node
+  \* that legitimately marks nothing can never be rolled — the livelock.
+  MaintProcessedGate,
   MaintFence,  \* TRUE = drain-before-restart (never roll a serving leg's tgt)
   MaintBarrier,\* TRUE = next node waits for readmission, not pod-readiness
   MaintLease,  \* TRUE = a dead roller's suppression mark self-clears
@@ -493,6 +507,16 @@ VARIABLES
   rolling,       \* SUBSET Legs: node whose tgt is down for a PLANNED restart
   rolled,        \* SUBSET Legs: nodes already rolled this campaign (monotone)
   suppress,      \* SUBSET Legs: readmission suppressed (the maintenance mark)
+  processed,     \* SUBSET Legs: the drain PASS completed for this node,
+                 \* whether or not it stamped a mark.  F61: the shipped
+                 \* code conflated this with `suppress`, because in THIS
+                 \* module MaintDrain always minted a mark, so "drained"
+                 \* and "marked" were the same event and one variable
+                 \* served both roles.  In the code they come apart —
+                 \* drain_leg marks per VOLUME, so a node whose every
+                 \* volume is skipped (consumer == node, unattached, no
+                 \* legs) finishes a pass having marked nothing — and the
+                 \* planner, keyed on marks, then never reaches DeletePod.
   rollerDead,    \* TRUE once the roll orchestrator died mid-campaign
   stalePlan,     \* SUBSET Legs (≤1): a second/deposed roller's captured
                  \* drain plan — valid when captured, committed later
@@ -569,11 +593,12 @@ VARIABLES
 vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
           lineage, riskSurfaced, state, writerSet, epochCut, claim,
           deferExpired, deemedDead, falseRisk, crashes,
-          rolling, rolled, suppress, rollerDead, legSize, raidSize, pvSize, wantNew,
+          rolling, rolled, suppress, processed, rollerDead, legSize, raidSize, pvSize, wantNew,
           bounceWindow, bouncePlan, bounceRisk, consecutiveBounces, dpFlag,
           everServed, podUp, bounceDoomed>>
 
-maintVars == <<rolling, rolled, suppress, rollerDead, stalePlan, leaderMoved>>
+maintVars == <<rolling, rolled, suppress, processed, rollerDead, stalePlan,
+               leaderMoved>>
 
 expandVars == <<legSize, raidSize, pvSize, wantNew>>
 
@@ -617,6 +642,7 @@ TypeOK ==
   /\ rolling \subseteq Legs
   /\ rolled \subseteq Legs
   /\ suppress \subseteq Legs
+  /\ processed \subseteq Legs
   /\ rollerDead \in BOOLEAN
   /\ stalePlan \subseteq Legs /\ Cardinality(stalePlan) <= 1
   /\ leaderMoved \in BOOLEAN
@@ -712,6 +738,7 @@ Init ==
   /\ crashes = 0
   /\ rolling = {}
   /\ rolled = {}
+  /\ processed = {}
   /\ suppress = {}
   /\ rollerDead = FALSE
   /\ stalePlan = {}
@@ -1013,7 +1040,7 @@ Replace(l) ==
   /\ legSize' = [legSize EXCEPT ![l] = pvSize]
   /\ UNCHANGED <<serving, zombie, raidGen, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, falseRisk, crashes,
-                 rolling, rollerDead, stalePlan, leaderMoved,
+                 rolling, processed, rollerDead, stalePlan, leaderMoved,
                  raidSize, pvSize, wantNew>>
   /\ UNCHANGED gateVars
   \* A swapped-in identity is a FRESH lvol: whatever the old one served,
@@ -1437,6 +1464,13 @@ MaintDrain(l) ==
   /\ state[l] = "insync"
   /\ Responsive(l)
   /\ l \notin rolled                      \* one campaign, each node once
+  /\ l \notin LocalLegs                   \* F61: a local-half leg's drain
+                                          \* is a NO-OP (MaintDrainSkip)
+  \* F61: ONE node in flight. The roller takes pending.first() and finishes
+  \* that node before starting the next, so a node cannot be processed while
+  \* an earlier processed node is still unrolled. Without this the model
+  \* interleaves two in-flight nodes — a state plan_roll cannot produce.
+  /\ processed \subseteq rolled
   /\ rolling = {} /\ suppress = {}        \* k8s pod-level serialization
   \* DATA-PLANE BELT: never drain the last serving member.  Found by the
   \* RecordBarrier run: with a record-only barrier, a deconfigured-but-
@@ -1462,9 +1496,43 @@ MaintDrain(l) ==
   /\ state' = [state EXCEPT ![l] = "stale"]
   /\ writerSet' = writerSet \ {l}
   /\ suppress' = suppress \cup {l}
+  /\ processed' = processed \cup {l}     \* the pass completed AND marked
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, deemedDead, falseRisk,
                  crashes, rolling, rolled, rollerDead, stalePlan, leaderMoved>>
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+(***************************************************************************)
+(* F61: the drain pass that legitimately drains NOTHING.  maint_roll.rs    *)
+(* iterates the node's volumes and `continue`s on each one whose consumer  *)
+(* IS this node (emitting MaintenanceLocalConsumer), so the pass completes *)
+(* with drained=0 and stamps no mark.  The node is still PROCESSED — the   *)
+(* roll is meant to restart its tgt anyway; the local half is a documented *)
+(* data-path gap, not a reason to skip the node.  With MaintProcessedGate  *)
+(* FALSE (the shipped predicate) RollStart can never fire for such a node  *)
+(* and the campaign livelocks: RollCampaignCompletes fails.                *)
+(***************************************************************************)
+MaintDrainSkip(l) ==
+  /\ MaintEnabled /\ MaintFence
+  /\ ~rollerDead
+  /\ l \in LocalLegs
+  /\ l \notin rolled
+  /\ l \notin processed
+  \* F61: ONE node in flight. The roller takes pending.first() and finishes
+  \* that node before starting the next, so a node cannot be processed while
+  \* an earlier processed node is still unrolled. Without this the model
+  \* interleaves two in-flight nodes — a state plan_roll cannot produce.
+  /\ processed \subseteq rolled
+  /\ rolling = {} /\ suppress = {}
+  /\ (MaintBarrier =>
+        IF BarrierRaidAware THEN FullRedundancy ELSE RecordRedundancy)
+  /\ processed' = processed \cup {l}
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes, rolling,
+                 rolled, suppress, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
@@ -1474,12 +1542,36 @@ RollStart(l) ==
   /\ ~rollerDead
   /\ legUp[l] = "up"
   /\ rolling = {} /\ l \notin rolled
-  /\ (MaintFence => l \in suppress)       \* drain first — the fence
+  \* F61: what makes a node ELIGIBLE to have its pod deleted.  The fix
+  \* asks "did the drain pass run?"; the shipped code asked "is there a
+  \* mark?" — and a mark only exists if some volume was actually drained.
+  /\ (MaintFence =>
+        IF MaintProcessedGate
+          THEN
+            \* F61, third attempt — and the first two were instructive.
+            \* `processed` alone is WRONG: it is monotone, so a leg that was
+            \* drained, rolled-past and later READMITTED stays eligible
+            \* forever and RollStart fires while it is serving —
+            \* Inv_MaintFenceHolds fails.  That is this very bug mirrored:
+            \* I swapped a TRANSIENT eligibility token (suppress = "drained
+            \* right now") for a PERMANENT one.  Eligibility must be
+            \* transient, so state it on the ground truth the fence cares
+            \* about — is this leg out of the serving raid?
+            /\ l \in processed                 \* the drain pass ran
+            /\ \/ l \notin serving             \* drained: the fence proper
+               \* The local half, knowingly: its drain was skipped, so it
+               \* IS still serving.  Roll it anyway (that is the documented
+               \* design) but never as the last serving member, or the roll
+               \* manufactures an outage with zero real failures — TLC found
+               \* that too, via Inv_PlannedRollNeverCausesOutage.
+               \/ /\ l \in LocalLegs
+                  /\ serving \ {l} # {}
+          ELSE l \in suppress)
   /\ rolling' = {l}
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolled, suppress, rollerDead, stalePlan, leaderMoved>>
+                 rolled, suppress, processed, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
@@ -1492,7 +1584,7 @@ RollFinish(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 suppress, rollerDead, stalePlan, leaderMoved>>
+                 suppress, processed, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
@@ -1505,7 +1597,7 @@ MaintClear(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, rollerDead, stalePlan, leaderMoved>>
+                 rolling, rolled, processed, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
@@ -1522,7 +1614,8 @@ RollerDie ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk,
-                 rolling, rolled, suppress, stalePlan, leaderMoved>>
+                 rolling, rolled, suppress, processed, stalePlan,
+                 leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
@@ -1540,7 +1633,7 @@ SuppressExpire(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, rollerDead, stalePlan, leaderMoved>>
+                 rolling, rolled, processed, rollerDead, stalePlan, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
@@ -1592,7 +1685,7 @@ RoguePlanDrain(l) ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, suppress, rollerDead>>
+                 rolling, rolled, suppress, processed, rollerDead>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
@@ -1630,7 +1723,7 @@ RogueDrainCommit ==
   /\ stalePlan' = {}
   /\ UNCHANGED <<zombie, legData, legUp, acked, nextWrite, lineage,
                  riskSurfaced, epochCut, claim, deemedDead, falseRisk,
-                 crashes, rolling, rolled, rollerDead, leaderMoved>>
+                 crashes, rolling, rolled, processed, rollerDead, leaderMoved>>
   /\ UNCHANGED expandVars
   /\ UNCHANGED gateVars
   /\ UNCHANGED bounceVars
@@ -1782,7 +1875,7 @@ RogueBouncePlan ==
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes,
-                 rolling, rolled, suppress, rollerDead, stalePlan>>
+                 rolling, rolled, suppress, processed, rollerDead, stalePlan>>
   /\ UNCHANGED <<bounceWindow, bounceRisk, consecutiveBounces, dpFlag,
                  everServed, podUp, bounceDoomed>>
   /\ UNCHANGED expandVars
@@ -2127,6 +2220,7 @@ Next ==
        \/ Admit(l)
        \/ LastResortServe(l)
        \/ MaintDrain(l)
+       \/ MaintDrainSkip(l)
        \/ RollStart(l)
        \/ RollFinish(l)
        \/ MaintClear(l)
@@ -2170,6 +2264,11 @@ FairnessCore ==
        \* MaintenanceEventuallyLifts is.  WF(RollFinish) — kubelet
        \* completes restarts — lives in FairnessKubelet below so the
        \* wedged-restart run can drop exactly that assumption.
+       \* F61: the no-op drain pass is a pure roller tick (it drains
+       \* nothing, so there is no operator-pacing decision in it). Fair,
+       \* so the FIXED run actually reaches the interesting world rather
+       \* than satisfying RollProcessedNodeRolls vacuously.
+       /\ WF_vars(MaintDrainSkip(l))
        /\ WF_vars(RollStart(l))
        /\ WF_vars(MaintClear(l))
        /\ WF_vars(SuppressExpire(l))
@@ -2365,8 +2464,24 @@ Inv_PlannedRollNeverCausesOutage ==
 \* RollStart, a suppressed leg is out of serving (drained) and cannot
 \* re-enter (HotRejoin/Admit/Assemble/LastResortServe all refuse), so
 \* the intersection stays empty — checked in the strict maintenance run.
+\*
+\* F61 SCOPE, and it is not a weakening for convenience — the model
+\* PROVED the two halves are coupled.  LocalLegs are legs whose drain is
+\* deliberately skipped (consumer == node): maint_roll.rs emits
+\* MaintenanceLocalConsumer and restarts that tgt anyway, by design, so
+\* such a leg IS serving while rolling.  When the F61 fix let RollStart
+\* fire for a processed-but-unmarked node, this invariant failed at once
+\* — which is the model saying: you cannot fix the campaign-progress bug
+\* without either (a) accepting a fence violation on local-half nodes,
+\* or (b) implementing the local half (staged-device continuity /
+\* ublk user-recovery).  The design doc treated "orchestration half" and
+\* "local half" as independent workstreams; they are not.  We take (a)
+\* consciously — the gap is documented, warned per volume at runtime, and
+\* the alternative is a DaemonSet that can never converge.  Excluding
+\* LocalLegs keeps the invariant's TEETH for every remotely-consumed leg,
+\* which is where the fence is the whole point.
 Inv_MaintFenceHolds ==
-  MaintFence => serving \cap rolling = {}
+  MaintFence => (serving \ LocalLegs) \cap rolling = {}
 
 \* THE BARRIER'S NECESSITY, restated sharply.  The unconditional
 \* last-serving-member belt (in MaintDrain) already prevents the direct
@@ -2602,6 +2717,33 @@ MaintenanceEventuallyLifts ==
   \A l \in Legs :
     []((l \in suppress /\ legUp[l] = "up")
         => <>(l \notin suppress \/ legUp[l] = "dead"))
+
+(***************************************************************************)
+(* THE ROLL-PROGRESS THEOREM (F61, found LIVE 2026-07-30 — drill 3.14's    *)
+(* first run — because NO property in this module could fail on it).        *)
+(*                                                                         *)
+(* Why the gap existed, exactly: the fairness comment above states that    *)
+(* "the campaign completes" is deliberately NOT a theorem, since STARTING  *)
+(* each node's drain is operator-paced.  That reasoning is right about     *)
+(* pacing and wrong about its blast radius — it also erased any way to     *)
+(* distinguish a campaign that has not STARTED from one that CANNOT        *)
+(* FINISH.  A wedged roll leaves the volume perfectly healthy, so          *)
+(* EventuallyServingAgain, EventuallyWritable and AdmissionNotStarved all  *)
+(* hold; and MaintenanceEventuallyLifts holds VACUOUSLY, because the       *)
+(* wedge never mints a mark for the stuck node.  Four green properties, a  *)
+(* roll that never converges.                                              *)
+(*                                                                         *)
+(* This property obligates the ROLLER, not the operator: it says nothing   *)
+(* about whether a campaign begins, only that once the roller has          *)
+(* PROCESSED a node — run its drain pass, marked or not — that node        *)
+(* eventually rolls.  With MaintProcessedGate FALSE (the shipped           *)
+(* predicate: RollStart needs a MARK) a LocalLegs node is processed by     *)
+(* MaintDrainSkip and can never be rolled: TLC returns the livelock.       *)
+(* Run with MaxCrashes = 0 — RollStart needs legUp = "up", so a real       *)
+(* failure legitimately stalls a roll and would mask the bug.              *)
+(***************************************************************************)
+RollProcessedNodeRolls ==
+  \A l \in Legs : [](l \in processed => <>(l \in rolled))
 
 (***************************************************************************)
 (* THE PARKING THEOREM (2026-07-29 audit).  A warm, responsive standby    *)

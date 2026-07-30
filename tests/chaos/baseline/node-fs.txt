@@ -1,0 +1,16 @@
+runao-aws-1 nodefs=4.86/7.93GiB 61.3% imagefs=2.04/7.93GiB 25.7%
+  pod-ephemeral kube-system/cilium-vzp9c 0.0GiB
+  pod-ephemeral flint-system/flint-csi-node-clm47 0.0GiB
+  pod-ephemeral kube-system/cilium-envoy-z7fmh 0.0GiB
+runao-aws-2 nodefs=5.11/7.93GiB 64.5% imagefs=2.21/7.93GiB 27.9%
+  pod-ephemeral kube-system/cilium-tbrwc 0.0GiB
+  pod-ephemeral flint-system/flint-csi-node-lh2g2 0.0GiB
+  pod-ephemeral kube-system/cilium-envoy-zb6c8 0.0GiB
+runao-aws-3 nodefs=4.84/7.93GiB 61.1% imagefs=2.04/7.93GiB 25.7%
+  pod-ephemeral kube-system/cilium-2wh6t 0.0GiB
+  pod-ephemeral flint-system/flint-csi-node-g6hlj 0.0GiB
+  pod-ephemeral kube-system/cilium-envoy-wvmm6 0.0GiB
+runao-aws-4 nodefs=5.11/7.93GiB 64.5% imagefs=2.21/7.93GiB 27.9%
+  pod-ephemeral kube-system/cilium-vq6st 0.0GiB
+  pod-ephemeral flint-system/flint-csi-node-l7j8q 0.0GiB
+  pod-ephemeral flint-system/flint-csi-controller-7cfc68bf65-g599x 0.0GiB

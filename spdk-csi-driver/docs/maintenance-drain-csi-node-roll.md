@@ -4,7 +4,24 @@ Status: **ORCHESTRATION HALF IMPLEMENTED + SIM-SWEPT 2026-07-28** (same
 day as the formal gate); live gate = drill 3.14, **RUN 2026-07-30 on
 runao — the three guards PASSED live, and it found F61.**
 
-> **F61 BLOCKS THE DEFAULT.** `docs/f61-maint-roll-wedges-on-undrainable-node.md`:
+> **F62 BLOCKS THE DEFAULT, AND F61'S FIX ALONE MAKES A ROLL WORSE.**
+> `docs/f62-local-half-outage-and-blind-barrier.md`: with F61 fixed, the
+> roller deleted the pod on the node hosting a serving raid (by design —
+> the drain is skipped there). The tgt restarted, **the raid was destroyed
+> and nothing re-published it**, the NFS server kept running with a dead
+> device, postgres hung indefinitely (hard mount: no PANIC, no restart,
+> just silence) and writes stopped for 347s+ with no self-healing. Worse,
+> **the barrier waved the campaign on to the next node one tick later**,
+> because its evidence is the sync record and the record still read
+> `2/2 in_sync` — no leg had failed; the raid was destroyed out from under
+> a healthy record. On a larger fleet that composes into the same
+> node-by-node total outage TLC rejected for the unfenced roll.
+> F61's wedge was accidentally PROTECTIVE: it was the only thing keeping
+> the un-implemented local half from being exercised. Do not enable the
+> flag until both are closed; the immediate move is to make the roller
+> REFUSE local-consumer nodes (and report them) rather than roll them.
+>
+> **F61 (fixed in rc5, keep the fix).** `docs/f61-maint-roll-wedges-on-undrainable-node.md`:
 > `plan_roll` reaches `DeletePod` only via `marked_nodes`, but the drain
 > stamps marks per *drained* volume — so a node whose volumes are all
 > skipped (`consumer == node`, unattached, or no legs) yields zero marks
