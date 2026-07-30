@@ -1,0 +1,56 @@
+  ✓ harness healthy (pg-0 Ready, ledger acking)
+
+▶ T0=1785370341 pg-0 on runao-aws-3; nfs flint-nfs-pvc-3cece943-bdef-4752-bf94-00cd190ef50f on runao-aws-4 (uid aaf9c4e9); witness on runao-aws-1
+  · ledger oracle on drill-target runao-aws-1 — relocating (acked.log must survive)
+pod "pg-load-86587cfc87-kxzmf" deleted
+  ✓ oracle relocated to runao-aws-4
+  · acked tail at kill: 4604 1785370374
+  · nfs pod flint-nfs-pvc-3cece943-bdef-4752-bf94-00cd190ef50f uid aaf9c4e9 restarts=0 — the identity that must NOT move
+  · raid pre (on runao-aws-4): raid_nfs-server-pvc-3cece943-bdef-4752-bf94-00cd190ef50f state=online base=2/2
+  · TERMINATED i-0cfd8df27ea77be17 (runao-aws-1) — remote leg cd405de7… permanently lost; the nfs server keeps writing
+  · Node object deleted at 85s — re-placement trigger armed
+  ✓ kill stall 36s ≤ 60s (degrade at 78s) — P4 held
+  ✓ identity swapped to runao-aws-3 at 198s
+  · replacement reached standby at 262s — the warm claim-priority window opens here
+  ✓ replacement leg in_sync at 422s — RWX redundancy restored (2/2)
+  · windows committed since T0: 1 (max window_ms=227)
+  ✓ admission cost the guest 1s ≤ 10s (quiesce span, not a bounce)
+  · cutover events: started=0 succeeded=0 ineffective=0; planner deferrals=0
+  · claim arbitration: catch-up ticks yielded to the window=0, resolver reservations=1, lease seizures=0 (seizures should be 0)
+  ✓ client saw ZERO ESTALE / ZERO PANIC across the admission
+  ✓ pg-0 restarts unchanged at 0 — the database never noticed
+  · settle window: re-asserting 2/2 at +360s (F44 signature: ReplicaHeadInUse + collapse)
+  ✓ redundancy HELD through the settle window (2/2 in_sync, writer_set=2, head_in_use_events=0, nfs Running/Ready)
+  ✓ no foreign leg/copy controllers linger off the server node
+  · raid post (on runao-aws-4): raid_nfs-server-pvc-3cece943-bdef-4752-bf94-00cd190ef50f state=online base=2/2
+  ✓ witness fresh at 791s (multi-node access intact)
+  ✓ witness clean (0 mismatches, last write 1s ago)
+  ✓ no acked-tail-risk raised (the serving raid never lost its writer)
+
+▶ 1/7 pod Ready (timeout 180s)
+  ✓ pg-0 Ready 793s after T0
+  ✓ attribution: in-place (runao-aws-3→runao-aws-3, postgres restarts 0)
+
+▶ 2/7 db verdict
+  ✓ db PASS
+
+▶ 3/7 volumeattachments
+  ✓ VA consistent (consumer nodes covered, none stale)
+
+▶ 4/7 data-path sessions (nvmeof)
+  ✓ pg volume session live
+  ✓ data path clean (live volume healthy, no new leaks)
+
+▶ 5/7 orphaned mounts
+  ✓ no orphaned pod mounts
+  · node fs pressure captured (/Users/ddalton/github/flint/tests/chaos/artifacts/3-3.12-1785370341/node-fs.txt)
+
+▶ 6/7 driver logs since T0
+  ✓ no unresolved volume errors (full scan in /Users/ddalton/github/flint/tests/chaos/artifacts/3-3.12-1785370341/driver-logs.txt)
+
+▶ 7/7 timings
+  ✓ max ledger stall 36s
+
+PASS: drill 3/3.12 — ready=793s stall=36s 
+./drills/phase3.sh: line 294: 70273 Terminated: 15          ( kubectl logs -n "$DRIVER_NS" -f "$(nfs_pod)" > "$ARTIFACTS/312-nfs-server.log" 2> /dev/null )
+  · fleet is one storage node down — replace via trove before further node-consuming drills

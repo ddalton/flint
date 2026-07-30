@@ -1,0 +1,12 @@
+=== ACCEPTANCE GATE 4 SCENARIO, UNPLANNED ===
+runao-aws-3 spot-reclaimed 2026-07-30T00:44:32Z (Service initiated) while its
+leg was DRAINED+STALE awaiting readmission, mid-roll. Sequence:
+  00:41:56 drain aws-3 leg + mark        (fence)
+  00:42:56 RollStart pod delete aws-3
+  00:43:56 MaintClear mark lifted        (lease)
+  00:44:32 AWS RECLAIMS aws-3
+  00:44:56 barrier blocks the roll, every tick thereafter (barrier)
+Outcome: aws-4 kept serving 1/2. No outage, no acked loss, no PANIC.
+Barrier refused to roll aws-4 (would have been 0/2 = RollUnfenced's counterexample).
+NUANCE: with no spare node the leg can never be readmitted, so the roll
+pauses INDEFINITELY. Safe, but only an INFO line surfaces it.

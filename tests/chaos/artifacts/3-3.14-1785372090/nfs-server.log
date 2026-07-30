@@ -1,0 +1,164 @@
+[2m2026-07-30T00:30:14.163726Z[0m [32m INFO[0m ╔═══════════════════════════════════════════════════════════╗
+[2m2026-07-30T00:30:14.163737Z[0m [32m INFO[0m ║        Flint NFSv4.2 Server - RWX Volume Export          ║
+[2m2026-07-30T00:30:14.163740Z[0m [32m INFO[0m ║          RFC 7862 - Concurrent I/O Support               ║
+[2m2026-07-30T00:30:14.163743Z[0m [32m INFO[0m ╚═══════════════════════════════════════════════════════════╝
+[2m2026-07-30T00:30:14.163745Z[0m [32m INFO[0m 
+[2m2026-07-30T00:30:14.163824Z[0m [32m INFO[0m 🔧 FileHandleManager created:
+[2m2026-07-30T00:30:14.163827Z[0m [32m INFO[0m    Instance ID: 2405226933241891929 (shared across pNFS cluster)
+[2m2026-07-30T00:30:14.163830Z[0m [32m INFO[0m    Export path: "/mnt/volume"
+[2m2026-07-30T00:30:14.163833Z[0m [32m INFO[0m    Export name: volume
+[2m2026-07-30T00:30:14.163842Z[0m [32m INFO[0m 🌳 Pseudo-filesystem created (instance_id=2405226933241891929)
+[2m2026-07-30T00:30:14.163850Z[0m [32m INFO[0m    RFC 7530 Section 7: Unified namespace for NFSv4 exports
+[2m2026-07-30T00:30:14.163853Z[0m [32m INFO[0m 📁 Adding export to pseudo-filesystem:
+[2m2026-07-30T00:30:14.163855Z[0m [32m INFO[0m    Name: volume
+[2m2026-07-30T00:30:14.163858Z[0m [32m INFO[0m    Path: "/mnt/volume"
+[2m2026-07-30T00:30:14.163860Z[0m [32m INFO[0m    ID: 1
+[2m2026-07-30T00:30:14.163863Z[0m [32m INFO[0m    pNFS: Enabled (layout types: [2, 1])
+[2m2026-07-30T00:30:14.164381Z[0m [32m INFO[0m 🧬 v4 kernel filehandles ACTIVE (probe passed) — path maps retired
+[2m2026-07-30T00:30:14.181832Z[0m [32m INFO[0m 🔥 fh identity index prewarmed: 1407 entries in 17.442189ms (F52)
+[2m2026-07-30T00:30:14.182816Z[0m [32m INFO[0m 💾 NFSv4 state: persistent at "/mnt/volume/.flint-nfs/state.db" (synchronous=FULL)
+[2m2026-07-30T00:30:14.183112Z[0m [32m INFO[0m LeaseManager created - grace period for 90s
+[2m2026-07-30T00:30:14.183162Z[0m [32m INFO[0m ClientManager created - mode="standalone", server_owner=flint-nfs-pvc-3cece943-bdef-4752-bf94-00cd190ef50f, server_scope=flint-nfs-pvc-3cece943-bdef-4752-bf94-00cd190ef50f
+[2m2026-07-30T00:30:14.183200Z[0m [32m INFO[0m SessionManager created
+[2m2026-07-30T00:30:14.183225Z[0m [32m INFO[0m StateIdManager created
+[2m2026-07-30T00:30:14.183260Z[0m [32m INFO[0m DelegationManager created
+[2m2026-07-30T00:30:14.183287Z[0m [32m INFO[0m 🔐 Initializing RPCSEC_GSS manager (Pure Rust implementation)
+[2m2026-07-30T00:30:14.183295Z[0m [33m WARN[0m ⚠️  No keytab path specified, RPCSEC_GSS will use placeholder mode
+[2m2026-07-30T00:30:14.183368Z[0m [32m INFO[0m 
+[2m2026-07-30T00:30:14.183377Z[0m [32m INFO[0m 📊 Configuration:
+[2m2026-07-30T00:30:14.183380Z[0m [32m INFO[0m    • Export Path: "/mnt/volume"
+[2m2026-07-30T00:30:14.183383Z[0m [32m INFO[0m    • Volume ID:   pvc-3cece943-bdef-4752-bf94-00cd190ef50f
+[2m2026-07-30T00:30:14.183385Z[0m [32m INFO[0m    • Bind Address: 0.0.0.0:2049
+[2m2026-07-30T00:30:14.183388Z[0m [32m INFO[0m 
+[2m2026-07-30T00:30:14.183390Z[0m [32m INFO[0m 🔧 Mount command (from client):
+[2m2026-07-30T00:30:14.183393Z[0m [32m INFO[0m    mount -t nfs -o vers=4.2,tcp <server-ip>:/ /mnt/point
+[2m2026-07-30T00:30:14.183395Z[0m [32m INFO[0m    OR: mount -t nfs -o vers=4.1,tcp <server-ip>:/ /mnt/point
+[2m2026-07-30T00:30:14.183397Z[0m [32m INFO[0m 
+[2m2026-07-30T00:30:14.183399Z[0m [32m INFO[0m ⚡ Server starting...
+[2m2026-07-30T00:30:14.183401Z[0m [32m INFO[0m 
+[2m2026-07-30T00:30:14.183429Z[0m [32m INFO[0m 🚀 Starting NFSv4.2 server on 0.0.0.0:2049
+[2m2026-07-30T00:30:14.183438Z[0m [32m INFO[0m 📂 Exporting: "/mnt/volume"
+[2m2026-07-30T00:30:14.183440Z[0m [32m INFO[0m 💾 Volume ID: pvc-3cece943-bdef-4752-bf94-00cd190ef50f
+[2m2026-07-30T00:30:14.183443Z[0m [32m INFO[0m 
+[2m2026-07-30T00:30:14.183445Z[0m [32m INFO[0m 🔧 Mount command (from client):
+[2m2026-07-30T00:30:14.183447Z[0m [32m INFO[0m    mount -t nfs -o vers=4.2,tcp <server-ip>:/ /mnt/point
+[2m2026-07-30T00:30:14.183449Z[0m [32m INFO[0m 
+[2m2026-07-30T00:30:14.183495Z[0m [32m INFO[0m [FENCE] backing-store watchdog armed (F33) [3mdeadline_secs[0m[2m=[0m90 [3minterval_ms[0m[2m=[0m10000
+[2m2026-07-30T00:30:14.185849Z[0m [32m INFO[0m 📈 NFSv4 server instance #4 for this volume (persisted counter)
+[2m2026-07-30T00:30:14.186102Z[0m [32m INFO[0m Lease created for client 2
+[2m2026-07-30T00:30:14.186111Z[0m [32m INFO[0m Lease created for client 8
+[2m2026-07-30T00:30:14.186113Z[0m [32m INFO[0m ClientManager loaded 2 records from backend
+[2m2026-07-30T00:30:14.186119Z[0m [32m INFO[0m SessionManager observed 2 persisted sessions; bumped counter past max_id=8, dropped them so kernel re-CREATE_SESSIONs naturally on BADSESSION
+[2m2026-07-30T00:30:14.186262Z[0m [32m INFO[0m StateIdManager loaded 100 records from backend
+[2m2026-07-30T00:30:14.186271Z[0m [32m INFO[0m StateManager loaded 2 clients, 2 sessions, 100 stateids from backend
+[2m2026-07-30T00:30:14.187249Z[0m [32m INFO[0m ✅ NFSv4.2 TCP server listening on 0.0.0.0:2049
+[2m2026-07-30T00:30:14.187256Z[0m [32m INFO[0m 
+[2m2026-07-30T00:30:15.973056Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2m2026-07-30T00:30:15.973072Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #1 from 10.244.1.42:53728 (Active connections: 1)
+[2m2026-07-30T00:30:15.973076Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1785371415, tv_nsec: 973076364 }
+[2m2026-07-30T00:30:15.973081Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2m2026-07-30T00:30:15.973133Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #1 from 10.244.1.42:53728
+[2m2026-07-30T00:30:15.973148Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #1 handler started for 10.244.1.42:53728
+[2m2026-07-30T00:30:15.973153Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1785371415, tv_nsec: 973152897 }
+[2m2026-07-30T00:30:15.973232Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8]) not found
+[2m2026-07-30T00:30:15.973315Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8]) not found
+[2m2026-07-30T00:30:16.834548Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2m2026-07-30T00:30:16.834565Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #2 from 10.244.2.91:40502 (Active connections: 2)
+[2m2026-07-30T00:30:16.834569Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1785371416, tv_nsec: 834568947 }
+[2m2026-07-30T00:30:16.834573Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2m2026-07-30T00:30:16.834621Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #2 from 10.244.2.91:40502
+[2m2026-07-30T00:30:16.834657Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #2 handler started for 10.244.2.91:40502
+[2m2026-07-30T00:30:16.834663Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1785371416, tv_nsec: 834662917 }
+[2m2026-07-30T00:30:16.834905Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.834922Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835065Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835105Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835147Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835306Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835359Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835407Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835421Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835643Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835924Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.835997Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.836082Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.836131Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.836140Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.836223Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.836427Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.836564Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.836710Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.836834Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.836992Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837149Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837259Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837296Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837327Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837358Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837406Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837413Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837438Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837470Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837488Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837502Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837551Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837596Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837599Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837643Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837679Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837710Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837756Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837757Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837853Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837888Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837919Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837903Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837951Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.837987Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838012Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838077Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838098Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838110Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838184Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838216Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838179Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838248Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838280Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838291Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838326Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838406Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838424Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838483Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838493Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838532Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838553Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838586Z[0m [33m WARN[0m SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+[2m2026-07-30T00:30:16.838954Z[0m [32m INFO[0m DESTROY_SESSION: sessionid=SessionId([0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 2])
+[2m2026-07-30T00:30:16.838964Z[0m [33m WARN[0m DESTROY_SESSION: Failed to destroy session: Session not found
+[2m2026-07-30T00:30:16.839213Z[0m [32m INFO[0m CREATE_SESSION: clientid=2, sequence=4
+[2m2026-07-30T00:30:16.839219Z[0m [32m INFO[0m CREATE_SESSION: Client requested - max_request=1049620, max_response=1049480, max_ops=8
+[2m2026-07-30T00:30:16.839224Z[0m [32m INFO[0m CREATE_SESSION: Negotiated: req=1048576, resp=1048576, ops=8
+[2m2026-07-30T00:30:16.839244Z[0m [32m INFO[0m Session created: client=2, session_id=SessionId([0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 2])
+[2m2026-07-30T00:30:16.839250Z[0m [32m INFO[0m CREATE_SESSION: Session SessionId([0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 2]) created for client 2 with 1024KB buffers
+[2m2026-07-30T00:30:16.839262Z[0m [32m INFO[0m CREATE_SESSION: registered back-channel writer for session SessionId([0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 2]) (CONN_BACK_CHAN requested)
+[2m2026-07-30T00:30:17.172926Z[0m [32m INFO[0m DESTROY_SESSION: sessionid=SessionId([0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8])
+[2m2026-07-30T00:30:17.172941Z[0m [33m WARN[0m DESTROY_SESSION: Failed to destroy session: Session not found
+[2m2026-07-30T00:30:17.173013Z[0m [32m INFO[0m CREATE_SESSION: clientid=8, sequence=2
+[2m2026-07-30T00:30:17.173033Z[0m [32m INFO[0m CREATE_SESSION: Client requested - max_request=1049620, max_response=1049480, max_ops=8
+[2m2026-07-30T00:30:17.173048Z[0m [32m INFO[0m CREATE_SESSION: Negotiated: req=1048576, resp=1048576, ops=8
+[2m2026-07-30T00:30:17.173060Z[0m [32m INFO[0m Session created: client=8, session_id=SessionId([0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 8])
+[2m2026-07-30T00:30:17.173065Z[0m [32m INFO[0m CREATE_SESSION: Session SessionId([0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 8]) created for client 8 with 1024KB buffers
+[2m2026-07-30T00:30:17.173074Z[0m [32m INFO[0m CREATE_SESSION: registered back-channel writer for session SessionId([0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 8]) (CONN_BACK_CHAN requested)
+[2m2026-07-30T00:30:27.095084Z[0m [33m WARN[0m CLOSE: Invalid stateid: NotFound (other=[00, 00, 00, 00, 00, 00, e8, 82, 00, 00, 00, 02] seqid=15)
+[2m2026-07-30T00:30:28.212946Z[0m [33m WARN[0m CLOSE: Invalid stateid: NotFound (other=[00, 00, 00, 00, 00, 00, e9, 1f, 00, 00, 00, 02] seqid=1)
+[2m2026-07-30T00:30:59.130631Z[0m [33m WARN[0m CLOSE: Invalid stateid: NotFound (other=[00, 00, 00, 00, 00, 00, d0, ca, 00, 00, 00, 02] seqid=15)
+[2m2026-07-30T00:44:32.546483Z[0m [33m WARN[0m ❌ SEQUENCE misordered: slot=20, expected 19342 or 19343, got 19344
+[2m2026-07-30T00:44:32.550716Z[0m [33m WARN[0m ❌ SEQUENCE misordered: slot=4, expected 32864 or 32865, got 32866
+[2m2026-07-30T00:44:35.355849Z[0m [32m INFO[0m DESTROY_SESSION: sessionid=SessionId([0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 2])
+[2m2026-07-30T00:44:35.355877Z[0m [32m INFO[0m Session destroyed: SessionId([0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 2])
+[2m2026-07-30T00:44:35.356092Z[0m [32m INFO[0m DESTROY_SESSION: Session SessionId([0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 2]) destroyed
+[2m2026-07-30T00:44:35.356510Z[0m [32m INFO[0m Lease removed for client 2
+[2m2026-07-30T00:44:35.356522Z[0m [32m INFO[0m Client 2 removed
+[2m2026-07-30T00:44:35.356526Z[0m [32m INFO[0m DESTROY_CLIENTID: clientid=2 destroyed
+[2m2026-07-30T00:44:35.358625Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #2 from 10.244.2.91:40502 closed after 858.523964634s (1626279 RPCs processed)
+[2m2026-07-30T00:44:35.358766Z[0m [32m INFO[0m ✓ [NFS_SERVER] Connection #2 from 10.244.2.91:40502 closed cleanly (Active: 1)

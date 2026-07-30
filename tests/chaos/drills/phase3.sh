@@ -52,6 +52,16 @@
 #   3.13  F55 live gate: bounce the server MID-CHECKPOINT (forced, not by
 #         luck) and assert zero postgres PANICs — the DrainGate contract.
 #         Consumes no nodes; ~3 minutes.
+#   3.14 ☠ MAINTENANCE DRAIN ROLL (the csi-node roll landmine) — acceptance
+#         gate 3 of docs/maintenance-drain-csi-node-roll.md. Trigger a DS
+#         pod-template change under load and let the ROLLER drive it: assert
+#         the fence (drain before every covered node's tgt dies), the barrier
+#         (never below one in_sync leg), the lease (marks stamped then
+#         lifted), zero UNFENCED degrades, and a consumer that never
+#         restarts. Needs SC=flint-r2 + maintenance.drainRoll.enabled=true +
+#         DS updateStrategy=OnDelete. Consumes no nodes. NOTE: the local half
+#         (serving raid on the rolling node) is design-only — the drill
+#         measures and reports it rather than gating it.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./lib.sh
@@ -1481,6 +1491,193 @@ case "$DRILL" in
   [ "${PG_RESTARTS_NOW:-0}" = "${PRE_RESTARTS:-0}" ] \
     || fail "3.13 FAIL: pg-0 restarted (${PRE_RESTARTS:-0} → ${PG_RESTARTS_NOW:-0}) — the bounce was not survivable even without a PANIC"
   ok "F55 gate PASSED: a checkpoint was in flight, the server drained it, the client rode through"
+  ;;
+
+3.14) # ☠ MAINTENANCE DRAIN ROLL — the csi-node roll landmine live gate.
+      # docs/maintenance-drain-csi-node-roll.md acceptance gate 3. Until this
+      # drill existed, maint_roll.rs had been gated ONLY by TLC + the sim
+      # crash-sweep + unit tests; the chart flag ships OFF for that reason.
+      #
+      # The landmine: a csi-node DS roll restarts spdk-tgt per node. The raid
+      # cannot tell a planned restart from a failure, so on post-P4 bits a
+      # routine roll manufactures degrade → stale-mark → rejoin per node, and
+      # k8s' maxUnavailable=1 (which judges POD readiness, knowing nothing of
+      # raid membership) composes those into a total outage at r=2. TLC finds
+      # that with ZERO real failures (FlintReplicationRollUnfenced.cfg).
+      #
+      # The roller's three guards: the FENCE (drain a node's serving legs
+      # before its tgt dies), the BARRIER (advance only at full redundancy —
+      # raid state, not pod-readiness), the LEASE (marks die with their
+      # holder). This drill observes all three on the wire.
+      #
+      # SCOPE — read this before believing a PASS. The roller covers legs
+      # consumed REMOTELY. When the serving raid itself lives on the rolling
+      # node (consumer == node) it emits MaintenanceLocalConsumer and SKIPS
+      # the drain: the local half (staged-device continuity) is design-only.
+      # On an RWX harness the consumer is the NFS server's node, so a
+      # full-fleet campaign necessarily exercises BOTH halves. The gate below
+      # is therefore strict on the fenced nodes and MEASURES the local one —
+      # quantifying that gap is what still blocks the chart default.
+      #
+      # Consumes no nodes; the roller drains and readmits rather than killing.
+  pre_rwx
+  kubectl get pv "$PV" -o jsonpath='{.spec.storageClassName}' | grep -q "flint-r2" \
+    || fail "3.14 needs SC=flint-r2 (a single-replica volume has no redundancy for the barrier to restore)"
+
+  # Preconditions. A roll with the roller OFF is the landmine itself, not a
+  # test of the fix — refuse rather than mint a meaningless verdict.
+  MAINT_ENV=$(kubectl get deploy -n "$DRIVER_NS" flint-csi-controller -o json 2>/dev/null \
+    | jq -r '.spec.template.spec.containers[] | select(.name=="flint-csi-controller")
+             | .env[]? | select(.name=="FLINT_MAINT_DRAIN") | .value' | head -1)
+  case "$(printf '%s' "${MAINT_ENV:-}" | tr 'A-Z' 'a-z')" in
+    disabled|false|0)
+      fail "3.14 INVALID: FLINT_MAINT_DRAIN=$MAINT_ENV — the roller is off, so this would roll the DS with raw k8s semantics (the landmine). helm upgrade --set maintenance.drainRoll.enabled=true first" ;;
+  esac
+  STRAT=$(kubectl get ds -n "$DRIVER_NS" flint-csi-node -o jsonpath='{.spec.updateStrategy.type}')
+  [ "$STRAT" = "OnDelete" ] \
+    || fail "3.14 INVALID: DS updateStrategy=$STRAT — with RollingUpdate the DS controller races the roller and k8s wins; the chart sets OnDelete when drainRoll is enabled"
+  ROLLER_UP=$(ctrl_log "$(( T0 - 600 ))" | grep -c "\[MAINT\] Maintenance roller started" || true)
+  [ "${ROLLER_UP:-0}" -gt 0 ] \
+    || note "no 'roller started' line in the last 10min of controller log — it may predate the window; continuing on the env+strategy evidence"
+
+  CONSUMER_NODE=$NFS_NODE          # the serving raid's home: the local half
+  LEG_NODES=$(pv_replicas_json | jq -r '.[].node_name' | sort -u)
+  FENCED_NODES=$(printf '%s\n' $LEG_NODES | grep -v "^${CONSUMER_NODE}$" || true)
+  note "legs on: $(printf '%s ' $LEG_NODES)| consumer(local half)=$CONSUMER_NODE | fenced: $(printf '%s ' ${FENCED_NODES:-none})"
+  [ -n "$FENCED_NODES" ] \
+    || fail "3.14 INVALID: every leg lives on the consumer node ($CONSUMER_NODE) — nothing is remotely consumed, so the fence has no work and a PASS would prove nothing"
+
+  REV_BEFORE=$(kubectl get ds -n "$DRIVER_NS" flint-csi-node -o jsonpath='{.status.observedGeneration}')
+  # Keep PRE_HASHES in the SAME newline form the loop's $H uses. A trailing
+  # `tr '\n' ' '` here made the two strings differ by whitespace alone, so the
+  # completion test fired on iteration 1 and the drill measured nothing — the
+  # first run of this drill did exactly that.
+  PRE_HASHES=$(kubectl get pods -n "$DRIVER_NS" -l app=flint-csi-node \
+    -o jsonpath='{range .items[*]}{.metadata.labels.controller-revision-hash}{"\n"}{end}' | sort -u)
+  note "pre-roll: generation=$REV_BEFORE revision-hash(es)=$(printf '%s' "$PRE_HASHES" | tr '\n' ' ')"
+
+  # Sample the serving raid's base count and the suppression marks for the
+  # whole campaign. base 2/2 → 1/2 is EXPECTED from a drain; what must not
+  # happen is an UNFENCED drop (1/2 with no live maint mark), which is the
+  # P4-manufactured degrade the fence exists to prevent.
+  SAMP="$ARTIFACTS/314-samples.tsv"; mkdir -p "$ARTIFACTS"
+  printf 't\tbase\tmarks\tin_sync\tpg_restarts\n' > "$SAMP"
+  ( while :; do
+      b=$(raid_summary "$(nfs_node)" 2>/dev/null | grep -o 'base=[0-9]*/[0-9]*' | head -1)
+      j=$(kubectl get pv "$PV" -o json 2>/dev/null \
+          | jq -r '.metadata.annotations["flint.csi.storage.io/replica-sync-state"] // "{}"')
+      m=$(printf '%s' "$j" | jq -r '[.replicas[]? | select(.maint_drain != null)] | length' 2>/dev/null)
+      s=$(printf '%s' "$j" | jq -r '[.replicas[]? | select(.sync_state=="in_sync")] | length' 2>/dev/null)
+      printf '%s\t%s\t%s\t%s\t%s\n' "$(( $(epoch) - T0 ))" "${b:-none}" "${m:-0}" "${s:-0}" "$(pg_restarts)" >> "$SAMP"
+      sleep 3
+    done ) &
+  SAMP_PID=$!
+
+  # TRIGGER: a benign pod-template change. Under OnDelete k8s will NOT act on
+  # it, so every pod restart from here is the roller's deliberate act.
+  kubectl patch ds -n "$DRIVER_NS" flint-csi-node --type=merge \
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"flint.io/drill-314\":\"$T0\"}}}}}" >/dev/null \
+    || fail "3.14: could not patch the DS pod template (the roll trigger)"
+  note "DS pod template patched at 0s — new revision pending; OnDelete means only the roller can act"
+
+  # Wait for the campaign: every node pod on a single NEW revision hash.
+  ROLL_BUDGET=${ROLL_BUDGET:-900}
+  T_DONE=-1
+  for i in $(seq 1 $(( ROLL_BUDGET / 10 )) ); do
+    H=$(kubectl get pods -n "$DRIVER_NS" -l app=flint-csi-node \
+        -o jsonpath='{range .items[*]}{.metadata.labels.controller-revision-hash}{"\n"}{end}' | sort -u)
+    NH=$(printf '%s\n' "$H" | grep -c . || true)
+    READY=$(kubectl get pods -n "$DRIVER_NS" -l app=flint-csi-node --no-headers 2>/dev/null \
+            | awk '{split($2,a,"/"); if(a[1]==a[2]) c++} END{print c+0}')
+    TOT=$(kubectl get pods -n "$DRIVER_NS" -l app=flint-csi-node --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$NH" = "1" ] && [ "$H" != "$PRE_HASHES" ] && [ "$READY" = "$TOT" ]; then
+      T_DONE=$(( $(epoch) - T0 )); break
+    fi
+    sleep 10
+  done
+  kill "$SAMP_PID" 2>/dev/null; wait "$SAMP_PID" 2>/dev/null
+
+  CLOG="$ARTIFACTS/314-controller.log"
+  ctrl_log "$T0" > "$CLOG" 2>/dev/null || true
+  DRAINS=$(grep -c "\[MAINT\] Leg drained from serving raid" "$CLOG" || true)
+  ROLLSTARTS=$(grep -c "node drained — deleting csi-node pod" "$CLOG" || true)
+  CLEARS=$(grep -c "lifting suppression marks" "$CLOG" || true)
+  BLOCKED=$(grep -c "\[MAINT\] roll blocked" "$CLOG" || true)
+  RENEWFAIL=$(grep -c "mark renewal failed" "$CLOG" || true)
+  LOCALWARN=$(kubectl get events -n "$DRIVER_NS" --field-selector reason=MaintenanceLocalConsumer \
+    -o jsonpath='{range .items[*]}{.involvedObject.name}{" "}{end}' 2>/dev/null | wc -w | tr -d ' ')
+  [ "$LOCALWARN" = "0" ] && LOCALWARN=$(kubectl get events -A --field-selector reason=MaintenanceLocalConsumer \
+    -o jsonpath='{range .items[*]}{.involvedObject.name}{" "}{end}' 2>/dev/null | wc -w | tr -d ' ')
+
+  # UNFENCED DEGRADE: any sample at reduced base with ZERO live maint marks.
+  # That is the raid discovering a member went silent — exactly what the
+  # fence must make impossible on the nodes it covers.
+  UNFENCED=$(awk -F'\t' 'NR>1 && $2!="base=2/2" && $2!="none" && $3=="0"' "$SAMP" | wc -l | tr -d ' ')
+  MARKED_MAX=$(awk -F'\t' 'NR>1 && $3>m {m=$3} END{print m+0}' "$SAMP")
+  MIN_SYNC=$(awk -F'\t' 'NR>1 && $4!="" {if(n==0||$4<m){m=$4}; n++} END{print (n?m:-1)}' "$SAMP")
+
+  PGL=$(kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null || true)
+  PANIC=$(printf '%s' "$PGL" | grep -c "PANIC" || true)
+  EIO=$(printf '%s' "$PGL" | grep -ci "Input/output error" || true)
+  ESTALE=$(printf '%s' "$PGL" | grep -ci "stale file" || true)
+  PG_NOW=$(pg_restarts)
+  wait_acks_fresh 300 && T_RESUME=$(( $(epoch) - T0 )) || T_RESUME=-1
+  STALL=$(max_stall_since "$T0")
+  witness_verdict "$T0"
+
+  note "roller: drains=$DRAINS rollstarts=$ROLLSTARTS clears=$CLEARS blocked=$BLOCKED renew_fail=$RENEWFAIL local_consumer_warnings=$LOCALWARN"
+  note "samples: unfenced_degrade_samples=$UNFENCED max_live_marks=$MARKED_MAX min_in_sync=$MIN_SYNC"
+  note "client: panic=$PANIC eio=$EIO estale=$ESTALE pg_restarts=${PRE_RESTARTS:-0}->${PG_NOW:-0} stall=${STALL}s io_resume=${T_RESUME}s"
+
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=300 \
+    NOTES="maint roll: done=${T_DONE}s drains=$DRAINS rollstarts=$ROLLSTARTS clears=$CLEARS blocked=$BLOCKED local_warn=$LOCALWARN unfenced=$UNFENCED stall=${STALL}s panic=$PANIC eio=$EIO pg_restarts=${PRE_RESTARTS:-0}->${PG_NOW:-0}" verify
+
+  # --- the gate -----------------------------------------------------------
+  # A drill that measured nothing must never report a verdict. The first run
+  # of 3.14 completed in 5s on a whitespace bug and sampled one header row;
+  # every downstream count was vacuously 0.
+  NSAMP=$(awk 'NR>1' "$SAMP" | wc -l | tr -d ' ')
+  [ "${NSAMP:-0}" -ge 10 ] \
+    || fail "3.14 INVALID: only $NSAMP sample(s) collected over a ${T_DONE}s campaign — the observation window closed before the roller acted, so every assertion below would be vacuous"
+  ok "$NSAMP samples across the campaign"
+
+  [ "$T_DONE" -ge 0 ] \
+    || fail "3.14 FAIL (campaign): the roll never reached one new revision with all node pods Ready inside ${ROLL_BUDGET}s — a roller that cannot finish is the wedge the design set out to retire (blocked=$BLOCKED)"
+  ok "campaign completed at ${T_DONE}s — every node pod on one new revision"
+
+  NFENCED=$(printf '%s\n' ${FENCED_NODES} | grep -c . || true)
+  [ "$DRAINS" -ge "$NFENCED" ] \
+    || fail "3.14 FAIL (fence): $DRAINS drain(s) for $NFENCED remotely-consumed leg node(s) — a node's tgt went down without its legs being drained first, which is the landmine"
+  ok "fence held: $DRAINS graceful drain(s) covering $NFENCED remotely-consumed leg node(s)"
+
+  [ "$MARKED_MAX" -ge 1 ] \
+    || fail "3.14 FAIL (lease): no live maint_drain mark was ever observed — the drain did not stamp a suppression mark, so readmission planning was never excluded and the barrier is meaningless"
+  [ "$CLEARS" -ge 1 ] \
+    || fail "3.14 FAIL (lease): marks were stamped but never lifted (MaintClear absent) — a drained leg parked at reduced redundancy is F43 re-created by a maintenance flag"
+  ok "lease observed: marks stamped (max $MARKED_MAX live) and lifted by the roller ($CLEARS MaintClear)"
+
+  [ "$UNFENCED" -eq 0 ] \
+    || fail "3.14 FAIL (P4/fence): $UNFENCED sample(s) showed the serving raid at reduced base with NO live suppression mark — the raid discovered a silent member, i.e. the roll manufactured a degrade instead of fencing it"
+  ok "zero unfenced degrades — every base reduction was an accounted, marked drain"
+
+  [ "${PANIC:-0}" -eq 0 ] \
+    || fail "3.14 FAIL: postgres PANICked during the roll (panic=$PANIC eio=$EIO) — the roll was not survivable"
+  [ "${PG_NOW:-0}" = "${PRE_RESTARTS:-0}" ] \
+    || fail "3.14 FAIL: pg-0 restarted (${PRE_RESTARTS:-0} → ${PG_NOW:-0}) during a PLANNED maintenance roll"
+  ok "consumer rode through: zero PANIC, zero restarts (eio=$EIO estale=$ESTALE)"
+
+  [ "$MIN_SYNC" -ge 1 ] \
+    || fail "3.14 FAIL (barrier): in_sync legs hit $MIN_SYNC — the roll took the last serving leg, which is precisely RollUnfenced's counterexample"
+  ok "barrier held: never fewer than $MIN_SYNC in_sync leg(s) at any sample"
+
+  # The local half is a KNOWN gap, not a failure. Report it loudly so a green
+  # 3.14 is never mistaken for "the whole landmine is closed".
+  if [ "${LOCALWARN:-0}" -gt 0 ]; then
+    note "LOCAL HALF EXERCISED: $LOCALWARN MaintenanceLocalConsumer warning(s) — the tgt under the serving raid on $CONSUMER_NODE was restarted WITHOUT a drain (staged-device continuity, design-only). Guest cost above is the honest measure of that gap; it is NOT covered by this gate."
+  else
+    note "no MaintenanceLocalConsumer warning — the consumer node was not rolled, so this run gates the fenced path only"
+  fi
+  ok "3.14 PASSED (orchestration half): fence + barrier + lease proven live under load"
   ;;
 
 *) fail "unknown drill '$DRILL'" ;;

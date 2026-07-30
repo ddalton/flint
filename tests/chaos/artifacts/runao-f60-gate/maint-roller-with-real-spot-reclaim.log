@@ -1,0 +1,7 @@
+[2m2026-07-30T00:40:56.623174Z[0m [32m INFO[0m [MAINT] Maintenance roller started [3mnamespace[0m[2m=[0mflint-system [3mds[0m[2m=[0mflint-csi-node [3msuppress_ttl_secs[0m[2m=[0m900
+[2m2026-07-30T00:41:56.714267Z[0m [32m INFO[0m [MAINT] Leg drained from serving raid (planned roll) [3mvolume_id[0m[2m=[0mpvc-3cece943-bdef-4752-bf94-00cd190ef50f [3mnode[0m[2m=[0mrunao-aws-4 [3mbase[0m[2m=[0mnvme_nqn_2024-11_com_flint_volume_pvc-3cece943-bdef-4752-bf94-00cd190ef50f_0n1
+[2m2026-07-30T00:41:56.719258Z[0m [32m INFO[0m [MAINT] drain pass complete (pod delete on a later tick) [3mnode[0m[2m=[0mrunao-aws-3 [3mdrained[0m[2m=[0m1
+[2m2026-07-30T00:42:56.638391Z[0m [32m INFO[0m [MAINT] node drained — deleting csi-node pod (RollStart) [3mpod[0m[2m=[0mflint-csi-node-g6hlj [3mnode[0m[2m=[0mrunao-aws-3
+[2m2026-07-30T00:43:56.637217Z[0m [32m INFO[0m [MAINT] node restart complete — lifting suppression marks (MaintClear) [3mnode[0m[2m=[0mrunao-aws-3
+[2m2026-07-30T00:44:56.635790Z[0m [32m INFO[0m [MAINT] roll blocked [3mreason[0m[2m=[0mbarrier: not fully redundant (pvc-3cece943-bdef-4752-bf94-00cd190ef50f: replica 21ffb5a1-cfa1-4fb8-935d-1316270bb5ac on runao-aws-3 is stale) — the roll waits (readmitted, not pod-ready)
+[2m2026-07-30T00:45:56.636549Z[0m [32m INFO[0m [MAINT] roll blocked [3mreason[0m[2m=[0mbarrier: not fully redundant (pvc-3cece943-bdef-4752-bf94-00cd190ef50f: replica 21ffb5a1-cfa1-4fb8-935d-1316270bb5ac on runao-aws-3 is stale) — the roll waits (readmitted, not pod-ready)

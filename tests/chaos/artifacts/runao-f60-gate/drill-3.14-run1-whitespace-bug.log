@@ -1,0 +1,40 @@
+  ✓ harness healthy (pg-0 Ready, ledger acking)
+
+▶ T0=1785372090 pg-0 on runao-aws-3; nfs flint-nfs-pvc-3cece943-bdef-4752-bf94-00cd190ef50f on runao-aws-4 (uid 59642f21); witness on runao-aws-4
+  · legs on: runao-aws-3 runao-aws-4 | consumer(local half)=runao-aws-4 | fenced: runao-aws-3 
+  · pre-roll: generation=3 revision-hash(es)=7d8b677456 
+  · DS pod template patched at 0s — new revision pending; OnDelete means only the roller can act
+  ✓ witness clean (0 mismatches, last write 0s ago)
+  · roller: drains=0 rollstarts=0 clears=0 blocked=0 renew_fail=0 local_consumer_warnings=0
+  · samples: unfenced_degrade_samples=0 max_live_marks=0 min_in_sync=-1
+  · client: panic=0 eio=0 estale=0 pg_restarts=0->0 stall=1s io_resume=3s
+
+▶ 1/7 pod Ready (timeout 300s)
+  ✓ pg-0 Ready 5s after T0
+  ✓ attribution: in-place (runao-aws-3→runao-aws-3, postgres restarts 0)
+
+▶ 2/7 db verdict
+  · db FAIL — see /Users/ddalton/github/flint/tests/chaos/artifacts/3-3.14-1785372090/db-verdict.txt
+
+▶ 3/7 volumeattachments
+  ✓ VA consistent (consumer nodes covered, none stale)
+
+▶ 4/7 data-path sessions (nvmeof)
+  ✓ pg volume session live
+  ✓ data path clean (live volume healthy, no new leaks)
+
+▶ 5/7 orphaned mounts
+Error from server: error dialing backend: dial tcp 172.31.12.19:10250: connect: connection refused
+  ✓ no orphaned pod mounts
+  · node fs pressure captured (/Users/ddalton/github/flint/tests/chaos/artifacts/3-3.14-1785372090/node-fs.txt)
+
+▶ 6/7 driver logs since T0
+  ✓ no unresolved volume errors (full scan in /Users/ddalton/github/flint/tests/chaos/artifacts/3-3.14-1785372090/driver-logs.txt)
+
+▶ 7/7 timings
+  ✓ max ledger stall 8s
+
+FAIL: drill 3/3.14 — ready=5s stall=8s (failed: db)
+  ✓ campaign completed at 2s — every node pod on one new revision
+
+✗ 3.14 FAIL (fence): 0 drain(s) for 1 remotely-consumed leg node(s) — a node's tgt went down without its legs being drained first, which is the landmine

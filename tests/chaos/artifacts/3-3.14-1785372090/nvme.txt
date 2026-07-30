@@ -1,0 +1,19 @@
+== runao-aws-3 ==
+== runao-aws-4 ==
+nvme-subsys2 - NQN=nqn.2024-11.com.flint:volume:pvc-3cece943-bdef-4752-bf94-00cd190ef50f
+               hostnqn=nqn.2024-11.com.flint:node:runao-aws-4
+               iopolicy=(null)
+\
+ +- nvme2 tcp traddr=127.0.0.1,trsvcid=4420,src_addr=127.0.0.1 live
+
+nvme-subsys1 - NQN=nqn.2008-08.com.amazon.aws:ec2-nvme-instance:AWS1BAB6AA56822FCB50
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:17d51538-1e0c-4aad-b3a4-7a471cf9c82b
+               iopolicy=(null)
+\
+ +- nvme1 pcie 0000:00:1f.0 live
+
+nvme-subsys0 - NQN=nqn:2008-08.com.amazon.aws:ebs:vol0501d8ce06dceacc9
+               hostnqn=nqn.2014-08.org.nvmexpress:uuid:17d51538-1e0c-4aad-b3a4-7a471cf9c82b
+               iopolicy=(null)
+\
+ +- nvme0 pcie 0000:00:04.0 live

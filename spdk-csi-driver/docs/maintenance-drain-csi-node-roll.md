@@ -1,7 +1,21 @@
 # Maintenance drain — the csi-node roll landmine fix (model-first design)
 
 Status: **ORCHESTRATION HALF IMPLEMENTED + SIM-SWEPT 2026-07-28** (same
-day as the formal gate); live gate = drill 3.14, owed. The LOCAL half
+day as the formal gate); live gate = drill 3.14, **RUN 2026-07-30 on
+runao — the three guards PASSED live, and it found F61.**
+
+> **F61 BLOCKS THE DEFAULT.** `docs/f61-maint-roll-wedges-on-undrainable-node.md`:
+> `plan_roll` reaches `DeletePod` only via `marked_nodes`, but the drain
+> stamps marks per *drained* volume — so a node whose volumes are all
+> skipped (`consumer == node`, unattached, or no legs) yields zero marks
+> and the planner returns `Drain` forever. The roll never converges. This
+> is guaranteed on the node hosting any RWX serving raid and on any CP
+> running the DS. Safe (nothing drained or restarted) but it IS a wedge.
+> It also **blocks measuring the local half**: the pod delete never
+> happens, so the tgt under the serving raid is never restarted.
+> `maintenance.drainRoll.enabled` stays OFF until F61 is fixed in BOTH
+> the code and the model — today no TLC run can fail this way, because
+> the model has no pending-and-undrainable node. The LOCAL half
 (staged-device continuity) remains design-only. The formal work landed
 ahead of the code, deliberately, in the S2 pattern: every
 orchestration-level safety and liveness question below is answered by a

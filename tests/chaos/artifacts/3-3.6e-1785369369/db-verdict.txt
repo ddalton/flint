@@ -1,0 +1,9 @@
+
+▶ db verdict (since 2026-07-29T23:56:09Z)
+  ✓ pg_isready
+  ✓ ledger: all 2779 acked writes present
+  ✓ pg_amcheck clean
+  ✓ postgres log clean (current + previous instance)
+  ✓ writability probe
+
+DB-VERDICT: PASS
