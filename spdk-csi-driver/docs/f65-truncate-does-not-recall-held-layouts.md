@@ -1,14 +1,31 @@
 # F65 — a truncate does not recall held layouts, so the truncate gate only covers clients that don't have one yet
 
-Status: **FOUND BY TLC 2026-07-31** while modelling the truncate gate
-(`formal/FlintTruncate.tla`); **FIXED same session.** `note_truncate` now
-recalls and revokes the file's layouts between the mark and the fanout.
-`FlintTruncateHeldLayout.cfg` is the regression run — it flips
-`RecallOnTruncate` back off and must keep FINDING the loss.
+Status: **FOUND BY TLC 2026-07-31; the fix landed the same day and a
+multi-agent audit hours later found it INEFFECTIVE AS SHIPPED.** The recall
+is emitted in a form a conforming client refuses, and the reply status is
+discarded so the server logs success either way. **Treat F65 as OPEN.**
 
-**One residual is NOT closed and is tracked as its own failing run**
-(`FlintTruncateLostRecall.cfg`): revocation is server-side, so it binds
-only clients the recall actually reached. See "The residual" below.
+`note_truncate` does now recall and revoke the file's layouts between the
+mark and the fanout — the ordering and the selector are right, and the
+gate's own theorem holds. What does not work is the CB_LAYOUTRECALL under
+it, which had never been exercised against a real client. Three independent
+blockers, each with its own failing gate run:
+
+| blocker | run | state |
+| --- | --- | --- |
+| no recall at all (F65 itself) | `FlintTruncateHeldLayout.cfg` | **fixed** |
+| recall emitted but refused (C1/C2), and scored `Acked` anyway (C3) | `FlintTruncateLostRecall.cfg` | **open** |
+| grant escapes gate + recall via a publish race (C6) | `FlintTruncateGrantRace.cfg` | **open** |
+
+`FlintTruncate.cfg` (the shipped world) deliberately does NOT list
+`Inv_NoStaleServe`. `FlintTruncateNoStaleServe.cfg` is the conditional
+green — what closing F65 requires, not what it currently does.
+
+Full audit findings, including four more (LAYOUTCOMMIT re-extending the
+truncated stub, the `nconnect=4` back-channel registry losing its writer, a
+self-recall stall on the connection read loop, and recalled clients being
+refused the MDS fallback path during a parked truncate) are recorded in the
+audit section below.
 
 ## The one-sentence version
 

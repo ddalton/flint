@@ -35,9 +35,12 @@
 (*     the clear, so TLC may interleave a fresh SETATTR between them.      *)
 (*   LAYOUTGET  returns TRYLATER while the mark is present                 *)
 (*     (operations/mod.rs:171).  This is the gate's ONLY tooth.            *)
-(*   nothing recalls a layout on truncate.  The only CB_LAYOUTRECALL in    *)
-(*     the tree is the device heartbeat's dead-DS fan-out (server.rs:982,  *)
-(*     :991).  RecallOnTruncate models the fix and is FALSE as shipped.    *)
+(*   note_truncate recalls the file's layouts before the fanout            *)
+(*     (RecallOnTruncate).  Whether that recall is HONOURED is a separate  *)
+(*     constant (RecallReaches) because the emitted CB is currently        *)
+(*     malformed — see below.  LAYOUTGET is TWO steps, not one             *)
+(*     (LayoutGetCheck / LayoutGetInsert), because the code is two steps   *)
+(*     with no lock between; PublishRecheck is the proposed repair.        *)
 (*                                                                         *)
 (* TWO THEOREMS, and they do not both hold.                                *)
 (*                                                                         *)
@@ -48,21 +51,38 @@
 (*     BlindClear mutation must rediscover the loss.                       *)
 (*                                                                         *)
 (*   Inv_NoStaleServe — no client ever reads content past the MDS size.    *)
-(*     This was F65.  The gate is a LAYOUTGET-time check, so a layout      *)
-(*     ACQUIRED BEFORE the truncate walked straight past it and the read   *)
-(*     never reached the MDS; TLC found it three steps from Init.  The     *)
-(*     fix (shipped: note_truncate recalls and revokes the file's layouts  *)
-(*     between the mark and the fanout) restores it, and the              *)
-(*     RecallOnTruncate = FALSE mutation must rediscover the loss.         *)
+(*     This was F65, and it is STILL NOT SATISFIED by shipped code.  The    *)
+(*     gate is a LAYOUTGET-time check, so a layout ACQUIRED BEFORE the      *)
+(*     truncate walked straight past it and the read never reached the MDS; *)
+(*     TLC found it three steps from Init.  note_truncate now recalls and   *)
+(*     revokes the file's layouts between the mark and the fanout — the     *)
+(*     right shape — but a 2026-07-31 audit found the shipped code fails    *)
+(*     this theorem on THREE independent counts, each isolated by its own   *)
+(*     failing run:                                                         *)
 (*                                                                         *)
-(*     THE RESIDUAL, which the fix does not close and the model states     *)
-(*     rather than assumes away: revocation is SERVER-side, so it binds    *)
-(*     only clients the recall actually reached.  A client behind a dead   *)
-(*     back-channel (NoChannel / TimedOut — both of which the code revokes *)
-(*     through anyway) still believes it holds the layout and still reads  *)
-(*     the DS directly.  RecallReaches = FALSE is that world and TLC finds *)
-(*     the violation.  Closing it needs the DS to refuse, not the MDS to   *)
-(*     ask — see the scope limits below.                                   *)
+(*       RecallOnTruncate = FALSE   F65 itself: no recall at all.  Fixed.   *)
+(*       RecallReaches = FALSE      the recall is EMITTED but refused.  The *)
+(*         CB carries the layout stateid verbatim (RFC 8881 §12.5.3 wants   *)
+(*         seqid+1; flint keeps no seqid state and generate_stateid         *)
+(*         randomises all 16 bytes) and CB_SEQUENCE hardcodes slot 0 /      *)
+(*         seqid 1, so a conforming client rejects it — and                 *)
+(*         `Ok(_reply) => Acked` discards the status, so the server logs    *)
+(*         success either way.  NOT FIXED.                                  *)
+(*       PublishRecheck = FALSE     layoutget reads the gate at             *)
+(*         operations/mod.rs:234 and publishes at layout.rs:862 with no     *)
+(*         lock between (LayoutManager has no Mutex or RwLock at all), so a *)
+(*         grant can pass the gate, have the mark arm under it, and publish *)
+(*         after the recall's snapshot — escaping BOTH teeth.  NOT FIXED.   *)
+(*                                                                         *)
+(*     The shipped cfg therefore does NOT list Inv_NoStaleServe.  Listing   *)
+(*     it would be the model asserting a delivery the code does not         *)
+(*     achieve, which is this module's own worst failure mode.              *)
+(*     FlintTruncateNoStaleServe.cfg is the CONDITIONAL green: what closing *)
+(*     F65 requires, not what it currently does.                            *)
+(*                                                                         *)
+(*     AND A RESIDUAL beyond all three: revocation is SERVER-side, so even  *)
+(*     a correctly-emitted recall binds only clients it reaches.  Closing   *)
+(*     that needs the DS to refuse, not the MDS to ask.                     *)
 (*                                                                         *)
 (* ABSTRACTIONS, STATED — this is the module's own THE-ABSTRACTION-WAS-    *)
 (* THE-BUG surface, so read these before citing a green run:               *)
@@ -98,7 +118,8 @@ CONSTANTS
   GateClearGuarded,  \* TRUE = clear_truncate_dirty_if's `confirmed <= min`
   MarkKeepsMin,      \* TRUE = mark_truncate_dirty's and_modify(min)
   RecallOnTruncate,  \* TRUE = recall+revoke held layouts when the gate arms
-  RecallReaches      \* TRUE = every recall is delivered AND honoured
+  RecallReaches,     \* TRUE = every recall is delivered AND honoured
+  PublishRecheck     \* TRUE = a layout re-reads the gate AFTER being published
 
 VARIABLES
   size,        \* the MDS stub's size — the authoritative attribute
@@ -107,10 +128,14 @@ VARIABLES
   gmin,        \* its SMALLEST unconfirmed target size (meaningful when gated)
   job,         \* [1..MaxJobs -> fanout record]
   sets,        \* SETATTR budget spent
-  held,        \* [Clients -> BOOLEAN] — client holds a layout
+  held,        \* [Clients -> BOOLEAN] — layout is IN the map (recallable)
+  granting,    \* [Clients -> BOOLEAN] — passed layoutget's gate check, not yet
+               \*   inserted.  The window between operations/mod.rs:234 and
+               \*   layout.rs:862, in which a layout is invisible to the recall
+               \*   snapshot because it is not in `layouts` yet.
   staleServed  \* ghost: a client was handed content past the MDS size
 
-vars == <<size, dsData, gated, gmin, job, sets, held, staleServed>>
+vars == <<size, dsData, gated, gmin, job, sets, held, granting, staleServed>>
 
 Offsets == 1..MaxOff
 Sizes == 0..MaxOff
@@ -133,6 +158,7 @@ TypeOK ==
   /\ job \in [JobIds -> [st : JobStates, target : Sizes, landed : SUBSET DSes]]
   /\ sets \in 0..MaxSets
   /\ held \in [Clients -> BOOLEAN]
+  /\ granting \in [Clients -> BOOLEAN]
   /\ staleServed \in BOOLEAN
 
 Init ==
@@ -143,6 +169,7 @@ Init ==
   /\ job = [j \in JobIds |-> NoJob]
   /\ sets = 0
   /\ held = [c \in Clients |-> FALSE]
+  /\ granting = [c \in Clients |-> FALSE]
   /\ staleServed = FALSE
 
 (***************************************************************************)
@@ -183,7 +210,12 @@ SetSize(n) ==
        /\ held' = IF RecallOnTruncate
                     THEN [c \in Clients |-> IF c \in lost THEN held[c] ELSE FALSE]
                     ELSE held
-  /\ UNCHANGED <<dsData, staleServed>>
+  \* `granting` is deliberately NOT touched.  recall_layouts_for_file
+  \* iterates `layouts`, and a layout still between its gate check and its
+  \* insert is not in that map — so the recall cannot see it.  That is the
+  \* implementation, and modelling LayoutGet as one atomic action (as this
+  \* module first did) is exactly what hid it.
+  /\ UNCHANGED <<dsData, granting, staleServed>>
 
 \* One DS confirms set_len(target).  Truncation drops the real content above
 \* the target; extension adds only zeros, which are not content.
@@ -192,7 +224,7 @@ Land(j, d) ==
   /\ d \notin job[j].landed
   /\ dsData' = [dsData EXCEPT ![d] = @ \cap 1..job[j].target]
   /\ job' = [job EXCEPT ![j].landed = @ \cup {d}]
-  /\ UNCHANGED <<size, gated, gmin, sets, held, staleServed>>
+  /\ UNCHANGED <<size, gated, gmin, sets, held, granting, staleServed>>
 
 \* truncate_fanout returned TRUE: every pinned DS confirmed.  The gate is
 \* lifted only if this confirmation satisfies the DEEPEST cut still pending
@@ -205,7 +237,7 @@ Complete(j) ==
      IN /\ gated' = IF gated /\ lifts THEN FALSE ELSE gated
         /\ gmin' = gmin
   /\ job' = [job EXCEPT ![j] = NoJob]
-  /\ UNCHANGED <<size, dsData, sets, held, staleServed>>
+  /\ UNCHANGED <<size, dsData, sets, held, granting, staleServed>>
 
 \* truncate_fanout returned FALSE — a pinned DS is unregistered with this
 \* MDS incarnation, or advertises no control listener.  The mark stays and
@@ -214,7 +246,7 @@ Park(j) ==
   /\ job[j].st = "live"
   /\ job[j].landed # DSes
   /\ job' = [job EXCEPT ![j].st = "parked"]
-  /\ UNCHANGED <<size, dsData, gated, gmin, sets, held, staleServed>>
+  /\ UNCHANGED <<size, dsData, gated, gmin, sets, held, granting, staleServed>>
 
 \* The retry loop's re-read: "Re-read the deepest pending size each round".
 \* Separating the read from the clear is the whole point — it lets TLC put
@@ -224,7 +256,7 @@ Retarget(j) ==
   /\ job[j].st = "parked"
   /\ gated
   /\ job' = [job EXCEPT ![j] = [st |-> "live", target |-> gmin, landed |-> {}]]
-  /\ UNCHANGED <<size, dsData, gated, gmin, sets, held, staleServed>>
+  /\ UNCHANGED <<size, dsData, gated, gmin, sets, held, granting, staleServed>>
 
 \* The retry's other exit: "the mark may also have been lifted (file
 \* removed, or a deeper concurrent truncate confirmed everywhere)" — the
@@ -233,25 +265,44 @@ RetryStandDown(j) ==
   /\ job[j].st = "parked"
   /\ ~gated
   /\ job' = [job EXCEPT ![j] = NoJob]
-  /\ UNCHANGED <<size, dsData, gated, gmin, sets, held, staleServed>>
+  /\ UNCHANGED <<size, dsData, gated, gmin, sets, held, granting, staleServed>>
 
 (***************************************************************************)
 (* The client side                                                         *)
 (***************************************************************************)
 
-\* LAYOUTGET.  The gate's only tooth: TRYLATER while the mark is present,
-\* "regardless of how long it has been dirty — layouts must NEVER expose
-\* stale bytes".
-LayoutGet(c) ==
+\* LAYOUTGET, in TWO steps, because the implementation is two steps.
+\*
+\* The gate is read at operations/mod.rs:234 and the layout is published at
+\* layout.rs:862, with NO lock between them — LayoutManager has no Mutex or
+\* RwLock at all; `layouts` and `truncate_dirty` are independent DashMaps.
+\* Collapsing these into one atomic action (this module's first cut) asserts
+\* an atomicity the code does not have, and asserting it is what made TLC
+\* green on a property the code does not hold.
+LayoutGetCheck(c) ==
   /\ ~held[c]
-  /\ ~gated
-  /\ held' = [held EXCEPT ![c] = TRUE]
+  /\ ~granting[c]
+  /\ ~gated                            \* TRYLATER while the mark is present
+  /\ granting' = [granting EXCEPT ![c] = TRUE]
+  /\ UNCHANGED <<size, dsData, gated, gmin, job, sets, held, staleServed>>
+
+\* The publish.  From here the layout is in `layouts` and a LATER recall can
+\* see it — but a recall that already ran cannot.
+\*
+\* PublishRecheck is the proposed fix: re-read the gate after publishing and
+\* revoke what was just inserted if it is dirty.  Sufficient by construction
+\* (the mark precedes the recall's snapshot, and the insert precedes the
+\* recheck), which is what the strict arm has to demonstrate.
+LayoutGetInsert(c) ==
+  /\ granting[c]
+  /\ granting' = [granting EXCEPT ![c] = FALSE]
+  /\ held' = [held EXCEPT ![c] = ~(PublishRecheck /\ gated)]
   /\ UNCHANGED <<size, dsData, gated, gmin, job, sets, staleServed>>
 
 LayoutReturn(c) ==
   /\ held[c]
   /\ held' = [held EXCEPT ![c] = FALSE]
-  /\ UNCHANGED <<size, dsData, gated, gmin, job, sets, staleServed>>
+  /\ UNCHANGED <<size, dsData, gated, gmin, job, sets, granting, staleServed>>
 
 \* A read issued directly to a DS under a held layout — the MDS is not on
 \* this path at all, which is exactly why a LAYOUTGET-time check cannot
@@ -260,7 +311,7 @@ LayoutReturn(c) ==
 Read(c, d, o) ==
   /\ held[c]
   /\ staleServed' = IF o > size /\ o \in dsData[d] THEN TRUE ELSE staleServed
-  /\ UNCHANGED <<size, dsData, gated, gmin, job, sets, held>>
+  /\ UNCHANGED <<size, dsData, gated, gmin, job, sets, held, granting>>
 
 Next ==
   \/ \E n \in Sizes : SetSize(n)
@@ -269,7 +320,8 @@ Next ==
   \/ \E j \in JobIds : Park(j)
   \/ \E j \in JobIds : Retarget(j)
   \/ \E j \in JobIds : RetryStandDown(j)
-  \/ \E c \in Clients : LayoutGet(c)
+  \/ \E c \in Clients : LayoutGetCheck(c)
+  \/ \E c \in Clients : LayoutGetInsert(c)
   \/ \E c \in Clients : LayoutReturn(c)
   \/ \E c \in Clients, d \in DSes, o \in Offsets : Read(c, d, o)
 

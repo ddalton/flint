@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, and the pNFS truncate gate
 
-Four modules, one gate (`scripts/check-tla.sh`, eighty-five TLC runs).
+Four modules, one gate (`scripts/check-tla.sh`, eighty-seven TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -100,29 +100,37 @@ was written, and the run that proves it now must keep failing:
   predicate survives it. The `BlindClear` mutation must rediscover the
   loss, so the predicate is load-bearing rather than defensive.
 * `Inv_NoStaleServe` — no client is ever served content past the MDS
-  size. This **was F65**: the gate is a LAYOUTGET-time check
-  (`operations/mod.rs:171` → TRYLATER) and `note_truncate` never touched
-  the layout manager — the only `CB_LAYOUTRECALL` in the tree was the
-  dead-DS heartbeat fan-out (`server.rs:982`, `:991`) — so a layout
-  acquired *before* the truncate walked straight past it, and the read
-  never reached the MDS at all. TLC found it three steps from `Init`.
-  **Fixed the same session**: `note_truncate` now recalls and revokes the
-  file's layouts between the mark and the fanout.
-  `FlintTruncateHeldLayout.cfg` flips the recall back off and is the
-  regression run — it must keep FINDING the loss, because a recall that
-  silently stops selecting the file's layouts looks like nothing at all.
+  size. **This does NOT hold on shipped code**, and the shipped cfg
+  deliberately does not list it. It was F65 (no recall on truncate at
+  all); `note_truncate` now recalls and revokes the file's layouts
+  between the mark and the fanout, which is the right shape, but a
+  2026-07-31 multi-agent audit found two further independent losses:
 
-  **The residual the fix does not close**, recorded as its own failing
-  run rather than assumed away: revocation is *server-side*, so it binds
-  only clients the recall actually reached. One behind a dead
-  back-channel (`NoChannel`, `cb_program=0`) or one that never answers
-  (`TimedOut`) still believes it holds the layout, and its reads go
-  straight to a DS. The code revokes through all those outcomes, which is
-  right and is not sufficient. `FlintTruncateLostRecall.cfg` is that
-  world and TLC finds the violation. Closing it needs the **DS** to
-  refuse reads past the pending size, not the MDS to ask more politely —
-  a deliberate non-fix for now. **Cite the strict run together with this
-  one or with neither.**
+  - **the recall is emitted but refused.** The CB carries the layout
+    stateid verbatim (RFC 8881 §12.5.3 wants seqid+1; flint keeps no
+    seqid state and `generate_stateid` randomises all sixteen bytes) and
+    CB_SEQUENCE hardcodes slot 0 / seqid 1. `Ok(_reply) => Acked`
+    discards the reply status, so the server logs `1/1 acked` regardless
+    — the reason a live drill would not have caught it either.
+    `FlintTruncateLostRecall.cfg`.
+  - **a grant can escape both teeth.** LAYOUTGET reads the gate at
+    `operations/mod.rs:234` and publishes at `layout.rs:862` with no lock
+    between — `LayoutManager` has no `Mutex` or `RwLock` at all. A grant
+    that passes the check, has the mark arm under it, then publishes,
+    is invisible to the recall's snapshot. `FlintTruncateGrantRace.cfg`.
+
+  **The second one is a lesson about this module, not just about the
+  code.** The first cut modelled LAYOUTGET as a single atomic
+  guard-and-effect action, which asserted an atomicity the
+  implementation does not have — and that assertion is what made TLC
+  green on a property the code never held. `LayoutGet` is now
+  `LayoutGetCheck` / `LayoutGetInsert`, two steps, because the code is
+  two steps. Craft rule, re-learned: **a single TLA+ action is a claim
+  that the code holds a lock.**
+
+  `FlintTruncateNoStaleServe.cfg` is the conditional green — what
+  closing F65 requires, stated as a specification for the remaining
+  work. Cite it as a goal, never as a property of shipped code.
 
 One hypothesis was **refuted** and is kept as a run so it cannot be
 quietly re-asserted: `MarkKeepsMin=FALSE` (mark_truncate_dirty
@@ -156,7 +164,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs eighty-five configs, ALL required:
+on first use).  It runs eighty-seven configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus

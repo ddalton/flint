@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Eighty-five runs, ALL required.
+# Eighty-seven runs, ALL required.
 #
 # (Counted as invocations. `grep -c '^strict_run'` also matches the three
 # function DEFINITIONS below — that miscount is how this header briefly read
@@ -718,31 +718,36 @@ mutation_run FlintSnapshots FlintSnapshotsOrder.cfg      "walk-order mutation (O
 mutation_run FlintSnapshots FlintSnapshotsBareDelete.cfg "bare-delete mutation (RelinkOnDelete=FALSE)" "Inv_SessionFaithful"
 
 # ---- the pNFS truncate gate (2026-07-31). ----
-# The one correctness invariant the pNFS layer holds in its OWN hands. Layout
-# op sequencing has RFC 8881 + pynfs as referee and single-client integrity has
-# fsx; DS failure is not re-placed at this layer at all (placements are PINNED),
-# so it is FlintReplication's machine underneath. What is left unrefereed is the
+# The one correctness invariant the pNFS layer holds in its OWN hands: the
 # window between the MDS stub's size changing and N data servers being cut.
-strict_run   FlintTruncate FlintTruncate.cfg              "truncate gate strict (shipped: clear-if-deepest, min-keeping, recall-on-truncate) — BOTH theorems hold"
-mutation_run FlintTruncate FlintTruncateBlindClear.cfg    "blind-clear mutation (GateClearGuarded=FALSE: a shallower confirm lifts a deeper cut's mark)" "Inv_ClearImpliesFlushed"
+#
+# READ THIS BEFORE CITING ANY RUN BELOW. The gate's own theorem holds. The
+# theorem that matters to a user — no client is ever SERVED content past the
+# MDS size — DOES NOT hold on shipped code, and the shipped cfg deliberately
+# does not list it. F65's fix landed but is INEFFECTIVE pending the audit's
+# C1/C2/C3 (the recall is emitted in a form a conforming client refuses, and
+# the reply status is discarded so the server logs success either way) and C6
+# (layoutget's gate check and its publish are not atomic). See
+# spdk-csi-driver/docs/f65-truncate-does-not-recall-held-layouts.md.
+strict_run   FlintTruncate FlintTruncate.cfg               "truncate gate strict, SHIPPED — Theorem 1 only (Inv_NoStaleServe is NOT claimed; see the cfg)"
+mutation_run FlintTruncate FlintTruncateBlindClear.cfg     "blind-clear mutation (GateClearGuarded=FALSE: a shallower confirm lifts a deeper cut's mark)" "Inv_ClearImpliesFlushed"
 
 # The REFUTED half. Keeping the min looks like the other load-bearing piece and
 # is not: overwriting only ever RAISES the mark, and the mark can only rise on a
 # SETATTR that also raised the size, so the exposure is unreachable. Kept as a
 # run so the claim cannot be quietly re-asserted later.
-strict_run   FlintTruncate FlintTruncateMarkOverwrite.cfg "min-keeping refutation (MarkKeepsMin=FALSE still holds — safety is carried by clear_truncate_dirty_if alone)"
+strict_run   FlintTruncate FlintTruncateMarkOverwrite.cfg  "min-keeping refutation (MarkKeepsMin=FALSE still holds — safety is carried by clear_truncate_dirty_if alone)"
 
-# F65's teeth. The gate is a LAYOUTGET-time check, so before the fix a layout
-# acquired BEFORE the truncate walked straight past it and the read never
-# reached the MDS. If this run ever PASSES, the recall has been removed or has
-# stopped selecting the file's layouts — a failure mode that looks like nothing.
-mutation_run FlintTruncate FlintTruncateHeldLayout.cfg    "F65 regression (RecallOnTruncate=FALSE: no recall, so the gate covers only clients without a layout yet)" "Inv_NoStaleServe"
+# Three INDEPENDENT ways Inv_NoStaleServe is lost. Each isolates one cause, so
+# fixing one and watching its run go green is a real signal rather than a
+# guess. All three must keep FAILING until their cause is repaired.
+mutation_run FlintTruncate FlintTruncateHeldLayout.cfg     "F65 itself (RecallOnTruncate=FALSE: no recall at all, so the gate covers only clients without a layout yet)" "Inv_NoStaleServe"
+mutation_run FlintTruncate FlintTruncateLostRecall.cfg     "audit C1/C2/C3 (RecallReaches=FALSE: the recall is emitted, refused by the client, and scored Acked anyway)" "Inv_NoStaleServe"
+mutation_run FlintTruncate FlintTruncateGrantRace.cfg      "audit C6 (PublishRecheck=FALSE: layoutget's gate check and its publish are not atomic, so a grant escapes both teeth)" "Inv_NoStaleServe"
 
-# THE RESIDUAL THE FIX DOES NOT CLOSE — an OPEN hazard, same shape as
-# FlintReplicationRollUnfenced: a failing run that RECORDS a gap. Revocation is
-# server-side, so it binds only clients the recall actually reached; one behind
-# a dead back-channel still believes it holds the layout. Closing it needs the
-# DS to refuse, not the MDS to ask. Cite the strict run above WITH this one.
-mutation_run FlintTruncate FlintTruncateLostRecall.cfg    "unreached-recall residual (RecallReaches=FALSE: server-side revocation does not bind a client that never got the callback)" "Inv_NoStaleServe"
+# The TARGET state, not the current one. What closing F65 requires, stated as a
+# green so the remaining work has a specification. Cite it as a goal; citing it
+# as a property of shipped code would be exactly the mistake the audit caught.
+strict_run   FlintTruncate FlintTruncateNoStaleServe.cfg   "truncate target state (recall fires AND is honoured AND the publish rechecks) — Inv_NoStaleServe holds"
 
 echo "TLA GATE PASSED"
