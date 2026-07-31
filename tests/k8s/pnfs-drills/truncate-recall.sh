@@ -179,6 +179,35 @@ REFUSED=$(kubectl logs -n "$NS" "$MDS_POD" --since=5m 2>/dev/null | grep -c "REF
 [ "${REFUSED:-0}" -eq 0 ] || fail "MDS logged ${REFUSED} REFUSED recall(s) — the client rejected the callback"
 ok "no refusals logged (and after C3 this line means something)"
 
+# ABSENCE OF A REFUSAL IS NOT AN ACK. Every defect in this chain so far —
+# C3's Ok(_)=>Acked, C8's denied RPC, C9's BADSESSION — produced a run
+# with no refusal logged at the point we looked. Demand the positive
+# statement: N/N acked, all revoked. `grep -c` not `grep -q`, because
+# `grep -q` under `set -o pipefail` exits early and SIGPIPEs its producer
+# (the runaj rule, learned the hard way and violated twice since).
+ACKED=$(kubectl logs -n "$NS" "$MDS_POD" --since=5m 2>/dev/null \
+  | grep -c "acked, all revoked server-side" || true)
+PARTIAL=$(kubectl logs -n "$NS" "$MDS_POD" --since=5m 2>/dev/null \
+  | grep -c "only .*/.* acked" || true)
+[ "${PARTIAL:-0}" -eq 0 ] \
+  || fail "MDS logged a PARTIAL recall (${PARTIAL} occurrence(s) of 'only N/M acked') — at least one client never confirmed, so it may still be reading past the new EOF"
+[ "${ACKED:-0}" -gt 0 ] \
+  || fail "no 'N/N acked, all revoked server-side' line — the recall was sent but never positively confirmed by any client. C3 made this line honest; a run without it is a run that did not prove delivery."
+ok "recall positively ACKED by every holder (${ACKED} fan-out(s), all revoked)"
+
+# C9 precondition. Not the oracle — the oracle is the ack above and the
+# bytes in phase 1 — but when a recall fails this tells you INSTANTLY
+# whether the back-channel handshake even happened, instead of leaving
+# you to diff a pcap. Pre-C9 the server registered the channel and never
+# echoed CONN_BACK_CHAN, so the client answered every callback with
+# BADSESSION and this line did not exist.
+BC=$(kubectl logs -n "$NS" "$MDS_POD" 2>/dev/null | grep -c "back channel ACCEPTED for session" || true)
+if [ "${BC:-0}" -gt 0 ]; then
+  ok "back-channel handshake completed (${BC} session(s) — csr_flags echoed CONN_BACK_CHAN)"
+else
+  note "no 'back channel ACCEPTED' line — either this MDS predates C9, or no client offered CONN_BACK_CHAN"
+fi
+
 # ---------------------------------------------------------------------------
 step "phase 3 — C4: LAYOUTCOMMIT must not re-extend the truncated stub"
 # ---------------------------------------------------------------------------
