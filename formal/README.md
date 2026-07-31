@@ -1,6 +1,6 @@
-# Formal models — the replica-lifecycle machine, the snapshot protocol, and the multi-process claims layer
+# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, and the pNFS truncate gate
 
-Three modules, one gate (`scripts/check-tla.sh`, fifty TLC runs).
+Four modules, one gate (`scripts/check-tla.sh`, eighty-eight TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -75,6 +75,65 @@ blobstore cluster absorption. Its theorem (`Inv_SessionFaithful`): every
 completed copy session delivers exactly the cut. Sessions are atomic —
 crash *inside* a session is the crash-sweep sim harness's job.
 
+`FlintTruncate.tla` (2026-07-31) models the **pNFS truncate gate** — the
+one correctness invariant the pNFS layer holds in its own hands. The rest
+of pNFS has a referee: layout op sequencing is RFC 8881 with pynfs
+adjudicating, single-client data integrity is fsx/fsstress's job, and DS
+failure is not re-placed at this layer at all (`layout.rs` mutates
+`placements` only on load, delete and rename — placements are **pinned**),
+so a dead DS is an availability event handled by the lvol underneath,
+which is `FlintReplication`'s machine. What is left unrefereed is the
+window between the MDS stub's size changing and N data servers being cut,
+and `truncate_dirty` is the gate that is supposed to make it
+unobservable.
+
+Two theorems, and they do not both hold — **cite them as a pair or not at
+all**:
+
+* `Inv_ClearImpliesFlushed` — the gate's own claim: whenever the mark is
+  absent, no DS holds content past the MDS size. **HOLDS.** This matters
+  because `clear_truncate_dirty_if` looks unsafe on inspection: the retry
+  task re-reads the deepest pending size and clears with the value it
+  just read, which is a repair writing its own guard's input (the F62
+  shape). Separating the re-read from the clear as distinct steps lets
+  TLC interleave a fresh SETATTR between them, and the `confirmed <= min`
+  predicate survives it. The `BlindClear` mutation must rediscover the
+  loss, so the predicate is load-bearing rather than defensive.
+* `Inv_NoStaleServe` — no client is ever served content past the MDS
+  size. **FAILS as shipped**, in three steps: acquire a layout while the
+  gate is clear, truncate, read. The gate is a LAYOUTGET-time check
+  (`operations/mod.rs:171` → TRYLATER) and `note_truncate` never touches
+  the layout manager — the only `CB_LAYOUTRECALL` in the tree is the
+  dead-DS heartbeat fan-out (`server.rs:982`, `:991`) — so a layout
+  acquired *before* the truncate walks straight past it, and the read
+  never reaches the MDS at all. `FlintTruncateHeldLayout.cfg` is a
+  **failing run that records an open hazard**, the same shape as
+  `FlintReplicationRollUnfenced.cfg`; it must keep failing until a recall
+  lands. `FlintTruncateRecall.cfg` names the fix and shows it is
+  sufficient: revoke outstanding layouts when the gate arms — a recall,
+  not a wider gate.
+
+One hypothesis was **refuted** and is kept as a run so it cannot be
+quietly re-asserted: `MarkKeepsMin=FALSE` (mark_truncate_dirty
+overwriting the pending size instead of keeping the smaller) still HOLDS.
+Overwriting only ever *raises* the mark, and the mark can only rise on a
+SETATTR that also raised the file size, so the exposure it would create
+is unreachable. Safety is carried by `clear_truncate_dirty_if` alone; the
+min-keeping is an ordering property, not this invariant.
+
+Scope limits, stated because this module's abstraction is its own biggest
+risk: every DS holds the same logical offset set (the gate is per-file
+and its fanout is all-DSes-or-nothing, so the stripe map changes *which*
+DS exposes a byte, never *whether* one does); `set_len` growth adds zeros
+and zeros are not content, which is why a stale fanout re-extending a
+stripe file is a size disagreement and not a stale read; reads are atomic
+with respect to revocation, so the recall green says the **server** stops
+issuing new stale reads and says nothing about a read already on the wire
+to a DS; and whether a conforming Linux client would *issue* the
+offending read is a client-behaviour question the model does not settle —
+it settles that flint does not stop it, which is the only half flint can
+fix.
+
 Verification of snapshots is layered deliberately:
 
 1. **SPDK blobstore internals** — not modeled; audited by citation (the
@@ -87,7 +146,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs fifty configs, ALL required:
+on first use).  It runs eighty-eight configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus

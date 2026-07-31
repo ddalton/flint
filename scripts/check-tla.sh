@@ -3,7 +3,10 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Eighty runs, ALL required.
+# Eighty-eight runs, ALL required.
+#
+# FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
+# bottom of this file, next to its runs.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -709,5 +712,32 @@ strict_run FlintSnapshots FlintSnapshots.cfg "snapshots strict (full ordered wal
 mutation_run FlintSnapshots FlintSnapshotsSplit.cfg      "delta-split mutation (WalkFull=FALSE)"       "Inv_SessionFaithful"
 mutation_run FlintSnapshots FlintSnapshotsOrder.cfg      "walk-order mutation (OrderedWalk=FALSE)"     "Inv_SessionFaithful"
 mutation_run FlintSnapshots FlintSnapshotsBareDelete.cfg "bare-delete mutation (RelinkOnDelete=FALSE)" "Inv_SessionFaithful"
+
+# ---- the pNFS truncate gate (2026-07-31). ----
+# The one correctness invariant the pNFS layer holds in its OWN hands. Layout
+# op sequencing has RFC 8881 + pynfs as referee and single-client integrity has
+# fsx; DS failure is not re-placed at this layer at all (placements are PINNED),
+# so it is FlintReplication's machine underneath. What is left unrefereed is the
+# window between the MDS stub's size changing and N data servers being cut.
+#
+# The two runs that matter are the last two, and they are a pair: the gate is
+# CORRECT and it is INCOMPLETE. Cite them together or neither.
+strict_run   FlintTruncate FlintTruncate.cfg              "truncate gate strict (shipped: clear-if-deepest, min-keeping, no recall) — the gate's own claim holds"
+mutation_run FlintTruncate FlintTruncateBlindClear.cfg    "blind-clear mutation (GateClearGuarded=FALSE: a shallower confirm lifts a deeper cut's mark)" "Inv_ClearImpliesFlushed"
+
+# The REFUTED half. Keeping the min looks like the other load-bearing piece and
+# is not: overwriting only ever RAISES the mark, and the mark can only rise on a
+# SETATTR that also raised the size, so the exposure is unreachable. Kept as a
+# run so the claim cannot be quietly re-asserted later.
+strict_run   FlintTruncate FlintTruncateMarkOverwrite.cfg "min-keeping refutation (MarkKeepsMin=FALSE still holds — safety is carried by clear_truncate_dirty_if alone)"
+
+# TODAY'S WORLD — an OPEN hazard, same shape as FlintReplicationRollUnfenced:
+# a failing run that RECORDS a gap rather than guarding a closed one. The gate
+# is a LAYOUTGET-time check and note_truncate never touches the layout manager
+# (the only CB_LAYOUTRECALL in the tree is the dead-DS fan-out), so a layout
+# acquired BEFORE the truncate walks straight past it. Three steps to the
+# counterexample. This run must keep FAILING until a recall lands.
+mutation_run FlintTruncate FlintTruncateHeldLayout.cfg    "held-layout gap (shipped: no recall on truncate, so the gate covers only clients without a layout yet)" "Inv_NoStaleServe"
+strict_run   FlintTruncate FlintTruncateRecall.cfg        "recall-on-truncate fix (RecallOnTruncate=TRUE closes it — a recall, not a wider gate)"
 
 echo "TLA GATE PASSED"
