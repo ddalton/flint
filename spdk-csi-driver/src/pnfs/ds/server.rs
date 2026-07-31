@@ -293,6 +293,10 @@ impl DataServer {
             pipeline.submit(
                 request,
                 more_queued,
+                // A DS connection never carries a back-channel — the MDS
+                // owns the client's callback path — so the inline fast
+                // path stays available here.
+                false,
                 move |req| Self::dispatch_minimal_nfs(req, io_c, sess_c, client_c),
                 move |reply| async move {
                     let reply_marker = 0x80000000 | reply.len() as u32;

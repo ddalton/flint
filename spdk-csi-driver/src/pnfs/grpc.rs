@@ -684,6 +684,7 @@ mod create_volume_tests {
             stripe_size: 8 * 1024 * 1024,
             device_ids: vec!["ds-a".into(), "ds-b".into()],
             file_id: 7,
+            truncate_pending: None,
         };
         s.layout_manager.load_placement_records(vec![
             rec("vol/a.parquet"),

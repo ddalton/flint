@@ -12,16 +12,33 @@ for one remaining reason that is not F65 — see the table.
 | C2 — CB_SEQUENCE hardcoded slot 0 / seqid 1 (§2.10.6.1) | — | **fixed** |
 | C3 — a refused reply scored as an ack | — | **fixed** |
 | C6 — grant escapes gate + recall via a publish race | `FlintTruncateGrantRace.cfg` | **fixed** |
-| C5 — one back-channel writer per session vs `nconnect=4` | `FlintTruncateLostRecall.cfg` | **open** |
-| C4 — LAYOUTCOMMIT re-extends the truncated stub | — | **open** |
-| R1 — recalled client refused the MDS fallback during a parked truncate | — | **open** |
-| R2 — self-recall stalls the connection read loop for the CB timeout | — | **open** |
-| R3 — post-recall LAYOUTRETURN answered SERVERFAULT | — | **open** |
-| R4 — the truncate-dirty gate does not survive an MDS restart | — | **open** |
+| C5 — one back-channel writer per session vs `nconnect=4` | — | **fixed** |
+| C4 — LAYOUTCOMMIT re-extends the truncated stub | — | **fixed** |
+| R1 — recalled client refused the MDS fallback during a parked truncate | — | **open, by decision** |
+| R2 — self-recall stalls the connection read loop for the CB timeout | — | **fixed** |
+| R3 — post-recall LAYOUTRETURN answered SERVERFAULT | — | **fixed** |
+| R4 — the truncate-dirty gate does not survive an MDS restart | — | **fixed** |
 
 `FlintTruncate.cfg` (the shipped world) still does NOT list
-`Inv_NoStaleServe`: server-side revocation cannot bind a client the recall
-never reached, and C5 makes that reachable on an ordinary mount.
+`Inv_NoStaleServe`. C5 is fixed, so a session's other bound transports are
+now usable, but revocation remains server-side: a client with NO live
+back-channel at all still cannot be bound. That is residual (a), and it
+needs the DS to refuse rather than the MDS to ask.
+
+**R1 is open by decision, not by omission, and it is the one to weigh.**
+`changed = true` is the correct RFC choice precisely because it tells the
+client to write through the MDS — but this MDS deliberately refuses striped-
+file I/O (a fallback WRITE into the sparse stub would diverge from the DS
+stripes). So a recalled client has no layout, no new layout while the gate is
+armed, and no MDS path: 90s of NFS4ERR_DELAY and then NFS4ERR_IO. On the fast
+path the gate lifts in milliseconds and this is invisible. On the PARK path —
+where the retry is designed to run for hours — Linux turns it into `-EIO`,
+drops the pages, and surfaces it at `fsync()`. Before the recall existed, the
+layout holder was immune to all of this; that immunity *was* F65. Fixing it
+means either granting a bounded `[0, new_size)` layout during a park or
+accepting stub writes below the confirmed size — both are real design work,
+and neither should be guessed at. The live drill below is what should decide
+it.
 `FlintTruncateNoStaleServe.cfg` is the conditional green — what closing it
 requires.
 

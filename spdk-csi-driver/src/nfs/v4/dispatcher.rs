@@ -54,7 +54,7 @@ pub struct CompoundDispatcher {
     /// delegation timeout).
     back_channels: Arc<dashmap::DashMap<
         crate::nfs::v4::protocol::SessionId,
-        Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+        Vec<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
     >>,
 
     /// Which TCP connections are bound to which session (RFC 8881 §2.10.3.1).
@@ -147,11 +147,27 @@ impl CompoundDispatcher {
     /// up `Arc<BackChannelWriter>` by session id and emit callback
     /// frames. Returning the `Arc` keeps the lifetime decoupled from
     /// `&self` and lets long-lived background tasks cache it.
+    /// Register one more back-channel writer for a session, idempotently.
+    fn bind_back_channel(
+        map: &Arc<dashmap::DashMap<
+            crate::nfs::v4::protocol::SessionId,
+            Vec<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
+        >>,
+        session: crate::nfs::v4::protocol::SessionId,
+        bcw: &Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+    ) {
+        bcw.mark_back_channel();
+        let mut entry = map.entry(session).or_default();
+        if !entry.iter().any(|w| Arc::ptr_eq(w, bcw)) {
+            entry.push(Arc::clone(bcw));
+        }
+    }
+
     pub fn back_channels(
         &self,
     ) -> Arc<dashmap::DashMap<
         crate::nfs::v4::protocol::SessionId,
-        Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+        Vec<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
     >> {
         Arc::clone(&self.back_channels)
     }
@@ -667,7 +683,7 @@ impl CompoundDispatcher {
                     const CSF_CONN_BACK_CHAN: u32 = 0x0000_0002;
                     if csa_flags & CSF_CONN_BACK_CHAN != 0 {
                         if let Some(bcw) = context.back_channel.as_ref() {
-                            self.back_channels.insert(res.sessionid, Arc::clone(bcw));
+                            Self::bind_back_channel(&self.back_channels, res.sessionid, bcw);
                             info!(
                                 "CREATE_SESSION: registered back-channel writer for session {:?} (CONN_BACK_CHAN requested)",
                                 res.sessionid,
@@ -763,7 +779,7 @@ impl CompoundDispatcher {
                     const CDFC_BOTH: u32 = 3;
                     if dir == CDFC_BACK || dir == CDFC_BOTH {
                         if let Some(bcw) = context.back_channel.as_ref() {
-                            self.back_channels.insert(sessionid, Arc::clone(bcw));
+                            Self::bind_back_channel(&self.back_channels, sessionid, bcw);
                             info!(
                                 "BIND_CONN_TO_SESSION: registered back-channel writer for session {:?}",
                                 sessionid,
@@ -2465,8 +2481,20 @@ impl CompoundDispatcher {
                 OperationResult::LayoutReturn(Nfs4Status::Ok)
             }
             Err(e) => {
-                warn!("LAYOUTRETURN failed: {}", e);
-                OperationResult::LayoutReturn(Nfs4Status::ServerFault)
+                // SERVERFAULT was wrong for every one of these and actively
+                // harmful for BadStateId: RFC 8881 wants BAD_STATEID / a
+                // no-matching-layout answer, which clients treat as benign,
+                // and Linux compounds LAYOUTRETURN into CLOSE — a failed op
+                // aborts the compound and the CLOSE behind it never runs
+                // (audit R3).
+                use crate::pnfs::mds::operations::LayoutReturnError;
+                let status = match e {
+                    LayoutReturnError::BadStateId => Nfs4Status::BadStateId,
+                    LayoutReturnError::UnknownLayoutType => Nfs4Status::UnknownLayoutType,
+                    LayoutReturnError::Inval => Nfs4Status::Inval,
+                };
+                warn!("LAYOUTRETURN failed: {:?} → {:?}", e, status);
+                OperationResult::LayoutReturn(status)
             }
         }
     }
@@ -2522,6 +2550,15 @@ impl CompoundDispatcher {
             }
         };
 
+        // AUDIT C4: never extend the stub past a cut that is still landing
+        // on the DSes. The recall a truncate fires is what prompts the
+        // client to LAYOUTCOMMIT in the first place, so this is the common
+        // ordering, not a rare one. The truncate is the newer operation and
+        // wins; the commit's tail is bytes that are being deleted anyway.
+        let commit_ceiling = self
+            .pnfs_current_fh_key(context)
+            .and_then(|k| self.pnfs_handler.as_ref().and_then(|p| p.truncate_gate_ceiling(&k)));
+
         // The open/set_len/set_times sequence hits the export's backing
         // device — run it on the blocking pool, not an async worker.
         let blocking_path = path.clone();
@@ -2531,6 +2568,19 @@ impl CompoundDispatcher {
                 // last_write_offset is the offset of the *last byte written*
                 // (RFC 8881 §18.42.1), so EOF is one past that.
                 let candidate = lwo.saturating_add(1);
+                // Clamp rather than refuse: a client whose commit straddles a
+                // truncate is not in error, and NFS4ERR_DELAY would only make
+                // it retry a claim that can never become true.
+                let candidate = match commit_ceiling {
+                    Some(ceiling) if candidate > ceiling => {
+                        debug!(
+                            "📥 LAYOUTCOMMIT: clamping {} → {} (truncate to {} still landing)",
+                            candidate, ceiling, ceiling,
+                        );
+                        ceiling
+                    }
+                    _ => candidate,
+                };
                 match std::fs::OpenOptions::new().write(true).open(&blocking_path) {
                     Ok(file) => {
                         let cur_size = file.metadata().map(|m| m.len()).unwrap_or(0);

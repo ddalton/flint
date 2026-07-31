@@ -54,7 +54,7 @@ pub const DEFAULT_CB_TIMEOUT: Duration = Duration::from_secs(10);
 /// path can fail a few different ways, all surfaced as
 /// [`CallbackError`].
 pub struct CallbackManager {
-    back_channels: Arc<DashMap<SessionId, Arc<BackChannelWriter>>>,
+    back_channels: Arc<DashMap<SessionId, Vec<Arc<BackChannelWriter>>>>,
     state_mgr: Arc<StateManager>,
     timeout: Duration,
     /// Per-session back-channel slot state: the sequenceid last sent on
@@ -84,7 +84,7 @@ impl CallbackManager {
     /// [`DEFAULT_CB_TIMEOUT`]; tests can override via
     /// [`with_timeout`].
     pub fn new(
-        back_channels: Arc<DashMap<SessionId, Arc<BackChannelWriter>>>,
+        back_channels: Arc<DashMap<SessionId, Vec<Arc<BackChannelWriter>>>>,
         state_mgr: Arc<StateManager>,
     ) -> Self {
         Self {
@@ -171,8 +171,9 @@ impl CallbackManager {
     ) -> Result<CbCompoundReply, CallbackError> {
         // Resolve the writer first — if the session never bound a
         // back-channel, there's nothing to send.
-        let writer = match self.back_channels.get(session_id) {
-            Some(w) => Arc::clone(w.value()),
+        // Any bound transport will do — they all reach the same client.
+        let writer = match self.back_channels.get(session_id).and_then(|w| w.first().cloned()) {
+            Some(w) => w,
             None => {
                 warn!(
                     "CB_LAYOUTRECALL: no back-channel for session {:?}",
@@ -731,7 +732,7 @@ mod tests {
         let (state_mgr, session_id) = fixture_state(0x40000000);
 
         let back_channels = Arc::new(DashMap::new());
-        back_channels.insert(session_id, Arc::clone(&writer));
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
 
         let cb_mgr = CallbackManager::new(Arc::clone(&back_channels), Arc::clone(&state_mgr))
             .with_timeout(Duration::from_secs(5));
@@ -778,7 +779,7 @@ mod tests {
         let (writer, server_read, client_read, mut client_write) = pair().await;
         let (state_mgr, session_id) = fixture_state(0x40000000);
         let back_channels = Arc::new(DashMap::new());
-        back_channels.insert(session_id, Arc::clone(&writer));
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
         let cb_mgr = CallbackManager::new(Arc::clone(&back_channels), Arc::clone(&state_mgr))
             .with_timeout(Duration::from_secs(5));
         let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
@@ -907,7 +908,7 @@ mod tests {
         let (state_mgr, session_id) = fixture_state(0x40000000);
 
         let back_channels = Arc::new(DashMap::new());
-        back_channels.insert(session_id, Arc::clone(&writer));
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
 
         let cb_mgr = CallbackManager::new(back_channels, state_mgr)
             .with_timeout(Duration::from_secs(5));
@@ -943,7 +944,7 @@ mod tests {
         let (state_mgr, session_id) = fixture_state(0x40000000);
 
         let back_channels = Arc::new(DashMap::new());
-        back_channels.insert(session_id, Arc::clone(&writer));
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
 
         let cb_mgr = CallbackManager::new(back_channels, state_mgr)
             .with_timeout(Duration::from_millis(150));
@@ -994,7 +995,7 @@ mod tests {
         let (state_mgr, session_id) = fixture_state(0x40000000);
 
         let back_channels = Arc::new(DashMap::new());
-        back_channels.insert(session_id, Arc::clone(&writer));
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
 
         let cb_mgr = CallbackManager::new(back_channels, state_mgr)
             .with_timeout(Duration::from_secs(5));
@@ -1033,7 +1034,7 @@ mod tests {
         let (writer, server_read, client_read, mut client_write) = pair().await;
         let (state_mgr, session_id) = fixture_state(0x40000000);
         let back_channels = Arc::new(DashMap::new());
-        back_channels.insert(session_id, Arc::clone(&writer));
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
         let cb_mgr = CallbackManager::new(back_channels, state_mgr)
             .with_timeout(Duration::from_secs(5));
         let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
@@ -1111,8 +1112,8 @@ mod tests {
             .session_id;
 
         let back_channels = Arc::new(DashMap::new());
-        back_channels.insert(session_a, Arc::clone(&writer_a));
-        back_channels.insert(session_b, Arc::clone(&writer_b));
+        back_channels.insert(session_a, vec![Arc::clone(&writer_a)]);
+        back_channels.insert(session_b, vec![Arc::clone(&writer_b)]);
 
         let cb_mgr = CallbackManager::new(back_channels, state_mgr)
             .with_timeout(Duration::from_secs(5));
@@ -1183,7 +1184,7 @@ mod tests {
             .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000)
             .session_id;
         let back_channels = Arc::new(DashMap::new());
-        back_channels.insert(session_id, Arc::clone(&writer));
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
         let cb_mgr = CallbackManager::new(back_channels, state_mgr);
 
         let results = cb_mgr.recall_layouts_for_device("ds-dead", &[]).await;
@@ -1199,7 +1200,7 @@ mod tests {
         let (writer, server_read, client_read, _client_write) = pair().await;
         let (state_mgr, session_id) = fixture_state(0x40000000);
         let back_channels = Arc::new(DashMap::new());
-        back_channels.insert(session_id, Arc::clone(&writer));
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
         let cb_mgr = CallbackManager::new(back_channels, state_mgr)
             .with_timeout(Duration::from_millis(150));
         let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);

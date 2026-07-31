@@ -331,7 +331,7 @@ async fn handle_tcp_connection(
         bcw: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
         back_channels: Arc<dashmap::DashMap<
             crate::nfs::v4::protocol::SessionId,
-            Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+            Vec<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
         >>,
     }
     impl Drop for InflightGuard {
@@ -340,8 +340,12 @@ async fn handle_tcp_connection(
             // Drop every registry entry that is THIS connection's writer —
             // the last Arc going away closes the write half and closes the
             // socket the kernel is holding in CLOSE_WAIT.
-            self.back_channels
-                .retain(|_, v| !Arc::ptr_eq(v, &self.bcw));
+            // Drop only THIS connection's writer; a session bound over
+            // several transports (nconnect) keeps the rest (audit C5).
+            self.back_channels.retain(|_, writers| {
+                writers.retain(|w| !Arc::ptr_eq(w, &self.bcw));
+                !writers.is_empty()
+            });
         }
     }
     let _inflight_guard = InflightGuard {
@@ -471,6 +475,10 @@ async fn handle_tcp_connection(
         pipeline.submit(
             request,
             more_queued,
+            // R2: never dispatch inline once this connection is a
+            // back-channel — its read loop has to stay free to route CB
+            // replies for compounds running on it.
+            bcw.is_back_channel(),
             move |req| async move {
                 let rpc_start = Instant::now();
                 let reply = dispatch_nfsv4(

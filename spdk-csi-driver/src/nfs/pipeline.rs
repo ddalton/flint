@@ -210,6 +210,7 @@ impl ConnectionPipeline {
         &self,
         request: Bytes,
         more_queued: bool,
+        must_spawn: bool,
         dispatch: D,
         write: W,
     ) -> std::io::Result<()>
@@ -238,7 +239,11 @@ impl ConnectionPipeline {
         };
 
         let Some(sem) = &self.sem else {
-            // I5: sequential fallback.
+            // I5: sequential fallback. `must_spawn` cannot be honoured
+            // here — there is no semaphore to spawn under — so a
+            // back-channel connection with FLINT_NFS_MAX_INFLIGHT=0
+            // still self-blocks on a callback. That configuration is the
+            // debugging one; the default path is covered below.
             let reply = dispatch(request).await;
             let res = write(reply).await;
             drop(token);
@@ -256,8 +261,14 @@ impl ConnectionPipeline {
         // Inline fast path: nothing else in flight and no backlog —
         // request/response ping-pong, where task fan-out is pure
         // per-op overhead.
+        // `must_spawn`: this connection is a session's back-channel, so CB
+        // replies land on THIS socket and only this read loop can route
+        // them. Dispatching inline would park the reader inside a compound
+        // that is itself awaiting one of those replies — the call then
+        // times out and the whole connection is head-of-line blocked for
+        // the duration (audit R2). Pay the task fan-out instead.
         let others_in_flight = sem.available_permits() < self.max_inflight - 1;
-        if !more_queued && !others_in_flight {
+        if !must_spawn && !more_queued && !others_in_flight {
             let reply = dispatch(request).await;
             let res = write(reply).await;
             drop(token);
@@ -307,6 +318,7 @@ mod tests {
         p.submit(
             req(0),
             true,
+                false,
             |r| async move {
                 sleep(Duration::from_millis(100)).await;
                 r
@@ -323,6 +335,7 @@ mod tests {
         p.submit(
             req(1),
             true,
+                false,
             |r| async move { r },
             move |r| async move {
                 o.lock().unwrap().push(r[0]);
@@ -390,6 +403,7 @@ mod tests {
                     p.submit(
                         Bytes::from(id.to_be_bytes().to_vec()),
                         true,
+                false,
                         move |r| async move {
                             let id = u16::from_be_bytes([r[0], r[1]]);
                             let mut reply = vec![(id % 251) as u8; frame_len(id)];
@@ -448,6 +462,7 @@ mod tests {
             p.submit(
                 req(i),
                 true,
+                false,
                 |_| async {
                     std::future::pending::<()>().await;
                     unreachable!()
@@ -458,7 +473,7 @@ mod tests {
             .unwrap();
         }
 
-        let fifth = p.submit(req(9), true, |r| async { r }, |_| async { Ok(()) });
+        let fifth = p.submit(req(9), true, false, |r| async { r }, |_| async { Ok(()) });
         assert!(
             timeout(Duration::from_millis(100), fifth).await.is_err(),
             "5th submit must block while 4 dispatches are in flight"
@@ -479,6 +494,7 @@ mod tests {
             p.submit(
                 req(i),
                 true,
+                false,
                 move |r| async move {
                     l1.lock().unwrap().push(format!("dispatch:{}", r[0]));
                     r
@@ -521,6 +537,7 @@ mod tests {
             p.submit(
                 req(i),
                 false,
+                false,
                 move |r| async move {
                     l1.lock().unwrap().push(format!("dispatch:{}", r[0]));
                     r
@@ -558,6 +575,7 @@ mod tests {
         p.submit(
             req(0),
             true,
+                false,
             |r| async move { r },
             |_| async {
                 Err(std::io::Error::new(
@@ -573,7 +591,7 @@ mod tests {
         let mut poisoned = false;
         for _ in 0..100 {
             sleep(Duration::from_millis(2)).await;
-            if p.submit(req(1), true, |r| async move { r }, |_| async { Ok(()) })
+            if p.submit(req(1), true, false, |r| async move { r }, |_| async { Ok(()) })
                 .await
                 .is_err()
             {
@@ -600,7 +618,8 @@ mod tests {
         let w = Arc::clone(&wrote);
         p.submit(
             req(0),
-            true, // force the spawned path
+            true,
+                false, // force the spawned path
             |r| async move {
                 sleep(Duration::from_millis(80)).await;
                 r
@@ -637,6 +656,7 @@ mod tests {
             .submit(
                 req(0),
                 true,
+                false,
                 move |r| async move {
                     d.store(true, Ordering::Release);
                     r
@@ -661,6 +681,7 @@ mod tests {
         p.submit(
             req(0),
             true,
+                false,
             |r| async move { r },
             |_| async {
                 std::future::pending::<()>().await;
@@ -688,6 +709,7 @@ mod tests {
         let res = p
             .submit(
                 req(0),
+                false,
                 false,
                 |r| async move { r },
                 |_| async {

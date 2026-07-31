@@ -109,6 +109,16 @@ pub struct BackChannelWriter {
     /// wraps without panic — 4B calls before reuse, far longer than
     /// any TCP connection.
     next_xid: AtomicU32,
+    /// Whether this connection is registered as a session's
+    /// back-channel — i.e. CB replies from the client arrive HERE and
+    /// only this connection's read loop can route them.
+    ///
+    /// The read loop must therefore never block inside a compound that
+    /// is itself awaiting a CB reply, or the reply cannot be read and
+    /// the call times out while the whole connection is head-of-line
+    /// blocked (audit R2). The pipeline consults this to force
+    /// off-task dispatch.
+    is_back_channel: std::sync::atomic::AtomicBool,
 }
 
 impl BackChannelWriter {
@@ -117,7 +127,22 @@ impl BackChannelWriter {
             inner: Mutex::new(buf_writer),
             inflight: DashMap::new(),
             next_xid: AtomicU32::new(1),
+            is_back_channel: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Mark this connection as a session's back-channel. Called when a
+    /// CREATE_SESSION or BIND_CONN_TO_SESSION registers it.
+    pub fn mark_back_channel(&self) {
+        self.is_back_channel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether CB replies can arrive on this connection. When true the
+    /// connection's read loop must stay free — see the field comment.
+    pub fn is_back_channel(&self) -> bool {
+        self.is_back_channel
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Write a complete RPC frame to the wire — record marker

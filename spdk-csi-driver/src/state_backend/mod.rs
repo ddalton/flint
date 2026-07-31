@@ -269,6 +269,20 @@ pub struct PlacementRecord {
     /// path-keyed pin (pre-upgrade record, serde default).
     #[serde(default)]
     pub file_id: u64,
+    /// The deepest size change not yet confirmed on every pinned DS —
+    /// the truncate-dirty gate, persisted.
+    ///
+    /// The gate lived only in memory, so an MDS restart during a PARKED
+    /// truncate (a pinned DS unregistered or with no control listener,
+    /// where the retry is designed to run for hours) came back with the
+    /// stub reporting the new size, the DSes still holding the old
+    /// bytes, and nothing gating LAYOUTGET — permanent, and silent
+    /// (audit R4). Restoring it re-arms both the gate and the retry.
+    ///
+    /// `None` = nothing pending; stored as -1 so the column stays NOT
+    /// NULL like its siblings.
+    #[serde(default)]
+    pub truncate_pending: Option<u64>,
 }
 
 /// Persistent id↔path mapping behind version-2 (id-based) NFSv4
@@ -599,6 +613,7 @@ mod tests {
             stripe_size: 8 * 1024 * 1024,
             device_ids: vec!["ds-1".into(), "ds-2".into(), "ds-3".into()],
             file_id: 0,
+            truncate_pending: None,
         };
         b.put_placement(&placement).await.unwrap();
         assert_eq!(

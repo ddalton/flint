@@ -32,6 +32,12 @@ pub const LAYOUT_SEQID_BASE: u32 = 1;
 /// up-front gate check gives) rather than a hard error.
 pub const GRANT_RACED_TRUNCATE: &str = "grant raced a truncate";
 
+/// How long a revoked stateid is remembered so the owner's LAYOUTRETURN
+/// can be answered NFS4_OK instead of an error. Comfortably longer than
+/// a client's recall-to-return turnaround, short enough that the set
+/// cannot grow without bound.
+pub const REVOKED_TOMBSTONE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// The identity of a layout stateid, as a map key.
 ///
 /// `layouts` and `by_owner` are keyed by this, NOT by the raw 16 bytes:
@@ -108,6 +114,9 @@ impl FilePlacement {
             stripe_size: self.stripe_size,
             device_ids: self.device_ids.clone(),
             file_id: self.file_id,
+            // Filled in by the caller that knows the gate state; the
+            // placement struct itself does not carry it.
+            truncate_pending: None,
         }
     }
 
@@ -241,6 +250,17 @@ pub struct LayoutManager {
     /// In-memory + best-effort by design: losing it leaks orphaned
     /// stripe space, never correctness.
     cleanup_queues: Arc<DashMap<String, Vec<String>>>,
+
+    /// Stateids WE revoked, with when. A client that answers a
+    /// CB_LAYOUTRECALL by doing the RFC-defined thing — LAYOUTRETURN of
+    /// the recalled stateid — must not be told SERVERFAULT for its
+    /// trouble: layouts are granted `return_on_close`, so Linux
+    /// compounds that LAYOUTRETURN into CLOSE and a failed op aborts the
+    /// compound, leaking the open state behind it (audit R3).
+    ///
+    /// Pruned opportunistically past [`REVOKED_TOMBSTONE_TTL`]; the set
+    /// only has to outlive the client's reaction to a recall.
+    revoked: Arc<DashMap<LayoutStateId, std::time::Instant>>,
 
     /// Files whose stripe truncation has NOT yet reached every pinned
     /// DS: gate key (see [`truncate_gate_key`]) → (when it went dirty,
@@ -459,6 +479,7 @@ impl LayoutManager {
             device_registry,
             layouts: Arc::new(DashMap::new()),
             by_owner: Arc::new(DashMap::new()),
+            revoked: Arc::new(DashMap::new()),
             policy: policy_impl,
             stripe_size,
             placements: Arc::new(DashMap::new()),
@@ -500,6 +521,26 @@ impl LayoutManager {
     /// listener accepts — a post-restart LAYOUTGET for a pre-restart
     /// file must find its pin, not mint a fresh one from whichever
     /// DSes happen to have re-registered first.
+    /// Every file with a cut still pending, as
+    /// `(gate_key, file_key, placement, pending_size)` — for re-arming
+    /// the retry after a restart (R4).
+    pub fn parked_truncates(&self) -> Vec<(String, String, FilePlacement, u64)> {
+        self.truncate_dirty
+            .iter()
+            .filter_map(|e| {
+                let gate = e.key().clone();
+                let (_, min) = *e.value();
+                self.placements.iter().find_map(|p| {
+                    if truncate_gate_key(p.value(), p.key()) == gate {
+                        Some((gate.clone(), p.key().clone(), p.value().clone(), min))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    }
+
     pub fn load_placement_records(&self, records: Vec<PlacementRecord>) {
         let n = records.len();
         for r in &records {
@@ -507,6 +548,20 @@ impl LayoutManager {
             self.stripe_groups
                 .entry(composite_device_id(&placement.device_ids))
                 .or_insert_with(|| placement.device_ids.clone());
+            // R4: re-arm the gate before anything can serve a layout.
+            // Restoring the mark without the retry would be a wedge, so
+            // MdsServer::load_persisted_state re-arms the retry right
+            // after this (see resume_parked_truncates).
+            if let Some(pending) = r.truncate_pending {
+                let gate = truncate_gate_key(&placement, &r.file_key);
+                self.truncate_dirty
+                    .insert(gate.clone(), (std::time::Instant::now(), pending));
+                warn!(
+                    "⏳ restored truncate gate for '{}' (deepest pending cut {}) — \
+                     LAYOUTGET stays TRYLATER until a DS confirms",
+                    gate, pending,
+                );
+            }
             self.placements.insert(r.file_key.clone(), placement);
         }
         info!("LayoutManager loaded {} placements from backend", n);
@@ -712,10 +767,32 @@ impl LayoutManager {
     /// dirty (the ceiling measures the total unconfirmed window; the
     /// gate lifts only when the deepest cut lands).
     pub fn mark_truncate_dirty(&self, gate_key: &str, size: u64) {
+        let mut pending = size;
         self.truncate_dirty
             .entry(gate_key.to_string())
-            .and_modify(|(_, min)| *min = (*min).min(size))
+            .and_modify(|(_, min)| {
+                *min = (*min).min(size);
+                pending = *min;
+            })
             .or_insert_with(|| (std::time::Instant::now(), size));
+        // R4: the gate has to outlive this process. A restart during a
+        // PARKED truncate otherwise comes back ungated with the DSes
+        // still holding the old bytes.
+        self.persist_gate(gate_key, Some(pending));
+    }
+
+    /// Mirror the gate onto the file's persisted placement record.
+    /// Best-effort and keyed by the gate, so a gate with no matching
+    /// placement (there should be none) is simply not written.
+    fn persist_gate(&self, gate_key: &str, pending: Option<u64>) {
+        for entry in self.placements.iter() {
+            if truncate_gate_key(entry.value(), entry.key()) == gate_key {
+                let mut rec = entry.value().to_record(entry.key());
+                rec.truncate_pending = pending;
+                self.backend.enqueue_write(WriteOp::PutPlacement(rec));
+                return;
+            }
+        }
     }
 
     /// Lift the gate if a fan-out that confirmed `confirmed_size` on
@@ -727,6 +804,7 @@ impl LayoutManager {
             .remove_if(gate_key, |_, (_, min)| confirmed_size <= *min)
             .is_some();
         if cleared {
+            self.persist_gate(gate_key, None);
             info!("Truncate-dirty cleared for '{}' (size {} confirmed)", gate_key, confirmed_size);
         }
         cleared
@@ -736,6 +814,7 @@ impl LayoutManager {
     /// enqueued for deletion outright).
     pub fn clear_truncate_dirty(&self, gate_key: &str) {
         self.truncate_dirty.remove(gate_key);
+        self.persist_gate(gate_key, None);
     }
 
     /// The gate state: (dirty-since, smallest unconfirmed size).
@@ -1050,6 +1129,15 @@ impl LayoutManager {
     /// by-client index alongside the primary map so the indexes stay
     /// consistent.
     pub fn return_layout(&self, stateid: &LayoutStateId) -> Result<(), String> {
+        // A layout WE revoked, being handed back by a client doing exactly
+        // what the recall asked. That is success, not an error.
+        if self.revoked.remove(&state_key(stateid)).is_some() {
+            debug!(
+                "LAYOUTRETURN of revoked stateid {:?} — answering OK (we took it)",
+                &stateid[0..4],
+            );
+            return Ok(());
+        }
         if let Some((_, layout)) = self.layouts.remove(&state_key(stateid)) {
             debug!(
                 "Layout returned: stateid={:?}, segments={}, client={}",
@@ -1105,6 +1193,9 @@ impl LayoutManager {
         let Some((_, layout)) = self.layouts.remove(&state_key(stateid)) else {
             return false;
         };
+        let now = std::time::Instant::now();
+        self.revoked.retain(|_, t| now.duration_since(*t) < REVOKED_TOMBSTONE_TTL);
+        self.revoked.insert(state_key(stateid), now);
         info!(
             "🚫 Layout revoked: stateid={:?}, segments={}, client={}",
             &stateid[0..4],
@@ -1779,6 +1870,72 @@ mod tests {
         assert_eq!(state_key(&hits[0].1), state_key(&live.stateid));
     }
 
+    /// AUDIT R3. A client that answers a recall by doing the RFC-defined
+    /// thing — LAYOUTRETURN of the recalled stateid — must not be told
+    /// the layout is bad. Layouts are `return_on_close`, so Linux
+    /// compounds that return into CLOSE and a failed op aborts the
+    /// compound, leaking the open behind it.
+    #[test]
+    fn layoutreturn_of_a_stateid_we_revoked_is_ok() {
+        let mgr = recall_fixture();
+        let l = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        let recalls = mgr.recall_layouts_for_file(&l.file_ident);
+        let recalled_stateid = recalls[0].1;
+        assert!(mgr.revoke_layout(&recalled_stateid));
+
+        // The client now hands it back, carrying the bumped seqid.
+        assert!(
+            mgr.return_layout(&recalled_stateid).is_ok(),
+            "a cooperative post-recall LAYOUTRETURN is success, not BAD_STATEID",
+        );
+        // Idempotent only once — the tombstone is consumed, and a second
+        // return of a stateid we never issued is still an error.
+        assert!(mgr.return_layout(&recalled_stateid).is_err());
+    }
+
+    /// AUDIT R4. The gate is derived state that has to outlive the
+    /// process: a restart during a PARKED truncate otherwise comes back
+    /// with the stub at the new size, the DSes holding the old bytes,
+    /// and nothing gating LAYOUTGET.
+    #[test]
+    fn truncate_gate_survives_a_restart() {
+        let mgr = recall_fixture();
+        let l = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        let gate = l.file_ident.clone();
+        mgr.mark_truncate_dirty(&gate, 4096);
+
+        // What the backend would hand back on the next boot.
+        let mut rec = mgr.placement_for("file-a").unwrap().to_record("file-a");
+        rec.truncate_pending = Some(4096);
+
+        let restarted = recall_fixture();
+        assert!(restarted.truncate_dirty_since(&gate).is_none());
+        restarted.load_placement_records(vec![rec]);
+        assert!(
+            restarted.truncate_dirty_since(&gate).is_some(),
+            "the gate must come back armed",
+        );
+        assert_eq!(restarted.truncate_dirty_state(&gate).map(|(_, m)| m), Some(4096));
+
+        // And it is re-armable work, not a wedge: the parked list names
+        // the file so the retry can be spawned again.
+        let parked = restarted.parked_truncates();
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[0].0, gate);
+        assert_eq!(parked[0].1, "file-a");
+        assert_eq!(parked[0].3, 4096);
+
+        // A placement with no pending cut restores clean.
+        let clean = recall_fixture();
+        clean.load_placement_records(vec![mgr.placement_for("file-a").unwrap().to_record("file-a")]);
+        assert!(clean.truncate_dirty_since(&gate).is_none());
+        assert!(clean.parked_truncates().is_empty());
+    }
+
     /// AUDIT C1. The minted seqid must be a known non-zero constant, not
     /// random: RFC 8881 §12.5.5.2.1 has the client check that a recall's
     /// seqid is exactly one higher than the one it holds, and §20.3.3
@@ -2134,6 +2291,7 @@ mod tests {
             stripe_size: 8 * 1024 * 1024,
             device_ids: vec!["ds-1".into(), "ds-2".into()],
             file_id: 0,
+            truncate_pending: None,
         }]);
 
         let old = mgr
@@ -2261,6 +2419,7 @@ mod tests {
             stripe_size: 8 << 20,
             device_ids: vec!["ds-1".into()],
             file_id: 0,
+            truncate_pending: None,
         }]);
         assert!(mgr.rename_placement("legacy", "elsewhere").is_err());
         assert!(mgr.placement_for("legacy").is_some(), "refused rename must not lose the pin");
@@ -2384,6 +2543,7 @@ mod tests {
             stripe_size: 8 << 20,
             device_ids: vec!["ds-1".into()],
             file_id: 0,
+            truncate_pending: None,
         }]);
         assert!(mgr.has_legacy_placements_under("old"));
         assert!(!mgr.has_legacy_placements_under("old2"));

@@ -146,6 +146,60 @@ impl PnfsOperationHandler {
         .await;
     }
 
+    /// Re-arm the background retry for every truncate that was still
+    /// parked when this MDS last stopped (audit R4).
+    ///
+    /// Restoring the GATE without the retry would be a wedge: LAYOUTGET
+    /// answers TRYLATER forever and nothing ever confirms the cut. Call
+    /// once at startup, after placements are loaded.
+    ///
+    /// Returns how many were re-armed. Deliberately loud even at zero on
+    /// the "some were parked" path — an operator seeing this line knows
+    /// a file is unreadable-by-layout until a DS comes back, which is
+    /// the honest state.
+    pub fn resume_parked_truncates(&self) -> usize {
+        let parked = self.layout_manager.parked_truncates();
+        for (gate, file_key, placement, pending) in &parked {
+            warn!(
+                "⏳ resuming parked truncate for '{}' (gate {}, deepest cut {}) — \
+                 a pinned DS never confirmed before the last restart",
+                file_key, gate, pending,
+            );
+            let registry = Arc::clone(&self.device_registry);
+            let clients = Arc::clone(&self.ds_control_clients);
+            let manager = Arc::clone(&self.layout_manager);
+            let export = self.export_fs_path.clone();
+            let key = file_key.clone();
+            let gate = gate.clone();
+            let placement = placement.clone();
+            tokio::spawn(async move {
+                // Same shape as note_truncate's retry: bounded backoff,
+                // unbounded duration. The first attempts will very likely
+                // fail — at startup the DSes have not re-registered yet —
+                // which is exactly what the backoff is for.
+                let mut delay = Duration::from_millis(500);
+                loop {
+                    tokio::time::sleep(delay).await;
+                    let Some((_, min_size)) = manager.truncate_dirty_state(&gate) else {
+                        return;
+                    };
+                    if truncate_fanout(&registry, &clients, &export, &key, &placement, min_size)
+                        .await
+                    {
+                        manager.clear_truncate_dirty_if(&gate, min_size);
+                        info!(
+                            "✂️ resumed truncate for '{}' (set_len {}) confirmed on all pinned DSes",
+                            key, min_size,
+                        );
+                        return;
+                    }
+                    delay = (delay * 2).min(Duration::from_secs(10));
+                }
+            });
+        }
+        parked.len()
+    }
+
     /// DS-relative path of a legacy (path-keyed) pin's stripe file.
     fn legacy_stripe_rel_path(&self, file_key: &str) -> String {
         let export_rel = self.export_fs_path.trim_start_matches('/');
@@ -1060,8 +1114,8 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         self.getdeviceinfo(args)
     }
     
-    fn layoutreturn(&self, args: LayoutReturnArgs) -> Result<(), String> {
-        self.layoutreturn(args).map(|_| ()).map_err(|e| format!("{:?}", e))
+    fn layoutreturn(&self, args: LayoutReturnArgs) -> Result<(), LayoutReturnError> {
+        self.layoutreturn(args).map(|_| ())
     }
 
     fn is_pnfs_managed(&self, file_key: &str) -> bool {
@@ -1070,6 +1124,12 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
 
     fn fallback_io_disposition(&self, file_key: &str) -> FallbackIoDisposition {
         self.fallback_io_disposition_impl(file_key)
+    }
+
+    fn truncate_gate_ceiling(&self, file_key: &str) -> Option<u64> {
+        let placement = self.layout_manager.placement_for(file_key)?;
+        let gate = truncate_gate_key(&placement, file_key);
+        self.layout_manager.truncate_dirty_state(&gate).map(|(_, min)| min)
     }
 
     fn note_remove(&self, file_key: &str) {

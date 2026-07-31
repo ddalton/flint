@@ -59,7 +59,14 @@ pub trait PnfsOperations: Send + Sync {
     fn getdeviceinfo(&self, args: GetDeviceInfoArgs) -> Result<GetDeviceInfoResult, GetDeviceInfoError>;
     
     /// Handle LAYOUTRETURN operation (opcode 51)
-    fn layoutreturn(&self, args: LayoutReturnArgs) -> Result<(), String>;
+    /// Returns the TYPED error: the dispatcher has to distinguish
+    /// BadStateId (benign to a client, and the normal answer after a
+    /// server-side revoke) from a genuine fault. Stringifying it here
+    /// forced a blanket SERVERFAULT at the call site (audit R3).
+    fn layoutreturn(
+        &self,
+        args: LayoutReturnArgs,
+    ) -> Result<(), crate::pnfs::mds::operations::LayoutReturnError>;
     
     /// Handle LAYOUTCOMMIT operation (opcode 49)
     fn layoutcommit(&self) -> Result<(), String> {
@@ -113,6 +120,24 @@ pub trait PnfsOperations: Send + Sync {
     /// before returning; on failure they park the file behind a
     /// LAYOUTGET/fallback gate until a background retry confirms.
     async fn note_truncate(&self, _file_key: &str, _new_size: u64) {}
+
+    /// The deepest size change currently unconfirmed on this file's
+    /// pinned DSes, if the truncate gate is armed.
+    ///
+    /// LAYOUTCOMMIT consults this before extending the MDS stub. A
+    /// client returning a layout with uncommitted writes reports the
+    /// last byte it wrote (RFC 8881 §18.42.1), and the recall a truncate
+    /// now fires actively INVITES that LAYOUTCOMMIT — so without this
+    /// the sequence "truncate to 0 → recall → client commits
+    /// last_write_offset = 1 MiB-1" sets the stub back to 1 MiB while
+    /// the DS stripes are being zeroed. The size attribute then lies and
+    /// reads return a megabyte of zeros that `stat` calls data (audit
+    /// C4).
+    ///
+    /// `None` means no cut is pending and the commit may extend freely.
+    fn truncate_gate_ceiling(&self, _file_key: &str) -> Option<u64> {
+        None
+    }
 
     /// Whether RENAME of `old_key` can preserve data. False only for
     /// legacy path-keyed pins (file_id 0): their DS stripes live at the

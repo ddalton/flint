@@ -271,6 +271,18 @@ impl MetadataServer {
             .map_err(|e| crate::pnfs::Error::Config(format!("list placements: {}", e)))?;
         let n = placements.len();
         self.layout_manager.load_placement_records(placements);
+
+        // R4: a gate restored above with no retry behind it is a wedge —
+        // LAYOUTGET answers TRYLATER forever. Re-arm before the listener
+        // binds.
+        let resumed = self.operation_handler.resume_parked_truncates();
+        if resumed > 0 {
+            warn!(
+                "⏳ {} file(s) came back with an unconfirmed truncate — layouts are \
+                 refused for them until a pinned DS confirms the cut",
+                resumed,
+            );
+        }
         info!("📦 MDS reloaded {} persisted placements from backend", n);
 
         Ok(())
@@ -514,14 +526,18 @@ impl MetadataServer {
             bcw: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
             back_channels: Arc<dashmap::DashMap<
                 crate::nfs::v4::protocol::SessionId,
-                Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+                Vec<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
             >>,
         }
         impl Drop for InflightGuard {
             fn drop(&mut self) {
                 self.bcw.drop_all_inflight();
-                self.back_channels
-                    .retain(|_, v| !Arc::ptr_eq(v, &self.bcw));
+                // Drop THIS connection's writer, keeping the session's
+                // other bound transports usable (audit C5).
+                self.back_channels.retain(|_, writers| {
+                    writers.retain(|w| !Arc::ptr_eq(w, &self.bcw));
+                    !writers.is_empty()
+                });
             }
         }
         let _inflight_guard = InflightGuard {
@@ -631,6 +647,10 @@ impl MetadataServer {
             pipeline.submit(
                 request,
                 more_queued,
+                // R2: never dispatch inline once this connection is a
+                // back-channel — its read loop has to stay free to route
+                // CB replies for compounds running on it.
+                bcw.is_back_channel(),
                 move |req| Self::dispatch_rpc_with_pnfs(req, dispatcher_c, gss_c, bcw_dispatch),
                 move |reply| async move { bcw_write.send_record(reply).await },
             ).await?;
