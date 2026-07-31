@@ -27,6 +27,15 @@
 #        in-place re-init + catch-up rebuild to in_sync
 #   2.10 v1.21.0 online expansion under writes (multi-replica fan-out;
 #        run again after 2.1 to prove the degraded-refusal belt)
+#   2.11 ALL-AT-ONCE: kill EVERY replica node's csi-node pod INCLUDING the
+#        raid host's, simultaneously — 2.7 without its raid-host exclusion.
+#        The supported all-at-once upgrade recipe in drill form: all-at-once
+#        should be the CORRECTNESS-SAFEST path (no leg goes Stale because
+#        nobody takes writes another misses), so the oracles are that
+#        degraded-direct and acked-tail-risk NEVER appear at ANY sample.
+#        Crosses the F62 shape on purpose — the raid host's tgt death
+#        destroys the composition with `staged` still set, so the periodic
+#        strike repair is the only inverse and recovery is MINUTES.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./lib.sh
@@ -501,6 +510,79 @@ case "$DRILL" in
   wait_acks_fresh 60 || fail "acks stalled after expansion"
   EXPECT_RESCHEDULE=none READY_TIMEOUT=60 \
     NOTES="online expand ${CUR}->${NEW} in ${T_DONE}s under writes; df ${DF_PRE}M->${DF_POST}M; raid=$(raid_summary "$RAID_HOST" | head -1)" verify
+  ;;
+
+2.11) # ALL-AT-ONCE: kill EVERY replica node's csi-node pod INCLUDING the raid
+  # host's, simultaneously.  2.7 does this for the REMOTE legs only (it greps
+  # the raid host out); dropping that exclusion is the entire difference, and
+  # it changes the drill from "can the raid ride out losing its legs" to "can
+  # the VOLUME come back when every tgt under it dies at once".
+  #
+  # WHY THIS SHAPE IS WORTH TESTING: it is the supported all-at-once upgrade
+  # recipe (pre-pull -> patch maxUnavailable="100%" -> helm upgrade -> revert),
+  # and on paper all-at-once is the CORRECTNESS-SAFEST path — simultaneous tgt
+  # death means nobody takes writes another misses, so no leg goes Stale and
+  # full membership is available on recovery.  A rolling upgrade, by contrast,
+  # always makes the rolled leg stale.  This drill is what turns that argument
+  # into a supported procedure, or refutes it.
+  #
+  # It also crosses the F62 shape deliberately: killing the RAID HOST's tgt
+  # destroys the composition while `staged` stays set, so NodeStage is never
+  # called again and the shipped periodic strike repair (repair_data_path, 2
+  # strikes) is the only inverse.  Recovery is therefore expected in MINUTES,
+  # not seconds.
+  #
+  # NEVER --force: a forced delete converts the safe UBLK_F_USER_RECOVERY
+  # quiesce into the DEAD case and costs the mount (runy2/runz).
+  pre_r2
+  ALL=$(replica_nodes "$PV")
+  N_ALL=$(echo "$ALL" | grep -c .)
+  [ "$N_ALL" -ge 2 ] || fail "need >=2 replica legs — found $N_ALL"
+  echo "$ALL" | grep -q "^$RAID_HOST$" \
+    || fail "2.11 requires the raid host among the replica nodes (got: $(echo $ALL)) — without it this is just 2.7"
+  EXPECT_BASE="$N_ALL"
+  note "killing csi-node on ALL $N_ALL replica nodes INCLUDING raid host $RAID_HOST"
+
+  dd_ann()   { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/degraded-direct}'   2>/dev/null; }
+  risk_ann() { kubectl get pv "$PV" -o jsonpath='{.metadata.annotations.flint\.io/acked-tail-risk}'  2>/dev/null; }
+
+  for n in $ALL; do note "spdk-tgt restarts pre on $n: $(spdk_restarts "$n")"; done
+  for n in $ALL; do
+    kubectl delete pod -n "$DRIVER_NS" "$(csi_node_pod "$n")" --wait=false
+    note "csi-node pod on $n deleted"
+  done
+
+  # SAMPLE THROUGHOUT — never at the end.  flint.io/degraded-direct is CLEARED
+  # by the next >=2-leg assembly (driver.rs, the annotation-homing comment), so
+  # a single post-hoc check would find it absent precisely BECAUSE the volume
+  # recovered through a degraded serve.  That is the checkpoint-phase luck that
+  # hid F55 in every earlier 3.6e run.  Same for the raid base count.
+  DD_SEEN=""; RISK_SEEN=""; WORST=0; BACK=""
+  for i in $(seq 1 60); do   # 60 x 5s = 5 min, sized for the strike ladder
+    D=$(dd_ann); [ -n "$D" ] && [ -z "$DD_SEEN" ] && { DD_SEEN="$D"; note "degraded-direct OBSERVED at t+$((i*5))s: $D"; }
+    R=$(risk_ann); [ -n "$R" ] && [ -z "$RISK_SEEN" ] && { RISK_SEEN="$R"; note "acked-tail-risk OBSERVED at t+$((i*5))s: $R"; }
+    last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
+    age=$(( $(epoch) - ${last:-0} )); [ "$age" -gt "$WORST" ] && WORST=$age
+    B=$(raid_summary "$RAID_HOST" 2>/dev/null | head -1)
+    case "$B" in *"base=$EXPECT_BASE/$EXPECT_BASE"*) [ -z "$BACK" ] && { BACK=$((i*5)); note "base back to $EXPECT_BASE/$EXPECT_BASE at t+${BACK}s"; } ;; esac
+    sleep 5
+  done
+
+  # ORACLES.  The first two are the point of the drill: all-at-once is only a
+  # supported recipe if the volume never degrades to a single-survivor DIRECT
+  # serve and never has to surface an acked tail.
+  [ -z "$DD_SEEN" ]   && ok "no degraded-direct at any sample (never fell to single-survivor direct serve)" \
+                      || fail "2.11 FAIL: degraded-direct raised — all-at-once DID lose redundancy: $DD_SEEN"
+  [ -z "$RISK_SEEN" ] && ok "no acked-tail-risk at any sample" \
+                      || fail "2.11 FAIL: acked-tail-risk raised — acked writes were at risk: $RISK_SEEN"
+  [ -n "$BACK" ]      && ok "composition back to $EXPECT_BASE/$EXPECT_BASE in ${BACK}s" \
+                      || fail "2.11 FAIL: base never returned to $EXPECT_BASE/$EXPECT_BASE within 300s (last: $(raid_summary "$RAID_HOST" | head -1))"
+  note "worst ack age ${WORST}s (ublk holds I/O rather than erroring, so a long stall is not loss)"
+  for n in $ALL; do note "spdk-tgt restarts post on $n: $(spdk_restarts "$n")"; done
+  note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
+
+  EXPECT_RESCHEDULE=none READY_TIMEOUT=120 \
+    NOTES="all-at-once ${N_ALL}-node csi-node kill incl raid host; degraded_direct=${DD_SEEN:-none}; acked_tail_risk=${RISK_SEEN:-none}; base_back=${BACK:-NEVER}s; worst_ack_age=${WORST}s; raid=$(raid_summary "$RAID_HOST" | head -1)" verify
   ;;
 
 *) fail "unknown drill '$DRILL' (phase-1 regression subset: PHASE_LABEL=2 ./drills/phase1.sh <id>)" ;;
