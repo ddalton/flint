@@ -15,7 +15,7 @@ use crate::state_backend::{
 };
 use dashmap::DashMap;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Layout state ID (combines with NFSv4 stateid)
 pub type LayoutStateId = [u8; 16];
@@ -240,6 +240,7 @@ impl LayoutState {
             owner_session_id: self.owner.session_id,
             owner_fsid: self.owner.fsid,
             filehandle: self.filehandle.clone(),
+            file_ident: self.file_ident.clone(),
             segments: self
                 .segments
                 .iter()
@@ -268,6 +269,7 @@ impl LayoutState {
                 fsid: r.owner_fsid,
             },
             filehandle: r.filehandle,
+            file_ident: r.file_ident,
             segments: r
                 .segments
                 .into_iter()
@@ -313,6 +315,17 @@ pub struct LayoutState {
 
     /// File handle this layout applies to
     pub filehandle: Vec<u8>,
+
+    /// Which FILE this layout is for, as [`truncate_gate_key`] spells
+    /// it. Recorded at grant time from the same placement the stripe
+    /// map came from, so the truncate recall (F65) and the
+    /// truncate-dirty gate are keyed identically by construction —
+    /// two separately-derived keys could drift, and a drifted key
+    /// recalls nothing while looking like it worked.
+    ///
+    /// Empty only for layouts restored from a pre-v7 record; those are
+    /// deliberately unmatchable rather than matched by a wildcard.
+    pub file_ident: String,
 
     /// Layout segments
     pub segments: Vec<LayoutSegment>,
@@ -835,6 +848,10 @@ impl LayoutManager {
             stateid,
             owner,
             filehandle,
+            // Same placement the stripe map above came from, so this is
+            // byte-identical to the key note_truncate files the gate
+            // under. Do NOT recompute it from file_key alone.
+            file_ident: truncate_gate_key(&placement, file_key),
             segments,
             iomode,
             return_on_close: true,
@@ -1140,6 +1157,60 @@ impl LayoutManager {
             );
         }
 
+        recalled
+    }
+
+    /// Every outstanding layout for ONE file, for the truncate recall
+    /// (F65). Returns `(session_id, stateid, filehandle)` per layout —
+    /// the filehandle is what makes the CB_LAYOUTRECALL per-file rather
+    /// than session-wide, which matters here in a way it does not for a
+    /// dead DS: a session-wide recall on every SETATTR(size) would drop
+    /// the client's layouts for every OTHER file too.
+    ///
+    /// `file_ident` is [`truncate_gate_key`]'s output. An empty ident
+    /// never matches: a layout restored from a pre-v7 record does not
+    /// know its file, and matching it would mean recalling every such
+    /// layout on every truncate. That is a real (narrow) hole — layouts
+    /// that survived an upgrade-restart are not recalled — and it
+    /// closes itself as those layouts are returned; it is not papered
+    /// over with a wildcard.
+    pub fn recall_layouts_for_file(
+        &self,
+        file_ident: &str,
+    ) -> Vec<(SessionIdBytes, LayoutStateId, Vec<u8>)> {
+        if file_ident.is_empty() {
+            return Vec::new();
+        }
+        let mut recalled = Vec::new();
+        let mut unidentified = 0usize;
+        for entry in self.layouts.iter() {
+            if entry.file_ident.is_empty() {
+                unidentified += 1;
+                continue;
+            }
+            if entry.file_ident == file_ident {
+                recalled.push((
+                    entry.owner.session_id,
+                    entry.stateid,
+                    entry.filehandle.clone(),
+                ));
+            }
+        }
+        if unidentified > 0 {
+            warn!(
+                "Truncate recall for '{}': {} layout(s) restored from a pre-v7 \
+                 record carry no file identity and were NOT considered — they \
+                 predate the column and cannot be matched to a file",
+                file_ident, unidentified,
+            );
+        }
+        if !recalled.is_empty() {
+            info!(
+                "Recalling {} layout(s) for truncated file {}",
+                recalled.len(),
+                file_ident,
+            );
+        }
         recalled
     }
 
@@ -1501,6 +1572,143 @@ mod tests {
 
         // Idempotent: a second LAYOUTRETURN ALL on the same client is a no-op.
         assert_eq!(mgr.return_all_for_client(1), Vec::<LayoutStateId>::new());
+    }
+
+    /// Two-device fixture for the F65 recall tests.
+    fn recall_fixture() -> LayoutManager {
+        let registry = Arc::new(DeviceRegistry::new());
+        for i in 1..=2 {
+            registry
+                .register(DeviceInfo::new(
+                    format!("ds-{}", i),
+                    format!("10.0.0.{}:2049", i),
+                    vec![format!("nvme{}n1", i)],
+                ))
+                .unwrap();
+        }
+        LayoutManager::new(
+            registry,
+            ConfigLayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
+        )
+    }
+
+    /// F65: the recall selector must key off the SAME string the
+    /// truncate gate is filed under. If these two ever drift, the
+    /// recall silently matches nothing and looks like it worked.
+    #[test]
+    fn layout_ident_equals_the_truncate_gate_key() {
+        let mgr = recall_fixture();
+        let layout = mgr
+            .generate_layout(
+                test_owner(1),
+                vec![0xAB],
+                "file-a",
+                0,
+                8 * 1024 * 1024,
+                IoMode::ReadWrite,
+            )
+            .unwrap();
+
+        let placement = mgr.placement_for("file-a").expect("pinned on first grant");
+        assert_eq!(layout.file_ident, truncate_gate_key(&placement, "file-a"));
+        // Identity pins key by file_id, so the ident survives a RENAME.
+        assert!(layout.file_ident.starts_with("id:"));
+    }
+
+    /// A truncate of one file must not disturb layouts on another.
+    /// The dead-DS fan-out sends a session-wide recall (empty FH) on
+    /// purpose; doing that here would drop the client's layouts for
+    /// every other file on every SETATTR(size).
+    #[test]
+    fn recall_for_file_selects_only_that_file() {
+        let mgr = recall_fixture();
+        let a = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        let b = mgr
+            .generate_layout(test_owner(1), vec![0xB], "file-b", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        assert_ne!(a.file_ident, b.file_ident);
+
+        let hits = mgr.recall_layouts_for_file(&a.file_ident);
+        assert_eq!(hits.len(), 1, "exactly one layout is for file-a");
+        assert_eq!(hits[0].1, a.stateid);
+        // The filehandle rides along — it is what makes the
+        // CB_LAYOUTRECALL per-file rather than session-wide.
+        assert_eq!(hits[0].2, vec![0xA]);
+
+        // file-b is untouched and still recallable in its own right.
+        assert_eq!(mgr.recall_layouts_for_file(&b.file_ident).len(), 1);
+    }
+
+    /// Every layout for the file, across clients and sessions — a
+    /// truncate has to reach all of them, not just the requester's.
+    #[test]
+    fn recall_for_file_spans_clients() {
+        let mgr = recall_fixture();
+        let one = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        let two = mgr
+            .generate_layout(test_owner(2), vec![0xA], "file-a", 0, 1 << 20, IoMode::Read)
+            .unwrap();
+
+        let hits = mgr.recall_layouts_for_file(&one.file_ident);
+        assert_eq!(hits.len(), 2);
+        let ids: Vec<_> = hits.iter().map(|(_, s, _)| *s).collect();
+        assert!(ids.contains(&one.stateid) && ids.contains(&two.stateid));
+    }
+
+    /// An empty ident must never behave as a wildcard. Layouts restored
+    /// from a pre-v7 record carry no file identity; matching them would
+    /// recall every such layout on every truncate of any file.
+    #[test]
+    fn empty_ident_never_matches() {
+        let mgr = recall_fixture();
+        let live = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+
+        // A layout as it would come back from a pre-v7 row.
+        let legacy = LayoutState {
+            stateid: [0x5A; 16],
+            owner: test_owner(9),
+            filehandle: vec![0xEE],
+            file_ident: String::new(),
+            segments: live.segments.clone(),
+            iomode: IoMode::ReadWrite,
+            return_on_close: true,
+        };
+        mgr.layouts.insert(legacy.stateid, legacy);
+
+        // Asking with an empty ident matches nothing at all...
+        assert!(mgr.recall_layouts_for_file("").is_empty());
+        // ...and the identity-less layout is not swept up by a real one.
+        let hits = mgr.recall_layouts_for_file(&live.file_ident);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1, live.stateid);
+    }
+
+    /// The ident survives the persistence round-trip — otherwise every
+    /// layout restored after an MDS restart becomes unrecallable and
+    /// F65 quietly reopens.
+    #[test]
+    fn file_ident_survives_the_record_round_trip() {
+        let mgr = recall_fixture();
+        let layout = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+
+        let restored = LayoutState::from_record(layout.to_record());
+        assert_eq!(restored.file_ident, layout.file_ident);
+        assert!(!restored.file_ident.is_empty());
+
+        // And a restored layout is still selectable by that ident.
+        let fresh = recall_fixture();
+        fresh.load_records(vec![restored.to_record()]);
+        assert_eq!(fresh.recall_layouts_for_file(&layout.file_ident).len(), 1);
     }
 
     #[test]

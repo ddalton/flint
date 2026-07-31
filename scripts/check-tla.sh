@@ -719,10 +719,7 @@ mutation_run FlintSnapshots FlintSnapshotsBareDelete.cfg "bare-delete mutation (
 # fsx; DS failure is not re-placed at this layer at all (placements are PINNED),
 # so it is FlintReplication's machine underneath. What is left unrefereed is the
 # window between the MDS stub's size changing and N data servers being cut.
-#
-# The two runs that matter are the last two, and they are a pair: the gate is
-# CORRECT and it is INCOMPLETE. Cite them together or neither.
-strict_run   FlintTruncate FlintTruncate.cfg              "truncate gate strict (shipped: clear-if-deepest, min-keeping, no recall) — the gate's own claim holds"
+strict_run   FlintTruncate FlintTruncate.cfg              "truncate gate strict (shipped: clear-if-deepest, min-keeping, recall-on-truncate) — BOTH theorems hold"
 mutation_run FlintTruncate FlintTruncateBlindClear.cfg    "blind-clear mutation (GateClearGuarded=FALSE: a shallower confirm lifts a deeper cut's mark)" "Inv_ClearImpliesFlushed"
 
 # The REFUTED half. Keeping the min looks like the other load-bearing piece and
@@ -731,13 +728,17 @@ mutation_run FlintTruncate FlintTruncateBlindClear.cfg    "blind-clear mutation 
 # run so the claim cannot be quietly re-asserted later.
 strict_run   FlintTruncate FlintTruncateMarkOverwrite.cfg "min-keeping refutation (MarkKeepsMin=FALSE still holds — safety is carried by clear_truncate_dirty_if alone)"
 
-# TODAY'S WORLD — an OPEN hazard, same shape as FlintReplicationRollUnfenced:
-# a failing run that RECORDS a gap rather than guarding a closed one. The gate
-# is a LAYOUTGET-time check and note_truncate never touches the layout manager
-# (the only CB_LAYOUTRECALL in the tree is the dead-DS fan-out), so a layout
-# acquired BEFORE the truncate walks straight past it. Three steps to the
-# counterexample. This run must keep FAILING until a recall lands.
-mutation_run FlintTruncate FlintTruncateHeldLayout.cfg    "held-layout gap (shipped: no recall on truncate, so the gate covers only clients without a layout yet)" "Inv_NoStaleServe"
-strict_run   FlintTruncate FlintTruncateRecall.cfg        "recall-on-truncate fix (RecallOnTruncate=TRUE closes it — a recall, not a wider gate)"
+# F65's teeth. The gate is a LAYOUTGET-time check, so before the fix a layout
+# acquired BEFORE the truncate walked straight past it and the read never
+# reached the MDS. If this run ever PASSES, the recall has been removed or has
+# stopped selecting the file's layouts — a failure mode that looks like nothing.
+mutation_run FlintTruncate FlintTruncateHeldLayout.cfg    "F65 regression (RecallOnTruncate=FALSE: no recall, so the gate covers only clients without a layout yet)" "Inv_NoStaleServe"
+
+# THE RESIDUAL THE FIX DOES NOT CLOSE — an OPEN hazard, same shape as
+# FlintReplicationRollUnfenced: a failing run that RECORDS a gap. Revocation is
+# server-side, so it binds only clients the recall actually reached; one behind
+# a dead back-channel still believes it holds the layout. Closing it needs the
+# DS to refuse, not the MDS to ask. Cite the strict run above WITH this one.
+mutation_run FlintTruncate FlintTruncateLostRecall.cfg    "unreached-recall residual (RecallReaches=FALSE: server-side revocation does not bind a client that never got the callback)" "Inv_NoStaleServe"
 
 echo "TLA GATE PASSED"

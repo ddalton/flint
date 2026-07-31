@@ -103,7 +103,13 @@ use tokio::sync::oneshot;
 ///        re-maps existing data when the fleet changes. New table
 ///        only — handled by the schema-batch's CREATE TABLE IF NOT
 ///        EXISTS.
-const SCHEMA_VERSION: i64 = 6;
+///   6 → add `file_placement.file_id` (identity-keyed pins).
+///   7 → add `layouts.file_ident` — the file identity a layout was
+///        issued against, so a truncate can recall exactly the layouts
+///        for that file (F65). DEFAULT '' = "unknown file", which is
+///        the honest meaning for pre-upgrade rows: they are NOT
+///        matched, rather than matched by a wildcard.
+const SCHEMA_VERSION: i64 = 7;
 
 /// One request to the writer thread.
 enum Req {
@@ -285,6 +291,32 @@ impl SqliteBackend {
                         })?;
                     }
                     tracing::info!("SqliteBackend: migrating schema → 6 (file_placement.file_id)");
+                }
+                if prev < 7 {
+                    // layouts.file_ident. DEFAULT '' means "this layout
+                    // predates the column, so we do not know which file
+                    // it belongs to" — recall_layouts_for_file skips
+                    // those rather than guessing. The alternative
+                    // (treating '' as a match) would recall every
+                    // restored layout on every truncate.
+                    let has_col: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('layouts') WHERE name = 'file_ident'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| {
+                        StateBackendError::Storage(format!("migrate v→7 (probe column): {}", e))
+                    })?;
+                    if has_col == 0 {
+                        conn.execute(
+                            "ALTER TABLE layouts ADD COLUMN file_ident TEXT NOT NULL DEFAULT ''",
+                            [],
+                        )
+                        .map_err(|e| {
+                            StateBackendError::Storage(format!("migrate v→7 (alter layouts): {}", e))
+                        })?;
+                    }
+                    tracing::info!("SqliteBackend: migrating schema → 7 (layouts.file_ident)");
                 }
                 conn.execute(
                     "UPDATE schema_version SET version = ?1 WHERE id = 1",
@@ -610,8 +642,8 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
             conn.prepare_cached(
                 "INSERT OR REPLACE INTO layouts
                  (stateid, owner_client_id, owner_session_id, owner_fsid,
-                  filehandle, segments, iomode, return_on_close)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  filehandle, segments, iomode, return_on_close, file_ident)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?
             .execute(params![
                 l.stateid.to_vec(),
@@ -622,6 +654,7 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
                 segments_json,
                 iomode_to_i64(l.iomode),
                 bool_to_i64(l.return_on_close),
+                l.file_ident,
             ])?;
         }
         WriteOp::DeleteLayout(s) => {
@@ -934,7 +967,7 @@ impl StateBackend for SqliteBackend {
             .with_conn(move |conn| {
                 conn.query_row(
                     "SELECT stateid, owner_client_id, owner_session_id, owner_fsid,
-                            filehandle, segments, iomode, return_on_close
+                            filehandle, segments, iomode, return_on_close, file_ident
                      FROM layouts WHERE stateid = ?1",
                     params![key],
                     decode_layout_row,
@@ -950,7 +983,7 @@ impl StateBackend for SqliteBackend {
             .with_conn(|conn| {
                 let mut stmt = conn.prepare(
                     "SELECT stateid, owner_client_id, owner_session_id, owner_fsid,
-                            filehandle, segments, iomode, return_on_close
+                            filehandle, segments, iomode, return_on_close, file_ident
                      FROM layouts",
                 )?;
                 let rows: rusqlite::Result<Vec<_>> =
@@ -1208,6 +1241,7 @@ fn decode_layout_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<L
     let segments_json: String = r.get(5)?;
     let iomode: i64 = r.get(6)?;
     let return_on_close: i64 = r.get(7)?;
+    let file_ident: String = r.get(8)?;
 
     Ok((|| -> StateBackendResult<LayoutRecord> {
         let segments: Vec<LayoutSegmentRecord> = serde_json::from_str(&segments_json)
@@ -1221,6 +1255,7 @@ fn decode_layout_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<L
             segments,
             iomode: i64_to_iomode(iomode)?,
             return_on_close: i64_to_bool(return_on_close),
+            file_ident,
         })
     })())
 }
@@ -1313,7 +1348,10 @@ CREATE TABLE IF NOT EXISTS layouts (
     filehandle BLOB NOT NULL,
     segments TEXT NOT NULL,
     iomode INTEGER NOT NULL,
-    return_on_close INTEGER NOT NULL
+    return_on_close INTEGER NOT NULL,
+    -- Schema v7: which file this layout is for, as truncate_gate_key
+    -- spells it. The truncate recall (F65) selects on this.
+    file_ident TEXT NOT NULL DEFAULT ''
 );
 
 -- Schema v5: per-file stripe placement (durable-DS plan Phase 0).
@@ -1557,6 +1595,7 @@ mod tests {
                 ],
                 iomode: IoModeRecord::ReadWrite,
                 return_on_close: true,
+                file_ident: "id:00000000deadbeef".into(),
             })
             .await
             .unwrap();

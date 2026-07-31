@@ -65,6 +65,21 @@ pub struct PnfsOperationHandler {
     /// Cached DsControl clients (MDS → DS), keyed by control endpoint.
     /// Entries are evicted on RPC failure so retries re-dial fresh.
     ds_control_clients: Arc<DashMap<String, crate::pnfs::grpc::AuthedDsControlClient>>,
+
+    /// Back-channel fan-out, for recalling layouts on truncate (F65).
+    ///
+    /// Attached AFTER construction rather than passed to `new`, because
+    /// the wiring is a cycle: `CallbackManager` borrows the
+    /// dispatcher's back-channel registry, the dispatcher needs this
+    /// handler as its `PnfsOperations`, and this handler needs the
+    /// CallbackManager. `MdsServer::new` builds them in that order and
+    /// calls `attach_callback_manager` last.
+    ///
+    /// `None` (never attached) is a legitimate state — unit tests build
+    /// the handler standalone — and means no recall is sent. That is
+    /// the pre-F65 behaviour, so the truncate gate still holds; only
+    /// the held-layout window reopens.
+    callback_manager: std::sync::OnceLock<Arc<crate::pnfs::mds::callback::CallbackManager>>,
 }
 
 impl PnfsOperationHandler {
@@ -80,7 +95,55 @@ impl PnfsOperationHandler {
             boot_instant: Instant::now(),
             export_fs_path,
             ds_control_clients: Arc::new(DashMap::new()),
+            callback_manager: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Hand the handler the back-channel fan-out, once the dispatcher
+    /// that owns the back-channel registry exists. Idempotent; a second
+    /// call is ignored (the first wins) rather than panicking, because
+    /// losing this race is harmless — both callers pass the same Arc.
+    pub fn attach_callback_manager(
+        &self,
+        callbacks: Arc<crate::pnfs::mds::callback::CallbackManager>,
+    ) {
+        if self.callback_manager.set(callbacks).is_err() {
+            debug!("PnfsOperationHandler: callback manager already attached");
+        }
+    }
+
+    /// Recall + revoke every outstanding layout for a file whose size
+    /// is changing (F65). No-op when nothing holds a layout, which is
+    /// the common case — `return_on_close` is set on every grant, so
+    /// layouts rarely outlive the open that created them.
+    ///
+    /// Silently does nothing when no `CallbackManager` was attached.
+    /// That is the standalone-handler case (unit tests); a real MDS
+    /// always attaches one in `MdsServer::new`.
+    async fn recall_layouts_for_truncate(&self, gate: &str, new_size: u64) {
+        let Some(callbacks) = self.callback_manager.get() else {
+            debug!(
+                "truncate of {}: no callback manager attached, layouts not recalled",
+                gate
+            );
+            return;
+        };
+        let recalls = self.layout_manager.recall_layouts_for_file(gate);
+        if recalls.is_empty() {
+            return;
+        }
+        let pairs: Vec<(crate::nfs::v4::protocol::SessionId, _, _)> = recalls
+            .into_iter()
+            .map(|(sid, stateid, fh)| (crate::nfs::v4::protocol::SessionId(sid), stateid, fh))
+            .collect();
+        crate::pnfs::mds::callback::recall_layouts_for_truncate(
+            callbacks,
+            &self.layout_manager,
+            gate,
+            new_size,
+            &pairs,
+        )
+        .await;
     }
 
     /// DS-relative path of a legacy (path-keyed) pin's stripe file.
@@ -1020,6 +1083,24 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         // confirms, no fresh layout may expose the file.
         let gate = truncate_gate_key(&placement, file_key);
         self.layout_manager.mark_truncate_dirty(&gate, new_size);
+
+        // F65: the gate above stops FRESH layouts, and that is all it
+        // can do — a client that already holds one reads its stripes
+        // straight from the DSes without the MDS ever being consulted.
+        // So recall and revoke the outstanding ones, and do it HERE:
+        // before the fanout, for the same reason the mark comes first.
+        // A recall issued after the DSes are cut is decoration.
+        //
+        // This blocks the SETATTR/OPEN compound for up to one CB
+        // round-trip per outstanding layout. That is deliberate — the
+        // alternative is returning success to the client while its
+        // peers can still read the bytes we just promised are gone —
+        // and it is bounded by CallbackManager's per-call timeout.
+        // The client issuing the truncate is recalled along with the
+        // rest: excluding it would rest on the assumption that a
+        // client never reads past a size it set itself, which is a
+        // claim about client behaviour, not about this server.
+        self.recall_layouts_for_truncate(&gate, new_size).await;
 
         let ok = truncate_fanout(
             &self.device_registry,

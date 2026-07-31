@@ -159,6 +159,13 @@ impl MetadataServer {
             Arc::clone(&state_mgr),
         ));
 
+        // Close the wiring cycle: the handler could not receive this at
+        // construction (the dispatcher it feeds had to exist first), and
+        // note_truncate needs it to recall layouts before cutting the
+        // DSes (F65). Without this line the truncate gate still holds
+        // but the held-layout window is wide open.
+        operation_handler.attach_callback_manager(Arc::clone(&callback_manager));
+
         // Register initial data servers from config
         for ds in &config.data_servers {
             let mut device_info = DeviceInfo::new(

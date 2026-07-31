@@ -230,6 +230,19 @@ pub struct LayoutRecord {
     pub segments: Vec<LayoutSegmentRecord>,
     pub iomode: IoModeRecord,
     pub return_on_close: bool,
+    /// The file identity this layout was issued against — literally
+    /// `truncate_gate_key`'s output (`id:<file_id>` for identity pins,
+    /// `path:<key>` for legacy ones). Stored rather than recomputed so
+    /// the truncate recall (F65) selects layouts by the SAME key the
+    /// truncate-dirty gate is filed under: two independently-derived
+    /// keys can drift, and a drifted key silently recalls nothing.
+    ///
+    /// Empty on rows written before schema v7. Such a layout cannot be
+    /// matched to a file, so a truncate will not recall it — see
+    /// `LayoutManager::recall_layouts_for_file`, which refuses to treat
+    /// an empty ident as a wildcard.
+    #[serde(default)]
+    pub file_ident: String,
 }
 
 /// Per-file stripe placement — which DSes (in which order) a file's
@@ -574,8 +587,11 @@ mod tests {
             ],
             iomode: IoModeRecord::ReadWrite,
             return_on_close: true,
+            file_ident: "id:00000000cafed00d".into(),
         };
         b.put_layout(&layout).await.unwrap();
+        // Round-trip includes file_ident: a backend that dropped it
+        // would leave every restored layout unrecallable on truncate.
         assert_eq!(b.get_layout(&[7u8; 16]).await.unwrap(), Some(layout.clone()));
 
         let placement = PlacementRecord {

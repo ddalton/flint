@@ -48,10 +48,21 @@
 (*     BlindClear mutation must rediscover the loss.                       *)
 (*                                                                         *)
 (*   Inv_NoStaleServe — no client ever reads content past the MDS size.    *)
-(*     FAILS as shipped, and the counterexample is two steps deep: the     *)
-(*     gate is a LAYOUTGET-time check, so a layout ACQUIRED BEFORE the     *)
-(*     truncate walks straight past it.  RecallOnTruncate = TRUE is the    *)
-(*     smallest thing that restores it.                                    *)
+(*     This was F65.  The gate is a LAYOUTGET-time check, so a layout      *)
+(*     ACQUIRED BEFORE the truncate walked straight past it and the read   *)
+(*     never reached the MDS; TLC found it three steps from Init.  The     *)
+(*     fix (shipped: note_truncate recalls and revokes the file's layouts  *)
+(*     between the mark and the fanout) restores it, and the              *)
+(*     RecallOnTruncate = FALSE mutation must rediscover the loss.         *)
+(*                                                                         *)
+(*     THE RESIDUAL, which the fix does not close and the model states     *)
+(*     rather than assumes away: revocation is SERVER-side, so it binds    *)
+(*     only clients the recall actually reached.  A client behind a dead   *)
+(*     back-channel (NoChannel / TimedOut — both of which the code revokes *)
+(*     through anyway) still believes it holds the layout and still reads  *)
+(*     the DS directly.  RecallReaches = FALSE is that world and TLC finds *)
+(*     the violation.  Closing it needs the DS to refuse, not the MDS to   *)
+(*     ask — see the scope limits below.                                   *)
 (*                                                                         *)
 (* ABSTRACTIONS, STATED — this is the module's own THE-ABSTRACTION-WAS-    *)
 (* THE-BUG surface, so read these before citing a green run:               *)
@@ -86,7 +97,8 @@ CONSTANTS
   MaxJobs,           \* concurrent fanout budget (>= MaxSets to never wedge)
   GateClearGuarded,  \* TRUE = clear_truncate_dirty_if's `confirmed <= min`
   MarkKeepsMin,      \* TRUE = mark_truncate_dirty's and_modify(min)
-  RecallOnTruncate   \* TRUE = revoke held layouts when the gate arms (NOT shipped)
+  RecallOnTruncate,  \* TRUE = recall+revoke held layouts when the gate arms
+  RecallReaches      \* TRUE = every recall is delivered AND honoured
 
 VARIABLES
   size,        \* the MDS stub's size — the authoritative attribute
@@ -155,10 +167,22 @@ SetSize(n) ==
   /\ gmin' = IF ~gated THEN n
              ELSE IF MarkKeepsMin THEN MinOf(gmin, n) ELSE n
   /\ sets' = sets + 1
-  \* The fix under test: recall and revoke every outstanding layout when
-  \* the gate arms.  As shipped this is FALSE — note_truncate never touches
-  \* the layout manager.
-  /\ held' = IF RecallOnTruncate THEN [c \in Clients |-> FALSE] ELSE held
+  \* The F65 fix: recall and revoke every outstanding layout for the file
+  \* before the fanout.
+  \*
+  \* `lost` is the honest part.  The implementation revokes SERVER-SIDE
+  \* whatever the recall outcome — Acked, TimedOut, NoChannel, Transport
+  \* all revoke — but server-side revocation does not stop a client that
+  \* never got the message: it does not know, and its reads go straight
+  \* to a DS.  So a recall closes the window only for clients it actually
+  \* reaches, and `lost` is the set it did not.  RecallReaches = TRUE
+  \* asserts delivery; the arm that lets `lost` be non-empty is what
+  \* states the residual instead of assuming it away.
+  /\ \E lost \in SUBSET Clients :
+       /\ RecallReaches => lost = {}
+       /\ held' = IF RecallOnTruncate
+                    THEN [c \in Clients |-> IF c \in lost THEN held[c] ELSE FALSE]
+                    ELSE held
   /\ UNCHANGED <<dsData, staleServed>>
 
 \* One DS confirms set_len(target).  Truncation drops the real content above

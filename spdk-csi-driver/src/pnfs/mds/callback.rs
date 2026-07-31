@@ -39,7 +39,7 @@ use crate::pnfs::mds::layout::LayoutStateId;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Default per-call timeout for CB CALLs. RFC 8881 §20.4 ("recall
 /// response time") doesn't mandate a value; 10s matches Linux nfsd.
@@ -94,6 +94,42 @@ impl CallbackManager {
         &self,
         session_id: &SessionId,
         layout_stateid: &LayoutStateId,
+        layout_type: u32,
+        iomode: u32,
+        changed: bool,
+    ) -> Result<CbCompoundReply, CallbackError> {
+        // Empty FH + whole range = the session-wide form (see the
+        // `recall` field below).
+        self.send_layoutrecall_range(
+            session_id,
+            layout_stateid,
+            Vec::new(),
+            0,
+            u64::MAX,
+            layout_type,
+            iomode,
+            changed,
+        )
+        .await
+    }
+
+    /// CB_LAYOUTRECALL scoped to ONE file and ONE byte range.
+    ///
+    /// The dead-DS path deliberately sends an empty FH, which Linux
+    /// treats as "return everything for this session" — right when a
+    /// device died, since every layout touching it is suspect. A
+    /// truncate is the opposite case: exactly one file changed, and
+    /// dropping the client's layouts for unrelated files on every
+    /// SETATTR(size) would be a self-inflicted performance bug. Pass
+    /// the layout's own filehandle and `[new_size, ..)` instead.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_layoutrecall_range(
+        &self,
+        session_id: &SessionId,
+        layout_stateid: &LayoutStateId,
+        fh: Vec<u8>,
+        offset: u64,
+        length: u64,
         layout_type: u32,
         iomode: u32,
         changed: bool,
@@ -168,14 +204,14 @@ impl CallbackManager {
                     iomode,
                     changed,
                     recall: LayoutRecall::File {
-                        // Empty FH = "any layout for this session"
-                        // — Linux's client treats this as a session-
-                        // wide return, which matches what we want
-                        // when a DS dies. Per-file recall is an
-                        // optimisation we can layer later.
-                        fh: Vec::new(),
-                        offset: 0,
-                        length: u64::MAX,
+                        // Empty FH = "any layout for this session" —
+                        // Linux's client treats this as a session-wide
+                        // return, which is what the dead-DS fan-out
+                        // wants. The truncate path passes a real FH and
+                        // range (see send_layoutrecall_range).
+                        fh,
+                        offset,
+                        length,
                         stateid,
                     },
                 },
@@ -270,6 +306,101 @@ impl CallbackManager {
         );
         results
     }
+}
+
+/// Fire one per-file CB_LAYOUTRECALL for each layout on a file whose
+/// size is changing, covering `[new_size, ..)`.
+///
+/// The REVOCATION POLICY DIFFERS from the dead-DS fan-out, and the
+/// difference is the point. There, an `Acked` layout gets a soft
+/// post-recall deadline before forcible revocation, because the client
+/// may still have a legitimate LAYOUTCOMMIT to land. Here the bytes
+/// past `new_size` are going away by definition, so a grace period is
+/// not politeness — it is exactly the exposure window the recall exists
+/// to close. Every layout is revoked server-side as soon as its recall
+/// attempt returns, whatever the outcome:
+///
+///   Acked      the client dropped it; revoking is bookkeeping.
+///   TimedOut   } the client either never heard or will not answer, and
+///   NoChannel  } RFC 5661 §12.5.5.2 lets us revoke immediately. It may
+///   Transport  } still be reading — which is why the caller must not
+///              } lift the truncate-dirty gate until the fanout lands.
+///
+/// Returns the outcomes for logging; the caller does not need to act on
+/// them, which is the whole simplification.
+pub async fn recall_layouts_for_truncate(
+    callbacks: &CallbackManager,
+    layout_manager: &crate::pnfs::mds::layout::LayoutManager,
+    file_ident: &str,
+    new_size: u64,
+    recalls: &[(SessionId, LayoutStateId, Vec<u8>)],
+) -> Vec<RecallResult> {
+    if recalls.is_empty() {
+        return Vec::new();
+    }
+    info!(
+        "📢 {} CB_LAYOUTRECALL(s) for truncated file {} → covering [{}, ..)",
+        recalls.len(),
+        file_ident,
+        new_size,
+    );
+
+    let mut results = Vec::with_capacity(recalls.len());
+    for (session_id, stateid, fh) in recalls {
+        let outcome = match callbacks
+            .send_layoutrecall_range(
+                session_id,
+                stateid,
+                fh.clone(),
+                new_size,
+                u64::MAX,
+                1, // LAYOUT4_NFSV4_1_FILES
+                3, // LAYOUTIOMODE4_ANY
+                true,
+            )
+            .await
+        {
+            Ok(_reply) => RecallOutcome::Acked,
+            Err(CallbackError::Timeout) => RecallOutcome::TimedOut,
+            Err(CallbackError::ConnectionClosed) => RecallOutcome::NoChannel,
+            Err(e) => {
+                let msg = e.to_string();
+                warn!(
+                    "CB_LAYOUTRECALL (truncate) to session {:?} failed: {}",
+                    session_id, msg,
+                );
+                RecallOutcome::Transport(msg)
+            }
+        };
+        // Unconditional, and BEFORE the next recall: a layout left live
+        // for the duration of the remaining round-trips is a layout
+        // that can still reach the bytes we are about to delete.
+        if layout_manager.revoke_layout(stateid) {
+            debug!(
+                "🚫 revoked layout {:?} on truncate of {} (recall outcome {:?})",
+                &stateid[0..4],
+                file_ident,
+                outcome,
+            );
+        }
+        results.push(RecallResult {
+            session_id: *session_id,
+            stateid: *stateid,
+            outcome,
+        });
+    }
+    let acked = results
+        .iter()
+        .filter(|r| matches!(r.outcome, RecallOutcome::Acked))
+        .count();
+    info!(
+        "📊 Truncate recall for {}: {}/{} acked, {} revoked server-side",
+        file_ident,
+        acked,
+        results.len(),
+        results.len(),
+    );
+    results
 }
 
 /// Outcome of one CB_LAYOUTRECALL CALL. Used by the heartbeat

@@ -1,9 +1,14 @@
 # F65 — a truncate does not recall held layouts, so the truncate gate only covers clients that don't have one yet
 
 Status: **FOUND BY TLC 2026-07-31** while modelling the truncate gate
-(`formal/FlintTruncate.tla`). **Not yet fixed.**
-`formal/FlintTruncateHeldLayout.cfg` is a gate run that must keep FAILING
-until it is.
+(`formal/FlintTruncate.tla`); **FIXED same session.** `note_truncate` now
+recalls and revokes the file's layouts between the mark and the fanout.
+`FlintTruncateHeldLayout.cfg` is the regression run — it flips
+`RecallOnTruncate` back off and must keep FINDING the loss.
+
+**One residual is NOT closed and is tracked as its own failing run**
+(`FlintTruncateLostRecall.cfg`): revocation is server-side, so it binds
+only clients the recall actually reached. See "The residual" below.
 
 ## The one-sentence version
 
@@ -12,7 +17,9 @@ the layout manager — so a client that acquired its layout *before* the
 truncate reads its stripes directly from the DSes, past the new EOF, without
 the MDS ever being consulted.
 
-## Why it is reachable
+## Why it was reachable
+
+*(All present tense in this section describes the code BEFORE the fix.)*
 
 The gate does exactly what its comment says, at the only place it is
 installed (`mds/operations/mod.rs:171`):
@@ -70,23 +77,86 @@ instead and still holds — overwriting only ever raises the mark, and the
 mark can only rise on a SETATTR that also raised the file size, so the
 exposure it would create is unreachable.
 
-## The fix, and why it is the small one
+## The fix as shipped
 
-`FlintTruncateRecall.cfg` sets `RecallOnTruncate = TRUE`: revoke every
-outstanding layout for the file when the gate arms. It holds. That is the
-whole change — a recall, **not** a wider gate. Widening the gate cannot work,
-because the read never asks the MDS anything.
+`note_truncate`, between `mark_truncate_dirty` and `truncate_fanout`:
 
-Concretely, in `note_truncate`, between `mark_truncate_dirty` and
-`truncate_fanout`: take the file's layouts (`layouts_for_client` has the
-index; a per-file lookup is the missing piece), `send_layoutrecall` each one
-through the existing `CallbackManager`, and apply the same revocation policy
-matrix `fan_out_recalls` already uses — `TimedOut`/`NoChannel`/`Transport`
-revoke immediately, `Acked` gets the post-recall deadline. All of that
-machinery exists; it is currently reachable only from the heartbeat monitor.
+```rust
+self.layout_manager.mark_truncate_dirty(&gate, new_size);
+self.recall_layouts_for_truncate(&gate, new_size).await;   // ← F65
+let ok = truncate_fanout(...).await;
+```
 
-Ordering matters: the recall must precede the fanout, for the same reason
-the mark does. A recall issued after the DSes are cut is decoration.
+A recall, **not** a wider gate. Widening cannot work, because the read
+never asks the MDS anything. Five pieces:
+
+1. **`LayoutState.file_ident`** — the file identity a layout was issued
+   against, recorded at grant time as *literally* `truncate_gate_key`'s
+   output from the same placement the stripe map came from. The recall
+   selector and the gate are therefore keyed identically by construction.
+   Deriving the key twice would let them drift, and a drifted key recalls
+   nothing while looking like it worked.
+2. **`LayoutManager::recall_layouts_for_file`** — returns
+   `(session, stateid, filehandle)` per layout. An empty ident never
+   matches; see the residual below.
+3. **`CallbackManager::send_layoutrecall_range`** — CB_LAYOUTRECALL for
+   one FH and one range. The dead-DS path deliberately sends an empty FH
+   (Linux reads that as session-wide, which is right when a device dies);
+   doing that on every `SETATTR(size)` would drop the client's layouts
+   for every unrelated file. The truncate path passes the layout's own FH
+   and `[new_size, ..)`.
+4. **`callback::recall_layouts_for_truncate`** — the fan-out, with a
+   *different* revocation policy from the dead-DS one. There, `Acked`
+   gets a soft post-recall deadline because the client may still have a
+   legitimate LAYOUTCOMMIT. Here the bytes past `new_size` are going away
+   by definition, so a grace period is not politeness — it is exactly the
+   exposure window the recall exists to close. Every layout is revoked
+   server-side as soon as its recall attempt returns, whatever the
+   outcome, and before the next recall is sent.
+5. **`PnfsOperationHandler::attach_callback_manager`** — a `OnceLock`,
+   because the wiring is a cycle: `CallbackManager` borrows the
+   dispatcher's back-channel registry, the dispatcher needs the handler
+   as its `PnfsOperations`, and the handler needs the CallbackManager.
+   `MdsServer::new` closes the cycle after construction.
+
+Persistence: `LayoutRecord.file_ident`, schema **v7**
+(`ALTER TABLE layouts ADD COLUMN file_ident TEXT NOT NULL DEFAULT ''`).
+Without it every layout restored across an MDS restart would be
+unrecallable and F65 would quietly reopen for them.
+
+The recall blocks the SETATTR/OPEN compound for up to one CB round-trip
+per outstanding layout, bounded by `CallbackManager`'s per-call timeout.
+That is deliberate: the alternative is returning success while the
+client's peers can still read bytes we just promised were gone. The
+client *issuing* the truncate is recalled along with everyone else —
+excluding it would rest on the assumption that a client never reads past
+a size it set itself, which is a claim about client behaviour, not about
+this server.
+
+## The residual — NOT closed
+
+Revocation is server-side. It binds the MDS's bookkeeping, not the
+client: one behind a dead back-channel (`NoChannel` — never bound, or
+`cb_program=0`) or one that does not answer (`TimedOut`) still believes
+it holds the layout, and its reads go straight to a DS. The code revokes
+through all of those outcomes, which is correct and is *not* sufficient.
+
+`FlintTruncateLostRecall.cfg` is that world and TLC finds the violation.
+Closing it needs the **DS** to refuse reads past the pending size — a
+DsControl fence issued before the `set_len` fanout, over the same channel
+`ds_truncate_one` already uses — not the MDS to ask more politely.
+
+That is a deliberate non-fix for now: it costs an extra RPC on every size
+change, and the exposed read was issued before the truncate was
+observable, which is defensible under NFS consistency. Revisit if a
+workload turns up that truncates under readers with flaky back-channels.
+
+There is a second, narrower residual: layouts restored from a **pre-v7**
+row carry no `file_ident` and cannot be matched to a file, so a truncate
+does not recall them. `recall_layouts_for_file` logs a WARN naming the
+count rather than treating `""` as a wildcard (which would recall every
+such layout on every truncate of any file). It closes itself as those
+layouts are returned.
 
 ## Scope limits — read before citing this
 
@@ -110,8 +180,8 @@ the mark does. A recall issued after the DSes are cut is decoration.
 
 | cfg | claim | required |
 | --- | --- | --- |
-| `FlintTruncate.cfg` | the gate's own claim holds | PASS |
+| `FlintTruncate.cfg` | shipped world: both theorems | PASS |
 | `FlintTruncateBlindClear.cfg` | `confirmed <= min` is load-bearing | FAIL (found) |
 | `FlintTruncateMarkOverwrite.cfg` | min-keeping is *not* what carries safety | PASS |
-| `FlintTruncateHeldLayout.cfg` | **this defect** | FAIL (found) |
-| `FlintTruncateRecall.cfg` | recall closes it | PASS |
+| `FlintTruncateHeldLayout.cfg` | **F65 regression** — no recall | FAIL (found) |
+| `FlintTruncateLostRecall.cfg` | **open residual** — recall never arrives | FAIL (found) |

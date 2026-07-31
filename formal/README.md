@@ -87,8 +87,8 @@ window between the MDS stub's size changing and N data servers being cut,
 and `truncate_dirty` is the gate that is supposed to make it
 unobservable.
 
-Two theorems, and they do not both hold — **cite them as a pair or not at
-all**:
+Two theorems. Both hold as shipped; one of them did not when the module
+was written, and the run that proves it now must keep failing:
 
 * `Inv_ClearImpliesFlushed` — the gate's own claim: whenever the mark is
   absent, no DS holds content past the MDS size. **HOLDS.** This matters
@@ -100,18 +100,29 @@ all**:
   predicate survives it. The `BlindClear` mutation must rediscover the
   loss, so the predicate is load-bearing rather than defensive.
 * `Inv_NoStaleServe` — no client is ever served content past the MDS
-  size. **FAILS as shipped**, in three steps: acquire a layout while the
-  gate is clear, truncate, read. The gate is a LAYOUTGET-time check
-  (`operations/mod.rs:171` → TRYLATER) and `note_truncate` never touches
-  the layout manager — the only `CB_LAYOUTRECALL` in the tree is the
+  size. This **was F65**: the gate is a LAYOUTGET-time check
+  (`operations/mod.rs:171` → TRYLATER) and `note_truncate` never touched
+  the layout manager — the only `CB_LAYOUTRECALL` in the tree was the
   dead-DS heartbeat fan-out (`server.rs:982`, `:991`) — so a layout
-  acquired *before* the truncate walks straight past it, and the read
-  never reaches the MDS at all. `FlintTruncateHeldLayout.cfg` is a
-  **failing run that records an open hazard**, the same shape as
-  `FlintReplicationRollUnfenced.cfg`; it must keep failing until a recall
-  lands. `FlintTruncateRecall.cfg` names the fix and shows it is
-  sufficient: revoke outstanding layouts when the gate arms — a recall,
-  not a wider gate.
+  acquired *before* the truncate walked straight past it, and the read
+  never reached the MDS at all. TLC found it three steps from `Init`.
+  **Fixed the same session**: `note_truncate` now recalls and revokes the
+  file's layouts between the mark and the fanout.
+  `FlintTruncateHeldLayout.cfg` flips the recall back off and is the
+  regression run — it must keep FINDING the loss, because a recall that
+  silently stops selecting the file's layouts looks like nothing at all.
+
+  **The residual the fix does not close**, recorded as its own failing
+  run rather than assumed away: revocation is *server-side*, so it binds
+  only clients the recall actually reached. One behind a dead
+  back-channel (`NoChannel`, `cb_program=0`) or one that never answers
+  (`TimedOut`) still believes it holds the layout, and its reads go
+  straight to a DS. The code revokes through all those outcomes, which is
+  right and is not sufficient. `FlintTruncateLostRecall.cfg` is that
+  world and TLC finds the violation. Closing it needs the **DS** to
+  refuse reads past the pending size, not the MDS to ask more politely —
+  a deliberate non-fix for now. **Cite the strict run together with this
+  one or with neither.**
 
 One hypothesis was **refuted** and is kept as a run so it cannot be
 quietly re-asserted: `MarkKeepsMin=FALSE` (mark_truncate_dirty
@@ -127,9 +138,8 @@ and its fanout is all-DSes-or-nothing, so the stripe map changes *which*
 DS exposes a byte, never *whether* one does); `set_len` growth adds zeros
 and zeros are not content, which is why a stale fanout re-extending a
 stripe file is a size disagreement and not a stale read; reads are atomic
-with respect to revocation, so the recall green says the **server** stops
-issuing new stale reads and says nothing about a read already on the wire
-to a DS; and whether a conforming Linux client would *issue* the
+with respect to revocation, so even the strict run's green covers only
+reads not yet on the wire to a DS; and whether a conforming Linux client would *issue* the
 offending read is a client-behaviour question the model does not settle —
 it settles that flint does not stop it, which is the only half flint can
 fix.
