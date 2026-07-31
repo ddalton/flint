@@ -103,6 +103,27 @@ pub struct CachedCreateSessionResRecord {
     pub fore_max_response_size_cached: u32,
     pub fore_max_operations: u32,
     pub fore_max_requests: u32,
+    /// Back-channel attrs as echoed in `csr_back_chan_attrs` (C9). These
+    /// only carry meaning when `flags` has `CREATE_SESSION4_FLAG_CONN_BACK_CHAN`
+    /// set; a client ignores the field otherwise. They must be cached
+    /// because a replay has to reproduce the original reply exactly — a
+    /// replay that echoed the flag but not the attrs would hand the client
+    /// a back channel it then rejects with EINVAL.
+    ///
+    /// `serde(default)` (not a schema bump): this record is stored as JSON
+    /// in the `clients.cs_cached_res` TEXT column, so pre-C9 rows simply
+    /// deserialize these as 0 — which is consistent, because those rows
+    /// also have `flags == 0`.
+    #[serde(default)]
+    pub back_max_request_size: u32,
+    #[serde(default)]
+    pub back_max_response_size: u32,
+    #[serde(default)]
+    pub back_max_response_size_cached: u32,
+    #[serde(default)]
+    pub back_max_operations: u32,
+    #[serde(default)]
+    pub back_max_requests: u32,
 }
 
 /// One client established via EXCHANGE_ID. Restored on MDS restart so a
@@ -511,6 +532,11 @@ mod tests {
             fore_max_response_size_cached: 1024,
             fore_max_operations: 16,
             fore_max_requests: 8,
+            back_max_request_size: 4096,
+            back_max_response_size: 4096,
+            back_max_response_size_cached: 0,
+            back_max_operations: 2,
+            back_max_requests: 1,
         };
         let client = ClientRecord {
             client_id: 42,

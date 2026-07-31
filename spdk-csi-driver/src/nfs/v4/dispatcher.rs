@@ -659,7 +659,6 @@ impl CompoundDispatcher {
                     cb_program,
                     cb_sec: cb_sec.clone(),
                 };
-                let csa_flags = flags;
                 let res = self.session_handler.handle_create_session(op, context);
                 if res.status == Nfs4Status::Ok {
                     // RFC 8881 §18.36.3: if the client set
@@ -669,27 +668,37 @@ impl CompoundDispatcher {
                     // BIND_CONN_TO_SESSION(BACK) on the current
                     // connection. Linux's NFSv4.1 client uses this
                     // path on every fresh mount and never sends a
-                    // separate BIND_CONN_TO_SESSION, so we register
-                    // the writer here. We do *not* echo
-                    // CONN_BACK_CHAN in csr_flags or fill in
-                    // csr_back_chan_attrs — proper back-channel
-                    // negotiation (advertising max-* values, etc.)
-                    // is its own follow-up; clients reject malformed
-                    // back-channel offers. Outbound CB CALLs go out
-                    // on the registered writer regardless; if the
-                    // client doesn't have a CB program listening on
-                    // a non-advertised channel, it returns
-                    // PROG_UNAVAIL, which `CallbackManager` surfaces
-                    // as `CallbackError::Reply`.
-                    const CSF_CONN_BACK_CHAN: u32 = 0x0000_0002;
-                    if csa_flags & CSF_CONN_BACK_CHAN != 0 {
+                    // separate BIND_CONN_TO_SESSION, so this is the
+                    // only place the binding is ever established.
+                    //
+                    // C9: register the writer iff the reply ECHOED the
+                    // flag (`back_chan_bound`), not merely because the
+                    // client asked. Registering without echoing was the
+                    // whole defect: the server queued callbacks on a
+                    // connection the client had never been told was a
+                    // back channel, so every CB_LAYOUTRECALL came back
+                    // BADSESSION at CB_SEQUENCE. Reading the decision
+                    // off `res` keeps the promise and the plumbing from
+                    // ever disagreeing again.
+                    if res.back_chan_bound {
                         if let Some(bcw) = context.back_channel.as_ref() {
                             Self::bind_back_channel(&self.back_channels, res.sessionid, bcw);
                             info!(
-                                "CREATE_SESSION: registered back-channel writer for session {:?} (CONN_BACK_CHAN requested)",
+                                "CREATE_SESSION: back channel ACCEPTED for session {:?} — \
+                                 csr_flags echoes CONN_BACK_CHAN, callbacks will use this connection",
                                 res.sessionid,
                             );
                         }
+                    } else if flags & 0x0000_0002 != 0 {
+                        // Asked for, not granted: the only way here is a
+                        // dispatch with no writer (unit test / in-process).
+                        // Worth a line, because a client in this state will
+                        // never receive a layout recall.
+                        warn!(
+                            "CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel \
+                             writer is available for session {:?} — recalls cannot be delivered",
+                            res.sessionid,
+                        );
                     }
                     // CREATE_SESSION binds its connection to the new
                     // session (RFC 8881 §18.36.3).

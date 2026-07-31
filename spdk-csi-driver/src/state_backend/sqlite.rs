@@ -1567,6 +1567,11 @@ mod tests {
                 fore_max_response_size_cached: 1024,
                 fore_max_operations: 16,
                 fore_max_requests: 8,
+                back_max_request_size: 4096,
+                back_max_response_size: 4096,
+                back_max_response_size_cached: 0,
+                back_max_operations: 2,
+                back_max_requests: 1,
             };
             let client = ClientRecord {
                 client_id: 42,

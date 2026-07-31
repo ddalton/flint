@@ -32,6 +32,13 @@ pub struct CachedCreateSessionRes {
     pub fore_max_response_size_cached: u32,
     pub fore_max_operations: u32,
     pub fore_max_requests: u32,
+    /// `csr_back_chan_attrs` as sent (C9). Meaningful only when `flags`
+    /// carries `CREATE_SESSION4_FLAG_CONN_BACK_CHAN`.
+    pub back_max_request_size: u32,
+    pub back_max_response_size: u32,
+    pub back_max_response_size_cached: u32,
+    pub back_max_operations: u32,
+    pub back_max_requests: u32,
 }
 
 /// EXCHANGE_ID UPD_CONFIRMED_REC_A flag (RFC 8881 §18.35.3).
@@ -288,6 +295,11 @@ impl Client {
                     fore_max_response_size_cached: c.fore_max_response_size_cached,
                     fore_max_operations: c.fore_max_operations,
                     fore_max_requests: c.fore_max_requests,
+                    back_max_request_size: c.back_max_request_size,
+                    back_max_response_size: c.back_max_response_size,
+                    back_max_response_size_cached: c.back_max_response_size_cached,
+                    back_max_operations: c.back_max_operations,
+                    back_max_requests: c.back_max_requests,
                 }
             }),
             initial_cs_sequence: self.initial_cs_sequence,
@@ -320,6 +332,11 @@ impl Client {
                 fore_max_response_size_cached: c.fore_max_response_size_cached,
                 fore_max_operations: c.fore_max_operations,
                 fore_max_requests: c.fore_max_requests,
+                back_max_request_size: c.back_max_request_size,
+                back_max_response_size: c.back_max_response_size,
+                back_max_response_size_cached: c.back_max_response_size_cached,
+                back_max_operations: c.back_max_operations,
+                back_max_requests: c.back_max_requests,
             }),
             initial_cs_sequence: r.initial_cs_sequence,
             reclaim_complete: r.reclaim_complete,

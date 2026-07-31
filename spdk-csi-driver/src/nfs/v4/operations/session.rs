@@ -21,7 +21,10 @@ use tracing::{debug, info, warn};
 // Defined for protocol completeness; not all flags are implemented yet
 #[allow(dead_code)]
 const CREATE_SESSION4_FLAG_PERSIST: u32 = 0x0000_0001;
-#[allow(dead_code)]
+/// Set in `csa_flags` by a client offering its connection as the session's
+/// back channel, and echoed in `csr_flags` by a server that accepts it
+/// (RFC 8881 §18.36.3). Both directions matter — see C9 in
+/// `handle_create_session`.
 const CREATE_SESSION4_FLAG_CONN_BACK_CHAN: u32 = 0x0000_0002;
 #[allow(dead_code)]
 const CREATE_SESSION4_FLAG_CONN_RDMA: u32 = 0x0000_0004;
@@ -102,6 +105,12 @@ pub struct CreateSessionRes {
     pub flags: u32,
     pub fore_chan_attrs: ChannelAttrs,
     pub back_chan_attrs: ChannelAttrs,
+    /// C9: `true` iff this reply echoed `CREATE_SESSION4_FLAG_CONN_BACK_CHAN`,
+    /// i.e. we promised the client that callbacks will arrive on this
+    /// connection. The dispatcher registers the back-channel writer off
+    /// this field so the promise and the registration are one decision,
+    /// not two predicates that can drift.
+    pub back_chan_bound: bool,
 }
 
 /// Build a CREATE_SESSION error reply with zeroed channel attributes. Used
@@ -115,6 +124,8 @@ fn create_session_err(status: Nfs4Status) -> CreateSessionRes {
         flags: 0,
         fore_chan_attrs: ChannelAttrs::default(),
         back_chan_attrs: ChannelAttrs::default(),
+        // A failed CREATE_SESSION binds nothing.
+        back_chan_bound: false,
     }
 }
 
@@ -415,7 +426,26 @@ impl SessionOperationHandler {
                         max_requests: cached.fore_max_requests,
                         rdma_ird: Vec::new(),
                     },
-                    back_chan_attrs: ChannelAttrs::default(),
+                    // C9: a replay must reproduce the ORIGINAL reply, so
+                    // the back-channel attrs come from the cache too.
+                    // Returning `default()` here while `cached.flags`
+                    // carries CONN_BACK_CHAN would hand the client a
+                    // 1 MB back channel it never offered — EINVAL, and
+                    // the mount fails on the retry path only. That is
+                    // precisely the kind of bug that hides for months.
+                    back_chan_attrs: ChannelAttrs {
+                        header_pad_size: 0,
+                        max_request_size: cached.back_max_request_size,
+                        max_response_size: cached.back_max_response_size,
+                        max_response_size_cached: cached.back_max_response_size_cached,
+                        max_operations: cached.back_max_operations,
+                        max_requests: cached.back_max_requests,
+                        rdma_ird: Vec::new(),
+                    },
+                    // The connection this replay arrived on may differ
+                    // from the original's; if the cached reply promised
+                    // a back channel, bind this one too.
+                    back_chan_bound: cached.flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN != 0,
                 };
             }
             CreateSessionSeq::Execute => { /* normal forward case */ }
@@ -511,19 +541,68 @@ impl SessionOperationHandler {
         info!("CREATE_SESSION: Session {:?} created for client {} with {}KB buffers",
               session.session_id, op.clientid, negotiated_max_request / 1024);
 
-        // Set server flags based on actual capabilities (RFC 5661 §18.36).
-        // We do not implement persistent reply cache, and we do not yet
-        // negotiate back-channel attrs, so we don't echo CONN_BACK_CHAN —
-        // even when we *do* register the connection's writer for callbacks
-        // (see the dispatcher's CREATE_SESSION arm). Linux v4.1 clients
-        // are happy to mount without CONN_BACK_CHAN echoed; they may
-        // refuse our outbound CB CALLs with PROG_UNAVAIL, which the
-        // CallbackManager surfaces cleanly.
-        let server_flags = 0u32;
+        // C9: accept the back channel, and SAY SO.
+        //
+        // RFC 8881 §18.36.3: when the client sets CONN_BACK_CHAN in
+        // csa_flags and the server agrees to use the connection as the
+        // session's back channel, the server MUST set CONN_BACK_CHAN in
+        // csr_flags. This is not decorative. A Linux client records the
+        // connection as a back channel only if the flag comes back
+        // (`nfs4_session_set_rwsize` / `nfs41_set_server_capabilities`
+        // path); without it, a callback arriving on that connection is
+        // answered with BADSESSION at CB_SEQUENCE — which is exactly
+        // what the F65 live drill on runas caught, one layer below the
+        // AUTH_NONE denial that C8 fixed. Linux sends *zero*
+        // BIND_CONN_TO_SESSION on a fresh v4.1 mount, so this flag is
+        // the only signal it ever gets.
+        //
+        // We echo it only when it is TRUE: the client asked for it AND
+        // this COMPOUND arrived on a connection we can actually write
+        // callbacks back down (`ctx.back_channel`). A unit-test or
+        // in-process dispatch has no writer, so it gets no flag. The
+        // dispatcher registers the writer off this same decision
+        // (`back_chan_bound`) rather than recomputing the predicate, so
+        // "we said yes" and "we can send" cannot drift apart.
+        let back_chan_bound = op.flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN != 0
+            && ctx.back_channel.is_some();
 
-        // We don't advertise back-channel attrs; clients ignore this
-        // field when csr_flags doesn't have CONN_BACK_CHAN set.
-        let back_chan_attrs = ChannelAttrs::default();
+        let server_flags = if back_chan_bound {
+            CREATE_SESSION4_FLAG_CONN_BACK_CHAN
+        } else {
+            0u32
+        };
+
+        // Echo the client's offered back-channel attrs VERBATIM.
+        //
+        // This is not laziness — it is the only choice that is
+        // unconditionally safe against Linux's
+        // `nfs4_verify_back_channel_attrs`, which fails the mount with
+        // EINVAL if the returned max_rqst_sz is *greater*, max_resp_sz
+        // *lesser*, or max_resp_sz_cached / max_ops / max_reqs
+        // *greater* than what it sent. Equality satisfies all five at
+        // once. Note what this means for the old code: had it set the
+        // flag while still returning `ChannelAttrs::default()` (1 MB
+        // request size vs Linux's PAGE_SIZE offer), the mount itself
+        // would have failed. The flag and the attrs had to change
+        // together.
+        let back_chan_attrs = if back_chan_bound {
+            op.back_chan_attrs.clone()
+        } else {
+            ChannelAttrs::default()
+        };
+
+        // A CB_LAYOUTRECALL COMPOUND is CB_SEQUENCE + CB_LAYOUTRECALL —
+        // two ops. Linux offers ca_maxoperations=2 exactly, so we sit on
+        // the limit by design. Anything less and no recall we send can
+        // ever be legal; say so at bind time rather than discovering it
+        // as an opaque callback failure under a truncate.
+        if back_chan_bound && back_chan_attrs.max_operations < 2 {
+            warn!(
+                "CREATE_SESSION: back channel accepted but ca_maxoperations={} < 2 — \
+                 CB_SEQUENCE+CB_LAYOUTRECALL will not fit; recalls to this client will fail",
+                back_chan_attrs.max_operations,
+            );
+        }
 
         // Record the result in the per-client CREATE_SESSION cache so a
         // future replay (same csa_sequence) returns byte-identical fields
@@ -541,11 +620,17 @@ impl SessionOperationHandler {
                 fore_max_response_size_cached: 64 * 1024,
                 fore_max_operations: session.fore_chan_maxops,
                 fore_max_requests: 128,
+                back_max_request_size: back_chan_attrs.max_request_size,
+                back_max_response_size: back_chan_attrs.max_response_size,
+                back_max_response_size_cached: back_chan_attrs.max_response_size_cached,
+                back_max_operations: back_chan_attrs.max_operations,
+                back_max_requests: back_chan_attrs.max_requests,
             },
         );
 
         CreateSessionRes {
             status: Nfs4Status::Ok,
+            back_chan_bound,
             sessionid: session.session_id,
             sequence: session.sequence,
             flags: server_flags,
@@ -758,6 +843,387 @@ impl SessionOperationHandler {
 
 #[cfg(test)]
 mod tests {
+    // ---- C9: back-channel acceptance must be ANNOUNCED ----------------
+    //
+    // These tests exist because the pre-C9 server registered a
+    // back-channel writer internally and never set CONN_BACK_CHAN in
+    // csr_flags. Everything server-side looked healthy — the session was
+    // in the registry, the recall was built, the RPC went out — and every
+    // CB_LAYOUTRECALL died at the client's CB_SEQUENCE with BADSESSION,
+    // because the client had never been told that connection was a back
+    // channel. Linux sends no BIND_CONN_TO_SESSION on a v4.1 mount, so
+    // the flag is the entire handshake.
+    //
+    // Following the C8 lesson: assert what RFC 8881 §18.36.3 and the
+    // Linux client REQUIRE, never what flint currently emits. A test that
+    // restates the implementation cannot fail when the implementation is
+    // the bug — the old `assert_eq!(flavor, AuthFlavor::Null)` proved it.
+
+    /// A verbatim transcription of the Linux client's
+    /// `nfs4_verify_back_channel_attrs` (fs/nfs/nfs4proc.c). If this
+    /// returns Err, a real Linux mount fails with EINVAL.
+    ///
+    /// Note the asymmetry — max_resp_sz must not come back SMALLER,
+    /// everything else must not come back LARGER. Guessing at "reasonable"
+    /// server values trips one side or the other; echoing the offer is
+    /// the only response that satisfies all five without knowing which
+    /// direction each check runs.
+    fn linux_verify_back_channel(
+        sent: &super::ChannelAttrs,
+        rcvd: &super::ChannelAttrs,
+        flags: u32,
+    ) -> Result<(), String> {
+        if flags & super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN == 0 {
+            return Ok(()); // client skips the checks entirely
+        }
+        if rcvd.max_request_size > sent.max_request_size {
+            return Err(format!(
+                "max_rqst_sz {} > offered {}",
+                rcvd.max_request_size, sent.max_request_size
+            ));
+        }
+        if rcvd.max_response_size < sent.max_response_size {
+            return Err(format!(
+                "max_resp_sz {} < offered {}",
+                rcvd.max_response_size, sent.max_response_size
+            ));
+        }
+        if rcvd.max_response_size_cached > sent.max_response_size_cached {
+            return Err(format!(
+                "max_resp_sz_cached {} > offered {}",
+                rcvd.max_response_size_cached, sent.max_response_size_cached
+            ));
+        }
+        if rcvd.max_operations > sent.max_operations {
+            return Err(format!(
+                "max_ops {} > offered {}",
+                rcvd.max_operations, sent.max_operations
+            ));
+        }
+        if rcvd.max_requests > sent.max_requests {
+            return Err(format!(
+                "max_reqs {} > offered {}",
+                rcvd.max_requests, sent.max_requests
+            ));
+        }
+        Ok(())
+    }
+
+    /// The back-channel attrs a Linux 6.1 client actually offers:
+    /// PAGE_SIZE request/response, zero cached, 2 ops (exactly
+    /// CB_SEQUENCE + one callback op), 1 slot.
+    fn linux_bc_offer() -> super::ChannelAttrs {
+        super::ChannelAttrs {
+            header_pad_size: 0,
+            max_request_size: 4096,
+            max_response_size: 4096,
+            max_response_size_cached: 0,
+            max_operations: 2,
+            max_requests: 1,
+            rdma_ird: Vec::new(),
+        }
+    }
+
+    /// Bring up a loopback TCP pair and hand back a real
+    /// `BackChannelWriter` for the server side, plus the halves that must
+    /// stay alive for the connection to remain open.
+    async fn loopback_writer() -> (
+        std::sync::Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+        tokio::net::TcpStream,
+        tokio::net::tcp::OwnedReadHalf,
+    ) {
+        use tokio::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (connect, accept) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let (server_stream, _) = accept.unwrap();
+        let client_stream = connect.unwrap();
+        let (server_read, server_write) = server_stream.into_split();
+        let writer = crate::nfs::v4::back_channel::BackChannelWriter::new(
+            tokio::io::BufWriter::with_capacity(4096, server_write),
+        );
+        (writer, client_stream, server_read)
+    }
+
+    /// Drive EXCHANGE_ID + CREATE_SESSION with the given csa_flags and
+    /// back-channel offer, optionally on a connection that has a real
+    /// back-channel writer.
+    async fn create_session_with(
+        csa_flags: u32,
+        bc_offer: super::ChannelAttrs,
+        with_writer: bool,
+    ) -> (super::CreateSessionRes, super::ChannelAttrs) {
+        use super::*;
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let handler = SessionOperationHandler::new(state_mgr);
+
+        let ex = handler.handle_exchange_id(
+            ExchangeIdOp {
+                client_owner: b"c9-client".to_vec(),
+                verifier: 1,
+                flags: 0,
+                state_protect: 0,
+                client_impl_id: None,
+            },
+            &CompoundContext::new(1),
+        );
+
+        let mut ctx = CompoundContext::new(1);
+        // Keep the connection halves alive for the duration of the call.
+        let _keepalive = if with_writer {
+            let (w, client_stream, server_read) = loopback_writer().await;
+            ctx.back_channel = Some(w);
+            Some((client_stream, server_read))
+        } else {
+            None
+        };
+
+        let res = handler.handle_create_session(
+            CreateSessionOp {
+                clientid: ex.clientid,
+                sequence: ex.sequenceid,
+                flags: csa_flags,
+                fore_chan_attrs: ChannelAttrs::default(),
+                back_chan_attrs: bc_offer.clone(),
+                cb_program: 0x4000_0000,
+                cb_sec: Vec::new(),
+            },
+            &ctx,
+        );
+        (res, bc_offer)
+    }
+
+    /// THE C9 REGRESSION. A client that offers its connection as a back
+    /// channel, to a server that can write callbacks down it, must be
+    /// TOLD the offer was accepted. Without this bit the client answers
+    /// every CB_LAYOUTRECALL with BADSESSION and a truncate can never
+    /// fence a stale layout holder.
+    #[tokio::test]
+    async fn accepted_back_channel_is_echoed_in_csr_flags() {
+        let (res, _) = create_session_with(
+            super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN,
+            linux_bc_offer(),
+            true,
+        )
+        .await;
+        assert_eq!(res.status, super::Nfs4Status::Ok);
+        assert_ne!(
+            res.flags & super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN,
+            0,
+            "server accepted the back channel but did not echo CONN_BACK_CHAN — \
+             the client will reject callbacks with BADSESSION (C9)",
+        );
+        assert!(
+            res.back_chan_bound,
+            "csr_flags promised a back channel, so the writer must be registered",
+        );
+    }
+
+    /// The echoed attrs must survive the client's own validation. This is
+    /// the test that catches the tempting half-fix: set the flag, leave
+    /// `csr_back_chan_attrs` at `ChannelAttrs::default()` (1 MB). That
+    /// combination doesn't just break recalls — `max_rqst_sz 1048576 >
+    /// offered 4096` fails the check and the MOUNT itself returns EINVAL.
+    #[tokio::test]
+    async fn echoed_back_chan_attrs_pass_the_linux_client_check() {
+        let (res, offered) = create_session_with(
+            super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN,
+            linux_bc_offer(),
+            true,
+        )
+        .await;
+        linux_verify_back_channel(&offered, &res.back_chan_attrs, res.flags)
+            .expect("Linux client would reject csr_back_chan_attrs");
+
+        // And prove the helper has teeth: the pre-C9 default would fail.
+        assert!(
+            linux_verify_back_channel(
+                &offered,
+                &super::ChannelAttrs::default(),
+                super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN,
+            )
+            .is_err(),
+            "the verifier must reject a 1 MB back channel against a 4 KiB offer, \
+             otherwise it proves nothing",
+        );
+    }
+
+    /// A back channel offered over a range of client attrs — including
+    /// odd but legal ones — is always echoed compatibly. Guards against a
+    /// future "clamp to server maximums" change quietly reintroducing the
+    /// EINVAL, which would only ever show up as a mount failure on real
+    /// hardware.
+    #[tokio::test]
+    async fn any_offer_is_echoed_compatibly() {
+        for offer in [
+            linux_bc_offer(),
+            super::ChannelAttrs {
+                header_pad_size: 0,
+                max_request_size: 256,
+                max_response_size: 256,
+                max_response_size_cached: 0,
+                max_operations: 2,
+                max_requests: 1,
+                rdma_ird: Vec::new(),
+            },
+            super::ChannelAttrs {
+                header_pad_size: 0,
+                max_request_size: 1 << 20,
+                max_response_size: 1 << 20,
+                max_response_size_cached: 4096,
+                max_operations: 16,
+                max_requests: 4,
+                rdma_ird: Vec::new(),
+            },
+        ] {
+            let (res, offered) = create_session_with(
+                super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN,
+                offer,
+                true,
+            )
+            .await;
+            assert_eq!(res.status, super::Nfs4Status::Ok);
+            linux_verify_back_channel(&offered, &res.back_chan_attrs, res.flags)
+                .unwrap_or_else(|e| panic!("offer {:?} echoed incompatibly: {e}", offered));
+        }
+    }
+
+    /// Never promise what we cannot deliver. With no writer for this
+    /// connection there is nothing to send callbacks down, so the flag
+    /// must stay clear even though the client asked — a client that
+    /// believes it has a back channel and never gets a recall is strictly
+    /// worse off than one that knows it has none.
+    #[tokio::test]
+    async fn no_writer_means_no_promise() {
+        let (res, _) = create_session_with(
+            super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN,
+            linux_bc_offer(),
+            false,
+        )
+        .await;
+        assert_eq!(res.status, super::Nfs4Status::Ok);
+        assert_eq!(
+            res.flags & super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN,
+            0,
+            "echoed CONN_BACK_CHAN with no writer to deliver callbacks on",
+        );
+        assert!(!res.back_chan_bound);
+    }
+
+    /// A client that never asked must never be handed a back channel;
+    /// RFC 8881 §18.36.3 makes csr_flags a response to csa_flags, not an
+    /// independent server assertion.
+    #[tokio::test]
+    async fn unrequested_back_channel_is_not_offered() {
+        let (res, _) = create_session_with(0, linux_bc_offer(), true).await;
+        assert_eq!(res.status, super::Nfs4Status::Ok);
+        assert_eq!(res.flags & super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN, 0);
+        assert!(!res.back_chan_bound);
+    }
+
+    /// `back_chan_bound` is the single source of truth the dispatcher
+    /// binds on. If it could ever be true while the flag is clear (or
+    /// vice versa) the server would be back to registering a channel it
+    /// never announced — the exact C9 shape.
+    #[tokio::test]
+    async fn bound_flag_and_csr_flag_cannot_disagree() {
+        for (csa, writer) in [
+            (super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN, true),
+            (super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN, false),
+            (0, true),
+            (0, false),
+        ] {
+            let (res, _) = create_session_with(csa, linux_bc_offer(), writer).await;
+            assert_eq!(
+                res.back_chan_bound,
+                res.flags & super::CREATE_SESSION4_FLAG_CONN_BACK_CHAN != 0,
+                "back_chan_bound={} disagrees with csr_flags=0x{:x} (csa=0x{:x}, writer={})",
+                res.back_chan_bound,
+                res.flags,
+                csa,
+                writer,
+            );
+        }
+    }
+
+    /// A CREATE_SESSION replay must reproduce the original reply — RFC
+    /// 8881 §15.1.10.4. Both halves matter: replaying the flag without
+    /// the cached attrs would give the client a back channel it never
+    /// offered, and only on the retry path, where nobody looks.
+    #[tokio::test]
+    async fn replay_reproduces_flags_and_back_chan_attrs() {
+        use super::*;
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let handler = SessionOperationHandler::new(state_mgr);
+        let ex = handler.handle_exchange_id(
+            ExchangeIdOp {
+                client_owner: b"c9-replay".to_vec(),
+                verifier: 1,
+                flags: 0,
+                state_protect: 0,
+                client_impl_id: None,
+            },
+            &CompoundContext::new(1),
+        );
+
+        let (w, _client_stream, _server_read) = loopback_writer().await;
+        let mut ctx = CompoundContext::new(1);
+        ctx.back_channel = Some(w);
+
+        let offer = linux_bc_offer();
+        let mk = || CreateSessionOp {
+            clientid: ex.clientid,
+            sequence: ex.sequenceid,
+            flags: CREATE_SESSION4_FLAG_CONN_BACK_CHAN,
+            fore_chan_attrs: ChannelAttrs::default(),
+            back_chan_attrs: offer.clone(),
+            cb_program: 0x4000_0000,
+            cb_sec: Vec::new(),
+        };
+
+        let first = handler.handle_create_session(mk(), &ctx);
+        assert_eq!(first.status, Nfs4Status::Ok);
+        assert_ne!(first.flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN, 0);
+
+        // Same csa_sequence → replay.
+        let replay = handler.handle_create_session(mk(), &ctx);
+        assert_eq!(replay.status, Nfs4Status::Ok);
+        assert_eq!(replay.sessionid, first.sessionid, "replay minted a new session");
+        assert_eq!(replay.flags, first.flags, "replay lost csr_flags");
+        assert_eq!(
+            replay.back_chan_attrs.max_request_size,
+            first.back_chan_attrs.max_request_size,
+        );
+        assert_eq!(
+            replay.back_chan_attrs.max_response_size,
+            first.back_chan_attrs.max_response_size,
+        );
+        assert_eq!(
+            replay.back_chan_attrs.max_operations,
+            first.back_chan_attrs.max_operations,
+        );
+        assert_eq!(
+            replay.back_chan_attrs.max_requests,
+            first.back_chan_attrs.max_requests,
+        );
+        assert!(replay.back_chan_bound, "replay dropped the back-channel binding");
+        linux_verify_back_channel(&offer, &replay.back_chan_attrs, replay.flags)
+            .expect("Linux client would reject the REPLAYED csr_back_chan_attrs");
+    }
+
+    /// A CB_LAYOUTRECALL COMPOUND is CB_SEQUENCE + CB_LAYOUTRECALL. If a
+    /// client's ca_maxoperations were below 2 we could never send one;
+    /// Linux offers exactly 2, so this documents that we sit on the limit
+    /// deliberately rather than by luck.
+    #[test]
+    fn linux_back_channel_offer_just_fits_a_layout_recall() {
+        const OPS_IN_A_RECALL: u32 = 2;
+        assert!(
+            linux_bc_offer().max_operations >= OPS_IN_A_RECALL,
+            "a recall does not fit in the back channel Linux offers",
+        );
+    }
+
     /// C8 selection. The server MUST pick a credential the client
     /// offered (RFC 8881 §18.36.3); AUTH_SYS is preferred because it is
     /// what Linux advertises, and RPCSEC_GSS must never be selected —
