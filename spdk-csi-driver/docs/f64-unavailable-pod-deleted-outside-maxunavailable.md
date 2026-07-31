@@ -94,12 +94,48 @@ already decided on — the roller stands down entirely when `on_delete` is false
 
 ## What does NOT close it
 
-* **A readinessProbe.** It changes which pods are NotReady, not what the
-  controller does with them. A *volume-scoped* probe makes it dramatically worse
-  — every peer reddens when one node rolls, and the whole fleet is deleted in one
-  sync. This is why the shipped predicate must be self-scoped and latching; see
-  `Inv_ProbeNeverReddensLive` in the kube-DS tranche, which fails the gate for any
-  cross-node or non-latching predicate.
+* **A readinessProbe. And self-scoping is NOT sufficient — read this before
+  building one.** A probe changes which pods are NotReady, not what the
+  controller does with them, so **every second of red window is a second in
+  which an upgrade is a multi-tgt kill.** Today the window is a few seconds:
+  the pod is Ready as soon as its containers run.
+
+  A *volume-scoped* probe is the obvious disaster — one node rolling reddens
+  every peer and the whole fleet dies in one sync. `Inv_ProbeNeverReddensLive`
+  (kube-DS tranche) fails the gate for any cross-node or non-latching
+  predicate, so that one is now mechanically blocked.
+
+  **But a self-scoped, monotone, latching probe is ALSO unsafe, for a reason
+  that has nothing to do with the predicate.** A per-process latch is cleared
+  by pod recreation — and pod recreation happens fleet-wide from causes that
+  have nothing to do with any roll: a spot-reclaim wave, a Karpenter/AMI drift
+  roll, a k8s version upgrade, an AZ event, a node reboot,
+  `kubectl delete pod -l app=flint-csi-node`. Those pods come back at the
+  *current* revision; a template bump **later** makes every one of them
+  old-revision. Any still inside their recovery window are old-revision AND
+  unavailable — appended unclipped, and every spdk-tgt dies at once.
+
+  The window is bounded only by whatever deadline the probe carries. At a
+  30-minute deadline that is **a standing 30-minute window, after every
+  fleet-wide node event, in which `helm upgrade` is a fleet-wide spdk-tgt
+  kill** — against ~seconds today. A readiness barrier built this way makes
+  THIS finding dramatically worse on exactly the axis it was meant to improve.
+
+  The structural reason: N independent node-side probes feeding a list the
+  controller never clips is unbounded by construction. Any workable version has
+  to be able to COUNT — e.g. a pod `readinessGate` condition written by the
+  leased controller, which can serialise how many pods it reddens at once and
+  fail open when it is down. That is unbuilt, and it is not a small change.
+
+* **Note on the 2026-07-30 fatal-exit fix (`52c138a`).** Making a dead node-agent
+  component fatal is right — the alternative was an unbounded silent zombie the
+  controller could not reach — but it does convert that zombie into a NotReady
+  window, since with no readinessProbe pod-Ready is just "all containers
+  running". A shared cause that kills a component fleet-wide therefore produces
+  a correlated NotReady window here too. It is short (container restart, image
+  cached; the long agent boot happens inside the already-running process), so
+  it is a much smaller amplifier than a probe would be — but it is not zero,
+  and it is the same mechanism.
 * **`minReadySeconds`.** It makes it worse. Measured: with `minReadySeconds: 30`,
   four pods that were `Ready=True` but had merely flipped Ready recently
   (`ready=4 available=0`) were **all four deleted**. It enlarges the unavailable
