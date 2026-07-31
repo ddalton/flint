@@ -1,0 +1,41 @@
+# The driver's own test suite. Added 2026-07-30 after discovering that CI ran
+# NO Rust tests at all: dashboard-ci.yml is npm-only and dashboard-api-spec.yml
+# runs one binary and diffs its output. The ~991-test lib suite — including
+# every regression pinned from a live finding (F36c, F43, F48, F54, F61, F62,
+# F63) — was a developer belt that nothing enforced on push.
+#
+# That also made any future lint theatre: a chart assertion or an identity lint
+# added to a CI which never runs them buys nothing. This job is the
+# precondition for those being worth writing.
+#
+# `--lib` deliberately, not bare `cargo test`: the pnfs doctests carry a known
+# pre-existing failure, so a bare run is red for a reason unrelated to the
+# change under test. Fixing those is its own task; gating on a suite that is
+# already red would train everyone to ignore this job.
+name: rust-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'spdk-csi-driver/**'
+      - '.github/workflows/rust-ci.yml'
+  pull_request:
+    paths:
+      - 'spdk-csi-driver/**'
+      - '.github/workflows/rust-ci.yml'
+
+jobs:
+  lib-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install protoc (tonic-build)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spdk-csi-driver
+      - name: cargo test --lib
+        working-directory: spdk-csi-driver
+        run: cargo test --lib --no-fail-fast
