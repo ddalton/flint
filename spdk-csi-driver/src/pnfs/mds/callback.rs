@@ -33,7 +33,7 @@
 
 use crate::nfs::v4::back_channel::{BackChannelWriter, CallbackError};
 use crate::nfs::v4::cb_compound::{CbCompoundCall, CbCompoundReply, CbOp, LayoutRecall};
-use crate::nfs::v4::protocol::{SessionId, StateId};
+use crate::nfs::v4::protocol::{Nfs4Status, SessionId, StateId};
 use crate::nfs::v4::state::StateManager;
 use crate::pnfs::mds::layout::LayoutStateId;
 use dashmap::DashMap;
@@ -57,6 +57,24 @@ pub struct CallbackManager {
     back_channels: Arc<DashMap<SessionId, Arc<BackChannelWriter>>>,
     state_mgr: Arc<StateManager>,
     timeout: Duration,
+    /// Per-session back-channel slot state: the sequenceid last sent on
+    /// slot 0.
+    ///
+    /// RFC 8881 §2.10.6.1 requires each reuse of a slot to carry
+    /// `previous + 1`, and requires the replier to treat a repeat as a
+    /// retry. This was hardcoded to 1, so the SECOND CB_COMPOUND a
+    /// session ever received — and every one after it — looked like a
+    /// replay of the first; with `cachethis: false` a conforming client
+    /// answers NFS4ERR_RETRY_UNCACHED_REP and aborts the compound AT
+    /// CB_SEQUENCE, so CB_LAYOUTRECALL never runs (audit C2).
+    ///
+    /// The mutex is held ACROSS the reply await, not just the send. The
+    /// old comment claimed the writer's mutex serialised recalls; it
+    /// does not — `send_record` releases before awaiting, so two
+    /// callers could have two CB_COMPOUNDs outstanding on slot 0 at
+    /// once. One slot per session is plenty for recalls, and holding it
+    /// across the round-trip is what makes the sequence well-defined.
+    slots: Arc<DashMap<SessionId, Arc<tokio::sync::Mutex<u32>>>>,
 }
 
 impl CallbackManager {
@@ -73,7 +91,24 @@ impl CallbackManager {
             back_channels,
             state_mgr,
             timeout: DEFAULT_CB_TIMEOUT,
+            slots: Arc::new(DashMap::new()),
         }
+    }
+
+    /// The slot-0 sequence lock for a session, created on first use.
+    fn slot(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<u32>> {
+        Arc::clone(
+            self.slots
+                .entry(*session_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(0)))
+                .value(),
+        )
+    }
+
+    /// Drop a session's slot state — its sequence restarts from 1 for a
+    /// fresh session, which is what a new session id means.
+    pub fn forget_session(&self, session_id: &SessionId) {
+        self.slots.remove(session_id);
     }
 
     /// Override the per-call timeout (tests).
@@ -183,6 +218,14 @@ impl CallbackManager {
             },
         };
 
+        // Hold slot 0 for the whole round-trip; `seq` is the value we are
+        // about to send and becomes the session's new high-water mark only
+        // if the call actually goes out.
+        let slot = self.slot(session_id);
+        let mut seq_guard = slot.lock().await;
+        let seq = seq_guard.wrapping_add(1);
+        let seq = if seq == 0 { 1 } else { seq };
+
         let call = CbCompoundCall {
             tag: String::new(),
             minorversion: 1,
@@ -190,11 +233,8 @@ impl CallbackManager {
             ops: vec![
                 CbOp::Sequence {
                     sessionid: *session_id,
-                    // Slot 0, seqid 1 — back-channel slot tracking
-                    // is its own follow-up; for now we serialize
-                    // recalls per-session through the writer's
-                    // mutex and use a single slot.
-                    sequenceid: 1,
+                    // One slot, strictly increasing. RFC 8881 §2.10.6.1.
+                    sequenceid: seq,
                     slotid: 0,
                     highest_slotid: 0,
                     cachethis: false,
@@ -222,9 +262,20 @@ impl CallbackManager {
             "📢 CB_LAYOUTRECALL → session {:?} (cb_program={}, type={}, iomode={})",
             session_id, cb_program, layout_type, iomode,
         );
-        let reply = writer
-            .send_cb_compound(cb_program, &call, self.timeout)
-            .await?;
+        let reply = match writer.send_cb_compound(cb_program, &call, self.timeout).await {
+            Ok(r) => r,
+            Err(e) => {
+                // The call may or may not have reached the client. Advance
+                // anyway: re-sending `seq` after a timeout would look like a
+                // retry of a request the client may have already executed,
+                // and RFC 8881 §2.10.6.1's retry semantics make that the
+                // more dangerous of the two readings.
+                *seq_guard = seq;
+                return Err(e);
+            }
+        };
+        *seq_guard = seq;
+        drop(seq_guard);
         info!(
             "✅ CB_LAYOUTRECALL ← session {:?}: status={:?}, {} results",
             session_id,
@@ -279,7 +330,7 @@ impl CallbackManager {
                 )
                 .await
             {
-                Ok(_reply) => RecallOutcome::Acked,
+                Ok(reply) => classify_reply(&reply),
                 Err(CallbackError::Timeout) => RecallOutcome::TimedOut,
                 Err(CallbackError::ConnectionClosed) => RecallOutcome::NoChannel,
                 Err(e) => {
@@ -360,7 +411,7 @@ pub async fn recall_layouts_for_truncate(
             )
             .await
         {
-            Ok(_reply) => RecallOutcome::Acked,
+            Ok(reply) => classify_reply(&reply),
             Err(CallbackError::Timeout) => RecallOutcome::TimedOut,
             Err(CallbackError::ConnectionClosed) => RecallOutcome::NoChannel,
             Err(e) => {
@@ -393,13 +444,35 @@ pub async fn recall_layouts_for_truncate(
         .iter()
         .filter(|r| matches!(r.outcome, RecallOutcome::Acked))
         .count();
-    info!(
-        "📊 Truncate recall for {}: {}/{} acked, {} revoked server-side",
-        file_ident,
-        acked,
-        results.len(),
-        results.len(),
-    );
+    // Refusals get their own line, loudly. The whole reason two RFC
+    // violations survived this long is that they were counted as acks.
+    for r in results.iter() {
+        if let RecallOutcome::Refused(why) = &r.outcome {
+            warn!(
+                "❌ CB_LAYOUTRECALL for {} REFUSED by session {:?}: {} — the client still \
+                 believes it holds the layout and can read past the new EOF; the \
+                 server-side revoke below does NOT bind it",
+                file_ident, r.session_id, why,
+            );
+        }
+    }
+    if acked == results.len() {
+        info!(
+            "📊 Truncate recall for {}: {}/{} acked, all revoked server-side",
+            file_ident,
+            acked,
+            results.len(),
+        );
+    } else {
+        warn!(
+            "📊 Truncate recall for {}: only {}/{} acked — {} client(s) may still be \
+             reading past the new EOF",
+            file_ident,
+            acked,
+            results.len(),
+            results.len() - acked,
+        );
+    }
     results
 }
 
@@ -424,6 +497,56 @@ pub enum RecallOutcome {
     /// reply-decode error. Treat the same as `TimedOut` for
     /// revocation purposes; the message is preserved for logs.
     Transport(String),
+    /// The client answered and REFUSED. `decode_cb_reply` returns Ok
+    /// for any NFS4 status once the RPC layer accepted, so without
+    /// this arm a rejection is indistinguishable from success — which
+    /// is how two RFC violations in the recall encoding survived a
+    /// gate, a test suite and a code review, all of them reading
+    /// "1/1 acked" (audit C3, 2026-07-31).
+    ///
+    /// NFS4ERR_NOMATCHING_LAYOUT is NOT refusal: the client is telling
+    /// us it already returned the layout, which is the outcome we
+    /// wanted. Everything else means the recall did not take effect.
+    Refused(String),
+}
+
+/// Classify a decoded CB reply. The layout is gone from the client on
+/// NFS4_OK and on NFS4ERR_NOMATCHING_LAYOUT and on nothing else.
+///
+/// Checks the per-op results, not just the top level: a CB_COMPOUND
+/// that fails at CB_SEQUENCE short-circuits, so CB_LAYOUTRECALL never
+/// runs and there is no LayoutRecall result at all — the case a
+/// hardcoded back-channel slot produces, and the one a top-level-only
+/// check is least likely to notice.
+fn classify_reply(reply: &CbCompoundReply) -> RecallOutcome {
+    use crate::nfs::v4::cb_compound::CbResult;
+
+    let mut saw_recall = false;
+    for r in &reply.results {
+        match r {
+            CbResult::Sequence { status, .. } if *status != Nfs4Status::Ok => {
+                return RecallOutcome::Refused(format!("CB_SEQUENCE {:?}", status));
+            }
+            CbResult::LayoutRecall { status } => {
+                saw_recall = true;
+                match status {
+                    Nfs4Status::Ok | Nfs4Status::NoMatchingLayout => {}
+                    other => {
+                        return RecallOutcome::Refused(format!("CB_LAYOUTRECALL {:?}", other))
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !saw_recall {
+        return RecallOutcome::Refused(format!(
+            "CB_LAYOUTRECALL never ran (compound status {:?}, {} result(s))",
+            reply.status,
+            reply.results.len(),
+        ));
+    }
+    RecallOutcome::Acked
 }
 
 /// One outcome per recall pair. Order matches the input order so
@@ -642,6 +765,135 @@ mod tests {
         assert!(matches!(reply.results[1], CbResult::LayoutRecall { .. }));
 
         mock_client.await.unwrap();
+    }
+
+    /// AUDIT C2. RFC 8881 §2.10.6.1: each reuse of a back-channel slot
+    /// carries `previous + 1`. This was hardcoded to 1, so the SECOND
+    /// CB_COMPOUND on a session looked like a replay of the first and a
+    /// conforming client aborts at CB_SEQUENCE — CB_LAYOUTRECALL never
+    /// running. One truncate can emit several recalls to one session, so
+    /// "the second one" is routine, not an edge case.
+    #[tokio::test]
+    async fn back_channel_sequenceid_advances_per_session() {
+        let (writer, server_read, client_read, mut client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, Arc::clone(&writer));
+        let cb_mgr = CallbackManager::new(Arc::clone(&back_channels), Arc::clone(&state_mgr))
+            .with_timeout(Duration::from_secs(5));
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+        // Mock client: answer three calls, recording the CB_SEQUENCE
+        // sequenceid it saw on each. Layout of the CB_COMPOUND args puts
+        // the sequenceid right after tag/minorversion/callback_ident/
+        // opcount/op + the 16-byte sessionid, so find it by scanning for
+        // the session id rather than hardcoding an offset.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        let sid_bytes = session_id.0;
+        let mock = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            for _ in 0..3 {
+                let call = read_record(&mut r).await;
+                let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+                let sid = &sid_bytes[..];
+                let at = call
+                    .windows(16)
+                    .position(|w| w == sid)
+                    .expect("sessionid appears in the CB_SEQUENCE args");
+                let seq_at = at + 16;
+                tx.send(u32::from_be_bytes([
+                    call[seq_at],
+                    call[seq_at + 1],
+                    call[seq_at + 2],
+                    call[seq_at + 3],
+                ]))
+                .unwrap();
+                write_record(&mut client_write, build_reply(xid, Nfs4Status::Ok)).await;
+            }
+        });
+
+        for _ in 0..3 {
+            let _ = cb_mgr.send_layoutrecall(&session_id, &[7u8; 16], 1, 3, true).await;
+        }
+        mock.await.unwrap();
+
+        let mut on_the_wire = Vec::new();
+        while let Ok(v) = rx.try_recv() {
+            on_the_wire.push(v);
+        }
+        assert_eq!(
+            on_the_wire,
+            vec![1, 2, 3],
+            "RFC 8881 §2.10.6.1: each slot reuse carries previous+1; a repeat is a replay",
+        );
+        assert_eq!(*cb_mgr.slot(&session_id).lock().await, 3);
+
+        // A different session has its own slot, starting over.
+        let other = SessionId([0xEE; 16]);
+        assert_eq!(*cb_mgr.slot(&other).lock().await, 0);
+
+        // A session that goes away resets — a new session id is a new sequence.
+        cb_mgr.forget_session(&session_id);
+        assert_eq!(*cb_mgr.slot(&session_id).lock().await, 0);
+    }
+
+    /// AUDIT C3. `decode_cb_reply` returns Ok for any NFS4 status once the
+    /// RPC layer accepted, so a blind `Ok(_) => Acked` scores a REFUSAL as
+    /// a success. That is how two RFC violations in the recall encoding
+    /// survived a gate, a test suite and a review — every log said
+    /// "1/1 acked".
+    #[test]
+    fn classify_reply_separates_refusal_from_ack() {
+        use crate::nfs::v4::cb_compound::CbResult;
+        let seq_ok = |status| CbResult::Sequence {
+            status,
+            sessionid: SessionId([0u8; 16]),
+            sequenceid: 1,
+            slotid: 0,
+            highest_slotid: 0,
+            target_highest_slotid: 0,
+        };
+        let reply = |status, results| CbCompoundReply { status, tag: String::new(), results };
+
+        // Success.
+        assert_eq!(
+            classify_reply(&reply(
+                Nfs4Status::Ok,
+                vec![seq_ok(Nfs4Status::Ok), CbResult::LayoutRecall { status: Nfs4Status::Ok }],
+            )),
+            RecallOutcome::Acked,
+        );
+        // "I already returned it" is the outcome we wanted, not a refusal.
+        assert_eq!(
+            classify_reply(&reply(
+                Nfs4Status::NoMatchingLayout,
+                vec![
+                    seq_ok(Nfs4Status::Ok),
+                    CbResult::LayoutRecall { status: Nfs4Status::NoMatchingLayout },
+                ],
+            )),
+            RecallOutcome::Acked,
+        );
+        // A refused recall.
+        assert!(matches!(
+            classify_reply(&reply(
+                Nfs4Status::Delay,
+                vec![seq_ok(Nfs4Status::Ok), CbResult::LayoutRecall { status: Nfs4Status::Delay }],
+            )),
+            RecallOutcome::Refused(_),
+        ));
+        // The C2 shape: the compound short-circuits AT CB_SEQUENCE, so there
+        // is no LayoutRecall result at all. A top-level-only check would
+        // miss this one.
+        assert!(matches!(
+            classify_reply(&reply(Nfs4Status::BadSession, vec![seq_ok(Nfs4Status::BadSession)])),
+            RecallOutcome::Refused(_),
+        ));
+        // Nothing ran at all.
+        assert!(matches!(
+            classify_reply(&reply(Nfs4Status::ServerFault, vec![])),
+            RecallOutcome::Refused(_),
+        ));
     }
 
     /// Client returns NFS4ERR_NOMATCHING_LAYOUT — call still

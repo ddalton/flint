@@ -20,6 +20,38 @@ use tracing::{debug, info, warn};
 /// Layout state ID (combines with NFSv4 stateid)
 pub type LayoutStateId = [u8; 16];
 
+/// The seqid every layout stateid is MINTED with. RFC 8881 §12.5.3 makes
+/// the seqid a version counter the server bumps on each CB_LAYOUTRECALL,
+/// so it cannot be part of the identity — `other` (the low 12 bytes) is.
+/// §20.3.3 also forbids a zero seqid, which is why minting starts at 1
+/// rather than 0.
+pub const LAYOUT_SEQID_BASE: u32 = 1;
+
+/// `generate_layout`'s refusal when the publish-time gate recheck fires.
+/// layoutget matches on it to answer TRYLATER (the same answer the
+/// up-front gate check gives) rather than a hard error.
+pub const GRANT_RACED_TRUNCATE: &str = "grant raced a truncate";
+
+/// The identity of a layout stateid, as a map key.
+///
+/// `layouts` and `by_owner` are keyed by this, NOT by the raw 16 bytes:
+/// once the seqid advances on a recall, the client's next LAYOUTRETURN
+/// carries the bumped value and a raw-bytes lookup would miss it — which
+/// is precisely the trap that kept the seqid frozen (audit C1). Spelled as
+/// a 16-byte array with the seqid canonicalised rather than as a distinct
+/// `[u8; 12]` type, to keep the change to the ten call sites that index
+/// these maps.
+pub fn state_key(stateid: &LayoutStateId) -> LayoutStateId {
+    let mut k = *stateid;
+    k[0..4].copy_from_slice(&LAYOUT_SEQID_BASE.to_be_bytes());
+    k
+}
+
+/// The seqid currently on a stateid.
+pub fn seqid_of(stateid: &LayoutStateId) -> u32 {
+    u32::from_be_bytes([stateid[0], stateid[1], stateid[2], stateid[3]])
+}
+
 /// 16-byte NFSv4.1 session id (mirrors `nfs::v4::protocol::SessionId`).
 /// Kept as a plain byte array here so the pNFS layer doesn't pull in
 /// the v4 protocol module.
@@ -454,7 +486,7 @@ impl LayoutManager {
             let stateid = r.stateid;
             let layout = LayoutState::from_record(r);
             let cid = layout.owner.client_id;
-            self.layouts.insert(stateid, layout);
+            self.layouts.insert(state_key(&stateid), layout);
             self.by_owner
                 .entry(cid)
                 .or_insert_with(Vec::new)
@@ -844,6 +876,7 @@ impl LayoutManager {
         };
 
         let stateid = Self::generate_stateid();
+        let gate_ident = truncate_gate_key(&placement, file_key);
         let layout = LayoutState {
             stateid,
             owner,
@@ -851,15 +884,39 @@ impl LayoutManager {
             // Same placement the stripe map above came from, so this is
             // byte-identical to the key note_truncate files the gate
             // under. Do NOT recompute it from file_key alone.
-            file_ident: truncate_gate_key(&placement, file_key),
+            file_ident: gate_ident.clone(),
             segments,
             iomode,
             return_on_close: true,
         };
 
-        // Track active layouts (primary map + secondary by-client index).
+        // PUBLISH, THEN RE-READ THE GATE (audit C6).
+        //
+        // layoutget checked truncate_dirty before calling in here, and there
+        // is no lock spanning the two — LayoutManager has none, and `layouts`
+        // and `truncate_dirty` are independent DashMaps. So a truncate can
+        // arm the mark between that check and this insert, and its recall
+        // scan iterates `layouts` before this entry is in it: the grant
+        // escapes the gate AND the recall. The retry task only re-fans-out,
+        // never re-recalls, so on the park path a microsecond race becomes an
+        // hours-long exposure with the gate showing dirty the whole time.
+        //
+        // Publishing first and re-reading after is sufficient by
+        // construction: the mark is set before the recall's scan, and this
+        // entry is visible before the recheck — so any interleaving is caught
+        // by one side or the other.
         self.persist(&layout);
-        self.layouts.insert(stateid, layout.clone());
+        self.layouts.insert(state_key(&stateid), layout.clone());
+        if self.truncate_dirty.contains_key(&gate_ident) {
+            self.layouts.remove(&state_key(&stateid));
+            self.persist_delete(stateid);
+            warn!(
+                "⏳ LAYOUTGET for '{}' raced a truncate — mark armed between the \
+                 gate check and the publish; revoking the grant and refusing",
+                file_key,
+            );
+            return Err(GRANT_RACED_TRUNCATE.to_string());
+        }
         self.by_owner
             .entry(owner.client_id)
             .or_insert_with(Vec::new)
@@ -993,7 +1050,7 @@ impl LayoutManager {
     /// by-client index alongside the primary map so the indexes stay
     /// consistent.
     pub fn return_layout(&self, stateid: &LayoutStateId) -> Result<(), String> {
-        if let Some((_, layout)) = self.layouts.remove(stateid) {
+        if let Some((_, layout)) = self.layouts.remove(&state_key(stateid)) {
             debug!(
                 "Layout returned: stateid={:?}, segments={}, client={}",
                 &stateid[0..4],
@@ -1005,7 +1062,7 @@ impl LayoutManager {
             // map doesn't accumulate stale clientid keys after long-running
             // clients hand back all their layouts.
             if let Some(mut entry) = self.by_owner.get_mut(&layout.owner.client_id) {
-                entry.retain(|s| s != stateid);
+                entry.retain(|s| state_key(s) != state_key(stateid));
                 let now_empty = entry.is_empty();
                 drop(entry);
                 if now_empty {
@@ -1045,7 +1102,7 @@ impl LayoutManager {
     /// "never existed," and the spec doesn't distinguish them on
     /// the wire either.
     pub fn revoke_layout(&self, stateid: &LayoutStateId) -> bool {
-        let Some((_, layout)) = self.layouts.remove(stateid) else {
+        let Some((_, layout)) = self.layouts.remove(&state_key(stateid)) else {
             return false;
         };
         info!(
@@ -1059,7 +1116,7 @@ impl LayoutManager {
         // than refactored shared because the *log line* differs (and
         // the caller cares about which one ran).
         if let Some(mut entry) = self.by_owner.get_mut(&layout.owner.client_id) {
-            entry.retain(|s| s != stateid);
+            entry.retain(|s| state_key(s) != state_key(stateid));
             let now_empty = entry.is_empty();
             drop(entry);
             if now_empty {
@@ -1182,6 +1239,7 @@ impl LayoutManager {
             return Vec::new();
         }
         let mut recalled = Vec::new();
+        let mut hits: Vec<LayoutStateId> = Vec::new();
         let mut unidentified = 0usize;
         for entry in self.layouts.iter() {
             if entry.file_ident.is_empty() {
@@ -1189,11 +1247,30 @@ impl LayoutManager {
                 continue;
             }
             if entry.file_ident == file_ident {
-                recalled.push((
-                    entry.owner.session_id,
-                    entry.stateid,
-                    entry.filehandle.clone(),
-                ));
+                hits.push(state_key(&entry.stateid));
+            }
+        }
+        // The scan above is finished before a single write below: a DashMap
+        // write taken while one of its own iterators is live deadlocks on the
+        // shard lock.
+        for key in hits {
+            if let Some(mut entry) = self.layouts.get_mut(&key) {
+                // RFC 8881 §12.5.3: the server increments the seqid on each
+                // CB_LAYOUTRECALL, and §12.5.5.2.1 makes the client CHECK it —
+                // a recall carrying the seqid the client already has is
+                // rejected with NFS4ERR_OLD_STATEID before the client drains
+                // anything. Bump first, then hand out the bumped value; the
+                // map key is `other` so this does not move the entry.
+                let next = seqid_of(&entry.stateid).wrapping_add(1);
+                let next = if next == 0 { LAYOUT_SEQID_BASE } else { next };
+                entry.stateid[0..4].copy_from_slice(&next.to_be_bytes());
+                let to_send = entry.stateid;
+                let owner_session = entry.owner.session_id;
+                let fh = entry.filehandle.clone();
+                let snapshot = entry.clone();
+                drop(entry);
+                self.persist(&snapshot);
+                recalled.push((owner_session, to_send, fh));
             }
         }
         if unidentified > 0 {
@@ -1216,7 +1293,7 @@ impl LayoutManager {
 
     /// Get layout by stateid
     pub fn get_layout(&self, stateid: &LayoutStateId) -> Option<LayoutState> {
-        self.layouts.get(stateid).map(|entry| entry.clone())
+        self.layouts.get(&state_key(stateid)).map(|entry| entry.clone())
     }
 
     /// Get all active layouts
@@ -1230,11 +1307,19 @@ impl LayoutManager {
     }
 
     /// Generate a unique layout stateid
+    /// Mint a stateid: random `other`, seqid pinned to
+    /// [`LAYOUT_SEQID_BASE`].
+    ///
+    /// The seqid bytes are NOT randomised. They were, and that was two
+    /// bugs in one: the client's first recall could never be seqid+1 of
+    /// anything meaningful, and one mint in 2^32 handed out the
+    /// §20.3.3-forbidden zero.
     fn generate_stateid() -> LayoutStateId {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let mut stateid = [0u8; 16];
-        rng.fill(&mut stateid);
+        rng.fill(&mut stateid[4..16]);
+        stateid[0..4].copy_from_slice(&LAYOUT_SEQID_BASE.to_be_bytes());
         stateid
     }
 }
@@ -1634,7 +1719,10 @@ mod tests {
 
         let hits = mgr.recall_layouts_for_file(&a.file_ident);
         assert_eq!(hits.len(), 1, "exactly one layout is for file-a");
-        assert_eq!(hits[0].1, a.stateid);
+        // The recall carries a BUMPED seqid (RFC 8881 §12.5.3), so compare
+        // identity, not raw bytes.
+        assert_eq!(state_key(&hits[0].1), state_key(&a.stateid));
+        assert_eq!(seqid_of(&hits[0].1), seqid_of(&a.stateid) + 1);
         // The filehandle rides along — it is what makes the
         // CB_LAYOUTRECALL per-file rather than session-wide.
         assert_eq!(hits[0].2, vec![0xA]);
@@ -1657,8 +1745,8 @@ mod tests {
 
         let hits = mgr.recall_layouts_for_file(&one.file_ident);
         assert_eq!(hits.len(), 2);
-        let ids: Vec<_> = hits.iter().map(|(_, s, _)| *s).collect();
-        assert!(ids.contains(&one.stateid) && ids.contains(&two.stateid));
+        let ids: Vec<_> = hits.iter().map(|(_, s, _)| state_key(s)).collect();
+        assert!(ids.contains(&state_key(&one.stateid)) && ids.contains(&state_key(&two.stateid)));
     }
 
     /// An empty ident must never behave as a wildcard. Layouts restored
@@ -1688,7 +1776,87 @@ mod tests {
         // ...and the identity-less layout is not swept up by a real one.
         let hits = mgr.recall_layouts_for_file(&live.file_ident);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].1, live.stateid);
+        assert_eq!(state_key(&hits[0].1), state_key(&live.stateid));
+    }
+
+    /// AUDIT C1. The minted seqid must be a known non-zero constant, not
+    /// random: RFC 8881 §12.5.5.2.1 has the client check that a recall's
+    /// seqid is exactly one higher than the one it holds, and §20.3.3
+    /// forbids zero. Randomising all sixteen bytes made both impossible.
+    #[test]
+    fn minted_stateid_has_a_known_nonzero_seqid() {
+        let mgr = recall_fixture();
+        let l = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(seqid_of(&l.stateid), LAYOUT_SEQID_BASE);
+        assert_ne!(LAYOUT_SEQID_BASE, 0, "RFC 8881 §20.3.3 forbids a zero seqid");
+        // and the identity half is still random
+        let m = mgr
+            .generate_layout(test_owner(1), vec![0xB], "file-b", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        assert_ne!(l.stateid[4..16], m.stateid[4..16]);
+    }
+
+    /// AUDIT C1. Each recall must advance the seqid, and the layout must
+    /// still be findable afterwards — the reason the seqid was frozen is
+    /// that `layouts` was keyed by the whole 16 bytes, so bumping it used
+    /// to lose the entry.
+    #[test]
+    fn recall_advances_the_seqid_and_the_layout_stays_addressable() {
+        let mgr = recall_fixture();
+        let l = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        let minted = seqid_of(&l.stateid);
+
+        let first = mgr.recall_layouts_for_file(&l.file_ident);
+        assert_eq!(first.len(), 1);
+        assert_eq!(seqid_of(&first[0].1), minted + 1, "recall must send seqid+1");
+
+        let second = mgr.recall_layouts_for_file(&l.file_ident);
+        assert_eq!(seqid_of(&second[0].1), minted + 2, "each recall advances again");
+
+        // The client will come back with the BUMPED stateid. Both that and
+        // the original must still resolve to this layout.
+        assert!(mgr.get_layout(&second[0].1).is_some(), "bumped stateid resolves");
+        assert!(mgr.get_layout(&l.stateid).is_some(), "original stateid resolves");
+        assert!(mgr.return_layout(&second[0].1).is_ok(), "LAYOUTRETURN with the bumped seqid");
+        assert!(mgr.get_layout(&l.stateid).is_none());
+        assert!(mgr.layouts_for_client(1).is_empty(), "by_owner cleaned up too");
+    }
+
+    /// AUDIT C6. A grant that passes layoutget's gate check and then has
+    /// the mark arm under it must not survive publication — otherwise it
+    /// escapes the gate (already checked) AND the recall (its snapshot
+    /// ran before the insert).
+    #[test]
+    fn grant_that_races_an_arming_truncate_is_refused() {
+        let mgr = recall_fixture();
+        // Pin the placement first so the gate key is computable, then arm
+        // the mark: this is the state layoutget finds itself in after its
+        // own check passed.
+        let first = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        let gate = first.file_ident.clone();
+        mgr.return_layout(&first.stateid).unwrap();
+        mgr.mark_truncate_dirty(&gate, 0);
+
+        let err = mgr
+            .generate_layout(test_owner(2), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .expect_err("a grant published under an armed mark must be refused");
+        assert_eq!(err, GRANT_RACED_TRUNCATE);
+        // And nothing was left behind for a later recall to miss.
+        assert!(mgr.recall_layouts_for_file(&gate).is_empty());
+        assert_eq!(mgr.layout_count(), 0);
+        assert!(mgr.layouts_for_client(2).is_empty());
+
+        // Once the cut confirms, grants resume.
+        assert!(mgr.clear_truncate_dirty_if(&gate, 0));
+        assert!(mgr
+            .generate_layout(test_owner(2), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .is_ok());
     }
 
     /// The ident survives the persistence round-trip — otherwise every

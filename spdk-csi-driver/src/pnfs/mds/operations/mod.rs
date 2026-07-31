@@ -270,8 +270,17 @@ impl PnfsOperationHandler {
                 args.iomode,
             )
             .map_err(|e| {
-                warn!("❌ Layout generation failed: {}", e);
-                LayoutGetError::LayoutUnavailable
+                // A grant that raced an arming truncate is TRYLATER, not
+                // "unavailable": the file is fine, the client just has to
+                // ask again once the stripes are cut. Same answer the
+                // up-front gate check gives, so a racing client and a
+                // late client are indistinguishable to the client.
+                if e == crate::pnfs::mds::layout::GRANT_RACED_TRUNCATE {
+                    LayoutGetError::TryLater
+                } else {
+                    warn!("❌ Layout generation failed: {}", e);
+                    LayoutGetError::LayoutUnavailable
+                }
             })?;
 
         // The grant above pinned (or reused) the placement; surface

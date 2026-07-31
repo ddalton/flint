@@ -1,31 +1,37 @@
 # F65 — a truncate does not recall held layouts, so the truncate gate only covers clients that don't have one yet
 
-Status: **FOUND BY TLC 2026-07-31; the fix landed the same day and a
-multi-agent audit hours later found it INEFFECTIVE AS SHIPPED.** The recall
-is emitted in a form a conforming client refuses, and the reply status is
-discarded so the server logs success either way. **Treat F65 as OPEN.**
+Status: **FOUND BY TLC 2026-07-31; fix landed the same day; a multi-agent
+audit hours later found that fix INEFFECTIVE; the four blocking defects are
+now FIXED.** F65 itself is closed. `Inv_NoStaleServe` still does not hold,
+for one remaining reason that is not F65 — see the table.
 
-`note_truncate` does now recall and revoke the file's layouts between the
-mark and the fanout — the ordering and the selector are right, and the
-gate's own theorem holds. What does not work is the CB_LAYOUTRECALL under
-it, which had never been exercised against a real client. Three independent
-blockers, each with its own failing gate run:
-
-| blocker | run | state |
+| audit finding | run | state |
 | --- | --- | --- |
-| no recall at all (F65 itself) | `FlintTruncateHeldLayout.cfg` | **fixed** |
-| recall emitted but refused (C1/C2), and scored `Acked` anyway (C3) | `FlintTruncateLostRecall.cfg` | **open** |
-| grant escapes gate + recall via a publish race (C6) | `FlintTruncateGrantRace.cfg` | **open** |
+| F65 itself — no recall on truncate | `FlintTruncateHeldLayout.cfg` | **fixed** |
+| C1 — layout stateid seqid never incremented (RFC 8881 §12.5.3) | — | **fixed** |
+| C2 — CB_SEQUENCE hardcoded slot 0 / seqid 1 (§2.10.6.1) | — | **fixed** |
+| C3 — a refused reply scored as an ack | — | **fixed** |
+| C6 — grant escapes gate + recall via a publish race | `FlintTruncateGrantRace.cfg` | **fixed** |
+| C5 — one back-channel writer per session vs `nconnect=4` | `FlintTruncateLostRecall.cfg` | **open** |
+| C4 — LAYOUTCOMMIT re-extends the truncated stub | — | **open** |
+| R1 — recalled client refused the MDS fallback during a parked truncate | — | **open** |
+| R2 — self-recall stalls the connection read loop for the CB timeout | — | **open** |
+| R3 — post-recall LAYOUTRETURN answered SERVERFAULT | — | **open** |
+| R4 — the truncate-dirty gate does not survive an MDS restart | — | **open** |
 
-`FlintTruncate.cfg` (the shipped world) deliberately does NOT list
-`Inv_NoStaleServe`. `FlintTruncateNoStaleServe.cfg` is the conditional
-green — what closing F65 requires, not what it currently does.
+`FlintTruncate.cfg` (the shipped world) still does NOT list
+`Inv_NoStaleServe`: server-side revocation cannot bind a client the recall
+never reached, and C5 makes that reachable on an ordinary mount.
+`FlintTruncateNoStaleServe.cfg` is the conditional green — what closing it
+requires.
 
-Full audit findings, including four more (LAYOUTCOMMIT re-extending the
-truncated stub, the `nconnect=4` back-channel registry losing its writer, a
-self-recall stall on the connection read loop, and recalled clients being
-refused the MDS fallback path during a parked truncate) are recorded in the
-audit section below.
+C3 is the one to understand if you read nothing else. `decode_cb_reply`
+returns `Ok` for any NFS4 status once the RPC layer accepts, so
+`Ok(_reply) => Acked` scored a *refusal* as a success and every log line
+read `1/1 acked`. That is why C1 and C2 — two independent RFC violations
+that make a conforming client reject the recall outright — survived a
+formal model, a passing gate, a test suite and a review. The instrument was
+lying, so nothing downstream of it meant anything.
 
 ## The one-sentence version
 

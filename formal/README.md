@@ -100,37 +100,36 @@ was written, and the run that proves it now must keep failing:
   predicate survives it. The `BlindClear` mutation must rediscover the
   loss, so the predicate is load-bearing rather than defensive.
 * `Inv_NoStaleServe` — no client is ever served content past the MDS
-  size. **This does NOT hold on shipped code**, and the shipped cfg
-  deliberately does not list it. It was F65 (no recall on truncate at
-  all); `note_truncate` now recalls and revokes the file's layouts
-  between the mark and the fanout, which is the right shape, but a
-  2026-07-31 multi-agent audit found two further independent losses:
+  size. **Still does not hold on shipped code**, and the shipped cfg
+  does not list it. F65 (no recall at all) is fixed, and so are the three
+  encoding defects a 2026-07-31 audit found in the recall itself — the
+  stateid seqid is now incremented per RFC 8881 §12.5.3, the
+  back-channel slot sequence advances per §2.10.6.1, and a refused reply
+  is no longer counted as an ack. What remains is the residual: server-
+  side revocation binds only clients the recall actually reached
+  (`FlintTruncateLostRecall.cfg`).
 
-  - **the recall is emitted but refused.** The CB carries the layout
-    stateid verbatim (RFC 8881 §12.5.3 wants seqid+1; flint keeps no
-    seqid state and `generate_stateid` randomises all sixteen bytes) and
-    CB_SEQUENCE hardcodes slot 0 / seqid 1. `Ok(_reply) => Acked`
-    discards the reply status, so the server logs `1/1 acked` regardless
-    — the reason a live drill would not have caught it either.
-    `FlintTruncateLostRecall.cfg`.
-  - **a grant can escape both teeth.** LAYOUTGET reads the gate at
-    `operations/mod.rs:234` and publishes at `layout.rs:862` with no lock
-    between — `LayoutManager` has no `Mutex` or `RwLock` at all. A grant
-    that passes the check, has the mark arm under it, then publishes,
-    is invisible to the recall's snapshot. `FlintTruncateGrantRace.cfg`.
+  **Two lessons about this module, not just about the code.**
 
-  **The second one is a lesson about this module, not just about the
-  code.** The first cut modelled LAYOUTGET as a single atomic
-  guard-and-effect action, which asserted an atomicity the
-  implementation does not have — and that assertion is what made TLC
-  green on a property the code never held. `LayoutGet` is now
-  `LayoutGetCheck` / `LayoutGetInsert`, two steps, because the code is
-  two steps. Craft rule, re-learned: **a single TLA+ action is a claim
-  that the code holds a lock.**
+  First, the module once asserted `RecallReaches = TRUE` for shipped
+  code. That constant means "delivered AND honoured", and the shipped
+  recall was malformed enough that no conforming client would honour it.
+  Having the constant was right; asserting it was a green that proved
+  nothing. **A constant that encodes an assumption must be justified
+  against the code every time the code moves, or it silently becomes a
+  lie.**
 
-  `FlintTruncateNoStaleServe.cfg` is the conditional green — what
-  closing F65 requires, stated as a specification for the remaining
-  work. Cite it as a goal, never as a property of shipped code.
+  Second, `LayoutGet` was a single atomic guard-and-effect action, and
+  the implementation reads the gate at `operations/mod.rs` and publishes
+  at `layout.rs` with no lock between — `LayoutManager` has no `Mutex`
+  or `RwLock` at all. That atomicity was the model's, not the code's, and
+  it hid a real escape (`FlintTruncateGrantRace.cfg`, now the regression
+  run for the publish-time recheck that fixes it). **A single TLA+ action
+  is a claim that the code holds a lock.**
+
+  `FlintTruncateNoStaleServe.cfg` is the conditional green — what closing
+  the theorem requires. Cite it as a goal, never as a property of shipped
+  code.
 
 One hypothesis was **refuted** and is kept as a run so it cannot be
 quietly re-asserted: `MarkKeepsMin=FALSE` (mark_truncate_dirty

@@ -723,11 +723,11 @@ mutation_run FlintSnapshots FlintSnapshotsBareDelete.cfg "bare-delete mutation (
 #
 # READ THIS BEFORE CITING ANY RUN BELOW. The gate's own theorem holds. The
 # theorem that matters to a user — no client is ever SERVED content past the
-# MDS size — DOES NOT hold on shipped code, and the shipped cfg deliberately
-# does not list it. F65's fix landed but is INEFFECTIVE pending the audit's
-# C1/C2/C3 (the recall is emitted in a form a conforming client refuses, and
-# the reply status is discarded so the server logs success either way) and C6
-# (layoutget's gate check and its publish are not atomic). See
+# MDS size — still does NOT hold on shipped code, and the shipped cfg
+# deliberately does not list it. Audit C1/C2/C3 (malformed recall, scored as
+# an ack) and C6 (non-atomic grant) are FIXED; what remains is that
+# server-side revocation cannot bind a client the recall never reached, which
+# audit C5 makes reachable on an ordinary nconnect=4 mount. See
 # spdk-csi-driver/docs/f65-truncate-does-not-recall-held-layouts.md.
 strict_run   FlintTruncate FlintTruncate.cfg               "truncate gate strict, SHIPPED — Theorem 1 only (Inv_NoStaleServe is NOT claimed; see the cfg)"
 mutation_run FlintTruncate FlintTruncateBlindClear.cfg     "blind-clear mutation (GateClearGuarded=FALSE: a shallower confirm lifts a deeper cut's mark)" "Inv_ClearImpliesFlushed"
@@ -742,8 +742,8 @@ strict_run   FlintTruncate FlintTruncateMarkOverwrite.cfg  "min-keeping refutati
 # fixing one and watching its run go green is a real signal rather than a
 # guess. All three must keep FAILING until their cause is repaired.
 mutation_run FlintTruncate FlintTruncateHeldLayout.cfg     "F65 itself (RecallOnTruncate=FALSE: no recall at all, so the gate covers only clients without a layout yet)" "Inv_NoStaleServe"
-mutation_run FlintTruncate FlintTruncateLostRecall.cfg     "audit C1/C2/C3 (RecallReaches=FALSE: the recall is emitted, refused by the client, and scored Acked anyway)" "Inv_NoStaleServe"
-mutation_run FlintTruncate FlintTruncateGrantRace.cfg      "audit C6 (PublishRecheck=FALSE: layoutget's gate check and its publish are not atomic, so a grant escapes both teeth)" "Inv_NoStaleServe"
+mutation_run FlintTruncate FlintTruncateLostRecall.cfg     "unreached-recall residual (RecallReaches=FALSE: server-side revocation does not bind a client the callback never reached — audit C5 makes this reachable)" "Inv_NoStaleServe"
+mutation_run FlintTruncate FlintTruncateGrantRace.cfg      "audit C6 REGRESSION (PublishRecheck=FALSE: without the publish-time recheck a grant escapes both the gate and the recall snapshot)" "Inv_NoStaleServe"
 
 # The TARGET state, not the current one. What closing F65 requires, stated as a
 # green so the remaining work has a specification. Cite it as a goal; citing it

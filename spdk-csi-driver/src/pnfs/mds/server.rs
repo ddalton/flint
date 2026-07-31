@@ -1081,7 +1081,13 @@ impl MetadataServer {
                         }
                     });
                 }
-                RecallOutcome::TimedOut | RecallOutcome::NoChannel | RecallOutcome::Transport(_) => {
+                // Refused joins the revoke-now arm deliberately: the client
+                // answered and did NOT drop the layout, so it is at least as
+                // dangerous as silence — and unlike a timeout we know it.
+                RecallOutcome::TimedOut
+                | RecallOutcome::NoChannel
+                | RecallOutcome::Transport(_)
+                | RecallOutcome::Refused(_) => {
                     if layout_manager.revoke_layout(&r.stateid) {
                         warn!(
                             "🚫 Forcibly revoking layout {:?} (recall {:?})",
