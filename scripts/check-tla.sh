@@ -3,7 +3,11 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Eighty-eight runs, ALL required.
+# Eighty-five runs, ALL required.
+#
+# (Counted as invocations. `grep -c '^strict_run'` also matches the three
+# function DEFINITIONS below — that miscount is how this header briefly read
+# 'eighty-eight'.)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
