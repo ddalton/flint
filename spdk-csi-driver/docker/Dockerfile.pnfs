@@ -41,6 +41,13 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     krb5-user \
+    # tcpdump is not a debugging luxury here. Every failure mode this
+    # server has that matters is on the wire, and the F65 audit showed
+    # why reading the server's own logs is not a substitute: a
+    # CB_LAYOUTRECALL the client REFUSED was scored and logged as an ack
+    # for as long as the bug existed. tests/k8s/pnfs-drills/truncate-recall.sh
+    # reads the CB_COMPOUND status directly and hard-fails without this.
+    tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy BOTH binaries to the runtime image
