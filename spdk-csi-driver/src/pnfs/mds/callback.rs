@@ -417,8 +417,33 @@ pub async fn recall_layouts_for_truncate(
         new_size,
     );
 
-    let mut results = Vec::with_capacity(recalls.len());
-    for (session_id, stateid, fh) in recalls {
+    // CONCURRENT ACROSS SESSIONS, serial within one.
+    //
+    // This loop used to be a plain `for ... .await`, which cost one full
+    // CB timeout per unresponsive holder, one after another. Measured on
+    // runat with synthetic holders that accept callbacks and never answer:
+    // 1 holder blocked the truncate 10.46s, 3 holders blocked it 30.43s —
+    // linear, at DEFAULT_CB_TIMEOUT each. The truncating client's SETATTR
+    // pays that bill, and on an RWX volume the holder count is the number
+    // of consumers.
+    //
+    // Per-SESSION ordering is still required and still enforced: a back
+    // channel negotiates ca_maxrequests=1, so two CB_COMPOUNDs to one
+    // session would collide on slot 0. `send_layoutrecall_range` takes
+    // that session's slot mutex and holds it across the reply, so two
+    // recalls to the SAME session serialize here exactly as before —
+    // only different sessions overlap.
+    //
+    // The revoke-before-proceeding property is preserved per layout: each
+    // task revokes its own layout as soon as its own recall returns, so no
+    // layout stays live while other round-trips are outstanding. That was
+    // the reason the loop was sequential, and it does not require
+    // sequencing — only that revoke follows its own recall.
+    //
+    // join_all preserves input order in the result vector, so the refusal
+    // logging below is unchanged and deterministic.
+    let results: Vec<RecallResult> = futures::future::join_all(recalls.iter().map(
+        |(session_id, stateid, fh)| async move {
         let outcome = match callbacks
             .send_layoutrecall_range(
                 session_id,
@@ -444,9 +469,11 @@ pub async fn recall_layouts_for_truncate(
                 RecallOutcome::Transport(msg)
             }
         };
-        // Unconditional, and BEFORE the next recall: a layout left live
-        // for the duration of the remaining round-trips is a layout
-        // that can still reach the bytes we are about to delete.
+        // Unconditional, and immediately after THIS recall returns: a
+        // layout left live while other round-trips are outstanding is a
+        // layout that can still reach the bytes we are about to delete.
+        // Note this is per-layout, not global ordering — which is why
+        // running the recalls concurrently does not weaken it.
         if layout_manager.revoke_layout(stateid) {
             debug!(
                 "🚫 revoked layout {:?} on truncate of {} (recall outcome {:?})",
@@ -455,12 +482,14 @@ pub async fn recall_layouts_for_truncate(
                 outcome,
             );
         }
-        results.push(RecallResult {
+        RecallResult {
             session_id: *session_id,
             stateid: *stateid,
             outcome,
-        });
-    }
+        }
+    },
+    ))
+    .await;
     let acked = results
         .iter()
         .filter(|r| matches!(r.outcome, RecallOutcome::Acked))
@@ -1240,6 +1269,82 @@ mod tests {
         assert_eq!(results[0].outcome, RecallOutcome::TimedOut);
         assert_eq!(results[0].stateid, stateid);
         drain.await.unwrap();
+    }
+
+    /// Truncate recalls to DIFFERENT sessions must overlap.
+    ///
+    /// This is the regression guard for a measured production hazard: the
+    /// fan-out was a plain sequential `for ... .await`, so every silent
+    /// holder cost a full CB timeout one after another. On runat, with
+    /// synthetic holders that accept callbacks and never answer, one
+    /// holder blocked the truncate 10.46s and three blocked it 30.43s —
+    /// linear. The truncating client's SETATTR pays it, and on an RWX
+    /// volume the holder count is the consumer count.
+    ///
+    /// Three silent sessions at a 300ms timeout: sequential would need
+    /// ~900ms, concurrent ~300ms. The bound is deliberately loose (600ms)
+    /// — this asserts "overlapping", not a stopwatch reading, so it does
+    /// not turn into a flaky test on a loaded CI box. It still fails
+    /// decisively if the concurrency is ever removed.
+    #[tokio::test]
+    async fn truncate_recalls_to_distinct_sessions_overlap() {
+        use crate::pnfs::mds::layout::LayoutManager;
+        use crate::pnfs::config::LayoutPolicy as ConfigLayoutPolicy;
+
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let back_channels: Arc<DashMap<SessionId, Vec<Arc<BackChannelWriter>>>> =
+            Arc::new(DashMap::new());
+
+        let mut recalls = Vec::new();
+        let mut keepalive = Vec::new();
+        let mut drains = Vec::new();
+        for i in 0..3u64 {
+            let session = state_mgr.sessions.create_session(
+                100 + i, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16,
+                0x4000_0000, None,
+            );
+            let (writer, server_read, client_read, client_write) = pair().await;
+            back_channels.insert(session.session_id, vec![Arc::clone(&writer)]);
+            let h = spawn_read_loop(Arc::clone(&writer), server_read);
+            // Drain the CALL and never reply — each session burns the full
+            // timeout, which is the whole point.
+            drains.push(tokio::spawn(async move {
+                let mut r = BufReader::new(client_read);
+                let _ = read_record(&mut r).await;
+            }));
+            keepalive.push((writer, client_write, h));
+            recalls.push((session.session_id, [i as u8 + 1; 16], vec![0xABu8; 8]));
+        }
+
+        let cb_mgr = CallbackManager::new(Arc::clone(&back_channels), Arc::clone(&state_mgr))
+            .with_timeout(Duration::from_millis(300));
+        // The layout map is empty, so revoke_layout is a no-op per
+        // stateid — this test is about the recall timing, not revocation.
+        let lm = LayoutManager::new(
+            Arc::new(crate::pnfs::mds::DeviceRegistry::new()),
+            ConfigLayoutPolicy::Stripe,
+            1 << 20,
+            crate::state_backend::memory_backend(),
+        );
+
+        let t0 = std::time::Instant::now();
+        let results = recall_layouts_for_truncate(&cb_mgr, &lm, "id:test", 0, &recalls).await;
+        let elapsed = t0.elapsed();
+
+        assert_eq!(results.len(), 3, "every recall must be reported");
+        for r in &results {
+            assert_eq!(r.outcome, RecallOutcome::TimedOut);
+        }
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "3 silent sessions took {:?} at a 300ms timeout — the recalls are \
+             running SEQUENTIALLY again, so a truncate now costs one CB timeout \
+             per unresponsive holder (measured live: 1 holder 10.5s, 3 holders 30.4s)",
+            elapsed,
+        );
+        for d in drains {
+            let _ = d.await;
+        }
     }
 
     /// No back-channel registered for the session → outcome is
