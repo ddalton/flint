@@ -612,7 +612,7 @@ CONSTANTS
                \* The 2026-07-29 code review found it in the code before the
                \* model could; these runs close that gap so the next belt's
                \* liveness is machine-checked rather than argued.
-  StageAdmit   \* TRUE = model admit_standbys_at_stage (driver.rs:1967 →
+  StageAdmit,  \* TRUE = model admit_standbys_at_stage (driver.rs:1967 →
                \* catchup.rs:2301) as its own action.  Required for the
                \* bounce's RETURN path: Admit cannot represent it — Admit
                \* demands claim = "admission" and serving # {}, while the
@@ -621,6 +621,70 @@ CONSTANTS
                \* record_in_sync (writer-set GROWTH) BEFORE the freshness
                \* gate rules (driver.rs:2089).  The code's order is
                \* admit→gate; this module's has been gate→admit.
+
+  (*************************************************************************)
+  (* THE KUBE-DS TRANCHE (2026-07-30).  The k8s DaemonSet controller as a   *)
+  (* THIRD actor, on its own pod-lifecycle axis, independent of the roller. *)
+  (*                                                                       *)
+  (* WHY IT HAS TO EXIST: MaintBarrier is conjoined ONLY into drain-side    *)
+  (* actions (MaintDrain :1979, MaintDrainSkip :2437, RoguePlanDrain :2665).*)
+  (* RollStart has NO redundancy gate of any kind and RollFinish is         *)
+  (* unconditional, so RollUnfenced.cfg is green with respect to a          *)
+  (* kubelet-side barrier it cannot express.  And the roller governs only   *)
+  (* OnDelete, which is OFF by default — the SHIPPED DaemonSet takes k8s    *)
+  (* RollingUpdate, which no flint code can refuse.                        *)
+  (*                                                                       *)
+  (* MEASURED LIVE 2026-07-30 (cluster runaq, k8s v1.34.10, 4 nodes,        *)
+  (* maxUnavailable=1) — these constants exist to make each observation     *)
+  (* a checkable claim rather than a story:                                 *)
+  (*   * all pods Ready, template bump  => max 1 unavailable NODE. Readiness*)
+  (*     DOES pace a DaemonSet roll.                                        *)
+  (*   * all pods NOT-Ready, bump       => ALL FOUR deleted in the SAME     *)
+  (*     SECOND.  update.go rollingUpdate() appends every unavailable       *)
+  (*     old-revision pod to allowedReplacementPods, which is NEVER clipped *)
+  (*     by the budget; only candidatePodsToDelete is.                      *)
+  (*   * delete one pod with 3 peers unavailable => replacement in ~5s.     *)
+  (*     Creation has ZERO availability accounting.                        *)
+  (*   * minReadySeconds=30, four HEALTHY Ready=True pods that had merely   *)
+  (*     flipped Ready recently => ALL FOUR deleted.                        *)
+  (*   * reproduced on flint's OWN csi-node DaemonSet (chart 1.21.0): two   *)
+  (*     spdk-tgt sidecars killed in the same second.                       *)
+  (*************************************************************************)
+  KubeDsArm,      \* TRUE = the DS controller exists.  FALSE in all 71
+                  \* legacy cfgs, which pins podPhase at Init and disables
+                  \* every new action, so no pre-existing behaviour graph
+                  \* moves.  This is the SHIPPED path: RollingUpdate with
+                  \* maintenance.drainRoll.enabled = FALSE.
+  ReadyScope,     \* WHICH readiness predicate the probe computes — the
+                  \* safety-critical choice, so every A/B varies it ALONE.
+                  \*   "socket"    SHIPPED: startupProbe test -S
+                  \*               /var/tmp/spdk.sock, a FILE, 2-5 min ahead
+                  \*               of data-path recovery.
+                  \*   "volume"    FORBIDDEN: a cross-node redundancy term.
+                  \*   "selfLive"  self-scoped but LIVE, not latching — the
+                  \*               probe a reviewer would actually write
+                  \*               believing they had followed the design.
+                  \*   "selfLatch" THE PROPOSAL: self-scoped, latching,
+                  \*               deadline-bounded.
+  PodTrigger,     \* WHICH trigger class may delete pods.  Craft rule 11: a
+                  \* model carrying ONE trigger reports the others as
+                  \* unreachable, and the measured result is exactly that
+                  \* readiness paces one class and not the other.
+                  \*   "template"  rollingUpdate() — the ONLY path that
+                  \*               consults readiness.
+                  \*   "evict"     manage() -> syncNodes(createDiff) — spot
+                  \*               reclaim, OOM, eviction.  No accounting.
+  MinReadySecsArm,\* TRUE = pods carry the minReadySeconds settle window.
+  MaxKubeEvents,  \* budget on external readiness faults.
+  GraceExceedsRecovery
+                  \* THE TRANCHE'S DELIVERABLE.  Without it ReadyOnDeadline
+                  \* is enabled in the very state PodStart produces, so the
+                  \* "deadline" is TRUE, every socket-arm behaviour has a
+                  \* step-for-step selfLatch counterpart, and NO run can
+                  \* show the proposal beats shipping nothing.  TRUE encodes
+                  \* "the configured grace outlives readmission latency" as
+                  \* "the deadline cannot fire while this node is still a
+                  \* warm standby awaiting admission".
 
 VARIABLES
   \* ---- data plane -------------------------------------------------------
@@ -894,10 +958,60 @@ VARIABLES
                  \* attributive ghost for PlannerDisjoint (the shared
                  \* pointless-rebounce canary cannot distinguish this
                  \* door from the three others, so it cannot test a fix)
-  everServed     \* SUBSET Legs — legs that have served in their CURRENT
+  everServed,    \* SUBSET Legs — legs that have served in their CURRENT
                  \* incarnation (Replace/Scrub wipe the payload and drop
                  \* membership).  The ghost that makes the admit-before-
                  \* gate theorem non-vacuous.
+  \* ---- the kube-DS axis (2026-07-30) ------------------------------------
+  podPhase,      \* [Nodes -> {"up","gone"}].  The POD, which is NOT the node
+                 \* and NOT the tgt.  SCOPE LIMIT, recorded because it now
+                 \* reads as a contradiction next to Responsive: TgtDie
+                 \* leaves podPhase alone, so a node whose tgt died is still
+                 \* pod-present.  The module has no action where a tgt death
+                 \* and a pod-readiness change are the SAME event — which is
+                 \* precisely the coupling a readinessProbe creates.
+  oldRev,        \* SUBSET Nodes — pods still on the pre-bump
+                 \* ControllerRevision.  A SET, re-minted by every
+                 \* TemplateBump, and PodStart removes n so a replacement is
+                 \* born current.  Deliberately NOT a counter: a counter
+                 \* admits exactly ONE campaign, and craft rule 5 — a scalar
+                 \* asserts a uniqueness the hazard denies.
+  probeGreen,    \* SUBSET Nodes — the MEMOIZED verdict of FLINT'S OWN probe.
+                 \* kubelet stores a pod condition and the controller reads
+                 \* the STORED one, so memoizing captures the one tick of
+                 \* probe staleness an inline evaluation cannot.
+  readyLatch,    \* SUBSET Nodes — the latch.  Monotone WITHIN an
+                 \* incarnation, with exactly ONE clearer (PodStart, and
+                 \* deletion).  That single-clearer fact is what makes the
+                 \* safety theorem structural rather than asserted.
+  settled,       \* SUBSET Nodes — minReadySeconds satisfied.  Cleared on the
+                 \* GREEN readiness transition as well as at pod start,
+                 \* because IsPodAvailable reads the Ready condition's
+                 \* LastTransitionTime.  Clearing only at start would be
+                 \* bookkeeping keyed on a REMEMBERED EVENT instead of the
+                 \* LIVE CONDITION (craft rule 7) and would make the MEASURED
+                 \* four-healthy-pods-deleted state unreachable.
+  extRed,        \* SUBSET Nodes — readiness reddened by something that is
+                 \* NOT the data path.  THE PRODUCER: a csi-node pod is Ready
+                 \* only when all four containers are, so the pod verdict
+                 \* already has an input unrelated to spdk-tgt.  This is
+                 \* exactly how runaq made 2 of 4 pods NotReady on the
+                 \* SHIPPED chart.  It is a conjunct of availability on EVERY
+                 \* arm: the fix arm does not get to be green by having its
+                 \* producer removed from it.
+  dsDeleted,     \* SUBSET Nodes — pods the controller has deleted.
+  kubeEvents,    \* 0..MaxKubeEvents
+  probeReddened, \* BOOLEAN ghost.  Single writer: ProbeEval's red branch,
+                 \* stamped only when the pod is present AND its tgt is up.
+  relatched,     \* BOOLEAN ghost.  Single writer: ReadyOnRecovery, stamped
+                 \* when a DELETED leg latches again — so the barrier probe
+                 \* names the ACTION (readmission ran) and not the SITUATION.
+  budgetBroken   \* BOOLEAN ghost.  Single writer: DsRollingUpdate.
+                 \* Inv_DsBudgetNeverBroken is a claim about a STEP (how many
+                 \* LIVE tgts died in one sync) and a state invariant cannot
+                 \* see a step.  Scoped to TgtUp nodes: TgtDie leaves podPhase
+                 \* alone, so an unscoped count would fire on a node the model
+                 \* is pretending is up — arithmetic, not harm.
 
 \* NOTE the bounce variables ARE in this tuple, deliberately: AgentFlag and
 \* AgentClear change nothing else, so with them omitted <<AgentClear(l)>>_vars
@@ -936,6 +1050,28 @@ gateVars == <<deferExpired>>
 \* untouched action carries exactly one extra UNCHANGED line).
 bounceVars == <<bounceWindow, bouncePlan, bounceRisk, consecutiveBounces,
                 dpFlag, everServed, podUp, bounceDoomed>>
+
+\* The kube-DS tranche's state.
+\*
+\* NOTE dsVars is deliberately NOT in `vars`, following the stalePlan /
+\* leaderMoved precedent noted above.  Keeping the tuple textually identical
+\* means [][Next]_vars and all THIRTY-EIGHT WF_vars(...) conjuncts are
+\* unchanged from before this tranche, so temporal checking cannot drift —
+\* the strongest zero-perturbation guarantee available, and it removes any
+\* need to touch the fairness block.  Fairness still works: WF_vars(A) needs
+\* an A-step that changes `vars`, and such steps exist because A's own
+\* variables still move.
+\*
+\* AND these do NOT appear in ~60 per-action UNCHANGED lists, unlike every
+\* previous tranche.  That route was measured and REJECTED: the existing
+\* groups do not nest uniformly (gateVars appears at 55 sites but only 35 are
+\* followed by bounceVars), so no scripted insertion covers every action, and
+\* a MISSED UNCHANGED is not loud — TLC reports an incompletely-specified
+\* successor only when that action actually FIRES, so a rarely-taken action
+\* survives the cheap runs and fails at run 60 of 91.  Instead Next wraps the
+\* whole legacy disjunction in `/\ UNCHANGED dsVars` exactly once; see Next.
+dsVars == <<podPhase, oldRev, probeGreen, readyLatch, settled, extRed,
+            dsDeleted, kubeEvents, probeReddened, relatched, budgetBroken>>
 
 \* A forced-stale (StaleFloor) member keeps record-state "stale" while it
 \* serves — the only way a stale-state leg is ever in the serving set
@@ -1001,8 +1137,32 @@ VaTruth == HostFor(localLegs)
 (***************************************************************************)
 VolumeUp == RaidPresent /\ serving # {}
 
+\* The composition host may be a node that owns no leg — the ordinary RWX
+\* shape.  The module has written (Legs \cup {"remote"}) inline since F62;
+\* naming it once is for the kube-DS tranche, which quantifies over it in
+\* nine actions.  Same set, so no existing definition changes meaning.
+Nodes == Legs \cup {"remote"}
+
+\* The shipped chart's maxUnavailable: node.yaml declares no rollingUpdate
+\* block, so this is k8s's default of 1.
+MaxUnavail == 1
+
 TypeOK ==
   /\ serving \subseteq Legs
+  \* ---- the kube-DS axis; no cardinality bound on any of these, because
+  \* the ABSENCE of a bound is what lets TLC occupy the fleet-wide-delete
+  \* state the tranche exists to find.
+  /\ podPhase \in [Nodes -> {"up", "gone"}]
+  /\ oldRev \subseteq Nodes
+  /\ probeGreen \subseteq Nodes
+  /\ readyLatch \subseteq Nodes
+  /\ settled \subseteq Nodes
+  /\ extRed \subseteq Nodes
+  /\ dsDeleted \subseteq Nodes
+  /\ kubeEvents \in 0..MaxKubeEvents
+  /\ probeReddened \in BOOLEAN
+  /\ relatched \in BOOLEAN
+  /\ budgetBroken \in BOOLEAN
   /\ zombie \subseteq Legs
   /\ legData \in [Legs -> SUBSET (1..MaxWrites)]
   /\ legUp \in [Legs -> {"up", "blackhole", "dead"}]
@@ -1053,12 +1213,28 @@ TypeOK ==
   /\ podUp \in BOOLEAN
   /\ bounceDoomed \in BOOLEAN
 
+\* ---- kube-DS helpers.  Declared here because Responsive reads TgtUp.
+\* (Nodes and MaxUnavail live above TypeOK, which types podPhase over Nodes.)
+
+PodPresent(n) == podPhase[n] = "up"
+
+\* "this node's spdk-tgt is serving": its pod exists AND, for a real leg,
+\* its node is up.  Note the asymmetry with TgtDie, which kills the
+\* composition WITHOUT touching podPhase — see the podPhase scope limit.
+TgtUp(n) == PodPresent(n) /\ (n \in Legs => legUp[n] = "up")
+
 \* A leg's data path answers: its node is up AND its tgt is not down for a
 \* planned restart.  The raid cannot tell the two apart — that symmetry is
 \* the whole landmine, and every data-plane guard below uses this, not
 \* legUp alone.  With MaintEnabled = FALSE, rolling = {} always and this
 \* reduces to the old legUp = "up".
+\*
+\* The KubeDsArm conjunct is how a DELETED POD reaches all ~20 Responsive
+\* sites at once: a csi-node pod delete kills spdk-tgt, so the leg stops
+\* answering.  Arm-gated, so with KubeDsArm = FALSE it is (FALSE => P) =
+\* TRUE and every legacy behaviour graph is untouched.
 Responsive(l) == legUp[l] = "up" /\ l \notin rolling
+                 /\ (KubeDsArm => TgtUp(l))
 
 UpInSync == {l \in Legs : state[l] = "insync" /\ Responsive(l)}
 
@@ -1111,8 +1287,52 @@ WarmWaiting ==
          /\ (RejoinGuard => legData[l] \subseteq legData[src])
          /\ (SizeGuard => (SizeHeal \/ legSize[src] = "old" \/ legSize[l] = "new"))
 
+\* The same predicate for ONE node, which is what the kube-DS grace needs:
+\* "the deadline cannot fire while this node is still a warm standby awaiting
+\* admission" is how GraceExceedsRecovery encodes "the configured grace
+\* outlives readmission latency".  Guarded on n \in Legs because state,
+\* legData and legSize are functions over Legs, so an unguarded version is a
+\* runtime error the moment it is applied to "remote".
+WarmWaitingFor(n) ==
+  /\ n \in Legs
+  /\ state[n] = "standby"
+  /\ Responsive(n)
+  /\ AdmissionOpen(n)
+  /\ epochCut \subseteq legData[n]
+  /\ serving # {}
+  /\ (SizeGuard => (SizeHeal \/ raidSize = "old" \/ legSize[n] = "new"))
+  /\ \E src \in serving :
+       /\ Responsive(src)
+       /\ (RejoinGuard => legData[n] \subseteq legData[src])
+       /\ (SizeGuard => (SizeHeal \/ legSize[src] = "old" \/ legSize[n] = "new"))
+
 Init ==
   /\ serving = Legs
+  \* ---- the kube-DS axis at rest.  With KubeDsArm = FALSE no action writes
+  \* any of these, so they are constant across every state of all 71 legacy
+  \* runs and each pre-existing state maps to exactly one new state — which
+  \* is why the distinct-state counts are required to be IDENTICAL.
+  /\ podPhase = [n \in Nodes |-> "up"]
+  /\ oldRev = {}
+  \* Nothing reports NotReady on the shipped chart: the csi-node DaemonSet
+  \* declares no readinessProbe at all (verified live on chart 1.21.0).
+  /\ probeGreen = Nodes
+  \* LATCHED at Init, like every other variable here: the run starts from a
+  \* healthy STEADY STATE (serving = Legs, every leg insync), i.e. pods that
+  \* started long ago and have long since recovered.  With readyLatch = {}
+  \* instead, the selfLatch verdict is FALSE at step 1 while the pod is still
+  \* marked green, so ProbeEval's change-guard fires and reddens EVERY pod
+  \* immediately — the fix arm would fail for a reason that has nothing to do
+  \* with the fix.  The latch is cleared by PodStart, which is exactly when
+  \* the grace is supposed to matter.
+  /\ readyLatch = Nodes
+  /\ settled = Nodes
+  /\ extRed = {}
+  /\ dsDeleted = {}
+  /\ kubeEvents = 0
+  /\ probeReddened = FALSE
+  /\ relatched = FALSE
+  /\ budgetBroken = FALSE
   /\ zombie = {}
   /\ legData = [l \in Legs |-> {}]
   /\ legUp = [l \in Legs |-> "up"]
@@ -2153,6 +2373,11 @@ StrikeRepair ==
   /\ vaNode \notin raidHosts
   \* is_staged_here — the belt, unconditional in the shipped code.
   /\ stagedAt = vaNode
+  \* The repair runs INSIDE the node agent process, so it cannot run on a
+  \* node whose pod is gone.  Without this the kube-DS tranche would let a
+  \* deleted node repair itself and every barrier run would be green for a
+  \* reason that cannot happen.  Arm-gated, so legacy runs are untouched.
+  /\ (KubeDsArm => TgtUp(vaNode))
   \* Something the records vouch for to rebuild from.
   /\ UpInSync # {}
   /\ raidHosts' = raidHosts \cup {vaNode}
@@ -3280,7 +3505,9 @@ DeferClockExpire ==
   /\ UNCHANGED raidVars
   /\ UNCHANGED bounceVars
 
-Next ==
+\* The legacy next-state relation, character-for-character as it stood before
+\* the kube-DS tranche.  Wrapped by Next below.
+NextLegacy ==
   \* The consumer relocating to a node that owns NO leg — the ordinary RWX
   \* shape, and unreachable from the per-leg quantifier below.
   \/ RelocateConsumer("remote")
@@ -3348,6 +3575,300 @@ Next ==
        \/ AgentFlag(l)
        \/ AgentClear(l)
        \/ AdmitAtStage(l)
+
+(***************************************************************************)
+(* THE KUBE-DS AXIS joins here, and this is the ONLY place the tranche      *)
+(* touches the legacy next-state relation.                                  *)
+(*                                                                          *)
+(* Every previous tranche added `/\ UNCHANGED <group>` to each pre-existing  *)
+(* action.  That route was measured and rejected for this one: the groups    *)
+(* do not nest uniformly (gateVars at 55 sites, only 35 followed by          *)
+(* bounceVars), so no scripted insertion reaches every action, and a MISSED  *)
+(* UNCHANGED is not loud — TLC reports an incompletely-specified successor    *)
+(* only when that action FIRES, so a rarely-taken action passes the cheap    *)
+(* runs and fails at run 60 of 91.  Sixty individually-silent edits is the   *)
+(* wrong risk in a module with four historical voids.                        *)
+(*                                                                          *)
+(* Wrapping the whole disjunction once is semantically exact and cannot      *)
+(* miss an action by construction.                                           *)
+(***************************************************************************)
+(***************************************************************************)
+(* THE KUBE-DS ACTIONS.  Every one is guarded on KubeDsArm, so with the     *)
+(* legacy value FALSE none is enabled and no pre-existing behaviour graph   *)
+(* can move — the property the zero-perturbation acceptance run pins.       *)
+(***************************************************************************)
+
+\* Shorthand for the DS actions that touch no data-plane state.  Mirrors the
+\* UNCHANGED shape TgtDie uses; deferExpired is covered by gateVars.
+LegacyUnchanged ==
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet,
+                 epochCut, claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED raidVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+\* Availability, exactly as podutil.IsPodAvailable computes it: Ready, AND
+\* Ready for longer than minReadySeconds.
+\*
+\* TWO DISTINCT INPUTS, and conflating them breaks the tranche in both
+\* directions.  probeGreen is FLINT'S OWN probe verdict; extRed is some OTHER
+\* container in the pod being NotReady.  A pod's Ready condition is the AND
+\* over its containers, so extRed makes the POD unavailable while saying
+\* nothing about flint's probe.  Folding extRed into the verdict would stamp
+\* probeReddened even under selfLatch and fire Inv_ProbeNeverReddensLive on
+\* the FIX arm — the guard would look broken when it is sound.
+Avail(n) == /\ n \in probeGreen
+            /\ n \notin extRed
+            /\ (MinReadySecsArm => n \in settled)
+
+\* THE BUG, transcribed from pkg/controller/daemon/update.go rollingUpdate().
+\* numUnavailable counts a node whose CURRENT (new-revision) pod is not
+\* available, or whose pod is missing.  An OLD-revision unavailable pod does
+\* NOT increment it — it goes to allowedReplacementPods, which is appended
+\* UNCLIPPED.  That asymmetry is the entire finding, and it is why V below
+\* can exceed MaxUnavail.
+NumUnavail ==
+  Cardinality({n \in Nodes : \/ ~PodPresent(n)
+                             \/ (PodPresent(n) /\ n \notin oldRev /\ ~Avail(n))})
+
+\* The self-scoped recovery predicate.  Guarded on n \in Legs so it is not
+\* vacuously TRUE for "remote" — an unguarded version latches for free and
+\* the barrier run passes without the readmission path ever running.
+SelfRecovered(n) ==
+  /\ n \in Legs
+  /\ (n \in raidHosts \/ state[n] = "insync")
+
+ProbeVerdict(n) ==
+  CASE ReadyScope = "socket"    -> TRUE
+    [] ReadyScope = "volume"    -> FullRedundancy
+    [] ReadyScope = "selfLive"  -> SelfRecovered(n)
+    [] ReadyScope = "selfLatch" -> n \in readyLatch
+    [] OTHER                    -> TRUE
+
+\* ---- 1. the trigger that READINESS PACES ---------------------------------
+TemplateBump ==
+  /\ KubeDsArm
+  /\ PodTrigger = "template"
+  /\ kubeEvents < MaxKubeEvents
+  /\ oldRev' = {n \in Nodes : PodPresent(n)}
+  /\ kubeEvents' = kubeEvents + 1
+  /\ UNCHANGED <<podPhase, probeGreen, readyLatch, settled, extRed,
+                 dsDeleted, probeReddened, relatched, budgetBroken>>
+  /\ LegacyUnchanged
+
+\* ---- 2. the controller's one sync.  THE HAZARD. --------------------------
+\* \E over C rather than CHOOSE: the controller's node iteration order is not
+\* exposed, so every selection must be explored rather than one canonical pick.
+DsRollingUpdate ==
+  /\ KubeDsArm
+  /\ PodTrigger = "template"
+  /\ LET Old        == {n \in Nodes : n \in oldRev /\ PodPresent(n)}
+         OldUnavail == {n \in Old : ~Avail(n)}
+         OldAvail   == {n \in Old : Avail(n)}
+         Remaining  == IF MaxUnavail > NumUnavail THEN MaxUnavail - NumUnavail
+                                                  ELSE 0
+         Clip       == IF Remaining < Cardinality(OldAvail) THEN Remaining
+                                                            ELSE Cardinality(OldAvail)
+     IN \E C \in SUBSET OldAvail :
+          /\ Cardinality(C) = Clip
+          /\ LET V == OldUnavail \cup C IN
+               /\ V # {}
+               /\ podPhase' = [n \in Nodes |-> IF n \in V THEN "gone" ELSE podPhase[n]]
+               /\ dsDeleted' = dsDeleted \cup V
+               \* THE HARM, scoped to tgts that were actually UP.  TgtDie
+               \* leaves podPhase alone, so an unscoped count would fire on a
+               \* node the model is pretending is up — arithmetic, not harm.
+               /\ budgetBroken' = (budgetBroken
+                                   \/ Cardinality({m \in V : TgtUp(m)}) > MaxUnavail)
+               /\ probeGreen' = probeGreen \ V
+               /\ readyLatch' = readyLatch \ V
+               /\ settled'    = settled \ V
+               /\ extRed'     = extRed \ V
+               \* A pod delete kills spdk-tgt, and that IS a class-3 death:
+               \* the composition dies, `staged` does NOT, so kubelet never
+               \* calls NodeStage again and the destroyer has no inverse.
+               \* WITHOUT THIS, VolumeUp can never fail and the whole
+               \* grace-deadline triple is vacuous.  Mirrors TgtDie(:2093).
+               /\ IF RaidLifetimeArm /\ (V \cap raidHosts) # {}
+                  THEN /\ raidHosts' = raidHosts \ V
+                       /\ serving' = {}
+                       /\ raidSeen' = DpSeenRehydrate
+                       /\ raidLostOnce' = TRUE
+                       /\ a2Created' = a2Created \ V
+                  ELSE UNCHANGED <<raidHosts, serving, raidSeen, raidLostOnce,
+                                   a2Created>>
+  /\ UNCHANGED <<oldRev, kubeEvents, probeReddened, relatched>>
+  \* UNPAIRED, deliberately: staged/stagedAt/vaNode untouched.
+  /\ UNCHANGED <<staged, stagedAt, vaNode, localLegs, relocating, adoptedA2,
+                 validateRemoved, flapped>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim,
+                 deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+\* ---- 3. kubelet recreates the pod.  The ONLY clearer of the latch. -------
+PodStart(n) ==
+  /\ KubeDsArm
+  /\ ~PodPresent(n)
+  /\ podPhase' = [podPhase EXCEPT ![n] = "up"]
+  /\ oldRev'     = oldRev \ {n}          \* the replacement is born CURRENT
+  /\ readyLatch' = readyLatch \ {n}
+  /\ probeGreen' = probeGreen \ {n}
+  /\ settled'    = settled \ {n}
+  /\ extRed'     = extRed \ {n}
+  /\ UNCHANGED <<dsDeleted, kubeEvents, probeReddened, relatched, budgetBroken>>
+  /\ LegacyUnchanged
+
+\* ---- 4. the FAILURE-DRIVEN trigger, which readiness does NOT pace. -------
+\* manage() -> podsShouldBeOnNode -> syncNodes(createDiff): zero availability
+\* accounting.  Carries the SAME composition-destroying clause, because a spot
+\* reclaim kills the tgt exactly as a template roll does.
+PodEvict(n) ==
+  /\ KubeDsArm
+  /\ PodTrigger = "evict"
+  /\ PodPresent(n)
+  /\ kubeEvents < MaxKubeEvents
+  /\ podPhase' = [podPhase EXCEPT ![n] = "gone"]
+  /\ dsDeleted' = dsDeleted \cup {n}
+  /\ kubeEvents' = kubeEvents + 1
+  /\ probeGreen' = probeGreen \ {n}
+  /\ readyLatch' = readyLatch \ {n}
+  /\ settled'    = settled \ {n}
+  /\ extRed'     = extRed \ {n}
+  /\ IF RaidLifetimeArm /\ n \in raidHosts
+     THEN /\ raidHosts' = raidHosts \ {n}
+          /\ serving' = {}
+          /\ raidSeen' = DpSeenRehydrate
+          /\ raidLostOnce' = TRUE
+          /\ a2Created' = a2Created \ {n}
+     ELSE UNCHANGED <<raidHosts, serving, raidSeen, raidLostOnce, a2Created>>
+  /\ UNCHANGED <<oldRev, probeReddened, relatched, budgetBroken>>
+  /\ UNCHANGED <<staged, stagedAt, vaNode, localLegs, relocating, adoptedA2,
+                 validateRemoved, flapped>>
+  /\ UNCHANGED <<zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
+                 lineage, riskSurfaced, state, writerSet, epochCut, claim,
+                 deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED gateVars
+  /\ UNCHANGED bounceVars
+
+\* ---- 5/6. THE PRODUCER: readiness reddened by a NON-data-path cause. -----
+\* A csi-node pod is Ready only when all four containers are.  This is how
+\* runaq made 2 of 4 pods NotReady on the SHIPPED chart.
+ExtProbeRed(n) ==
+  /\ KubeDsArm
+  /\ PodPresent(n)
+  /\ n \notin extRed
+  /\ kubeEvents < MaxKubeEvents
+  /\ extRed' = extRed \cup {n}
+  /\ kubeEvents' = kubeEvents + 1
+  /\ UNCHANGED <<podPhase, oldRev, probeGreen, readyLatch, settled, dsDeleted,
+                 probeReddened, relatched, budgetBroken>>
+  /\ LegacyUnchanged
+
+\* The GREEN transition CLEARS settled: IsPodAvailable reads the Ready
+\* condition's LastTransitionTime, so every red->green flip restarts the
+\* minReadySeconds clock.  Clearing only at pod start would be bookkeeping
+\* keyed on a REMEMBERED EVENT instead of the LIVE CONDITION, and would make
+\* the MEASURED state (four healthy Ready=True pods, all deleted) unreachable.
+ExtProbeGreen(n) ==
+  /\ KubeDsArm
+  /\ n \in extRed
+  /\ extRed' = extRed \ {n}
+  /\ settled' = settled \ {n}
+  /\ UNCHANGED <<podPhase, oldRev, probeGreen, readyLatch, dsDeleted,
+                 kubeEvents, probeReddened, relatched, budgetBroken>>
+  /\ LegacyUnchanged
+
+\* ---- 7. kubelet stores the verdict; the controller reads the STORED one. --
+ProbeEval(n) ==
+  /\ KubeDsArm
+  /\ PodPresent(n)
+  /\ LET g == ProbeVerdict(n) IN
+       /\ (g <=> n \notin probeGreen)              \* fire only on CHANGE
+       /\ probeGreen' = IF g THEN probeGreen \cup {n} ELSE probeGreen \ {n}
+       /\ settled'    = IF g THEN settled \ {n} ELSE settled
+       \* THE ANTI-CROSS-NODE TOOTH.  Single writer, stamped only when a
+       \* probe reddens a pod whose tgt is UP.  Under selfLatch this is
+       \* STRUCTURALLY unreachable — g is (n \in readyLatch), which only
+       \* GROWS within an incarnation while its only clearers (PodStart,
+       \* DsRollingUpdate, PodEvict) clear probeGreen in the SAME step, so
+       \* the red direction of the change-guard is unsatisfiable.  Under
+       \* "volume"/"selfLive" it fires in three steps.  A NAME-CHECKED
+       \* INVARIANT, not a temporal property: the harness greps only
+       \* "Temporal properties were violated" and names nothing.
+       /\ probeReddened' = (probeReddened \/ (~g /\ TgtUp(n)))
+  /\ UNCHANGED <<podPhase, oldRev, readyLatch, extRed, dsDeleted, kubeEvents,
+                 relatched, budgetBroken>>
+  /\ LegacyUnchanged
+
+\* ---- 8. the latch's honest arm ------------------------------------------
+ReadyOnRecovery(n) ==
+  /\ KubeDsArm
+  /\ ReadyScope = "selfLatch"
+  /\ PodPresent(n)
+  /\ n \notin readyLatch
+  /\ SelfRecovered(n)
+  /\ readyLatch' = readyLatch \cup {n}
+  \* Stamped when a DELETED leg latches again, so the barrier probe names the
+  \* ACTION (readmission ran) rather than the SITUATION (|dsDeleted| > 1).
+  /\ relatched' = (relatched \/ (n \in dsDeleted /\ n \in Legs))
+  /\ UNCHANGED <<podPhase, oldRev, probeGreen, settled, extRed, dsDeleted,
+                 kubeEvents, probeReddened, budgetBroken>>
+  /\ LegacyUnchanged
+
+\* ---- 9. the grace expires and the pod latches green anyway ---------------
+\* Unguarded, this is enabled in the very state PodStart produces, so the
+\* "deadline" is TRUE, every socket-arm behaviour has a step-for-step
+\* selfLatch counterpart, and no run can show the proposal beats shipping
+\* nothing.  GraceExceedsRecovery = TRUE encodes "the configured grace
+\* outlives readmission latency".
+ReadyOnDeadline(n) ==
+  /\ KubeDsArm
+  /\ ReadyScope = "selfLatch"
+  /\ PodPresent(n)
+  /\ n \notin readyLatch
+  /\ (GraceExceedsRecovery => ~WarmWaitingFor(n))
+  /\ readyLatch' = readyLatch \cup {n}
+  /\ UNCHANGED <<podPhase, oldRev, probeGreen, settled, extRed, dsDeleted,
+                 kubeEvents, probeReddened, relatched, budgetBroken>>
+  /\ LegacyUnchanged
+
+\* ---- 10. the minReadySeconds window elapses ------------------------------
+PodSettle(n) ==
+  /\ KubeDsArm
+  /\ MinReadySecsArm
+  /\ PodPresent(n)
+  /\ n \in probeGreen
+  /\ n \notin settled
+  /\ settled' = settled \cup {n}
+  /\ UNCHANGED <<podPhase, oldRev, probeGreen, readyLatch, extRed, dsDeleted,
+                 kubeEvents, probeReddened, relatched, budgetBroken>>
+  /\ LegacyUnchanged
+
+DsNext ==
+  \/ TemplateBump
+  \/ DsRollingUpdate
+  \/ \E n \in Nodes :
+       \/ PodStart(n)
+       \/ PodEvict(n)
+       \/ ExtProbeRed(n)
+       \/ ExtProbeGreen(n)
+       \/ ProbeEval(n)
+       \/ ReadyOnRecovery(n)
+       \/ ReadyOnDeadline(n)
+       \/ PodSettle(n)
+
+Next ==
+  \/ (NextLegacy /\ UNCHANGED dsVars)
+  \/ DsNext
 
 \* Recovery actions are weakly fair.  WF(RaidDeconfigure) is P4;
 \* WF(LegPerish) is the axiom that a blackhole eventually resolves
@@ -3656,6 +4177,26 @@ Inv_NoStaleServe == ~StaleServed
 \* halves happening to fall together.
 Inv_PlannedRollNeverCausesOutage ==
   (crashes = 0 /\ ~relocating) => VolumeUp
+
+(***************************************************************************)
+(* THE KUBE-DS THEOREMS.  Neither carries a `KubeDsArm =>` antecedent:      *)
+(* craft rule 3 says never condition an invariant on the arm it evaluates.  *)
+(* With the arm FALSE both ghosts stay at their Init values and these hold  *)
+(* trivially, WITHOUT being conditioned on the arm.                         *)
+(***************************************************************************)
+
+\* THE HARM.  A claim about a STEP — how many LIVE tgts died in one sync —
+\* which is why it needs a ghost: a state invariant cannot see a step.
+\* Scoped to TgtUp nodes because TgtDie leaves podPhase alone, so an
+\* unscoped count would fire on a node the model is pretending is up.
+Inv_DsBudgetNeverBroken == ~budgetBroken
+
+\* THE ANTI-CROSS-NODE TOOTH, and the tranche's answer to "what stops the
+\* next reviewer adding an in_sync term to the predicate?".  Under selfLatch
+\* this is structurally unreachable; under "volume" or "selfLive" TLC finds
+\* it in a handful of steps.  So a future cross-node predicate does not get
+\* argued about — it FAILS THE GATE.
+Inv_ProbeNeverReddensLive == ~probeReddened
 
 \* SPDK's own coupling, as a checkable claim: with no composition there is
 \* nothing for a base to be a member of (raid_bdev_deconfigure below the
