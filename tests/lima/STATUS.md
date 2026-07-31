@@ -765,7 +765,7 @@ So the client side is solved. The work is all on the MDS.
 
 | Component | Effort | Status today |
 |---|---:|---|
-| FFLv4 layout encoding (mirrored variant) | ~3 days | We had FFLv4 advertised but pulled it back (commit `cdbbe21`) because layout negotiation was off; bringing it back for mirroring is real-but-tractable work. The `FfLayoutReturn4` decoder already exists. |
+| FFLv4 layout encoding (mirrored variant) | ~3 days | **Written fresh, not re-enabled.** FFLv4 was advertised once and pulled back (`cdbbe21`) because the kernel silently discarded the body without issuing GETDEVICEINFO — that framing question is still open and must be settled against a real kernel first. The half-built encoder has since been deleted; it had no callers and had never been on a wire. See `docs/plans/pnfs-production-readiness.md` Phase C item 1 for what a fresh one must satisfy. The `FfLayoutReturn4` decoder does still exist (`pnfs/mds/operations/mod.rs:523`) and is wired into LAYOUTRETURN — but it is the *return* path only, and unreachable while all three FS_LAYOUT_TYPES sites advertise `[1]`. |
 | `LayoutPolicy::MirroredStripe { factor: N }` in MDS | ~2 days | Today's `LayoutManager::assign_segments_for_layout` picks one DS per stripe; needs to pick N and emit them as the mirror set. |
 | **CB_LAYOUTRECALL backchannel (Task #4)** | ~1-2 weeks | Required to revoke layouts when re-mirroring after DS failure. Already on the roadmap as a production prereq regardless. |
 | **State persistence (Task #5)** | ~1 week | Required so re-mirror progress survives MDS restart. Already on the roadmap. |

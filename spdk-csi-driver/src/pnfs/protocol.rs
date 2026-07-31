@@ -13,14 +13,6 @@ use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use crate::nfs::v4::xdr::{Nfs4XdrDecoder, Nfs4XdrEncoder};
 use crate::nfs::v4::protocol::StateId;
 
-/// Layout type constants (RFC 8881 Section 3.3.23, RFC 8435)
-pub mod layout_type {
-    pub const LAYOUT4_NFSV4_1_FILES: u32 = 1;
-    pub const LAYOUT4_BLOCK_VOLUME: u32 = 2;
-    pub const LAYOUT4_OSD2_OBJECTS: u32 = 3;
-    pub const LAYOUT4_FLEX_FILES: u32 = 4;  // RFC 8435 - Flexible File Layout
-}
-
 /// I/O mode constants (RFC 8881 Section 3.3.20)
 pub mod iomode {
     pub const LAYOUTIOMODE4_READ: u32 = 1;

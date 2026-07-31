@@ -29,24 +29,6 @@ pub fn generate_file_id(filename: &str) -> u64 {
     hasher.finish()
 }
 
-/// Generate pNFS filehandle for a specific stripe on a specific DS
-///
-/// # Arguments
-/// * `instance_id` - Cluster-wide shared instance ID
-/// * `filename` - Original filename (e.g., "test.dat")
-/// * `stripe_index` - Which stripe segment (0, 1, 2...)
-///
-/// # Returns
-/// Filehandle that works on any DS with matching instance_id
-pub fn generate_pnfs_filehandle(
-    instance_id: u64,
-    filename: &str,
-    stripe_index: u32,
-) -> Nfs4FileHandle {
-    let file_id = generate_file_id(filename);
-    generate_pnfs_filehandle_from_id(instance_id, file_id, stripe_index)
-}
-
 /// Generate a v2 filehandle from an ALLOCATED file identity (the
 /// placement's `file_id`). Prefer this over the name-hash variant:
 /// name-derived ids are deterministic, so a recreated same-name file
@@ -150,8 +132,9 @@ mod tests {
         let filename = "test.dat";
         let stripe_index = 5;
         
-        let fh = generate_pnfs_filehandle(instance_id, filename, stripe_index);
-        
+        let fh = generate_pnfs_filehandle_from_id(
+            instance_id, generate_file_id(filename), stripe_index);
+
         assert_eq!(fh.data.len(), 21);
         assert_eq!(fh.data[0], 2); // version
         
@@ -177,7 +160,8 @@ mod tests {
     #[test]
     fn test_ds_path_mapping() {
         let instance_id = 1734648000000000000u64;
-        let fh = generate_pnfs_filehandle(instance_id, "test.dat", 3);
+        let fh = generate_pnfs_filehandle_from_id(
+            instance_id, generate_file_id("test.dat"), 3);
         
         let ds_path = filehandle_to_ds_path(&fh, Path::new("/mnt/pnfs-data")).unwrap();
         

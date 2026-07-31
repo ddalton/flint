@@ -270,7 +270,24 @@ Builds on A + B. Roughly the timeline from STATUS.md's "HDFS replication
 factor 3" section, **substantially shorter** because A + B are no longer
 on the critical path:
 
-1. Re-enable FFLv4 layout encoding for mirrors. ~3 days.
+1. **Write** an FFLv4 layout encoder for mirrors — from scratch, ~3
+   days. There is nothing to re-enable: the half-built encoder was
+   deleted (it had never been on a wire, and its five green tests
+   asserted only its own output). A fresh one must satisfy, at minimum:
+   v2 `file_id`-keyed filehandles via
+   `generate_pnfs_filehandle_from_id` (the name-hash variant is gone —
+   a recreated same-name file collided with its predecessor's stripes);
+   a real `ffds_stateid`, not the anonymous all-zeros one; and a
+   *decided* coupling model for `ffds_user`/`ffds_group` rather than
+   empty strings, since a second client↔DS identity domain is the most
+   expensive known bug class here. Settle the `ff_layout4` framing
+   against a real kernel before writing anything — commit `cdbbe21`
+   pulled FFLv4 back because Linux silently discarded the body without
+   ever issuing GETDEVICEINFO, and that question is still open.
+   Per-DS deviceids already resolve (`pnfs/mds/device.rs:167`); no
+   `stripe_groups` work is needed, and stripe rotation is not
+   applicable — a mirrored `ff_mirror4` carries one `ff_data_server4`,
+   so there is no array order to rotate.
 2. `LayoutPolicy::MirroredStripe { factor: N }`. ~2 days.
 3. Topology-aware DS selection. ~3 days.
 4. Re-mirror coordinator (the new subsystem). ~2 weeks.
