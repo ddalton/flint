@@ -85,6 +85,10 @@ pub struct CreateSessionOp {
 
     /// Callback program number
     pub cb_program: u32,
+
+    /// Credentials the client will accept on callback CALLs
+    /// (`csa_sec_parms<>`). The server MUST pick one of these — see C8.
+    pub cb_sec: Vec<crate::nfs::v4::compound::CallbackSecParms>,
 }
 
 // ChannelAttrs is now imported from compound.rs to ensure field name consistency
@@ -474,6 +478,34 @@ impl SessionOperationHandler {
             negotiated_max_ops,
             negotiated_max_requests,
             op.cb_program,
+            // C8: pick a credential the CLIENT said it would accept.
+            // AUTH_SYS is preferred when offered — it is what Linux
+            // advertises and what it will actually honour; AUTH_NONE is
+            // used only when explicitly offered or when nothing was.
+            // RPCSEC_GSS is recognised but not emittable, so it is
+            // skipped rather than selected.
+            op.cb_sec
+                .iter()
+                .find(|p| matches!(p, crate::nfs::v4::compound::CallbackSecParms::Sys { .. }))
+                .or_else(|| {
+                    op.cb_sec
+                        .iter()
+                        .find(|p| matches!(p, crate::nfs::v4::compound::CallbackSecParms::None))
+                })
+                .cloned(),
+        );
+
+        // C8 evidence, logged rather than assumed: what the client will
+        // actually ACCEPT on a callback. The pre-C8 code hardcoded
+        // AUTH_NONE on the belief this "matches Linux client behaviour";
+        // that belief was never measured, and a Linux 6.1 client denied
+        // the RPC. Print the offer so the next person does not have to
+        // guess either.
+        info!(
+            "CREATE_SESSION: client offered {} callback credential(s): {:?} → selected {:?}",
+            op.cb_sec.len(),
+            op.cb_sec,
+            session.cb_cred,
         );
 
         info!("CREATE_SESSION: Session {:?} created for client {} with {}KB buffers",
@@ -726,6 +758,40 @@ impl SessionOperationHandler {
 
 #[cfg(test)]
 mod tests {
+    /// C8 selection. The server MUST pick a credential the client
+    /// offered (RFC 8881 §18.36.3); AUTH_SYS is preferred because it is
+    /// what Linux advertises, and RPCSEC_GSS must never be selected —
+    /// flint cannot emit it, so choosing it would guarantee a DENIED.
+    #[test]
+    fn selects_a_credential_the_client_actually_offered() {
+        use crate::nfs::v4::compound::CallbackSecParms as P;
+        let sys = P::Sys {
+            stamp: 1,
+            machinename: "host".into(),
+            uid: 0,
+            gid: 0,
+            gids: vec![],
+        };
+        let pick = |offer: Vec<P>| -> Option<P> {
+            offer
+                .iter()
+                .find(|p| matches!(p, P::Sys { .. }))
+                .or_else(|| offer.iter().find(|p| matches!(p, P::None)))
+                .cloned()
+        };
+
+        // AUTH_SYS wins when offered, whatever the order.
+        assert_eq!(pick(vec![sys.clone()]), Some(sys.clone()));
+        assert_eq!(pick(vec![P::None, sys.clone()]), Some(sys.clone()));
+        assert_eq!(pick(vec![P::Gss, sys.clone()]), Some(sys.clone()));
+        // AUTH_NONE only when it is what was offered.
+        assert_eq!(pick(vec![P::None]), Some(P::None));
+        // Nothing usable: GSS alone, or an empty offer, must NOT select
+        // GSS — degrade to AUTH_NONE rather than send what we cannot build.
+        assert_eq!(pick(vec![P::Gss]), None);
+        assert_eq!(pick(vec![]), None);
+    }
+
     use super::*;
 
     #[test]
@@ -772,6 +838,7 @@ mod tests {
             fore_chan_attrs: ChannelAttrs::default(),
             back_chan_attrs: ChannelAttrs::default(),
             cb_program: 0,
+            cb_sec: Vec::new(),
         };
 
         let res = handler.handle_create_session(create_op, &CompoundContext::new(1));
@@ -801,6 +868,7 @@ mod tests {
             fore_chan_attrs: ChannelAttrs::default(),
             back_chan_attrs: ChannelAttrs::default(),
             cb_program: 0,
+            cb_sec: Vec::new(),
         };
         let create_res = handler.handle_create_session(create_op, &CompoundContext::new(1));
 
@@ -851,6 +919,7 @@ mod tests {
             fore_chan_attrs: ChannelAttrs::default(),
             back_chan_attrs: ChannelAttrs::default(),
             cb_program: 0,
+            cb_sec: Vec::new(),
         };
         let create_res = handler.handle_create_session(create_op, &CompoundContext::new(1));
 
@@ -911,6 +980,7 @@ mod tests {
             fore_chan_attrs: ChannelAttrs::default(),
             back_chan_attrs: ChannelAttrs::default(),
             cb_program: 0,
+            cb_sec: Vec::new(),
         };
         let create_res = handler.handle_create_session(create_op, &CompoundContext::new(1));
 

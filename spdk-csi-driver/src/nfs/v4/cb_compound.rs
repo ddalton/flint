@@ -248,6 +248,61 @@ fn encode_cb_op(enc: &mut XdrEncoder, op: &CbOp) {
 /// validate callback creds beyond presence of an AUTH_NONE
 /// placeholder, and RPCSEC_GSS on the back-channel is a separate
 /// project that can land later without re-shaping this API.
+/// Encode a callback CALL with the credential the client offered at
+/// CREATE_SESSION.
+///
+/// C8: this used to hardcode AUTH_NONE on the stated belief that it
+/// "matches Linux client behaviour". A Linux 6.1 client DENIED the RPC
+/// for it (reply_status=1, in 419 µs — an active refusal, not a
+/// timeout), and RFC 8881 §18.36.3 requires the server to use one of the
+/// credentials from `csa_sec_parms<>`.
+pub fn encode_cb_call_with_cred(
+    xid: u32,
+    cb_program: u32,
+    cred: Option<&crate::nfs::v4::compound::CallbackSecParms>,
+    args: &CbCompoundCall,
+) -> Bytes {
+    use crate::nfs::v4::compound::CallbackSecParms;
+    let mut enc = XdrEncoder::new();
+    enc.encode_u32(xid);
+    enc.encode_u32(MessageType::Call as u32);
+    enc.encode_u32(2); // RPC version
+    enc.encode_u32(cb_program);
+    enc.encode_u32(CB_VERSION);
+    enc.encode_u32(cb_procedure::CB_COMPOUND);
+
+    match cred {
+        Some(CallbackSecParms::Sys { stamp, machinename, uid, gid, gids }) => {
+            // AUTH_SYS: the body is the authsys_parms the CLIENT gave us,
+            // echoed verbatim. Length-prefixed as an opaque, so build it
+            // first and then emit it.
+            let mut body = XdrEncoder::new();
+            body.encode_u32(*stamp);
+            body.encode_string(machinename);
+            body.encode_u32(*uid);
+            body.encode_u32(*gid);
+            body.encode_u32(gids.len() as u32);
+            for g in gids {
+                body.encode_u32(*g);
+            }
+            enc.encode_u32(AuthFlavor::Unix as u32);
+            enc.encode_opaque(&body.finish());
+        }
+        // AUTH_NONE, or nothing usable offered.
+        _ => {
+            enc.encode_u32(AuthFlavor::Null as u32);
+            enc.encode_opaque(&[]);
+        }
+    }
+    // Verifier is always AUTH_NONE for these flavours (RFC 5531 §8.2).
+    enc.encode_u32(AuthFlavor::Null as u32);
+    enc.encode_opaque(&[]);
+
+    let body = args.encode();
+    enc.append_raw(&body);
+    enc.finish()
+}
+
 pub fn encode_cb_call(xid: u32, cb_program: u32, args: &CbCompoundCall) -> Bytes {
     let mut enc = XdrEncoder::new();
     // RPC header — see RFC 5531 §9.
@@ -548,7 +603,11 @@ mod tests {
         assert_eq!(dec.decode_u32().unwrap(), cb_program);
         assert_eq!(dec.decode_u32().unwrap(), CB_VERSION);
         assert_eq!(dec.decode_u32().unwrap(), cb_procedure::CB_COMPOUND);
-        // cred (AUTH_NONE, empty body)
+        // cred: AUTH_NONE only because this call passed no credential.
+        // The old version of this assertion was unconditional, which made
+        // it a statement that flint ALWAYS sends AUTH_NONE — i.e. it
+        // encoded C8 as a requirement and would have blocked the fix.
+        // See cb_call_uses_the_credential_the_client_offered.
         assert_eq!(dec.decode_u32().unwrap(), AuthFlavor::Null as u32);
         assert_eq!(dec.decode_opaque().unwrap().len(), 0);
         // verf (AUTH_NONE, empty body)
@@ -745,5 +804,59 @@ mod tests {
             }
         }
         enc.finish()
+    }
+
+    /// C8. Measured on runas 2026-07-31: a Linux 6.1 client advertises
+    /// EXACTLY ONE callback credential and it is AUTH_SYS —
+    ///
+    ///   0000 0001   csa_sec_parms<> count = 1
+    ///   0000 0001   cb_secflavor = AUTH_SYS
+    ///   ...         stamp, "ip-172-31-15-129...", uid 0, gid 0
+    ///
+    /// so the pre-C8 hardcoded AUTH_NONE was guaranteed to be DENIED.
+    /// The server must echo the client's own authsys_parms back
+    /// (RFC 8881 §18.36.3).
+    #[test]
+    fn cb_call_uses_the_credential_the_client_offered() {
+        use crate::nfs::v4::compound::CallbackSecParms;
+        let cred = CallbackSecParms::Sys {
+            stamp: 0xda039c49,
+            machinename: "ip-172-31-15-129.us-west-1.compute.internal".into(),
+            uid: 0,
+            gid: 0,
+            gids: vec![],
+        };
+        let bytes = encode_cb_call_with_cred(7, 0x40000000, Some(&cred), &sample_recall_call());
+        let mut dec = XdrDecoder::new(bytes.clone());
+        assert_eq!(dec.decode_u32().unwrap(), 7); // xid
+        assert_eq!(dec.decode_u32().unwrap(), MessageType::Call as u32);
+        assert_eq!(dec.decode_u32().unwrap(), 2);
+        assert_eq!(dec.decode_u32().unwrap(), 0x40000000);
+        assert_eq!(dec.decode_u32().unwrap(), CB_VERSION);
+        assert_eq!(dec.decode_u32().unwrap(), cb_procedure::CB_COMPOUND);
+
+        // THE assertion: AUTH_SYS, not AUTH_NONE.
+        assert_eq!(dec.decode_u32().unwrap(), AuthFlavor::Unix as u32);
+        let body = dec.decode_opaque().unwrap();
+        let mut b = XdrDecoder::new(bytes::Bytes::from(body));
+        assert_eq!(b.decode_u32().unwrap(), 0xda039c49);
+        assert_eq!(b.decode_string().unwrap(), "ip-172-31-15-129.us-west-1.compute.internal");
+        assert_eq!(b.decode_u32().unwrap(), 0); // uid
+        assert_eq!(b.decode_u32().unwrap(), 0); // gid
+        assert_eq!(b.decode_u32().unwrap(), 0); // gids<> empty
+
+        // Verifier stays AUTH_NONE (RFC 5531 §8.2).
+        assert_eq!(dec.decode_u32().unwrap(), AuthFlavor::Null as u32);
+        assert_eq!(dec.decode_opaque().unwrap().len(), 0);
+    }
+
+    /// Nothing offered ⇒ AUTH_NONE, which is the honest degradation.
+    #[test]
+    fn cb_call_falls_back_to_auth_none_when_nothing_offered() {
+        let bytes = encode_cb_call_with_cred(9, 0x40000000, None, &sample_recall_call());
+        let mut dec = XdrDecoder::new(bytes.clone());
+        for _ in 0..6 { let _ = dec.decode_u32().unwrap(); }
+        assert_eq!(dec.decode_u32().unwrap(), AuthFlavor::Null as u32);
+        assert_eq!(dec.decode_opaque().unwrap().len(), 0);
     }
 }

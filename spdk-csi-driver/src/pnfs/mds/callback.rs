@@ -259,11 +259,31 @@ impl CallbackManager {
             ],
         };
 
+        let cb_cred = self
+            .state_mgr
+            .sessions
+            .get_session(session_id)
+            .and_then(|s| s.cb_cred.clone());
         info!(
-            "📢 CB_LAYOUTRECALL → session {:?} (cb_program={}, type={}, iomode={})",
-            session_id, cb_program, layout_type, iomode,
+            "📢 CB_LAYOUTRECALL → session {:?} (cb_program={}, type={}, iomode={}, cred={})",
+            session_id,
+            cb_program,
+            layout_type,
+            iomode,
+            // Name the flavour: a DENIED reply is otherwise a guessing game
+            // about which of {what we sent, what was offered} is wrong, and
+            // that guess cost a live drill once already (C8).
+            match cb_cred.as_ref() {
+                Some(crate::nfs::v4::compound::CallbackSecParms::Sys { uid, gid, .. }) =>
+                    format!("AUTH_SYS uid={} gid={}", uid, gid),
+                Some(crate::nfs::v4::compound::CallbackSecParms::Gss) => "RPCSEC_GSS (UNSUPPORTED — will be denied)".to_string(),
+                _ => "AUTH_NONE".to_string(),
+            },
         );
-        let reply = match writer.send_cb_compound(cb_program, &call, self.timeout).await {
+        let reply = match writer
+            .send_cb_compound(cb_program, cb_cred.as_ref(), &call, self.timeout)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 // The call may or may not have reached the client. Advance
@@ -718,6 +738,7 @@ mod tests {
             16,                 // max_ops
             16,                 // max_requests
             cb_program,
+            None,
         );
         (state_mgr, session.session_id)
     }
@@ -1104,11 +1125,11 @@ mod tests {
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let session_a = state_mgr
             .sessions
-            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000)
+            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None)
             .session_id;
         let session_b = state_mgr
             .sessions
-            .create_session(2, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000)
+            .create_session(2, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None)
             .session_id;
 
         let back_channels = Arc::new(DashMap::new());
@@ -1181,7 +1202,7 @@ mod tests {
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let session_id = state_mgr
             .sessions
-            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000)
+            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None)
             .session_id;
         let back_channels = Arc::new(DashMap::new());
         back_channels.insert(session_id, vec![Arc::clone(&writer)]);

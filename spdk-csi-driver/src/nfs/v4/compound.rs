@@ -24,6 +24,79 @@ use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use bytes::Bytes;
 use tracing::{warn, debug};
 
+/// One entry of `csa_sec_parms<>` (RFC 8881 §18.36.1): a credential the
+/// client is willing to accept on callback CALLs.
+///
+/// Only the two flavours flint can actually emit are represented.
+/// RPCSEC_GSS is parsed far enough to be SKIPPED correctly — the body is
+/// `gss_cb_handles4`, and mis-framing it would desync every later entry,
+/// so it is consumed rather than ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallbackSecParms {
+    /// AUTH_NONE — no credential body.
+    None,
+    /// AUTH_SYS. The server must echo back exactly these values, so the
+    /// whole `authsys_parms` is kept, not just the flavour.
+    Sys {
+        stamp: u32,
+        machinename: String,
+        uid: u32,
+        gid: u32,
+        gids: Vec<u32>,
+    },
+    /// RPCSEC_GSS — recognised and skipped; flint cannot emit it yet.
+    Gss,
+}
+
+/// Decode `csa_sec_parms<>`.
+///
+/// Returns Err on a malformed body so the caller can degrade to
+/// AUTH_NONE rather than desync — see the call site for why that is the
+/// right failure mode here.
+fn decode_callback_sec_parms(d: &mut XdrDecoder) -> Result<Vec<CallbackSecParms>, String> {
+    const AUTH_NONE: u32 = 0;
+    const AUTH_SYS: u32 = 1;
+    const RPCSEC_GSS: u32 = 6;
+
+    let count = d.decode_u32()? as usize;
+    // A client offering hundreds of callback credentials is malformed;
+    // bound it so a bad length cannot make us allocate wildly.
+    if count > 16 {
+        return Err(format!("csa_sec_parms<> length implausible: {}", count));
+    }
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        match d.decode_u32()? {
+            AUTH_NONE => out.push(CallbackSecParms::None),
+            AUTH_SYS => {
+                let stamp = d.decode_u32()?;
+                let machinename = d.decode_string()?;
+                let uid = d.decode_u32()?;
+                let gid = d.decode_u32()?;
+                let n = d.decode_u32()? as usize;
+                if n > 16 {
+                    return Err(format!("authsys_parms gids<16> too long: {}", n));
+                }
+                let mut gids = Vec::with_capacity(n);
+                for _ in 0..n {
+                    gids.push(d.decode_u32()?);
+                }
+                out.push(CallbackSecParms::Sys { stamp, machinename, uid, gid, gids });
+            }
+            RPCSEC_GSS => {
+                // gss_cb_handles4: gcbp_service (u32) + two opaque<> handles.
+                let _service = d.decode_u32()?;
+                let _handle_from_server = d.decode_opaque()?;
+                let _handle_from_client = d.decode_opaque()?;
+                out.push(CallbackSecParms::Gss);
+            }
+            other => return Err(format!("unknown callback sec flavour {}", other)),
+        }
+    }
+    Ok(out)
+}
+
+
 /// utf8str_cs validity beyond raw UTF-8: RFC 8881 §14.4 excludes Unicode
 /// noncharacters (pynfs COMP3 sends U+FFFE as a compound tag and expects
 /// NFS4ERR_INVAL; RNM8/9 do the same with component names).
@@ -215,6 +288,10 @@ pub enum Operation {
         /// on the session so the back-channel writer's call frame can
         /// address `program=cb_program, version=1, proc=CB_COMPOUND`.
         cb_program: u32,
+        /// `csa_sec_parms<>` — the credentials the client will ACCEPT on
+        /// callback CALLs (RFC 8881 §18.36.3). Empty means it offered
+        /// none, which we read as AUTH_NONE.
+        cb_sec: Vec<CallbackSecParms>,
     },
     DestroySession(SessionId),
     DestroyClientId(u64),        // clientid
@@ -1392,6 +1469,8 @@ impl CompoundRequest {
                     impl_id,
                 })
             }
+
+
             opcode::CREATE_SESSION => {
                 // Wire layout (RFC 5661 §18.36):
                 //   csa_clientid (u64)
@@ -1455,15 +1534,24 @@ impl CompoundRequest {
                 let cb_program = decoder.decode_u32()?;
 
                 // csa_sec_parms<> is a discriminated union on auth_flavor4 —
-                // it has variable, flavor-specific body sizes, NOT a uniform
-                // length prefix per element. AUTH_NONE has 0 bytes, AUTH_SYS
-                // carries authsys_parms, RPCSEC_GSS carries gss_cb_handles4.
-                // We currently emit callbacks with AUTH_NONE creds (matches
-                // Linux client behaviour for v4.1 mounts), so we don't yet
-                // need to act on the parms; we leave them unconsumed.
-                // CREATE_SESSION is universally the last op in the COMPOUND,
-                // so leaving the remaining bytes unconsumed does not desync
-                // the next op.
+                // variable, flavor-specific body sizes, NOT a uniform length
+                // prefix per element. AUTH_NONE has 0 bytes, AUTH_SYS carries
+                // authsys_parms, RPCSEC_GSS carries gss_cb_handles4.
+                //
+                // C8: this used to be left unconsumed, on the stated
+                // assumption that emitting AUTH_NONE creds "matches Linux
+                // client behaviour for v4.1 mounts". The 2026-07-31 runas
+                // drill falsified it: a Linux 6.1 client DENIED the callback
+                // RPC outright (reply_status=1) in 419 µs. RFC 8881 §18.36.3
+                // is explicit — the server MUST use one of the credentials
+                // the client offered here. So decode them and remember what
+                // was on offer.
+                //
+                // A decode failure is NOT fatal: falling back to an empty
+                // list degrades to AUTH_NONE, which is exactly the old
+                // behaviour, and refusing the whole CREATE_SESSION over a
+                // callback detail would break mounts that never use one.
+                let cb_sec = decode_callback_sec_parms(decoder).unwrap_or_default();
 
                 Ok(Operation::CreateSession {
                     clientid,
@@ -1472,6 +1560,7 @@ impl CompoundRequest {
                     fore_chan_attrs,
                     back_chan_attrs,
                     cb_program,
+                    cb_sec,
                 })
             }
             opcode::DESTROY_SESSION => {
@@ -2458,6 +2547,105 @@ impl CompoundResponse {
 
 #[cfg(test)]
 mod tests {
+    // ── C8: csa_sec_parms<> ──────────────────────────────────────────
+    //
+    // There were NO CREATE_SESSION decode tests before this. That is how
+    // "we leave them unconsumed" survived: nothing looked at the field,
+    // and the one CB-encoding test that existed asserted AUTH_NONE
+    // unconditionally — encoding the bug as a requirement.
+    //
+    // The AUTH_SYS bytes below are the real ones a Linux 6.1 client sent
+    // on runas, 2026-07-31, captured with tcpdump at CREATE_SESSION.
+
+    fn sec_parms_bytes(entries: &[&[u8]]) -> bytes::Bytes {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for e in entries {
+            v.extend_from_slice(e);
+        }
+        bytes::Bytes::from(v)
+    }
+
+    /// The exact AUTH_SYS entry observed on the wire.
+    fn linux_auth_sys_entry() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&1u32.to_be_bytes());          // AUTH_SYS
+        v.extend_from_slice(&0xda039c49u32.to_be_bytes()); // stamp
+        let name = b"ip-172-31-15-129.us-west-1.compute.internal"; // 43 bytes
+        v.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        v.extend_from_slice(name);
+        v.push(0); // XDR pad to a 4-byte boundary (43 -> 44)
+        v.extend_from_slice(&0u32.to_be_bytes());          // uid
+        v.extend_from_slice(&0u32.to_be_bytes());          // gid
+        v.extend_from_slice(&0u32.to_be_bytes());          // gids<> empty
+        v
+    }
+
+    #[test]
+    fn decodes_the_auth_sys_offer_a_real_linux_client_sends() {
+        let buf = sec_parms_bytes(&[&linux_auth_sys_entry()]);
+        let mut d = XdrDecoder::new(buf);
+        let parsed = decode_callback_sec_parms(&mut d).expect("decodes");
+        assert_eq!(
+            parsed,
+            vec![CallbackSecParms::Sys {
+                stamp: 0xda039c49,
+                machinename: "ip-172-31-15-129.us-west-1.compute.internal".into(),
+                uid: 0,
+                gid: 0,
+                gids: vec![],
+            }],
+            "a Linux 6.1 client offers exactly one credential and it is AUTH_SYS — \
+             the pre-C8 hardcoded AUTH_NONE could only ever be DENIED",
+        );
+    }
+
+    #[test]
+    fn decodes_auth_none_and_an_empty_offer() {
+        let none_entry = 0u32.to_be_bytes().to_vec();
+        let mut d = XdrDecoder::new(sec_parms_bytes(&[&none_entry]));
+        assert_eq!(
+            decode_callback_sec_parms(&mut d).unwrap(),
+            vec![CallbackSecParms::None]
+        );
+
+        let mut d = XdrDecoder::new(sec_parms_bytes(&[]));
+        assert!(decode_callback_sec_parms(&mut d).unwrap().is_empty());
+    }
+
+    /// RPCSEC_GSS must be CONSUMED, not ignored: its body is variable
+    /// length, so mis-framing it desyncs every entry after it.
+    #[test]
+    fn gss_entry_is_consumed_so_later_entries_still_parse() {
+        let mut gss = Vec::new();
+        gss.extend_from_slice(&6u32.to_be_bytes()); // RPCSEC_GSS
+        gss.extend_from_slice(&1u32.to_be_bytes()); // gcbp_service
+        gss.extend_from_slice(&4u32.to_be_bytes()); // handle len
+        gss.extend_from_slice(b"abcd");
+        gss.extend_from_slice(&2u32.to_be_bytes()); // handle len
+        gss.extend_from_slice(b"xy");
+        gss.extend_from_slice(&[0, 0]);             // pad to 4
+
+        let buf = sec_parms_bytes(&[&gss, &linux_auth_sys_entry()]);
+        let mut d = XdrDecoder::new(buf);
+        let parsed = decode_callback_sec_parms(&mut d).expect("decodes past the GSS entry");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], CallbackSecParms::Gss);
+        assert!(
+            matches!(&parsed[1], CallbackSecParms::Sys { machinename, .. }
+                     if machinename.starts_with("ip-172-31")),
+            "the entry AFTER the GSS one must still frame correctly",
+        );
+    }
+
+    #[test]
+    fn refuses_an_implausible_offer_rather_than_allocating() {
+        let mut v = Vec::new();
+        v.extend_from_slice(&9999u32.to_be_bytes());
+        let mut d = XdrDecoder::new(bytes::Bytes::from(v));
+        assert!(decode_callback_sec_parms(&mut d).is_err());
+    }
+
     use super::*;
     use crate::nfs::xdr::XdrDecoder;
     use bytes::{BytesMut, BufMut};

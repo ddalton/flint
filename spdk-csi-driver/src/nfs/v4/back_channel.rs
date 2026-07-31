@@ -35,7 +35,7 @@
 //! path so awaiters see a clean error instead of hanging forever.
 
 use crate::nfs::v4::cb_compound::{
-    decode_cb_reply, encode_cb_call, CbCompoundCall, CbCompoundReply, CbReplyError,
+    decode_cb_reply, encode_cb_call_with_cred, CbCompoundCall, CbCompoundReply, CbReplyError,
 };
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -222,11 +222,12 @@ impl BackChannelWriter {
     pub async fn send_cb_compound(
         self: &Arc<Self>,
         cb_program: u32,
+        cred: Option<&crate::nfs::v4::compound::CallbackSecParms>,
         args: &CbCompoundCall,
         timeout: Duration,
     ) -> Result<CbCompoundReply, CallbackError> {
         let xid = self.next_xid();
-        let frame = encode_cb_call(xid, cb_program, args);
+        let frame = encode_cb_call_with_cred(xid, cb_program, cred, args);
         let rx = self.register_inflight(xid);
 
         // Send first; any transport error means the inflight slot

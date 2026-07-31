@@ -103,13 +103,32 @@ kubectl exec "$WA" -- sh -c "awk -v fid=${PFX} -v blocks=$BLOCKS -f /tmp/stamp.a
   dd if=/tmp/src of=${F} bs=1M count=$BIG_MB 2>/dev/null && sync" \
   || fail "could not write the test file"
 
-# Force A to actually hold a layout: read the tail, which makes the kernel
-# LAYOUTGET, then keep the fd open so the layout is not returned on close.
+# Force A to actually hold a layout AT THE MOMENT OF THE TRUNCATE.
+#
+# An idle open fd is NOT enough and the first version of this drill was
+# wrong about that: layouts are granted `return_on_close`, and the Linux
+# client hands one back as soon as the I/O that needed it finishes. The
+# first live run showed 2 layouts granted and 2 returned before the
+# truncate, so the recall correctly found nothing and phase 2 failed with
+# "no CB traffic" — which is the drill catching its own bug rather than
+# the server's.
+#
+# So keep reading continuously in the background. The client then holds a
+# layout across the truncate, which is the state F65 is about.
+#
+# The redirects are load-bearing, not tidiness. `kubectl exec` holds the
+# connection open while ANY process still has its stdout/stderr, so an
+# infinite background loop that inherits them makes the exec never return
+# — the drill's first attempt at this parked for eleven minutes on a call
+# it thought was instant. Detach the loop's streams explicitly.
 kubectl exec "$WA" -- sh -c \
-  "(exec 3<${F}; dd if=${F} bs=$STAMP_BLK skip=$(( BLOCKS - 1 )) count=1 of=/dev/null 2>/dev/null; \
-    sleep 300) & echo \$! > /tmp/holder; sleep 2" >/dev/null \
+  "nohup sh -c 'while :; do dd if=${F} bs=$STAMP_BLK skip=\$(( \$\$ % $BLOCKS )) count=1 of=/dev/null 2>/dev/null; done' \
+     >/dev/null 2>&1 & echo \$! > /tmp/holder" >/dev/null 2>&1 \
   || fail "could not establish the layout holder"
-ok "A read the tail and is holding the file open (layout live)"
+sleep 3
+HELD=$(kubectl exec "$WA" -- sh -c 'cat /tmp/holder' 2>/dev/null | tr -d ' ')
+[ -n "$HELD" ] || fail "reader loop did not start"
+ok "A is reading continuously (pid ${HELD}) — a layout is live across the truncate"
 
 # Start the wire capture BEFORE the truncate. Best effort on the tooling,
 # but its ABSENCE is a phase-2 failure, not a skip.
@@ -124,6 +143,9 @@ T0=$(date +%s)
 kubectl exec "$WB" -- sh -c "printf '' > ${F}; sync" || fail "B's truncate failed"
 T1=$(date +%s)
 ok "B truncated ${F} to 0 in $(( T1 - T0 ))s"
+
+# Stop the reader so the oracle below measures a settled state.
+kubectl exec "$WA" -- sh -c "kill ${HELD} 2>/dev/null; sleep 1" >/dev/null 2>&1
 
 # The oracle. A's stale layout points at stripes that still held stamped
 # bytes; after the recall it must not be able to read them.

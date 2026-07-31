@@ -855,7 +855,7 @@ mod state_persistence_tests {
         };
         let session = mgr1
             .sessions
-            .create_session(client_id, 1, 0, 1 << 20, 1 << 20, 4096, 8, 64, 0x4000_0000);
+            .create_session(client_id, 1, 0, 1 << 20, 1 << 20, 4096, 8, 64, 0x4000_0000, None);
         mgr1.clients.mark_confirmed(client_id);
         mgr1.clients.mark_reclaim_complete(client_id);
         let open_stateid =
@@ -902,7 +902,7 @@ mod state_persistence_tests {
         assert!(mgr2.sessions.get_session(&session.session_id).is_none());
         let session2 = mgr2
             .sessions
-            .create_session(client_id, 1, 0, 1 << 20, 1 << 20, 4096, 8, 64, 0x4000_0000);
+            .create_session(client_id, 1, 0, 1 << 20, 1 << 20, 4096, 8, 64, 0x4000_0000, None);
         assert_ne!(session2.session_id.0, session.session_id.0);
 
         // A re-issued EXCHANGE_ID with the same owner finds the

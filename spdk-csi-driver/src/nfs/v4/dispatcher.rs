@@ -649,7 +649,7 @@ impl CompoundDispatcher {
                 }
             }
 
-            Operation::CreateSession { clientid, sequence, flags, fore_chan_attrs, back_chan_attrs, cb_program } => {
+            Operation::CreateSession { clientid, sequence, flags, fore_chan_attrs, back_chan_attrs, cb_program, cb_sec } => {
                 let op = CreateSessionOp {
                     clientid,
                     sequence,
@@ -657,6 +657,7 @@ impl CompoundDispatcher {
                     fore_chan_attrs: fore_chan_attrs.clone(),
                     back_chan_attrs: back_chan_attrs.clone(),
                     cb_program,
+                    cb_sec: cb_sec.clone(),
                 };
                 let csa_flags = flags;
                 let res = self.session_handler.handle_create_session(op, context);
