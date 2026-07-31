@@ -36,7 +36,8 @@ independent reasons it could not execute:
    `encode_file_layout_striped`. So a type-4 LAYOUTGET is answered
    `NFS4_OK` with a body tagged type 1. That is a real wire defect, one
    advertisement flag away from reachable; this deletion neither
-   creates nor fixes it. Filed as a residual below.
+   created nor fixed it. **Fixed separately 2026-07-31** — see
+   residuals.
 
 So this was not a fire. The cost of carrying it was future-tense and
 concentrated in two lines — `docs/plans/pnfs-production-readiness.md:273`
@@ -209,9 +210,17 @@ argument for deleting it.
 
 ## Residuals — out of scope, decide separately
 
-- **`dispatcher.rs` answers a type-4 LAYOUTGET with a type-1 body.** See
-  "Why" reason 3. Correct would be `NFS4ERR_UNKNOWN_LAYOUTTYPE`. Latent
-  only because nothing advertises type 4.
+- ~~**`dispatcher.rs` answers a type-4 LAYOUTGET with a type-1 body.**~~
+  **FIXED 2026-07-31.** LAYOUTGET and GETDEVICEINFO — the two operations
+  that *emit* a layout-typed body — now go through one
+  `layout_type_served()` guard returning `NFS4ERR_UNKNOWN_LAYOUTTYPE`
+  (10062) for anything but type 1, replacing the generic `NFS4ERR_NOTSUPP`
+  they returned for types 2 and 3. GETDEVICEINFO was the worse of the
+  two: it echoed the requested type back over a files-layout device
+  address, so a type-4 caller got a body explicitly labelled FFLv4.
+  LAYOUTRETURN deliberately stays lenient — it emits nothing, so there is
+  nothing to mislabel, and accepting type 4 is what lets a client hand
+  back a layout this server granted before `cdbbe21`.
 - **`encode_file_layout` (`dispatcher.rs` ~2863-2916 pre-deletion) is
   genuinely dead** — `#[allow(dead_code)]`, zero callers. Files-layout
   code, so deleting it is a different judgement than deleting FFL. It
@@ -220,11 +229,32 @@ argument for deleting it.
   no warning, and drops the tree's only comment stating `nfl_util4` is
   32-bit. Don't confuse it with `pnfs/protocol.rs:634 pub fn
   encode_file_layout`, which *is* exercised by a test at `:772`.
-- **`striped_layout_rotates_first_stripe_index_per_file` does not test
-  what its name implies.** It calls with `file_id = 0`, which exercises
-  only the legacy FH-hash `else` arm. The `file_id`-derived rotation —
-  the invariant this plan's "no stripe rotation" argument leans on — is
-  untested.
+- ~~**`striped_layout_rotates_first_stripe_index_per_file` does not test
+  what its name implies.**~~ **FIXED 2026-07-31.** Replaced by three
+  tests: the identity-keyed arm asserted against the exact documented
+  mapping (`file_id % N`, for stripe widths that are not powers of two),
+  the legacy `file_id == 0` arm kept separately and asserted to *differ*
+  from it, and the invariant the placement drill actually caught — same
+  `file_id`, different filehandle, same rotation, so a reader arriving
+  after a RENAME reassembles the stripes in the order the writer laid
+  them down.
+
+  All four guards were mutation-tested. The rename test was written with
+  two filehandles first; the mutation run showed it passing against a
+  server whose rotation followed the FH, because with N=4 a single pair
+  collides 25% of the time. It now sweeps six filehandles. A test that
+  cannot fail is the same instrument-reports-on-itself shape this whole
+  plan is about — it just took a mutation run to see it.
+
+- **A duplicate `pnfs_error` module in `pnfs/protocol.rs` had six of
+  seven error codes wrong** — found while reaching for the right
+  constant for the fix above. `NFS4ERR_UNKNOWN_LAYOUTTYPE` was 10052,
+  which is `NFS4ERR_BADSESSION`: a client told that tears down its
+  session. `BADLAYOUT` and `RECALLCONFLICT` were both 10051, which is
+  `BAD_SESSION_DIGEST`. Zero references, `pub`, so no warning would ever
+  have fired — the third dead-`pub`-module trap in this one change.
+  **Deleted 2026-07-31** rather than corrected; `nfs::v4::protocol::Nfs4Status`
+  is the definition the wire encoder actually uses.
 - **`filehandle_pnfs.rs` is mislabelled RFC 8435** at `nfs/v4/mod.rs:22`,
   while its live output feeds the RFC 8881 §13 FILES path.
 

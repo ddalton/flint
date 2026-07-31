@@ -27,16 +27,15 @@ pub mod layout_return_type {
     pub const LAYOUTRETURN4_ALL: u32 = 3;
 }
 
-/// pNFS-specific error codes (RFC 8881 Section 15.1)
-pub mod pnfs_error {
-    pub const NFS4ERR_LAYOUTUNAVAILABLE: u32 = 10049;
-    pub const NFS4ERR_NOMATCHING_LAYOUT: u32 = 10050;
-    pub const NFS4ERR_RECALLCONFLICT: u32 = 10051;
-    pub const NFS4ERR_UNKNOWN_LAYOUTTYPE: u32 = 10052;
-    pub const NFS4ERR_LAYOUTTRYLATER: u32 = 10058;
-    pub const NFS4ERR_BADIOMODE: u32 = 10033;
-    pub const NFS4ERR_BADLAYOUT: u32 = 10051;
-}
+// The pNFS error codes live in `nfs::v4::protocol::Nfs4Status`, which is
+// what the wire encoder actually uses. A duplicate `pnfs_error` module
+// used to sit here with six of its seven values wrong against RFC 8881
+// §15.1 — NFS4ERR_UNKNOWN_LAYOUTTYPE was 10052, which is BADSESSION, so
+// reaching for it would have told the client to tear down its session;
+// BADLAYOUT and RECALLCONFLICT were both 10051, which is
+// BAD_SESSION_DIGEST. It had zero references, and being a `pub` module
+// it would never have drawn a dead-code warning. Deleted rather than
+// corrected: one definition of an error code is the point.
 
 // ============================================================================
 // LAYOUTGET (opcode 50)

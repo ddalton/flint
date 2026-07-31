@@ -2032,6 +2032,41 @@ impl CompoundDispatcher {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Map a wire `layout_type` onto the one layout type this server
+    /// actually serves, for the operations that *emit* a layout-typed
+    /// body: LAYOUTGET and GETDEVICEINFO.
+    ///
+    /// We advertise `[LAYOUT4_NFSV4_1_FILES]` and nothing else — all
+    /// three `FATTR4_FS_LAYOUT_TYPES` sites in `operations/fileops.rs`
+    /// emit the one-element array `[1]` — and both replies are encoded
+    /// as files-layout structures (`nfsv4_1_file_layout4`,
+    /// `nfsv4_1_file_layout_ds_addr4`).
+    ///
+    /// So anything other than type 1 must be refused *here*. Accepting
+    /// it and then encoding a files-layout body is worse than refusing:
+    /// the client is told NFS4_OK and handed a structure that is not
+    /// the one it asked for. Type 4 (FFLv4, RFC 8435) was accepted this
+    /// way — LAYOUTGET answered it with a body tagged type 1, and
+    /// GETDEVICEINFO echoed type 4 back over a files-layout device
+    /// address. Latent only because nothing advertises type 4; one flag
+    /// away from a client acting on a mislabelled body.
+    ///
+    /// RFC 8881 §18.43.3 (LAYOUTGET) and §18.40.3 (GETDEVICEINFO):
+    /// NFS4ERR_UNKNOWN_LAYOUTTYPE is the error for a layout type the
+    /// server does not support. NFS4ERR_NOTSUPP, which this used to
+    /// return for types 2 and 3, is the generic "op not supported" and
+    /// says nothing about *why*.
+    ///
+    /// LAYOUTRETURN deliberately does not use this — see the note there.
+    fn layout_type_served(
+        layout_type: u32,
+    ) -> Result<crate::pnfs::mds::layout::LayoutType, Nfs4Status> {
+        match layout_type {
+            1 => Ok(crate::pnfs::mds::layout::LayoutType::NfsV4_1Files),
+            _ => Err(Nfs4Status::UnknownLayoutType),
+        }
+    }
+
     fn handle_layoutget(
         &self,
         _signal_layout_avail: bool,
@@ -2045,7 +2080,7 @@ impl CompoundDispatcher {
         context: &CompoundContext,
     ) -> OperationResult {
         use crate::pnfs::mds::operations::LayoutGetArgs;
-        use crate::pnfs::mds::layout::{LayoutOwner, LayoutType, IoMode};
+        use crate::pnfs::mds::layout::{LayoutOwner, IoMode};
         use crate::nfs::xdr::XdrEncoder;
         
         // Check if pNFS handler is available
@@ -2123,12 +2158,12 @@ impl CompoundDispatcher {
         // Convert arguments
         let args = LayoutGetArgs {
             signal_layout_avail: _signal_layout_avail,
-            layout_type: match layout_type {
-                1 => LayoutType::NfsV4_1Files,
-                4 => LayoutType::FlexFiles,  // RFC 8435
-                _ => {
-                    warn!("❌ Unsupported layout type: {}", layout_type);
-                    return OperationResult::LayoutGet(Nfs4Status::NotSupp, None);
+            layout_type: match Self::layout_type_served(layout_type) {
+                Ok(lt) => lt,
+                Err(status) => {
+                    warn!("❌ LAYOUTGET for layout type {} — we serve FILES (1) only",
+                          layout_type);
+                    return OperationResult::LayoutGet(status, None);
                 }
             },
             iomode: match iomode {
@@ -2243,7 +2278,6 @@ impl CompoundDispatcher {
         _notify_types: Vec<u32>,
     ) -> OperationResult {
         use crate::pnfs::mds::operations::GetDeviceInfoArgs;
-        use crate::pnfs::mds::layout::LayoutType;
         use crate::pnfs::mds::device::DeviceId;
         use crate::nfs::xdr::XdrEncoder;
         
@@ -2271,12 +2305,12 @@ impl CompoundDispatcher {
         
         let args = GetDeviceInfoArgs {
             device_id: dev_id,
-            layout_type: match layout_type {
-                1 => LayoutType::NfsV4_1Files,
-                4 => LayoutType::FlexFiles,  // RFC 8435
-                _ => {
-                    warn!("❌ Unsupported layout type: {}", layout_type);
-                    return OperationResult::GetDeviceInfo(Nfs4Status::NotSupp, None);
+            layout_type: match Self::layout_type_served(layout_type) {
+                Ok(lt) => lt,
+                Err(status) => {
+                    warn!("❌ GETDEVICEINFO for layout type {} — we serve FILES (1) only",
+                          layout_type);
+                    return OperationResult::GetDeviceInfo(status, None);
                 }
             },
             maxcount: _maxcount,
@@ -2447,9 +2481,21 @@ impl CompoundDispatcher {
             }
         };
 
+        // NOT `layout_type_served`, deliberately. That guard exists
+        // because LAYOUTGET and GETDEVICEINFO *emit* a layout-typed
+        // body and must not mislabel it. LAYOUTRETURN emits nothing —
+        // the body travels client→server, and we decode it as whatever
+        // the client says it is, so there is nothing to mislabel.
+        //
+        // Staying lenient on type 4 is what lets a client hand back a
+        // layout this server itself granted before `cdbbe21`, when
+        // FFLv4 was briefly advertised. Refusing it would strand that
+        // layout as unreturnable state on a server that has no other
+        // way to learn the client is done with it. Return paths should
+        // accept more than request paths grant.
         let lt = match layout_type {
             1 => LayoutType::NfsV4_1Files,
-            4 => LayoutType::FlexFiles,
+            4 => LayoutType::FlexFiles,  // RFC 8435 — accepted on return only
             _ => return OperationResult::LayoutReturn(Nfs4Status::UnknownLayoutType),
         };
         let im = match iomode {
@@ -3045,44 +3091,144 @@ mod tests {
         assert_eq!(stats.active_clients, 1);
     }
 
-    #[test]
-    fn striped_layout_rotates_first_stripe_index_per_file() {
+    /// nfl_first_stripe_index sits after the 16-byte deviceid + 4-byte
+    /// nfl_util in the encoded nfsv4_1_file_layout4.
+    fn encoded_first_stripe_index(fh: &[u8], file_id: u64, n_ds: usize) -> u32 {
         use crate::pnfs::mds::layout::{IoMode, LayoutSegment};
-        let seg = |id: &str, idx: u32| LayoutSegment {
-            offset: 0,
-            length: u64::MAX,
-            iomode: IoMode::ReadWrite,
-            device_id: id.to_string(),
-            stripe_index: idx,
-            pattern_offset: 0,
-        };
-        let segments = vec![seg("ds-1", 0), seg("ds-2", 1)];
+        let ids: Vec<String> = (0..n_ds).map(|i| format!("ds-{}", i + 1)).collect();
+        let segments: Vec<LayoutSegment> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| LayoutSegment {
+                offset: 0,
+                length: u64::MAX,
+                iomode: IoMode::ReadWrite,
+                device_id: id.clone(),
+                stripe_index: i as u32,
+                pattern_offset: 0,
+            })
+            .collect();
+        let device_id = crate::pnfs::mds::layout::composite_device_id(&ids);
+        let enc = CompoundDispatcher::encode_file_layout_striped(
+            &segments, fh, 8 << 20, device_id, file_id,
+        );
+        u32::from_be_bytes(enc[20..24].try_into().unwrap())
+    }
 
-        // nfl_first_stripe_index sits after the 16-byte deviceid + 4-byte
-        // nfl_util in the encoded nfsv4_1_file_layout4.
-        let first_index = |fh: &[u8]| {
-            let device_id = crate::pnfs::mds::layout::composite_device_id(&[
-                "ds-1".to_string(),
-                "ds-2".to_string(),
-            ]);
-            let enc = CompoundDispatcher::encode_file_layout_striped(
-                &segments, fh, 8 << 20, device_id, 0,
+    /// The identity-keyed rotation — the live path for every file with
+    /// an allocated `file_id`.
+    ///
+    /// This is what the old version of this test *claimed* to cover and
+    /// did not: it passed `file_id = 0` for every case, which routes to
+    /// the legacy filehandle-hash arm, so the `file_id % N` branch was
+    /// never executed once.
+    #[test]
+    fn striped_layout_rotates_first_stripe_index_per_file_id() {
+        // Exactly the documented mapping, not merely "some rotation":
+        // a wrong-but-deterministic formula would satisfy a spread check.
+        for file_id in 1..=32u64 {
+            assert_eq!(
+                encoded_first_stripe_index(b"any-fh", file_id, 4),
+                (file_id % 4) as u32,
+                "file_id {} must rotate to file_id % N", file_id,
             );
-            u32::from_be_bytes(enc[20..24].try_into().unwrap())
-        };
-
-        // Deterministic per file: same filehandle → same rotation.
-        assert_eq!(first_index(b"file-A"), first_index(b"file-A"));
-        // Always within the stripe count.
-        for name in [b"aa".as_ref(), b"bb", b"cc", b"dd", b"ee"] {
-            assert!(first_index(name) < segments.len() as u32);
         }
+
+        // Always inside the stripe count, for stripe widths that are not
+        // powers of two.
+        for n in [1usize, 2, 3, 5, 7] {
+            for file_id in [1u64, 2, 9, 1_000_003, u64::MAX] {
+                assert!(encoded_first_stripe_index(b"fh", file_id, n) < n as u32);
+            }
+        }
+
         // Small files must not all start on DS[0]: across a sample of
-        // filehandles both starting indices occur.
+        // file_ids every DS is used as a starting point.
+        let mut seen = std::collections::HashSet::new();
+        for file_id in 1..=64u64 {
+            seen.insert(encoded_first_stripe_index(b"fh", file_id, 4));
+        }
+        assert_eq!(seen.len(), 4, "rotation does not reach every DS");
+    }
+
+    /// The invariant the placement drill actually caught, and the reason
+    /// the rotation is keyed on `file_id` rather than the filehandle:
+    /// a reader that arrives after a RENAME holds a *different* FH for
+    /// the same file. If rotation followed the FH, that reader would
+    /// reassemble the stripes in a different order than the writer laid
+    /// them down.
+    ///
+    /// Uses many filehandles, not two: with N=4 a single pair has a 1-in-4
+    /// chance of hashing to the same index anyway, so a two-FH version of
+    /// this test passes 25% of the time on a server that is broken. It was
+    /// written that way first, and the mutation run caught it.
+    #[test]
+    fn striped_layout_rotation_survives_rename() {
+        const FILE_ID: u64 = 0xDEAD_BEEF;
+        let expected = (FILE_ID % 4) as u32;
+        for fh in [
+            b"fh-before-rename".as_ref(),
+            b"a-completely-different-fh",
+            b"/exports/data/train-00001.tfrecord",
+            b"\x02\x00\x00\x00\x00\x00\x00\x00\x01",
+            b"x",
+            b"",
+        ] {
+            assert_eq!(
+                encoded_first_stripe_index(fh, FILE_ID, 4), expected,
+                "rotation must depend on file_id alone, not the filehandle",
+            );
+        }
+    }
+
+    /// Legacy pins (`file_id == 0`) keep the historical FH-derived
+    /// rotation. Their filehandles are path-stable because their renames
+    /// are refused, so keying on the FH is safe for them — but it must
+    /// stay deterministic and spread.
+    #[test]
+    fn striped_layout_legacy_pins_rotate_on_filehandle() {
+        assert_eq!(encoded_first_stripe_index(b"file-A", 0, 2),
+                   encoded_first_stripe_index(b"file-A", 0, 2));
+
+        // Distinct from the identity-keyed arm: same FH, file_id 0 vs a
+        // file_id chosen so the two arms must disagree. If the branch
+        // were ever collapsed, this is what would catch it.
+        //
+        // The `+ 4` is load-bearing: it keeps the probe file_id non-zero
+        // when `(legacy + 1) % 4 == 0`, which would otherwise land back
+        // on the legacy sentinel and compare the arm against itself.
+        let legacy = encoded_first_stripe_index(b"probe", 0, 4);
+        let probe_file_id = (legacy as u64 + 1) % 4 + 4;
+        assert_ne!(probe_file_id, 0);
+        let identity = encoded_first_stripe_index(b"probe", probe_file_id, 4);
+        assert_ne!(legacy, identity);
+
         let mut seen = std::collections::HashSet::new();
         for i in 0..16u8 {
-            seen.insert(first_index(&[b'f', i]));
+            seen.insert(encoded_first_stripe_index(&[b'f', i], 0, 2));
         }
-        assert_eq!(seen.len(), 2, "rotation never picks the second DS");
+        assert_eq!(seen.len(), 2, "legacy rotation never picks the second DS");
+    }
+
+    /// We advertise `[LAYOUT4_NFSV4_1_FILES]` only, so the two
+    /// operations that emit a layout-typed body must refuse everything
+    /// else rather than answer with a mislabelled one.
+    #[test]
+    fn only_the_files_layout_type_is_served() {
+        assert_eq!(CompoundDispatcher::layout_type_served(1),
+                   Ok(crate::pnfs::mds::layout::LayoutType::NfsV4_1Files));
+
+        // Type 4 is the one that mattered: it used to be ACCEPTED here
+        // and then answered NFS4_OK with a body tagged type 1.
+        assert_eq!(CompoundDispatcher::layout_type_served(4),
+                   Err(Nfs4Status::UnknownLayoutType));
+
+        // RFC 8881 §15.1: the error is UNKNOWN_LAYOUTTYPE (10062), not
+        // the generic NOTSUPP this used to return for 2 and 3.
+        for t in [0u32, 2, 3, 5, 99, u32::MAX] {
+            assert_eq!(CompoundDispatcher::layout_type_served(t),
+                       Err(Nfs4Status::UnknownLayoutType), "layout type {}", t);
+        }
+        assert_eq!(Nfs4Status::UnknownLayoutType as u32, 10062);
     }
 }
