@@ -51,6 +51,10 @@ wait_load "$WRITER" 420
 [ "$LOAD_STATUS" = "OK" ] || fail "writer status: $LOAD_STATUS"
 STALL=$(max_stall "$WRITER")
 verify_load "$WRITER"
+# The MDS is the layout authority and it just restarted: a placement
+# reloaded wrongly would route stripes to the wrong DS. Sweep the whole
+# fleet, not one target — any DS could be the one holding foreign bytes.
+verify_all_ds_stripes
 ok "writer OK; max client-visible stall ${STALL}s"
 
 printf '\n✅ PASS: MDS roll mid-workload (stall %ss, zero errors, zero recalls)\n' "$STALL"

@@ -75,6 +75,9 @@ wait_load "$WRITER" 600
 [ "$LOAD_STATUS" = "OK" ] || fail "writer status: ${LOAD_STATUS} — in-flight-wedge residual hit (see plan doc; fix = MDS proxy I/O)"
 STALL=$(max_stall "$WRITER")
 verify_load "$WRITER"
+# The PVC followed the pod across nodes — ask the DS whether the bytes
+# came with it, and whether they are still at the offsets they claim.
+verify_ds_stripes "$TARGET_DS"
 ok "writer OK; DS outage $(( T1 - T0 ))s, max client stall ${STALL}s"
 
 printf '\n✅ PASS: DS reschedule under load (outage %ss, stall %ss, zero errors)\n' "$(( T1 - T0 ))" "$STALL"

@@ -119,6 +119,9 @@ wait_load "$WRITER" 600
 [ "$LOAD_STATUS" = "OK" ] || fail "writer status: ${LOAD_STATUS}"
 STALL=$(max_stall "$WRITER")
 verify_load "$WRITER"
+# The node died under this DS; its replacement re-attached the volume.
+# Ask the DS whether the stripes it now serves are still its own.
+verify_ds_stripes "$TARGET_DS"
 ok "writer OK; max client stall ${STALL}s"
 
 step "restoring node (taint removal + kubelet via SSM)"

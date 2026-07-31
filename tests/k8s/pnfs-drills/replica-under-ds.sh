@@ -71,13 +71,7 @@ ok "raid ${RAID} 2/2 on ${DS_NODE}; remote leg ${LEG_IP}:${LEG_PORT}"
 
 step "writer + load (unique prefix ${PFX})"
 make_writer "$WRITER"
-kubectl exec "$WRITER" -- sh -c "rm -f /tmp/st /tmp/prog; \
-  (for i in \$(seq 1 $N_FILES); do \
-     dd if=/dev/zero of=/data/${PFX}-\$i.bin bs=1M count=$FILE_MB 2>/dev/null \
-       || { echo FAIL > /tmp/st; exit 1; }; \
-     sync; echo \"\$i \$(date +%s)\" >> /tmp/prog; sleep 0.2; \
-   done; echo OK > /tmp/st) & echo started" >/dev/null || fail "writer start"
-ok "load started"
+start_load "$WRITER" "$PFX"
 sleep 12
 
 step "detach remote leg mid-write"
@@ -96,14 +90,13 @@ step "writer verdict through the degraded window"
 wait_load "$WRITER" 420
 [ "$LOAD_STATUS" = "OK" ] || fail "writer status: $LOAD_STATUS"
 STALL=$(max_stall "$WRITER")
-kubectl exec "$WRITER" -- sh -c "bad=0; for i in \$(seq 1 $N_FILES); do \
-    s=\$(sha256sum /data/${PFX}-\$i.bin | cut -d' ' -f1); \
-    [ \"\$s\" = \"$ZEROS_SHA\" ] || bad=1; done; \
-  [ \$bad -eq 0 ] && echo CHECKSUMS-OK" | grep CHECKSUMS-OK >/dev/null \
-  || fail "checksum verification failed"
+verify_load "$WRITER" "$PFX"
 N_ON_DS=$(kubectl exec -n "$NS" "$TARGET_DS" -- sh -c "find /data -name '${PFX}-*' | wc -l" 2>/dev/null | tr -d ' ')
 [ "${N_ON_DS:-0}" -ge 1 ] || fail "no drill stripes ever landed on ${TARGET_DS} (stale pinned names? fleet width?)"
-ok "writer OK, checksums OK, stall ${STALL}s, ${N_ON_DS}/${N_FILES} files on ${TARGET_DS} incl. the degraded window"
+# The payoff of stamping: the degraded leg sat UNDER this DS, so ask the
+# DS itself whether the bytes it kept are still the bytes it owns.
+verify_ds_stripes "$TARGET_DS" "$PFX"
+ok "writer OK, payload verified, stall ${STALL}s, ${N_ON_DS}/${N_FILES} files on ${TARGET_DS} incl. the degraded window"
 
 step "reattach leg + rebuild"
 rpc bdev_nvme_attach_controller -b "$CTRL" -t tcp -a "$LEG_IP" -s "$LEG_PORT" \
