@@ -12,6 +12,104 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-07-30
+
+The maintenance-and-proof release. A routine `helm upgrade` used to be
+able to take a replicated volume fully down with zero real failures;
+this release makes the csi-node roll a drained, barriered, node-by-node
+operation and turns it on by default. Alongside it, the correctness
+argument moved from prose to machine-checked models — TLA+ now covers
+the replica lifecycle, claims, snapshots, expansion, the availability
+envelope, cutover, the pod layer, and the DaemonSet roll itself, and the
+models found real bugs the tests could not (F56, F59, F61, F62).
+
+### Added
+
+- **The maintenance drain roll — DEFAULT ON, and the headline behaviour
+  change of this release.** The csi-node DaemonSet now runs
+  `updateStrategy: OnDelete` and the controller's maintenance roller
+  drives every template change node-by-node: drain the node's serving
+  legs out of the raid (the FENCE), delete the pod, and advance only at
+  full redundancy judged on raid membership rather than pod readiness
+  (the BARRIER), with marks that die with their holder (the LEASE).
+  Without it, k8s `RollingUpdate` gates on pod readiness, which knows
+  nothing of raid membership — TLC refutes that gate directly
+  (`FlintReplicationRollUnfenced.cfg`).
+
+  **Rolls are now partial by design.** A node hosting a serving
+  composition is REFUSED rather than rolled, and skipped with an
+  operator-facing event; the campaign converges "except for N announced
+  refusals". A `helm upgrade` may therefore legitimately leave
+  consumer-hosting nodes on the old revision until you relocate the
+  consumer and re-run. This is deliberate — a loud incomplete roll
+  instead of a silent outage. The LOCAL half (rolling the node a
+  consumer sits on) remains design-only; see
+  `docs/f62-local-half-outage-and-blind-barrier.md`. Restore the old
+  unattended behaviour with `maintenance.drainRoll.enabled: false`.
+- **Bounce-free RWX admission (S2).** The hot-rejoin window now runs on
+  the live serving raid, replacing the NFS-server bounce with ~228 ms of
+  quiesce. Live-gated with the kill switch both ON and OFF.
+- **kube-Lease leader election for the orchestrators (P1).** The
+  single-orchestrator invariant is mechanical now rather than a
+  deployment convention.
+- **`StorageId` / `StagedHandle` newtypes (P2).** The identity-domain
+  crossing that produced the F44/F45/F46 family is a compile-time
+  surface.
+- **Bounded dead-target detection (P4).** Closes the TCP-blackhole gap
+  behind the 150–177 s RWX stall; measured 36 s after the fix.
+- **TLA+ models plus a TLC gate (`scripts/check-tla.sh`, run out of
+  band — not wired into CI)** covering the replica lifecycle/writer
+  set, claims (the F50/F53 multi-process layer), snapshots at
+  block-content level, expansion, the availability envelope, cutover,
+  the pod layer, and the DaemonSet roll — plus a deterministic
+  crash-sweep sim harness for hot rejoin.
+- **`rust-ci` actually runs the driver's test suite.** It had been a
+  developer belt that nothing enforced on push.
+- **Chaos drills 3.12, 3.13, 3.14 and 2.11.** 3.14 is the maintenance
+  roll's live gate; 2.11 is the all-at-once upgrade shape.
+
+### Fixed
+
+- **F62 — a roll could destroy a live raid composition.** Rolling the
+  node that hosts a serving composition tore it down while `staged`
+  stayed set, so NodeStage was never called again and only the periodic
+  strike repair could rebuild it. The roller now models the
+  composition's lifetime and refuses the step.
+- **F61 — the drain PASS was conflated with the MARK**, so a roll step
+  could advance on evidence it had not actually earned.
+- **F63 — a refusal hole on `plan_roll`'s marked-node completion path.**
+- **F60 — the cutover bounce is belted** by a commit-time preflight,
+  a bounce claim with a deadline, and attempt backoff. The model
+  refuted the first draft belt as check-then-act.
+- **F59 — two rollers could double-drain**; found by the model and the
+  fix sharpened by it.
+- **F56 — partial expand fan-out crossed with the §5 chase produced a
+  permanent size livelock.** Catch-up owns size convergence now.
+- **F57 standby replacement**, per-leg maintenance suppression, a
+  device high-water floor, and forced-stale guards.
+- **F55 — an NFS shutdown could truncate in-flight replies**, which
+  clients saw as EIO and postgres as a PANIC. Shutdown is frame-atomic
+  and drains in-flight replies before exit.
+- **F54 §3 — the prestage consumer is identity-verified pre-connect**,
+  so a zombie never rides into the window.
+- **Two fail-open paths into a single-survivor direct serve (F36c).**
+- **The node-agent's data-path repair is free of the monitor pass
+  chain**, and a dead component is now fatal rather than silent.
+- **Probe-not-parse everywhere it converges (P3)** — the F48/F54 class
+  of "parse SPDK's untextual errors" audited out.
+
+### Notes
+
+- Drill 3.14 passed on runap (4 runs) and again on runar against these
+  bits: fence + barrier + lease + the F62 refusal proven on the wire
+  under load, zero unfenced degrades, never fewer than one in_sync leg,
+  consumer through with zero PANIC/EIO/ESTALE and zero restarts.
+- Drill 2.11 (all-at-once: every tgt under the volume killed at once,
+  raid host included) passed on two clusters — never a degraded-direct
+  serve, never an acked-tail risk, composition rebuilt in 105 s.
+- This file skips 1.7.0 through 1.21.0; those releases were tagged and
+  published without CHANGELOG entries.
+
 ## [1.6.0] - 2026-07-04
 
 ### Added

@@ -134,7 +134,17 @@ runao — the three guards PASSED live, and it found F61.**
 > happens, so the tgt under the serving raid is never restarted.
 > `maintenance.drainRoll.enabled` stays OFF until F61 is fixed in BOTH
 > the code and the model — today no TLC run can fail this way, because
-> the model has no pending-and-undrainable node. The LOCAL half
+> the model has no pending-and-undrainable node.
+>
+> **That condition is now met, and the default flipped ON in 1.22.0.**
+> F61 was fixed in code and model together (the drain PASS separated from
+> the MARK), F62 and F63 followed out of that fix, and drill 3.14 has
+> since passed on runap (4 runs) and on runar against the 1.22.0 bits —
+> fence, barrier, lease and the F62 refusal observed on the wire under
+> load. Note what the refusal costs: a node hosting a serving composition
+> is SKIPPED, so a roll is partial by design and `helm upgrade` can leave
+> consumer-hosting nodes on the old revision until the consumer moves.
+> The LOCAL half
 (staged-device continuity) remains design-only. The formal work landed
 ahead of the code, deliberately, in the S2 pattern: every
 orchestration-level safety and liveness question below is answered by a
@@ -171,9 +181,12 @@ drill-gated instead.
 - `volume_claims.rs` — `OP_MAINT_DRAIN`, Resolver class (operator time
   must not lose the reacquisition race to catch-up's timer — the F43
   lasso shape).
-- Chart: `maintenance.drainRoll.enabled` (DEFAULT OFF until drill 3.14)
-  sets the DS `updateStrategy: OnDelete` + `FLINT_MAINT_DRAIN`; RBAC
-  adds read-only `apps/daemonsets` + `controllerrevisions`.
+- Chart: `maintenance.drainRoll.enabled` (DEFAULT ON as of 1.22.0; drill
+  3.14 gated it on runap and runar) sets the DS `updateStrategy:
+  OnDelete` + `FLINT_MAINT_DRAIN`; RBAC adds read-only `apps/daemonsets`
+  + `controllerrevisions`. Set it to `false` to restore unattended
+  RollingUpdate rolls — which reinstates the landmine this doc exists
+  for.
 - Tests: planner table, kill-switch parse, drain/lease/belt record
   tests, catch-up + rejoin exclusion A/B (live vs expired mark), and
   `sim_crash_sweep_maint_drain_roll_recovers` — acceptance gate 2:
