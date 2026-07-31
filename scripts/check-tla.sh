@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Seventy-two runs, ALL required.
+# Eighty runs, ALL required.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -668,6 +668,37 @@ liveness_mutation_run FlintReplication FlintReplicationBounceStarve.cfg "unbound
 strict_run FlintReplication FlintReplicationBounceBounded.cfg "bounded-refusal strict (the shipped bound: the remediation is never starved by its own belt, at no cost in safety)"
 
 strict_run FlintClaims FlintClaims.cfg "claims strict (two processes, Lease + marker grace; F50/F53 layer)"
+
+# ---- the kube-DS tooth (2026-07-30). THE ANTI-CROSS-NODE GUARD. ----
+# Not a claim that a readinessProbe is safe — a claim about WHICH predicate
+# it may compute. The design's whole safety rests on "no cross-node term,
+# ever", which was a comment a reviewer had to remember. These four make it
+# MECHANICAL: any future predicate that reddens a LIVE pod fails the gate.
+#
+# The pair that matters is the last one. "selfLive" is self-scoped and
+# carries no cross-node term — it is simply not LATCHING — i.e. it is the
+# predicate a careful reviewer would write believing they had followed the
+# design. It fails in 51 states.
+#
+# SCOPE LIMIT, STATED SO THIS IS NOT OVER-CITED: all four pin
+# UncontrolledTgtDeath = FALSE. So these runs say the LATCHING predicate never
+# reddens a live pod; they say NOTHING about what the latch does when the data
+# path dies UNDER it after latching. It cannot re-redden — a separate
+# adversarial run found the stale green in 1,496 states — which is craft rule 8
+# and a TRUE property of the proposed probe, not a modelling artifact. Arming
+# UncontrolledTgtDeath here would NOT settle it either: TgtDie conflates process
+# death with composition destruction, so that green would be void the way the
+# scalar-raidHost green was void. The honest claim is about WHICH PREDICATE may
+# be computed, never that a readinessProbe is safe to ship.
+#
+# Lean by construction: RaidLifetimeArm/UncontrolledTgtDeath FALSE and two
+# legs, because the claim is about ProbeEval alone. Carrying the raid
+# lifetime pushed one arm past 18M states while contributing nothing to it —
+# a cfg should carry the arms its claim needs and no more.
+strict_run   FlintReplication FlintReplicationKubeToothSocket.cfg  "kube-DS tooth: shipped socket probe never reddens a live pod"
+strict_run   FlintReplication FlintReplicationKubeToothLatched.cfg "kube-DS tooth: the LATCHING self-scoped predicate never reddens a live pod"
+mutation_run FlintReplication FlintReplicationKubeToothVolume.cfg   "kube-DS tooth mutation (ReadyScope=volume: a CROSS-NODE term)"      "Inv_ProbeNeverReddensLive"
+mutation_run FlintReplication FlintReplicationKubeToothSelfLive.cfg "kube-DS tooth mutation (ReadyScope=selfLive: self-scoped but NOT latching)" "Inv_ProbeNeverReddensLive"
 
 mutation_run FlintClaims FlintClaimsNoGrace.cfg "F50 mutation (MarkerGrace=FALSE: scrub under a live window, cold admission)" "Inv_NoColdAdmission"
 
