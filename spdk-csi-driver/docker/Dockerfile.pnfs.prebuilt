@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1
+# Runtime-only variant of Dockerfile.pnfs for HOST-CROSS-COMPILED binaries.
+#
+# The canonical Dockerfile.pnfs builds inside rust:1.90-slim-bookworm, which
+# on an arm64 host means an emulated amd64 cargo build — tens of minutes for
+# a change that is one `apt-get` line and a few hundred lines of Rust. This
+# file skips the in-container build the same way Dockerfile.csi.prebuilt
+# does for the driver image.
+#
+# MULTI-ARCH: buildx sets TARGETARCH per platform; stage each arch's
+# binaries under ${BIN_DIR}/${TARGETARCH}/ and buildx emits one manifest
+# list. Cross-compile both arches on one host (an arm64 Mac needs no
+# Graviton builder):
+#
+#   for T in x86_64 aarch64; do
+#     cargo zigbuild --release --target $T-unknown-linux-musl \
+#       --bin flint-pnfs-mds --bin flint-pnfs-ds; done
+#   # stage: docker/prebuilt/amd64/{flint-pnfs-mds,flint-pnfs-ds} (x86_64)
+#   #        docker/prebuilt/arm64/{flint-pnfs-mds,flint-pnfs-ds} (aarch64)
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#       -f docker/Dockerfile.pnfs.prebuilt --build-arg BIN_DIR=docker/prebuilt \
+#       -t dilipdalton/flint-pnfs:<tag> --push .
+#
+# NOTE the musl/glibc difference from the canonical file: Dockerfile.pnfs
+# links against the builder's glibc, this one produces static musl binaries.
+# Both run on the ubuntu:24.04 runtime; the musl build is if anything the
+# safer of the two (no runtime libc coupling at all).
+#
+# The runtime stage below must stay IDENTICAL to Dockerfile.pnfs's — same
+# base, same packages, same entrypoint. If you change one, change both.
+FROM ubuntu:24.04
+
+# BIN_DIR holds per-arch subdirs (amd64/, arm64/); TARGETARCH is buildx's
+# per-platform value.
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
+
+# Install runtime dependencies
+# Includes NFS client/server tools, gRPC requirements, and Kerberos support
+RUN apt-get update && apt-get install -y \
+    nfs-common \
+    e2fsprogs \
+    xfsprogs \
+    ca-certificates \
+    curl \
+    krb5-user \
+    # tcpdump is not a debugging luxury here. Every failure mode this
+    # server has that matters is on the wire, and the F65 audit showed
+    # why reading the server's own logs is not a substitute: a
+    # CB_LAYOUTRECALL the client REFUSED was scored and logged as an ack
+    # for as long as the bug existed. tests/k8s/pnfs-drills/truncate-recall.sh
+    # reads the CB_COMPOUND status directly and hard-fails without this.
+    tcpdump \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ${BIN_DIR}/${TARGETARCH}/flint-pnfs-mds /usr/local/bin/flint-pnfs-mds
+COPY ${BIN_DIR}/${TARGETARCH}/flint-pnfs-ds /usr/local/bin/flint-pnfs-ds
+
+# Expose ports for both MDS and DS
+# (only the relevant ports will be used depending on which binary runs)
+EXPOSE 2049/tcp
+EXPOSE 50051/tcp
+
+# Default to MDS (can be overridden)
+# For DS, use: docker run flint/pnfs:<tag> /usr/local/bin/flint-pnfs-ds
+ENTRYPOINT ["/usr/local/bin/flint-pnfs-mds"]
+CMD ["--config", "/etc/flint/pnfs.yaml"]
