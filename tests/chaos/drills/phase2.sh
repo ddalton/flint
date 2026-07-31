@@ -53,9 +53,18 @@ spdk_rpc() { # <node> <rpc args...> — spdk RPC via the node's spdk-tgt contain
 }
 
 replica_nodes() { # <pv> — nodes whose spdk-tgt holds an lvol bdev for this PV
-  local n
+  local n hits
   for n in $(worker_nodes); do
-    spdk_rpc "$n" bdev_get_bdevs 2>/dev/null | grep -q "$1" && echo "$n"
+    # grep -c, NOT grep -q — the lib.sh single_orchestrator rule applies
+    # verbatim here: -q exits on the first match, `kubectl exec` takes
+    # SIGPIPE, and `set -o pipefail` (top of this file) then reports the
+    # whole pipeline failed, so the leg is silently dropped. It is a RACE
+    # against kubectl's write, so it under-reports intermittently — which
+    # reads as "the volume lost a leg" and fired 2.11's >=2 guard on a
+    # cluster whose raid was demonstrably online base=2/2. Count instead:
+    # counting consumes the stream, so there is no early exit to race.
+    hits=$(spdk_rpc "$n" bdev_get_bdevs 2>/dev/null | grep -c "$1")
+    [ "${hits:-0}" -gt 0 ] && echo "$n"
   done
 }
 
@@ -557,14 +566,35 @@ case "$DRILL" in
   # a single post-hoc check would find it absent precisely BECAUSE the volume
   # recovered through a degraded serve.  That is the checkpoint-phase luck that
   # hid F55 in every earlier 3.6e run.  Same for the raid base count.
-  DD_SEEN=""; RISK_SEEN=""; WORST=0; BACK=""
+  DD_SEEN=""; RISK_SEEN=""; WORST=0; BACK=""; TORN=""
   for i in $(seq 1 60); do   # 60 x 5s = 5 min, sized for the strike ladder
     D=$(dd_ann); [ -n "$D" ] && [ -z "$DD_SEEN" ] && { DD_SEEN="$D"; note "degraded-direct OBSERVED at t+$((i*5))s: $D"; }
     R=$(risk_ann); [ -n "$R" ] && [ -z "$RISK_SEEN" ] && { RISK_SEEN="$R"; note "acked-tail-risk OBSERVED at t+$((i*5))s: $R"; }
     last=$(timeout 15 kubectl exec -n "$NS" "$(load_pod)" -- sh -c 'tail -1 /acked/acked.log 2>/dev/null' | awk '{print $2}')
     age=$(( $(epoch) - ${last:-0} )); [ "$age" -gt "$WORST" ] && WORST=$age
     B=$(raid_summary "$RAID_HOST" 2>/dev/null | head -1)
-    case "$B" in *"base=$EXPECT_BASE/$EXPECT_BASE"*) [ -z "$BACK" ] && { BACK=$((i*5)); note "base back to $EXPECT_BASE/$EXPECT_BASE at t+${BACK}s"; } ;; esac
+    # TWO-PHASE LATCH — the composition must be observed GONE before any
+    # $EXPECT_BASE/$EXPECT_BASE reading may be counted as RECOVERY.
+    #
+    # The delete is graceful by design (never --force), so for the first tens
+    # of seconds the OLD spdk-tgt is still up and still answering this very
+    # RPC with the PRE-KILL state.  A one-phase latch therefore records
+    # "recovered" from a reading taken before anything died: runaq's first run
+    # reported base_back=5s when the replacement tgt did not start until t+35s
+    # and the in-place repair did not report success until t+170s.  It cannot
+    # be back 30s before the process that rebuilds it exists.
+    #
+    # That is the SAME checkpoint-phase luck this drill's header calls out for
+    # degraded-direct, reappearing in the recovery oracle: a pass earned by
+    # sampling the wrong side of the event.  Requiring TORN first makes the
+    # number mean "time to rebuild" instead of "time to notice nothing yet".
+    case "$B" in
+      *"base=$EXPECT_BASE/$EXPECT_BASE"*)
+        [ -n "$TORN" ] && [ -z "$BACK" ] \
+          && { BACK=$((i*5)); note "base back to $EXPECT_BASE/$EXPECT_BASE at t+${BACK}s (torn at t+${TORN}s)"; } ;;
+      *)
+        [ -z "$TORN" ] && { TORN=$((i*5)); note "composition observed GONE at t+${TORN}s (raid: ${B:-unreachable})"; } ;;
+    esac
     sleep 5
   done
 
@@ -575,14 +605,23 @@ case "$DRILL" in
                       || fail "2.11 FAIL: degraded-direct raised — all-at-once DID lose redundancy: $DD_SEEN"
   [ -z "$RISK_SEEN" ] && ok "no acked-tail-risk at any sample" \
                       || fail "2.11 FAIL: acked-tail-risk raised — acked writes were at risk: $RISK_SEEN"
-  [ -n "$BACK" ]      && ok "composition back to $EXPECT_BASE/$EXPECT_BASE in ${BACK}s" \
-                      || fail "2.11 FAIL: base never returned to $EXPECT_BASE/$EXPECT_BASE within 300s (last: $(raid_summary "$RAID_HOST" | head -1))"
+  # Three outcomes, not two.  A run that never saw the composition go down has
+  # not shown recovery is fast — it has shown the sampler missed the event, and
+  # that must not be reported as a pass (it is how base_back=5s got into
+  # results.csv as if it were a measurement).
+  if [ -z "$TORN" ]; then
+    fail "2.11 INCONCLUSIVE: composition never observed torn down — every sample read $EXPECT_BASE/$EXPECT_BASE, so recovery was never witnessed (stale RPC from the terminating tgt, or the kill did not land). Worst ack age ${WORST}s"
+  elif [ -n "$BACK" ]; then
+    ok "composition back to $EXPECT_BASE/$EXPECT_BASE in ${BACK}s (torn at t+${TORN}s, rebuild took $((BACK - TORN))s)"
+  else
+    fail "2.11 FAIL: torn at t+${TORN}s but base never returned to $EXPECT_BASE/$EXPECT_BASE within 300s (last: $(raid_summary "$RAID_HOST" | head -1))"
+  fi
   note "worst ack age ${WORST}s (ublk holds I/O rather than erroring, so a long stall is not loss)"
   for n in $ALL; do note "spdk-tgt restarts post on $n: $(spdk_restarts "$n")"; done
   note "raid state post: $(raid_summary "$RAID_HOST" | head -2)"
 
   EXPECT_RESCHEDULE=none READY_TIMEOUT=120 \
-    NOTES="all-at-once ${N_ALL}-node csi-node kill incl raid host; degraded_direct=${DD_SEEN:-none}; acked_tail_risk=${RISK_SEEN:-none}; base_back=${BACK:-NEVER}s; worst_ack_age=${WORST}s; raid=$(raid_summary "$RAID_HOST" | head -1)" verify
+    NOTES="all-at-once ${N_ALL}-node csi-node kill incl raid host; degraded_direct=${DD_SEEN:-none}; acked_tail_risk=${RISK_SEEN:-none}; torn=${TORN:-NEVER}s; base_back=${BACK:-NEVER}s; rebuild=$([ -n "$TORN" ] && [ -n "$BACK" ] && echo $((BACK - TORN)) || echo NA)s; worst_ack_age=${WORST}s; raid=$(raid_summary "$RAID_HOST" | head -1)" verify
   ;;
 
 *) fail "unknown drill '$DRILL' (phase-1 regression subset: PHASE_LABEL=2 ./drills/phase1.sh <id>)" ;;

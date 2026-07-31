@@ -1,0 +1,4 @@
+runaq-aws-1 globalmounts=1 orphans=''
+runaq-aws-2 globalmounts=0 orphans=''
+runaq-aws-3 globalmounts=0 orphans=''
+runaq-aws-4 globalmounts=0 orphans=''
