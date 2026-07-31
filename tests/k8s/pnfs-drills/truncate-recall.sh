@@ -60,6 +60,16 @@ ok "MDS ${MDS_POD} on ${MDS_NODE}"
 # ---------------------------------------------------------------------------
 step "two clients on one RWX volume"
 # ---------------------------------------------------------------------------
+# Start from a clean slate. cleanup() deletes with --wait=false so the
+# drill exits promptly, which means a back-to-back re-run can `apply`
+# onto pods that are still terminating — kubectl accepts the apply, then
+# `exec` fails with `container not found`. Wait the old ones out first.
+if kubectl get pod "$WA" "$WB" >/dev/null 2>&1; then
+  note "prior drill pods still present — waiting for them to terminate"
+  kubectl delete pod "$WA" "$WB" --ignore-not-found --timeout=120s >/dev/null 2>&1
+  kubectl wait --for=delete "pod/${WA}" "pod/${WB}" --timeout=120s >/dev/null 2>&1
+fi
+
 kubectl apply -f - <<EOF >/dev/null
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -113,31 +123,88 @@ kubectl exec "$WA" -- sh -c "awk -v fid=${PFX} -v blocks=$BLOCKS -f /tmp/stamp.a
 # "no CB traffic" — which is the drill catching its own bug rather than
 # the server's.
 #
-# So keep reading continuously in the background. The client then holds a
-# layout across the truncate, which is the state F65 is about.
+# A LOOP IS NOT ENOUGH EITHER, and this cost a second live run. The
+# previous holder was
+#     while :; do dd if=$F bs=4096 skip=$(($$ % BLOCKS)) count=1; done
+# whose `skip` is evaluated ONCE, so it re-reads a single 4 KiB block
+# forever. After the first read that block is in the client's page cache
+# and NO further I/O reaches the server at all — zero LAYOUTGETs, nothing
+# to recall, and phase 2 reports "the recall never left the server" as if
+# the server were at fault. Both wrong holders (idle fd, cached loop)
+# failed the same way: they made the drill pass its precondition while
+# testing nothing.
+#
+# What works, measured on runas: reads that MISS the page cache, issued
+# back to back. O_DIRECT is the reliable way to guarantee that — every
+# read goes to the wire, so a layout is held continuously rather than
+# for the ~80 ms after each cached hit.
 #
 # The redirects are load-bearing, not tidiness. `kubectl exec` holds the
 # connection open while ANY process still has its stdout/stderr, so an
 # infinite background loop that inherits them makes the exec never return
 # — the drill's first attempt at this parked for eleven minutes on a call
 # it thought was instant. Detach the loop's streams explicitly.
+DIRECT="iflag=direct"
+kubectl exec "$WA" -- sh -c "dd if=${F} of=/dev/null bs=1M count=1 iflag=direct" >/dev/null 2>&1 \
+  || { DIRECT=""; note "busybox dd lacks iflag=direct — falling back to a full-file scan"; }
+
 kubectl exec "$WA" -- sh -c \
-  "nohup sh -c 'while :; do dd if=${F} bs=$STAMP_BLK skip=\$(( \$\$ % $BLOCKS )) count=1 of=/dev/null 2>/dev/null; done' \
+  "nohup sh -c 'while :; do dd if=${F} of=/dev/null bs=1M ${DIRECT} 2>/dev/null; done' \
      >/dev/null 2>&1 & echo \$! > /tmp/holder" >/dev/null 2>&1 \
   || fail "could not establish the layout holder"
 sleep 3
 HELD=$(kubectl exec "$WA" -- sh -c 'cat /tmp/holder' 2>/dev/null | tr -d ' ')
 [ -n "$HELD" ] || fail "reader loop did not start"
-ok "A is reading continuously (pid ${HELD}) — a layout is live across the truncate"
+
+# PROVE THE PRECONDITION. Everything downstream is meaningless if A does
+# not actually hold a layout when B truncates, and twice now the drill has
+# asserted "a layout is live" purely from the fact that a process started.
+# Ask the server. A drill that cannot confirm its own setup must fail, not
+# proceed — "no CB traffic" then means the server is broken, which is the
+# only reading worth reporting.
+#
+# Needs pnfs.server.logLevel=debug: LAYOUTGET is logged at debug, so at
+# info this check would see zero and wrongly blame the holder.
+LG=$(kubectl logs -n "$NS" "$MDS_POD" --since=60s 2>/dev/null | grep -c "LAYOUTGET RECEIVED" || true)
+if [ "${LG:-0}" -eq 0 ]; then
+  note "MDS logged no LAYOUTGET in the last 60s (log level is $(kubectl get deploy -n "$NS" flint-pnfs-mds -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="RUST_LOG")].value}' 2>/dev/null || echo '?'))"
+  fail "A is not holding a layout — the drill never established the state F65 is about, so any verdict below would be vacuous. Fix the holder, not the server."
+fi
+ok "A is reading continuously (pid ${HELD}, ${LG} LAYOUTGET(s) on the server) — a layout is live across the truncate"
 
 # Start the wire capture BEFORE the truncate. Best effort on the tooling,
 # but its ABSENCE is a phase-2 failure, not a skip.
+#
+# THREE THINGS HERE ARE SCAR TISSUE, all from one run that "passed"
+# phase 2 against a capture from the PREVIOUS run:
+#
+#   rm -f first  — the pcap lives in the pod and outlives the drill, so a
+#                  stale one from a prior run is sitting there ready to be
+#                  validated. Deleting it means "no capture" fails loudly
+#                  instead of silently succeeding on old bytes.
+#   -U           — tcpdump buffers by default. The file on disk was the
+#                  last FLUSHED state (from whichever run was killed
+#                  cleanly), not this run's traffic. Packet-buffered mode
+#                  keeps the file current.
+#   kill by PID  — `pkill tcpdump` did not work here; four tcpdumps were
+#                  still alive after the drill exited, each holding the
+#                  same -w path. Record the pid and kill that.
 CAP_OK=""
+CAP_PID=""
 if kubectl exec -n "$NS" "$MDS_POD" -- sh -c 'command -v tcpdump' >/dev/null 2>&1; then
   kubectl exec -n "$NS" "$MDS_POD" -- sh -c \
-    "nohup tcpdump -i any -s 0 -w ${CAP} 'tcp port 2049' >/dev/null 2>&1 & echo started" >/dev/null \
-    && CAP_OK=1 && sleep 2
+    "pkill -f 'tcpdump.*${CAP}' >/dev/null 2>&1; rm -f ${CAP}" >/dev/null 2>&1
+  CAP_PID=$(kubectl exec -n "$NS" "$MDS_POD" -- sh -c \
+    "nohup tcpdump -i any -U -s 0 -w ${CAP} 'tcp port 2049' >/dev/null 2>&1 & echo \$!" 2>/dev/null | tr -d ' \r')
+  sleep 2
+  # Prove it is actually running and actually writing, here, now.
+  if [ -n "$CAP_PID" ] && kubectl exec -n "$NS" "$MDS_POD" -- sh -c "kill -0 ${CAP_PID}" >/dev/null 2>&1; then
+    CAP_OK=1
+  else
+    note "tcpdump did not stay up (pid='${CAP_PID}')"
+  fi
 fi
+CAP_T0=$(date -u +%s)
 
 T0=$(date +%s)
 kubectl exec "$WB" -- sh -c "printf '' > ${F}; sync" || fail "B's truncate failed"
@@ -165,14 +232,46 @@ esac
 step "phase 2 — the WIRE check (never the log line)"
 # ---------------------------------------------------------------------------
 [ -n "$CAP_OK" ] || fail "no tcpdump in the MDS image — phase 2 cannot run, and a recall oracle that cannot see the recall is exactly the failure this drill exists to prevent. Add tcpdump to the image or run with CAP_SKIP=1 and treat phase 1 as unconfirmed."
-kubectl exec -n "$NS" "$MDS_POD" -- sh -c "pkill tcpdump; sleep 1" >/dev/null 2>&1
-CB=$(kubectl exec -n "$NS" "$MDS_POD" -- sh -c \
-  "tcpdump -r ${CAP} -A 2>/dev/null | grep -c CB_" 2>/dev/null | tr -d ' ')
-[ "${CB:-0}" -gt 0 ] || fail "no CB traffic in the capture — the recall never left the server"
-ok "callback traffic present in the capture (${CB} frame(s))"
-note "read the CB_COMPOUND status by hand to confirm the client ACCEPTED it:"
-note "  kubectl exec -n ${NS} ${MDS_POD} -- tcpdump -r ${CAP} -X | less"
-note "  NFS4ERR_OLD_STATEID (10024) => C1 regressed; RETRY_UNCACHED_REP (10068) => C2 regressed"
+kubectl exec -n "$NS" "$MDS_POD" -- sh -c \
+  "kill ${CAP_PID} 2>/dev/null; sleep 1; pkill -f 'tcpdump.*${CAP}' 2>/dev/null; sleep 1" >/dev/null 2>&1
+
+# FRESHNESS GATE. A capture that predates the truncate cannot contain the
+# recall, and validating one is worse than having none — it produces a
+# green. Demand that the file was modified after the capture started.
+CAP_MTIME=$(kubectl exec -n "$NS" "$MDS_POD" -- sh -c "stat -c %Y ${CAP} 2>/dev/null" 2>/dev/null | tr -d ' \r')
+[ -n "$CAP_MTIME" ] || fail "capture file ${CAP} does not exist after the truncate — tcpdump never wrote anything"
+[ "$CAP_MTIME" -ge "$CAP_T0" ] \
+  || fail "capture is STALE (mtime ${CAP_MTIME} < capture start ${CAP_T0}) — it is from an earlier run, and decoding it would report on traffic this drill never generated"
+ok "capture is fresh (written after the truncate)"
+
+# DECODE the callback, don't grep it. The previous version ran
+#   tcpdump -r $CAP -A | grep -c CB_
+# which counts an ASCII string in a binary XDR stream: structurally
+# always zero, so it could only ever report "the recall never left the
+# server" — blaming the server for the oracle's own blindness. It did
+# exactly that on the first two runs of this very fix.
+#
+# cb-decode.py walks the RPC. Its own teeth are proven by mutating a real
+# captured CB reply: reply_stat -> MSG_DENIED reproduces C8, and
+# CB_SEQUENCE -> NFS4ERR_BADSESSION reproduces C9; both flip it to FAIL
+# with the matching diagnosis.
+# NOTE: we already `cd "$(dirname "$0")"` at the top, so the decoder is
+# simply ./cb-decode.py — re-deriving it from $0 double-prefixes the path.
+[ -f ./cb-decode.py ] || fail "cb-decode.py missing next to the drill"
+CB_OUT=$(kubectl exec -n "$NS" "$MDS_POD" -- sh -c "tcpdump -r ${CAP} -X 2>/dev/null" \
+  | python3 ./cb-decode.py 2>&1)
+CB_RC=$?
+printf '%s\n' "$CB_OUT" | sed 's/^/    /'
+# Distinguish "the decoder could not run" from "the decoder says the
+# server failed". Conflating them is how the previous oracle reported a
+# server bug that did not exist.
+case "$CB_OUT" in
+  *VERDICT*) : ;;
+  *) fail "cb-decode.py did not produce a verdict — the ORACLE failed, not necessarily the server. Fix the drill before reading anything into this run." ;;
+esac
+[ "$CB_RC" -eq 0 ] \
+  || fail "the callback exchange did not complete cleanly on the wire (see the decode above) — the capture contains the RPC and the client's answer to it, so this is a server-side failure"
+ok "CB_LAYOUTRECALL accepted by the client ON THE WIRE (AUTH_SYS cred, CB_SEQUENCE NFS4_OK)"
 
 # The server-side counterpart, which is now trustworthy BECAUSE C3 landed:
 REFUSED=$(kubectl logs -n "$NS" "$MDS_POD" --since=5m 2>/dev/null | grep -c "REFUSED by session" || true)
@@ -239,8 +338,18 @@ step "phase 5 — R4: the truncate gate survives an MDS restart"
 # ---------------------------------------------------------------------------
 OLD_UID=$(kubectl get pod -n "$NS" "$MDS_POD" -o jsonpath='{.metadata.uid}')
 kubectl delete pod -n "$NS" "$MDS_POD" --wait=false >/dev/null
-kubectl wait --for=condition=Ready pod -l app=flint-pnfs-mds -n "$NS" --timeout=180s >/dev/null \
-  || fail "MDS never came back"
+# `kubectl wait --for=condition=Ready pod -l app=...` waits for EVERY
+# matching pod, and the one we just deleted is still in the list while it
+# terminates — it will never go Ready, so the wait always burns its full
+# timeout. Watch the Deployment roll out instead. The timeout is generous
+# because the MDS PVC is RWO: the replacement cannot attach until the old
+# pod fully releases it (observed ~36s of Multi-Attach backoff), so a
+# tight bound here reports "MDS never came back" about an MDS that came
+# back fine.
+kubectl rollout status deploy/flint-pnfs-mds -n "$NS" --timeout=300s >/dev/null 2>&1 \
+  || fail "MDS never came back (deployment did not finish rolling out)"
+kubectl wait --for=condition=Ready pod -l app=flint-pnfs-mds -n "$NS" --timeout=120s >/dev/null 2>&1 \
+  || fail "MDS rolled out but never became Ready"
 NEW_POD=$(kubectl get pods -n "$NS" -l app=flint-pnfs-mds -o jsonpath='{.items[0].metadata.name}')
 [ "$NEW_POD" != "$MDS_POD" ] || [ "$(kubectl get pod -n "$NS" "$NEW_POD" -o jsonpath='{.metadata.uid}')" != "$OLD_UID" ] \
   || fail "MDS pod did not actually restart"
