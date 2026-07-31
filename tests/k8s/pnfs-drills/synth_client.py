@@ -105,11 +105,16 @@ class Reader:
 class Nfs41Client:
     """One TCP connection: forward channel + (optionally) back channel."""
 
-    def __init__(self, host, port=2049, verbose=False):
+    def __init__(self, host, port=2049, verbose=False, deaf=False):
+        # deaf=True: accept callbacks and NEVER answer them. Models a
+        # client that is wedged or whose host has gone away with the TCP
+        # connection still open — the case that costs the server a full
+        # CB timeout rather than a fast broken-pipe.
         self.sock = socket.create_connection((host, port), timeout=30)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.xid = 1000
         self.verbose = verbose
+        self.deaf = deaf
         self.clientid = None
         self.seqid = None
         self.sessionid = None
@@ -275,6 +280,11 @@ class Nfs41Client:
         """Answer CB_COMPOUND. Answering is the point: R1 is about what a
         client sees AFTER it has been recalled, so refusing here would test
         a different (and easier) scenario."""
+        if self.deaf:
+            self.cb_calls.append({"op": "IGNORED"})
+            if self.verbose:
+                print("    [deaf: callback received, deliberately NOT answered]")
+            return
         r = Reader(body)
         r.u32(); r.u32()                                   # xid, mtype(CALL)
         r.u32(); prog = r.u32(); r.u32(); proc = r.u32()   # rpcvers, prog, vers, proc
