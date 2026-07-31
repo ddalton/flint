@@ -526,25 +526,43 @@ impl NodeAgent {
         info!(port = node_agent_port, "[NODE_AGENT] Starting HTTP server");
 
         // Start the HTTP server, discovery loop, and reconcile/health monitor
-        tokio::select! {
-            _ = warp::serve(routes).run(([0, 0, 0, 0], node_agent_port)) => {
-                info!("[NODE_AGENT] HTTP server stopped");
-            }
-            _ = discovery_task => {
-                info!("[NODE_AGENT] Discovery task stopped");
-            }
-            _ = monitor_task => {
-                info!("[NODE_AGENT] Monitor task stopped");
-            }
-            _ = detector_task => {
-                info!("[NODE_AGENT] Data-path detector task stopped");
-            }
-            _ = loss_task => {
-                info!("[NODE_AGENT] Export loss-detector task stopped");
-            }
-        }
+        // ANY arm completing here is a PARTIAL DEATH, never a shutdown, and
+        // until 2026-07-30 it was SILENT.
+        //
+        // The four loops are `tokio::spawn` handles, so select! dropping them
+        // DETACHES (they keep running); the warp future is NOT spawned, so
+        // dropping it CANCELS the HTTP server. So whichever arm wins, the
+        // usual outcome is: the node agent's API on 9081 is gone while the
+        // loops run on. Nothing observes that. `/healthz` is a DIFFERENT
+        // server (main.rs start_health_server) and answers OK unconditionally,
+        // so the liveness probe stays green; and the controller reaches this
+        // agent ONLY over 9081 (driver.rs get_node_agent_pod_ip), so it simply
+        // loses the node while the pod looks perfectly healthy.
+        //
+        // Returning Ok(()) made that invisible: main.rs logs only the Err arm.
+        // Fail loudly instead and let kubelet restart the container — spdk-tgt
+        // is a separate native sidecar, so a driver-container restart does not
+        // touch the data path, and boot rehydrate is the designed recovery.
+        //
+        // All five arms are infinite (`loop { interval.tick().await; ... }`, and
+        // warp::serve().run() never returns), so completion here always means a
+        // genuine failure — there is no benign path that could crash-loop us.
+        let died = tokio::select! {
+            _ = warp::serve(routes).run(([0, 0, 0, 0], node_agent_port)) => "http api server",
+            _ = discovery_task => "disk discovery loop",
+            _ = monitor_task    => "reconcile/health monitor loop",
+            _ = detector_task   => "data-path detector loop",
+            _ = loss_task       => "export loss-detector loop",
+        };
 
-        Ok(())
+        error!(
+            component = died,
+            port = node_agent_port,
+            "[NODE_AGENT] component exited — the node agent is now PARTIALLY DEAD \
+             and nothing else reports it (/healthz is a separate server and stays \
+             green). Failing so kubelet restarts the container."
+        );
+        Err(format!("node agent component '{died}' exited unexpectedly").into())
     }
 
     /// Setup HTTP API routes for controller communication

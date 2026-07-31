@@ -448,7 +448,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let node_agent_clone = node_agent.clone();
         tokio::spawn(async move {
             if let Err(e) = node_agent_clone.start().await {
-                eprintln!("❌ [NODE_AGENT] Failed to start: {}", e);
+                // FATAL, deliberately (2026-07-30). NodeAgent::start only
+                // returns Err when one of its five components has died, which
+                // leaves the pod partially dead in a way NO probe can see:
+                // /healthz is this process's other server and answers OK
+                // regardless, and the controller reaches the agent only over
+                // the node-agent port. Logging and continuing produced a
+                // zombie that served CSI while the controller believed the
+                // node unreachable. Exiting hands it to kubelet, which
+                // restarts THIS container only — spdk-tgt is a separate
+                // native sidecar, so the data path is untouched.
+                eprintln!("❌ [NODE_AGENT] FATAL: {e} — exiting so kubelet restarts the container");
+                std::process::exit(1);
             }
         });
     }
