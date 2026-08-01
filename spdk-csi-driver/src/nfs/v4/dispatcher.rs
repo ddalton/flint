@@ -95,6 +95,7 @@ impl CompoundDispatcher {
         let session_handler = SessionOperationHandler::new(state_mgr.clone());
         let io_handler = IoOperationHandler::new(state_mgr.clone(), fh_mgr.clone());
         let file_handler = FileOperationHandler::new(fh_mgr.clone(), pnfs_enabled)
+            .with_pnfs_handler(pnfs_handler.clone())
             .with_open_files(io_handler.open_file_view());
         let perf_handler = PerfOperationHandler::new_with_pnfs(
             state_mgr.clone(),
@@ -3450,6 +3451,78 @@ mod tests {
             d.dispatch_operation(mk(0), &mut ctx).await.status(),
             Nfs4Status::BadStateId
         );
+    }
+
+    /// A striped file must not report zero allocation.
+    ///
+    /// The MDS stub is `set_len`-only, so `blocks()` is 0 while the size
+    /// is real — the metadata signature of a fully sparse file. Measured
+    /// on lima 2026-08-01 with the raw value: `tar --sparse` of a 24 MiB
+    /// striped file produced a 10,240-byte archive and restored a file
+    /// with ZERO non-zero bytes, exit status 0. `du` said 0.
+    ///
+    /// The unpinned arm is mandatory. Without it, "always report size"
+    /// passes — and that would break genuinely sparse files, which are
+    /// the reason the attribute exists.
+    #[tokio::test]
+    async fn a_striped_file_does_not_report_zero_allocation() {
+        use crate::nfs::v4::operations::fileops::GetAttrOp;
+        const FATTR4_SPACE_USED: u32 = 45;
+        const SIZE: u64 = 3 * 1024 * 1024;
+
+        for pinned in [true, false] {
+            let (d, temp) = create_test_dispatcher_pnfs(
+                &["stub.dat"],
+                crate::pnfs::FallbackIoDisposition::FailFast,
+            );
+            let name = if pinned { "stub.dat" } else { "ordinary.dat" };
+            let path = temp.path().canonicalize().unwrap().join(name);
+
+            // A size-only stub: real length, zero blocks — exactly what
+            // the MDS creates for a placement-pinned file.
+            let f = std::fs::File::create(&path).unwrap();
+            f.set_len(SIZE).unwrap();
+            drop(f);
+
+            let mut ctx = CompoundContext::new(1);
+            ctx.current_fh =
+                Some(d.file_handler.fh_manager().path_to_filehandle(&path).unwrap());
+
+            let res = d
+                .file_handler
+                .handle_getattr(
+                    GetAttrOp {
+                        // attr 45 lives in bitmap WORD 1 (attrs 32..63),
+                        // bit 45-32 = 13.
+                        attr_request: vec![0, 1u32 << (FATTR4_SPACE_USED - 32), 0],
+                    },
+                    &ctx,
+                )
+                .await;
+            assert_eq!(res.status, Nfs4Status::Ok, "GETATTR failed for {name}");
+
+            // fattr4 body: bitmap words are in the reply; the value we
+            // asked for is the only one present, so it is the trailing u64.
+            let attrs = res.obj_attributes.expect("attributes present");
+            let v = &attrs.attr_vals;
+            assert!(v.len() >= 8, "attr body too short for a u64: {} bytes", v.len());
+            let space_used =
+                u64::from_be_bytes(v[v.len() - 8..].try_into().expect("8 bytes"));
+
+            if pinned {
+                assert_eq!(
+                    space_used, SIZE,
+                    "a striped file must report its size as allocated, not 0 — \
+                     0 makes tar --sparse back up nothing"
+                );
+            } else {
+                assert_eq!(
+                    space_used, 0,
+                    "a genuinely sparse, never-layouted file must keep reporting \
+                     its real (zero) allocation"
+                );
+            }
+        }
     }
 
     /// COPY's `wr_writeverf` must equal what COMMIT reports.

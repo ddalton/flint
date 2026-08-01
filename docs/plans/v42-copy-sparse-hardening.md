@@ -246,13 +246,57 @@ precisely the regression this catches, and an aggregate count cannot tell
 "passed" from "never ran". Those four are the entire 4.2 surface this
 pynfs has; a gate naming COPY1..COPY4 would fail for the wrong reason.
 
-### Still to run
+### 2.3 — run, and A3 is worse than a reporting bug
 
-- **2.3** `du -sh` vs `ls -l` on a striped file, to confirm or kill A3
-  before the SPACE_USED fix is written. Needs the pNFS rig (MDS + 2 DSes),
-  which `tests/lima/pnfs/pynfs.sh` already stands up in the same VM.
-- **The NOTSUPP fallback question is still open** — but only for the pNFS
-  striped-file guards, which is now the only place flint returns NOTSUPP
+Measured on the lima pNFS rig (MDS + 2 DSes, all inside Linux),
+2026-08-01. A 24 MiB striped file:
+
+| | size | `st_blocks` | `du` |
+|---|---|---|---|
+| striped file via MDS | 25165824 | **0** | **0** |
+| ordinary file, standalone server (control) | 4194304 | 8192 | 4.0M |
+
+The control matters: `space_used` is **correct** on a non-pNFS server, so
+this is specific to striped files, not a general breakage. The MDS stub is
+`set_len`-only — `size=25165824 blocks=0` on disk — which is precisely the
+metadata signature of a fully sparse file.
+
+**The consequence is silent data loss, not bad reporting.** `tar --sparse`
+trusts `st_blocks` to mean "this range is a hole" and never reads the
+file:
+
+| | before | after the fix |
+|---|---|---|
+| archive size for 24 MiB | **10,240 bytes** | 25,169,920 bytes |
+| non-zero bytes restored | **0** | 25,066,747 |
+| exit status | 0 | 0 |
+
+A backup that silently contains nothing, reporting success. This is the
+F15 class exactly. (`cp --sparse=auto` and `--sparse=always` were checked
+and are safe — they read the data.)
+
+Fixed: for a pinned file the MDS reports `space_used = size`. Per file,
+not per role, so a genuinely sparse never-layouted file on an MDS still
+reports its real allocation — asserted by the test's control arm, and both
+mutations are killed. Over-reporting is the deliberate direction: it makes
+tools do more work, whereas under-reporting to zero makes them skip real
+data.
+
+### Method note, second instalment
+
+The first re-test after the fix reported "DATA INTACT" and it was a **false
+pass**. The MDS config uses `state.backend: memory`, so restarting it
+forgot every placement; the pre-restart file was no longer pinned, the
+mount served the zero stub, and `cmp` was comparing zeros to zeros while
+the archive was still 10,240 bytes. The two contradictory numbers in the
+same output are what gave it away. Any re-test after an MDS restart must
+create a **new** striped file and prove it striped (DS stripe files
+present) before measuring.
+
+### Still open
+
+- **The NOTSUPP fallback question** now applies only to the pNFS
+  striped-file guards, which is the one place flint still returns NOTSUPP
   for these ops. On the standalone mount the client never sees a refusal.
 
 ## Phase 3 — mostly dropped, and why

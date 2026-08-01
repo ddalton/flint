@@ -1437,12 +1437,64 @@ pub struct FileOperationHandler {
     /// via fstat instead of STALE. None only in unit tests constructed
     /// without an io handler.
     open_files: Option<crate::nfs::v4::operations::ioops::OpenFileView>,
+    /// Present only in the MDS role. Used to answer SPACE_USED honestly
+    /// for striped files — see [`Self::correct_space_used`].
+    pnfs_handler: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
 }
 
 impl FileOperationHandler {
     /// Create a new file operation handler
     pub fn new(fh_mgr: Arc<FileHandleManager>, pnfs_enabled: bool) -> Self {
-        Self { fh_mgr, pnfs_enabled, open_files: None }
+        Self { fh_mgr, pnfs_enabled, open_files: None, pnfs_handler: None }
+    }
+
+    /// Attach the pNFS handler (MDS role only).
+    pub fn with_pnfs_handler(
+        mut self,
+        pnfs: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
+    ) -> Self {
+        self.pnfs_handler = pnfs;
+        self
+    }
+
+    /// Report a striped file's allocation as its size instead of the MDS
+    /// stub's block count.
+    ///
+    /// For a placement-pinned file the MDS's local file is created with
+    /// `set_len` and never written, so `blocks()` is 0 while `len()` is
+    /// the real size — the exact metadata signature of a fully sparse
+    /// file. The bytes are not missing; they are on the DS fleet.
+    ///
+    /// Measured consequence of reporting the raw 0 (lima, 2026-08-01):
+    /// `tar --sparse` of a 24 MiB striped file produced a 10,240-byte
+    /// archive and restored a file containing ZERO non-zero bytes, exit
+    /// status 0. `du` reported 0. sparse-aware tools trust `st_blocks`
+    /// to mean "this range is a hole" and skip reading it, so a backup
+    /// silently contains nothing. (`cp --sparse=auto/always` was
+    /// verified to still copy correctly — it reads the data.)
+    ///
+    /// `size` is an over-estimate for a striped file that is genuinely
+    /// sparse on the DSes. That direction is deliberate: over-reporting
+    /// allocation makes tools do more work, under-reporting it to zero
+    /// makes them skip real data. Summing true DS allocation would need
+    /// a fan-out on every GETATTR and has no answer while a DS is down.
+    fn correct_space_used(&self, snapshot: &mut AttributeSnapshot) {
+        let Some(pnfs) = &self.pnfs_handler else {
+            return;
+        };
+        if snapshot.space_used != 0 || snapshot.size == 0 {
+            return;
+        }
+        let export = self.fh_mgr.get_export_path();
+        let key = snapshot
+            .path
+            .strip_prefix(export)
+            .unwrap_or(&snapshot.path)
+            .to_string_lossy()
+            .into_owned();
+        if !key.is_empty() && pnfs.is_pnfs_managed(&key) {
+            snapshot.space_used = snapshot.size;
+        }
     }
 
     /// Attach the io handler's open-file view (dispatcher wiring).
@@ -2117,7 +2169,7 @@ impl FileOperationHandler {
 
         // PHASE 1: Fetch attribute snapshot (SINGLE VFS CALL)
         // This is the ONLY place where we do filesystem I/O for attributes
-        let snapshot = match AttributeSnapshot::from_path(&path).await {
+        let mut snapshot = match AttributeSnapshot::from_path(&path).await {
             Ok(s) => s,
             Err(e) => {
                 warn!("GETATTR: Failed to create attribute snapshot for {:?}: {}", path, e);
@@ -2132,6 +2184,11 @@ impl FileOperationHandler {
             }
         };
         
+        // A striped file's bytes are on the DSes; the local stub has 0
+        // blocks. Reporting that verbatim tells sparse-aware tools the
+        // whole file is a hole — `tar --sparse` then backs up nothing.
+        self.correct_space_used(&mut snapshot);
+
         // Debug log snapshot values (all from same point in time!)
         debug!("📊 Attribute snapshot for {:?}:", path);
         debug!("   type: {}, size: {}, fileid: {}", snapshot.ftype, snapshot.size, snapshot.fileid);
@@ -2428,13 +2485,17 @@ impl FileOperationHandler {
             let entry_path = entry.path();
 
             // Get metadata for this entry
-            let snapshot = match AttributeSnapshot::from_path(&entry_path).await {
+            let mut snapshot = match AttributeSnapshot::from_path(&entry_path).await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("READDIR: Failed to stat '{}': {}, skipping", file_name, e);
                     continue; // Skip entries we can't stat
                 }
             };
+
+            // Same correction as GETATTR: a READDIR carrying attributes
+            // must not report a striped file as fully unallocated either.
+            self.correct_space_used(&mut snapshot);
 
             all_entries.push((file_name, snapshot));
         }

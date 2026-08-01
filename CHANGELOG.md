@@ -58,6 +58,16 @@ than migrated.
 
 ### Fixed
 
+- **`tar --sparse` backed up striped files as nothing.** A pNFS file's
+  MDS stub is `set_len`-only, so `blocks()` is 0 while the size is real —
+  the metadata signature of a fully sparse file — and `FATTR4_SPACE_USED`
+  reported that verbatim. Measured on a real Linux client: `tar --sparse`
+  of a 24 MiB striped file produced a **10,240-byte archive** and restored
+  a file containing **zero** non-zero bytes, exit status 0; `du` said 0.
+  A backup that silently contains nothing. The MDS now reports
+  `space_used = size` for pinned files — per file, so a genuinely sparse
+  never-layouted file still reports its real allocation. `cp
+  --sparse=auto/always` was verified unaffected (it reads the data).
 - **COPY livelocked a real Linux client, and the server did the work every
   time.** `wr_writeverf` was a hardcoded zero, commented "sync copy:
   unused". Linux (verified on the wire, kernel 6.8) issues COPY and COMMIT
