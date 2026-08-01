@@ -405,7 +405,7 @@ pnfs:
     # MDS + DS ship in one image (both binaries; entrypoint selects).
     image:
       name: flint-pnfs
-      tag: "1.15.0"  # DS heartbeat reports real storage health (write+fsync probe, not hardcoded Healthy)
+      tag: "1.23.0"  # The pNFS truncate-correctness release. The truncate_dirty gate exists to hide the window where a truncate has hit the MDS stub but the DSes still hold bytes past the new EOF — TLC found it did not, and closing F65 took nine further defects, every one invisible because the server's own logs scored a refused recall as an ack. Also carries the NFSv4.2 wave (see the driver image). WAS PINNED AT 1.15.0 THROUGH v1.22.0: that pin would have shipped this release's headline pNFS fixes in the changelog and NOT in the deployed image.
 
     # FILE-layout stripe unit in bytes. Pinned PER FILE at first
     # LAYOUTGET (Phase 0): changing this affects only files created
