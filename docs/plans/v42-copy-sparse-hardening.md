@@ -326,11 +326,47 @@ same output are what gave it away. Any re-test after an MDS restart must
 create a **new** striped file and prove it striped (DS stripe files
 present) before measuring.
 
-### Still open
+### The NOTSUPP-fallback question — ANSWERED 2026-08-01
 
-- **The NOTSUPP fallback question** now applies only to the pNFS
-  striped-file guards, which is the one place flint still returns NOTSUPP
-  for these ops. On the standalone mount the client never sees a refusal.
+Measured by hand-mounting the MDS with `vers=4.2` (the only way to reach
+the guards: at `minorversion=1` the ops never leave the client, and the
+0.6 gate would answer OP_ILLEGAL anyway), then exercising all five on a
+24 MiB striped file.
+
+All four reachable ops hit the server, the guards fired, and the server
+answered `NFS4ERR_NOTSUPP` **exactly once each** — 2 packets per op, no
+retry storm:
+
+| op | wire | client behaviour | data |
+|---|---|---|---|
+| COPY (60) | 1 call → NOTSUPP | `copy_file_range` fell back internally, returned the full count | correct |
+| SEEK (69) | 1 call → NOTSUPP | client emulated (DATA→0, HOLE→size) | n/a |
+| ALLOCATE (59) | 1 call → NOTSUPP | glibc emulated `posix_fallocate`, returned OK | file intact |
+| CLONE (71) | 1 call → NOTSUPP | EOPNOTSUPP surfaced; `cp --reflink=always` failed correctly, plain `cp` succeeded and copied 24 MiB intact | intact |
+| DEALLOCATE (62) | **never sent** | `ENOTSUP` raised client-side; 0 packets on the wire | n/a |
+
+**The refusal is free, not a per-call tax.** Three successive
+`copy_file_range` calls after the first refusal emitted **zero** COPY
+RPCs — the client caches the cleared capability per mount. This was the
+open question the research named as deciding whether "refuse on striped
+files" is cheap; it is.
+
+So the guards are safe in both directions: no livelock, no data loss,
+every fallback produced correct bytes, and the cost is one refused RPC
+per mount per operation.
+
+### Method note, third instalment
+
+Two more instrument bugs, both caught only because a number looked wrong:
+
+- `posix_fallocate` on an **O_WRONLY** fd returns EBADF from glibc's
+  emulation (it reads to preserve data). That is the test's fault, not
+  the server's — use O_RDWR.
+- `copy_file_range` with `offset_src=None` **advances the fd offset**.
+  Reusing one source fd across three calls copies three *consecutive*
+  megabytes, so comparing every destination against byte 0 of the source
+  reports a mismatch that is not there. Each destination matched the
+  range it actually read.
 
 ## Phase 3 — mostly dropped, and why
 
