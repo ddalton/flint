@@ -234,9 +234,15 @@ impl PnfsOperationHandler {
         // MDS-fallback I/O is expected, not a trap symptom. Park it
         // while the confirmation retry runs; ceiling still applies so a
         // permanently unreachable DS can't livelock the client.
+        // `truncate_dirty_age`, NOT `truncate_dirty_since`: the age has
+        // to span MDS incarnations. Measuring from a process-local
+        // Instant re-armed this ceiling at every restart, so a client on
+        // the fallback path during a long park could be DELAYed without
+        // bound as long as the MDS bounced periodically — the exact
+        // livelock the ceiling exists to prevent.
         let gate = truncate_gate_key(&placement, file_key);
-        if let Some(since) = self.layout_manager.truncate_dirty_since(&gate) {
-            return if Instant::now().saturating_duration_since(since) < ceiling {
+        if let Some(age) = self.layout_manager.truncate_dirty_age(&gate) {
+            return if age < ceiling {
                 FallbackIoDisposition::Delay
             } else {
                 FallbackIoDisposition::FailFast
@@ -1344,6 +1350,52 @@ mod fallback_tests {
             handler.fallback_io_disposition_bounded("f.bin", Duration::ZERO),
             FallbackIoDisposition::FailFast,
             "an outage past the ceiling must fail fast, not hang apps forever"
+        );
+    }
+
+    /// The ceiling that bounds a fallback client's wait must survive an
+    /// MDS restart.
+    ///
+    /// The gate's age lived in a process-local `Instant`, re-stamped by
+    /// `load_placement_records` on every boot. So an MDS that bounced
+    /// more often than the ceiling handed the same client `Delay`
+    /// forever — the unbounded wait the ceiling exists to prevent, and
+    /// invisible because each individual process saw a young gate.
+    ///
+    /// A restart is not progress. A gate armed before this process
+    /// started is as old as it says it is.
+    #[test]
+    fn a_restart_does_not_re_arm_the_fallback_ceiling() {
+        let (_registry, handler) = pinned_handler(&["ds-1", "ds-2"], "f.bin");
+        let placement = handler.layout_manager.placement_for("f.bin").unwrap();
+        let gate = truncate_gate_key(&placement, "f.bin");
+
+        // Freshly armed in this process: the client waits.
+        handler.layout_manager.mark_truncate_dirty(&gate, 0);
+        assert_eq!(
+            handler.fallback_io_disposition_bounded("f.bin", CEILING),
+            FallbackIoDisposition::Delay,
+            "a gate armed a moment ago is inside the ceiling",
+        );
+
+        // Now the MDS restarts, an hour into the same parked truncate.
+        let (_registry2, restarted) = pinned_handler(&["ds-1", "ds-2"], "f.bin");
+        let mut rec = restarted
+            .layout_manager
+            .placement_for("f.bin")
+            .unwrap()
+            .to_record("f.bin");
+        rec.truncate_pending = Some(0);
+        rec.truncate_since_unix =
+            Some(crate::pnfs::mds::layout::unix_now_for_test() - 3600);
+        restarted.layout_manager.load_placement_records(vec![rec]);
+
+        assert_eq!(
+            restarted.fallback_io_disposition_bounded("f.bin", CEILING),
+            FallbackIoDisposition::FailFast,
+            "the gate has been dirty for an hour across the restart — a bounce \
+             is not progress, and re-arming the ceiling lets a fallback client \
+             be DELAYed without bound",
         );
     }
 

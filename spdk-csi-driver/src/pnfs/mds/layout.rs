@@ -15,7 +15,51 @@ use crate::state_backend::{
 };
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info, warn};
+
+/// Seconds since the Unix epoch. Wall-clock, and deliberately so: this
+/// value has to survive a process, which `Instant` cannot. Everything
+/// that measures a DURATION uses the monotonic clock; the wall clock is
+/// only ever used to carry an age ACROSS a restart, where the
+/// alternative is not a better clock but no memory at all.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A truncate-dirty mark.
+///
+/// `since` is monotonic but process-scoped; `carried` is the age
+/// inherited from previous MDS incarnations. The sum is what the
+/// fallback delay ceiling measures.
+///
+/// Splitting it this way rather than reconstructing an `Instant` in the
+/// past is deliberate: `Instant::now() - carried` is not portably
+/// representable when the process has been up for less time than the
+/// gate has been dirty — which, right after the restart that motivated
+/// this, is every time.
+#[derive(Debug, Clone, Copy)]
+struct GateMark {
+    since: std::time::Instant,
+    carried: Duration,
+    min: u64,
+}
+
+impl GateMark {
+    fn age(&self) -> Duration {
+        self.carried + self.since.elapsed()
+    }
+}
+
+/// `unix_now` for tests in sibling modules that need to build a
+/// placement record with a stamp in the past.
+#[cfg(test)]
+pub fn unix_now_for_test() -> u64 {
+    unix_now()
+}
 
 /// Layout state ID (combines with NFSv4 stateid)
 pub type LayoutStateId = [u8; 16];
@@ -108,7 +152,7 @@ pub struct FilePlacement {
 }
 
 impl FilePlacement {
-    fn to_record(&self, file_key: &str) -> PlacementRecord {
+    pub(crate) fn to_record(&self, file_key: &str) -> PlacementRecord {
         PlacementRecord {
             file_key: file_key.to_string(),
             stripe_size: self.stripe_size,
@@ -117,6 +161,7 @@ impl FilePlacement {
             // Filled in by the caller that knows the gate state; the
             // placement struct itself does not carry it.
             truncate_pending: None,
+            truncate_since_unix: None,
         }
     }
 
@@ -273,7 +318,7 @@ pub struct LayoutManager {
     /// own length). In-memory: an MDS crash inside the
     /// (milliseconds-wide) stub-truncate → DS-ack window can lose a
     /// mark; accepted residual documented in the operator runbook.
-    truncate_dirty: Arc<DashMap<String, (std::time::Instant, u64)>>,
+    truncate_dirty: Arc<DashMap<String, GateMark>>,
 
     /// Persistence target. Layouts surviving MDS restart prevents the
     /// kernel from issuing fresh LAYOUTGETs (disruptive but functional)
@@ -529,7 +574,7 @@ impl LayoutManager {
             .iter()
             .filter_map(|e| {
                 let gate = e.key().clone();
-                let (_, min) = *e.value();
+                let min = e.value().min;
                 self.placements.iter().find_map(|p| {
                     if truncate_gate_key(p.value(), p.key()) == gate {
                         Some((gate.clone(), p.key().clone(), p.value().clone(), min))
@@ -554,12 +599,24 @@ impl LayoutManager {
             // after this (see resume_parked_truncates).
             if let Some(pending) = r.truncate_pending {
                 let gate = truncate_gate_key(&placement, &r.file_key);
-                self.truncate_dirty
-                    .insert(gate.clone(), (std::time::Instant::now(), pending));
+                // Inherit the age. Re-stamping to now() here re-armed the
+                // fallback ceiling on EVERY restart, so a client taking the
+                // MDS-fallback path during a long park could be DELAYed
+                // without bound across repeated bounces — exactly the
+                // livelock FALLBACK_DELAY_CEILING_DEFAULT exists to prevent.
+                let carried = r
+                    .truncate_since_unix
+                    .map(|stamp| Duration::from_secs(unix_now().saturating_sub(stamp)))
+                    .unwrap_or_default();
+                self.truncate_dirty.insert(
+                    gate.clone(),
+                    GateMark { since: std::time::Instant::now(), carried, min: pending },
+                );
                 warn!(
-                    "⏳ restored truncate gate for '{}' (deepest pending cut {}) — \
-                     LAYOUTGET stays TRYLATER until a DS confirms",
-                    gate, pending,
+                    "⏳ restored truncate gate for '{}' (deepest pending cut {}, \
+                     already dirty {}s before this incarnation) — LAYOUTGET \
+                     stays TRYLATER until a DS confirms",
+                    gate, pending, carried.as_secs(),
                 );
             }
             self.placements.insert(r.file_key.clone(), placement);
@@ -768,27 +825,39 @@ impl LayoutManager {
     /// gate lifts only when the deepest cut lands).
     pub fn mark_truncate_dirty(&self, gate_key: &str, size: u64) {
         let mut pending = size;
+        let mut age = Duration::ZERO;
         self.truncate_dirty
             .entry(gate_key.to_string())
-            .and_modify(|(_, min)| {
-                *min = (*min).min(size);
-                pending = *min;
+            .and_modify(|m| {
+                m.min = m.min.min(size);
+                pending = m.min;
+                age = m.age();
             })
-            .or_insert_with(|| (std::time::Instant::now(), size));
+            .or_insert_with(|| GateMark {
+                since: std::time::Instant::now(),
+                carried: Duration::ZERO,
+                min: size,
+            });
         // R4: the gate has to outlive this process. A restart during a
         // PARKED truncate otherwise comes back ungated with the DSes
         // still holding the old bytes.
-        self.persist_gate(gate_key, Some(pending));
+        //
+        // The stamp is wall-clock because it has to survive a process,
+        // and it is derived from the monotonic age rather than read
+        // fresh so that re-marking an ALREADY-dirty gate cannot reset
+        // it — mark keeps the oldest, and so must its persisted form.
+        self.persist_gate(gate_key, Some(pending), Some(unix_now().saturating_sub(age.as_secs())));
     }
 
     /// Mirror the gate onto the file's persisted placement record.
     /// Best-effort and keyed by the gate, so a gate with no matching
     /// placement (there should be none) is simply not written.
-    fn persist_gate(&self, gate_key: &str, pending: Option<u64>) {
+    fn persist_gate(&self, gate_key: &str, pending: Option<u64>, since_unix: Option<u64>) {
         for entry in self.placements.iter() {
             if truncate_gate_key(entry.value(), entry.key()) == gate_key {
                 let mut rec = entry.value().to_record(entry.key());
                 rec.truncate_pending = pending;
+                rec.truncate_since_unix = since_unix;
                 self.backend.enqueue_write(WriteOp::PutPlacement(rec));
                 return;
             }
@@ -801,10 +870,10 @@ impl LayoutManager {
     pub fn clear_truncate_dirty_if(&self, gate_key: &str, confirmed_size: u64) -> bool {
         let cleared = self
             .truncate_dirty
-            .remove_if(gate_key, |_, (_, min)| confirmed_size <= *min)
+            .remove_if(gate_key, |_, m| confirmed_size <= m.min)
             .is_some();
         if cleared {
-            self.persist_gate(gate_key, None);
+            self.persist_gate(gate_key, None, None);
             info!("Truncate-dirty cleared for '{}' (size {} confirmed)", gate_key, confirmed_size);
         }
         cleared
@@ -814,17 +883,30 @@ impl LayoutManager {
     /// enqueued for deletion outright).
     pub fn clear_truncate_dirty(&self, gate_key: &str) {
         self.truncate_dirty.remove(gate_key);
-        self.persist_gate(gate_key, None);
+        self.persist_gate(gate_key, None, None);
     }
 
-    /// The gate state: (dirty-since, smallest unconfirmed size).
+    /// The gate state: (dirty-since IN THIS PROCESS, smallest
+    /// unconfirmed size). Callers measuring the unconfirmed window want
+    /// `truncate_dirty_age`, not this — `since` restarts at every
+    /// incarnation and this accessor cannot see the inherited part.
     pub fn truncate_dirty_state(&self, gate_key: &str) -> Option<(std::time::Instant, u64)> {
-        self.truncate_dirty.get(gate_key).map(|e| *e.value())
+        self.truncate_dirty.get(gate_key).map(|e| (e.value().since, e.value().min))
     }
 
-    /// When the file went truncate-dirty, if it still is.
+    /// When the file went truncate-dirty in THIS process, if it still
+    /// is. Presence checks only; see `truncate_dirty_age` for duration.
     pub fn truncate_dirty_since(&self, gate_key: &str) -> Option<std::time::Instant> {
         self.truncate_dirty_state(gate_key).map(|(since, _)| since)
+    }
+
+    /// How long the file has been truncate-dirty IN TOTAL, across every
+    /// MDS incarnation since the mark was first set. This is what the
+    /// fallback delay ceiling has to measure: a bounce is not progress,
+    /// and a gate that has been dirty for an hour is an hour old however
+    /// many times the process restarted underneath it.
+    pub fn truncate_dirty_age(&self, gate_key: &str) -> Option<Duration> {
+        self.truncate_dirty.get(gate_key).map(|e| e.value().age())
     }
 
     /// Get-or-create the pinned placement for `file_key`.
@@ -1936,6 +2018,134 @@ mod tests {
         assert!(clean.parked_truncates().is_empty());
     }
 
+    /// The gate's AGE has to survive the restart too, not just the gate.
+    ///
+    /// `fallback_delay_ceiling` fails a client's MDS-fallback I/O once
+    /// the gate has been dirty past the ceiling — that is the only thing
+    /// bounding the wait. The age lived in a process-local `Instant`, so
+    /// every restart re-stamped it to now() and re-armed the ceiling: an
+    /// MDS that bounces more often than the ceiling could DELAY a
+    /// fallback client forever, which is exactly the livelock the
+    /// ceiling exists to prevent.
+    #[test]
+    fn truncate_gate_age_survives_a_restart() {
+        let mgr = recall_fixture();
+        mgr.generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        let gate = truncate_gate_key(&mgr.placement_for("file-a").unwrap(), "file-a");
+        mgr.mark_truncate_dirty(&gate, 4096);
+
+        // The record as the backend would hand it back one hour later.
+        let mut rec = mgr.placement_for("file-a").unwrap().to_record("file-a");
+        rec.truncate_pending = Some(4096);
+        rec.truncate_since_unix = Some(unix_now() - 3600);
+
+        let restarted = recall_fixture();
+        restarted.load_placement_records(vec![rec.clone()]);
+
+        let age = restarted.truncate_dirty_age(&gate).expect("gate re-armed");
+        assert!(
+            age >= Duration::from_secs(3600),
+            "the gate was armed an hour before this process started; \
+             age came back as {}s — the ceiling has been re-armed by the restart",
+            age.as_secs(),
+        );
+
+        // The pre-upgrade row: no stamp recorded. It must come back
+        // armed and simply look freshly armed — the behaviour before
+        // this column existed — rather than fail to restore.
+        let mut legacy = rec.clone();
+        legacy.truncate_since_unix = None;
+        let fresh = recall_fixture();
+        fresh.load_placement_records(vec![legacy]);
+        let age = fresh.truncate_dirty_age(&gate).expect("gate re-armed without a stamp");
+        assert!(age < Duration::from_secs(60), "an unknown stamp means newly armed");
+
+        // A backwards wall-clock jump — a stamp in the FUTURE — must not
+        // underflow into a huge age and fail-fast every client. Saturating
+        // subtraction makes it look newly armed, which delays the
+        // fail-fast rather than triggering it early: the safe direction.
+        let mut skewed = rec.clone();
+        skewed.truncate_since_unix = Some(unix_now() + 86_400);
+        let skew = recall_fixture();
+        skew.load_placement_records(vec![skewed]);
+        let age = skew.truncate_dirty_age(&gate).expect("gate re-armed under clock skew");
+        assert!(age < Duration::from_secs(60), "a future stamp must not underflow");
+    }
+
+    /// Re-marking an already-dirty gate keeps the OLDEST stamp, in the
+    /// persisted form as well as in memory. If the persisted stamp were
+    /// refreshed on every mark, a file being repeatedly truncated would
+    /// hold the ceiling open indefinitely — the same unbounded wait as
+    /// the restart bug, reached without a restart.
+    #[tokio::test]
+    async fn remarking_a_dirty_gate_does_not_refresh_the_persisted_stamp() {
+        // Reads the PERSISTED record, not the in-memory mark. An earlier
+        // version of this test asserted on `truncate_dirty_age` and was
+        // therefore unable to fail: `and_modify` never touches `since`,
+        // so the in-memory age is correct no matter what gets written
+        // down. The mutation run caught it — a persisted-stamp refresh
+        // sailed through green. The bug it must catch is a file
+        // truncated repeatedly holding the ceiling open forever, which
+        // is the restart bug reached without a restart.
+        let backend = crate::state_backend::memory_backend();
+        let registry = Arc::new(DeviceRegistry::new());
+        for i in 1..=2 {
+            registry
+                .register(DeviceInfo::new(
+                    format!("ds-{}", i),
+                    format!("10.0.0.{}:2049", i),
+                    vec![format!("nvme{}n1", i)],
+                ))
+                .unwrap();
+        }
+        let mgr = LayoutManager::new(
+            registry,
+            ConfigLayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            backend.clone(),
+        );
+        mgr.generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        let placement = mgr.placement_for("file-a").unwrap();
+        let gate = truncate_gate_key(&placement, "file-a");
+
+        // Arm it as if an hour ago.
+        let armed_at = unix_now() - 3600;
+        let mut rec = placement.to_record("file-a");
+        rec.truncate_pending = Some(4096);
+        rec.truncate_since_unix = Some(armed_at);
+        mgr.load_placement_records(vec![rec]);
+
+        // A second, deeper truncate arrives on the same still-dirty gate.
+        mgr.mark_truncate_dirty(&gate, 2048);
+
+        let persisted = backend
+            .get_placement("file-a")
+            .await
+            .unwrap()
+            .expect("placement persisted");
+        let stamp = persisted.truncate_since_unix.expect("stamp persisted");
+        assert!(
+            stamp <= armed_at + 5,
+            "re-marking refreshed the persisted stamp: armed at {}, written back as {} \
+             ({}s younger) — the ceiling would never be reached by a file that keeps \
+             being truncated",
+            armed_at,
+            stamp,
+            stamp.saturating_sub(armed_at),
+        );
+        assert_eq!(
+            persisted.truncate_pending,
+            Some(2048),
+            "the deeper cut is still what gets written down",
+        );
+        assert!(
+            mgr.truncate_dirty_age(&gate).unwrap() >= Duration::from_secs(3600),
+            "the in-memory age must carry the inherited hour too",
+        );
+    }
+
     /// AUDIT C1. The minted seqid must be a known non-zero constant, not
     /// random: RFC 8881 §12.5.5.2.1 has the client check that a recall's
     /// seqid is exactly one higher than the one it holds, and §20.3.3
@@ -2292,6 +2502,7 @@ mod tests {
             device_ids: vec!["ds-1".into(), "ds-2".into()],
             file_id: 0,
             truncate_pending: None,
+            truncate_since_unix: None,
         }]);
 
         let old = mgr
@@ -2420,6 +2631,7 @@ mod tests {
             device_ids: vec!["ds-1".into()],
             file_id: 0,
             truncate_pending: None,
+            truncate_since_unix: None,
         }]);
         assert!(mgr.rename_placement("legacy", "elsewhere").is_err());
         assert!(mgr.placement_for("legacy").is_some(), "refused rename must not lose the pin");
@@ -2544,6 +2756,7 @@ mod tests {
             device_ids: vec!["ds-1".into()],
             file_id: 0,
             truncate_pending: None,
+            truncate_since_unix: None,
         }]);
         assert!(mgr.has_legacy_placements_under("old"));
         assert!(!mgr.has_legacy_placements_under("old2"));

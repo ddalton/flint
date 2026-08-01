@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Eighty-seven runs, ALL required.
+# Eighty-eight runs, ALL required.
 #
 # (Counted as invocations. `grep -c '^strict_run'` also matches the three
 # function DEFINITIONS below — that miscount is how this header briefly read
@@ -591,6 +591,15 @@ strict_run FlintReplication FlintReplicationA2Armed.cfg "A2 + local-staging belt
 mutation_run FlintA2Probe FlintA2ProbeArmed.cfg "A2-fires non-vacuity probe for A2Armed (a2Created has exactly ONE writer, so a violation is a witness that AgentBootReconcile really executes: Init -> TgtDie -> AgentBootReconcile. THE STANDING RULE — no cfg may claim to exercise A2 without this pairing, because a green safety run and its non-vacuity probe prove nothing apart)" "ProbeA2Fires"
 
 # The destroyer nobody can refuse, A/B/C.  The green run is the indictment.
+#
+# THE PROBE RUNS FIRST, and it did not run at all until 2026-07-31: the
+# Blind green below CITES FlintA2ProbeDeath.cfg as its non-vacuity licence
+# (and so does the catalogue at the top of this file), but no invocation
+# ever executed it.  A green whose licence is a run the gate does not
+# perform is exactly the thing FlintA2Probe.tla:24-25 declares a standing
+# rule against — asserted inside the gate that declares it.
+mutation_run FlintA2Probe FlintA2ProbeDeath.cfg "tgt-death reachability probe for UncontrolledBlind (raidLostOnce has one writer, so a violation witnesses the class-3 death actually occurring; without it the Blind green could mean 'nothing ever died' rather than 'nothing could recover')" "ProbeTgtDeathReachable"
+
 strict_run FlintReplication FlintReplicationUncontrolledBlind.cfg "uncontrolled tgt death, UNREPAIRED (a routine helm upgrade in the DEFAULT configuration; Inv_RaidRecoveryUnreachable HOLDS = the volume can never come back, and the tgt death is verified REACHABLE via FlintA2ProbeDeath.cfg so the green is a real permanent outage and not a vacuous one)"
 mutation_run FlintReplication FlintReplicationUncontrolledA1.cfg "uncontrolled tgt death repaired by A1 (ALREADY SHIPPED, and in the default configuration the only thing standing between a routine helm upgrade and a permanent outage — fixes B and B' cannot reach this path)" "Inv_RaidRecoveryUnreachable"
 mutation_run FlintReplication FlintReplicationUncontrolledA2.cfg "uncontrolled tgt death recovered with the A2 arm set — ⚠️ CONFOUNDED A/B, DO NOT CITE AS 'A2 RECOVERS' (2026-07-30: the required violation is produced by Assemble, not AgentBootReconcile — trace Init -> TgtDie -> Assemble. FlintReplication.tla:1633 is (RaidLifetimeArm => (~staged \\/ RaidReconcileArm)), so the A2 constant ALSO relaxes ordinary NodeStage on a still-staged volume and the A/B against UncontrolledBlind moves two things at once. The credited recoverer is the stronger, UNBELTED one. De-confounding this needs a separate constant for the staged-reassemble relaxation — owed, tracked in the A2 doc)" "Inv_RaidRecoveryUnreachable"

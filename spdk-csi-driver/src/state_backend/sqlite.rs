@@ -113,7 +113,15 @@ use tokio::sync::oneshot;
 ///        gate, persisted so an MDS restart during a parked truncate
 ///        does not come back ungated with the DSes still holding the
 ///        pre-truncate bytes. -1 = no cut pending.
-const SCHEMA_VERSION: i64 = 8;
+///   9 → add `file_placement.truncate_since_unix` — when that gate was
+///        FIRST armed, in epoch seconds. The age drives the fallback
+///        delay ceiling, and it lived only in an `Instant`, so every
+///        restart re-stamped it and re-armed the 90s: a fallback client
+///        could be DELAYed without bound across repeated bounces. -1 =
+///        unknown, which for a pre-upgrade row means the gate is treated
+///        as newly armed — the same behaviour as before this column, so
+///        the migration changes nothing for rows written without it.
+const SCHEMA_VERSION: i64 = 9;
 
 /// One request to the writer thread.
 enum Req {
@@ -346,6 +354,31 @@ impl SqliteBackend {
                         })?;
                     }
                     tracing::info!("SqliteBackend: migrating schema → 8 (file_placement.truncate_pending)");
+                }
+                if prev < 9 {
+                    // file_placement.truncate_since_unix. -1 = unknown.
+                    // A pre-upgrade row carrying a live gate loses only
+                    // the gate's AGE, not the gate — it comes back armed
+                    // and simply looks freshly armed, which is exactly
+                    // what the old code did unconditionally.
+                    let has_col: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('file_placement') WHERE name = 'truncate_since_unix'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| {
+                        StateBackendError::Storage(format!("migrate v→9 (probe column): {}", e))
+                    })?;
+                    if has_col == 0 {
+                        conn.execute(
+                            "ALTER TABLE file_placement ADD COLUMN truncate_since_unix INTEGER NOT NULL DEFAULT -1",
+                            [],
+                        )
+                        .map_err(|e| {
+                            StateBackendError::Storage(format!("migrate v→9 (alter file_placement): {}", e))
+                        })?;
+                    }
+                    tracing::info!("SqliteBackend: migrating schema → 9 (file_placement.truncate_since_unix)");
                 }
                 conn.execute(
                     "UPDATE schema_version SET version = ?1 WHERE id = 1",
@@ -695,8 +728,9 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             conn.prepare_cached(
                 "INSERT OR REPLACE INTO file_placement
-                 (file_key, stripe_size, device_ids, file_id, truncate_pending)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (file_key, stripe_size, device_ids, file_id, truncate_pending,
+                  truncate_since_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?
             .execute(params![
                 p.file_key,
@@ -704,6 +738,7 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
                 device_ids_json,
                 u64_to_i64(p.file_id),
                 p.truncate_pending.map(u64_to_i64).unwrap_or(-1),
+                p.truncate_since_unix.map(u64_to_i64).unwrap_or(-1),
             ])?;
         }
         WriteOp::DeletePlacement(k) => {
@@ -1060,7 +1095,8 @@ impl StateBackend for SqliteBackend {
         let row = self
             .with_conn(move |conn| {
                 conn.query_row(
-                    "SELECT file_key, stripe_size, device_ids, file_id, truncate_pending
+                    "SELECT file_key, stripe_size, device_ids, file_id, truncate_pending,
+                            truncate_since_unix
                      FROM file_placement WHERE file_key = ?1",
                     params![key],
                     decode_placement_row,
@@ -1075,7 +1111,8 @@ impl StateBackend for SqliteBackend {
         let rows = self
             .with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT file_key, stripe_size, device_ids, file_id, truncate_pending FROM file_placement",
+                    "SELECT file_key, stripe_size, device_ids, file_id, truncate_pending,
+                            truncate_since_unix FROM file_placement",
                 )?;
                 let rows: rusqlite::Result<Vec<_>> =
                     stmt.query_map([], decode_placement_row)?.collect();
@@ -1299,6 +1336,7 @@ fn decode_placement_row(
     let device_ids_json: String = r.get(2)?;
     let file_id: i64 = r.get(3)?;
     let truncate_pending: i64 = r.get(4)?;
+    let truncate_since_unix: i64 = r.get(5)?;
 
     Ok((|| -> StateBackendResult<PlacementRecord> {
         let device_ids: Vec<String> = serde_json::from_str(&device_ids_json)
@@ -1308,6 +1346,11 @@ fn decode_placement_row(
                 None
             } else {
                 Some(i64_to_u64(truncate_pending))
+            },
+            truncate_since_unix: if truncate_since_unix < 0 {
+                None
+            } else {
+                Some(i64_to_u64(truncate_since_unix))
             },
             file_key,
             stripe_size: i64_to_u64(stripe_size),
@@ -1400,7 +1443,8 @@ CREATE TABLE IF NOT EXISTS file_placement (
     device_ids TEXT NOT NULL,
     file_id INTEGER NOT NULL DEFAULT 0,
     -- Schema v8: the truncate-dirty gate. -1 = no cut pending.
-    truncate_pending INTEGER NOT NULL DEFAULT -1
+    truncate_pending INTEGER NOT NULL DEFAULT -1,
+    truncate_since_unix INTEGER NOT NULL DEFAULT -1
 );
 
 CREATE TABLE IF NOT EXISTS instance_counter (

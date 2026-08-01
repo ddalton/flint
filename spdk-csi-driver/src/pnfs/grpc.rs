@@ -685,6 +685,7 @@ mod create_volume_tests {
             device_ids: vec!["ds-a".into(), "ds-b".into()],
             file_id: 7,
             truncate_pending: None,
+            truncate_since_unix: None,
         };
         s.layout_manager.load_placement_records(vec![
             rec("vol/a.parquet"),

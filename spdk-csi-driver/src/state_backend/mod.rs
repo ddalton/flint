@@ -304,6 +304,23 @@ pub struct PlacementRecord {
     /// NULL like its siblings.
     #[serde(default)]
     pub truncate_pending: Option<u64>,
+    /// Wall-clock seconds since the epoch at which the gate above was
+    /// FIRST armed — not when it was last written.
+    ///
+    /// The gate's age drives `fallback_delay_ceiling`, past which a
+    /// client taking MDS-fallback I/O is failed rather than delayed
+    /// forever. That age lived only in an `Instant`, so every MDS
+    /// restart re-stamped it to now() and re-armed the ceiling: during
+    /// a long park with periodic bounces a fallback client could be
+    /// DELAYed without bound, which is precisely the livelock the
+    /// ceiling exists to prevent.
+    ///
+    /// Wall-clock, because it must outlive the process. A backwards
+    /// clock jump makes the gate look YOUNGER (saturating subtraction),
+    /// which delays the fail-fast rather than triggering it early —
+    /// the safe direction for a value whose only job is to bound a wait.
+    #[serde(default)]
+    pub truncate_since_unix: Option<u64>,
 }
 
 /// Persistent id↔path mapping behind version-2 (id-based) NFSv4
@@ -640,6 +657,7 @@ mod tests {
             device_ids: vec!["ds-1".into(), "ds-2".into(), "ds-3".into()],
             file_id: 0,
             truncate_pending: None,
+            truncate_since_unix: None,
         };
         b.put_placement(&placement).await.unwrap();
         assert_eq!(
