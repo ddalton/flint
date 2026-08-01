@@ -1479,6 +1479,9 @@ impl CompoundDispatcher {
                         count: res.count,
                         consecutive: true,  // Assume consecutive for simplicity
                         synchronous: res.sync,
+                        // Must be the SAME verifier COMMIT reports — the
+                        // client compares them within one compound.
+                        verifier: self.io_handler.write_verifier(),
                     }))
                 } else {
                     OperationResult::Copy(res.status, None)
@@ -3446,6 +3449,106 @@ mod tests {
         assert_eq!(
             d.dispatch_operation(mk(0), &mut ctx).await.status(),
             Nfs4Status::BadStateId
+        );
+    }
+
+    /// COPY's `wr_writeverf` must equal what COMMIT reports.
+    ///
+    /// Measured on lima (Ubuntu 24.04, kernel 6.8.0-136) on 2026-08-01:
+    /// Linux issues COPY and COMMIT in ONE compound and compares the two
+    /// verifiers. flint returned a hardcoded zero for COPY's, commented
+    /// "sync copy: unused". The client read every successful copy as a
+    /// server reboot and reissued the identical COPY — a single
+    /// `copy_file_range()` of 1 MiB produced 264,601 COPY RPCs, each of
+    /// which the server really performed, and the syscall never returned.
+    ///
+    /// No single-operation assertion can see this: both replies are
+    /// individually well-formed and both say NFS4_OK. Only the RELATION
+    /// between them is wrong, so the test has to compare the two.
+    #[tokio::test]
+    async fn copy_and_commit_report_the_same_write_verifier() {
+        let (d, temp) = create_test_dispatcher();
+        let mut ctx = CompoundContext::new(2);
+
+        let src = temp.path().join("src.bin");
+        let dst = temp.path().join("dst.bin");
+        std::fs::write(&src, vec![7u8; 4096]).unwrap();
+        std::fs::write(&dst, b"").unwrap();
+        let src_fh = d.file_handler.fh_manager().path_to_filehandle(&src).unwrap();
+        let dst_fh = d.file_handler.fh_manager().path_to_filehandle(&dst).unwrap();
+        let mk_sid = |fh: &crate::nfs::v4::protocol::Nfs4FileHandle| {
+            d.state_mgr.stateids.allocate(
+                crate::nfs::v4::state::StateType::Open, 1, Some(fh.data.clone()))
+        };
+
+        ctx.current_fh = Some(dst_fh.clone());
+        let copy = d
+            .dispatch_operation(
+                Operation::Copy {
+                    src_stateid: mk_sid(&src_fh),
+                    dst_stateid: mk_sid(&dst_fh),
+                    src_offset: 0,
+                    dst_offset: 0,
+                    count: 4096,
+                    consecutive: false,
+                    synchronous: true,
+                    source_server_count: 0,
+                },
+                &mut ctx,
+            )
+            .await;
+
+        let copy_verf = match copy {
+            OperationResult::Copy(Nfs4Status::Ok, Some(r)) => r.verifier,
+            other => panic!("COPY did not succeed: {other:?}"),
+        };
+
+        let commit = d
+            .dispatch_operation(Operation::Commit { offset: 0, count: 4096 }, &mut ctx)
+            .await;
+        let commit_verf = match commit {
+            OperationResult::Commit(Nfs4Status::Ok, Some(v)) => u64::from_be_bytes(v),
+            other => panic!("COMMIT did not succeed: {other:?}"),
+        };
+
+        assert_eq!(
+            copy_verf, commit_verf,
+            "COPY's wr_writeverf must equal COMMIT's verifier; a mismatch makes a \
+             Linux client retry the copy forever"
+        );
+        assert_ne!(copy_verf, 0, "a zero verifier is what caused the livelock");
+
+        // AND on the wire. The struct assertions above are not enough: the
+        // original bug was in the ENCODER, which wrote a hardcoded zero and
+        // ignored whatever the handler produced. A test that stops at
+        // CopyResult passes against the broken encoder — verified by
+        // mutation, which is how this half came to be written.
+        let encoded = crate::nfs::v4::compound::CompoundResponse {
+            status: Nfs4Status::Ok,
+            tag: String::new(),
+            results: vec![OperationResult::Copy(
+                Nfs4Status::Ok,
+                Some(crate::nfs::v4::compound::CopyResult {
+                    count: 4096,
+                    consecutive: true,
+                    synchronous: true,
+                    verifier: copy_verf,
+                }),
+            )],
+            raw_reply: None,
+            cache_slot: None,
+        }
+        .encode();
+
+        // status(4) tag_len(4) count(4) | opcode(4) status(4)
+        // wr_callback_id count(4) wr_count(8) wr_committed(4) wr_writeverf(8)
+        let verf_off = 4 + 4 + 4 + 4 + 4 + 4 + 8 + 4;
+        let on_wire = u64::from_be_bytes(
+            encoded[verf_off..verf_off + 8].try_into().expect("8 verifier bytes"),
+        );
+        assert_eq!(
+            on_wire, copy_verf,
+            "the ENCODED wr_writeverf must carry the real verifier, not a constant"
         );
     }
 

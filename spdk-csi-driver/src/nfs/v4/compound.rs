@@ -492,6 +492,10 @@ pub struct CopyResult {
     pub count: u64,
     pub consecutive: bool,
     pub synchronous: bool,
+    /// `wr_writeverf` — this server lifetime's write verifier, the SAME
+    /// value COMMIT reports. See `IoOperationHandler::write_verifier`:
+    /// a mismatch livelocks a Linux client.
+    pub verifier: u64,
 }
 
 /// Result for SEEK operation
@@ -2504,7 +2508,18 @@ impl CompoundResponse {
                         encoder.encode_u32(0); // wr_callback_id<1>: empty (copy is synchronous)
                         encoder.encode_u64(res.count);
                         encoder.encode_u32(2); // wr_committed = FILE_SYNC4
-                        encoder.encode_fixed_opaque(&[0u8; 8]); // wr_writeverf (sync copy: unused)
+                        // wr_writeverf. This was a hardcoded zero commented
+                        // "sync copy: unused" — and that assumption is what
+                        // hung a real client. Linux 6.8 sends COPY and
+                        // COMMIT in ONE compound and compares the two
+                        // verifiers; zeros never match COMMIT's, so it read
+                        // every successful copy as a server reboot and
+                        // reissued the identical COPY forever. Measured on
+                        // lima 2026-08-01: one copy_file_range() of 1 MiB
+                        // produced 264,601 COPY RPCs, each of which the
+                        // server actually performed, and the syscall never
+                        // returned.
+                        encoder.encode_fixed_opaque(&res.verifier.to_be_bytes());
                         encoder.encode_bool(res.consecutive);
                         encoder.encode_bool(res.synchronous);
                     }

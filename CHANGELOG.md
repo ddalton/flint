@@ -58,6 +58,19 @@ than migrated.
 
 ### Fixed
 
+- **COPY livelocked a real Linux client, and the server did the work every
+  time.** `wr_writeverf` was a hardcoded zero, commented "sync copy:
+  unused". Linux (verified on the wire, kernel 6.8) issues COPY and COMMIT
+  in ONE compound and compares COPY's verifier against COMMIT's; zeros
+  never match, so the client read every successful copy as a server reboot
+  and reissued the identical COPY forever. Measured: one 1 MiB
+  `copy_file_range()` produced **264,601 COPY RPCs**, each of which the
+  server actually performed, and the syscall never returned. COPY now
+  reports the same per-lifetime verifier as WRITE and COMMIT; the same
+  operation now takes **2 RPCs** and returns. Every reply was
+  individually well-formed and said NFS4_OK — only the *relation* between
+  the two verifiers was wrong, which is why no single-operation assertion
+  could have caught it.
 - **COPY silently dropped the tail of its own arguments.** `COPY4args`
   ends with `ca_source_server<netloc4>` and the decoder stopped before it,
   so the array's length word was read as the next opcode. For the ordinary

@@ -153,40 +153,83 @@ Notes on the non-obvious ones:
 - **1.6** bumps from the destination **fd** inside the blocking closure,
   not `bump_path` — a raced rename must not steer it.
 
-## Phase 2 — measurement — NOT STARTED, cheap, re-orders Phase 3
+## Phase 2 — measurement — RUN 2026-08-01, and it found a livelock
 
-**Nobody has established whether a Linux client falls back cleanly when
-COPY returns NFS4ERR_NOTSUPP.** It is unmeasured in both directions: no
-pcap, drill, or log line in the tree shows a COPY ever arriving at flint,
-and pynfs COPY5 is SKIP in every artifact.
+**No cluster was needed.** The lima rig (Ubuntu 24.04, kernel 6.8.0-136,
+nfs-utils 2.6.4) is a real Linux NFS client. The one change required was
+running the **server** inside the VM too — the Makefile runs it on the
+macOS host, where SEEK/ALLOCATE/DEALLOCATE are `#[cfg(target_os =
+"linux")]` stubs that answer NOTSUPP unconditionally, so a capture against
+that rig measures the platform, not the code. `cargo zigbuild --target
+aarch64-unknown-linux-musl --bin flint-nfs-server`, `limactl copy`, run it
+under `systemd-run` (backgrounding via `limactl shell ... &` does not
+survive the shell exiting).
 
-The in-tree precedent is READ_PLUS (F15, observed live) and it is
-**weaker than it looks**: READ_PLUS falls back to plain READ, mandatory in
-every minor version, so the client always has somewhere to go. COPY's
-fallback is `copy_file_range(2)` erroring into userspace.
+### What the wire said
 
-One capture on the **shipped RWX mount** answers all of it:
+**COPY livelocked a real Linux client.** One `copy_file_range()` of 1 MiB
+produced **264,601 COPY RPCs** and the syscall never returned; the server
+performed a full 1 MiB server-side copy on every iteration. Every reply
+was individually well-formed and said NFS4_OK with `length: 1048576`,
+`committed: FILE_SYNC4`, `synchronous: Yes`.
 
+The cause was one line in the encoder:
+
+```rust
+encoder.encode_fixed_opaque(&[0u8; 8]); // wr_writeverf (sync copy: unused)
 ```
-tcpdump -i any -s0 -w /tmp/copy.pcap port 2049 &
-strace -f -e trace=copy_file_range,ioctl,read,write,lseek cp --reflink=never big.bin copy1
-strace -f -e trace=ioctl cp --reflink=always big.bin copy2
-```
 
-Read the XDR by hand (`tshark -O nfs -V`). **Do not `grep -c` the
-capture** — this repo has already shipped a drill that scored `grep -c CB_`
-on binary XDR and structurally could never match.
+Linux issues COPY and COMMIT in **one compound** and compares COPY's
+`wr_writeverf` against COMMIT's verifier. Zeros never match, so the client
+read every successful copy as a server reboot and reissued the identical
+COPY forever. Phase 1 had explicitly DEFERRED verifier plumbing as
+cosmetic; the measurement overturned that.
 
-It settles: whether opcode 60 is emitted at all; `ca_synchronous`
-TRUE/FALSE (three findings lean on that one bit in *opposite* directions);
-whether `ca_source_server` is on the wire; whether NOTSUPP clears the
-capability mount-wide or is re-asked per call (a free guard vs a per-call
-tax); and whether the client emits opcode 71 at all given
-`fattr4_clone_blksize` is absent from SUPPORTED_ATTRS.
+| | COPY RPCs for one 1 MiB copy | syscall |
+|---|---|---|
+| before | 264,601 | never returned |
+| after | 2 (one call, one reply) | returned 1048576 in 5.2 s |
 
-Also: find out **why** ALLOC1-3/COPY5 are skipped in all 25 pynfs
-artifacts, and convert the aggregate gate to a named-code gate where
-PASS→SKIP is a failure.
+Verified byte-identical afterwards on all three client paths:
+`copy_file_range` (opcode 60), `cp --reflink=always` (opcode 71 via
+FICLONE, `ioctl(...) = 0`), and plain `cp`.
+
+### The deciding question, answered differently than expected
+
+The question was "does the Linux client fall back cleanly when COPY
+returns NOTSUPP?" It never arose, because **COPY does not return
+NOTSUPP** — the client reaches a working COPY and CLONE on the shipped
+`vers=4.2` mount. So:
+
+- **COPY and CLONE are not theoretical.** A stock `cp --reflink=always`
+  emits opcode 71, and `copy_file_range(2)` emits opcode 60. Both are
+  reachable from ordinary user commands, which retroactively raises the
+  severity of the Phase 0 CLONE truncate bug: that path is one `cp` away.
+- The NOTSUPP fallback question **remains open for the pNFS striped-file
+  guards**, which is where NOTSUPP is actually returned. Not yet measured.
+- `ca_synchronous` arrives **TRUE** from Linux, and `ca_source_server` is
+  **absent** (empty array) — settling the three findings that leaned on
+  that bit in opposite directions. The empty array is exactly the case
+  whose length word the old decoder ate as the next opcode.
+
+### Method note
+
+Two harness mistakes worth remembering. `cp --reflink=never` emits **zero**
+`copy_file_range` calls — that flag forces a plain copy, so that arm
+measured nothing; use `copy_file_range(2)` directly. And `tshark -c N`
+limits packets **read**, not packets **matched**, so `-Y filter -c 6`
+silently returns nothing on a large capture.
+
+### Still to run
+
+- **2.2** pynfs: `st_sparse` (ALLOC1-3) and `st_copy` (COPY5) are the only
+  4.2 tests present and are SKIP in all 25 artifacts. The harness passes no
+  `--minorversion`, and `nfs4.1/testserver.py` defaults to 1, which would
+  make them skip by construction. Confirm, then gate on named codes with
+  PASS→SKIP a failure. Only COPY5 exists — a gate naming COPY1..COPY4
+  fails for the wrong reason.
+- **2.3** `du -sh` vs `ls -l` on a striped file, to confirm or kill A3
+  before the SPACE_USED fix is written.
 
 ## Phase 3 — mostly dropped, and why
 

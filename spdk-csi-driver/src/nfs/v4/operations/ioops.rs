@@ -266,6 +266,19 @@ impl IoOperationHandler {
         }
     }
 
+    /// This server lifetime's write verifier — the value WRITE and COMMIT
+    /// report, and therefore the value COPY must report too.
+    ///
+    /// A Linux client (6.8, verified on the wire) issues COPY and COMMIT
+    /// in ONE compound and compares COPY's `wr_writeverf` against
+    /// COMMIT's verifier. Any difference reads as "the server rebooted
+    /// mid-copy, the data may be gone", and the client reissues the
+    /// identical COPY — forever. Returning a constant here is not a
+    /// cosmetic inaccuracy; it is an infinite loop.
+    pub fn write_verifier(&self) -> u64 {
+        self.write_verifier
+    }
+
     /// Shared read-only view over the fd cache (see [`OpenFileView`]).
     pub fn open_file_view(&self) -> OpenFileView {
         OpenFileView {
