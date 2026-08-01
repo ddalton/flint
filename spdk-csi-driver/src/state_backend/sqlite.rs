@@ -75,53 +75,25 @@ use std::collections::HashMap;
 use std::path::Path;
 use tokio::sync::oneshot;
 
-/// Schema version persisted in the `schema_version` table. Bump when
-/// adding columns or tables; the open path runs supported migrations
-/// and errors out on unsupported version drift (operator must move
-/// the DB aside).
-///
+/// Schema version persisted in the `schema_version` table.
 /// Version history:
-///   1 → initial: clients, sessions, stateids, layouts,
-///        instance_counter.
-///   2 → add `server_identity` (singleton row with the persistent
-///        per-deployment server id used by FileHandleManager so
-///        cached FHs survive MDS restart).
-///   3 → add `clients.reclaim_complete` so a post-restart MDS knows
-///        which clients have already done RECLAIM_COMPLETE — without
-///        this, a second RECLAIM_COMPLETE would silently succeed
-///        instead of returning `NFS4ERR_COMPLETE_ALREADY`.
-///   4 → add `locks` (byte-range lock table). Lock STATEIDS already
-///        persisted (v1 `stateids` rows with state_type=Lock) but the
-///        lock substance was memory-only, so after a restart the
-///        stateid validated while mutual exclusion was silently gone.
-///        New table only — handled by the schema-batch's CREATE TABLE
-///        IF NOT EXISTS, like v1 → v2.
-///   5 → add `file_placement` (per-file stripe placement, durable-DS
-///        plan Phase 0). Layout grants pin each file's ordered DS
-///        list + stripe size here; without it the stripe map is
-///        recomputed from the live device registry and silently
-///        re-maps existing data when the fleet changes. New table
-///        only — handled by the schema-batch's CREATE TABLE IF NOT
-///        EXISTS.
-///   6 → add `file_placement.file_id` (identity-keyed pins).
-///   7 → add `layouts.file_ident` — the file identity a layout was
-///        issued against, so a truncate can recall exactly the layouts
-///        for that file (F65). DEFAULT '' = "unknown file", which is
-///        the honest meaning for pre-upgrade rows: they are NOT
-///        matched, rather than matched by a wildcard.
-///   8 → add `file_placement.truncate_pending` — the truncate-dirty
-///        gate, persisted so an MDS restart during a parked truncate
-///        does not come back ungated with the DSes still holding the
-///        pre-truncate bytes. -1 = no cut pending.
-///   9 → add `file_placement.truncate_since_unix` — when that gate was
-///        FIRST armed, in epoch seconds. The age drives the fallback
-///        delay ceiling, and it lived only in an `Instant`, so every
-///        restart re-stamped it and re-armed the 90s: a fallback client
-///        could be DELAYed without bound across repeated bounces. -1 =
-///        unknown, which for a pre-upgrade row means the gate is treated
-///        as newly armed — the same behaviour as before this column, so
-///        the migration changes nothing for rows written without it.
-const SCHEMA_VERSION: i64 = 9;
+/// ONE schema, no migrations. flint is pre-release, so a database from
+/// a different build is a stale dev artefact rather than operator state
+/// to preserve: opening one is a hard error telling you to delete it,
+/// not a stepwise ALTER chain.
+///
+/// This replaced nine incremental versions whose ALTER steps had, in
+/// total, zero test coverage — every backend test builds a fresh schema
+/// with `open_in_memory`, so the path that would run against real state
+/// was the only one nobody exercised. Untested migration code is worse
+/// than none: it reads as a guarantee.
+///
+/// Bump this whenever the schema below changes shape. The number's only
+/// job now is to make a stale file fail loudly instead of being
+/// misread — a dropped column reads as NULL, and a NULL that decodes to
+/// a default is exactly the silent-wrong-answer class this codebase
+/// keeps finding.
+const SCHEMA_VERSION: i64 = 1;
 
 /// One request to the writer thread.
 enum Req {
@@ -228,170 +200,21 @@ impl SqliteBackend {
                 })?;
             }
             Some(v) if v == SCHEMA_VERSION => {}
-            Some(prev) if prev >= 1 && prev < SCHEMA_VERSION => {
-                // Stepwise migration. Each step is idempotent against
-                // the running schema-batch (CREATE TABLE IF NOT
-                // EXISTS already created any net-new tables); the
-                // ALTER steps need explicit handling because SQLite
-                // doesn't have IF NOT EXISTS for columns.
-                //
-                //  v1 → v2: server_identity table (handled by the
-                //           schema-batch's IF NOT EXISTS).
-                //  v2 → v3: clients.reclaim_complete column. ALTER
-                //           with NOT NULL DEFAULT 0 so existing rows
-                //           default to "haven't done RECLAIM_COMPLETE"
-                //           — matches the conservative interpretation
-                //           (a pre-v3 client gets to do RECLAIM_COMPLETE
-                //           one more time post-upgrade, which is a
-                //           harmless no-op).
-                if prev < 2 {
-                    tracing::info!("SqliteBackend: migrating schema → 2 (server_identity)");
-                }
-                if prev < 3 {
-                    // Idempotent ALTER TABLE: SQLite has no
-                    // "ADD COLUMN IF NOT EXISTS", so we ask
-                    // pragma_table_info whether the column is already
-                    // there. Idempotency matters because an
-                    // interrupted migration could leave the column
-                    // present but `schema_version` still at 2.
-                    let has_col: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM pragma_table_info('clients') WHERE name = 'reclaim_complete'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| {
-                        StateBackendError::Storage(format!("migrate v→3 (probe column): {}", e))
-                    })?;
-                    if has_col == 0 {
-                        conn.execute(
-                            "ALTER TABLE clients ADD COLUMN reclaim_complete INTEGER NOT NULL DEFAULT 0",
-                            [],
-                        )
-                        .map_err(|e| {
-                            StateBackendError::Storage(format!("migrate v→3 (alter clients): {}", e))
-                        })?;
-                    }
-                    tracing::info!("SqliteBackend: migrating schema → 3 (clients.reclaim_complete)");
-                }
-                if prev < 4 {
-                    // locks table: created by the schema-batch above.
-                    tracing::info!("SqliteBackend: migrating schema → 4 (locks table)");
-                }
-                if prev < 5 {
-                    // file_placement table: created by the schema-batch above.
-                    tracing::info!("SqliteBackend: migrating schema → 5 (file_placement table)");
-                }
-                if prev < 6 {
-                    // file_placement.file_id column. DEFAULT 0 = the
-                    // legacy path-keyed sentinel, which is exactly the
-                    // right meaning for pre-upgrade pins.
-                    let has_col: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM pragma_table_info('file_placement') WHERE name = 'file_id'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| {
-                        StateBackendError::Storage(format!("migrate v→6 (probe column): {}", e))
-                    })?;
-                    if has_col == 0 {
-                        conn.execute(
-                            "ALTER TABLE file_placement ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
-                            [],
-                        )
-                        .map_err(|e| {
-                            StateBackendError::Storage(format!("migrate v→6 (alter file_placement): {}", e))
-                        })?;
-                    }
-                    tracing::info!("SqliteBackend: migrating schema → 6 (file_placement.file_id)");
-                }
-                if prev < 7 {
-                    // layouts.file_ident. DEFAULT '' means "this layout
-                    // predates the column, so we do not know which file
-                    // it belongs to" — recall_layouts_for_file skips
-                    // those rather than guessing. The alternative
-                    // (treating '' as a match) would recall every
-                    // restored layout on every truncate.
-                    let has_col: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM pragma_table_info('layouts') WHERE name = 'file_ident'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| {
-                        StateBackendError::Storage(format!("migrate v→7 (probe column): {}", e))
-                    })?;
-                    if has_col == 0 {
-                        conn.execute(
-                            "ALTER TABLE layouts ADD COLUMN file_ident TEXT NOT NULL DEFAULT ''",
-                            [],
-                        )
-                        .map_err(|e| {
-                            StateBackendError::Storage(format!("migrate v→7 (alter layouts): {}", e))
-                        })?;
-                    }
-                    tracing::info!("SqliteBackend: migrating schema → 7 (layouts.file_ident)");
-                }
-                if prev < 8 {
-                    // file_placement.truncate_pending. -1 = none, which is
-                    // right for every pre-upgrade row: a gate that was live
-                    // when the old binary stopped is unrecoverable anyway
-                    // (it was never written down), and claiming one that
-                    // does not exist would wedge the file behind TRYLATER.
-                    let has_col: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM pragma_table_info('file_placement') WHERE name = 'truncate_pending'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| {
-                        StateBackendError::Storage(format!("migrate v→8 (probe column): {}", e))
-                    })?;
-                    if has_col == 0 {
-                        conn.execute(
-                            "ALTER TABLE file_placement ADD COLUMN truncate_pending INTEGER NOT NULL DEFAULT -1",
-                            [],
-                        )
-                        .map_err(|e| {
-                            StateBackendError::Storage(format!("migrate v→8 (alter file_placement): {}", e))
-                        })?;
-                    }
-                    tracing::info!("SqliteBackend: migrating schema → 8 (file_placement.truncate_pending)");
-                }
-                if prev < 9 {
-                    // file_placement.truncate_since_unix. -1 = unknown.
-                    // A pre-upgrade row carrying a live gate loses only
-                    // the gate's AGE, not the gate — it comes back armed
-                    // and simply looks freshly armed, which is exactly
-                    // what the old code did unconditionally.
-                    let has_col: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM pragma_table_info('file_placement') WHERE name = 'truncate_since_unix'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| {
-                        StateBackendError::Storage(format!("migrate v→9 (probe column): {}", e))
-                    })?;
-                    if has_col == 0 {
-                        conn.execute(
-                            "ALTER TABLE file_placement ADD COLUMN truncate_since_unix INTEGER NOT NULL DEFAULT -1",
-                            [],
-                        )
-                        .map_err(|e| {
-                            StateBackendError::Storage(format!("migrate v→9 (alter file_placement): {}", e))
-                        })?;
-                    }
-                    tracing::info!("SqliteBackend: migrating schema → 9 (file_placement.truncate_since_unix)");
-                }
-                conn.execute(
-                    "UPDATE schema_version SET version = ?1 WHERE id = 1",
-                    params![SCHEMA_VERSION],
-                )
-                .map_err(|e| {
-                    StateBackendError::Storage(format!("schema_version migrate: {}", e))
-                })?;
-            }
             Some(v) => {
+                // No migrations. flint is pre-1.0 and unreleased, so a
+                // database written by a different build is not operator
+                // state to preserve — it is a stale dev artefact, and
+                // reading it with a schema that has since changed shape
+                // is how you get a silent misread instead of a loud stop.
+                //
+                // The schema batch above is the WHOLE schema: one set of
+                // CREATE TABLE IF NOT EXISTS statements, every column
+                // present from the start. There is nothing to step
+                // through.
                 return Err(StateBackendError::Storage(format!(
-                    "schema_version mismatch: db has {}, code expects {}; \
-                     move the file aside or run a migration",
+                    "state database schema is {}, this build expects {} — \
+                     flint has no migrations (pre-release); delete the state \
+                     file and let the MDS rebuild it",
                     v, SCHEMA_VERSION
                 )));
             }
@@ -1381,7 +1204,8 @@ CREATE TABLE IF NOT EXISTS clients (
     last_cs_sequence INTEGER,
     cs_cached_res TEXT,
     initial_cs_sequence INTEGER NOT NULL,
-    -- Schema v3: see SCHEMA_VERSION docs.
+    -- Set once RECLAIM_COMPLETE lands, so a restarted MDS returns
+    -- NFS4ERR_COMPLETE_ALREADY on a second one instead of succeeding.
     reclaim_complete INTEGER NOT NULL DEFAULT 0
 );
 
@@ -1407,7 +1231,9 @@ CREATE TABLE IF NOT EXISTS stateids (
     revoked INTEGER NOT NULL
 );
 
--- Schema v4: byte-range locks (see SCHEMA_VERSION docs). Keyed by the
+-- Byte-range locks. Lock STATEIDS live in `stateids` (state_type=Lock),
+-- but the lock substance needs its own table or a restart validates the
+-- stateid while mutual exclusion is silently gone. Keyed by the
 -- lock stateid's `other`, mirroring the in-memory LockManager table.
 CREATE TABLE IF NOT EXISTS locks (
     other BLOB PRIMARY KEY,
@@ -1429,12 +1255,14 @@ CREATE TABLE IF NOT EXISTS layouts (
     segments TEXT NOT NULL,
     iomode INTEGER NOT NULL,
     return_on_close INTEGER NOT NULL,
-    -- Schema v7: which file this layout is for, as truncate_gate_key
+    -- Which file this layout is for, as truncate_gate_key
     -- spells it. The truncate recall (F65) selects on this.
     file_ident TEXT NOT NULL DEFAULT ''
 );
 
--- Schema v5: per-file stripe placement (durable-DS plan Phase 0).
+-- Per-file stripe placement (durable-DS plan Phase 0). Without it the
+-- stripe map is recomputed from the live device registry and silently
+-- re-maps existing data when the fleet changes.
 -- device_ids is an ordered JSON array; order is load-bearing (it IS
 -- the stripe map). Keyed by export-relative path.
 CREATE TABLE IF NOT EXISTS file_placement (
@@ -1442,7 +1270,9 @@ CREATE TABLE IF NOT EXISTS file_placement (
     stripe_size INTEGER NOT NULL,
     device_ids TEXT NOT NULL,
     file_id INTEGER NOT NULL DEFAULT 0,
-    -- Schema v8: the truncate-dirty gate. -1 = no cut pending.
+    -- The truncate-dirty gate, persisted so a restart during a parked
+    -- truncate does not come back ungated with the DSes still holding
+    -- the pre-truncate bytes. -1 = no cut pending.
     truncate_pending INTEGER NOT NULL DEFAULT -1,
     truncate_since_unix INTEGER NOT NULL DEFAULT -1
 );
@@ -1461,7 +1291,7 @@ CREATE TABLE IF NOT EXISTS fh_mappings (
     path TEXT NOT NULL
 );
 
--- Schema v2: persistent per-deployment server identifier. Generated
+-- Persistent per-deployment server identifier. Generated
 -- once on first start (random non-zero u64); reused for the lifetime
 -- of the state.db. FileHandleManager stamps this into every NFSv4
 -- file handle so cached FHs survive MDS restart.
@@ -1479,6 +1309,59 @@ mod tests {
         server_id_stable_and_nonzero,
     };
     use std::sync::Arc;
+
+    /// flint has no migrations, so the ONE thing the version number has
+    /// to do is make a database from a different build fail loudly.
+    ///
+    /// The failure mode this guards is not a crash — it is a SILENT
+    /// MISREAD: SQLite is happy to open a file whose `file_placement`
+    /// lacks `truncate_since_unix`, and the row decoder would then fail
+    /// on a missing column, or worse, a future schema change that only
+    /// REORDERS columns would decode fine and return the wrong field.
+    #[tokio::test]
+    async fn a_database_from_another_build_is_refused_not_misread() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.db");
+
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (id INTEGER PRIMARY KEY, version INTEGER NOT NULL);
+                 INSERT INTO schema_version (id, version) VALUES (1, 8);",
+            )
+            .unwrap();
+        }
+
+        let err = SqliteBackend::open(&path)
+            .err()
+            .expect("a database from another build must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("schema is 8") && msg.contains("delete the state file"),
+            "the error has to tell an operator what to DO; got: {}",
+            msg,
+        );
+
+        // And a fresh file opens, stamps the current version, and
+        // round-trips the newest column — the whole schema is created in
+        // one batch, so there is no partially-built state to reach.
+        let fresh = dir.path().join("fresh.db");
+        let b = SqliteBackend::open(&fresh).expect("a fresh database opens");
+        let rec = PlacementRecord {
+            file_key: "vol-1/f.bin".into(),
+            stripe_size: 8 << 20,
+            device_ids: vec!["ds-1".into(), "ds-2".into()],
+            file_id: 42,
+            truncate_pending: Some(4096),
+            truncate_since_unix: Some(1_700_000_000),
+        };
+        b.put_placement(&rec).await.unwrap();
+        assert_eq!(b.get_placement("vol-1/f.bin").await.unwrap(), Some(rec));
+
+        // Re-opening one we wrote ourselves is fine.
+        drop(b);
+        SqliteBackend::open(&fresh).expect("re-open our own database");
+    }
 
     #[tokio::test]
     async fn sqlite_round_trip_all_records() {
@@ -1555,38 +1438,6 @@ mod tests {
             seen.insert(t.await.unwrap());
         }
         assert_eq!(seen.len(), 1, "all callers must observe one stable id");
-    }
-
-    /// v1 → v2 migration: an on-disk DB written by an older build
-    /// (before the FH-stability follow-up) opens cleanly, gets the
-    /// `server_identity` table created, and a freshly-generated id
-    /// becomes the new stable value.
-    #[tokio::test]
-    async fn sqlite_v1_to_v2_migration() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
-        // Forge a v1 DB: open at v2, then downgrade the version
-        // marker. (No real v1 build in tree; this is the closest
-        // approximation.) Deliberately do not pre-create the
-        // server_identity table — the migration must do that.
-        {
-            let _ = SqliteBackend::open(&path).unwrap();
-            let conn = Connection::open(&path).unwrap();
-            conn.execute(
-                "UPDATE schema_version SET version = 1 WHERE id = 1",
-                [],
-            )
-            .unwrap();
-            conn.execute("DROP TABLE server_identity", []).unwrap();
-        }
-        // Re-open: should run the v1→v2 migration, not error out.
-        let b = SqliteBackend::open(&path).unwrap();
-        let id = b.get_or_init_server_id().await.unwrap();
-        assert_ne!(id, 0);
-        // Subsequent re-opens see the same id.
-        drop(b);
-        let b2 = SqliteBackend::open(&path).unwrap();
-        assert_eq!(b2.get_or_init_server_id().await.unwrap(), id);
     }
 
     /// **The whole point of B.2.** Write records, drop the backend
@@ -1753,7 +1604,11 @@ mod tests {
             .expect("open must reject unsupported schema version");
         match err {
             StateBackendError::Storage(msg) => {
-                assert!(msg.contains("schema_version mismatch"), "got: {}", msg);
+                assert!(
+                    msg.contains("schema is 51") && msg.contains("delete the state file"),
+                    "got: {}",
+                    msg,
+                );
             }
             other => panic!("expected Storage variant, got {:?}", other),
         }
