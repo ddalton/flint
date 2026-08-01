@@ -290,6 +290,24 @@ the data is absent; only the archive's byte count (10,240, i.e. tar's
 minimum blocking factor) or an actual restore shows it. Do not accept a
 tar listing as evidence that a backup holds data.
 
+**The trigger is `st_blocks == 0` EXACTLY, and that is why the fix stays
+narrow.** GNU tar 1.35 declares a file entirely sparse without reading it
+only when the block count is zero; any non-zero value makes it scan.
+Measured over NFS: a genuinely sparse file (`st_blocks=16`, two 4 KiB
+extents in 24 MiB) round-trips through `tar --sparse` **intact** — 8157
+non-zero bytes before and after, in a correctly-small 10,240-byte archive.
+
+Two consequences worth keeping:
+
+- The correction fires only when `space_used == 0`, so a partially
+  materialised pinned file (the B2 case: bytes written to the MDS before
+  the first LAYOUTGET pinned it) still reports just its MDS-local blocks.
+  That is an UNDER-report with no data-loss path, because the non-zero
+  value defeats tar's shortcut.
+- Widening it to "always report size when pinned" would be actively
+  worse: every genuinely sparse striped file would then back up as fully
+  dense, for no safety gain.
+
 Fixed: for a pinned file the MDS reports `space_used = size`. Per file,
 not per role, so a genuinely sparse never-layouted file on an MDS still
 reports its real allocation — asserted by the test's control arm, and both
