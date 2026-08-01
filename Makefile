@@ -146,6 +146,31 @@ test-nfs-protocol: ## Run full pynfs NFSv4.1 conformance suite (--maketree)
 	limactl cp $(LIMA_VM):/tmp/pynfs.json /tmp/flint-pynfs-results.json
 	@echo "Results: /tmp/flint-pynfs-results.json"
 
+.PHONY: test-nfs-42
+test-nfs-42: ## Run the NFSv4.2 conformance tests (ALLOC1-3, COPY5)
+	# WHY THIS TARGET EXISTS. testserver.py's --minorversion DEFAULTS TO 1
+	# (testserver.py:77) and it skips any test whose declared version range
+	# excludes it (:193). st_sparse and st_copy are 4.2-only, so the `all`
+	# run above skipped ALLOC1/2/3 and COPY5 in every one of the 25
+	# archived artifacts — not because they failed, but because nobody
+	# asked for 4.2. With --minorversion=2 they PASS (verified 2026-08-01).
+	#
+	# These four are the ENTIRE 4.2 surface pynfs has. A gate naming
+	# COPY1..COPY4 would fail for the wrong reason: those codes exist in no
+	# artifact and in no version of the suite here.
+	$(MAKE) nfs-server-stop
+	rm -rf $(NFS_EXPORT)/.flint-nfs $(NFS_EXPORT)/tmp
+	$(MAKE) nfs-server-bg
+	mkdir -p $(NFS_EXPORT)/tmp
+	chmod 0777 $(NFS_EXPORT)/tmp
+	limactl shell $(LIMA_VM) -- bash -lc '\
+	  cd /opt/pynfs/nfs4.1 && \
+	  python3 ./testserver.py $(LIMA_HOST_ADDR):$(NFS_PORT)/tmp \
+	    --maketree --nocleanup --minorversion=2 \
+	    --json=/tmp/pynfs42.json sparse copy || true'
+	limactl cp $(LIMA_VM):/tmp/pynfs42.json /tmp/flint-pynfs42-results.json
+	@python3 scripts/check-pynfs42.py /tmp/flint-pynfs42-results.json
+
 .PHONY: test-nfs-frag
 test-nfs-frag: ## Force fragmented WRITE (T1) — large file via dd over NFS
 	limactl shell $(LIMA_VM) -- sudo bash -lc '\

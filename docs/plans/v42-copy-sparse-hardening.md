@@ -220,16 +220,40 @@ measured nothing; use `copy_file_range(2)` directly. And `tshark -c N`
 limits packets **read**, not packets **matched**, so `-Y filter -c 6`
 silently returns nothing on a large capture.
 
+### 2.2 — answered, and now gated
+
+`testserver.py`'s `--minorversion` **defaults to 1** (`:77`), and it skips
+any test whose declared version range excludes it (`:193`). `st_sparse`
+and `st_copy` are 4.2-only. The harness never passed the flag, so all four
+were skipped **by construction** across 25 archived runs — the aggregate
+"91 skipped" reported a clean bill of health for operations that never
+executed.
+
+Run with `--minorversion=2` against flint on 2026-08-01:
+
+```
+ALLOC1   st_sparse.testAllocateSupported    : PASS
+ALLOC2   st_sparse.testAllocateStateidZero  : PASS
+ALLOC3   st_sparse.testAllocateStateidOne   : PASS
+COPY5    st_copy.testZeroLengthCopy         : PASS
+```
+
+They were never failing. Nobody asked.
+
+Now `make test-nfs-42` plus `scripts/check-pynfs42.py`, which gates on
+**named codes and treats SKIP as FAILURE** — a test that stops running is
+precisely the regression this catches, and an aggregate count cannot tell
+"passed" from "never ran". Those four are the entire 4.2 surface this
+pynfs has; a gate naming COPY1..COPY4 would fail for the wrong reason.
+
 ### Still to run
 
-- **2.2** pynfs: `st_sparse` (ALLOC1-3) and `st_copy` (COPY5) are the only
-  4.2 tests present and are SKIP in all 25 artifacts. The harness passes no
-  `--minorversion`, and `nfs4.1/testserver.py` defaults to 1, which would
-  make them skip by construction. Confirm, then gate on named codes with
-  PASS→SKIP a failure. Only COPY5 exists — a gate naming COPY1..COPY4
-  fails for the wrong reason.
 - **2.3** `du -sh` vs `ls -l` on a striped file, to confirm or kill A3
-  before the SPACE_USED fix is written.
+  before the SPACE_USED fix is written. Needs the pNFS rig (MDS + 2 DSes),
+  which `tests/lima/pnfs/pynfs.sh` already stands up in the same VM.
+- **The NOTSUPP fallback question is still open** — but only for the pNFS
+  striped-file guards, which is now the only place flint returns NOTSUPP
+  for these ops. On the standalone mount the client never sees a refusal.
 
 ## Phase 3 — mostly dropped, and why
 
