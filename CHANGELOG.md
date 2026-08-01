@@ -10,15 +10,37 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
-## [Unreleased]
+## [1.23.0] - 2026-08-01
 
-The pNFS truncate-correctness release. A truncate applied to the MDS stub
-and then fanned out to N data servers leaves a window in which the DSes
-still hold bytes past the new EOF; the `truncate_dirty` gate exists to
-make that window unobservable, and TLC found that it did not. Closing
-F65 took nine further defects, every one of which had been invisible
-because the server's own logs reported success — the recall was emitted,
-refused on the wire, and scored as an ack.
+The correctness-under-measurement release. Two independent waves, and the
+thing they have in common is that neither set of bugs was visible from
+reading the code — every one of them was found by running the thing and
+looking at the wire.
+
+**pNFS truncate.** A truncate applied to the MDS stub and then fanned out
+to N data servers leaves a window in which the DSes still hold bytes past
+the new EOF; the `truncate_dirty` gate exists to make that window
+unobservable, and TLC found that it did not. Closing F65 took nine
+further defects, every one of which had been invisible because the
+server's own logs reported success — the recall was emitted, refused on
+the wire, and scored as an ack.
+
+**NFSv4.2.** Two of these are reachable from an ordinary user command.
+`cp --reflink=always` emptied the destination before the ioctl that
+decides whether a clone is even possible, so on ext4 a failed rebuild
+left the client told "CLONE failed" with the data already gone. And a
+single `copy_file_range()` never returned: COPY's hardcoded zero write
+verifier never matched COMMIT's, so a Linux client read every successful
+copy as a server reboot and reissued it — 264,601 times for one 1 MiB
+request, the server performing the full copy each time. Alongside those,
+4.2 operations turned out not to be gated on the negotiated minor version
+at all, which made the pNFS mount's `minorversion=1` a client convention
+rather than a server property.
+
+Two judgements made during this release were overturned by measuring
+them: the COPY verifier was deferred as cosmetic (it was an infinite
+loop), and `space_used` was deferred pending evidence (the evidence was
+`tar --sparse` restoring a 24 MiB file as zeros).
 
 **No live upgrade path is provided and none is needed: flint is not
 deployed anywhere.** The MDS state database schema was collapsed to a
