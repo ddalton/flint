@@ -357,6 +357,11 @@ pub enum Operation {
         offset: u64,
         what: u32,  // DATA=0, HOLE=1
     },
+    /// COPY (RFC 7862 §15.2). `source_server_count` is the length of the
+    /// decoded `ca_source_server<netloc4>` array: 0 for an ordinary
+    /// intra-server copy, non-zero for an inter-server copy, which this
+    /// server does not implement and must refuse rather than silently
+    /// perform locally.
     Copy {
         src_stateid: StateId,
         dst_stateid: StateId,
@@ -365,6 +370,7 @@ pub enum Operation {
         count: u64,
         consecutive: bool,
         synchronous: bool,
+        source_server_count: u32,
     },
     Clone {
         src_stateid: StateId,
@@ -980,6 +986,51 @@ impl CompoundRequest {
             // knows it and sets it post-decode.
             wire_size: 0,
         })
+    }
+
+    /// Consume a `netloc4<>` array and return its length.
+    ///
+    /// RFC 7862 §3.1:
+    /// ```text
+    /// enum netloc_type4 { NL4_NAME = 1, NL4_URL = 2, NL4_NETADDR = 3 };
+    /// union netloc4 switch (netloc_type4 nl_type) {
+    ///   case NL4_NAME:    utf8str_cis nl_name;
+    ///   case NL4_URL:     utf8str_cis nl_url;
+    ///   case NL4_NETADDR: netaddr4    nl_addr;   /* two strings */
+    /// };
+    /// ```
+    ///
+    /// The point is to leave the cursor EXACTLY at the end of the array so
+    /// the next operation decodes from the right offset. Returning the
+    /// count without consuming the arms would move the lie rather than fix
+    /// it, so an unrecognised `nl_type` is a decode error (→ BADXDR) — the
+    /// discriminant determines the arm's width, and a server that cannot
+    /// determine the width cannot honestly claim to have consumed it.
+    fn decode_netloc_array(decoder: &mut XdrDecoder) -> Result<u32, String> {
+        let count = decoder.decode_u32()?;
+        // Length-prefixed arrays are attacker-controlled; each element is
+        // at least 8 bytes on the wire, so anything past that is malformed
+        // rather than merely large.
+        if count > 1024 {
+            return Err(format!("implausible ca_source_server count {count}"));
+        }
+        for i in 0..count {
+            match decoder.decode_u32()? {
+                1 | 2 => {
+                    decoder.decode_string()?;
+                }
+                3 => {
+                    decoder.decode_string()?; // na_r_netid
+                    decoder.decode_string()?; // na_r_addr
+                }
+                other => {
+                    return Err(format!(
+                        "unknown netloc_type4 {other} at ca_source_server[{i}]"
+                    ))
+                }
+            }
+        }
+        Ok(count)
     }
 
     /// Decode a single operation
@@ -1726,6 +1777,21 @@ impl CompoundRequest {
                 let count = decoder.decode_u64()?;
                 let consecutive = decoder.decode_bool()?;
                 let synchronous = decoder.decode_bool()?;
+                // COPY4args ends with ca_source_server<netloc4> (RFC 7862
+                // §15.2.1). This decoder used to stop at `synchronous`,
+                // which had two consequences, both silent:
+                //
+                //   * the array's length word was read as the NEXT opcode.
+                //     For the common empty case that word is 0, which is
+                //     reserved, so the op became Unsupported and the
+                //     `stop` break below truncated the compound. The loop's
+                //     own comment records exactly this symptom being
+                //     treated at the wrong layer once already.
+                //   * a NON-empty array — an inter-server copy request —
+                //     was ignored, and a LOCAL copy was performed and
+                //     reported OK. That is the F15 class: answering a
+                //     question that was not asked, successfully.
+                let source_server_count = Self::decode_netloc_array(decoder)?;
                 Ok(Operation::Copy {
                     src_stateid,
                     dst_stateid,
@@ -1734,6 +1800,7 @@ impl CompoundRequest {
                     count,
                     consecutive,
                     synchronous,
+                    source_server_count,
                 })
             }
             opcode::CLONE => {
@@ -2579,6 +2646,116 @@ mod tests {
         v.extend_from_slice(&0u32.to_be_bytes());          // gid
         v.extend_from_slice(&0u32.to_be_bytes());          // gids<> empty
         v
+    }
+
+    // ── COPY4args.ca_source_server<netloc4> ──────────────────────────
+    //
+    // Same failure shape as C8 above and worth stating plainly: a
+    // variable-length trailing field that was never consumed, so
+    // everything after it decoded from the wrong offset. Here the array's
+    // length word was read as the NEXT opcode, and for the ordinary empty
+    // case that word is 0 — a reserved opcode — so the compound was
+    // silently truncated to one operation plus an OP_ILLEGAL.
+
+    /// Build a COMPOUND: tag "", minorversion 2, [COPY(args), GETATTR].
+    fn compound_with_copy(netloc: &[u8]) -> bytes::Bytes {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_be_bytes()); // tag<> empty
+        v.extend_from_slice(&2u32.to_be_bytes()); // minorversion
+        v.extend_from_slice(&2u32.to_be_bytes()); // 2 operations
+
+        v.extend_from_slice(&opcode::COPY.to_be_bytes());
+        for _ in 0..2 {
+            v.extend_from_slice(&1u32.to_be_bytes()); // stateid seqid
+            v.extend_from_slice(&[0u8; 12]); // stateid other
+        }
+        v.extend_from_slice(&0u64.to_be_bytes()); // ca_src_offset
+        v.extend_from_slice(&0u64.to_be_bytes()); // ca_dst_offset
+        v.extend_from_slice(&16u64.to_be_bytes()); // ca_count
+        v.extend_from_slice(&0u32.to_be_bytes()); // ca_consecutive = FALSE
+        v.extend_from_slice(&1u32.to_be_bytes()); // ca_synchronous = TRUE
+        v.extend_from_slice(netloc); // ca_source_server<>
+
+        v.extend_from_slice(&opcode::GETATTR.to_be_bytes());
+        v.extend_from_slice(&0u32.to_be_bytes()); // attr bitmap<> empty
+
+        bytes::Bytes::from(v)
+    }
+
+    #[test]
+    fn an_empty_source_server_list_leaves_the_next_operation_decodable() {
+        let empty = 0u32.to_be_bytes().to_vec();
+        let req = CompoundRequest::decode(XdrDecoder::new(compound_with_copy(&empty))).expect("decodes");
+        assert_eq!(
+            req.operations.len(),
+            2,
+            "the GETATTR after COPY must survive: {:?}",
+            req.operations
+        );
+        assert!(matches!(req.operations[1], Operation::GetAttr(_)));
+        match &req.operations[0] {
+            Operation::Copy { source_server_count, count, .. } => {
+                assert_eq!(*source_server_count, 0);
+                assert_eq!(*count, 16);
+            }
+            other => panic!("expected COPY, got {other:?}"),
+        }
+    }
+
+    /// A non-empty list is an INTER-server copy. Each arm has a different
+    /// width, so the decoder has to walk them to leave the cursor right —
+    /// returning the count without consuming the bodies would move the
+    /// desync rather than remove it.
+    #[test]
+    fn a_populated_source_server_list_is_consumed_arm_by_arm() {
+        // One NL4_NETADDR entry: two strings, the second needing XDR pad.
+        let mut netloc = Vec::new();
+        netloc.extend_from_slice(&1u32.to_be_bytes()); // one entry
+        netloc.extend_from_slice(&3u32.to_be_bytes()); // NL4_NETADDR
+        netloc.extend_from_slice(&3u32.to_be_bytes()); // na_r_netid len
+        netloc.extend_from_slice(b"tcp");
+        netloc.push(0); // pad 3 -> 4
+        netloc.extend_from_slice(&9u32.to_be_bytes()); // na_r_addr len
+        netloc.extend_from_slice(b"10.0.0.1.");
+        netloc.extend_from_slice(&[0, 0, 0]); // pad 9 -> 12
+
+        let req = CompoundRequest::decode(XdrDecoder::new(compound_with_copy(&netloc))).expect("decodes");
+        assert_eq!(req.operations.len(), 2, "GETATTR must still be reachable");
+        assert!(matches!(req.operations[1], Operation::GetAttr(_)));
+        match &req.operations[0] {
+            Operation::Copy { source_server_count, .. } => assert_eq!(*source_server_count, 1),
+            other => panic!("expected COPY, got {other:?}"),
+        }
+    }
+
+    /// An NL4_NAME entry (single string) — the other arm width.
+    #[test]
+    fn a_name_arm_source_server_entry_is_consumed() {
+        let mut netloc = Vec::new();
+        netloc.extend_from_slice(&1u32.to_be_bytes());
+        netloc.extend_from_slice(&1u32.to_be_bytes()); // NL4_NAME
+        netloc.extend_from_slice(&4u32.to_be_bytes());
+        netloc.extend_from_slice(b"srv1");
+
+        let req = CompoundRequest::decode(XdrDecoder::new(compound_with_copy(&netloc))).expect("decodes");
+        assert_eq!(req.operations.len(), 2);
+        assert!(matches!(req.operations[1], Operation::GetAttr(_)));
+    }
+
+    /// An unknown discriminant has an unknown width, so the decoder cannot
+    /// honestly claim to have consumed it: BADXDR, not a guess.
+    #[test]
+    fn an_unknown_netloc_arm_is_a_decode_error_not_a_silent_skip() {
+        let mut netloc = Vec::new();
+        netloc.extend_from_slice(&1u32.to_be_bytes());
+        netloc.extend_from_slice(&99u32.to_be_bytes()); // not a netloc_type4
+
+        let req = CompoundRequest::decode(XdrDecoder::new(compound_with_copy(&netloc))).expect("decodes");
+        assert!(
+            matches!(req.operations[0], Operation::BadXdr(opcode::COPY)),
+            "got {:?}",
+            req.operations[0]
+        );
     }
 
     #[test]

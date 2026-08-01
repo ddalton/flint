@@ -46,22 +46,73 @@ use tracing::{debug, warn};
 /// the workspace `Cargo.toml` has no `[profile]` section, so that
 /// subtraction WRAPPED in release builds and yielded a ~16-exabyte
 /// length. A `saturating_sub` would have hidden it rather than fixed it.
+/// RFC 7862 §15.2.3 (COPY) and §15.13.3 (CLONE) carry the identical
+/// sentence, which is why one helper serves both:
+///
+/// > If the source offset or the source offset plus count is greater than
+/// > the size of the source file, the operation MUST fail with
+/// > NFS4ERR_INVAL.
 fn resolve_range_len(src_size: u64, src_offset: u64, count: u64) -> std::io::Result<u64> {
+    let inval = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg);
+
     if src_offset > src_size {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "source offset {} is past end of source file ({} bytes)",
-                src_offset, src_size
-            ),
-        ));
+        return Err(inval(format!(
+            "source offset {} is past end of source file ({} bytes)",
+            src_offset, src_size
+        )));
     }
-    Ok(if count == 0 {
+    let len = if count == 0 {
         src_size - src_offset
     } else {
         count
-    })
+    };
+    // checked_add, not `src_offset + len`: both come off the wire as u64
+    // and their sum is exactly the quantity the RFC asks us to compare.
+    match src_offset.checked_add(len) {
+        Some(end) if end <= src_size => Ok(len),
+        _ => Err(inval(format!(
+            "source range [{}, {}+{}) extends past end of source file ({} bytes)",
+            src_offset, src_offset, len, src_size
+        ))),
+    }
 }
+
+/// Whether two open files are the same filesystem object.
+///
+/// Compares `(dev, ino)` rather than paths because the filehandle layer
+/// follows a rename-alias table: one inode is legitimately reachable
+/// through different handle bytes and different path strings, so a path
+/// comparison would miss the case the RFC is about.
+#[cfg(unix)]
+fn same_file(a: &std::fs::File, b: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (x, y) = (a.metadata()?, b.metadata()?);
+    Ok(x.dev() == y.dev() && x.ino() == y.ino())
+}
+
+#[cfg(not(unix))]
+fn same_file(_a: &std::fs::File, _b: &std::fs::File) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+/// Bump the change counter for an already-open file.
+///
+/// Takes the fd rather than a path (the `bump_path` form) so a rename
+/// racing the operation cannot steer the bump onto a different inode.
+#[cfg(unix)]
+fn bump_change_counter(f: &std::fs::File) {
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(md) = f.metadata() {
+        crate::nfs::v4::change_counter::bump(
+            md.dev(),
+            md.ino(),
+            crate::nfs::v4::change_counter::ctime_ns(&md),
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn bump_change_counter(_f: &std::fs::File) {}
 
 /// Copy a byte range with positioned I/O. Returns bytes actually copied,
 /// which is short only when the source ends early.
@@ -580,12 +631,15 @@ impl PerfOperationHandler {
         let src_offset = op.src_offset;
         let dst_offset = op.dst_offset;
         let count = op.count;
-        let sync = op.sync;
+        // `op.sync` (ca_synchronous) is deliberately NOT read. It is the
+        // client's REQUEST, and this server has exactly one behaviour:
+        // copy synchronously, fsync, reply. Letting it steer the fsync is
+        // what made wr_committed = FILE_SYNC4 a lie for async requests.
 
         let copy_result = tokio::task::spawn_blocking(move || {
             // Open source file for reading
             let src_file = std::fs::File::open(&src_path)?;
-            
+
             // Open destination file for writing. truncate(false) is
             // explicit, not incidental: COPY writes a byte RANGE and must
             // leave everything outside it — including the destination's
@@ -596,14 +650,28 @@ impl PerfOperationHandler {
                 .truncate(false)
                 .open(&dst_path)?;
 
-            // RFC 7862 §15.2.3: ca_count == 0 means "copy from
-            // ca_src_offset through end of source file", not a
-            // zero-byte copy (pynfs COPY5).
-            let count = if count == 0 {
-                src_file.metadata()?.len().saturating_sub(src_offset)
-            } else {
-                count
-            };
+            // RFC 7862 §15.2.3: "SAVED_FH and CURRENT_FH must be different
+            // files. If SAVED_FH and CURRENT_FH refer to the same file, the
+            // operation MUST fail with NFS4ERR_INVAL." No overlap
+            // qualifier — COPY is stricter than CLONE here.
+            //
+            // It is also the corruption case: the chunk loop is a memcpy
+            // where a same-file copy would need a memmove, so with
+            // src=0/dst=512K the first 1 MiB chunk overwrites source bytes
+            // the second chunk has yet to read.
+            if same_file(&src_file, &dst_file)? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "COPY source and destination are the same file",
+                ));
+            }
+
+            // Resolves ca_count == 0 to "through EOF" and enforces the
+            // source-range rule. Because the range is now known to lie
+            // inside the source, the reads below cannot come up short, so
+            // wr_count always equals the requested count.
+            let src_size = src_file.metadata()?.len();
+            let count = resolve_range_len(src_size, src_offset, count)?;
 
             // Copy data in chunks using positioned I/O
             // This allows concurrent operations on the same files
@@ -614,34 +682,48 @@ impl PerfOperationHandler {
             while total_copied < count {
                 let remaining = count - total_copied;
                 let to_read = std::cmp::min(remaining, CHUNK_SIZE as u64) as usize;
-                
+
                 // Read from source at current position
                 let bytes_read = src_file.read_at(
-                    &mut buffer[..to_read], 
+                    &mut buffer[..to_read],
                     src_offset + total_copied
                 )?;
-                
+
                 if bytes_read == 0 {
-                    break; // EOF reached
+                    // The source shrank under us (the range was validated
+                    // against its size a moment ago). Report the short
+                    // count honestly rather than claiming the full copy.
+                    break;
                 }
-                
+
                 // Write to destination at current position
                 let bytes_written = dst_file.write_at(
                     &buffer[..bytes_read],
                     dst_offset + total_copied
                 )?;
-                
+
                 total_copied += bytes_written as u64;
-                
+
                 if bytes_read < to_read {
                     break; // Partial read = EOF
                 }
             }
 
-            // Sync if requested
-            if sync {
-                dst_file.sync_all()?;
-            }
+            // Unconditional, and NOT `if sync`. The reply hardcodes
+            // wr_committed = FILE_SYNC4, so the durability claim was true
+            // only when the client happened to ask for a synchronous copy.
+            // Syncing always makes the claim true by construction, with no
+            // new reply fields and no dependence on ca_synchronous — whose
+            // value on the wire has never been measured (see
+            // docs/plans/v42-copy-sparse-hardening.md, Phase 2).
+            dst_file.sync_all()?;
+
+            // COPY mutates the destination and must advance its change
+            // attribute. `current()` returns max(stored, ctime floor), so
+            // the omission was usually masked — except when a prior bump
+            // on the same inode landed inside the same clock tick, which
+            // pinned the reported value until some unrelated op moved it.
+            bump_change_counter(&dst_file);
 
             Ok::<u64, std::io::Error>(total_copied)
         }).await;
@@ -653,7 +735,17 @@ impl PerfOperationHandler {
                       dst_path_name.as_deref().unwrap_or("unknown"));
                 CopyRes {
                     status: Nfs4Status::Ok,
-                    sync,
+                    // TRUE unconditionally, because it is TRUE: the copy
+                    // completed inside this call. This field used to echo
+                    // the client's REQUEST (`op.sync`), which put two
+                    // adjacent fields of one reply in contradiction —
+                    // wr_callback_id is encoded as an empty array, meaning
+                    // "nothing to wait for", while cr_synchronous=false
+                    // claims an async copy the client should await. flint
+                    // emits no CB_OFFLOAD and dispatches neither
+                    // OFFLOAD_STATUS nor OFFLOAD_CANCEL, so there has never
+                    // been an asynchronous copy to describe.
+                    sync: true,
                     count: bytes_copied,
                     completion: CopyCompletion::Synchronous,
                 }
@@ -663,6 +755,10 @@ impl PerfOperationHandler {
                 let status = match e.kind() {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+                    // Same-file and out-of-range rejections (RFC 7862
+                    // §15.2.3), both raised above as InvalidInput.
+                    std::io::ErrorKind::InvalidInput => Nfs4Status::Inval,
+                    std::io::ErrorKind::StorageFull => Nfs4Status::NoSpc,
                     _ => Nfs4Status::Io,
                 };
                 CopyRes {
@@ -798,6 +894,24 @@ impl PerfOperationHandler {
 
             let src_size = src_file.metadata()?.len();
             let len = resolve_range_len(src_size, src_offset, count)?;
+
+            // RFC 7862 §15.13.3: "If SAVED_FH and CURRENT_FH refer to the
+            // same file and the source and target ranges overlap, the
+            // operation MUST fail with NFS4ERR_INVAL."
+            //
+            // Note this is WEAKER than COPY's rule, which forbids the same
+            // file outright with no overlap qualifier. Two ops, two
+            // sentences, deliberately not unified.
+            if same_file(&src_file, &dst_file)?
+                && src_offset < dst_offset.saturating_add(len)
+                && dst_offset < src_offset.saturating_add(len)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "CLONE source and target ranges overlap within one file",
+                ));
+            }
+
             if len == 0 {
                 return Ok::<u64, std::io::Error>(0);
             }
@@ -806,6 +920,7 @@ impl PerfOperationHandler {
             match try_reflink_range(&src_file, &dst_file, src_offset, len, dst_offset) {
                 Ok(()) => {
                     debug!("CLONE: reflinked {} bytes (CoW, zero-copy)", len);
+                    bump_change_counter(&dst_file);
                     return Ok(len);
                 }
                 Err(e) => {
@@ -814,6 +929,7 @@ impl PerfOperationHandler {
             }
 
             let copied = copy_range(&src_file, &dst_file, src_offset, dst_offset, len)?;
+            bump_change_counter(&dst_file);
             debug!(
                 "CLONE: copied {} of {} bytes from offset {} to offset {}",
                 copied, len, src_offset, dst_offset
@@ -834,10 +950,10 @@ impl PerfOperationHandler {
                 let status = match e.kind() {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
-                    // resolve_range_len's out-of-range rejection. RFC 7862
-                    // §15.13.3 wants NFS4ERR_INVAL for a source range that
-                    // starts past EOF.
+                    // Out-of-range source and overlapping same-file ranges
+                    // (RFC 7862 §15.13.3), both raised as InvalidInput.
                     std::io::ErrorKind::InvalidInput => Nfs4Status::Inval,
+                    std::io::ErrorKind::StorageFull => Nfs4Status::NoSpc,
                     _ => Nfs4Status::Io,
                 };
                 CloneRes {
@@ -910,6 +1026,20 @@ impl PerfOperationHandler {
         };
         if length == 0 {
             // RFC 7862: zero-length range is INVAL.
+            return Nfs4Status::Inval;
+        }
+        // offset and length arrive as wire u64 and are cast to off_t (i64)
+        // below. Anything above i64::MAX becomes NEGATIVE under that cast,
+        // which fallocate would interpret as a range this server never
+        // meant to name. Reject before the cast, not after.
+        if offset > i64::MAX as u64
+            || length > i64::MAX as u64
+            || offset.checked_add(length).is_none_or(|end| end > i64::MAX as u64)
+        {
+            warn!(
+                "ALLOCATE/DEALLOCATE: range [{}, +{}) is not representable as off_t → INVAL",
+                offset, length
+            );
             return Nfs4Status::Inval;
         }
         let p = path.clone();
@@ -1035,17 +1165,49 @@ impl PerfOperationHandler {
             {
                 use std::os::fd::AsRawFd;
                 let file = std::fs::File::open(&path)?;
+                let size = file.metadata()?.len();
+
+                // RFC 7862 §15.11.3: "If the sa_offset is beyond the end of
+                // the file, then SEEK MUST return NFS4ERR_NXIO."
+                //
+                // This has to be decided BEFORE lseek, because Linux
+                // returns ENXIO for two different questions — "you are past
+                // EOF" and "there is no more data before EOF" — and the RFC
+                // gives them opposite answers. The old code collapsed both
+                // into Ok(eof, size), so a genuinely out-of-range SEEK was
+                // reported as success.
+                if start > size {
+                    return Err(std::io::Error::from_raw_os_error(nix::libc::ENXIO));
+                }
+
+                // A wire u64 above i64::MAX becomes a NEGATIVE off_t under
+                // the cast below, which lseek would read as a rewind.
+                if start > i64::MAX as u64 {
+                    return Err(std::io::Error::from_raw_os_error(nix::libc::EINVAL));
+                }
+
                 let whence = match what {
                     SeekType::Data => nix::unistd::Whence::SeekData,
                     SeekType::Hole => nix::unistd::Whence::SeekHole,
                 };
                 match nix::unistd::lseek(file.as_raw_fd(), start as nix::libc::off_t, whence) {
-                    Ok(off) => Ok((false, off as u64)),
-                    Err(nix::errno::Errno::ENXIO) => {
-                        // Past EOF (or no further data): report eof at size.
-                        let size = file.metadata()?.len();
-                        Ok((true, size))
+                    // sr_eof is NOT "the operation finished". RFC 7862
+                    // §15.11.3's own worked example is a dense file where
+                    // {SEEK 0 CONTENT_HOLE} must answer {eof=1, offset=X}
+                    // with X the file size, because "all files MUST have a
+                    // virtual hole at the end of the file". eof was
+                    // hardcoded false here, so it could never be true on a
+                    // successful lseek and that example answered wrongly.
+                    Ok(off) => {
+                        let off = off as u64;
+                        Ok((off >= size, off))
                     }
+                    // Not past EOF (checked above), so this is the other
+                    // question: no content of that type before EOF. §15.11.3
+                    // — "If the server cannot find a corresponding sa_what,
+                    // then the status will still be NFS4_OK, but sr_eof
+                    // would be TRUE."
+                    Err(nix::errno::Errno::ENXIO) => Ok((true, size)),
                     Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
                 }
             }
@@ -1064,6 +1226,11 @@ impl PerfOperationHandler {
                     Some(nix::libc::ENOENT) => Nfs4Status::NoEnt,
                     Some(nix::libc::EISDIR) => Nfs4Status::IsDir,
                     Some(nix::libc::EOPNOTSUPP) => Nfs4Status::NotSupp,
+                    // RFC 7862 §15.11.3. Nfs4Status::NxIo has existed in
+                    // protocol.rs since the beginning and had zero uses:
+                    // this is the only operation that can produce it.
+                    Some(nix::libc::ENXIO) => Nfs4Status::NxIo,
+                    Some(nix::libc::EINVAL) => Nfs4Status::Inval,
                     _ => Nfs4Status::Io,
                 })
             }
@@ -1554,68 +1721,301 @@ mod tests {
         );
     }
 
+    // Both of these tests used to request 1024 bytes from a 37-byte
+    // source and assert Ok, which pinned the very bug RFC 7862 §15.2.3
+    // and §15.13.3 name ("the source offset plus count is greater than
+    // the size of the source file ... MUST fail with NFS4ERR_INVAL").
+    // They also set current_fh = SOURCE and saved_fh = DESTINATION,
+    // backwards from the RFC, and passed only because neither handler
+    // reads the context — which is exactly the template that would lead
+    // someone to build a guard around the wrong filehandle. Both are
+    // corrected here, with post-conditions that a stubbed-out copy loop
+    // cannot satisfy.
+
     #[tokio::test]
     async fn test_copy() {
         let (handler, _temp) = create_test_handler();
-        let mut ctx = CompoundContext::new(0);
+        let mut ctx = CompoundContext::new(2);
 
-        // Set up source and destination filehandles
         let src_path = handler.fh_mgr.get_export_path().join("source.txt");
         let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
-        
+
         let src_fh = handler.fh_mgr.path_to_filehandle(&src_path).unwrap();
         let dst_fh = handler.fh_mgr.path_to_filehandle(&dst_path).unwrap();
-        
-        ctx.current_fh = Some(src_fh.clone());
-        ctx.saved_fh = Some(dst_fh.clone());
 
-        // Create stateids with associated filehandles
-        let src_stateid = handler.state_mgr.stateids.allocate(StateType::Open, 1, Some(src_fh.data.clone()));
-        let dst_stateid = handler.state_mgr.stateids.allocate(StateType::Open, 1, Some(dst_fh.data.clone()));
+        // RFC 7862 §15.2: SAVED_FH is the source, CURRENT_FH the target.
+        ctx.saved_fh = Some(src_fh.clone());
+        ctx.current_fh = Some(dst_fh.clone());
+
+        let src_bytes = std::fs::read(&src_path).unwrap();
+        let src_len = src_bytes.len() as u64;
 
         let op = CopyOp {
-            src_stateid,
-            dst_stateid,
+            src_stateid: handler.state_mgr.stateids.allocate(
+                StateType::Open, 1, Some(src_fh.data.clone())),
+            dst_stateid: handler.state_mgr.stateids.allocate(
+                StateType::Open, 1, Some(dst_fh.data.clone())),
             src_offset: 0,
             dst_offset: 0,
-            count: 1024, // Copy 1KB (size of source file)
-            sync: true,
+            count: src_len,
+            // Request an ASYNC copy and expect the reply to say
+            // synchronous: the field reports what the server did.
+            sync: false,
         };
 
         let res = handler.handle_copy(op, &ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
-        // Don't assert exact count - depends on file size
+        assert_eq!(res.count, src_len, "wr_count must be the full range");
+        assert!(res.sync, "cr_synchronous states what the server did, not what was asked");
+        assert_eq!(
+            &std::fs::read(&dst_path).unwrap()[..src_len as usize],
+            &src_bytes[..],
+            "the destination must actually hold the source bytes"
+        );
+    }
+
+    /// A COPY may not name one file twice — RFC 7862 §15.2.3: "SAVED_FH
+    /// and CURRENT_FH must be different files."
+    ///
+    /// It is also the corruption case: the chunk loop is a memcpy where a
+    /// same-file copy needs a memmove, so an overlapping request would
+    /// shred the file and report Ok. The byte assertion is what stops a
+    /// handler that returns INVAL only *after* doing the damage.
+    #[tokio::test]
+    async fn copy_within_one_file_is_refused_and_changes_nothing() {
+        let (handler, _temp) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let path = handler.fh_mgr.get_export_path().join("selfcopy.bin");
+        let original: Vec<u8> = (0..(3 * 1024 * 1024u32)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &original).unwrap();
+
+        let op = CopyOp {
+            src_stateid: open_stateid_for(&handler, &path),
+            dst_stateid: open_stateid_for(&handler, &path),
+            src_offset: 0,
+            dst_offset: 512 * 1024,
+            count: 2 * 1024 * 1024,
+            sync: true,
+        };
+
+        let res = handler.handle_copy(op, &ctx).await;
+        assert_eq!(res.status, Nfs4Status::Inval);
+        assert_eq!(res.count, 0);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "a refused same-file COPY must not have moved a byte"
+        );
+    }
+
+    /// CLONE's same-file rule is WEAKER than COPY's: RFC 7862 §15.13.3
+    /// forbids it only when the ranges overlap. Both arms asserted so the
+    /// two rules cannot be quietly unified in either direction.
+    #[tokio::test]
+    async fn clone_within_one_file_is_refused_only_when_ranges_overlap() {
+        let (handler, _temp) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let path = handler.fh_mgr.get_export_path().join("selfclone.bin");
+        std::fs::write(&path, vec![b'a'; 4096]).unwrap();
+
+        let mk = |src_offset, dst_offset, count| CloneOp {
+            src_stateid: open_stateid_for(&handler, &path),
+            dst_stateid: open_stateid_for(&handler, &path),
+            src_offset,
+            dst_offset,
+            count,
+        };
+
+        // [0,1024) into [512,1536) — overlapping.
+        assert_eq!(
+            handler.handle_clone(mk(0, 512, 1024), &ctx).await.status,
+            Nfs4Status::Inval
+        );
+        // [0,1024) into [2048,3072) — same file, disjoint: legal.
+        assert_eq!(
+            handler.handle_clone(mk(0, 2048, 1024), &ctx).await.status,
+            Nfs4Status::Ok
+        );
     }
 
     #[tokio::test]
     async fn test_clone() {
         let (handler, _temp) = create_test_handler();
-        let mut ctx = CompoundContext::new(0);
+        let mut ctx = CompoundContext::new(2);
 
-        // Set up source and destination filehandles
         let src_path = handler.fh_mgr.get_export_path().join("source.txt");
         let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
-        
+
         let src_fh = handler.fh_mgr.path_to_filehandle(&src_path).unwrap();
         let dst_fh = handler.fh_mgr.path_to_filehandle(&dst_path).unwrap();
-        
-        ctx.current_fh = Some(src_fh.clone());
-        ctx.saved_fh = Some(dst_fh.clone());
 
-        // Create stateids with associated filehandles
-        let src_stateid = handler.state_mgr.stateids.allocate(StateType::Open, 1, Some(src_fh.data.clone()));
-        let dst_stateid = handler.state_mgr.stateids.allocate(StateType::Open, 1, Some(dst_fh.data.clone()));
+        // RFC 7862 §15.13: SAVED_FH is the source, CURRENT_FH the target.
+        ctx.saved_fh = Some(src_fh.clone());
+        ctx.current_fh = Some(dst_fh.clone());
+
+        let src_bytes = std::fs::read(&src_path).unwrap();
 
         let op = CloneOp {
-            src_stateid,
-            dst_stateid,
+            src_stateid: handler.state_mgr.stateids.allocate(
+                StateType::Open, 1, Some(src_fh.data.clone())),
+            dst_stateid: handler.state_mgr.stateids.allocate(
+                StateType::Open, 1, Some(dst_fh.data.clone())),
             src_offset: 0,
             dst_offset: 0,
-            count: 1024, // Clone 1KB
+            count: src_bytes.len() as u64,
         };
 
         let res = handler.handle_clone(op, &ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
+        assert_eq!(
+            &std::fs::read(&dst_path).unwrap()[..src_bytes.len()],
+            &src_bytes[..]
+        );
+    }
+
+    /// A COPY range that runs past the end of the source is INVAL, not a
+    /// short copy reported as success.
+    #[tokio::test]
+    async fn a_copy_past_the_end_of_the_source_is_invalid() {
+        let (handler, _temp) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let src_path = handler.fh_mgr.get_export_path().join("source.txt");
+        let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
+        let src_len = std::fs::metadata(&src_path).unwrap().len();
+
+        let op = CopyOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: 0,
+            dst_offset: 0,
+            count: src_len + 1,
+            sync: true,
+        };
+        assert_eq!(handler.handle_copy(op, &ctx).await.status, Nfs4Status::Inval);
+    }
+
+    /// SEEK's three RFC 7862 §15.11.3 rules, which the old code got wrong
+    /// in three different ways.
+    ///
+    /// Linux-gated: `lseek(SEEK_DATA/SEEK_HOLE)` exists nowhere else, and
+    /// every arm here would answer NOTSUPP on darwin — passing or failing
+    /// for reasons that have nothing to do with the code under test.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn seek_reports_eof_and_distinguishes_past_eof_from_no_more_data() {
+        let (handler, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(2);
+        let path = handler.fh_mgr.get_export_path().join("sparse.bin");
+
+        // A file with a LEADING hole, so SEEK_DATA(0) has a non-zero
+        // answer. On a dense file `SEEK_DATA(0) == 0` is also what a
+        // hardcoded `Ok((false, start))` returns, and the test could not
+        // tell them apart.
+        {
+            use std::os::unix::fs::FileExt;
+            let f = std::fs::File::create(&path).unwrap();
+            f.set_len(128 * 1024).unwrap();
+            f.write_at(b"data", 64 * 1024).unwrap();
+            f.sync_all().unwrap();
+        }
+        let size = std::fs::metadata(&path).unwrap().len();
+        ctx.current_fh = Some(handler.fh_mgr.path_to_filehandle(&path).unwrap());
+        let stateid = open_stateid_for(&handler, &path);
+
+        let seek = |what, offset| {
+            let sid = stateid.clone();
+            async move {
+                handler.handle_seek(SeekOp { stateid: sid, offset, what }, &ctx).await
+            }
+        };
+
+        // 1. Real data found before EOF → eof FALSE, at the leading hole's end.
+        let r = seek(SeekType::Data, 0).await;
+        assert_eq!(r.status, Nfs4Status::Ok);
+        assert!(!r.eof, "data exists before EOF, so sr_eof must be FALSE");
+        assert!(r.offset > 0 && r.offset <= 64 * 1024, "offset={}", r.offset);
+
+        // 2. "All files MUST have a virtual hole at the end of the file."
+        //    Asking for a HOLE at the last byte lands at EOF → eof TRUE.
+        //    This is the case a hardcoded `eof = false` could never answer.
+        let r = seek(SeekType::Hole, size - 1).await;
+        assert_eq!(r.status, Nfs4Status::Ok);
+        assert!(r.eof, "a hole search reaching EOF must set sr_eof");
+        assert_eq!(r.offset, size);
+
+        // 3. "If the sa_offset is beyond the end of the file, then SEEK
+        //    MUST return NFS4ERR_NXIO." The old code answered Ok(eof, size)
+        //    here — success for an out-of-range request.
+        let r = seek(SeekType::Data, size + 1).await;
+        assert_eq!(r.status, Nfs4Status::NxIo, "past EOF is NXIO, not OK");
+    }
+
+    /// A range that cannot be represented as `off_t` is rejected BEFORE
+    /// the cast, not handed to fallocate as a negative offset.
+    ///
+    /// Runs on every platform: the guard sits ahead of the Linux-only
+    /// block, so it is one of the few space-op assertions that is not
+    /// vacuous on darwin. `Inval` — not the `NotSupp` a non-Linux host
+    /// answers for a well-formed request — is what makes that meaningful.
+    #[tokio::test]
+    async fn an_allocate_range_outside_off_t_is_rejected_before_the_cast() {
+        let (handler, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(2);
+        let path = handler.fh_mgr.get_export_path().join("alloc.bin");
+        std::fs::write(&path, b"x").unwrap();
+        ctx.current_fh = Some(handler.fh_mgr.path_to_filehandle(&path).unwrap());
+        let stateid = open_stateid_for(&handler, &path);
+
+        let over = i64::MAX as u64 + 1;
+        for (offset, length) in [(over, 4096u64), (0, over), (i64::MAX as u64 - 1, 4096)] {
+            let res = handler
+                .handle_allocate(AllocateOp { stateid: stateid.clone(), offset, length }, &ctx)
+                .await;
+            assert_eq!(
+                res.status,
+                Nfs4Status::Inval,
+                "offset={offset} length={length} must be refused as unrepresentable"
+            );
+        }
+    }
+
+    /// COPY must advance the destination's change attribute.
+    ///
+    /// The stored counter is seeded far beyond any real ctime and the
+    /// floor is held fixed, so the assertion cannot be satisfied by the
+    /// clock ticking during the test — which is how the naive version
+    /// ("write, copy, assert it moved") passes against a server that
+    /// never bumps at all.
+    #[tokio::test]
+    async fn copy_advances_the_destination_change_attribute() {
+        use std::os::unix::fs::MetadataExt;
+        let (handler, _temp) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let src_path = handler.fh_mgr.get_export_path().join("source.txt");
+        let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
+
+        let md = std::fs::metadata(&dst_path).unwrap();
+        let (dev, ino) = (md.dev(), md.ino());
+        let far_future = crate::nfs::v4::change_counter::ctime_ns(&md) + 1_000_000_000_000;
+        crate::nfs::v4::change_counter::bump(dev, ino, far_future);
+        let before = crate::nfs::v4::change_counter::current(dev, ino, far_future);
+
+        let src_len = std::fs::metadata(&src_path).unwrap().len();
+        let op = CopyOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: 0,
+            dst_offset: 0,
+            count: src_len,
+            sync: true,
+        };
+        assert_eq!(handler.handle_copy(op, &ctx).await.status, Nfs4Status::Ok);
+
+        let after = crate::nfs::v4::change_counter::current(dev, ino, far_future);
+        assert!(
+            after > before,
+            "COPY must bump the change counter (before={before}, after={after})"
+        );
     }
 
     #[tokio::test]

@@ -1448,7 +1448,22 @@ impl CompoundDispatcher {
             }
 
             // NFSv4.2 performance operations
-            Operation::Copy { src_stateid, dst_stateid, src_offset, dst_offset, count, consecutive: _, synchronous } => {
+            Operation::Copy {
+                src_stateid, dst_stateid, src_offset, dst_offset, count,
+                consecutive: _, synchronous, source_server_count,
+            } => {
+                // A non-empty ca_source_server is an INTER-server copy:
+                // "pull these bytes from that other server". flint has no
+                // COPY_NOTIFY, no inter-server auth, and no client for a
+                // remote read. Performing a local copy and reporting OK
+                // would answer a question nobody asked — the F15 class.
+                if source_server_count > 0 {
+                    warn!(
+                        "⛔ COPY names {} source server(s) — inter-server copy is not implemented; NFS4ERR_NOTSUPP rather than a silent local copy",
+                        source_server_count
+                    );
+                    return OperationResult::Copy(Nfs4Status::NotSupp, None);
+                }
                 let op = CopyOp {
                     src_stateid,
                     dst_stateid,
@@ -1519,11 +1534,23 @@ impl CompoundDispatcher {
                 if let Some(res) = self.refuse_if_striped("SEEK", context) {
                     return OperationResult::Seek(res, None);
                 }
-                let op = SeekOp {
-                    stateid,
-                    offset,
-                    what: if what == 0 { SeekType::Data } else { SeekType::Hole },
+                // data_content4 (RFC 7862 §15.11.1) has exactly two arms:
+                // NFS4_CONTENT_DATA = 0, NFS4_CONTENT_HOLE = 1. This used
+                // to be `if what == 0 { Data } else { Hole }`, which
+                // answers a question the client did not ask for every
+                // other value — and RFC 7862 §11.1.1.1 defines a code for
+                // precisely this case: "the server supports the given
+                // operation, [but] it does not support the selected arm of
+                // the discriminated union".
+                let what = match what {
+                    0 => SeekType::Data,
+                    1 => SeekType::Hole,
+                    other => {
+                        warn!("SEEK: unsupported data_content4 arm {} → UNION_NOTSUPP", other);
+                        return OperationResult::Seek(Nfs4Status::UnionNotsupp, None);
+                    }
                 };
+                let op = SeekOp { stateid, offset, what };
                 let res = self.perf_handler.handle_seek(op, context).await;
                 if res.status == Nfs4Status::Ok {
                     use crate::nfs::v4::compound::SeekResult;
@@ -3350,6 +3377,7 @@ mod tests {
                     src_stateid: dummy.clone(), dst_stateid: dummy.clone(),
                     src_offset: 0, dst_offset: 0, count: 1,
                     consecutive: false, synchronous: true,
+                    source_server_count: 0,
                 }),
                 (opcode::CLONE, Op::Clone {
                     src_stateid: dummy.clone(), dst_stateid: dummy.clone(),
@@ -3382,6 +3410,74 @@ mod tests {
                 Nfs4Status::OpIllegal,
                 "opcode {code} must be legal in a 4.2 COMPOUND"
             );
+        }
+    }
+
+    /// An inter-server COPY is refused, not silently performed locally.
+    ///
+    /// The stateids are dummies, so a server that ignored
+    /// `ca_source_server` would answer BADSTATEID here. Asserting the
+    /// exact NOTSUPP is what distinguishes "refused the inter-server
+    /// request" from "failed for an unrelated reason", and it also proves
+    /// the check runs BEFORE stateid resolution.
+    #[tokio::test]
+    async fn an_inter_server_copy_is_refused_rather_than_done_locally() {
+        let dummy = crate::nfs::v4::protocol::StateId::new(1, [0u8; 12]);
+        let mk = |source_server_count| Operation::Copy {
+            src_stateid: dummy.clone(),
+            dst_stateid: dummy.clone(),
+            src_offset: 0,
+            dst_offset: 0,
+            count: 1,
+            consecutive: false,
+            synchronous: true,
+            source_server_count,
+        };
+
+        let (d, _t) = create_test_dispatcher();
+        let mut ctx = CompoundContext::new(2);
+        assert_eq!(
+            d.dispatch_operation(mk(1), &mut ctx).await.status(),
+            Nfs4Status::NotSupp
+        );
+
+        // Control: the ordinary intra-server case must still reach the
+        // handler. Without this arm, refusing every COPY passes.
+        assert_eq!(
+            d.dispatch_operation(mk(0), &mut ctx).await.status(),
+            Nfs4Status::BadStateId
+        );
+    }
+
+    /// data_content4 has exactly two arms. Anything else is
+    /// NFS4ERR_UNION_NOTSUPP (RFC 7862 §11.1.1.1), not silently treated
+    /// as HOLE.
+    #[tokio::test]
+    async fn seek_rejects_an_unknown_data_content_arm() {
+        let dummy = crate::nfs::v4::protocol::StateId::new(1, [0u8; 12]);
+        let (d, _t) = create_test_dispatcher();
+        let mut ctx = CompoundContext::new(2);
+
+        for what in [2u32, 3, u32::MAX] {
+            let res = d
+                .dispatch_operation(
+                    Operation::Seek { stateid: dummy.clone(), offset: 0, what },
+                    &mut ctx,
+                )
+                .await;
+            assert_eq!(res.status(), Nfs4Status::UnionNotsupp, "sa_what={what}");
+        }
+
+        // Both defined arms must get PAST the union check. They fail on the
+        // dummy stateid, which is the point — they were not rejected here.
+        for what in [0u32, 1] {
+            let res = d
+                .dispatch_operation(
+                    Operation::Seek { stateid: dummy.clone(), offset: 0, what },
+                    &mut ctx,
+                )
+                .await;
+            assert_ne!(res.status(), Nfs4Status::UnionNotsupp, "sa_what={what}");
         }
     }
 

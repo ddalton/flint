@@ -58,6 +58,53 @@ than migrated.
 
 ### Fixed
 
+- **COPY silently dropped the tail of its own arguments.** `COPY4args`
+  ends with `ca_source_server<netloc4>` and the decoder stopped before it,
+  so the array's length word was read as the next opcode. For the ordinary
+  empty case that word is 0 — reserved — so the COMPOUND was truncated to
+  one operation plus an OP_ILLEGAL. Worse, a **non-empty** list is an
+  inter-server copy request, and it was ignored while a **local** copy was
+  performed and reported OK. The array is now consumed arm by arm (an
+  unknown `netloc_type4` is BADXDR, since an unknown discriminant means an
+  unknown width) and a non-empty list returns `NFS4ERR_NOTSUPP`.
+- **COPY's reply contradicted itself.** `cr_synchronous` echoed the
+  client's *request* rather than what the server did, while
+  `wr_callback_id` was encoded as an empty array — so an async request got
+  a reply that simultaneously said "this is asynchronous" and "there is
+  nothing to wait for". flint emits no CB_OFFLOAD and dispatches neither
+  OFFLOAD_STATUS nor OFFLOAD_CANCEL; there has never been an asynchronous
+  copy to describe. It now reports TRUE, and the fsync is unconditional,
+  which makes the hardcoded `wr_committed = FILE_SYNC4` true by
+  construction instead of true only when the client happened to ask.
+- **COPY and CLONE accepted ranges that run off the end of the source**
+  (RFC 7862 §15.2.3 and §15.13.3: "MUST fail with NFS4ERR_INVAL"), and
+  **COPY accepted a source and destination that were the same file** —
+  which is not merely non-conforming but corrupting, since the chunk loop
+  is a memcpy where a same-file copy needs a memmove. CLONE's rule is
+  deliberately weaker, matching the RFC: same file is legal there unless
+  the ranges overlap. Comparison is by `(dev, ino)`, not path, because the
+  filehandle layer follows a rename-alias table.
+- **COPY and CLONE never advanced the destination's change attribute**,
+  the very ordering key `change_counter` exists to protect — its module
+  doc names "two extends of a COPY burst" as the disease. Mostly masked by
+  the ctime floor, except when a prior bump landed in the same clock tick.
+- **SEEK reported success for offsets past the end of the file, and could
+  never report EOF.** Linux returns ENXIO for two different questions —
+  "past EOF" and "no more content of that type" — and RFC 7862 §15.11.3
+  gives them opposite answers: the first MUST be `NFS4ERR_NXIO`, the
+  second is OK with `sr_eof` TRUE. Both were collapsed into a success.
+  `sr_eof` was additionally hardcoded false, so the RFC's own worked
+  example (`SEEK 0 CONTENT_HOLE` on a dense file → `eof=1, offset=size`)
+  was answered wrongly. An unknown `sa_what` was treated as HOLE and now
+  returns `NFS4ERR_UNION_NOTSUPP`. `NxIo` and `UnionNotsupp` had both been
+  declared and never used.
+- **ALLOCATE/DEALLOCATE offsets above `i64::MAX` reached `fallocate` as
+  negative values** — a wire `u64` cast straight to `off_t`. Rejected
+  before the cast now. ENOSPC also maps to `NFS4ERR_NOSPC` rather than
+  a generic I/O error.
+- **Two dead attribute encoders deleted** (493 lines, zero callers) that
+  disagreed with the live encoder on `space_used`. Two encoders answering
+  one attribute differently is how the next reader gets it wrong.
 - **CLONE destroyed the destination before it knew it could clone.** The
   whole-file path opened the destination `.truncate(true)` *before*
   issuing the FICLONE ioctl and returned an error on failure with the

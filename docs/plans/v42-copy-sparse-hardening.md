@@ -1,6 +1,8 @@
 # NFSv4.2 server-side copy and sparse-file handling
 
-Status: **Phase 0 landed.** Phases 1–3 are specified below and not started.
+Status: **Phases 0 and 1 landed** (1.9 partially — see below). Phase 2 is
+the wire capture and needs a cluster. Phase 3 is mostly dropped, with
+reasons.
 
 Scope: COPY (60), CLONE (71), ALLOCATE (59), DEALLOCATE (62), SEEK (69),
 READ_PLUS (68).
@@ -74,39 +76,82 @@ same file.
 Error is `NFS4ERR_NOTSUPP`, matching what this server already answers for
 LINK, RENAME and READ_PLUS on a striped file.
 
-## Phase 1 — conformance on the live path — NOT STARTED
+## Phase 1 — conformance on the live path — LANDED
 
-| # | Change | Site | Error |
-|---|---|---|---|
-| 1.1 | Consume `ca_source_server<netloc4>`; NOTSUPP when non-empty | `compound.rs` COPY decoder | NOTSUPP |
-| 1.2 | `cr_synchronous = TRUE` unconditionally on success | `perfops.rs`, `dispatcher.rs` | — |
-| 1.3 | Unconditional `sync_all()` before replying; keep FILE_SYNC4 | `perfops.rs` | — |
-| 1.4 | Range validation for both ops (end-of-range, `> i64::MAX` before the `off_t` cast) | shared helper | INVAL |
-| 1.5 | src==dst overlap check on resolved `(dev, ino)` | both handlers | INVAL |
-| 1.6 | change-counter bump for COPY and CLONE | `perfops.rs` | — |
-| 1.7 | SEEK: `eof = (offset >= size)`; ENXIO → NXIO | `perfops.rs` | NXIO |
-| 1.8 | ENOSPC → NoSpc; fix `count: 0` on partial failure | `perfops.rs` | NOSPC |
-| 1.9 | SPACE_USED for striped files; delete the dead second attribute encoder | `fileops.rs` | — |
+Every rule below was taken from the RFC 7862 text, read directly rather
+than recalled. Two things that changed the plan on contact:
 
-Notes:
+**COPY and CLONE do not share a same-file rule.** §15.2.3: "SAVED_FH and
+CURRENT_FH must be different files. If SAVED_FH and CURRENT_FH refer to
+the same file, the operation MUST fail with NFS4ERR_INVAL" — no overlap
+qualifier. §15.13.3 forbids it only when "the source and target ranges
+overlap". A same-file, non-overlapping CLONE is legal; a same-file COPY
+never is. They *do* share the source-range sentence verbatim, which is why
+`resolve_range_len` is shared and the same-file checks are not.
 
-- **1.1 first.** The COPY decoder stops before `ca_source_server`, so the
-  array's length word is read as the next opcode. Zero is reserved →
-  `Operation::Unsupported` → the decode loop breaks and truncates the
-  compound. Separately, a **non-empty** `ca_source_server` — an
-  inter-server copy request — is silently performed *locally* and reported
-  OK. That is the F15 class exactly. Land this before any wire capture:
-  you cannot read `ca_synchronous` off a trace with confidence while the
-  server's own view of COPY4args is known to be short.
+**SEEK's ENXIO is two different answers.** Linux returns ENXIO both for
+"the offset is past EOF" and for "there is no more content of that type
+before EOF". §15.11.3 gives them OPPOSITE results — the first MUST be
+NFS4ERR_NXIO, the second is NFS4_OK with `sr_eof` TRUE. The old code
+collapsed both into `Ok(eof, size)`, so an out-of-range SEEK reported
+success.
+
+| # | Change | Error |
+|---|---|---|
+| 1.1 | `ca_source_server<netloc4>` consumed arm-by-arm; non-empty refused | NOTSUPP |
+| 1.2 | `cr_synchronous` reports what the server DID | — |
+| 1.3 | Unconditional `sync_all()` before replying | — |
+| 1.4 | Shared source-range validation, `checked_add` | INVAL |
+| 1.5 | COPY: same file at all. CLONE: same file AND overlapping | INVAL |
+| 1.6 | change-counter bump for COPY and CLONE, keyed off the fd | — |
+| 1.7 | SEEK `sr_eof`; past-EOF → NXIO; unknown `sa_what` → UNION_NOTSUPP | NXIO / UNION_NOTSUPP |
+| 1.8 | ENOSPC → NOSPC; `off_t` representability guard | NOSPC / INVAL |
+| 1.9 | **Partial** — dead encoders deleted; SPACE_USED value NOT changed | — |
+
+`Nfs4Status::NxIo` and `Nfs4Status::UnionNotsupp` had both existed with
+zero uses. SEEK is now the only producer of either.
+
+**1.9 is deliberately half-done.** The two dead attribute encoders
+(`encode_attributes`, `encode_single_attribute` — 493 lines, zero callers)
+are gone; they disagreed with the live encoder on `space_used` itself,
+which is how the next reader gets it wrong. The *value* is unchanged:
+fixing it properly needs the per-file pNFS predicate threaded into the
+attribute encoder, and doing it at role level would over-report for
+never-layouted files — the same "per file, not per role" principle as the
+guards. Phase 2.3 measures A3 before that fix is written.
+
+### Not covered by any test, stated plainly
+
+- **1.3, the unconditional fsync.** No unit test can observe whether
+  `sync_all` was called. It is unverified by construction, not by
+  omission.
+- **1.7's `sr_eof` and NXIO behaviour** is Linux-gated and this
+  development host is darwin, so those two arms were never *executed*
+  here and their mutations were never run. They compile and are logically
+  derived from the quoted RFC text; that is all that can be claimed until
+  CI (ubuntu) or a cluster runs them.
+
+Notes on the non-obvious ones:
+
+- **1.1** was landed first for a reason: you cannot read `ca_synchronous`
+  off a wire capture with any confidence while the server's own view of
+  COPY4args is known to be short. An unknown `netloc_type4` discriminant
+  is now BADXDR rather than a skip — the discriminant determines the arm's
+  width, and a decoder that cannot determine the width cannot honestly
+  claim to have consumed it.
 - **1.3** makes the hardcoded `wr_committed = FILE_SYNC4` true by
-  construction with no new `CopyResult` fields and no dependence on the
-  unmeasured `ca_synchronous` bit.
+  construction, with no new `CopyResult` fields and no dependence on the
+  unmeasured `ca_synchronous` bit — correct whichever value the client
+  sends. Plumbing `committed` + `verifier` through `CopyResult` stays
+  deferred until the fsync cost is measured.
+- **1.4** rejects rather than saturates. The old `len() - src_offset` on
+  u64 wrapped in release (no `[profile]` section in the workspace); a
+  `saturating_sub` would have hidden that rather than fixed it.
 - **1.5** compares `(dev, ino)`, not paths: the filehandle layer follows a
   rename-alias table, so one inode is legitimately reachable through
   different handle bytes.
-- **1.7's `eof` half** is unconditionally wrong today and needs no RFC
-  arbitration — `sr_eof` is hardcoded false, so it can never be true on a
-  successful lseek. `Nfs4Status::NxIo` is declared and used nowhere.
+- **1.6** bumps from the destination **fd** inside the blocking closure,
+  not `bump_path` — a raced rename must not steer it.
 
 ## Phase 2 — measurement — NOT STARTED, cheap, re-orders Phase 3
 
