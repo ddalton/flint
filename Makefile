@@ -125,6 +125,11 @@ test-nfs-protocol: ## Run full pynfs NFSv4.1 conformance suite (--maketree)
 	# post-boot grace window. Restart with a clean state DB so every run
 	# sees the same server age.
 	$(MAKE) nfs-server-stop
+	# Wiping .flint-nfs resets the state DB — but it ALSO deletes the F30
+	# identity marker, and without that the server refuses to serve
+	# ("empty/foreign dir, not volume ..."), so this target could not run
+	# at all. Re-stamp the marker after the wipe. Found 2026-08-01 while
+	# gating v1.23.0; the breakage predates v1.22.0.
 	rm -rf $(NFS_EXPORT)/.flint-nfs
 	# Leftovers from an aborted previous run (dangling symlinks, per-test
 	# dirs) make pynfs's own clean_dir abort the whole suite before any
@@ -132,6 +137,8 @@ test-nfs-protocol: ## Run full pynfs NFSv4.1 conformance suite (--maketree)
 	rm -rf $(NFS_EXPORT)/tmp
 	# pynfs's grace tests (RECC3 et al.) assume the server is in grace
 	# whenever they run; the suite outlasts the RFC-default 90s window.
+	mkdir -p $(NFS_EXPORT)/.flint-nfs
+	printf '%s' '$(NFS_VOLUME_ID)' > $(NFS_EXPORT)/.flint-nfs/volume-id
 	FLINT_NFS_GRACE_SECS=900 $(MAKE) nfs-server-bg
 	# `--maketree` builds the test directory ($(NFS_EXPORT)/tmp/tree) of
 	# regular file, dir, symlink, socket/fifo/block/char stand-ins that
@@ -139,12 +146,53 @@ test-nfs-protocol: ## Run full pynfs NFSv4.1 conformance suite (--maketree)
 	# the export so the build step has a writable parent.
 	mkdir -p $(NFS_EXPORT)/tmp
 	chmod 0777 $(NFS_EXPORT)/tmp
+	-limactl shell $(LIMA_VM) -- sudo rm -f /tmp/pynfs.json
+	rm -f /tmp/flint-pynfs-results.json
 	limactl shell $(LIMA_VM) -- bash -lc '\
 	  cd /opt/pynfs/nfs4.1 && \
 	  python3 ./testserver.py $(LIMA_HOST_ADDR):$(NFS_PORT)/tmp \
 	    --maketree --nocleanup --json=/tmp/pynfs.json all || true'
 	limactl cp $(LIMA_VM):/tmp/pynfs.json /tmp/flint-pynfs-results.json
 	@echo "Results: /tmp/flint-pynfs-results.json"
+
+# ─────────────────── NFS server INSIDE the Lima VM ───────────────────────────
+#
+# The targets above run flint-nfs-server on the macOS HOST. That is fine for
+# protocol conformance, but it CANNOT test the space-management operations:
+# the real bodies of SEEK/ALLOCATE/DEALLOCATE are #[cfg(target_os = "linux")]
+# and every other target returns NOTSUPP unconditionally. A run against a
+# darwin-hosted server therefore measures the PLATFORM, not the code — it
+# fails ALLOC1-3 no matter what the code does.
+#
+# These targets cross-compile the same musl binary we ship and run it inside
+# the VM, so client AND server are Linux.
+LIMA_ARCH      := $(shell test "$$(uname -m)" = arm64 && echo aarch64 || echo x86_64)
+VM_SERVER_BIN  := $(CARGO_DIR)/target/$(LIMA_ARCH)-unknown-linux-musl/release/flint-nfs-server
+VM_EXPORT      := /srv/flint-nfs-export
+
+.PHONY: nfs-server-vm
+nfs-server-vm: ## Build+run flint-nfs-server INSIDE the Lima VM (real Linux server)
+	cd $(CARGO_DIR) && cargo zigbuild --release \
+	  --target $(LIMA_ARCH)-unknown-linux-musl --bin flint-nfs-server
+	limactl copy $(VM_SERVER_BIN) $(LIMA_VM):/tmp/flint-nfs-server-vm
+	limactl shell $(LIMA_VM) -- sudo bash -lc '\
+	  systemctl stop flint-nfs-vm 2>/dev/null || true; \
+	  systemctl reset-failed flint-nfs-vm 2>/dev/null || true; \
+	  chmod +x /tmp/flint-nfs-server-vm; \
+	  rm -rf $(VM_EXPORT); mkdir -p $(VM_EXPORT)/.flint-nfs $(VM_EXPORT)/tmp; \
+	  printf "%s" "$(NFS_VOLUME_ID)" > $(VM_EXPORT)/.flint-nfs/volume-id; \
+	  chmod 0777 $(VM_EXPORT)/tmp; \
+	  systemd-run --unit=flint-nfs-vm --collect /tmp/flint-nfs-server-vm \
+	    --bind-addr 127.0.0.1 --port $(NFS_PORT) \
+	    --export-path $(VM_EXPORT) --volume-id $(NFS_VOLUME_ID)'
+	@sleep 3
+	@limactl shell $(LIMA_VM) -- sudo ss -lntp | grep -q ":$(NFS_PORT)" \
+	  && echo "flint-nfs-server running INSIDE the VM on 127.0.0.1:$(NFS_PORT)"
+
+.PHONY: nfs-server-vm-stop
+nfs-server-vm-stop: ## Stop the in-VM flint-nfs-server
+	-limactl shell $(LIMA_VM) -- sudo systemctl stop flint-nfs-vm
+	-limactl shell $(LIMA_VM) -- sudo systemctl reset-failed flint-nfs-vm
 
 .PHONY: test-nfs-42
 test-nfs-42: ## Run the NFSv4.2 conformance tests (ALLOC1-3, COPY5)
@@ -158,14 +206,19 @@ test-nfs-42: ## Run the NFSv4.2 conformance tests (ALLOC1-3, COPY5)
 	# These four are the ENTIRE 4.2 surface pynfs has. A gate naming
 	# COPY1..COPY4 would fail for the wrong reason: those codes exist in no
 	# artifact and in no version of the suite here.
-	$(MAKE) nfs-server-stop
-	rm -rf $(NFS_EXPORT)/.flint-nfs $(NFS_EXPORT)/tmp
-	$(MAKE) nfs-server-bg
-	mkdir -p $(NFS_EXPORT)/tmp
-	chmod 0777 $(NFS_EXPORT)/tmp
+	# Runs against the IN-VM server: ALLOC1-3 exercise fallocate, which does
+	# not exist off Linux, so a host-run server fails them unconditionally.
+	$(MAKE) nfs-server-vm
+	# Delete BOTH copies first. A stale results file is not a harmless
+	# leftover: if the run cannot write its JSON (e.g. the file is owned by
+	# root from an earlier sudo run) the copy below silently ships the
+	# PREVIOUS run's results and the gate passes on them. Observed
+	# 2026-08-01 while gating v1.23.0.
+	-limactl shell $(LIMA_VM) -- sudo rm -f /tmp/pynfs42.json
+	rm -f /tmp/flint-pynfs42-results.json
 	limactl shell $(LIMA_VM) -- bash -lc '\
 	  cd /opt/pynfs/nfs4.1 && \
-	  python3 ./testserver.py $(LIMA_HOST_ADDR):$(NFS_PORT)/tmp \
+	  python3 ./testserver.py 127.0.0.1:$(NFS_PORT)/tmp \
 	    --maketree --nocleanup --minorversion=2 \
 	    --json=/tmp/pynfs42.json sparse copy || true'
 	limactl cp $(LIMA_VM):/tmp/pynfs42.json /tmp/flint-pynfs42-results.json
