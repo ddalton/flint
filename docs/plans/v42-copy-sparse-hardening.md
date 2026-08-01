@@ -275,6 +275,21 @@ A backup that silently contains nothing, reporting success. This is the
 F15 class exactly. (`cp --sparse=auto` and `--sparse=always` were checked
 and are safe — they read the data.)
 
+**Inspecting the archive does not reveal it.** Decoded headers:
+
+| field | before | after |
+|---|---|---|
+| typeflag | `'S'` (GNU sparse) | `'0'` (regular) |
+| `size` (bytes stored) | **0** | 25165824 |
+| `realsize` (claimed) | 25165824 | n/a for typeflag `0` |
+| sparse map | `(25165824, 0)` — no data regions at all | — |
+
+`tar -tvf` prints `realsize`, so the broken archive lists a normal
+`-rw-r--r-- root/root 25165824 striped.bin`. The catalogue is correct and
+the data is absent; only the archive's byte count (10,240, i.e. tar's
+minimum blocking factor) or an actual restore shows it. Do not accept a
+tar listing as evidence that a backup holds data.
+
 Fixed: for a pinned file the MDS reports `space_used = size`. Per file,
 not per role, so a genuinely sparse never-layouted file on an MDS still
 reports its real allocation — asserted by the test's control arm, and both
