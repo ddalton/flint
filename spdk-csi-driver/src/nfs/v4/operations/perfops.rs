@@ -28,55 +28,148 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use tracing::{debug, warn};
 
-/// Try to create a reflink (CoW clone) on filesystems that support it
-/// (XFS with reflink enabled, Btrfs, OCFS2)
-/// 
-/// This uses the Linux FICLONE ioctl which creates an instant zero-copy clone
-/// Returns Ok(bytes_cloned) on success, Err on failure (not supported or error)
-#[cfg(target_os = "linux")]
-fn try_reflink_clone(src: &Path, dst: &Path) -> std::io::Result<u64> {
-    use std::os::unix::io::AsRawFd;
-    
-    // Open source for reading
-    let src_file = std::fs::File::open(src)?;
-    let src_size = src_file.metadata()?.len();
-    
-    // Create/open destination for writing  
-    let dst_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dst)?;
-    
-    // FICLONE ioctl number: 0x40049409
-    // This is defined in linux/fs.h as _IOW(0x94, 9, int)
-    // Equivalent to: ioctl(dst_fd, FICLONE, src_fd)
-    const FICLONE: nix::libc::Ioctl = 0x40049409;
+/// Resolve a wire `count` against the source file, or reject the request.
+///
+/// RFC 7862 §15.13.3 (CLONE) and §15.2.3 (COPY): a count of 0 means "to
+/// the end of the source file", not "zero bytes".
+///
+/// This exists because `handle_clone` used to hold TWO readings of the
+/// same request. Its `(0,0,0)` branch treated count==0 as "replace the
+/// whole destination file"; its range branch treated the identical
+/// count==0 as "to source EOF, leave the destination's tail alone". One
+/// request, one function, two meanings. There is now one path and one
+/// reading, and it lives here so COPY can adopt it in the conformance
+/// pass without the two drifting apart again.
+///
+/// Rejecting `src_offset > src_size` is not defensive politeness: the
+/// old range branch computed `metadata()?.len() - src_offset` on u64,
+/// the workspace `Cargo.toml` has no `[profile]` section, so that
+/// subtraction WRAPPED in release builds and yielded a ~16-exabyte
+/// length. A `saturating_sub` would have hidden it rather than fixed it.
+fn resolve_range_len(src_size: u64, src_offset: u64, count: u64) -> std::io::Result<u64> {
+    if src_offset > src_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "source offset {} is past end of source file ({} bytes)",
+                src_offset, src_size
+            ),
+        ));
+    }
+    Ok(if count == 0 {
+        src_size - src_offset
+    } else {
+        count
+    })
+}
 
-    // Perform the reflink clone ioctl
-    let result = unsafe {
+/// Copy a byte range with positioned I/O. Returns bytes actually copied,
+/// which is short only when the source ends early.
+fn copy_range(
+    src_file: &std::fs::File,
+    dst_file: &std::fs::File,
+    src_offset: u64,
+    dst_offset: u64,
+    len: u64,
+) -> std::io::Result<u64> {
+    const CHUNK: usize = 1024 * 1024;
+    let mut buffer = vec![0u8; (len.min(CHUNK as u64)) as usize];
+    let mut done = 0u64;
+
+    while done < len {
+        let want = (len - done).min(buffer.len() as u64) as usize;
+        let got = src_file.read_at(&mut buffer[..want], src_offset + done)?;
+        if got == 0 {
+            break; // source ended early
+        }
+        dst_file.write_at(&buffer[..got], dst_offset + done)?;
+        done += got as u64;
+    }
+
+    Ok(done)
+}
+
+/// Try a copy-on-write clone of a byte range via the Linux FICLONERANGE
+/// ioctl (XFS with reflink, Btrfs, OCFS2).
+///
+/// NON-DESTRUCTIVE ON FAILURE, and that is the entire reason this is
+/// FICLONERANGE and not FICLONE. The FICLONE path this replaces opened
+/// the destination `.truncate(true)` BEFORE issuing the ioctl, so on any
+/// filesystem without reflink support — and `mkfs.ext4` is a shipped
+/// option (main.rs) — every whole-file CLONE emptied the destination and
+/// then rebuilt it non-atomically. When the rebuild then failed (ENOSPC,
+/// EACCES) the client was told CLONE had FAILED and the destination was
+/// already gone: an error naming the opposite of what happened.
+///
+/// FICLONERANGE writes nothing on failure and grows the destination only
+/// when the cloned range reaches past its end — which is what a byte-range
+/// CLONE is supposed to do.
+///
+/// Err (EOPNOTSUPP off-reflink, EINVAL when the range is not block
+/// aligned) means "fall back to a read/write loop", not "the file is
+/// damaged".
+#[cfg(target_os = "linux")]
+fn try_reflink_range(
+    src_file: &std::fs::File,
+    dst_file: &std::fs::File,
+    src_offset: u64,
+    len: u64,
+    dst_offset: u64,
+) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    // struct file_clone_range {
+    //     __s64 src_fd; __u64 src_offset; __u64 src_length; __u64 dest_offset;
+    // };
+    #[repr(C)]
+    struct FileCloneRange {
+        src_fd: i64,
+        src_offset: u64,
+        src_length: u64,
+        dest_offset: u64,
+    }
+
+    // linux/fs.h: FICLONERANGE = _IOW(0x94, 13, struct file_clone_range)
+    //   _IOC_WRITE<<30 | sizeof(32)<<16 | 0x94<<8 | 13
+    // = 0x40000000 | 0x00200000 | 0x9400 | 0x0D
+    const FICLONERANGE: nix::libc::Ioctl = 0x4020_940D;
+
+    let arg = FileCloneRange {
+        src_fd: src_file.as_raw_fd() as i64,
+        src_offset,
+        src_length: len,
+        dest_offset: dst_offset,
+    };
+
+    let rc = unsafe {
         nix::libc::ioctl(
             dst_file.as_raw_fd(),
-            FICLONE,
-            src_file.as_raw_fd()
+            FICLONERANGE,
+            &arg as *const FileCloneRange,
         )
     };
-    
-    if result == 0 {
-        // Success - reflink clone created instantly!
-        Ok(src_size)
+
+    if rc == 0 {
+        Ok(())
     } else {
-        // Failed - return error (typically EOPNOTSUPP if reflink not available)
         Err(std::io::Error::last_os_error())
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn try_reflink_clone(_src: &Path, _dst: &Path) -> std::io::Result<u64> {
-    // Reflink only supported on Linux
+fn try_reflink_range(
+    _src_file: &std::fs::File,
+    _dst_file: &std::fs::File,
+    _src_offset: u64,
+    _len: u64,
+    _dst_offset: u64,
+) -> std::io::Result<()> {
+    // Reflink is Linux-only. Note this arm touches NEITHER file, so the
+    // fallback below sees an untouched destination — same contract as the
+    // Linux failure path.
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "Reflink cloning only supported on Linux"
+        "Reflink cloning only supported on Linux",
     ))
 }
 
@@ -315,12 +408,56 @@ enum AllocMode {
 pub struct PerfOperationHandler {
     state_mgr: Arc<StateManager>,
     fh_mgr: Arc<FileHandleManager>,
+    /// Present only in the MDS role. See `is_striped`.
+    pnfs_handler: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
 }
 
 impl PerfOperationHandler {
-    /// Create a new performance operation handler
+    /// Create a new performance operation handler (standalone / DS role:
+    /// no pNFS, every file is served locally).
     pub fn new(state_mgr: Arc<StateManager>, fh_mgr: Arc<FileHandleManager>) -> Self {
-        Self { state_mgr, fh_mgr }
+        Self::new_with_pnfs(state_mgr, fh_mgr, None)
+    }
+
+    /// Create a handler that knows about striped files.
+    pub fn new_with_pnfs(
+        state_mgr: Arc<StateManager>,
+        fh_mgr: Arc<FileHandleManager>,
+        pnfs_handler: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
+    ) -> Self {
+        Self { state_mgr, fh_mgr, pnfs_handler }
+    }
+
+    /// Whether `path` names a pNFS-managed (placement-pinned) file — one
+    /// whose bytes live on the DS fleet and whose MDS-local file is a
+    /// sparse, size-only stub.
+    ///
+    /// COPY and CLONE are guarded HERE rather than in the dispatcher, and
+    /// that is forced, not stylistic. Under RFC 7862 §15.2 the COPY source
+    /// is SAVED_FH and the destination is CURRENT_FH; these two handlers
+    /// resolve both ends from their own stateids and never read the
+    /// compound context at all. A dispatcher-side guard keyed on the
+    /// CURRENT filehandle — which is how ALLOCATE/DEALLOCATE/SEEK are
+    /// guarded, correctly, because those DO read current_fh — structurally
+    /// cannot see a COPY's source, for any client, conforming or not.
+    ///
+    /// Keyed PER FILE (`is_pnfs_managed`), not per role
+    /// (`pnfs_handler.is_some()`): an MDS deliberately keeps files that
+    /// were never layouted fully readable and writable, a decision spelled
+    /// out in both `pnfs/handler_trait.rs` and the READ/WRITE guard in
+    /// `dispatcher.rs`. Reversing it here alone would make COPY stricter
+    /// than WRITE on the same file.
+    fn is_striped(&self, path: &Path) -> bool {
+        let Some(pnfs) = &self.pnfs_handler else {
+            return false;
+        };
+        let export = self.fh_mgr.get_export_path();
+        let key = path
+            .strip_prefix(export)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        !key.is_empty() && pnfs.is_pnfs_managed(&key)
     }
 
     /// Handle COPY operation
@@ -414,6 +551,26 @@ impl PerfOperationHandler {
             }
         };
 
+        // Refuse either end being a striped file. Copying FROM one reads
+        // the sparse stub and silently produces a destination full of
+        // zeros; copying TO one writes bytes the DSes will never serve.
+        // Both report success, which is the F15 failure class exactly.
+        for (role, path) in [("source", &src_path), ("destination", &dst_path)] {
+            if self.is_striped(path) {
+                warn!(
+                    "⛔ COPY {} '{}' is a striped file — its bytes live on the DSes and the MDS file is a sparse stub. NFS4ERR_NOTSUPP so the client falls back to read/write",
+                    role,
+                    path.display()
+                );
+                return CopyRes {
+                    status: Nfs4Status::NotSupp,
+                    sync: true,
+                    count: 0,
+                    completion: CopyCompletion::Synchronous,
+                };
+            }
+        }
+
         // Clone paths for logging before moving into closure
         let src_path_name = src_path.file_name().map(|n| n.to_string_lossy().to_string());
         let dst_path_name = dst_path.file_name().map(|n| n.to_string_lossy().to_string());
@@ -429,10 +586,14 @@ impl PerfOperationHandler {
             // Open source file for reading
             let src_file = std::fs::File::open(&src_path)?;
             
-            // Open destination file for writing
+            // Open destination file for writing. truncate(false) is
+            // explicit, not incidental: COPY writes a byte RANGE and must
+            // leave everything outside it — including the destination's
+            // length — alone.
             let dst_file = std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(&dst_path)?;
 
             // RFC 7862 §15.2.3: ca_count == 0 means "copy from
@@ -597,77 +758,69 @@ impl PerfOperationHandler {
             }
         };
 
+        // Same reasoning as COPY's guard above.
+        for (role, path) in [("source", &src_path), ("destination", &dst_path)] {
+            if self.is_striped(path) {
+                warn!(
+                    "⛔ CLONE {} '{}' is a striped file — its bytes live on the DSes and the MDS file is a sparse stub. NFS4ERR_NOTSUPP so the client falls back to read/write",
+                    role,
+                    path.display()
+                );
+                return CloneRes {
+                    status: Nfs4Status::NotSupp,
+                };
+            }
+        }
+
         let src_offset = op.src_offset;
         let dst_offset = op.dst_offset;
         let count = op.count;
 
-        // Perform clone operation
-        // Try reflink (CoW) first for instant cloning on XFS/Btrfs
-        // Fall back to regular copy if reflink not supported
+        // ONE path for every range, including the whole-file case.
+        //
+        // What was here before: a `(0,0,0)` special case that called
+        // FICLONE (destructive, see try_reflink_range) and, on failure,
+        // std::fs::copy. std::fs::copy is whole-file — it truncates the
+        // destination to the source's length and carries the source's
+        // PERMISSION BITS across. Neither belongs to any NFS operation:
+        // CLONE copies a byte range and says nothing about mode, owner,
+        // or the bytes past the range.
         let clone_result = tokio::task::spawn_blocking(move || {
-            if src_offset == 0 && dst_offset == 0 && count == 0 {
-                // Full file clone - try reflink first for zero-copy CoW
-                
-                // Attempt reflink clone using FICLONE ioctl (XFS, Btrfs, OCFS2)
-                // This creates an instant CoW clone without copying data
-                match try_reflink_clone(&src_path, &dst_path) {
-                    Ok(bytes_copied) => {
-                        debug!("CLONE: Created CoW reflink clone ({} bytes, INSTANT zero-copy!)", bytes_copied);
-                        return Ok(bytes_copied);
-                    }
-                    Err(e) => {
-                        debug!("CLONE: Reflink not supported ({}), falling back to regular copy", e);
-                        // Fall through to regular copy
-                    }
-                }
-                
-                // Fallback: Regular copy for filesystems without reflink support
-                match std::fs::copy(&src_path, &dst_path) {
-                    Ok(bytes_copied) => {
-                        debug!("CLONE: Copied entire file ({} bytes, full copy)", bytes_copied);
-                        Ok(bytes_copied)
-                    }
-                    Err(e) => Err(e),
-                }
-            } else {
-                // Partial range clone - read and write the range
-                let src_file = std::fs::File::open(&src_path)?;
-                let dst_file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .open(&dst_path)?;
+            let src_file = std::fs::File::open(&src_path)?;
+            // truncate(false) is the whole fix stated as code: the old
+            // whole-file path opened this destination with truncate(true)
+            // BEFORE it knew whether the clone could succeed.
+            let dst_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&dst_path)?;
 
-                use std::os::unix::fs::FileExt;
-                let actual_count = if count == 0 {
-                    src_file.metadata()?.len() - src_offset
-                } else {
-                    count
-                };
-
-                let mut buffer = vec![0u8; actual_count.min(1024 * 1024) as usize];
-                let mut remaining = actual_count;
-                let mut current_src_offset = src_offset;
-                let mut current_dst_offset = dst_offset;
-
-                while remaining > 0 {
-                    let to_read = remaining.min(buffer.len() as u64) as usize;
-                    let bytes_read = src_file.read_at(&mut buffer[..to_read], current_src_offset)?;
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    
-                    dst_file.write_at(&buffer[..bytes_read], current_dst_offset)?;
-                    
-                    remaining -= bytes_read as u64;
-                    current_src_offset += bytes_read as u64;
-                    current_dst_offset += bytes_read as u64;
-                }
-
-                debug!("CLONE: Copied {} bytes from offset {} to offset {}", 
-                      actual_count - remaining, src_offset, dst_offset);
-                Ok(actual_count - remaining)
+            let src_size = src_file.metadata()?.len();
+            let len = resolve_range_len(src_size, src_offset, count)?;
+            if len == 0 {
+                return Ok::<u64, std::io::Error>(0);
             }
-        }).await;
+
+            // Fast path. Failure here is free — nothing has been written.
+            match try_reflink_range(&src_file, &dst_file, src_offset, len, dst_offset) {
+                Ok(()) => {
+                    debug!("CLONE: reflinked {} bytes (CoW, zero-copy)", len);
+                    return Ok(len);
+                }
+                Err(e) => {
+                    debug!("CLONE: reflink unavailable ({e}), copying the range instead");
+                }
+            }
+
+            let copied = copy_range(&src_file, &dst_file, src_offset, dst_offset, len)?;
+            debug!(
+                "CLONE: copied {} of {} bytes from offset {} to offset {}",
+                copied, len, src_offset, dst_offset
+            );
+            Ok(copied)
+        })
+        .await;
 
         match clone_result {
             Ok(Ok(_bytes)) => {
@@ -681,6 +834,10 @@ impl PerfOperationHandler {
                 let status = match e.kind() {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+                    // resolve_range_len's out-of-range rejection. RFC 7862
+                    // §15.13.3 wants NFS4ERR_INVAL for a source range that
+                    // starts past EOF.
+                    std::io::ErrorKind::InvalidInput => Nfs4Status::Inval,
                     _ => Nfs4Status::Io,
                 };
                 CloneRes {
@@ -1010,6 +1167,391 @@ mod tests {
 
     fn create_test_stateid(handler: &PerfOperationHandler, client_id: u64) -> StateId {
         handler.state_mgr.stateids.allocate(StateType::Open, client_id, None)
+    }
+
+    /// A pNFS handler that reports a fixed set of export-relative keys as
+    /// placement-pinned. Only `is_pnfs_managed` matters to COPY/CLONE.
+    struct PinnedKeys(std::collections::HashSet<String>);
+
+    #[tonic::async_trait]
+    impl crate::pnfs::PnfsOperations for PinnedKeys {
+        fn layoutget(
+            &self,
+            _args: crate::pnfs::mds::operations::LayoutGetArgs,
+        ) -> Result<
+            crate::pnfs::mds::operations::LayoutGetResult,
+            crate::pnfs::mds::operations::LayoutGetError,
+        > {
+            Err(crate::pnfs::mds::operations::LayoutGetError::LayoutUnavailable)
+        }
+        fn getdeviceinfo(
+            &self,
+            _args: crate::pnfs::mds::operations::GetDeviceInfoArgs,
+        ) -> Result<
+            crate::pnfs::mds::operations::GetDeviceInfoResult,
+            crate::pnfs::mds::operations::GetDeviceInfoError,
+        > {
+            Err(crate::pnfs::mds::operations::GetDeviceInfoError::NoEnt)
+        }
+        fn layoutreturn(
+            &self,
+            _args: crate::pnfs::mds::operations::LayoutReturnArgs,
+        ) -> Result<(), crate::pnfs::mds::operations::LayoutReturnError> {
+            Ok(())
+        }
+        fn is_pnfs_managed(&self, file_key: &str) -> bool {
+            self.0.contains(file_key)
+        }
+    }
+
+    /// An MDS-role handler in whose export `pinned` are striped files.
+    fn create_test_handler_pnfs(pinned: &[&str]) -> (PerfOperationHandler, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let export_path = temp_dir.path().to_path_buf();
+        std::fs::write(export_path.join("source.txt"), b"source file data for copy/clone tests")
+            .unwrap();
+        std::fs::write(export_path.join("dest.txt"), b"destination file").unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(export_path));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let pnfs: Arc<dyn crate::pnfs::PnfsOperations> =
+            Arc::new(PinnedKeys(pinned.iter().map(|s| s.to_string()).collect()));
+        let handler = PerfOperationHandler::new_with_pnfs(state_mgr, fh_mgr, Some(pnfs));
+        (handler, temp_dir)
+    }
+
+    /// Allocate an Open stateid bound to `path`'s filehandle.
+    ///
+    /// Every guard test needs a REAL stateid: all five perfops arms
+    /// validate the stateid before touching a file, so a dummy one yields
+    /// BadStateId both before and after the guard exists, and an
+    /// `assert_ne!(status, Ok)` would pass either way.
+    fn open_stateid_for(handler: &PerfOperationHandler, path: &Path) -> StateId {
+        let fh = handler.fh_mgr.path_to_filehandle(path).unwrap();
+        handler
+            .state_mgr
+            .stateids
+            .allocate(StateType::Open, 1, Some(fh.data.clone()))
+    }
+
+    /// T2 — a COPY whose SOURCE is striped must refuse, and must not
+    /// materialise a destination.
+    ///
+    /// The length assertion is the load-bearing half. Reading a striped
+    /// file through the MDS returns the sparse stub's zeros, so a COPY
+    /// that refused only *after* running would still report NOTSUPP while
+    /// having written a megabyte of real zeros over the destination — and
+    /// a status-only test would call that a pass.
+    #[tokio::test]
+    async fn copy_from_a_striped_file_is_refused_before_anything_is_written() {
+        let (handler, _t) = create_test_handler_pnfs(&["source.txt"]);
+        let ctx = CompoundContext::new(2);
+
+        let src_path = handler.fh_mgr.get_export_path().join("source.txt");
+        let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
+        std::fs::write(&dst_path, b"").unwrap();
+
+        let op = CopyOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: 0,
+            dst_offset: 0,
+            count: 1024 * 1024,
+            sync: true,
+        };
+
+        let res = handler.handle_copy(op, &ctx).await;
+        assert_eq!(res.status, Nfs4Status::NotSupp);
+        assert_eq!(res.count, 0);
+        assert_eq!(
+            std::fs::metadata(&dst_path).unwrap().len(),
+            0,
+            "a refused COPY must not have written to the destination"
+        );
+    }
+
+    /// The other end: a COPY whose DESTINATION is striped writes bytes the
+    /// DSes will never serve. A guard that checked only the source would
+    /// pass every other test in this file.
+    #[tokio::test]
+    async fn copy_to_a_striped_file_is_refused() {
+        let (handler, _t) = create_test_handler_pnfs(&["dest.txt"]);
+        let ctx = CompoundContext::new(2);
+        let src_path = handler.fh_mgr.get_export_path().join("source.txt");
+        let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
+
+        let op = CopyOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: 0,
+            dst_offset: 0,
+            count: 16,
+            sync: true,
+        };
+        assert_eq!(handler.handle_copy(op, &ctx).await.status, Nfs4Status::NotSupp);
+    }
+
+    /// T3 — THE TRAP ARM: the test that decides where the guard lives.
+    ///
+    /// The source is striped; `ctx.current_fh` names an unrelated,
+    /// UNPINNED file. RFC 7862 §15.2 puts COPY's source in SAVED_FH, so a
+    /// guard implemented in the dispatcher on `pnfs_current_fh_key` would
+    /// consult the wrong file here and let the copy through — while every
+    /// other COPY test in this file stayed green.
+    ///
+    /// Note the context is deliberately *hostile*, not merely absent: this
+    /// also fails a guard that reads `current_fh` as a fallback.
+    #[tokio::test]
+    async fn the_copy_guard_does_not_read_the_current_filehandle() {
+        let (handler, _t) = create_test_handler_pnfs(&["source.txt"]);
+        let export = handler.fh_mgr.get_export_path().to_path_buf();
+        let src_path = export.join("source.txt");
+        let dst_path = export.join("dest.txt");
+
+        let bystander = export.join("unpinned-bystander.txt");
+        std::fs::write(&bystander, b"not striped, not involved").unwrap();
+
+        let mut ctx = CompoundContext::new(2);
+        ctx.current_fh = Some(handler.fh_mgr.path_to_filehandle(&bystander).unwrap());
+        ctx.saved_fh = Some(handler.fh_mgr.path_to_filehandle(&src_path).unwrap());
+
+        let op = CopyOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: 0,
+            dst_offset: 0,
+            count: 16,
+            sync: true,
+        };
+        assert_eq!(
+            handler.handle_copy(op, &ctx).await.status,
+            Nfs4Status::NotSupp,
+            "the COPY guard must key on the stateid-resolved source, not on current_fh"
+        );
+    }
+
+    /// A file that was never layouted stays fully copyable on an MDS.
+    /// Without this, a guard that simply refused COPY whenever a pNFS
+    /// handler is present would pass every test above.
+    #[tokio::test]
+    async fn copy_between_unpinned_files_still_works_on_an_mds() {
+        let (handler, _t) = create_test_handler_pnfs(&["something-else.txt"]);
+        let ctx = CompoundContext::new(2);
+        let src_path = handler.fh_mgr.get_export_path().join("source.txt");
+        let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
+        let src_len = std::fs::metadata(&src_path).unwrap().len();
+
+        let op = CopyOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: 0,
+            dst_offset: 0,
+            count: src_len,
+            sync: true,
+        };
+        let res = handler.handle_copy(op, &ctx).await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        assert_eq!(res.count, src_len);
+    }
+
+    /// CLONE gets the same two-ended guard.
+    #[tokio::test]
+    async fn clone_refuses_either_end_being_striped() {
+        for pinned in [&["source.txt"][..], &["dest.txt"][..]] {
+            let (handler, _t) = create_test_handler_pnfs(pinned);
+            let ctx = CompoundContext::new(2);
+            let src_path = handler.fh_mgr.get_export_path().join("source.txt");
+            let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
+
+            let op = CloneOp {
+                src_stateid: open_stateid_for(&handler, &src_path),
+                dst_stateid: open_stateid_for(&handler, &dst_path),
+                src_offset: 0,
+                dst_offset: 0,
+                count: 0,
+            };
+            assert_eq!(
+                handler.handle_clone(op, &ctx).await.status,
+                Nfs4Status::NotSupp,
+                "CLONE must refuse when {:?} is striped",
+                pinned
+            );
+        }
+    }
+
+    /// T7 — THE DATA-DESTRUCTION REGRESSION. Fails against the old code
+    /// with no mutation applied; that is the point of it.
+    ///
+    /// The old whole-file path opened the destination `.truncate(true)`
+    /// BEFORE the FICLONE ioctl, so on any filesystem without reflink
+    /// support the destination was emptied and then rebuilt by
+    /// `std::fs::copy`. Here the rebuild is made to fail (the destination
+    /// is read-only), which is the ENOSPC/EACCES shape: the client is told
+    /// CLONE failed, and under the old code the file was already gone.
+    ///
+    /// No content-equality test on the SUCCESS path can see this. The
+    /// fault injection is the instrument.
+    #[tokio::test]
+    async fn a_failed_clone_leaves_the_destination_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (handler, _t) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let export = handler.fh_mgr.get_export_path().to_path_buf();
+        let src_path = export.join("source.txt");
+        let dst_path = export.join("dest.txt");
+
+        let pre_fill: Vec<u8> = (0..4096u32).map(|i| (i % 251 + 1) as u8).collect();
+        std::fs::write(&dst_path, &pre_fill).unwrap();
+
+        // Make the destination unwritable so both the reflink attempt and
+        // the byte-range fallback fail.
+        let mut perms = std::fs::metadata(&dst_path).unwrap().permissions();
+        perms.set_mode(0o400);
+        std::fs::set_permissions(&dst_path, perms).unwrap();
+
+        let op = CloneOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: 0,
+            dst_offset: 0,
+            count: 0,
+        };
+        let res = handler.handle_clone(op, &ctx).await;
+        assert_ne!(res.status, Nfs4Status::Ok, "the clone was supposed to fail");
+
+        let mut perms = std::fs::metadata(&dst_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&dst_path, perms).unwrap();
+
+        assert_eq!(
+            std::fs::read(&dst_path).unwrap(),
+            pre_fill,
+            "a CLONE that reports failure must not have altered the destination"
+        );
+    }
+
+    /// T8 — a whole-file CLONE is a byte-range clone of [0, src_len), not
+    /// a file replacement. It must not shorten a longer destination and
+    /// must not carry the source's permission bits.
+    ///
+    /// Restoring the old `(0,0,0) => std::fs::copy` path fails this on
+    /// both counts. A test asserting only `dst[..src_len] == src` passes
+    /// against that bug.
+    #[tokio::test]
+    async fn a_whole_file_clone_preserves_the_destination_tail_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (handler, _t) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let export = handler.fh_mgr.get_export_path().to_path_buf();
+        let src_path = export.join("source.txt");
+        let dst_path = export.join("dest.txt");
+
+        let src_bytes = std::fs::read(&src_path).unwrap();
+        let tail = b"TAIL-THAT-MUST-SURVIVE".to_vec();
+        let mut dst_bytes = vec![b'x'; src_bytes.len()];
+        dst_bytes.extend_from_slice(&tail);
+        std::fs::write(&dst_path, &dst_bytes).unwrap();
+
+        std::fs::set_permissions(&src_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&dst_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let op = CloneOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: 0,
+            dst_offset: 0,
+            count: 0,
+        };
+        assert_eq!(handler.handle_clone(op, &ctx).await.status, Nfs4Status::Ok);
+
+        let after = std::fs::read(&dst_path).unwrap();
+        assert_eq!(&after[..src_bytes.len()], &src_bytes[..], "cloned range");
+        assert_eq!(
+            after.len(),
+            dst_bytes.len(),
+            "a byte-range CLONE must not truncate the destination"
+        );
+        assert_eq!(&after[src_bytes.len()..], &tail[..], "destination tail");
+        assert_eq!(
+            std::fs::metadata(&dst_path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "CLONE must not carry the source's permission bits"
+        );
+    }
+
+    /// A CLONE starting past the source's EOF is NFS4ERR_INVAL, not a
+    /// wrapped length.
+    ///
+    /// The old code computed `len() - src_offset` on u64. The workspace
+    /// has no `[profile]` section, so in release that wrapped to ~16 EiB
+    /// and the loop ran until the source read returned 0.
+    #[tokio::test]
+    async fn a_clone_starting_past_eof_is_invalid_not_a_wrapped_length() {
+        let (handler, _t) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let export = handler.fh_mgr.get_export_path().to_path_buf();
+        let src_path = export.join("source.txt");
+        let dst_path = export.join("dest.txt");
+        let src_len = std::fs::metadata(&src_path).unwrap().len();
+
+        let op = CloneOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: src_len + 1,
+            dst_offset: 0,
+            count: 0, // "to source EOF" — the arm that used to underflow
+        };
+        assert_eq!(handler.handle_clone(op, &ctx).await.status, Nfs4Status::Inval);
+    }
+
+    /// The paired success case. Without it, the INVAL test above is
+    /// satisfied by a handler that refuses every CLONE.
+    #[tokio::test]
+    async fn a_clone_of_a_range_inside_the_source_copies_exactly_that_range() {
+        let (handler, _t) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let export = handler.fh_mgr.get_export_path().to_path_buf();
+        let src_path = export.join("source.txt");
+        let dst_path = export.join("dest.txt");
+
+        std::fs::write(&src_path, b"0123456789abcdef").unwrap();
+        std::fs::write(&dst_path, vec![b'.'; 32]).unwrap();
+
+        let op = CloneOp {
+            src_stateid: open_stateid_for(&handler, &src_path),
+            dst_stateid: open_stateid_for(&handler, &dst_path),
+            src_offset: 4,
+            dst_offset: 8,
+            count: 6,
+        };
+        assert_eq!(handler.handle_clone(op, &ctx).await.status, Nfs4Status::Ok);
+
+        let after = std::fs::read(&dst_path).unwrap();
+        assert_eq!(&after[8..14], b"456789", "the cloned range");
+        assert_eq!(&after[..8], &[b'.'; 8], "bytes before the range");
+        assert_eq!(&after[14..], &[b'.'; 18], "bytes after the range");
+    }
+
+    /// `resolve_range_len` is the single reading of `count == 0` that
+    /// replaced two contradictory ones. Pinned directly because it is now
+    /// the only thing standing between a wire u64 and a length.
+    #[test]
+    fn resolve_range_len_reads_zero_as_to_eof_and_rejects_past_eof() {
+        assert_eq!(resolve_range_len(100, 0, 0).unwrap(), 100);
+        assert_eq!(resolve_range_len(100, 40, 0).unwrap(), 60);
+        assert_eq!(resolve_range_len(100, 40, 10).unwrap(), 10);
+        // Exactly at EOF is a legal empty range, not an error.
+        assert_eq!(resolve_range_len(100, 100, 0).unwrap(), 0);
+        // One past is where the old subtraction wrapped.
+        assert_eq!(
+            resolve_range_len(100, 101, 0).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            resolve_range_len(0, u64::MAX, 0).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
     }
 
     #[tokio::test]

@@ -96,7 +96,11 @@ impl CompoundDispatcher {
         let io_handler = IoOperationHandler::new(state_mgr.clone(), fh_mgr.clone());
         let file_handler = FileOperationHandler::new(fh_mgr.clone(), pnfs_enabled)
             .with_open_files(io_handler.open_file_view());
-        let perf_handler = PerfOperationHandler::new(state_mgr.clone(), fh_mgr.clone());
+        let perf_handler = PerfOperationHandler::new_with_pnfs(
+            state_mgr.clone(),
+            fh_mgr.clone(),
+            pnfs_handler.clone(),
+        );
         let lock_handler = LockOperationHandler::new(state_mgr.clone(), lock_mgr.clone());
 
         Self {
@@ -612,6 +616,30 @@ impl CompoundDispatcher {
         operation: Operation,
         context: &mut CompoundContext,
     ) -> OperationResult {
+        // An operation that does not exist in the negotiated minor version
+        // is illegal, not merely unimplemented (RFC 8881 §2.6, §15.2).
+        //
+        // Without this the server routes NFSv4.2 opcodes purely by opcode
+        // NUMBER: compound.rs decodes them unconditionally, the match below
+        // dispatches them, and the only minor-version check in this file
+        // rejects `> 2`. So the pNFS MDS mount's `minorversion=1` (set in
+        // main.rs, with no StorageClass override) was protecting the 4.2
+        // handlers only by CLIENT CONVENTION — one hand-mount against the
+        // MDS Service port reached every one of them. This makes it a
+        // server property.
+        if context.minor_version < NFS_V4_MINOR_VERSION_2 {
+            if let Some(opcode) = minor_version_2_opcode(&operation) {
+                warn!(
+                    "NFSv4.2 opcode {} arrived in a minorversion={} COMPOUND → OP_ILLEGAL",
+                    opcode, context.minor_version
+                );
+                return OperationResult::Unsupported {
+                    opcode,
+                    status: Nfs4Status::OpIllegal,
+                };
+            }
+        }
+
         match operation {
             // Session operations (NFSv4.1)
             Operation::ExchangeId { clientowner, flags, state_protect, impl_id } => {
@@ -1454,19 +1482,43 @@ impl CompoundDispatcher {
                 OperationResult::Clone(res.status)
             }
 
+            // ALLOCATE / DEALLOCATE / SEEK operate on the CURRENT
+            // filehandle, and their handlers read `ctx.current_fh` to
+            // resolve it — so a guard keyed on `pnfs_current_fh_key` reads
+            // bit-identically what the handler will read. (COPY and CLONE
+            // are guarded inside perfops instead: their source is SAVED_FH
+            // and they never touch the context. See
+            // PerfOperationHandler::is_striped.)
+            //
+            // For a striped file the MDS's local file is a sparse size-only
+            // stub, so: ALLOCATE reserves space on the wrong node and
+            // reports the file extended; DEALLOCATE punches a hole in a
+            // stub that is already all holes, a structural no-op reported
+            // as success while the DS bytes survive; SEEK walks the stub
+            // and answers "the entire file is one hole", which is the
+            // fake-sparse shape F15 was raised for.
             Operation::Allocate { stateid, offset, length } => {
+                if let Some(res) = self.refuse_if_striped("ALLOCATE", context) {
+                    return OperationResult::Allocate(res);
+                }
                 let op = AllocateOp { stateid, offset, length };
                 let res = self.perf_handler.handle_allocate(op, context).await;
                 OperationResult::Allocate(res.status)
             }
 
             Operation::Deallocate { stateid, offset, length } => {
+                if let Some(res) = self.refuse_if_striped("DEALLOCATE", context) {
+                    return OperationResult::Deallocate(res);
+                }
                 let op = DeallocateOp { stateid, offset, length };
                 let res = self.perf_handler.handle_deallocate(op, context).await;
                 OperationResult::Deallocate(res.status)
             }
 
             Operation::Seek { stateid, offset, what } => {
+                if let Some(res) = self.refuse_if_striped("SEEK", context) {
+                    return OperationResult::Seek(res, None);
+                }
                 let op = SeekOp {
                     stateid,
                     offset,
@@ -1973,6 +2025,31 @@ impl CompoundDispatcher {
             .to_string_lossy()
             .into_owned();
         if key.is_empty() { None } else { Some(key) }
+    }
+
+    /// NFS4ERR_NOTSUPP when the CURRENT filehandle names a striped file,
+    /// else None (proceed). For the space-management ops whose whole
+    /// premise is that the local file holds the data.
+    ///
+    /// NOTSUPP rather than a hard error: it is what this server already
+    /// answers for the operations it declines on a striped file (LINK,
+    /// RENAME) and for READ_PLUS, whose fallback to plain READ was
+    /// observed live during F15. What NOTSUPP costs on these three ops is
+    /// NOT established — in particular whether a Linux client clears the
+    /// capability mount-wide or re-asks per call — and ALLOCATE is the one
+    /// op with prior wire evidence of arriving at all (PG16's
+    /// posix_fallocate, captured per-op on runw).
+    fn refuse_if_striped(&self, op: &str, context: &CompoundContext) -> Option<Nfs4Status> {
+        let pnfs = self.pnfs_handler.as_ref()?;
+        let key = self.pnfs_current_fh_key(context)?;
+        if !pnfs.is_pnfs_managed(&key) {
+            return None;
+        }
+        warn!(
+            "⛔ {} refused for striped file '{}' — its bytes live on the DSes and the MDS file is a sparse size-only stub, so this would report success against data that is not here (NFS4ERR_NOTSUPP)",
+            op, key
+        );
+        Some(Nfs4Status::NotSupp)
     }
 
     /// Disposition for READ/WRITE through the MDS when the current
@@ -2948,6 +3025,26 @@ pub struct ServerStats {
     pub lock_stateids: usize,
 }
 
+/// The opcode of `op` when that operation exists ONLY in NFSv4.2
+/// (RFC 7862), else None.
+///
+/// Deliberately a total match over the 4.2 variants rather than a range
+/// test on a numeric opcode: adding a new 4.2 operation to the `Operation`
+/// enum without listing it here is a compile-time-visible omission in one
+/// place, not a silently ungated handler.
+fn minor_version_2_opcode(op: &Operation) -> Option<u32> {
+    Some(match op {
+        Operation::Allocate { .. } => opcode::ALLOCATE,
+        Operation::Copy { .. } => opcode::COPY,
+        Operation::Deallocate { .. } => opcode::DEALLOCATE,
+        Operation::IoAdvise { .. } => opcode::IO_ADVISE,
+        Operation::ReadPlus { .. } => opcode::READ_PLUS,
+        Operation::Seek { .. } => opcode::SEEK,
+        Operation::Clone { .. } => opcode::CLONE,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2961,6 +3058,342 @@ mod tests {
         let lock_mgr = Arc::new(LockManager::new());
         let dispatcher = CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr);
         (dispatcher, temp_dir)
+    }
+
+    /// A PnfsOperations that answers only the two questions the I/O
+    /// guards ask, from a fixed set of pinned keys.
+    ///
+    /// It overrides `fallback_io_disposition` DIRECTLY rather than
+    /// inheriting the trait default. The default derives its answer from
+    /// `is_pnfs_managed` and can only ever return Serve or Delay — so a
+    /// fake that overrode `is_pnfs_managed` alone would leave the
+    /// `FailFast` arm of the READ/WRITE guard structurally unreachable,
+    /// and any test claiming to cover it would be testing nothing.
+    struct FakePnfs {
+        pinned: std::collections::HashSet<String>,
+        disposition: crate::pnfs::FallbackIoDisposition,
+    }
+
+    impl FakePnfs {
+        fn new(
+            pinned: &[&str],
+            disposition: crate::pnfs::FallbackIoDisposition,
+        ) -> Arc<dyn crate::pnfs::PnfsOperations> {
+            Arc::new(Self {
+                pinned: pinned.iter().map(|s| s.to_string()).collect(),
+                disposition,
+            })
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::pnfs::PnfsOperations for FakePnfs {
+        fn layoutget(
+            &self,
+            _args: crate::pnfs::mds::operations::LayoutGetArgs,
+        ) -> Result<
+            crate::pnfs::mds::operations::LayoutGetResult,
+            crate::pnfs::mds::operations::LayoutGetError,
+        > {
+            Err(crate::pnfs::mds::operations::LayoutGetError::LayoutUnavailable)
+        }
+
+        fn getdeviceinfo(
+            &self,
+            _args: crate::pnfs::mds::operations::GetDeviceInfoArgs,
+        ) -> Result<
+            crate::pnfs::mds::operations::GetDeviceInfoResult,
+            crate::pnfs::mds::operations::GetDeviceInfoError,
+        > {
+            Err(crate::pnfs::mds::operations::GetDeviceInfoError::NoEnt)
+        }
+
+        fn layoutreturn(
+            &self,
+            _args: crate::pnfs::mds::operations::LayoutReturnArgs,
+        ) -> Result<(), crate::pnfs::mds::operations::LayoutReturnError> {
+            Ok(())
+        }
+
+        fn is_pnfs_managed(&self, file_key: &str) -> bool {
+            self.pinned.contains(file_key)
+        }
+
+        fn fallback_io_disposition(
+            &self,
+            file_key: &str,
+        ) -> crate::pnfs::FallbackIoDisposition {
+            if self.pinned.contains(file_key) {
+                self.disposition
+            } else {
+                crate::pnfs::FallbackIoDisposition::Serve
+            }
+        }
+    }
+
+    fn create_test_dispatcher_pnfs(
+        pinned: &[&str],
+        disposition: crate::pnfs::FallbackIoDisposition,
+    ) -> (CompoundDispatcher, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        // Canonicalized deliberately. FileHandleManager::new canonicalizes
+        // the export path, while resolve_handle returns a path that is
+        // explicitly NOT canonicalized (it must not follow symlinks), and
+        // both pNFS key helpers strip one from the other. On macOS the temp
+        // dir is /var/... with /private/var/... as its real path, so an
+        // uncanonicalized export makes every strip_prefix miss and every
+        // guard below silently degrade to "not striped" — the tests would
+        // pass while asserting nothing. Production export paths have no
+        // symlink component, so canonicalizing here reproduces production
+        // rather than papering over it. (That the guards depend on this at
+        // all is a real fragility; noted, not fixed here.)
+        let export_path = temp_dir.path().canonicalize().unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(export_path));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let lock_mgr = Arc::new(LockManager::new());
+        let dispatcher = CompoundDispatcher::new_with_pnfs(
+            fh_mgr,
+            state_mgr,
+            lock_mgr,
+            Some(FakePnfs::new(pinned, disposition)),
+        );
+        (dispatcher, temp_dir)
+    }
+
+    /// T0 — the harness meta-assertion every guard test below depends on.
+    ///
+    /// If `create_test_dispatcher_pnfs` ever loses its pNFS handler, every
+    /// guard short-circuits to "no pnfs_handler ⇒ allow" before resolving
+    /// anything, and each of those tests goes green while asserting
+    /// nothing. Without this test that failure is invisible.
+    #[test]
+    fn the_pnfs_test_dispatcher_actually_has_a_pnfs_handler() {
+        let (d, _t) = create_test_dispatcher_pnfs(
+            &["f"],
+            crate::pnfs::FallbackIoDisposition::Delay,
+        );
+        assert!(
+            d.pnfs_handler.is_some(),
+            "the pNFS test dispatcher must carry a handler or every guard test below is vacuous"
+        );
+        let (plain, _t2) = create_test_dispatcher();
+        assert!(plain.pnfs_handler.is_none());
+    }
+
+    /// Set `current_fh` to a real file in the export and return an Open
+    /// stateid bound to it.
+    fn pin_current_fh(
+        d: &CompoundDispatcher,
+        ctx: &mut CompoundContext,
+        temp: &TempDir,
+        name: &str,
+        contents: &[u8],
+    ) -> StateId {
+        let path = temp.path().canonicalize().unwrap().join(name);
+        std::fs::write(&path, contents).unwrap();
+        let fh = d.file_handler.fh_manager().path_to_filehandle(&path).unwrap();
+        ctx.current_fh = Some(fh.clone());
+        d.state_mgr.stateids.allocate(
+            crate::nfs::v4::state::StateType::Open,
+            1,
+            Some(fh.data.clone()),
+        )
+    }
+
+    /// T1 — retro-coverage for the READ/WRITE stub guard.
+    ///
+    /// That guard has shipped since runn (2026-07-06) with NOTHING in the
+    /// tree that would go red if it were deleted. Both dispositions are
+    /// asserted by exact status, and the `FailFast` arm is reachable only
+    /// because FakePnfs overrides `fallback_io_disposition` directly
+    /// rather than inheriting the trait default (which cannot produce it).
+    #[tokio::test]
+    async fn read_and_write_through_the_mds_honour_both_stub_dispositions() {
+        for (disposition, expected) in [
+            (crate::pnfs::FallbackIoDisposition::Delay, Nfs4Status::Delay),
+            (crate::pnfs::FallbackIoDisposition::FailFast, Nfs4Status::Io),
+        ] {
+            let (d, temp) = create_test_dispatcher_pnfs(&["striped.dat"], disposition);
+            let mut ctx = CompoundContext::new(2);
+            let sid = pin_current_fh(&d, &mut ctx, &temp, "striped.dat", b"stub");
+
+            let read = d
+                .dispatch_operation(
+                    Operation::Read { stateid: sid.clone(), offset: 0, count: 4 },
+                    &mut ctx,
+                )
+                .await;
+            assert_eq!(read.status(), expected, "READ under {:?}", disposition);
+
+            let write = d
+                .dispatch_operation(
+                    Operation::Write {
+                        stateid: sid,
+                        offset: 0,
+                        stable: 2,
+                        data: bytes::Bytes::from_static(b"zzzz"),
+                    },
+                    &mut ctx,
+                )
+                .await;
+            assert_eq!(write.status(), expected, "WRITE under {:?}", disposition);
+        }
+    }
+
+    /// The same guard must not touch a file that was never layouted. An
+    /// MDS deliberately serves those; a role-level guard would break them
+    /// and still pass the test above.
+    #[tokio::test]
+    async fn read_of_a_never_layouted_file_on_an_mds_is_served() {
+        let (d, temp) = create_test_dispatcher_pnfs(
+            &["some-other-file.dat"],
+            crate::pnfs::FallbackIoDisposition::FailFast,
+        );
+        let mut ctx = CompoundContext::new(2);
+        let sid = pin_current_fh(&d, &mut ctx, &temp, "ordinary.dat", b"real bytes");
+
+        let read = d
+            .dispatch_operation(
+                Operation::Read { stateid: sid, offset: 0, count: 10 },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(read.status(), Nfs4Status::Ok);
+    }
+
+    /// The space-management guard's predicate, asserted directly so it is
+    /// covered on every platform. The wired-up A/B test below can only run
+    /// on Linux (see its comment), and a predicate this small should not
+    /// be provable on one target only.
+    #[test]
+    fn the_space_op_guard_fires_only_for_pinned_files_and_only_on_an_mds() {
+        let (d, temp) = create_test_dispatcher_pnfs(
+            &["striped.dat"],
+            crate::pnfs::FallbackIoDisposition::FailFast,
+        );
+        let mut ctx = CompoundContext::new(2);
+        pin_current_fh(&d, &mut ctx, &temp, "striped.dat", b"stub");
+        assert_eq!(d.refuse_if_striped("SEEK", &ctx), Some(Nfs4Status::NotSupp));
+
+        pin_current_fh(&d, &mut ctx, &temp, "ordinary.dat", b"real");
+        assert_eq!(d.refuse_if_striped("SEEK", &ctx), None);
+
+        // Standalone / DS role: no pnfs handler, nothing is striped.
+        let (plain, temp2) = create_test_dispatcher();
+        let mut ctx2 = CompoundContext::new(2);
+        pin_current_fh(&plain, &mut ctx2, &temp2, "striped.dat", b"stub");
+        assert_eq!(plain.refuse_if_striped("SEEK", &ctx2), None);
+    }
+
+    /// ALLOCATE / DEALLOCATE / SEEK on a striped file are refused, and on
+    /// an unpinned file still work.
+    ///
+    /// Linux-only, and the B arm is why. The real bodies of all three are
+    /// `#[cfg(target_os = "linux")]`; every other target returns NOTSUPP
+    /// unconditionally, so on darwin the pinned arm would pass against
+    /// completely unguarded code. Arm B — the unpinned control must NOT
+    /// answer NOTSUPP — is what distinguishes a working guard from a build
+    /// where the operation simply does not exist.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn space_ops_refuse_striped_files_and_still_serve_unpinned_ones() {
+        use crate::nfs::v4::compound::Operation as Op;
+
+        for pinned in [true, false] {
+            let (d, temp) = create_test_dispatcher_pnfs(
+                &["striped.dat"],
+                crate::pnfs::FallbackIoDisposition::FailFast,
+            );
+            let name = if pinned { "striped.dat" } else { "ordinary.dat" };
+            let mut ctx = CompoundContext::new(2);
+            let sid = pin_current_fh(&d, &mut ctx, &temp, name, &vec![0u8; 8192]);
+
+            let ops = [
+                Op::Allocate { stateid: sid.clone(), offset: 0, length: 4096 },
+                Op::Deallocate { stateid: sid.clone(), offset: 0, length: 4096 },
+                Op::Seek { stateid: sid.clone(), offset: 0, what: 0 },
+            ];
+            for op in ops {
+                let label = format!("{:?} pinned={}", std::mem::discriminant(&op), pinned);
+                let res = d.dispatch_operation(op, &mut ctx).await;
+                if pinned {
+                    assert_eq!(res.status(), Nfs4Status::NotSupp, "{label}");
+                } else {
+                    assert_ne!(
+                        res.status(),
+                        Nfs4Status::NotSupp,
+                        "{label}: the guard fired on a file that was never layouted"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The opcode/minor-version gate. An NFSv4.2 operation in a 4.1
+    /// COMPOUND is OP_ILLEGAL, and the same operation in a 4.2 COMPOUND
+    /// reaches its handler.
+    ///
+    /// Arm B is mandatory: without it, a gate that rejected these opcodes
+    /// unconditionally — i.e. removed 4.2 support altogether — passes.
+    #[tokio::test]
+    async fn nfsv4_2_opcodes_are_illegal_in_a_4_1_compound() {
+        use crate::nfs::v4::compound::Operation as Op;
+
+        let dummy = crate::nfs::v4::protocol::StateId::new(1, [0u8; 12]);
+        let mk = || {
+            vec![
+                (opcode::ALLOCATE, Op::Allocate { stateid: dummy.clone(), offset: 0, length: 1 }),
+                (opcode::DEALLOCATE, Op::Deallocate { stateid: dummy.clone(), offset: 0, length: 1 }),
+                (opcode::SEEK, Op::Seek { stateid: dummy.clone(), offset: 0, what: 0 }),
+                (opcode::READ_PLUS, Op::ReadPlus { stateid: dummy.clone(), offset: 0, count: 1 }),
+                (opcode::COPY, Op::Copy {
+                    src_stateid: dummy.clone(), dst_stateid: dummy.clone(),
+                    src_offset: 0, dst_offset: 0, count: 1,
+                    consecutive: false, synchronous: true,
+                }),
+                (opcode::CLONE, Op::Clone {
+                    src_stateid: dummy.clone(), dst_stateid: dummy.clone(),
+                    src_offset: 0, dst_offset: 0, count: 1,
+                }),
+            ]
+        };
+
+        // Arm A: minorversion 1 — illegal, and the reply names the opcode.
+        for (code, op) in mk() {
+            let (d, _t) = create_test_dispatcher();
+            let mut ctx = CompoundContext::new(1);
+            let res = d.dispatch_operation(op, &mut ctx).await;
+            assert_eq!(res.status(), Nfs4Status::OpIllegal, "opcode {code} at 4.1");
+            match res {
+                OperationResult::Unsupported { opcode, .. } => assert_eq!(opcode, code),
+                other => panic!("opcode {code}: expected Unsupported, got {other:?}"),
+            }
+        }
+
+        // Arm B: minorversion 2 — the gate must let them through to their
+        // handlers. A dummy stateid means they fail on BADSTATEID, which is
+        // exactly the point: they got past the gate.
+        for (code, op) in mk() {
+            let (d, _t) = create_test_dispatcher();
+            let mut ctx = CompoundContext::new(2);
+            let res = d.dispatch_operation(op, &mut ctx).await;
+            assert_ne!(
+                res.status(),
+                Nfs4Status::OpIllegal,
+                "opcode {code} must be legal in a 4.2 COMPOUND"
+            );
+        }
+    }
+
+    /// Operations that exist in 4.1 are untouched by the gate.
+    #[tokio::test]
+    async fn the_minor_version_gate_does_not_catch_pre_4_2_operations() {
+        let (d, _t) = create_test_dispatcher();
+        let mut ctx = CompoundContext::new(1);
+        let res = d.dispatch_operation(Operation::PutRootFh, &mut ctx).await;
+        assert_eq!(res.status(), Nfs4Status::Ok);
+        assert!(minor_version_2_opcode(&Operation::PutRootFh).is_none());
+        assert!(minor_version_2_opcode(&Operation::GetFh).is_none());
     }
 
     #[tokio::test]
@@ -3232,3 +3665,4 @@ mod tests {
         assert_eq!(Nfs4Status::UnknownLayoutType as u32, 10062);
     }
 }
+

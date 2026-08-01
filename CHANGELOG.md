@@ -12,6 +12,177 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+The pNFS truncate-correctness release. A truncate applied to the MDS stub
+and then fanned out to N data servers leaves a window in which the DSes
+still hold bytes past the new EOF; the `truncate_dirty` gate exists to
+make that window unobservable, and TLC found that it did not. Closing
+F65 took nine further defects, every one of which had been invisible
+because the server's own logs reported success — the recall was emitted,
+refused on the wire, and scored as an ack.
+
+**No live upgrade path is provided and none is needed: flint is not
+deployed anywhere.** The MDS state database schema was collapsed to a
+single version with the migration machinery removed; a database written
+by an earlier build is refused at open with an actionable error rather
+than migrated.
+
+### Added
+
+- **A TLA+ model of the pNFS truncate gate** (`formal/FlintTruncate.tla`,
+  seven configs). It carries two theorems and is explicit that only one
+  holds: `Inv_ClearImpliesFlushed` (the gate's own claim — whenever the
+  mark is absent, no DS holds content past the MDS size) is proven, and
+  `Inv_NoStaleServe` is deliberately NOT listed in the shipped config,
+  because one residual still defeats it. The counterexample that started
+  the wave was three steps from `Init`.
+- **A synthetic NFSv4.1/pNFS client** (`tests/k8s/pnfs-drills/synth_client.py`)
+  that holds layouts across events the harness schedules, answers
+  `CB_LAYOUTRECALL`, and has a `--deaf` mode that accepts callbacks and
+  never replies. A real kernel returns its layout ~80 ms after each I/O,
+  so the states this release is about are not reachable with one. It is
+  explicitly **not** a conformance oracle — pynfs remains that.
+- **An XDR callback decoder for the drills** (`cb-decode.py`). The drill
+  previously ran `grep -c CB_` over binary XDR, which is structurally
+  always zero, so it passed by not looking.
+- **Regression coverage for the pNFS READ/WRITE stub guard**, which had
+  shipped since 2026-07-06 with nothing in the tree that would go red if
+  it were deleted. Both dispositions are now asserted by exact status;
+  the `FailFast` arm is reachable only because the test double overrides
+  `fallback_io_disposition` directly rather than inheriting the trait
+  default, which cannot produce it.
+- **`docs/plans/v42-copy-sparse-hardening.md`** — the conformance and
+  measurement work this release does *not* do, with the deciding question
+  stated plainly: nobody has established whether a Linux client falls
+  back cleanly when COPY returns `NFS4ERR_NOTSUPP`, and the READ_PLUS
+  precedent does not transfer because its fallback target is mandatory.
+
+### Fixed
+
+- **CLONE destroyed the destination before it knew it could clone.** The
+  whole-file path opened the destination `.truncate(true)` *before*
+  issuing the FICLONE ioctl and returned an error on failure with the
+  file already emptied. `mkfs.ext4` is a shipped option and ext4 has no
+  reflink, so on ext4 **every** whole-file CLONE emptied the destination
+  and rebuilt it non-atomically; if the rebuild then failed (ENOSPC,
+  EACCES) the client was told CLONE had failed and the data was gone.
+  Now FICLONERANGE, which writes nothing on failure. Live on the
+  standalone RWX mount (`vers=4.2`) — nothing to do with pNFS.
+- **CLONE read one request two ways.** `count == 0` meant "replace the
+  whole destination file" in its `(0,0,0)` branch and "to source EOF,
+  leave the tail alone" in its range branch. One path now, one reading.
+  The range branch also computed `len() - src_offset` on `u64` with no
+  `[profile]` overflow checks in the workspace, so a source offset past
+  EOF wrapped to ~16 EiB in release; that is now `NFS4ERR_INVAL`.
+  `std::fs::copy` is gone from CLONE entirely — it is whole-file, it
+  truncates, and it carries the source's permission bits.
+- **NFSv4.2 operations were not gated on the negotiated minor version.**
+  The COMPOUND decoder and dispatcher routed COPY, CLONE, ALLOCATE,
+  DEALLOCATE, SEEK, READ_PLUS and IO_ADVISE purely by opcode number, and
+  the only minor-version check rejected `> 2`. The pNFS MDS mount is
+  `minorversion=1`, so its safety was a *client convention* — one
+  hand-mount against the MDS Service port reached every 4.2 handler.
+  They are now `NFS4ERR_OP_ILLEGAL` outside a 4.2 COMPOUND.
+- **COPY, CLONE, ALLOCATE, DEALLOCATE and SEEK ignored striped files.**
+  Only READ and WRITE consulted the pNFS stub guard. For a placement-
+  pinned file the MDS's local file is a sparse size-only stub, so COPY
+  read zeros and reported success, DEALLOCATE punched a hole in a file
+  that is already all holes, and SEEK answered "the whole file is one
+  hole" — the F15 fake-sparse class. All five now return
+  `NFS4ERR_NOTSUPP` for pinned files, per file rather than per role, so
+  files that were never layouted stay fully usable on an MDS.
+  COPY and CLONE are guarded inside the handler rather than the
+  dispatcher because their source is SAVED_FH: a `current_fh`-keyed
+  guard structurally cannot see it.
+- **F65 — a truncate did not recall held layouts.** The gate is a
+  LAYOUTGET-time check, so a layout acquired *before* the truncate walked
+  straight past it and the read never reached the MDS at all.
+  `note_truncate` now recalls and revokes the file's layouts between
+  marking the gate and fanning out.
+- **C1 — the callback carried the layout stateid verbatim** where RFC 8881
+  §12.5.3 wants `seqid+1`, so a conforming client rejected every recall.
+- **C2 — `CB_SEQUENCE` hardcoded slot 0 / seqid 1.** Per-session
+  back-channel slot sequencing now holds the lock across the reply await
+  (§2.10.6.1).
+- **C3 — a refused reply was scored as an ack.** This is why C1 and C2
+  could hide: `Ok(_reply) => Acked` discarded the status, so the server
+  logged success either way. Replies are classified now, including a
+  compound in which `CB_LAYOUTRECALL` never ran.
+- **C4 — LAYOUTCOMMIT re-extended the truncated stub.**
+- **C5 — one back-channel writer per session against an `nconnect=4`
+  mount**, so a session's other bound transports were never tried.
+- **C6 — a grant could escape both the gate and the recall.** LAYOUTGET
+  reads the gate and publishes the layout with no lock between them, so a
+  grant could pass the check, have the mark arm under it, and publish
+  after the recall's snapshot. The publish now re-reads the gate and
+  revokes what it just inserted.
+- **C8 — callbacks were sent with AUTH_NONE and refused at the RPC layer**
+  (`reply_stat = MSG_DENIED`, in 419 µs — an active refusal, not a
+  timeout). `csa_sec_parms<>` was never decoded; the server now answers
+  with the credential the client offered.
+- **C9 — the back channel was registered but never announced.** RFC 8881
+  §18.36.3 makes `csr_flags` the server's answer to `csa_flags`, and
+  Linux sends zero `BIND_CONN_TO_SESSION` on a v4.1 mount — so that
+  echoed `CONN_BACK_CHAN` bit *is* the entire handshake. Without it the
+  client refuses callbacks one layer below the auth check C8 fixed. The
+  flag cannot be set alone: `nfs4_verify_back_channel_attrs` only runs
+  when it is set, and the old 1 MB `csr_back_chan_attrs` against Linux's
+  `PAGE_SIZE` offer would have failed the mount.
+- **R2 — a self-recall stalled the connection read loop** for the full
+  callback timeout.
+- **R3 — a post-recall LAYOUTRETURN was answered SERVERFAULT**, which
+  aborts the compound Linux folds it into and leaks the open behind it.
+- **R4 — the truncate-dirty gate did not survive an MDS restart.** It is
+  persisted and the retry re-armed on load.
+- **A truncate's cost was linear in the number of layout holders.**
+  Recalls ran sequentially with a 10 s callback timeout each, so three
+  wedged holders cost 30 s of blocked SETATTR. Per-session ordering is
+  required (a back channel negotiates `ca_maxrequests=1`); nothing
+  required it *across* sessions. Measured 30.43 s → 10.45 s at three deaf
+  holders — linear to flat.
+- **The MDS-fallback delay ceiling was re-armed by every restart.** The
+  gate's age lived in a process-local `Instant`, so an MDS that bounced
+  more often than the ceiling could DELAY a fallback client without
+  bound — the exact livelock the ceiling exists to prevent.
+- **LAYOUTGET and GETDEVICEINFO answered layout types they do not serve.**
+  Both decoded type 4 (FFLv4) and replied `NFS4_OK` with a files-layout
+  body; GETDEVICEINFO echoed the requested type back over it, so a
+  type-4 caller got a structure explicitly labelled FFLv4. Both now return
+  `NFS4ERR_UNKNOWN_LAYOUTTYPE`. LAYOUTRETURN stays lenient by design — it
+  emits no body, so there is nothing to mislabel.
+
+### Changed
+
+- **The MDS state schema is a single version with no migrations.** Nine
+  incremental versions and their stepwise `ALTER` chain are replaced by
+  one `CREATE TABLE` batch that already contained every column they
+  added. The migration code had zero test coverage — every backend test
+  builds a fresh schema — so the one path that would run against real
+  state was the only one nobody exercised.
+- **The dead FFLv4 layout encoder is deleted** (~440 lines). It had no
+  callers, was never advertised, and had never been on a wire, but five
+  green unit tests asserted its own output. Two documents told a future
+  implementer to "re-enable FFLv4, ~3 days"; both now say it must be
+  written fresh, and list what a fresh one must satisfy.
+
+### Known gaps
+
+- **`Inv_NoStaleServe` still does not hold**, for one reason that is not
+  F65: revocation is server-side, so it binds only clients the recall
+  reaches. A client with no live back channel at all cannot be bound
+  however well the callback is encoded. Closing it needs the DS to refuse
+  reads past the pending size — a DsControl fence before the `set_len`
+  fanout — not the MDS to ask more politely.
+- **R1 is a liveness exposure, not a correctness one.** A client recalled
+  by a truncate that then parks is refused a new layout for as long as
+  the park lasts. Measured on hardware: `STILL TRYLATER after 251.01s —
+  never converted to an error`, refuting the audit's predicted
+  "90 s DELAY then NFS4ERR_IO" (that ceiling is on the *fallback* path,
+  not the LAYOUTGET path — both readings were right about different
+  code).
+- **The fallback-ceiling and schema changes have no live gate.** F65
+  itself was gated end-to-end on hardware with wire proof; these landed
+  after that cluster was torn down.
+
 ## [1.22.0] - 2026-07-30
 
 The maintenance-and-proof release. A routine `helm upgrade` used to be
