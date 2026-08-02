@@ -34,6 +34,13 @@ service MdsControl {
   // legacy metadata file) and reclaims all DS stripes pinned under
   // it. Idempotent: DeleteVolume on an absent volume is a success.
   rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+
+  // Grow a pNFS volume's recorded capacity. Directory volumes (the
+  // current model) carry no per-volume size on the MDS — capacity is
+  // pool-side at the data servers — so this is a metadata-only
+  // acknowledgement. Legacy sparse-file volumes DO have a real size and
+  // are grown in place. Shrinking is always refused.
+  rpc ExpandVolume(ExpandVolumeRequest) returns (ExpandVolumeResponse);
 }
 
 // CreateVolume request from CSI driver to MDS.
@@ -46,6 +53,36 @@ message CreateVolumeRequest {
   // Total volume size in bytes. The MDS pre-allocates (sparse) to
   // this size so kernel WRITEs at any offset within the volume succeed.
   uint64 size_bytes = 2;
+
+  // Per-volume stripe geometry, from StorageClass parameters
+  // `pnfs.flint.io/stripeSize` and `pnfs.flint.io/stripeWidth`.
+  // 0 means "unset — use the MDS's configured default".
+  //
+  // Geometry is fixed at volume creation and applies to every file
+  // subsequently created in the volume: a file's placement is pinned at
+  // its FIRST layout grant and never re-striped, so changing these
+  // later could not affect existing data anyway.
+  //
+  // stripe_width caps how many data servers a file in this volume is
+  // pinned across. The default (0) pins every active DS, which
+  // maximises per-file bandwidth but also makes the failure domain the
+  // whole fleet — any one DS loss affects every file. A smaller width
+  // trades peak throughput for blast radius.
+  uint64 stripe_size = 3;
+  uint32 stripe_width = 4;
+
+  // Ownership and permissions for the volume's root directory, from
+  // StorageClass parameters `pnfs.flint.io/dirGid` and `dirMode`.
+  //
+  // The historical behaviour — 0777, no group — is what 0 in both
+  // fields still means. Setting dir_gid chgrps the volume root to that
+  // gid and sets the setgid bit, so files created inside inherit the
+  // group; that is what makes a pod's `fsGroup` usable on a volume
+  // whose consumers run as different uids. Without setgid, a 0770
+  // volume would be group-writable but every file inside would land in
+  // its creator's primary group, unreadable to the other consumers.
+  uint32 dir_gid = 5;
+  uint32 dir_mode = 6;
 }
 
 message CreateVolumeResponse {
@@ -77,6 +114,33 @@ message CreateVolumeResponse {
   // an older MDS that predates the field): NodePublish mounts the
   // export root as before.
   bool directory = 6;
+
+  // The geometry the MDS ACTUALLY recorded for this volume, after
+  // clamping and defaulting. The caller compares these against what it
+  // asked for and fails the provision on mismatch.
+  //
+  // This echo is load-bearing, not diagnostic: the chart pins the pNFS
+  // server image independently of the driver image, and proto3 silently
+  // drops fields an older peer does not know. Without the echo, asking
+  // an older MDS for a 1 MiB stripe would return a healthy-looking PV
+  // striped at the 8 MiB default, and nothing would ever say so.
+  // 0 in both fields = an MDS that predates them.
+  uint64 effective_stripe_size = 7;
+  uint32 effective_stripe_width = 8;
+}
+
+message ExpandVolumeRequest {
+  string volume_id = 1;
+  uint64 size_bytes = 2;
+}
+
+message ExpandVolumeResponse {
+  bool expanded = 1;
+  // Size the MDS now records. For directory volumes this echoes the
+  // request (nothing is stored per-volume); for legacy file volumes it
+  // is the sparse file's new length.
+  uint64 size_bytes = 2;
+  string message = 3;
 }
 
 message DeleteVolumeRequest {

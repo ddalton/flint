@@ -46,6 +46,183 @@ pub mod ctx_keys {
     /// (NodePublish mounts the export root). Absent on PVs provisioned
     /// before this key existed — treat as "file".
     pub const VOLUME_MODE: &str = "pnfs.flint.io/volume-mode";
+    /// The stripe geometry the MDS actually recorded, stamped onto the
+    /// PV so it is visible with `kubectl get pv -o yaml`. Observability
+    /// only — nothing reads these back, because no RPC exists to assert
+    /// geometry on an existing volume. They answer "what is this volume
+    /// actually striped at?", which otherwise requires reading MDS logs.
+    pub const STRIPE_SIZE: &str = "pnfs.flint.io/stripe-size";
+    pub const STRIPE_WIDTH: &str = "pnfs.flint.io/stripe-width";
+}
+
+/// StorageClass parameter names understood by the pNFS provisioning
+/// path. Everything under `pnfs.flint.io/` that is NOT in this list is
+/// REJECTED at CreateVolume — a typo in a parameter name would
+/// otherwise be indistinguishable from success, and the mistake only
+/// becomes visible as a performance or layout surprise much later.
+pub mod sc_params {
+    pub const STRIPE_SIZE: &str = "pnfs.flint.io/stripeSize";
+    pub const STRIPE_WIDTH: &str = "pnfs.flint.io/stripeWidth";
+    pub const DIR_GID: &str = "pnfs.flint.io/dirGid";
+    pub const DIR_MODE: &str = "pnfs.flint.io/dirMode";
+
+    pub const ALL: &[&str] = &[STRIPE_SIZE, STRIPE_WIDTH, DIR_GID, DIR_MODE];
+}
+
+/// Per-volume options carried from StorageClass parameters into
+/// `CreateVolume`. All-zero means "MDS defaults", which is exactly the
+/// behaviour of every volume provisioned before these existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VolumeOptions {
+    /// Stripe unit in bytes; 0 = MDS default.
+    pub stripe_size: u64,
+    /// Max data servers a file is pinned across; 0 = all active.
+    pub stripe_width: u32,
+    /// Group owner for the volume root; 0 = leave alone.
+    pub dir_gid: u32,
+    /// Permission bits for the volume root; 0 = the historical 0777.
+    pub dir_mode: u32,
+}
+
+impl VolumeOptions {
+    /// Parse from StorageClass `parameters`, rejecting anything wrong.
+    ///
+    /// Errors are returned as human-readable strings destined for a
+    /// FAILED_PRECONDITION — they surface on the PVC as an event, which
+    /// is the only place a StorageClass author will look.
+    pub fn from_parameters(
+        params: &std::collections::HashMap<String, String>,
+    ) -> Result<Self, String> {
+        // Unknown keys in our namespace are a hard error, not a warning.
+        for key in params.keys() {
+            if key.starts_with("pnfs.flint.io/") && !sc_params::ALL.contains(&key.as_str()) {
+                return Err(format!(
+                    "unknown StorageClass parameter '{}'; supported: {}",
+                    key,
+                    sc_params::ALL.join(", ")
+                ));
+            }
+        }
+
+        let num = |key: &str| -> Result<Option<u64>, String> {
+            match params.get(key) {
+                None => Ok(None),
+                Some(raw) => {
+                    let t = raw.trim();
+                    // Modes are octal by universal convention ("0770");
+                    // everything else is decimal.
+                    let parsed = if key == sc_params::DIR_MODE {
+                        u64::from_str_radix(t.trim_start_matches("0o"), 8)
+                    } else {
+                        t.parse::<u64>()
+                    };
+                    parsed
+                        .map(Some)
+                        .map_err(|_| format!("{}: '{}' is not a valid number", key, raw))
+                }
+            }
+        };
+
+        let mut o = Self::default();
+
+        if let Some(v) = num(sc_params::STRIPE_SIZE)? {
+            // Bounds: below one page striping is pure RPC overhead, and
+            // the unit must divide evenly into the layout arithmetic
+            // (offset / stripe_size), so a power of two keeps the
+            // per-DS extents aligned with client readahead.
+            if v < 4096 || v > 1024 * 1024 * 1024 {
+                return Err(format!(
+                    "{}: {} out of range (4 KiB .. 1 GiB)",
+                    sc_params::STRIPE_SIZE,
+                    v
+                ));
+            }
+            if !v.is_power_of_two() {
+                return Err(format!(
+                    "{}: {} must be a power of two",
+                    sc_params::STRIPE_SIZE,
+                    v
+                ));
+            }
+            o.stripe_size = v;
+        }
+
+        if let Some(v) = num(sc_params::STRIPE_WIDTH)? {
+            if v == 0 || v > 4096 {
+                return Err(format!(
+                    "{}: {} out of range (1 .. 4096; omit the parameter for 'all data servers')",
+                    sc_params::STRIPE_WIDTH,
+                    v
+                ));
+            }
+            o.stripe_width = v as u32;
+        }
+
+        if let Some(v) = num(sc_params::DIR_GID)? {
+            if v == 0 || v > u32::MAX as u64 {
+                return Err(format!("{}: {} is not a usable gid", sc_params::DIR_GID, v));
+            }
+            o.dir_gid = v as u32;
+        }
+
+        if let Some(v) = num(sc_params::DIR_MODE)? {
+            if v == 0 || v > 0o7777 {
+                return Err(format!(
+                    "{}: '{}' is not a valid octal mode",
+                    sc_params::DIR_MODE,
+                    params.get(sc_params::DIR_MODE).unwrap()
+                ));
+            }
+            o.dir_mode = v as u32;
+        }
+
+        // A non-default mode without a group is a foot-gun: 0770 with no
+        // gid means the volume is writable only by the server's own
+        // group, which no pod is in, and every write fails with EACCES
+        // at first use rather than at provision time.
+        if o.dir_mode != 0 && o.dir_mode & 0o007 == 0 && o.dir_gid == 0 {
+            return Err(format!(
+                "{} = {:o} denies access to other users but no {} was set —                  the volume would be unwritable by any pod",
+                sc_params::DIR_MODE,
+                o.dir_mode,
+                sc_params::DIR_GID
+            ));
+        }
+
+        Ok(o)
+    }
+
+    /// Compare what the MDS says it recorded against what we asked for.
+    fn check_echo(&self, eff_size: u64, eff_width: u32) -> Result<(), String> {
+        let asked_for_geometry = self.stripe_size != 0 || self.stripe_width != 0;
+        if !asked_for_geometry {
+            return Ok(());
+        }
+        if eff_size == 0 && eff_width == 0 {
+            return Err(format!(
+                "this MDS does not support per-volume stripe geometry                  (it echoed nothing for {}/{}). Upgrade the pNFS server image                  to match the CSI driver, or remove the parameters from the                  StorageClass",
+                sc_params::STRIPE_SIZE,
+                sc_params::STRIPE_WIDTH,
+            ));
+        }
+        if self.stripe_size != 0 && eff_size != self.stripe_size {
+            return Err(format!(
+                "MDS recorded stripe size {} but {} asked for {}",
+                eff_size,
+                sc_params::STRIPE_SIZE,
+                self.stripe_size
+            ));
+        }
+        if self.stripe_width != 0 && eff_width != self.stripe_width {
+            return Err(format!(
+                "MDS recorded stripe width {} but {} asked for {}",
+                eff_width,
+                sc_params::STRIPE_WIDTH,
+                self.stripe_width
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// All errors the `pnfs_csi` surface can produce. Each maps to a CSI
@@ -176,11 +353,26 @@ impl PnfsCsi {
         volume_id: &str,
         size_bytes: u64,
     ) -> Result<HashMap<String, String>, PnfsError> {
+        self.create_volume_with(volume_id, size_bytes, &VolumeOptions::default())
+            .await
+    }
+
+    /// `create_volume` with per-volume options from the StorageClass.
+    pub async fn create_volume_with(
+        &self,
+        volume_id: &str,
+        size_bytes: u64,
+        opts: &VolumeOptions,
+    ) -> Result<HashMap<String, String>, PnfsError> {
         let mut client = self.dial().await?;
         let resp = client
             .create_volume(CreateVolumeRequest {
                 volume_id: volume_id.to_string(),
                 size_bytes,
+                stripe_size: opts.stripe_size,
+                stripe_width: opts.stripe_width,
+                dir_gid: opts.dir_gid,
+                dir_mode: opts.dir_mode,
             })
             .await
             .map_err(|e| PnfsError::Transport(format!("CreateVolume: {}", e)))?
@@ -192,6 +384,20 @@ impl PnfsCsi {
             } else {
                 resp.message
             }));
+        }
+
+        // Version-skew gate. The chart pins the pNFS server image
+        // independently of the driver image, and proto3 silently drops
+        // fields an older peer does not understand — so an MDS that
+        // predates stripe geometry would happily return `created: true`
+        // having ignored it, and the PVC would come up striped at the
+        // MDS default with nothing anywhere saying so. Fail the
+        // provision instead: a PVC stuck Pending with this message is
+        // recoverable, a volume silently built to the wrong geometry is
+        // not (placements are pinned at first layout grant and never
+        // re-striped).
+        if let Err(msg) = opts.check_echo(resp.effective_stripe_size, resp.effective_stripe_width) {
+            return Err(PnfsError::Mds(msg));
         }
 
         // The mount host is the same name we dialed for gRPC (in the
@@ -231,6 +437,20 @@ impl PnfsCsi {
             ctx_keys::VOLUME_MODE.into(),
             if resp.directory { "dir" } else { "file" }.into(),
         );
+        // Stamp the EFFECTIVE geometry, not what was asked for — they are
+        // equal by now (check_echo above would have failed otherwise), and
+        // recording the server's answer is what makes the PV a truthful
+        // record of the volume rather than of the request.
+        if resp.effective_stripe_size != 0 {
+            ctx.insert(
+                ctx_keys::STRIPE_SIZE.into(),
+                resp.effective_stripe_size.to_string(),
+            );
+            ctx.insert(
+                ctx_keys::STRIPE_WIDTH.into(),
+                resp.effective_stripe_width.to_string(),
+            );
+        }
         Ok(ctx)
     }
 
@@ -254,6 +474,42 @@ impl PnfsCsi {
             }));
         }
         Ok(())
+    }
+
+    /// Grow a pNFS volume's recorded capacity.
+    ///
+    /// Directory volumes hold no per-volume size on the MDS — capacity
+    /// is pool-side at the data servers — so this is a metadata-only
+    /// acknowledgement. It exists anyway because refusing the CSI
+    /// ControllerExpandVolume call leaves the PVC permanently in
+    /// `Resizing` with a FAILED_PRECONDITION event, for an operation
+    /// that had nothing to do in the first place. Legacy sparse-file
+    /// volumes are grown in place by the MDS.
+    ///
+    /// Returns the size the MDS now records.
+    pub async fn expand_volume(
+        &self,
+        volume_id: &str,
+        size_bytes: u64,
+    ) -> Result<u64, PnfsError> {
+        let mut client = self.dial().await?;
+        let resp = client
+            .expand_volume(crate::pnfs::grpc::ExpandVolumeRequest {
+                volume_id: volume_id.to_string(),
+                size_bytes,
+            })
+            .await
+            .map_err(|e| PnfsError::Transport(format!("ExpandVolume: {}", e)))?
+            .into_inner();
+
+        if !resp.expanded {
+            return Err(PnfsError::Mds(if resp.message.is_empty() {
+                "MDS rejected ExpandVolume (no message)".into()
+            } else {
+                resp.message
+            }));
+        }
+        Ok(resp.size_bytes)
     }
 }
 
@@ -421,11 +677,84 @@ fn parse_host_port(endpoint: &str) -> Result<(String, String), PnfsError> {
     Ok((h.into(), p.into()))
 }
 
+/// Build the option string for the kernel NFS mount that backs a pNFS PV.
+///
+/// `user_flags` are the operator's `mount_flags` (StorageClass
+/// `mountOptions` → PV `spec.mountOptions` → `VolumeCapability`). They are
+/// appended LAST so they win the kernel's last-one-wins parse, and if they
+/// pin a protocol version the built-in default is omitted entirely —
+/// emitting both spellings is a conflicting-option mount failure, not a
+/// silent override.
+///
+/// The default is `minorversion=2`. pNFS needs at least 4.1 (the kernel
+/// won't issue LAYOUTGET on 4.0) but nothing needs the CEILING at 4.1,
+/// where this used to be pinned. That pin was load-bearing only by
+/// accident: until the opcode/minor-version gate landed server-side, the
+/// mount option was the ONLY thing keeping 4.2 opcodes away from the MDS,
+/// so the safety of the pNFS path rested on a Linux client convention.
+/// 4.2 against the MDS was then measured (2026-08-01, `b903e43`):
+/// COPY/CLONE/SEEK/ALLOCATE on a striped file each answer NFS4ERR_NOTSUPP
+/// exactly once — 2 packets, no retry storm, no mount-wide capability
+/// loss — and every client-side fallback produced correct bytes. The RWX
+/// path has mounted `vers=4.2` all along; this stops pNFS volumes being a
+/// minor version behind it.
+///
+/// The rest: `nconnect=4` (the knob that turned the bench-sweep 1.6x win
+/// into the steady-state result), `rsize=wsize=1M` (the bench's sweet spot
+/// for per-RPC payload), `noresvport` (needed when running unprivileged,
+/// matching the rwx_nfs path).
+pub fn build_pnfs_mount_opts(mds_port: &str, readonly: bool, user_flags: &[String]) -> String {
+    let pinned = |prefixes: &[&str]| {
+        user_flags.iter().any(|f| {
+            f.split(',')
+                .any(|o| prefixes.iter().any(|p| o.trim().starts_with(p)))
+        })
+    };
+    let version_pinned = pinned(&["vers=", "nfsvers=", "minorversion="]);
+    let sec_pinned = pinned(&["sec="]);
+
+    let mut opts = String::new();
+    if !version_pinned {
+        opts.push_str("minorversion=2,");
+    }
+    // sec=sys is load-bearing, exactly as on the RWX path (main.rs, the
+    // `vers=4.2,noresvport,sec=sys` literal). Without it the client
+    // negotiates AUTH_NONE — this server's SECINFO lists AUTH_NONE first
+    // (`encode_secinfo_flavors`) — and under AUTH_NONE `Auth::unix_uid_gid`
+    // returns None, so the creator-ownership stamp in OPEN/CREATE is
+    // skipped and every file lands owned by the server process (root).
+    // Ownership-sensitive workloads (postgres checks st_uid == geteuid)
+    // then refuse to start on the volume. The pNFS mount was missing this
+    // while the RWX mount had it, so a `mount | grep` on a pNFS volume
+    // showed `sec=null`.
+    if !sec_pinned {
+        opts.push_str("sec=sys,");
+    }
+    opts.push_str(&format!(
+        "proto=tcp,port={},nconnect=4,rsize=1048576,wsize=1048576,noresvport",
+        mds_port,
+    ));
+    if readonly {
+        opts.push_str(",ro");
+    }
+    for flag in user_flags {
+        let flag = flag.trim();
+        if !flag.is_empty() {
+            opts.push(',');
+            opts.push_str(flag);
+        }
+    }
+    opts
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pnfs::grpc::{
-        CreateVolumeResponse, DeleteVolumeResponse, MdsControl, MdsControlServer,
+        CreateVolumeResponse, DeleteVolumeResponse,
+        ExpandVolumeRequest, ExpandVolumeResponse,
+        MdsControl, MdsControlServer,
         RegisterRequest, RegisterResponse,
         HeartbeatRequest, HeartbeatResponse, CapacityUpdate, CapacityResponse,
         UnregisterRequest, UnregisterResponse,
@@ -440,8 +769,10 @@ mod tests {
     struct MockMds {
         canned_create: Mutex<Option<CreateVolumeResponse>>,
         canned_delete: Mutex<Option<DeleteVolumeResponse>>,
+        canned_expand: Mutex<Option<ExpandVolumeResponse>>,
         last_create_volume_id: Mutex<Option<String>>,
         last_delete_volume_id: Mutex<Option<String>>,
+        last_create_request: Mutex<Option<CreateVolumeRequest>>,
     }
 
     impl MockMds {
@@ -449,6 +780,8 @@ mod tests {
             Self {
                 canned_create: Mutex::new(Some(create)),
                 canned_delete: Mutex::new(Some(delete)),
+                canned_expand: Mutex::new(None),
+                last_create_request: Mutex::new(None),
                 last_create_volume_id: Mutex::new(None),
                 last_delete_volume_id: Mutex::new(None),
             }
@@ -477,10 +810,23 @@ mod tests {
         ) -> Result<Response<UnregisterResponse>, Status> {
             unimplemented!()
         }
+        async fn expand_volume(
+            &self, req: Request<ExpandVolumeRequest>,
+        ) -> Result<Response<ExpandVolumeResponse>, Status> {
+            let req = req.into_inner();
+            let canned = self.canned_expand.lock().unwrap().clone();
+            Ok(Response::new(canned.unwrap_or(ExpandVolumeResponse {
+                expanded: true,
+                size_bytes: req.size_bytes,
+                message: String::new(),
+            })))
+        }
         async fn create_volume(
             &self, req: Request<CreateVolumeRequest>,
         ) -> Result<Response<CreateVolumeResponse>, Status> {
-            *self.last_create_volume_id.lock().unwrap() = Some(req.into_inner().volume_id);
+            let req = req.into_inner();
+            *self.last_create_request.lock().unwrap() = Some(req.clone());
+            *self.last_create_volume_id.lock().unwrap() = Some(req.volume_id);
             let canned = self.canned_create.lock().unwrap().clone()
                 .expect("canned_create not set");
             Ok(Response::new(canned))
@@ -541,8 +887,7 @@ mod tests {
                 volume_file: "pvc-abc".into(),
                 message: String::new(),
                 nfs_port: 20490,
-                directory: true,
-            },
+                directory: true, effective_stripe_size: 0, effective_stripe_width: 0, },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
         let addr = start_mock_mds(mock.clone()).await;
@@ -579,8 +924,7 @@ mod tests {
                 volume_file: String::new(),
                 message: "size mismatch: existing 4096, requested 8192".into(),
                 nfs_port: 0,
-                directory: false,
-            },
+                directory: false, effective_stripe_size: 0, effective_stripe_width: 0, },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
         let addr = start_mock_mds(mock).await;
@@ -602,8 +946,7 @@ mod tests {
                 volume_file: "v".into(),
                 message: String::new(),
                 nfs_port: 2049,
-                directory: true,
-            },
+                directory: true, effective_stripe_size: 0, effective_stripe_width: 0, },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
         let addr = start_mock_mds(mock.clone()).await;
@@ -746,8 +1089,7 @@ mod tests {
             export_path: "/data/exports".into(),
             volume_file: "pvc-routed".into(),
             nfs_port: 2049,
-            directory: true,
-        };
+            directory: true, effective_stripe_size: 0, effective_stripe_width: 0, };
         let canned_delete = DeleteVolumeResponse { deleted: true, message: String::new() };
         let mock0 = std::sync::Arc::new(MockMds::new(canned_create.clone(), canned_delete.clone()));
         let mock1 = std::sync::Arc::new(MockMds::new(canned_create, canned_delete));
@@ -777,5 +1119,239 @@ mod tests {
             Some(name),
         );
         assert!(m_miss.last_create_volume_id.lock().unwrap().is_none());
+    }
+}
+
+
+#[cfg(test)]
+mod mount_opts_tests {
+    use super::build_pnfs_mount_opts;
+
+    fn flags(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The default must be NFSv4.2, not 4.1. pNFS volumes were pinned a
+    /// minor version behind the RWX path (which has always mounted
+    /// `vers=4.2`) for no measured reason — 4.2 against the MDS was
+    /// exercised on a striped file and every 4.2 op fell back cleanly.
+    #[test]
+    fn the_default_mount_is_nfs_v4_2() {
+        let opts = build_pnfs_mount_opts("2049", false, &[]);
+        assert!(opts.contains("minorversion=2"), "{opts}");
+        assert!(!opts.contains("minorversion=1"), "{opts}");
+        assert!(opts.contains("port=2049"), "{opts}");
+        assert!(opts.contains("nconnect=4"), "{opts}");
+    }
+
+    /// AUTH_SYS must be the default. Without `sec=sys` the client negotiates
+    /// AUTH_NONE (this server's SECINFO lists AUTH_NONE first), no uid reaches
+    /// the server, and every created file lands owned by root — the exact
+    /// failure the RWX mount path documents and avoids.
+    #[test]
+    fn the_default_mount_requests_auth_sys() {
+        let opts = build_pnfs_mount_opts("2049", false, &[]);
+        assert!(opts.split(',').any(|o| o == "sec=sys"), "{opts}");
+    }
+
+    /// An operator asking for Kerberos must not also get sec=sys — the
+    /// kernel takes the last one, but emitting both is a lie about intent
+    /// and masks a typo in the operator's flavour name.
+    #[test]
+    fn an_operator_security_flavour_replaces_the_default() {
+        for pin in ["sec=krb5", "sec=krb5p", "sec=none"] {
+            let opts = build_pnfs_mount_opts("2049", false, &flags(&[pin]));
+            assert!(opts.contains(pin), "{pin} missing from {opts}");
+            assert!(!opts.contains("sec=sys"), "default survived beside {pin}: {opts}");
+        }
+    }
+
+    /// A version pin must not suppress the security default, nor vice
+    /// versa — they are independent knobs and an early version of this
+    /// guard shared one flag between them.
+    #[test]
+    fn the_version_and_security_defaults_are_independent() {
+        let v = build_pnfs_mount_opts("2049", false, &flags(&["vers=4.1"]));
+        assert!(v.split(',').any(|o| o == "sec=sys"), "sec dropped by version pin: {v}");
+        let s = build_pnfs_mount_opts("2049", false, &flags(&["sec=krb5"]));
+        assert!(s.contains("minorversion=2"), "version dropped by sec pin: {s}");
+    }
+
+    /// An operator pinning the version must not get BOTH their option and
+    /// ours — the kernel rejects conflicting protocol versions, so emitting
+    /// both is a mount failure rather than an override.
+    #[test]
+    fn an_operator_pinned_version_replaces_the_default_rather_than_joining_it() {
+        for pin in ["vers=4.1", "nfsvers=4.2", "minorversion=1"] {
+            let opts = build_pnfs_mount_opts("2049", false, &flags(&[pin]));
+            assert!(opts.contains(pin), "{pin} missing from {opts}");
+            assert!(
+                !opts.contains("minorversion=2") || pin == "minorversion=2",
+                "default survived alongside operator pin {pin}: {opts}"
+            );
+        }
+    }
+
+    /// A pin inside a comma-joined flag string counts too — kubelet passes
+    /// PV `spec.mountOptions` through as separate entries, but nothing stops
+    /// an operator writing one entry containing several options.
+    #[test]
+    fn a_version_pin_inside_a_comma_joined_flag_is_detected() {
+        let opts = build_pnfs_mount_opts("2049", false, &flags(&["hard,vers=4.1,timeo=600"]));
+        assert!(!opts.contains("minorversion=2"), "{opts}");
+        assert!(opts.contains("vers=4.1"), "{opts}");
+    }
+
+    /// Operator options land last so they win the kernel's last-one-wins
+    /// parse for any key we also set.
+    #[test]
+    fn operator_options_are_appended_after_the_defaults() {
+        let opts = build_pnfs_mount_opts("2049", false, &flags(&["nconnect=16"]));
+        let ours = opts.find("nconnect=4").expect("default present");
+        let theirs = opts.rfind("nconnect=16").expect("override present");
+        assert!(theirs > ours, "operator option must come last: {opts}");
+    }
+
+    /// Read-only must survive the presence of operator options.
+    #[test]
+    fn readonly_is_still_applied_alongside_operator_options() {
+        let opts = build_pnfs_mount_opts("2049", true, &flags(&["hard"]));
+        assert!(opts.split(',').any(|o| o == "ro"), "{opts}");
+        assert!(opts.split(',').any(|o| o == "hard"), "{opts}");
+    }
+
+    /// Empty entries must not produce a stray comma — `mount` rejects the
+    /// resulting empty option.
+    #[test]
+    fn empty_operator_entries_do_not_produce_an_empty_option() {
+        let opts = build_pnfs_mount_opts("2049", false, &flags(&["", "  ", "hard"]));
+        assert!(!opts.split(',').any(|o| o.trim().is_empty()), "{opts}");
+    }
+}
+
+
+#[cfg(test)]
+mod volume_options_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn params(kv: &[(&str, &str)]) -> HashMap<String, String> {
+        kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// No parameters must mean exactly the old behaviour: every field
+    /// zero, which the MDS reads as "your defaults".
+    #[test]
+    fn no_parameters_means_mds_defaults() {
+        let o = VolumeOptions::from_parameters(&params(&[("layout", "pnfs")])).unwrap();
+        assert_eq!(o, VolumeOptions::default());
+    }
+
+    /// A typo in a parameter name must FAIL the provision. Ignoring it
+    /// would produce a healthy-looking PVC with none of the geometry the
+    /// author asked for — and geometry is fixed at create, so there is
+    /// no later point at which the mistake surfaces or can be fixed.
+    #[test]
+    fn an_unknown_pnfs_parameter_is_refused() {
+        let e = VolumeOptions::from_parameters(&params(&[
+            ("layout", "pnfs"),
+            ("pnfs.flint.io/stripesize", "1048576"), // wrong case
+        ]))
+        .unwrap_err();
+        assert!(e.contains("unknown StorageClass parameter"), "{e}");
+        assert!(e.contains("pnfs.flint.io/stripeSize"), "error should list the real names: {e}");
+    }
+
+    /// Parameters outside our namespace belong to other provisioners
+    /// and to the SPDK path; we must not police them.
+    #[test]
+    fn parameters_outside_the_pnfs_namespace_are_left_alone() {
+        VolumeOptions::from_parameters(&params(&[
+            ("layout", "pnfs"),
+            ("numReplicas", "3"),
+            ("csi.storage.k8s.io/fstype", "ext4"),
+        ]))
+        .expect("foreign parameters must not be rejected");
+    }
+
+    #[test]
+    fn stripe_size_must_be_a_power_of_two_in_range() {
+        for bad in ["0", "1024", "3145728", "2147483648"] {
+            let e = VolumeOptions::from_parameters(&params(&[(sc_params::STRIPE_SIZE, bad)]))
+                .unwrap_err();
+            assert!(e.contains(sc_params::STRIPE_SIZE), "{bad}: {e}");
+        }
+        let o = VolumeOptions::from_parameters(&params(&[(sc_params::STRIPE_SIZE, "1048576")]))
+            .unwrap();
+        assert_eq!(o.stripe_size, 1024 * 1024);
+    }
+
+    /// Width 0 is spelled "omit the parameter", not "0" — an explicit 0
+    /// most likely means the author thought it meant "unlimited", and
+    /// silently accepting it would give them the opposite of a narrow
+    /// stripe.
+    #[test]
+    fn an_explicit_zero_stripe_width_is_refused() {
+        let e = VolumeOptions::from_parameters(&params(&[(sc_params::STRIPE_WIDTH, "0")]))
+            .unwrap_err();
+        assert!(e.contains("omit the parameter"), "{e}");
+    }
+
+    /// Modes are octal — "0770" must not be read as seven hundred and
+    /// seventy, which would be 0o1402 and nonsense.
+    #[test]
+    fn dir_mode_is_parsed_as_octal() {
+        let o = VolumeOptions::from_parameters(&params(&[
+            (sc_params::DIR_MODE, "0770"),
+            (sc_params::DIR_GID, "2000"),
+        ]))
+        .unwrap();
+        assert_eq!(o.dir_mode, 0o770);
+        assert_eq!(o.dir_gid, 2000);
+    }
+
+    /// A mode that denies "other" without a group is unwritable by any
+    /// pod — catch it at provision, not at the app's first write.
+    #[test]
+    fn a_restrictive_mode_without_a_group_is_refused() {
+        let e = VolumeOptions::from_parameters(&params(&[(sc_params::DIR_MODE, "0750")]))
+            .unwrap_err();
+        assert!(e.contains(sc_params::DIR_GID), "{e}");
+    }
+
+    /// ...but a mode that still grants "other" is the author's call.
+    #[test]
+    fn a_permissive_mode_without_a_group_is_allowed() {
+        let o = VolumeOptions::from_parameters(&params(&[(sc_params::DIR_MODE, "0775")])).unwrap();
+        assert_eq!(o.dir_mode, 0o775);
+    }
+
+    /// An MDS too old to know about geometry echoes zeros. Asking for
+    /// geometry and getting silence must fail the provision: proto3
+    /// drops unknown fields, so the volume would otherwise be built at
+    /// the MDS default with nothing anywhere saying so.
+    #[test]
+    fn an_mds_that_ignores_geometry_fails_the_provision() {
+        let o = VolumeOptions { stripe_size: 1 << 20, ..Default::default() };
+        let e = o.check_echo(0, 0).unwrap_err();
+        assert!(e.contains("does not support per-volume stripe geometry"), "{e}");
+    }
+
+    /// An MDS that recorded something OTHER than what was asked is a
+    /// worse failure than one that ignored it, and must also fail.
+    #[test]
+    fn a_geometry_mismatch_fails_the_provision() {
+        let o = VolumeOptions { stripe_size: 1 << 20, stripe_width: 2, ..Default::default() };
+        assert!(o.check_echo(8 << 20, 2).unwrap_err().contains("stripe size"));
+        assert!(o.check_echo(1 << 20, 4).unwrap_err().contains("stripe width"));
+        o.check_echo(1 << 20, 2).expect("exact echo must pass");
+    }
+
+    /// A volume that asked for NO geometry must not be tripped up by an
+    /// old MDS's zero echo — that is the upgrade path for every volume
+    /// provisioned before this feature.
+    #[test]
+    fn asking_for_no_geometry_tolerates_an_old_mds() {
+        VolumeOptions::default().check_echo(0, 0).expect("must not fail");
     }
 }

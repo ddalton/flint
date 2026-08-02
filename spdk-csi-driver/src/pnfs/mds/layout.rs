@@ -277,8 +277,18 @@ pub struct LayoutManager {
     /// Layout policy
     policy: LayoutPolicyImpl,
 
-    /// Stripe size in bytes
+    /// MDS-wide default stripe size in bytes. Per-volume overrides live
+    /// in `volume_geometry`; this is the fallback.
     stripe_size: u64,
+
+    /// Per-volume stripe geometry, keyed by volume directory name, set
+    /// at provision time from StorageClass parameters. Acts as a cache
+    /// loaded eagerly at startup by `load_volume_geometry`. `None` means
+    /// "no geometry declared for this volume", cached as a negative.
+    /// `None` = "no geometry declared for this volume", cached as a
+    /// negative so absence stays distinguishable from the fleet default.
+    volume_geometry: Arc<DashMap<String, Option<VolumeGeometry>>>,
+
 
     /// Per-file pinned placements (keyed by export-relative path).
     /// Source of truth for every grant after the first; persisted so
@@ -501,6 +511,26 @@ enum LayoutPolicyImpl {
     Locality,
 }
 
+/// Stripe geometry chosen for a volume at provision time and fixed for
+/// its lifetime. A file's placement is pinned at its first layout grant
+/// and never re-striped, so changing geometry afterwards could not
+/// affect existing data — fixing it at create is honest, not a
+/// limitation being papered over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolumeGeometry {
+    /// Stripe unit in bytes.
+    pub stripe_size: u64,
+    /// Maximum data servers a file in this volume is pinned across.
+    /// 0 = every active DS (the historical behaviour).
+    pub stripe_width: u32,
+}
+
+impl Default for VolumeGeometry {
+    fn default() -> Self {
+        Self { stripe_size: 0, stripe_width: 0 }
+    }
+}
+
 impl LayoutManager {
     /// Create a new layout manager backed by `backend`.
     pub fn new(
@@ -531,14 +561,159 @@ impl LayoutManager {
             stripe_groups: Arc::new(DashMap::new()),
             cleanup_queues: Arc::new(DashMap::new()),
             truncate_dirty: Arc::new(DashMap::new()),
+            volume_geometry: Arc::new(DashMap::new()),
             backend,
         }
     }
 
-    /// Configured stripe size (bytes) — advertised as the FILE-layout
-    /// stripe unit in LAYOUTGET replies.
-    pub fn stripe_size(&self) -> u64 {
-        self.stripe_size
+    /// Record the geometry chosen for `volume` at provision time and
+    /// AWAIT its durability before returning.
+    ///
+    /// Awaited rather than queued on purpose. `enqueue_write` returns
+    /// before the op has reached the page cache, so a SIGKILL — the
+    /// dominant Kubernetes crash — between CreateVolume's reply and the
+    /// writer draining would leave an acknowledged volume whose geometry
+    /// silently reverted to the fleet default. Geometry is written once
+    /// per volume, on a human-timescale control path, so the await costs
+    /// nothing that matters.
+    ///
+    /// Returns the geometry actually stored, after resolving `0` to the
+    /// fleet default.
+    pub async fn set_volume_geometry(
+        &self,
+        volume: &str,
+        requested: VolumeGeometry,
+    ) -> VolumeGeometry {
+        let geom = VolumeGeometry {
+            stripe_size: if requested.stripe_size == 0 {
+                self.stripe_size
+            } else {
+                requested.stripe_size
+            },
+            stripe_width: requested.stripe_width,
+        };
+        if let Err(e) = self
+            .backend
+            .put_volume_geometry(&crate::state_backend::VolumeGeometryRecord {
+                volume: volume.to_string(),
+                stripe_size: geom.stripe_size,
+                stripe_width: geom.stripe_width,
+            })
+            .await
+        {
+            // Caching it anyway would make THIS MDS stripe correctly while
+            // any other shard, and this one after a restart, used the
+            // default — one volume striped two ways, invisibly. Refuse the
+            // cache so the caller's echo check fails the provision.
+            warn!("geometry: persisting volume '{}' failed: {} — not caching", volume, e);
+            return VolumeGeometry { stripe_size: self.stripe_size, stripe_width: 0 };
+        }
+        self.volume_geometry.insert(volume.to_string(), Some(geom));
+        info!(
+            "📐 Volume '{}' geometry: stripe_size={} stripe_width={}",
+            volume,
+            geom.stripe_size,
+            if geom.stripe_width == 0 { "all".to_string() } else { geom.stripe_width.to_string() },
+        );
+        geom
+    }
+
+    /// Forget a volume's geometry (called on DeleteVolume). Queued, not
+    /// awaited: a lost delete leaks one tiny row that the next
+    /// CreateVolume of the same name overwrites anyway.
+    pub fn forget_volume_geometry(&self, volume: &str) {
+        self.volume_geometry.remove(volume);
+        self.backend
+            .enqueue_write(WriteOp::DeleteVolumeGeometry(volume.to_string()));
+    }
+
+    /// Seed the geometry cache from the backend at MDS startup.
+    ///
+    /// Eager rather than lazy because the cache is the only reader on the
+    /// hot path: a LAYOUTGET arriving before the load would pin a file at
+    /// the fleet default and never re-stripe it.
+    ///
+    /// `known_volumes` is the set of volume directories on the export. A
+    /// directory with no geometry row is USUALLY benign (every volume
+    /// provisioned before geometry existed), but it is also exactly what
+    /// a lost row looks like — so it gets one WARN each. That line is the
+    /// only signal distinguishing "never declared" from "acked, then
+    /// lost", and without it the loss is silent.
+    pub async fn load_volume_geometry(&self, known_volumes: &[String]) {
+        let records = match self.backend.list_volume_geometry().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("geometry: load failed: {} — every volume will use the fleet default", e);
+                return;
+            }
+        };
+        let n = records.len();
+        for r in records {
+            self.volume_geometry.insert(
+                r.volume,
+                Some(VolumeGeometry { stripe_size: r.stripe_size, stripe_width: r.stripe_width }),
+            );
+        }
+        for v in known_volumes {
+            if !self.volume_geometry.contains_key(v) {
+                warn!(
+                    "📐 volume '{}' has no geometry record — new files in it will use the \
+                     fleet default (stripe_size={}, all data servers). Expected for volumes \
+                     created before per-volume geometry; otherwise the record was lost.",
+                    v, self.stripe_size,
+                );
+                // Cache the negative so it costs one lookup, not one per file.
+                self.volume_geometry.insert(v.clone(), None);
+            }
+        }
+        info!("📐 MDS loaded {} volume geometry record(s)", n);
+    }
+
+    /// The geometry RECORDED for `volume`, or `None` if none ever was.
+    ///
+    /// A pure cache lookup: everything is loaded at startup, and
+    /// `set_volume_geometry` inserts on the create path. The `Option`
+    /// keeps "no geometry declared" distinguishable from "geometry that
+    /// happens to equal the fleet default" — collapsing them is what let
+    /// an idempotent CreateVolume retry echo zeros for a volume that had
+    /// been created perfectly well.
+    fn recorded_geometry(&self, volume: &str) -> Option<VolumeGeometry> {
+        self.volume_geometry.get(volume).and_then(|g| *g)
+    }
+
+    /// Geometry in force for `file_key`, which is an export-relative
+    /// path — its first component names the volume. Falls back to the
+    /// MDS-wide default for legacy volumes and for anything provisioned
+    /// before geometry existed.
+    fn geometry_for(&self, file_key: &str) -> VolumeGeometry {
+        let default = VolumeGeometry { stripe_size: self.stripe_size, stripe_width: 0 };
+        match file_key.split('/').find(|c| !c.is_empty()) {
+            Some(volume) => self.recorded_geometry(volume).unwrap_or(default),
+            None => default,
+        }
+    }
+
+    /// Geometry for `volume`, recording `requested` if none is on file.
+    ///
+    /// Called from the CreateVolume already-exists path, which is a
+    /// ROUTINE path — the CSI provisioner re-issues CreateVolume by name
+    /// — so it must report the geometry actually in force. It also
+    /// repairs a create that crashed between making the directory and
+    /// recording the geometry.
+    ///
+    /// An existing record WINS over `requested`: geometry is fixed at
+    /// creation, so a StorageClass edited between attempts must not
+    /// silently re-stripe. The caller's echo check turns that
+    /// disagreement into a visible error instead.
+    pub async fn ensure_volume_geometry(
+        &self,
+        volume: &str,
+        requested: VolumeGeometry,
+    ) -> VolumeGeometry {
+        match self.recorded_geometry(volume) {
+            Some(g) => g,
+            None => self.set_volume_geometry(volume, requested).await,
+        }
     }
 
     /// Repopulate the in-memory primary + by-owner maps from a backend
@@ -928,6 +1103,27 @@ impl LayoutManager {
         // sort again here so placement content is deterministic even
         // if the registry's ordering ever regresses.
         devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+
+        // Per-volume geometry. Width narrows the pin: striping across
+        // fewer DSes lowers a file's peak bandwidth but also shrinks its
+        // failure domain, because a pinned DS going missing makes the
+        // file unavailable (see `placement_refuses_when_pinned_device_missing`).
+        // Pinning all DSes — the default — means any single DS loss
+        // affects every file in the fleet.
+        //
+        // The subset is taken from the SORTED head, so it is a pure
+        // function of the fleet and reproducible; it deliberately does
+        // NOT hash-spread volumes across different subsets, because that
+        // would make the fleet's failure domains overlap in a way no
+        // operator could reason about. Spreading is a later decision
+        // that needs a policy, not an accident of hashing.
+        let geometry = self.geometry_for(file_key);
+        if geometry.stripe_width > 0 {
+            let want = geometry.stripe_width as usize;
+            if want < devices.len() {
+                devices.truncate(want);
+            }
+        }
         // Capacity honesty: pins are forever, so warn loudly when a
         // new file is being pinned onto a nearly-full DS. (Placement
         // still proceeds — capacity-aware selection is future work;
@@ -949,7 +1145,11 @@ impl LayoutManager {
             .placements
             .entry(file_key.to_string())
             .or_insert_with(|| FilePlacement {
-                stripe_size: self.stripe_size,
+                // The VOLUME's stripe size, not the fleet default — the
+                // placement is what every later grant reads, so this is
+                // the single point where per-volume geometry becomes
+                // durable for the file.
+                stripe_size: geometry.stripe_size,
                 device_ids,
                 file_id: allocate_file_id(),
             })
@@ -2350,8 +2550,165 @@ mod tests {
         )
     }
 
+    fn stripe_mgr_on(
+        registry: &Arc<DeviceRegistry>,
+        stripe: u64,
+        backend: Arc<dyn StateBackend>,
+    ) -> LayoutManager {
+        LayoutManager::new(Arc::clone(registry), ConfigLayoutPolicy::Stripe, stripe, backend)
+    }
+
     fn ds(id: &str) -> DeviceInfo {
         DeviceInfo::new(id.to_string(), format!("{}:2049", id), vec![])
+    }
+
+    /// Per-volume stripe SIZE overrides the fleet default, and applies
+    /// to files under that volume's directory only.
+    #[tokio::test]
+    async fn a_volume_geometry_overrides_the_default_stripe_size() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+
+        mgr.set_volume_geometry(
+            "narrow",
+            VolumeGeometry { stripe_size: 1024 * 1024, stripe_width: 0 },
+        )
+        .await;
+
+        mgr.generate_layout(test_owner(1), vec![1], "narrow/f", 0, 4 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(mgr.placement_for("narrow/f").unwrap().stripe_size, 1024 * 1024);
+
+        // A file in an un-configured volume still gets the fleet default.
+        mgr.generate_layout(test_owner(1), vec![1], "other/f", 0, 4 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(mgr.placement_for("other/f").unwrap().stripe_size, 8 * 1024 * 1024);
+    }
+
+    /// Stripe WIDTH narrows the pin. This is the blast-radius control:
+    /// a file pinned to 2 of 4 DSes survives the loss of the other two,
+    /// where the default all-DS pin makes every file depend on every DS.
+    #[tokio::test]
+    async fn a_volume_stripe_width_narrows_the_pin() {
+        let registry = Arc::new(DeviceRegistry::new());
+        for id in ["ds-1", "ds-2", "ds-3", "ds-4"] {
+            registry.register(ds(id)).unwrap();
+        }
+        let mgr = stripe_mgr(&registry, 1024 * 1024);
+        mgr.set_volume_geometry("narrow", VolumeGeometry { stripe_size: 0, stripe_width: 2 }).await;
+
+        mgr.generate_layout(test_owner(1), vec![1], "narrow/f", 0, 4 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        let pinned = mgr.placement_for("narrow/f").unwrap().device_ids;
+        assert_eq!(pinned, vec!["ds-1".to_string(), "ds-2".to_string()], "narrowed to the sorted head");
+
+        // Default width still takes the whole fleet.
+        mgr.generate_layout(test_owner(1), vec![1], "wide/f", 0, 4 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(mgr.placement_for("wide/f").unwrap().device_ids.len(), 4);
+    }
+
+    /// A width larger than the fleet is not an error — it means "all of
+    /// them", and must not truncate to something surprising or panic.
+    #[tokio::test]
+    async fn a_stripe_width_wider_than_the_fleet_uses_the_whole_fleet() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+        let mgr = stripe_mgr(&registry, 1024 * 1024);
+        mgr.set_volume_geometry("v", VolumeGeometry { stripe_size: 0, stripe_width: 16 }).await;
+        mgr.generate_layout(test_owner(1), vec![1], "v/f", 0, 2 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        assert_eq!(mgr.placement_for("v/f").unwrap().device_ids.len(), 2);
+    }
+
+    /// Geometry survives an MDS restart. It lives in the state backend
+    /// alongside placements, so this is the test that the record
+    /// round-trips — without it a restarted MDS would silently fall back
+    /// to the fleet default for every NEW file in the volume, leaving one
+    /// volume striped two different ways.
+    #[tokio::test]
+    async fn volume_geometry_survives_a_restart() {
+        let backend: Arc<dyn StateBackend> = crate::state_backend::memory_backend();
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+
+        let first = stripe_mgr_on(&registry, 8 * 1024 * 1024, Arc::clone(&backend));
+        first
+            .set_volume_geometry(
+                "vol",
+                VolumeGeometry { stripe_size: 2 * 1024 * 1024, stripe_width: 1 },
+            )
+            .await;
+
+        // A fresh manager over the same backend = the restarted MDS.
+        let restarted = stripe_mgr_on(&registry, 8 * 1024 * 1024, Arc::clone(&backend));
+        restarted.load_volume_geometry(&["vol".to_string()]).await;
+        restarted
+            .generate_layout(test_owner(1), vec![1], "vol/f", 0, 4 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        let p = restarted.placement_for("vol/f").unwrap();
+        assert_eq!(p.stripe_size, 2 * 1024 * 1024, "stripe size lost across restart");
+        assert_eq!(p.device_ids.len(), 1, "stripe width lost across restart");
+    }
+
+    /// A volume directory with no geometry record must load as an
+    /// explicit negative, so the fleet default is used and the operator
+    /// gets one WARN — the only signal separating "never declared" from
+    /// "acked, then lost".
+    #[tokio::test]
+    async fn a_volume_without_a_geometry_record_falls_back_to_the_default() {
+        let backend: Arc<dyn StateBackend> = crate::state_backend::memory_backend();
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+
+        let mgr = stripe_mgr_on(&registry, 8 * 1024 * 1024, backend);
+        mgr.load_volume_geometry(&["legacy".to_string()]).await;
+        mgr.generate_layout(test_owner(1), vec![1], "legacy/f", 0, 4 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        let p = mgr.placement_for("legacy/f").unwrap();
+        assert_eq!(p.stripe_size, 8 * 1024 * 1024);
+        assert_eq!(p.device_ids.len(), 2, "no record ⇒ all data servers");
+    }
+
+    /// Deleting a volume must drop its geometry, or a volume re-created
+    /// at the same name would inherit the previous StorageClass's
+    /// geometry instead of its own.
+    #[tokio::test]
+    async fn deleting_a_volume_forgets_its_geometry() {
+        let backend: Arc<dyn StateBackend> = crate::state_backend::memory_backend();
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        registry.register(ds("ds-2")).unwrap();
+        let mgr = stripe_mgr_on(&registry, 8 * 1024 * 1024, Arc::clone(&backend));
+
+        mgr.set_volume_geometry("v", VolumeGeometry { stripe_size: 1024 * 1024, stripe_width: 1 })
+            .await;
+        mgr.forget_volume_geometry("v");
+
+        let after = stripe_mgr_on(&registry, 8 * 1024 * 1024, backend);
+        after.load_volume_geometry(&["v".to_string()]).await;
+        after
+            .generate_layout(test_owner(1), vec![1], "v/f", 0, 2 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        let p = after.placement_for("v/f").unwrap();
+        assert_eq!(p.stripe_size, 8 * 1024 * 1024, "stale geometry survived delete");
+        assert_eq!(p.device_ids.len(), 2);
+    }
+
+    /// A zero stripe_size means "use the fleet default" — it must be
+    /// resolved at record time, not stored as 0 and later divided by.
+    #[tokio::test]
+    async fn a_zero_stripe_size_resolves_to_the_fleet_default() {
+        let registry = Arc::new(DeviceRegistry::new());
+        registry.register(ds("ds-1")).unwrap();
+        let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
+        let got = mgr.set_volume_geometry("v", VolumeGeometry { stripe_size: 0, stripe_width: 0 }).await;
+        assert_eq!(got.stripe_size, 8 * 1024 * 1024);
     }
 
     fn segment_devices(l: &LayoutState) -> Vec<String> {

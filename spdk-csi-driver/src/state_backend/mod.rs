@@ -278,6 +278,30 @@ pub struct LayoutRecord {
 /// (`{file_id:016x}.stripeN`), so the path key is pure metadata and a
 /// RENAME just re-keys the record. Legacy records (file_id 0) share
 /// the path identity with the DSes' path-nested storage and cannot be
+/// Per-VOLUME stripe geometry, chosen from StorageClass parameters at
+/// CreateVolume and fixed for the volume's life.
+///
+/// Distinct from [`PlacementRecord`], which is per FILE and is written
+/// when a file is first laid out. Geometry has to exist BEFORE any file
+/// does, so it cannot be derived from placements — and `PlacementRecord`
+/// carries no `stripe_width` to derive it from anyway.
+///
+/// Losing a row is not a data-correctness event: files already laid out
+/// keep their pinned placements. It changes only how files not yet
+/// created are striped, which is why the loss is worth a loud WARN
+/// rather than a refusal to serve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeGeometryRecord {
+    /// Volume directory name under the MDS export — the first component
+    /// of a `PlacementRecord::file_key`.
+    pub volume: String,
+    /// Stripe unit in bytes. Always resolved: never 0.
+    pub stripe_size: u64,
+    /// Max data servers a file in this volume is pinned across.
+    /// 0 = every active DS.
+    pub stripe_width: u32,
+}
+
 /// renamed safely.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementRecord {
@@ -362,6 +386,8 @@ pub enum WriteOp {
     DeleteLayout([u8; 16]),
     PutPlacement(PlacementRecord),
     DeletePlacement(String),
+    PutVolumeGeometry(VolumeGeometryRecord),
+    DeleteVolumeGeometry(String),
     PutFhMapping(FhMappingRecord),
     DeleteFhMapping(u64),
 }
@@ -377,6 +403,7 @@ pub enum WriteOpKey {
     Lock([u8; 12]),
     Layout([u8; 16]),
     Placement(String),
+    VolumeGeometry(String),
     FhMapping(u64),
 }
 
@@ -395,6 +422,8 @@ impl WriteOp {
             WriteOp::DeleteLayout(s) => WriteOpKey::Layout(*s),
             WriteOp::PutPlacement(p) => WriteOpKey::Placement(p.file_key.clone()),
             WriteOp::DeletePlacement(k) => WriteOpKey::Placement(k.clone()),
+            WriteOp::PutVolumeGeometry(g) => WriteOpKey::VolumeGeometry(g.volume.clone()),
+            WriteOp::DeleteVolumeGeometry(v) => WriteOpKey::VolumeGeometry(v.clone()),
             WriteOp::PutFhMapping(m) => WriteOpKey::FhMapping(m.file_id),
             WriteOp::DeleteFhMapping(id) => WriteOpKey::FhMapping(*id),
         }
@@ -415,6 +444,8 @@ impl WriteOp {
             WriteOp::DeleteLayout(_) => "layout.delete",
             WriteOp::PutPlacement(_) => "placement.put",
             WriteOp::DeletePlacement(_) => "placement.delete",
+            WriteOp::PutVolumeGeometry(_) => "volume_geometry.put",
+            WriteOp::DeleteVolumeGeometry(_) => "volume_geometry.delete",
             WriteOp::PutFhMapping(_) => "fh_mapping.put",
             WriteOp::DeleteFhMapping(_) => "fh_mapping.delete",
         }
@@ -496,6 +527,15 @@ pub trait StateBackend: Send + Sync {
     async fn get_placement(&self, file_key: &str) -> StateBackendResult<Option<PlacementRecord>>;
     async fn list_placements(&self) -> StateBackendResult<Vec<PlacementRecord>>;
     async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()>;
+
+    // Per-volume stripe geometry. `put` is awaited by CreateVolume
+    // rather than queued: a queued op has not reached the page cache
+    // when it returns, and SIGKILL (the dominant Kubernetes crash) would
+    // lose an acknowledged provision's geometry.
+    async fn put_volume_geometry(&self, g: &VolumeGeometryRecord) -> StateBackendResult<()>;
+    async fn get_volume_geometry(&self, volume: &str) -> StateBackendResult<Option<VolumeGeometryRecord>>;
+    async fn list_volume_geometry(&self) -> StateBackendResult<Vec<VolumeGeometryRecord>>;
+    async fn delete_volume_geometry(&self, volume: &str) -> StateBackendResult<()>;
 
     // id↔path mappings behind v2 (id-based) metadata filehandles.
     // put upserts on file_id (RENAME re-writes the path in place).

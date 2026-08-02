@@ -1466,6 +1466,24 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             // retries by name; a load-based pick could double-provision
             // on two shards). The pin travels in the returned volume_id
             // (`<name>~m<shard>`) so delete/expand route statelessly.
+            // StorageClass parameters. Unknown `pnfs.flint.io/*` keys are
+            // rejected rather than ignored: a typo would otherwise
+            // provision a healthy-looking volume with none of the
+            // geometry the author asked for, and stripe geometry is
+            // fixed at create — there is no later point at which the
+            // mistake becomes visible or fixable.
+            let vol_opts = match spdk_csi_driver::pnfs_csi::VolumeOptions::from_parameters(
+                &req.parameters,
+            ) {
+                Ok(o) => o,
+                Err(msg) => {
+                    eprintln!("❌ [pNFS] bad StorageClass parameters: {}", msg);
+                    return Err(tonic::Status::invalid_argument(format!(
+                        "pNFS StorageClass: {}", msg
+                    )));
+                }
+            };
+
             let (shard, shard_client) = pnfs.pick_for_create(&volume_id);
             println!(
                 "📡 [pNFS] Volume {} via MDS shard {} at {} ({} bytes)",
@@ -1475,7 +1493,10 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 size_bytes,
             );
 
-            let ctx = match shard_client.create_volume(&volume_id, size_bytes).await {
+            let ctx = match shard_client
+                .create_volume_with(&volume_id, size_bytes, &vol_opts)
+                .await
+            {
                 Ok(ctx) => ctx,
                 Err(e) => {
                     eprintln!("❌ [pNFS] CreateVolume failed: {}", e);
@@ -2633,11 +2654,56 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         // honest reason instead of falling through to the PV-name
         // lookup below, which would 404 (PV names lack the pin suffix)
         // and misreport the situation as "volume not found".
+        // pNFS volumes route to the MDS. Directory volumes — the current
+        // model — hold no per-volume size there, so this is a
+        // metadata-only acknowledgement; legacy sparse-file volumes are
+        // grown in place. This used to be an unconditional refusal,
+        // which left the PVC stuck in `Resizing` forever over an
+        // operation that had nothing to do: FAILED_PRECONDITION is final
+        // for external-resizer, so the condition never cleared and the
+        // only exit was editing the PVC back down.
+        //
+        // `node_expansion_required: false` — there is no filesystem on
+        // the node to grow; the mount is a kernel NFS client.
         if spdk_csi_driver::pnfs_csi::parse_shard_suffix(&volume_id).is_some() {
-            return Err(tonic::Status::failed_precondition(
-                "pNFS volumes do not support expansion yet — capacity is enforced \
-                 pool-side at the data servers (see the operator runbook's capacity \
-                 section)",
+            let pnfs = match self.pnfs_csi.as_ref() {
+                Some(p) => p,
+                None => {
+                    return Err(tonic::Status::failed_precondition(
+                        "volume looks like a pNFS volume but pNFS is not enabled \
+                         on this driver (FLINT_PNFS_MDS_ENDPOINT unset)",
+                    ));
+                }
+            };
+            // `route` also strips the `~m<shard>` pin — the MDS knows the
+            // volume by its bare name, and passing the pinned id would
+            // 404 on a name that has never existed on disk.
+            let (_shard, shard_client, bare) = match pnfs.route(&volume_id) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err(tonic::Status::failed_precondition(format!(
+                        "pNFS sharding: {}", e
+                    )));
+                }
+            };
+            let recorded = shard_client
+                .expand_volume(bare, new_size_bytes as u64)
+                .await
+                .map_err(|e| match e {
+                    spdk_csi_driver::pnfs_csi::PnfsError::Transport(m) =>
+                        tonic::Status::unavailable(format!("pNFS transport: {}", m)),
+                    other => tonic::Status::failed_precondition(other.to_string()),
+                })?;
+            println!(
+                "✅ [pNFS] Volume {} expanded to {} bytes (metadata-only; capacity is \
+                 pool-side at the data servers)",
+                volume_id, recorded,
+            );
+            return Ok(tonic::Response::new(
+                spdk_csi_driver::csi::ControllerExpandVolumeResponse {
+                    capacity_bytes: recorded as i64,
+                    node_expansion_required: false,
+                },
             ));
         }
 
@@ -3928,27 +3994,26 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             } else {
                 format!("{}:/", mds_ip)
             };
-            // Critical mount options:
-            //   minorversion=1   — NFSv4.1 required for pNFS layout types
-            //                       (kernel won't issue LAYOUTGET on v4.0).
-            //   nconnect=4       — 4 parallel TCP streams; this is the
-            //                       knob that turned the bench-sweep
-            //                       1.6× win into the steady-state
-            //                       result. See docs/decisions/0003-...
-            //   rsize=wsize=1M   — large blocks; NFS WRITE/READ negotiate
-            //                       up to wsize, so this caps per-RPC
-            //                       payload at 1 MiB which the bench
-            //                       proved is the sweet spot.
-            //   noresvport       — required when running unprivileged
-            //                       NFS (matches the existing rwx_nfs
-            //                       path's choice).
-            let mut mount_opts = format!(
-                "minorversion=1,proto=tcp,port={},nconnect=4,rsize=1048576,wsize=1048576,noresvport",
-                mds_port,
-            );
-            if readonly {
-                mount_opts.push_str(",ro");
-            }
+            // Operator-supplied options (StorageClass `mountOptions` →
+            // PV `spec.mountOptions` → VolumeCapability.mount.mount_flags).
+            // Honored so the minor version — and anything else here — is
+            // reachable without a driver rebuild. There was no override at
+            // all before: `mount_flags` was consulted nowhere on this path,
+            // so every knob below was effectively a compile-time constant.
+            let user_flags: Vec<String> = req
+                .volume_capability
+                .as_ref()
+                .and_then(|vc| vc.access_type.as_ref())
+                .and_then(|at| match at {
+                    spdk_csi_driver::csi::volume_capability::AccessType::Mount(m) => {
+                        Some(m.mount_flags.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            let mount_opts =
+                spdk_csi_driver::pnfs_csi::build_pnfs_mount_opts(mds_port, readonly, &user_flags);
 
             eprintln!("📋 [pNFS] mount -t nfs4 -o {} {} {}",
                       mount_opts, nfs_source, target_path);

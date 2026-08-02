@@ -137,6 +137,17 @@ pub struct MdsControlService {
     /// gRPC — before this field it stamped that gRPC port into the
     /// kernel mount options (found live on runn, 2026-07-06).
     nfs_port: u16,
+
+    /// Whether this MDS's state backend survives a restart.
+    ///
+    /// False under `state.backend: memory` — which is not hypothetical:
+    /// it is set in `deployments/pnfs-mds-config.yaml` and in half the
+    /// lima MDS configs. There, geometry would be accepted, acked, and
+    /// silently gone on the next restart, leaving one volume striped two
+    /// ways. Accepting a per-volume geometry we cannot keep is worse
+    /// than refusing it, so a request carrying geometry is refused
+    /// outright.
+    durable_state: bool,
 }
 
 impl MdsControlService {
@@ -151,6 +162,7 @@ impl MdsControlService {
         export_path: std::path::PathBuf,
         layout_manager: crate::pnfs::mds::layout::LayoutManager,
         nfs_port: u16,
+        durable_state: bool,
     ) -> Self {
         Self {
             device_registry,
@@ -159,6 +171,7 @@ impl MdsControlService {
             export_path,
             layout_manager,
             nfs_port,
+            durable_state,
         }
     }
 }
@@ -372,6 +385,28 @@ impl MdsControl for MdsControlService {
                 message: "volume_id must be non-empty and contain no '/' or NUL".into(),
                 nfs_port: self.nfs_port as u32,
                 directory: false,
+                effective_stripe_size: 0,
+                effective_stripe_width: 0,
+            }));
+        }
+
+        // Refuse geometry we cannot keep. Echoing 0/0 instead would make
+        // the driver blame image skew; naming the real cause here is what
+        // an operator can act on.
+        if !self.durable_state && (req.stripe_size != 0 || req.stripe_width != 0) {
+            return Ok(Response::new(CreateVolumeResponse {
+                created: false,
+                export_path: String::new(),
+                volume_file: String::new(),
+                message: "this MDS runs with state.backend: memory, which does not survive a \
+                          restart; per-volume stripe geometry would be silently lost. Switch the \
+                          MDS to state.backend: sqlite, or drop the pnfs.flint.io/stripeSize and \
+                          stripeWidth parameters from the StorageClass"
+                    .into(),
+                nfs_port: self.nfs_port as u32,
+                directory: false,
+                effective_stripe_size: 0,
+                effective_stripe_width: 0,
             }));
         }
 
@@ -384,9 +419,29 @@ impl MdsControl for MdsControlService {
         // refuse) so pre-existing PVs behave unchanged.
         if let Ok(meta) = std::fs::metadata(&file_path) {
             if meta.is_dir() {
+                // The CSI provisioner re-issues CreateVolume by name, so
+                // this is a ROUTINE path, not an exceptional one — and it
+                // must echo the geometry actually in force. Echoing zeros
+                // here made the driver's version-skew check fail the PVC
+                // with "this MDS does not support per-volume stripe
+                // geometry" on a volume that had been created perfectly
+                // well, permanently, on nothing worse than a retry.
+                //
+                // `ensure_` rather than a plain read: it also repairs a
+                // create that crashed between mkdir and recording the
+                // geometry. An existing record wins over the request, so a
+                // StorageClass edited between attempts surfaces as an echo
+                // mismatch instead of silently re-striping.
+                let geometry = self.layout_manager.ensure_volume_geometry(
+                    &req.volume_id,
+                    crate::pnfs::mds::layout::VolumeGeometry {
+                        stripe_size: req.stripe_size,
+                        stripe_width: req.stripe_width,
+                    },
+                ).await;
                 info!(
-                    "📦 CreateVolume: directory volume {} already exists",
-                    req.volume_id
+                    "📦 CreateVolume: directory volume {} already exists (stripe_size={} width={})",
+                    req.volume_id, geometry.stripe_size, geometry.stripe_width
                 );
                 return Ok(Response::new(CreateVolumeResponse {
                     created: true,
@@ -395,6 +450,8 @@ impl MdsControl for MdsControlService {
                     message: "already exists".into(),
                     nfs_port: self.nfs_port as u32,
                     directory: true,
+                    effective_stripe_size: geometry.stripe_size,
+                    effective_stripe_width: geometry.stripe_width,
                 }));
             }
             if meta.len() == req.size_bytes {
@@ -402,6 +459,13 @@ impl MdsControl for MdsControlService {
                     "📦 CreateVolume: legacy file volume {} already exists at correct size ({} bytes)",
                     req.volume_id, req.size_bytes
                 );
+                let geometry = self.layout_manager.ensure_volume_geometry(
+                    &req.volume_id,
+                    crate::pnfs::mds::layout::VolumeGeometry {
+                        stripe_size: req.stripe_size,
+                        stripe_width: req.stripe_width,
+                    },
+                ).await;
                 return Ok(Response::new(CreateVolumeResponse {
                     created: true,
                     export_path: export_str,
@@ -409,6 +473,8 @@ impl MdsControl for MdsControlService {
                     message: "already exists".into(),
                     nfs_port: self.nfs_port as u32,
                     directory: false,
+                    effective_stripe_size: geometry.stripe_size,
+                    effective_stripe_width: geometry.stripe_width,
                 }));
             }
             return Ok(Response::new(CreateVolumeResponse {
@@ -421,6 +487,8 @@ impl MdsControl for MdsControlService {
                 ),
                 nfs_port: self.nfs_port as u32,
                 directory: false,
+                effective_stripe_size: 0,
+                effective_stripe_width: 0,
             }));
         }
 
@@ -436,6 +504,8 @@ impl MdsControl for MdsControlService {
                 message: format!("export dir not writable: {}", e),
                 nfs_port: self.nfs_port as u32,
                 directory: false,
+                effective_stripe_size: 0,
+                effective_stripe_width: 0,
             }));
         }
 
@@ -448,20 +518,60 @@ impl MdsControl for MdsControlService {
                 message: format!("create dir: {}", e),
                 nfs_port: self.nfs_port as u32,
                 directory: false,
+                effective_stripe_size: 0,
+                effective_stripe_width: 0,
             }));
         }
-        // World-writable like the export rigs: the consuming pod's uid
-        // is arbitrary (Spark executors, app containers) and NFS has
-        // no idmapping story here. The dir, not the export, is the
-        // isolation boundary.
+        // Directory ownership and mode.
+        //
+        // The historical behaviour was an unconditional 0777 — the
+        // consuming pod's uid is arbitrary (Spark executors, app
+        // containers) and NFS has no idmapping story here, so
+        // world-writable was the only thing guaranteed to work. It is
+        // also the loosest possible setting, and gives a PVC author no
+        // way to ask for anything tighter.
+        //
+        // `dir_gid` + `dir_mode` (StorageClass `pnfs.flint.io/dirGid`
+        // and `dirMode`) let a workload run with a `fsGroup` instead:
+        // chgrp the volume root to that gid, set the mode, and set the
+        // setgid bit so files created inside inherit the group. Without
+        // setgid, a 0770 directory would be writable by the group but
+        // every file inside would land in the creator's primary group
+        // and be unreadable by the volume's other consumers.
+        //
+        // Defaults preserve 0777 with no chgrp, so existing volumes and
+        // classes are unaffected.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let mode = if req.dir_mode != 0 { req.dir_mode } else { 0o777 };
+            let mode = if req.dir_gid != 0 { mode | 0o2000 } else { mode };
+            if req.dir_gid != 0 {
+                if let Err(e) = std::os::unix::fs::chown(&file_path, None, Some(req.dir_gid)) {
+                    warn!(
+                        "CreateVolume: chgrp {:?} to gid {} failed: {} — \
+                         a pod relying on fsGroup will not be able to write",
+                        file_path, req.dir_gid, e
+                    );
+                }
+            }
             let _ = std::fs::set_permissions(
                 &file_path,
-                std::fs::Permissions::from_mode(0o777),
+                std::fs::Permissions::from_mode(mode),
             );
         }
+
+        // Record the volume's stripe geometry before returning, so the
+        // very first file created in it is placed correctly. Echoed back
+        // so the caller can detect a driver/MDS version skew instead of
+        // silently getting the default.
+        let geometry = self.layout_manager.set_volume_geometry(
+            &req.volume_id,
+            crate::pnfs::mds::layout::VolumeGeometry {
+                stripe_size: req.stripe_size,
+                stripe_width: req.stripe_width,
+            },
+        ).await;
 
         info!(
             "📦 CreateVolume: created directory volume {} at {:?} ({} bytes requested, pool-enforced)",
@@ -474,6 +584,99 @@ impl MdsControl for MdsControlService {
             message: String::new(),
             nfs_port: self.nfs_port as u32,
             directory: true,
+            effective_stripe_size: geometry.stripe_size,
+            effective_stripe_width: geometry.stripe_width,
+        }))
+    }
+
+    /// Grow a volume's recorded capacity.
+    ///
+    /// Directory volumes — the current model — hold no per-volume size on
+    /// the MDS at all: `CreateVolume` logs the requested bytes as
+    /// "pool-enforced" and stores nothing. So expansion is genuinely a
+    /// metadata-only acknowledgement, and refusing it (as the driver did
+    /// before) left a PVC permanently wedged in `Resizing` for an
+    /// operation that had nothing to do. Legacy sparse-file volumes DO
+    /// carry a real length and are grown in place.
+    ///
+    /// Shrinking is refused in both shapes: CSI forbids it, and for a
+    /// legacy file it would discard data.
+    async fn expand_volume(
+        &self,
+        request: Request<ExpandVolumeRequest>,
+    ) -> Result<Response<ExpandVolumeResponse>, Status> {
+        let req = request.into_inner();
+        if req.volume_id.is_empty()
+            || req.volume_id.contains('/')
+            || req.volume_id.contains('\0')
+        {
+            return Ok(Response::new(ExpandVolumeResponse {
+                expanded: false,
+                size_bytes: 0,
+                message: "volume_id must be non-empty and contain no '/' or NUL".into(),
+            }));
+        }
+
+        let path = self.export_path.join(&req.volume_id);
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(Response::new(ExpandVolumeResponse {
+                    expanded: false,
+                    size_bytes: 0,
+                    message: format!("volume {} not found: {}", req.volume_id, e),
+                }));
+            }
+        };
+
+        if meta.is_dir() {
+            info!(
+                "📏 ExpandVolume: directory volume {} → {} bytes (metadata-only; \
+                 capacity is pool-side at the data servers)",
+                req.volume_id, req.size_bytes
+            );
+            return Ok(Response::new(ExpandVolumeResponse {
+                expanded: true,
+                size_bytes: req.size_bytes,
+                message: String::new(),
+            }));
+        }
+
+        if req.size_bytes < meta.len() {
+            return Ok(Response::new(ExpandVolumeResponse {
+                expanded: false,
+                size_bytes: meta.len(),
+                message: format!(
+                    "cannot shrink legacy file volume {} from {} to {} bytes",
+                    req.volume_id,
+                    meta.len(),
+                    req.size_bytes
+                ),
+            }));
+        }
+        if req.size_bytes > meta.len() {
+            if let Err(e) = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|f| f.set_len(req.size_bytes))
+            {
+                return Ok(Response::new(ExpandVolumeResponse {
+                    expanded: false,
+                    size_bytes: meta.len(),
+                    message: format!("grow {}: {}", req.volume_id, e),
+                }));
+            }
+            info!(
+                "📏 ExpandVolume: legacy file volume {} grown {} → {} bytes",
+                req.volume_id,
+                meta.len(),
+                req.size_bytes
+            );
+        }
+        Ok(Response::new(ExpandVolumeResponse {
+            expanded: true,
+            size_bytes: req.size_bytes,
+            message: String::new(),
         }))
     }
 
@@ -516,6 +719,10 @@ impl MdsControl for MdsControlService {
                     mgr.enqueue_stripe_cleanup(&p, &req.volume_id);
                 }
             }
+            // Geometry outlives nothing: a volume re-created at the same
+            // name must get the new StorageClass's geometry, not inherit
+            // the old one the way a stale placement pin would.
+            mgr.forget_volume_geometry(&req.volume_id);
         };
 
         let removed = match std::fs::symlink_metadata(&file_path) {
@@ -582,6 +789,273 @@ mod create_volume_tests {
     use super::*;
     use crate::pnfs::mds::device::DeviceRegistry;
 
+    fn cvreq(id: &str, size: u64) -> CreateVolumeRequest {
+        CreateVolumeRequest {
+            volume_id: id.into(),
+            size_bytes: size,
+            stripe_size: 0,
+            stripe_width: 0,
+            dir_gid: 0,
+            dir_mode: 0,
+        }
+    }
+
+    /// Expanding a directory volume must SUCCEED. It stores no
+    /// per-volume size — capacity is pool-side at the data servers — so
+    /// there is genuinely nothing to do, and refusing left the PVC stuck
+    /// in `Resizing` forever: FAILED_PRECONDITION is final for
+    /// external-resizer, so the condition never cleared.
+    #[tokio::test]
+    async fn expanding_a_directory_volume_is_a_metadata_only_success() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        assert!(s.create_volume(Request::new(cvreq("vol", 1 << 20))).await.unwrap().into_inner().created);
+
+        let r = s
+            .expand_volume(Request::new(ExpandVolumeRequest {
+                volume_id: "vol".into(),
+                size_bytes: 100 << 20,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.expanded, "{}", r.message);
+        assert_eq!(r.size_bytes, 100 << 20);
+    }
+
+    /// A legacy sparse-file volume DOES carry a real length, so expand
+    /// must actually grow the file — reporting success without growing
+    /// it would leave writes past the old EOF failing.
+    #[tokio::test]
+    async fn expanding_a_legacy_file_volume_grows_the_file() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        let path = d.path().join("legacy");
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+
+        let r = s
+            .expand_volume(Request::new(ExpandVolumeRequest {
+                volume_id: "legacy".into(),
+                size_bytes: 8192,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.expanded, "{}", r.message);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8192);
+    }
+
+    #[tokio::test]
+    async fn shrinking_a_legacy_file_volume_is_refused() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        std::fs::write(d.path().join("legacy"), vec![0u8; 8192]).unwrap();
+
+        let r = s
+            .expand_volume(Request::new(ExpandVolumeRequest {
+                volume_id: "legacy".into(),
+                size_bytes: 4096,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.expanded);
+        assert!(r.message.contains("cannot shrink"), "{}", r.message);
+        assert_eq!(std::fs::metadata(d.path().join("legacy")).unwrap().len(), 8192);
+    }
+
+    #[tokio::test]
+    async fn expanding_an_absent_volume_is_refused() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        let r = s
+            .expand_volume(Request::new(ExpandVolumeRequest {
+                volume_id: "nope".into(),
+                size_bytes: 4096,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.expanded);
+        assert!(r.message.contains("not found"), "{}", r.message);
+    }
+
+    /// A path-traversing volume_id must be refused on the expand verb
+    /// too — the create verb guards it, and an unguarded sibling is how
+    /// that kind of check gets bypassed.
+    #[tokio::test]
+    async fn expand_refuses_a_path_traversing_volume_id() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        for bad in ["../escape", "a/b", ""] {
+            let r = s
+                .expand_volume(Request::new(ExpandVolumeRequest {
+                    volume_id: bad.into(),
+                    size_bytes: 4096,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(!r.expanded, "{bad} should be refused");
+        }
+    }
+
+    /// The default stays 0777 with no group — every volume provisioned
+    /// before dirGid/dirMode existed depends on it.
+    #[tokio::test]
+    async fn the_default_volume_directory_is_world_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        assert!(s.create_volume(Request::new(cvreq("v", 1 << 20))).await.unwrap().into_inner().created);
+        let mode = std::fs::metadata(d.path().join("v")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o777, "default mode changed: {:o}", mode);
+    }
+
+    /// Asking for a group sets the setgid bit as well as the mode.
+    /// Without setgid a 0770 volume is group-writable but every file
+    /// created inside lands in its creator's primary group, unreadable
+    /// to the volume's other consumers — which is the whole point of
+    /// pointing an fsGroup at a shared volume.
+    #[tokio::test]
+    async fn a_requested_group_sets_the_setgid_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        let gid = nix_current_gid();
+        let mut req = cvreq("g", 1 << 20);
+        req.dir_gid = gid;
+        req.dir_mode = 0o770;
+        let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
+        assert!(r.created, "{}", r.message);
+
+        let mode = std::fs::metadata(d.path().join("g")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o770, "mode not applied: {:o}", mode);
+        assert_eq!(mode & 0o2000, 0o2000, "setgid not set: {:o}", mode);
+    }
+
+    fn svc_nondurable(export: &std::path::Path) -> MdsControlService {
+        let registry = Arc::new(DeviceRegistry::new());
+        let layout_manager = crate::pnfs::mds::layout::LayoutManager::new(
+            Arc::clone(&registry),
+            crate::pnfs::config::LayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            Arc::new(crate::state_backend::MemoryBackend::new()),
+        );
+        MdsControlService::new(
+            registry,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            export.to_path_buf(),
+            layout_manager,
+            2049,
+            false,
+        )
+    }
+
+    /// An MDS whose state does not survive a restart must REFUSE
+    /// geometry rather than accept and lose it. `state.backend: memory`
+    /// is not hypothetical — it is set in deployments/pnfs-mds-config.yaml
+    /// and half the lima MDS configs. Accepting there would ack a
+    /// provision, then silently revert to the fleet default on the next
+    /// restart, leaving one volume striped two ways.
+    #[tokio::test]
+    async fn a_non_durable_mds_refuses_geometry() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc_nondurable(d.path());
+        let mut req = cvreq("v", 1 << 20);
+        req.stripe_size = 1 << 20;
+
+        let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
+        assert!(!r.created, "must refuse");
+        assert!(r.message.contains("state.backend: memory"), "{}", r.message);
+        assert!(!d.path().join("v").exists(), "nothing should have been created");
+    }
+
+    /// ...but a request WITHOUT geometry must still work there, or every
+    /// existing dev rig and lima config breaks.
+    #[tokio::test]
+    async fn a_non_durable_mds_still_serves_volumes_without_geometry() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc_nondurable(d.path());
+        let r = s.create_volume(Request::new(cvreq("plain", 1 << 20))).await.unwrap().into_inner();
+        assert!(r.created, "{}", r.message);
+        assert!(d.path().join("plain").is_dir());
+    }
+
+    /// An idempotent retry — which the CSI provisioner does routinely —
+    /// must echo the geometry ACTUALLY IN FORCE, not zeros. Echoing zeros
+    /// made the driver read "this MDS is too old", failing a PVC for a
+    /// volume that had been created perfectly well. Regression test for a
+    /// bug introduced by patching every response literal alike, without
+    /// distinguishing the success paths from the failure paths.
+    #[tokio::test]
+    async fn an_idempotent_retry_echoes_the_recorded_geometry() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        let mut req = cvreq("retried", 1 << 20);
+        req.stripe_size = 1 << 20;
+        req.stripe_width = 2;
+
+        let first = s.create_volume(Request::new(req.clone())).await.unwrap().into_inner();
+        assert!(first.created);
+        assert_eq!(first.effective_stripe_size, 1 << 20);
+
+        let again = s.create_volume(Request::new(req)).await.unwrap().into_inner();
+        assert!(again.created, "retry must succeed");
+        assert_eq!(again.message, "already exists");
+        assert_eq!(again.effective_stripe_size, 1 << 20, "retry echoed the wrong stripe size");
+        assert_eq!(again.effective_stripe_width, 2, "retry echoed the wrong stripe width");
+    }
+
+    /// A retry on a volume created BEFORE geometry existed must echo the
+    /// MDS default, not zeros — otherwise every pre-existing pNFS PVC
+    /// fails its next provisioner retry after the upgrade.
+    #[tokio::test]
+    async fn a_retry_on_a_volume_without_geometry_echoes_the_default() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        // Simulate a pre-upgrade volume: the directory exists, no
+        // geometry was ever recorded for it.
+        std::fs::create_dir(d.path().join("old")).unwrap();
+
+        let r = s.create_volume(Request::new(cvreq("old", 1 << 20))).await.unwrap().into_inner();
+        assert!(r.created);
+        assert_eq!(r.effective_stripe_size, 8 * 1024 * 1024, "must echo the fleet default");
+    }
+
+    /// The geometry the MDS records must be echoed back, so the driver
+    /// can tell "recorded what I asked" from "silently ignored it".
+    #[tokio::test]
+    async fn create_volume_echoes_the_geometry_it_recorded() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        let mut req = cvreq("geo", 1 << 20);
+        req.stripe_size = 1 << 20;
+        req.stripe_width = 3;
+        let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
+        assert!(r.created, "{}", r.message);
+        assert_eq!(r.effective_stripe_size, 1 << 20);
+        assert_eq!(r.effective_stripe_width, 3);
+    }
+
+    /// An unset stripe size must be echoed as the MDS's DEFAULT, not as
+    /// 0 — the driver reads a zero echo as "this MDS is too old".
+    #[tokio::test]
+    async fn an_unset_stripe_size_echoes_the_mds_default() {
+        let d = tempfile::TempDir::new().unwrap();
+        let s = svc(d.path());
+        let r = s.create_volume(Request::new(cvreq("plain", 1 << 20))).await.unwrap().into_inner();
+        assert_eq!(r.effective_stripe_size, 8 * 1024 * 1024);
+    }
+
+    /// The caller's real gid, so the chgrp in create_volume can succeed
+    /// without root. Using an arbitrary gid would make the test assert
+    /// on a chgrp that always fails.
+    fn nix_current_gid() -> u32 {
+        unsafe { libc::getgid() }
+    }
+
     fn svc(export: &std::path::Path) -> MdsControlService {
         let registry = Arc::new(DeviceRegistry::new());
         let layout_manager = crate::pnfs::mds::layout::LayoutManager::new(
@@ -597,6 +1071,7 @@ mod create_volume_tests {
             export.to_path_buf(),
             layout_manager,
             2049,
+            true,
         )
     }
 
@@ -607,8 +1082,7 @@ mod create_volume_tests {
 
         let r = s.create_volume(Request::new(CreateVolumeRequest {
             volume_id: "pvc-abc".into(),
-            size_bytes: 1024 * 1024,
-        })).await.unwrap().into_inner();
+            size_bytes: 1024 * 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
         assert!(r.created, "create should succeed: {}", r.message);
         assert_eq!(r.volume_file, "pvc-abc");
         assert!(r.directory, "new volumes are directory subtrees");
@@ -626,7 +1100,7 @@ mod create_volume_tests {
     async fn create_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let s = svc(dir.path());
-        let req = CreateVolumeRequest { volume_id: "v1".into(), size_bytes: 4096 };
+        let req = CreateVolumeRequest { volume_id: "v1".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, };
         assert!(s.create_volume(Request::new(req.clone())).await.unwrap().into_inner().created);
         let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
         assert!(r.created, "second call should also succeed");
@@ -647,14 +1121,12 @@ mod create_volume_tests {
         f.set_len(4096).unwrap();
 
         let r = s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "v-legacy".into(), size_bytes: 4096,
-        })).await.unwrap().into_inner();
+            volume_id: "v-legacy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
         assert!(r.created, "same-size re-create of a legacy file: {}", r.message);
         assert!(!r.directory, "legacy volume must NOT be advertised as a directory");
 
         let r = s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "v-legacy".into(), size_bytes: 8192,
-        })).await.unwrap().into_inner();
+            volume_id: "v-legacy".into(), size_bytes: 8192, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
         assert!(!r.created);
         assert!(r.message.contains("refusing to resize"));
 
@@ -675,8 +1147,7 @@ mod create_volume_tests {
 
         for v in ["vol", "volume2"] {
             let r = s.create_volume(Request::new(CreateVolumeRequest {
-                volume_id: v.into(), size_bytes: 4096,
-            })).await.unwrap().into_inner();
+                volume_id: v.into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
             assert!(r.created);
         }
         let rec = |key: &str| crate::state_backend::PlacementRecord {
@@ -714,8 +1185,7 @@ mod create_volume_tests {
         let dir = tempfile::tempdir().unwrap();
         let s = svc(dir.path());
         s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "busy".into(), size_bytes: 4096,
-        })).await.unwrap();
+            volume_id: "busy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap();
         std::fs::create_dir_all(dir.path().join("busy/deep/tree")).unwrap();
         std::fs::write(dir.path().join("busy/deep/tree/f.bin"), b"data").unwrap();
 
@@ -743,8 +1213,7 @@ mod create_volume_tests {
         let s = svc(dir.path());
         for bad in &["", "../escape", "a/b", "with\0nul"] {
             let r = s.create_volume(Request::new(CreateVolumeRequest {
-                volume_id: (*bad).into(), size_bytes: 1024,
-            })).await.unwrap().into_inner();
+                volume_id: (*bad).into(), size_bytes: 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
             assert!(!r.created, "should reject {:?}", bad);
         }
     }

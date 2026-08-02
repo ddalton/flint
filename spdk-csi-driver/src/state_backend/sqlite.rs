@@ -66,6 +66,7 @@
 use super::{
     CachedCreateSessionResRecord, ClientRecord, FhMappingRecord, IoModeRecord, LayoutRecord,
     LayoutSegmentRecord, LockRecord, PlacementRecord, SessionRecord, StateBackend,
+    VolumeGeometryRecord,
     StateBackendError, StateBackendResult, StateIdRecord, StateTypeRecord, WriteOp, WriteOpKey,
 };
 use async_trait::async_trait;
@@ -568,6 +569,18 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
             conn.prepare_cached("DELETE FROM file_placement WHERE file_key = ?1")?
                 .execute(params![k])?;
         }
+        WriteOp::PutVolumeGeometry(g) => {
+            conn.prepare_cached(
+                "INSERT OR REPLACE INTO volume_geometry
+                   (volume, stripe_size, stripe_width)
+                 VALUES (?1, ?2, ?3)",
+            )?
+            .execute(params![g.volume, g.stripe_size as i64, g.stripe_width as i64])?;
+        }
+        WriteOp::DeleteVolumeGeometry(v) => {
+            conn.prepare_cached("DELETE FROM volume_geometry WHERE volume = ?1")?
+                .execute(params![v])?;
+        }
         WriteOp::PutFhMapping(m) => {
             conn.prepare_cached("INSERT OR REPLACE INTO fh_mappings (file_id, path) VALUES (?1, ?2)")?
                 .execute(params![u64_to_i64(m.file_id), m.path])?;
@@ -945,6 +958,46 @@ impl StateBackend for SqliteBackend {
         rows.into_iter().collect()
     }
 
+    async fn put_volume_geometry(&self, g: &VolumeGeometryRecord) -> StateBackendResult<()> {
+        self.write(WriteOp::PutVolumeGeometry(g.clone())).await
+    }
+
+    async fn get_volume_geometry(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Option<VolumeGeometryRecord>> {
+        let key = volume.to_string();
+        let row = self
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT volume, stripe_size, stripe_width
+                     FROM volume_geometry WHERE volume = ?1",
+                    params![key],
+                    decode_volume_geometry_row,
+                )
+                .optional()
+            })
+            .await?;
+        row.transpose()
+    }
+
+    async fn list_volume_geometry(&self) -> StateBackendResult<Vec<VolumeGeometryRecord>> {
+        let rows = self
+            .with_conn(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT volume, stripe_size, stripe_width FROM volume_geometry")?;
+                let rows: rusqlite::Result<Vec<_>> =
+                    stmt.query_map([], decode_volume_geometry_row)?.collect();
+                rows
+            })
+            .await?;
+        rows.into_iter().collect()
+    }
+
+    async fn delete_volume_geometry(&self, volume: &str) -> StateBackendResult<()> {
+        self.write(WriteOp::DeleteVolumeGeometry(volume.to_string())).await
+    }
+
     async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()> {
         self.write(WriteOp::DeletePlacement(file_key.to_string())).await
     }
@@ -1151,6 +1204,16 @@ fn decode_layout_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<L
     })())
 }
 
+fn decode_volume_geometry_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StateBackendResult<VolumeGeometryRecord>> {
+    Ok(Ok(VolumeGeometryRecord {
+        volume: row.get(0)?,
+        stripe_size: row.get::<_, i64>(1)? as u64,
+        stripe_width: row.get::<_, i64>(2)? as u32,
+    }))
+}
+
 fn decode_placement_row(
     r: &rusqlite::Row,
 ) -> rusqlite::Result<StateBackendResult<PlacementRecord>> {
@@ -1265,6 +1328,12 @@ CREATE TABLE IF NOT EXISTS layouts (
 -- re-maps existing data when the fleet changes.
 -- device_ids is an ordered JSON array; order is load-bearing (it IS
 -- the stripe map). Keyed by export-relative path.
+CREATE TABLE IF NOT EXISTS volume_geometry (
+    volume TEXT PRIMARY KEY,
+    stripe_size INTEGER NOT NULL,
+    stripe_width INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS file_placement (
     file_key TEXT PRIMARY KEY,
     stripe_size INTEGER NOT NULL,
@@ -1361,6 +1430,82 @@ mod tests {
         // Re-opening one we wrote ourselves is fine.
         drop(b);
         SqliteBackend::open(&fresh).expect("re-open our own database");
+    }
+
+    /// The whole cost argument for putting geometry in the state backend
+    /// rests on this: a NEW table needs no schema-version bump, because
+    /// `execute_batch(SCHEMA_SQL)` runs BEFORE the version check and
+    /// every table is `CREATE TABLE IF NOT EXISTS`. Open a DB written by
+    /// a build that had no `volume_geometry` table and confirm it gains
+    /// the table rather than failing the version canary.
+    ///
+    /// If this ever fails, adding a record type has become a fleet-wide
+    /// migration and the design decision needs revisiting.
+    #[tokio::test]
+    async fn a_db_written_before_volume_geometry_existed_still_opens() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.db");
+
+        // Simulate the older build: same schema, minus the new table.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let older: String = SCHEMA_SQL
+                .split("CREATE TABLE IF NOT EXISTS volume_geometry")
+                .next()
+                .unwrap()
+                .to_string();
+            conn.execute_batch(&older).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, ?1)",
+                rusqlite::params![SCHEMA_VERSION],
+            )
+            .unwrap();
+        }
+
+        let b = SqliteBackend::open(&path).expect("a pre-geometry DB must still open");
+        assert!(
+            b.list_volume_geometry().await.unwrap().is_empty(),
+            "the table should have been created empty"
+        );
+        b.put_volume_geometry(&VolumeGeometryRecord {
+            volume: "v".into(),
+            stripe_size: 1 << 20,
+            stripe_width: 2,
+        })
+        .await
+        .unwrap();
+        b.flush().await.unwrap();
+        let got = b.get_volume_geometry("v").await.unwrap().expect("row must persist");
+        assert_eq!(got.stripe_size, 1 << 20);
+        assert_eq!(got.stripe_width, 2);
+    }
+
+    /// Geometry must survive reopening the same file — the whole point.
+    #[tokio::test]
+    async fn volume_geometry_survives_reopen() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let b = SqliteBackend::open(&path).unwrap();
+            b.put_volume_geometry(&VolumeGeometryRecord {
+                volume: "vol".into(),
+                stripe_size: 4 << 20,
+                stripe_width: 3,
+            })
+            .await
+            .unwrap();
+            b.flush().await.unwrap();
+        }
+        let b = SqliteBackend::open(&path).unwrap();
+        let all = b.list_volume_geometry().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].volume, "vol");
+        assert_eq!(all[0].stripe_size, 4 << 20);
+        assert_eq!(all[0].stripe_width, 3);
+
+        b.delete_volume_geometry("vol").await.unwrap();
+        b.flush().await.unwrap();
+        assert!(b.get_volume_geometry("vol").await.unwrap().is_none());
     }
 
     #[tokio::test]

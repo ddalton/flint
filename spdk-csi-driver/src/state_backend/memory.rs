@@ -13,6 +13,7 @@
 
 use super::{
     ClientRecord, FhMappingRecord, LayoutRecord, LockRecord, PlacementRecord, SessionRecord,
+    VolumeGeometryRecord,
     StateBackend, StateBackendResult, StateIdRecord, WriteOp,
 };
 use async_trait::async_trait;
@@ -30,6 +31,7 @@ pub struct MemoryBackend {
     locks: DashMap<[u8; 12], LockRecord>,
     layouts: DashMap<[u8; 16], LayoutRecord>,
     placements: DashMap<String, PlacementRecord>,
+    volume_geometry: DashMap<String, VolumeGeometryRecord>,
     fh_mappings: DashMap<u64, FhMappingRecord>,
     instance_counter: AtomicU64,
     /// Lazily-initialised per-deployment server id. `OnceLock` makes
@@ -85,6 +87,12 @@ impl StateBackend for MemoryBackend {
             }
             WriteOp::DeletePlacement(k) => {
                 self.placements.remove(&k);
+            }
+            WriteOp::PutVolumeGeometry(g) => {
+                self.volume_geometry.insert(g.volume.clone(), g);
+            }
+            WriteOp::DeleteVolumeGeometry(v) => {
+                self.volume_geometry.remove(&v);
             }
             WriteOp::PutFhMapping(m) => {
                 self.fh_mappings.insert(m.file_id, m);
@@ -200,6 +208,27 @@ impl StateBackend for MemoryBackend {
 
     async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()> {
         self.placements.remove(file_key);
+        Ok(())
+    }
+
+    async fn put_volume_geometry(&self, g: &VolumeGeometryRecord) -> StateBackendResult<()> {
+        self.volume_geometry.insert(g.volume.clone(), g.clone());
+        Ok(())
+    }
+
+    async fn get_volume_geometry(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Option<VolumeGeometryRecord>> {
+        Ok(self.volume_geometry.get(volume).map(|r| r.clone()))
+    }
+
+    async fn list_volume_geometry(&self) -> StateBackendResult<Vec<VolumeGeometryRecord>> {
+        Ok(self.volume_geometry.iter().map(|r| r.clone()).collect())
+    }
+
+    async fn delete_volume_geometry(&self, volume: &str) -> StateBackendResult<()> {
+        self.volume_geometry.remove(volume);
         Ok(())
     }
 

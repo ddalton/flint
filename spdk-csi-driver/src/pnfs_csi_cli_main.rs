@@ -22,6 +22,7 @@ fn usage() -> ! {
     eprintln!(
         "usage:\n  \
          pnfs-csi-cli create --endpoint <host:port> --volume-id <id> --size-bytes <n>\n  \
+           [--stripe-size <bytes>] [--stripe-width <n>] [--dir-gid <gid>] [--dir-mode <octal>]\n  \
          pnfs-csi-cli delete --endpoint <host:port> --volume-id <id>"
     );
     std::process::exit(2);
@@ -39,6 +40,7 @@ async fn main() -> ExitCode {
     let mut endpoint: Option<String> = None;
     let mut volume_id: Option<String> = None;
     let mut size_bytes: Option<u64> = None;
+    let mut opts = spdk_csi_driver::pnfs_csi::VolumeOptions::default();
     let mut i = 2;
     while i < args.len() {
         let key = &args[i];
@@ -50,6 +52,13 @@ async fn main() -> ExitCode {
             "--endpoint" => endpoint = Some(val),
             "--volume-id" => volume_id = Some(val),
             "--size-bytes" => size_bytes = val.parse::<u64>().ok(),
+            "--stripe-size" => opts.stripe_size = val.parse::<u64>().unwrap_or_else(|_| usage()),
+            "--stripe-width" => opts.stripe_width = val.parse::<u32>().unwrap_or_else(|_| usage()),
+            "--dir-gid" => opts.dir_gid = val.parse::<u32>().unwrap_or_else(|_| usage()),
+            "--dir-mode" => {
+                opts.dir_mode =
+                    u32::from_str_radix(val.trim_start_matches("0o"), 8).unwrap_or_else(|_| usage())
+            }
             _ => usage(),
         }
         i += 2;
@@ -62,7 +71,7 @@ async fn main() -> ExitCode {
     let result: Result<(), PnfsError> = match args[1].as_str() {
         "create" => {
             let size = size_bytes.unwrap_or_else(|| usage());
-            match pnfs.create_volume(&volume_id, size).await {
+            match pnfs.create_volume_with(&volume_id, size, &opts).await {
                 Ok(ctx) => {
                     // Single-line JSON for easy `jq -r` consumption.
                     let pairs: Vec<String> = ctx.iter()
