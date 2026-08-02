@@ -38,18 +38,26 @@ use std::collections::HashSet;
 pub struct ReconnectPolicy {
     pub ctrl_loss_tmo_secs: i64,
     pub reconnect_delay_secs: u64,
+    /// Seconds until QUEUED I/O starts failing while reconnect continues;
+    /// 0 disables. See [`ReconnectPolicy::fast_io_fail_sysfs`] for why this
+    /// is applied through sysfs rather than as a connect flag.
+    pub fast_io_fail_tmo_secs: u64,
 }
 
 impl Default for ReconnectPolicy {
     fn default() -> Self {
-        // 30 min of reconnecting at 5s intervals (~360 attempts).
-        Self { ctrl_loss_tmo_secs: 1800, reconnect_delay_secs: 5 }
+        // 30 min of reconnecting at 5s intervals (~360 attempts), with I/O
+        // failing after 20s. 20s matches LegTransportPolicy: long enough to
+        // ride a target restart + export reconcile (#1), short enough that a
+        // consumer faults instead of parking in D-state.
+        Self { ctrl_loss_tmo_secs: 1800, reconnect_delay_secs: 5, fast_io_fail_tmo_secs: 20 }
     }
 }
 
 impl ReconnectPolicy {
-    /// Reads `FLINT_NVME_CTRL_LOSS_TMO` (seconds, or `-1` for infinite) and
-    /// `FLINT_NVME_RECONNECT_DELAY` (seconds); unset/garbage → the defaults.
+    /// Reads `FLINT_NVME_CTRL_LOSS_TMO` (seconds, or `-1` for infinite),
+    /// `FLINT_NVME_RECONNECT_DELAY` and `FLINT_NVME_FAST_IO_FAIL` (seconds,
+    /// `0` to disable); unset/garbage → the defaults.
     pub fn from_env() -> Self {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
@@ -66,10 +74,19 @@ impl ReconnectPolicy {
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|&v| v >= 1)
             .unwrap_or(d.reconnect_delay_secs);
-        Self { ctrl_loss_tmo_secs, reconnect_delay_secs }
+        let fast_io_fail_tmo_secs = get("FLINT_NVME_FAST_IO_FAIL")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(d.fast_io_fail_tmo_secs);
+        Self { ctrl_loss_tmo_secs, reconnect_delay_secs, fast_io_fail_tmo_secs }
     }
 
     /// The `nvme connect` argument fragment for this policy.
+    ///
+    /// NOTE fast-io-fail is deliberately NOT here. `nvme connect` in the
+    /// shipped image (nvme-cli 2.8) exposes only `--keep-alive-tmo` and
+    /// `--ctrl-loss-tmo` — verified by running `nvme connect --help` inside
+    /// the driver container on a live node. Passing an unknown flag would
+    /// fail EVERY attach, so it goes through sysfs after connect instead.
     pub fn connect_args(&self) -> Vec<String> {
         vec![
             "--ctrl-loss-tmo".to_string(),
@@ -77,6 +94,37 @@ impl ReconnectPolicy {
             "--reconnect-delay".to_string(),
             self.reconnect_delay_secs.to_string(),
         ]
+    }
+
+    /// The value to write to `/sys/class/nvme/<ctrl>/fast_io_fail_tmo`, or
+    /// `None` when it must not be written.
+    ///
+    /// WHY THIS EXISTS (runay, 2026-08-02). F42 bounded queued I/O on
+    /// `LegTransportPolicy` — the SPDK-side attach used for raid LEGS. The
+    /// KERNEL initiator that a consumer's filesystem sits on comes from this
+    /// policy, and it emitted no fast-io-fail at all. Measured on a live
+    /// node: `ctrl_loss_tmo=1800 fast_io_fail_tmo=off`. So when spdk-tgt
+    /// died under a mounted volume the controller went to `connecting` and
+    /// QUEUED I/O for thirty minutes rather than failing it — `umount` parked
+    /// in `blkdev_issue_flush` in D state, the pod could not terminate, its
+    /// RWO volume could not detach, and `reboot` itself hung in `ksys_sync`
+    /// on the same superblock. Leg I/O was bounded; consumer I/O was not.
+    ///
+    /// Refuses the combinations the kernel rejects, because a rejected write
+    /// is silent and would leave the old `off` in place while looking fixed:
+    /// the timeout must be positive, and with a finite `ctrl_loss_tmo` it
+    /// must not exceed it (failing I/O later than the controller gives up is
+    /// meaningless).
+    pub fn fast_io_fail_sysfs(&self) -> Option<String> {
+        if self.fast_io_fail_tmo_secs == 0 {
+            return None;
+        }
+        if self.ctrl_loss_tmo_secs >= 0
+            && self.fast_io_fail_tmo_secs > self.ctrl_loss_tmo_secs as u64
+        {
+            return None;
+        }
+        Some(self.fast_io_fail_tmo_secs.to_string())
     }
 }
 
@@ -286,6 +334,81 @@ mod tests {
             p.connect_args(),
             vec!["--ctrl-loss-tmo", "1800", "--reconnect-delay", "5"]
         );
+    }
+
+    /// The regression for the runay D-state wedge: queued I/O on the KERNEL
+    /// initiator was unbounded (`fast_io_fail_tmo=off` measured live) while
+    /// the SPDK-side legs were bounded by F42. A consumer's umount then
+    /// parked in `blkdev_issue_flush` for the full 1800s ctrl_loss_tmo.
+    #[test]
+    fn the_kernel_initiator_bounds_queued_io_by_default() {
+        let p = ReconnectPolicy::default();
+        assert_eq!(p.fast_io_fail_tmo_secs, 20);
+        assert_eq!(
+            p.fast_io_fail_sysfs().as_deref(),
+            Some("20"),
+            "a consumer's controller must fail I/O rather than queue it forever"
+        );
+        assert!(
+            p.fast_io_fail_tmo_secs < p.ctrl_loss_tmo_secs as u64,
+            "I/O must fail well before the controller gives up entirely"
+        );
+    }
+
+    /// nvme-cli 2.8 in the shipped image has no fast-io-fail flag (verified
+    /// with `nvme connect --help` on a live node), so passing one would fail
+    /// EVERY attach. It must travel via sysfs, never in the argv.
+    #[test]
+    fn fast_io_fail_never_leaks_into_the_connect_arguments() {
+        let p = ReconnectPolicy::default();
+        for a in p.connect_args() {
+            assert!(
+                !a.contains("fast"),
+                "nvme connect has no fast-io-fail option; `{a}` would break every attach"
+            );
+        }
+    }
+
+    /// A rejected sysfs write is silent, so a value the kernel would refuse
+    /// must be refused here instead — otherwise the controller keeps `off`
+    /// while everything looks configured.
+    #[test]
+    fn fast_io_fail_refuses_what_the_kernel_would_reject() {
+        let disabled = ReconnectPolicy { fast_io_fail_tmo_secs: 0, ..Default::default() };
+        assert_eq!(disabled.fast_io_fail_sysfs(), None, "0 means disabled");
+
+        let too_late = ReconnectPolicy {
+            ctrl_loss_tmo_secs: 10,
+            fast_io_fail_tmo_secs: 20,
+            ..Default::default()
+        };
+        assert_eq!(
+            too_late.fast_io_fail_sysfs(),
+            None,
+            "failing I/O after the controller has already given up is meaningless"
+        );
+
+        let infinite = ReconnectPolicy { ctrl_loss_tmo_secs: -1, ..Default::default() };
+        assert_eq!(
+            infinite.fast_io_fail_sysfs().as_deref(),
+            Some("20"),
+            "bounded I/O alongside infinite reconnect is the whole point of the split"
+        );
+    }
+
+    #[test]
+    fn fast_io_fail_is_tunable_and_can_be_switched_off() {
+        let env = |k: &str| match k {
+            "FLINT_NVME_FAST_IO_FAIL" => Some("45".to_string()),
+            _ => None,
+        };
+        assert_eq!(ReconnectPolicy::from_lookup(env).fast_io_fail_sysfs().as_deref(), Some("45"));
+
+        let off = |k: &str| match k {
+            "FLINT_NVME_FAST_IO_FAIL" => Some("0".to_string()),
+            _ => None,
+        };
+        assert_eq!(ReconnectPolicy::from_lookup(off).fast_io_fail_sysfs(), None);
     }
 
     #[test]

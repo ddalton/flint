@@ -2084,7 +2084,48 @@ impl NodeAgent {
             }
         }
 
+        // Bound queued I/O on the freshly-connected controller. Applied here
+        // and not as a connect flag because nvme-cli 2.8 has no such option —
+        // see ReconnectPolicy::fast_io_fail_sysfs for the D-state hang this
+        // exists to prevent.
+        Self::kernel_nvme_apply_fast_io_fail(nqn, &policy);
+
         Ok(())
+    }
+
+    /// Write `fast_io_fail_tmo` to every controller serving `nqn`.
+    ///
+    /// Best-effort by design: a failure here degrades to the old unbounded
+    /// behaviour, which must not fail the attach. It is logged loudly instead
+    /// — a silently-unbounded controller is exactly what made the runay wedge
+    /// so hard to see.
+    fn kernel_nvme_apply_fast_io_fail(nqn: &str, policy: &crate::nvme_recovery::ReconnectPolicy) {
+        let Some(value) = policy.fast_io_fail_sysfs() else { return };
+        let nvme_path = std::path::Path::new("/sys/class/nvme");
+        let Ok(entries) = std::fs::read_dir(nvme_path) else { return };
+        for entry in entries.flatten() {
+            let Ok(subsys) = std::fs::read_to_string(entry.path().join("subsysnqn")) else {
+                continue;
+            };
+            if subsys.trim() != nqn {
+                continue;
+            }
+            let attr = entry.path().join("fast_io_fail_tmo");
+            match std::fs::write(&attr, &value) {
+                Ok(()) => println!(
+                    "🧯 [NODE_AGENT] {} fast_io_fail_tmo={}s (queued I/O now faults \
+                     instead of hanging a consumer in D-state)",
+                    entry.file_name().to_string_lossy(),
+                    value
+                ),
+                Err(e) => eprintln!(
+                    "⚠️  [NODE_AGENT] could not set fast_io_fail_tmo on {}: {e} — \
+                     this controller will QUEUE I/O for the full ctrl_loss_tmo if \
+                     its target dies",
+                    entry.file_name().to_string_lossy()
+                ),
+            }
+        }
     }
 
     /// Helper: Trigger a namespace rescan on the kernel controller connected
