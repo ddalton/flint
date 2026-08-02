@@ -51,13 +51,30 @@ PVC="blockceil-pvc"
 echo "▶ block-layer ceiling on $NODE (sc=$SC, ${DUR}s per point)"
 
 # ── spdk-tgt CPU on this node, in cores ─────────────────────────────────
-# utime+stime of the spdk_tgt process itself, not the whole node: the DS
-# and the consumer pod are on other cores and would drown the signal.
+# MATCH ON THE COMMAND LINE, NOT THE PROCESS NAME. SPDK renames its main
+# thread to the reactor it is running, so `comm` is "reactor_0" and
+# `pgrep -x spdk_tgt` matches NOTHING — the first run of this script
+# reported 0.00 cores for every single point, floor included, and a
+# zero that looks like an answer is worse than an error.
 tgt_cpu() {
   "$HERE/nodesh.sh" "$NODE" \
-    'p=$(pgrep -x spdk_tgt | head -1); [ -n "$p" ] || { echo 0; exit; }
+    'p=$(pgrep -f "/usr/local/bin/spdk_tgt" | head -1); [ -n "$p" ] || { echo 0; exit; }
      awk "{print \$14+\$15}" /proc/$p/stat' 2>/dev/null | tail -1
 }
+
+# AND KNOW WHAT THIS NUMBER CANNOT TELL YOU. An SPDK reactor BUSY-POLLS:
+# measured on runaz, `ps` shows reactor_0 at 100% of a core while the node
+# is completely idle. So CPU% reads ~1.00 whether the reactor is saturated
+# or doing nothing, and the "rise above floor" this script was built
+# around cannot discriminate the two. It is kept because a rise ABOVE one
+# core would still be meaningful (more reactors, or non-reactor threads),
+# but the honest instrument for saturation is SPDK's own accounting —
+# `thread_get_stats` returns busy_tsc and idle_tsc per thread, and their
+# ratio is the utilisation. rpc.py is not in the shipped image, so that
+# needs the node agent's RPC passthrough. Until then, treat a flat
+# throughput plateau across block size AND queue depth as the evidence
+# (that shape means a fixed pipe, not a latency limit) and do not claim
+# which component it is without the tsc ratio.
 
 echo -n "  spdk-tgt idle floor: "
 F0=$(tgt_cpu); sleep 5; F1=$(tgt_cpu)
@@ -103,15 +120,22 @@ kubectl exec "$POD" -- sh -c \
 run() {  # rw, bs, iodepth, numjobs
   local a b cpu res mibps
   a=$(tgt_cpu)
+  # --size is PER JOB in fio, so numjobs=4 --size=8G wants 32 GiB of files
+  # on a 32Gi PVC that already holds the 8 GiB layout file -> ENOSPC, and
+  # the point comes back "?" (lost the only multi-job attribution point on
+  # the first runaz run). Divide the footprint by the job count, and sum
+  # every job's bandwidth rather than reading jobs[0], which is one job's
+  # share and would under-report a multi-job run by 4x.
+  local per=$((8 / $4))
   res=$(kubectl exec "$POD" -- sh -c \
     "fio --name=lay --directory=/data --rw=$1 --bs=$2 --iodepth=$3 --numjobs=$4 \
-         --ioengine=libaio --direct=1 --time_based --runtime=$DUR --size=8G \
+         --ioengine=libaio --direct=1 --time_based --runtime=$DUR --size=${per}G \
          --group_reporting --output-format=json 2>/dev/null" \
     | python3 -c "
 import sys,json
-d=json.load(sys.stdin)['jobs'][0]
+d=json.load(sys.stdin)
 k='read' if '$1'=='read' else 'write'
-print(int(d[k]['bw_bytes']/1048576))
+print(int(sum(j[k]['bw_bytes'] for j in d['jobs'])/1048576))
 " 2>/dev/null)
   b=$(tgt_cpu)
   cpu=$(python3 -c "print(f'{(${b:-0}-${a:-0})/100/$DUR:.2f}')")
