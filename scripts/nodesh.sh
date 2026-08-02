@@ -14,11 +14,26 @@
 # JSON and two shells. That is not fastidiousness: an earlier campaign shipped
 # `\&\&` into a container entrypoint and printed `sh: 1: [: missing ]` on
 # every start.
+#
+# SPEED. A fresh pod per invocation costs 15-20s (schedule, pull, run, reap).
+# That is fine for one-off pokes and ruinous for measurement: a diag run that
+# snapshots 5 data servers before and after wraps ~3-4 MINUTES of pod churn
+# around a 45-second measurement, and the churn is what you end up waiting
+# on. `nodesh-daemon.sh up` leaves one sleeper pod per node behind; this
+# script then execs into it (~1s) and only falls back to spawning when no
+# sleeper exists. Same command, same output, one order of magnitude.
 set -uo pipefail
 NODE=${1:?usage: nodesh.sh <node> '<command>' | <node> -}
 shift
 if [ "${1:-}" = "-" ]; then CMD=$(cat); else CMD="$*"; fi
 [ -n "$CMD" ] || { echo "nodesh: empty command" >&2; exit 2; }
+
+# Fast path: a long-lived sleeper already on this node.
+SLEEPER="nodesh-daemon-$(echo "$NODE" | tr -cd 'a-z0-9')"
+if kubectl get pod "$SLEEPER" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; then
+  exec kubectl exec "$SLEEPER" -- nsenter -t 1 -m -u -i -n -p -- \
+    sh -c "echo $(printf '%s' "$CMD" | base64 | tr -d '\n') | base64 -d | sh"
+fi
 
 IMAGE=${NODESH_IMAGE:-busybox:1.36}
 POD="nodesh-$(echo "$NODE$CMD$$" | cksum | cut -d' ' -f1)"
