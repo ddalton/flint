@@ -80,7 +80,27 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     patch -p1 < /tmp/raid-skip-rebuild.patch && \
     echo "✅ raid skip_rebuild + leased quiesce patch applied" && \
     rm /tmp/*.patch && \
-    ./configure --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
+    # --target-arch is NOT cosmetic. SPDK's configure defaults it to
+    # `native`, which compiles DPDK for the BUILD MACHINE's CPU and bakes
+    # that in as a hard runtime requirement. Because our builders are
+    # throwaway spot instances, that made the image's minimum CPU an
+    # accident of scheduling: an image built on Ice Lake refuses to start
+    # anywhere older, with only DPDK's
+    #
+    #   ERROR: This system does not support "VPCLMULQDQ".
+    #   EAL: unsupported cpu type.
+    #
+    # to explain it — and since spdk-tgt is an INIT container, the whole
+    # flint-csi-node DaemonSet init-crashloops and the node has no CSI
+    # driver at all. Measured 2026-08-01 on i3en.xlarge (Xeon 8175M,
+    # Skylake-SP): all 7 nodes down, cluster unusable.
+    #
+    # `corei7` is DPDK's own generic x86 baseline (config/meson.build maps
+    # cpu_instruction_set=generic to it, "the most portable version while
+    # still being able to support the CPU features required for DPDK") and
+    # is a valid GNU arch for SPDK's own -march. Raise it deliberately if
+    # profiling ever shows a vector-path win — never leave it implicit.
+    ./configure --target-arch=corei7 --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
     make -j$(nproc)
 
 #--------------------------------------------------------------------
