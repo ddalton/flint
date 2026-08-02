@@ -19,7 +19,7 @@ images:
   # SPDK Target daemon (runs on each node)
   spdkTarget:
     name: spdk-tgt          # SPDK target daemon (SPDK v26.05)
-    tag: "1.6.0"            # SPDK v26.05 + F5 dirty-restart fixes (blob-recovery-batched + lvol-flush-sync) — HARD dependency for ublk mode (every roll is a dirty tgt restart)
+    tag: "1.6.1"            # SPDK v26.05 + F5 dirty-restart fixes (blob-recovery-batched + lvol-flush-sync) — HARD dependency for ublk mode (every roll is a dirty tgt restart). 1.6.1 rebuilds with --target-arch=corei7: 1.6.0 and every image before it were built with SPDK's default --target-arch=native, so the BUILD MACHINE's CPU became the image's hard minimum. Since builders are throwaway spot instances, flint's hardware requirements were an accident of scheduling and silently unreproducible. On any host older than the builder, DPDK's EAL aborts with `This system does not support "VPCLMULQDQ"` — and because spdk-tgt is an INIT container, the whole flint-csi-node DaemonSet init-crashloops and the node has NO CSI driver at all. Measured on i3en.xlarge (Xeon 8175M, Skylake-SP): 7/7 nodes down. A/B on one Skylake host: 1.6.0 dies on the CPU gate, 1.6.1 clears it.
   # NFS Server for ReadWriteMany (RWX) volumes
   # By default, uses the same image as flintCsiDriver (which includes flint-nfs-server binary)
   # Uncomment to override with a separate NFS server image
@@ -355,6 +355,58 @@ pnfs:
   # the driver refuses any layout: pnfs StorageClass with a clear
   # FAILED_PRECONDITION error. This is the safe default.
   enabled: false
+
+  # A StorageClass for pNFS volumes. NOTHING renders one otherwise —
+  # the main `storageclass.yaml` template hardcodes the four SPDK
+  # parameters and never ranges over `.Values.storageClass.parameters`,
+  # so `--set storageClass.parameters.layout=pnfs` renders nothing at
+  # all. Before this block, the only pNFS class was a hand-applied
+  # manifest under deployments/.
+  storageClass:
+    create: false
+    name: flint-pnfs
+    # pNFS PVs are shared namespaces mounted by many pods; Retain
+    # avoids deleting a dataset because one claim went away. Flip to
+    # Delete for scratch/shuffle classes.
+    reclaimPolicy: Retain
+    # WaitForFirstConsumer costs nothing here (every node mounts the
+    # same MDS) and keeps behaviour uniform with the SPDK class.
+    volumeBindingMode: WaitForFirstConsumer
+    isDefaultClass: false
+
+    # Per-volume stripe geometry. Both are FIXED AT CREATE: a file's
+    # placement is pinned at its first layout grant and never
+    # re-striped, so changing these later affects only new volumes.
+    # Leave empty for the MDS defaults (pnfs.server.stripeSize, and
+    # every active data server).
+    #
+    #   stripeSize   bytes, power of two, 4 KiB .. 1 GiB. Lower it for
+    #                small-file-heavy datasets: at the 8 MiB default a
+    #                file under 8 MiB lives entirely on ONE data server
+    #                and gets no parallelism at all.
+    #   stripeWidth  how many data servers a file is striped across.
+    #                Empty = all of them, which maximises per-file
+    #                bandwidth AND makes the failure domain the whole
+    #                fleet — any one DS loss affects every file. A
+    #                smaller width trades peak throughput for blast
+    #                radius.
+    stripeSize: ""
+    stripeWidth: ""
+
+    # Volume-root ownership. Empty dirGid keeps the historical 0777,
+    # which is the loosest possible setting and the only one that works
+    # when consuming pods run as arbitrary uids. Setting dirGid chgrps
+    # the volume root and sets the setgid bit so files created inside
+    # inherit the group — that is what makes a pod's `fsGroup` usable.
+    # Set both together: a dirMode denying "other" without a dirGid is
+    # refused at provision, because no pod would be able to write.
+    dirGid: ""
+    dirMode: ""
+
+    # Extra mount options appended to the driver's defaults; they win
+    # the kernel's last-one-wins parse. `sec=sys` is already the
+    # default, so this is for things like a larger nconnect.
+    mountOptions: []
 
   # gRPC endpoint of an EXTERNALLY managed MDS. Ignored (and may be
   # left empty) when pnfs.server.enabled is true — the controller then

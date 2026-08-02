@@ -1,0 +1,52 @@
+{{- /*
+StorageClass for pNFS volumes.
+
+Separate from `storageclass.yaml` on purpose: that template renders the
+SPDK class and hardcodes its four parameters, so there was previously NO
+way to get a pNFS class out of the chart — `--set
+storageClass.parameters.layout=pnfs` renders nothing, and the only pNFS
+class shipped was a hand-applied manifest under deployments/.
+
+`allowVolumeExpansion` is true: expansion on a directory volume is a
+metadata-only acknowledgement (the MDS stores no per-volume size —
+capacity is pool-side at the data servers), so the resize completes
+rather than wedging the PVC in `Resizing`. It does NOT reserve capacity.
+
+Snapshots and clones are refused by the driver for pNFS volumes, so do
+not pair this class with a VolumeSnapshotClass.
+*/}}
+{{- if and .Values.pnfs.enabled .Values.pnfs.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.pnfs.storageClass.name }}
+  {{- if .Values.pnfs.storageClass.isDefaultClass }}
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+  {{- end }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs
+provisioner: {{ .Values.driver.name }}
+reclaimPolicy: {{ .Values.pnfs.storageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.pnfs.storageClass.volumeBindingMode }}
+allowVolumeExpansion: true
+parameters:
+  layout: pnfs
+  {{- with .Values.pnfs.storageClass.stripeSize }}
+  pnfs.flint.io/stripeSize: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.pnfs.storageClass.stripeWidth }}
+  pnfs.flint.io/stripeWidth: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.pnfs.storageClass.dirGid }}
+  pnfs.flint.io/dirGid: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.pnfs.storageClass.dirMode }}
+  pnfs.flint.io/dirMode: {{ . | quote }}
+  {{- end }}
+{{- with .Values.pnfs.storageClass.mountOptions }}
+mountOptions:
+{{ toYaml . | indent 2 }}
+{{- end }}
+{{- end }}

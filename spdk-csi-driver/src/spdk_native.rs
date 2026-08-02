@@ -571,7 +571,7 @@ mod tests {
             ("primitive string", json!("invalidParam")),
             ("primitive number", json!(42)),
             ("primitive boolean", json!(true)),
-            ("primitive float", json!(3.14)),
+            ("primitive float", json!(4.25)),
         ];
         
         for (name, params) in invalid_cases {

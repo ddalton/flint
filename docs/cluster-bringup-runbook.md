@@ -148,11 +148,36 @@ helm upgrade flint-csi /tmp/chartup/flint-csi-driver-chart-<v>.tgz \
 ```
 
 Gives `flint-pnfs-mds` + `flint-pnfs-ds-{0,1}` (MDS count 1, DS count 2 by
-default). Then a pNFS StorageClass with `layout: pnfs`.
+default). The chart can now render the StorageClass too — it could not
+before, and `--set storageClass.parameters.layout=pnfs` renders *nothing*
+because `storageclass.yaml` hardcodes the four SPDK keys:
 
-**The MDS mount is hardcoded `minorversion=1`** with no StorageClass
-override, so NFSv4.2 operations are unreachable on a pNFS volume in the
-shipped configuration.
+```bash
+--set pnfs.storageClass.create=true --set pnfs.storageClass.name=flint-pnfs
+```
+
+### pNFS StorageClass parameters
+
+All are optional; omitting one means the MDS default. Unknown
+`pnfs.flint.io/*` keys are **rejected** at provision — a typo used to be
+indistinguishable from success.
+
+| parameter | meaning |
+|---|---|
+| `pnfs.flint.io/stripeSize` | stripe unit, power of two, 4 KiB..1 GiB. At the 8 MiB default a file smaller than 8 MiB lives on ONE data server and gets no parallelism. |
+| `pnfs.flint.io/stripeWidth` | how many DSes a file is striped across. Omit = all of them, which maximises bandwidth **and** makes the failure domain the whole fleet. |
+| `pnfs.flint.io/dirGid` | group owner of the volume root; also sets setgid so files inherit the group (this is what makes a pod `fsGroup` usable). |
+| `pnfs.flint.io/dirMode` | octal mode for the volume root. Default 0777. A mode denying "other" without a `dirGid` is refused — no pod could write. |
+
+Both geometry parameters are **fixed at create**: a file's placement is
+pinned at its first layout grant and never re-striped.
+
+`mountOptions` on the class reach the kernel mount and win over the
+driver's defaults. The mount is **NFSv4.2** (`minorversion=2`) and
+requests **`sec=sys`**; earlier releases pinned 4.1 and sent no `sec=`
+at all, which negotiated AUTH_NULL so no uid reached the server and
+every created file landed owned by root — measured, and the reason
+ownership-sensitive workloads (postgres) would not start on a pNFS PVC.
 
 **Pods must use `nodeSelector`, not `nodeName`** — an explicit `nodeName`
 bypasses the scheduler and a `WaitForFirstConsumer` PVC then never binds.

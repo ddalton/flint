@@ -51,7 +51,7 @@
 //!
 //! # async fn example() -> std::io::Result<()> {
 //! let config = NfsConfig::default();
-//! let server = NfsServer::new(config)?;
+//! let server = NfsServer::new(config).await?;
 //! server.serve().await
 //! # }
 //! ```
