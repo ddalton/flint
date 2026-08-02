@@ -666,10 +666,24 @@ impl CompoundDispatcher {
                 };
                 let res = self.session_handler.handle_exchange_id(op, context);
                 if res.status == Nfs4Status::Ok {
+                    // A pNFS-enabled dispatcher IS the MDS, so advertise the
+                    // MDS role (RFC 8881 §18.35.3) — without EXCHGID4_FLAG_
+                    // USE_PNFS_MDS the client never asks for a layout and
+                    // every read/write goes through the metadata server.
+                    //
+                    // This lives here rather than in the MDS's RPC layer
+                    // because it was the ONLY behavioural difference between
+                    // that layer and the standalone one; keeping it here is
+                    // what lets both share a single serving path.
+                    let flags = if self.pnfs_handler.is_some() {
+                        crate::pnfs::exchange_id::set_pnfs_mds_flags(res.flags)
+                    } else {
+                        res.flags
+                    };
                     OperationResult::ExchangeId(res.status, Some(ExchangeIdResult {
                         clientid: res.clientid,
                         sequenceid: res.sequenceid,
-                        flags: res.flags,
+                        flags,
                         server_owner: res.server_owner,
                         server_scope: res.server_scope,
                     }))
@@ -3723,6 +3737,59 @@ mod tests {
             }
             _ => panic!("Expected ExchangeId result"),
         }
+    }
+
+    /// EXCHANGE_ID must advertise the pNFS MDS role when — and only when —
+    /// the dispatcher has a pNFS handler.
+    ///
+    /// This used to be a post-dispatch patch inside the MDS's own copy of
+    /// the RPC layer. That copy is gone (it silently missed the SEQUENCE
+    /// reply cache and the F55 drain gate for months), and this flag was the
+    /// only behaviour it carried. Getting it wrong is quiet and expensive:
+    /// without EXCHGID4_FLAG_USE_PNFS_MDS the client never asks for a
+    /// layout, so every read and write goes through the metadata server and
+    /// pNFS degrades to a plain — and much slower — NFS mount, with nothing
+    /// failing to say so.
+    #[tokio::test]
+    async fn exchange_id_advertises_the_mds_role_only_when_pnfs_is_enabled() {
+        use crate::pnfs::exchange_id::is_pnfs_mds_mode;
+
+        async fn flags_from(dispatcher: &CompoundDispatcher) -> u32 {
+            let request = CompoundRequest {
+                tag: "eid".to_string(),
+                tag_valid: true,
+                minor_version: 2,
+                operations: vec![Operation::ExchangeId {
+                    clientowner: ClientId {
+                        verifier: 99,
+                        id: b"pnfs-flag-probe".to_vec(),
+                    },
+                    flags: 0,
+                    state_protect: 0,
+                    impl_id: vec![],
+                }],
+                wire_size: 0,
+            };
+            match &dispatcher.dispatch_compound(request, Vec::new()).await.results[0] {
+                OperationResult::ExchangeId(Nfs4Status::Ok, Some(res)) => res.flags,
+                other => panic!("expected a successful ExchangeId, got {:?}", other),
+            }
+        }
+
+        let (pnfs_dispatcher, _t1) = create_test_dispatcher_pnfs(
+            &[],
+            crate::pnfs::FallbackIoDisposition::Serve,
+        );
+        assert!(
+            is_pnfs_mds_mode(flags_from(&pnfs_dispatcher).await),
+            "a pNFS dispatcher must set USE_PNFS_MDS, or clients never request a layout"
+        );
+
+        let (plain_dispatcher, _t2) = create_test_dispatcher();
+        assert!(
+            !is_pnfs_mds_mode(flags_from(&plain_dispatcher).await),
+            "the standalone server must NOT claim to be a pNFS MDS"
+        );
     }
 
     #[tokio::test]

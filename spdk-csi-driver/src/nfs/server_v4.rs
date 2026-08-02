@@ -236,7 +236,17 @@ impl NfsServer {
 }
 
 /// Serve NFSv4.2 over TCP
-async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, gss_manager: Arc<RpcSecGssManager>) -> std::io::Result<()> {
+/// Serve NFSv4 over TCP until the listener dies.
+///
+/// `pub(crate)` because the pNFS MDS serves through this same function.
+/// It used to carry its own fork of this whole layer (`serve_tcp` ..
+/// `handle_gss_continue_init`, ~500 lines copied in the original pNFS
+/// commit). The fork silently missed every later fix to this file — the
+/// SEQUENCE reply cache (`1a543b5`) and the F55 drain gate (`a4902ef`)
+/// among them — so the two are now one path. Anything MDS-specific
+/// belongs in `CompoundDispatcher`, which already knows whether it is
+/// a pNFS server.
+pub(crate) async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, gss_manager: Arc<RpcSecGssManager>) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     
     // Track active connections for debugging concurrent mount issues

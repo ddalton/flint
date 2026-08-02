@@ -10,21 +10,15 @@ use crate::pnfs::mds::layout::LayoutManager;
 use crate::pnfs::mds::operations::PnfsOperationHandler;
 use crate::pnfs::grpc::{MdsControlService, MdsControlServer};
 use crate::pnfs::Result;
-use crate::nfs::rpc::{CallMessage, ReplyBuilder, AuthFlavor};
-use crate::nfs::rpcsec_gss::{RpcSecGssManager, RpcGssCred, procedure as gss_proc};
-use crate::nfs::xdr::{XdrEncoder, XdrDecoder};
-use crate::nfs::v4::protocol::{procedure, NFS4_PROGRAM};
+use crate::nfs::rpcsec_gss::RpcSecGssManager;
 use crate::nfs::v4::dispatcher::CompoundDispatcher;
 use crate::nfs::v4::filehandle::FileHandleManager;
 use crate::nfs::v4::state::StateManager;
 use crate::nfs::v4::operations::lockops::LockManager;
-use bytes::{Bytes, BytesMut};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, BufWriter};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// Metadata Server
 pub struct MetadataServer {
@@ -125,6 +119,10 @@ impl MetadataServer {
         // Initialize layout manager. Shares the StateManager's
         // backend so layout records persist alongside client /
         // session / stateid records.
+        // Per-volume stripe geometry persists in the same state backend
+        // as placements (`load_persisted_state` seeds it below).
+        // `config.layout.stripe_size` stays the fleet-wide default for
+        // volumes that ask for nothing.
         let layout_manager = Arc::new(LayoutManager::new(
             Arc::clone(&device_registry),
             config.layout.policy,
@@ -285,6 +283,25 @@ impl MetadataServer {
         }
         info!("📦 MDS reloaded {} persisted placements from backend", n);
 
+        // Per-volume stripe geometry, seeded EAGERLY: the cache is the
+        // only reader on the layout path, so a LAYOUTGET arriving before
+        // the load would pin a file at the fleet default and never
+        // re-stripe it. This runs before `serve()` opens the listener.
+        //
+        // The volume list comes from the export directory, so a volume
+        // whose geometry record is missing gets one WARN. That is the
+        // only signal separating "created before geometry existed"
+        // (routine) from "acked at provision, then lost" (not).
+        let volumes: Vec<String> = std::fs::read_dir(&self.export_path)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.layout_manager.load_volume_geometry(&volumes).await;
+
         Ok(())
     }
 
@@ -342,6 +359,11 @@ impl MetadataServer {
         let bind_addr = self.config.bind.address.clone();
         let nfs_port = self.config.bind.port;
         let export_path = self.export_path.clone();
+        // Whether per-volume geometry can be kept across a restart.
+        let durable_state = !matches!(
+            self.config.state.backend,
+            crate::pnfs::config::StateBackend::Memory
+        );
         let layout_manager = self.layout_manager.as_ref().clone();
         // Build the operator's `device_id → reachable endpoint` map from
         // the static config. The gRPC service uses this to override the
@@ -386,6 +408,7 @@ impl MetadataServer {
                 export_path,
                 layout_manager,
                 nfs_port,
+                durable_state,
             );
 
             // Control-plane auth: when FLINT_PNFS_CONTROL_TOKEN is set,
@@ -438,523 +461,28 @@ impl MetadataServer {
         );
     }
 
-    /// Serve pNFS over TCP
+    /// Serve pNFS over TCP.
+    ///
+    /// Delegates to the standalone server's RPC layer
+    /// (`nfs::server_v4::serve_tcp`). The MDS used to carry its own fork of
+    /// that whole layer — accept loop, connection handler, RPC dispatch,
+    /// COMPOUND handler and the three RPCSEC_GSS entry points. The two were
+    /// identical apart from log strings and one EXCHANGE_ID tweak (now in
+    /// `CompoundDispatcher`, which knows it is a pNFS server), but the copy
+    /// silently missed every fix made to the original after the fork:
+    /// the SEQUENCE reply cache (`1a543b5`, pynfs SEQ9a-f) and the F55
+    /// drain gate (`a4902ef`) among them.
     async fn serve_tcp(&self, addr: &str) -> Result<()> {
-        info!("🔧 Attempting to bind TCP server on {}", addr);
-        
-        let listener = match TcpListener::bind(addr).await {
-            Ok(l) => {
-                info!("✅ TCP listener bound successfully on {}", addr);
-                l
-            }
-            Err(e) => {
-                error!("❌ Failed to bind TCP listener on {}: {}", addr, e);
-                return Err(crate::pnfs::Error::Io(e));
-            }
-        };
-        
-        info!("🚀 pNFS MDS TCP server listening on {}", addr);
-        info!("🔄 Entering accept loop to handle client connections...");
-        info!("");
-        
-        let mut connection_count = 0u64;
-
-        loop {
-            debug!("💤 Waiting for TCP connection...");
-            let (stream, peer) = listener.accept()
-                .await
-                .map_err(|e| crate::pnfs::Error::Io(e))?;
-            
-            connection_count += 1;
-            info!("📡 New TCP connection #{} from {}", connection_count, peer);
-            
-            // Clone refs for this connection
-            let base_dispatcher = Arc::clone(&self.base_dispatcher);
-            let gss_manager = Arc::clone(&self.gss_manager);
-            let conn_id = connection_count;
-            
-            tokio::spawn(async move {
-                debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
-                if let Err(e) = Self::handle_tcp_connection(
-                    stream,
-                    base_dispatcher,
-                    gss_manager,
-                    peer,
-                ).await {
-                    warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
-                } else {
-                    info!("✓ TCP connection #{} from {} closed cleanly", conn_id, peer);
-                }
-            });
-        }
+        info!("🚀 pNFS MDS serving NFSv4 on {}", addr);
+        crate::nfs::server_v4::serve_tcp(
+            addr,
+            Arc::clone(&self.base_dispatcher),
+            Arc::clone(&self.gss_manager),
+        )
+        .await
+        .map_err(crate::pnfs::Error::Io)
     }
 
-    /// Handle a single TCP connection
-    async fn handle_tcp_connection(
-        stream: TcpStream,
-        base_dispatcher: Arc<CompoundDispatcher>,
-        gss_manager: Arc<RpcSecGssManager>,
-        peer: std::net::SocketAddr,
-    ) -> std::io::Result<()> {
-        use tokio::time::Instant;
-
-        let connect_time = Instant::now();
-        debug!("🔌 TCP connection handler started for {}", peer);
-
-        // Set TCP_NODELAY for low latency
-        stream.set_nodelay(true)?;
-
-        // Split stream for independent reading and buffered writing
-        let (reader, writer) = stream.into_split();
-        let mut reader = tokio::io::BufReader::with_capacity(128 * 1024, reader);
-        let writer = BufWriter::with_capacity(128 * 1024, writer);
-        // Wrap the writer so the dispatcher can register it as a
-        // back-channel when the client sends CREATE_SESSION with
-        // CONN_BACK_CHAN (or, later, BIND_CONN_TO_SESSION). The
-        // forward-reply path also goes through this writer — same
-        // mutex serializes against any concurrent CB_LAYOUTRECALL.
-        let bcw = crate::nfs::v4::back_channel::BackChannelWriter::new(writer);
-
-        // Inflight cleanup on every exit path. Without this, awaiting
-        // CB callers hang on `Timeout` instead of seeing
-        // `ConnectionClosed`. The dispatcher's back-channel registry
-        // holds another STRONG Arc to the writer — it must be purged
-        // here too, or the dead connection's socket stays pinned open
-        // (CLOSE_WAIT) and its HUP readiness spins the async driver
-        // (F18; observed on the RWX server, same registry pattern).
-        struct InflightGuard {
-            bcw: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
-            back_channels: Arc<dashmap::DashMap<
-                crate::nfs::v4::protocol::SessionId,
-                Vec<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
-            >>,
-        }
-        impl Drop for InflightGuard {
-            fn drop(&mut self) {
-                self.bcw.drop_all_inflight();
-                // Drop THIS connection's writer, keeping the session's
-                // other bound transports usable (audit C5).
-                self.back_channels.retain(|_, writers| {
-                    writers.retain(|w| !Arc::ptr_eq(w, &self.bcw));
-                    !writers.is_empty()
-                });
-            }
-        }
-        let _inflight_guard = InflightGuard {
-            bcw: Arc::clone(&bcw),
-            back_channels: base_dispatcher.back_channels(),
-        };
-
-        // Per-connection RPC pipelining (RFC 8881 §2.10.6): metadata
-        // ops (GETATTR/LOOKUP/LAYOUTGET) no longer queue behind a slow
-        // op on the same connection. Replies stay frame-safe via the
-        // BCW mutex. FLINT_NFS_MAX_INFLIGHT=0 restores sequential.
-        let pipeline = crate::nfs::pipeline::ConnectionPipeline::from_env();
-
-        // Reusable buffer
-        let mut buf = BytesMut::with_capacity(128 * 1024);
-
-        let mut rpc_count = 0;
-
-        loop {
-            debug!("📥 Waiting for RPC message #{} from {}", rpc_count + 1, peer);
-            
-            // Read RPC record marker (4 bytes)
-            let mut marker_buf = [0u8; 4];
-            match reader.read_exact(&mut marker_buf).await {
-                Ok(_) => {
-                    debug!("✅ Received RPC marker from {}", peer);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // Connection closed gracefully
-                    let duration = connect_time.elapsed();
-                    info!("🔌 Connection from {} closed after {:?} ({} RPCs processed)", 
-                          peer, duration, rpc_count);
-                    return Ok(());
-                }
-                Err(e) => {
-                    warn!("❌ Error reading RPC marker from {}: {}", peer, e);
-                    return Err(e);
-                }
-            }
-
-            let marker = u32::from_be_bytes(marker_buf);
-            let _is_last = (marker & 0x80000000) != 0;
-            let length = (marker & 0x7FFFFFFF) as usize;
-
-            debug!("📊 RPC message size: {} bytes", length);
-
-            // Prevent oversized allocations
-            if length > 4 * 1024 * 1024 {
-                warn!("❌ Rejecting oversized RPC message from {}: {} bytes", peer, length);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "RPC message too large",
-                ));
-            }
-
-            if length == 0 {
-                warn!("⚠️  Zero-length RPC message from {}, ignoring", peer);
-                continue;
-            }
-
-            // Read message
-            buf.clear();
-            buf.reserve(length);
-            unsafe { buf.set_len(length); }
-            
-            debug!("📥 Reading RPC payload: {} bytes from {}", length, peer);
-            reader.read_exact(&mut buf[..length]).await?;
-
-            let request = buf.split().freeze();
-
-            // RFC 5531 §9 frame layout: [0..4]=xid, [4..8]=msg_type
-            // (0=CALL, 1=REPLY). REPLY frames coming inbound are
-            // responses to our own CB_LAYOUTRECALL CALLs — route them
-            // to the inflight registry instead of trying to parse as
-            // a forward NFS CALL.
-            if request.len() >= 8 {
-                let msg_type = u32::from_be_bytes([
-                    request[4], request[5], request[6], request[7],
-                ]);
-                if msg_type == 1 {
-                    let xid = u32::from_be_bytes([
-                        request[0], request[1], request[2], request[3],
-                    ]);
-                    if !bcw.deliver_reply(xid, request) {
-                        warn!(
-                            "📭 CB reply for unknown xid={} on conn from {} (timed out or never registered)",
-                            xid, peer,
-                        );
-                    }
-                    continue;
-                }
-            }
-
-            // Dispatch through the pipeline; the reply goes out via
-            // the same writer the back-channel uses — `send_record`
-            // prepends the record marker and flushes; the inner mutex
-            // serializes against concurrent replies and
-            // CB_LAYOUTRECALL frames.
-            debug!(">>> Processing pNFS/NFSv4 request from {}", peer);
-            let dispatcher_c = Arc::clone(&base_dispatcher);
-            let gss_c = Arc::clone(&gss_manager);
-            let bcw_dispatch = Arc::clone(&bcw);
-            let bcw_write = Arc::clone(&bcw);
-            // Backlog hint: bytes already buffered mean the client is
-            // pipelining, so concurrent dispatch pays for its overhead.
-            let more_queued = !reader.buffer().is_empty();
-            pipeline.submit(
-                request,
-                more_queued,
-                // R2: never dispatch inline once this connection is a
-                // back-channel — its read loop has to stay free to route
-                // CB replies for compounds running on it.
-                bcw.is_back_channel(),
-                move |req| Self::dispatch_rpc_with_pnfs(req, dispatcher_c, gss_c, bcw_dispatch),
-                move |reply| async move { bcw_write.send_record(reply).await },
-            ).await?;
-
-            rpc_count += 1;
-        }
-    }
-
-    /// Dispatch RPC call with pNFS support
-    async fn dispatch_rpc_with_pnfs(
-        request: Bytes,
-        base_dispatcher: Arc<CompoundDispatcher>,
-        gss_manager: Arc<RpcSecGssManager>,
-        back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
-    ) -> Bytes {
-        // Parse RPC call message
-        let (call, args) = match CallMessage::decode_with_args(request) {
-            Ok(result) => result,
-            Err(e) => {
-                warn!("❌ Failed to parse RPC call: {}", e);
-                return ReplyBuilder::garbage_args(0).into();
-            }
-        };
-
-        debug!(
-            ">>> RPC CALL: xid={}, program={}, procedure={}, cred={:?}",
-            call.xid, call.program, call.procedure, call.cred.flavor
-        );
-
-        // Handle RPCSEC_GSS authentication
-        if call.cred.flavor == AuthFlavor::RpcsecGss {
-            debug!("🔐 RPCSEC_GSS authentication detected on MDS");
-            return Self::handle_rpcsec_gss_call(call, args, gss_manager, base_dispatcher, back_channel).await;
-        }
-
-        // Check program number
-        if call.program != NFS4_PROGRAM {
-            warn!("❌ Invalid program number: {}", call.program);
-            return ReplyBuilder::prog_unavail(call.xid);
-        }
-
-        // Check version
-        if call.version != 4 {
-            warn!("❌ Invalid NFSv4 version: {}", call.version);
-            return ReplyBuilder::proc_unavail(call.xid);
-        }
-
-        // Handle procedure
-        match call.procedure {
-            procedure::NULL => {
-                debug!(">>> NULL procedure");
-                ReplyBuilder::success(call.xid).finish()
-            }
-
-            procedure::COMPOUND => {
-                debug!(">>> COMPOUND procedure");
-                // Handle COMPOUND with pNFS support
-                Self::handle_compound_with_pnfs(
-                    call,
-                    args,
-                    base_dispatcher,
-                    back_channel,
-                ).await
-            }
-
-            _ => {
-                warn!("Invalid NFSv4 procedure: {}", call.procedure);
-                ReplyBuilder::proc_unavail(call.xid)
-            }
-        }
-    }
-
-    /// Handle COMPOUND request with pNFS operation support
-    async fn handle_compound_with_pnfs(
-        call: CallMessage,
-        args: Bytes,
-        base_dispatcher: Arc<CompoundDispatcher>,
-        back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
-    ) -> Bytes {
-        use crate::nfs::v4::compound::CompoundRequest;
-        use crate::nfs::xdr::XdrDecoder;
-
-        // Capture original wire size before decoding so the dispatcher
-        // can compare against the session's negotiated `ca_maxrequestsize`
-        // (RFC 8881 §18.46.4) after SEQUENCE binds the session.
-        let wire_size = args.len();
-
-        // Decode COMPOUND request
-        let decoder = XdrDecoder::new(args);
-        let mut compound_req = match CompoundRequest::decode(decoder) {
-            Ok(req) => req,
-            Err(e) => {
-                warn!("Failed to decode COMPOUND request: {}", e);
-                return ReplyBuilder::garbage_args(call.xid);
-            }
-        };
-        compound_req.wire_size = wire_size;
-
-        debug!(
-            "COMPOUND: tag={}, minor_version={}, {} operations",
-            compound_req.tag,
-            compound_req.minor_version,
-            compound_req.operations.len()
-        );
-
-        // Dispatch through base dispatcher (which handles both pNFS and regular ops).
-        // Pass the RPC-level principal so EXCHANGE_ID's §18.35.5 state machine
-        // can distinguish per-principal client owners. The back-channel writer
-        // is plumbed through so CREATE_SESSION (CONN_BACK_CHAN flag) and
-        // BIND_CONN_TO_SESSION can register it in the dispatcher's per-session
-        // back_channels registry — that's how `CallbackManager` finds the
-        // writer for CB_LAYOUTRECALL on DS death.
-        let principal = call.cred.principal();
-        let mut compound_resp = base_dispatcher
-            .dispatch_compound_with_cred(
-                compound_req,
-                principal,
-                call.cred.unix_uid_gid(),
-                Some(back_channel),
-            )
-            .await;
-
-        // Post-process EXCHANGE_ID responses to set pNFS MDS flags
-        // This tells clients that we're a pNFS server capable of providing layouts
-        use crate::pnfs::exchange_id::set_pnfs_mds_flags;
-        use crate::nfs::v4::compound::OperationResult;
-        
-        for result in &mut compound_resp.results {
-            if let OperationResult::ExchangeId(status, Some(ref mut res)) = result {
-                if *status == crate::nfs::v4::protocol::Nfs4Status::Ok {
-                    let old_flags = res.flags;
-                    // Modify flags to advertise pNFS MDS role
-                    res.flags = set_pnfs_mds_flags(res.flags);
-                    info!("🎯 EXCHANGE_ID: Modified flags for pNFS MDS");
-                    info!("   Before: 0x{:08x} (USE_NON_PNFS)", old_flags);
-                    info!("   After:  0x{:08x} (USE_PNFS_MDS)", res.flags);
-                    info!("   ✅ Client will now request layouts and use pNFS!");
-                }
-            }
-        }
-
-        debug!(
-            "COMPOUND result: status={:?}, {} results",
-            compound_resp.status,
-            compound_resp.results.len()
-        );
-
-        // Encode COMPOUND response
-        let compound_data = compound_resp.encode();
-
-        // Build RPC SUCCESS reply
-        let mut encoder = XdrEncoder::new();
-        encoder.encode_u32(call.xid);
-        encoder.encode_u32(1);  // REPLY
-        encoder.encode_u32(0);  // MSG_ACCEPTED
-        encoder.encode_u32(0);  // AUTH_NONE
-        encoder.encode_u32(0);  // Auth length
-        encoder.encode_u32(0);  // SUCCESS
-        encoder.append_raw(&compound_data);
-
-        encoder.finish()
-    }
-
-    /// Handle RPCSEC_GSS authenticated RPC call
-    async fn handle_rpcsec_gss_call(
-        call: CallMessage,
-        args: Bytes,
-        gss_manager: Arc<RpcSecGssManager>,
-        dispatcher: Arc<CompoundDispatcher>,
-        back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
-    ) -> Bytes {
-        // Decode RPCSEC_GSS credentials
-        let gss_cred = match RpcGssCred::decode(&call.cred.body) {
-            Ok(cred) => {
-                debug!("🔐 GSS Cred: version={}, procedure={}, seq={}, service={:?}",
-                      cred.version, cred.procedure, cred.sequence_num, cred.service);
-                cred
-            }
-            Err(e) => {
-                warn!("❌ Failed to decode RPCSEC_GSS credentials: {}", e);
-                return ReplyBuilder::garbage_args(call.xid);
-            }
-        };
-
-        // Handle different GSS procedures
-        match gss_cred.procedure {
-            gss_proc::INIT => {
-                info!("🔐 RPCSEC_GSS_INIT on MDS");
-                Self::handle_gss_init(call.xid, &gss_cred, args, gss_manager).await
-            }
-
-            gss_proc::CONTINUE_INIT => {
-                info!("🔐 RPCSEC_GSS_CONTINUE_INIT on MDS");
-                Self::handle_gss_continue_init(call.xid, &gss_cred, args, gss_manager).await
-            }
-
-            gss_proc::DATA => {
-                debug!("🔐 RPCSEC_GSS_DATA on MDS");
-                // Validate the GSS context
-                if let Err(e) = gss_manager.validate_data(&gss_cred).await {
-                    warn!("❌ GSS DATA validation failed: {}", e);
-                    return ReplyBuilder::system_err(call.xid);
-                }
-
-                // GSS validated, proceed with normal COMPOUND processing
-                debug!("✅ GSS authentication successful on MDS, processing COMPOUND");
-                Self::handle_compound_with_pnfs(call, args, dispatcher, back_channel).await
-            }
-
-            gss_proc::DESTROY => {
-                info!("🔐 RPCSEC_GSS_DESTROY on MDS");
-                gss_manager.handle_destroy(&gss_cred).await;
-                ReplyBuilder::success(call.xid).finish()
-            }
-
-            _ => {
-                warn!("❌ Unknown RPCSEC_GSS procedure: {}", gss_cred.procedure);
-                ReplyBuilder::proc_unavail(call.xid)
-            }
-        }
-    }
-
-    /// Handle RPCSEC_GSS_INIT
-    async fn handle_gss_init(
-        xid: u32,
-        gss_cred: &RpcGssCred,
-        args: Bytes,
-        gss_manager: Arc<RpcSecGssManager>,
-    ) -> Bytes {
-        // Extract init token from args
-        let mut decoder = XdrDecoder::new(args);
-        let init_token = match decoder.decode_opaque() {
-            Ok(token) => token.to_vec(),
-            Err(e) => {
-                warn!("❌ Failed to decode GSS init token: {}", e);
-                return ReplyBuilder::garbage_args(xid);
-            }
-        };
-
-        info!("🔐 GSS_INIT: service={:?}, token_len={}", gss_cred.service, init_token.len());
-
-        // Handle the initialization
-        let init_res = gss_manager.handle_init(gss_cred, &init_token).await;
-
-        // Build RPC reply with GSS init result
-        let mut encoder = XdrEncoder::new();
-
-        // RPC Reply header
-        encoder.encode_u32(xid);
-        encoder.encode_u32(1);  // Message type: REPLY
-        encoder.encode_u32(0);  // Reply status: MSG_ACCEPTED
-        encoder.encode_u32(0);  // Auth flavor: AUTH_NONE
-        encoder.encode_u32(0);  // Auth length: 0
-        encoder.encode_u32(0);  // AcceptStatus::Success
-
-        // Encode RPCSEC_GSS init result
-        let init_result_data = init_res.encode();
-        encoder.append_bytes(&init_result_data);
-
-        info!("✅ GSS_INIT complete on MDS: handle_len={}, major={}, minor={}",
-              init_res.handle.len(), init_res.major_status, init_res.minor_status);
-
-        encoder.finish()
-    }
-
-    /// Handle RPCSEC_GSS_CONTINUE_INIT
-    async fn handle_gss_continue_init(
-        xid: u32,
-        gss_cred: &RpcGssCred,
-        args: Bytes,
-        gss_manager: Arc<RpcSecGssManager>,
-    ) -> Bytes {
-        // Extract continuation token from args
-        let mut decoder = XdrDecoder::new(args);
-        let token = match decoder.decode_opaque() {
-            Ok(t) => t.to_vec(),
-            Err(e) => {
-                warn!("❌ Failed to decode GSS continue token: {}", e);
-                return ReplyBuilder::garbage_args(xid);
-            }
-        };
-
-        info!("🔐 GSS_CONTINUE_INIT: token_len={}", token.len());
-
-        // Handle the continuation
-        let init_res = gss_manager.handle_continue_init(gss_cred, &token).await;
-
-        // Build RPC reply
-        let mut encoder = XdrEncoder::new();
-        encoder.encode_u32(xid);
-        encoder.encode_u32(1);  // REPLY
-        encoder.encode_u32(0);  // MSG_ACCEPTED
-        encoder.encode_u32(0);  // AUTH_NONE
-        encoder.encode_u32(0);
-        encoder.encode_u32(0);  // SUCCESS
-
-        let init_result_data = init_res.encode();
-        encoder.append_bytes(&init_result_data);
-
-        info!("✅ GSS_CONTINUE_INIT complete on MDS: major={}, minor={}",
-              init_res.major_status, init_res.minor_status);
-
-        encoder.finish()
-    }
 
     /// Start heartbeat monitoring in the background
     fn start_heartbeat_monitor(&self, timeout: Duration) {
