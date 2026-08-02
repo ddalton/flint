@@ -10,6 +10,63 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.24.0] - 2026-08-01
+
+The pNFS-as-a-PVC release. The theme is duplication: two of the three
+headline bugs are a copy of something that drifted from its original, and
+the third is a build that copied the builder's CPU into the product.
+
+**The MDS had its own RPC layer.** Pointing the general 4.1 conformance
+suite at the metadata server for the first time scored 160/171, where the
+standalone server scores 171/171. The cause was not in the session code:
+`pnfs/mds/server.rs` carried ~510 lines copied out of `nfs/server_v4.rs`
+in the original pNFS commit, and the copy never received the SEQUENCE
+reply-cache fix or the F55 drain gate. Eight months of fixes landed on
+one path and silently not the other, and nothing tested the difference
+because nobody had ever run the general suite against the MDS. The fork
+is deleted rather than patched. **MDS is now 171/171.** The remaining
+RECC3 "failure" is not one — grace is 90s from server start, so that test
+is only meaningful inside the window; restart the MDS and it passes 4/4.
+
+**Symlink containment dereferenced the leaf.** The export-containment
+check called `canonicalize()` on the whole path, which follows a trailing
+symlink — so naming a link inside the export that pointed elsewhere was
+judged an escape and refused (`NFS4ERR_RESOURCE` on LOOKUP,
+`NFS4ERR_IO` on CREATE). It resolves the parent and rejoins the leaf now.
+Never MDS-specific; standalone passed only because its export tree had no
+such links.
+
+**pNFS volumes are now tunable per PVC.** New StorageClass parameters
+`pnfs.flint.io/{stripeSize,stripeWidth,dirGid,dirMode}`, persisted through
+the state backend and reloaded at MDS start so placement survives a
+restart, plus online expand. Unknown `pnfs.flint.io/*` keys are REFUSED at
+provision — a typo used to be indistinguishable from success. The chart
+can finally render a pNFS StorageClass at all (`storageclass.yaml`
+hardcodes the four SPDK parameters, so `--set
+storageClass.parameters.layout=pnfs` rendered nothing).
+
+**`sec=sys` is the load-bearing fix in that wave.** The mount requested no
+auth flavour, so it negotiated AUTH_NULL, no uid reached the server, and
+every file a pod created landed owned by root — measured uid=0 before,
+uid=1000 after. That is why ownership-sensitive workloads would not start
+on a pNFS PVC. The mount is also NFSv4.2 now; the server has supported
+4.2 since 1.23.0 and only the mount option said otherwise.
+
+**spdk-tgt 1.6.1: the image's minimum CPU was whichever spot node built
+it.** SPDK's `configure` defaults `--target-arch` to `native` and the
+Dockerfile never set it, so DPDK was compiled for the build machine and
+that became a hard requirement of the shipped image — making flint's
+hardware floor an accident of scheduling and unreproducible between
+builds. On anything older, DPDK aborts with `This system does not support
+"VPCLMULQDQ"`, and because spdk-tgt is an *init* container the whole
+`flint-csi-node` DaemonSet init-crashloops and the node has no CSI driver
+at all. Measured on i3en.xlarge (Skylake-SP): 7/7 nodes down. Now pinned
+to `corei7`, DPDK's own generic x86 baseline.
+
+Also fixes two pre-existing breakages that had `cargo test` red on main: a
+clippy `approx_constant` on a test fixture, and a doc example calling
+`NfsServer::new(config)?` that became async on 2026-07-07.
+
 ## [1.23.0] - 2026-08-01
 
 The correctness-under-measurement release. Two independent waves, and the

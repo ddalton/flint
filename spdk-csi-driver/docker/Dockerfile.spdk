@@ -4,6 +4,12 @@
 #--------------------------------------------------------------------
 FROM ubuntu:24.04 AS builder
 
+# The image's minimum CPU. See the --target-arch note on the build step
+# below for why this must never be left implicit. Overridable so the
+# floor can be A/B'd against throughput on real hardware rather than
+# argued about:  docker build --build-arg SPDK_TARGET_ARCH=skylake-avx512
+ARG SPDK_TARGET_ARCH=corei7
+
 # Install all build-time dependencies including RDMA support
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -100,7 +106,7 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # still being able to support the CPU features required for DPDK") and
     # is a valid GNU arch for SPDK's own -march. Raise it deliberately if
     # profiling ever shows a vector-path win — never leave it implicit.
-    ./configure --target-arch=corei7 --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
+    ./configure --target-arch=${SPDK_TARGET_ARCH} --with-ublk --with-rdma --with-uring --disable-tests --disable-unit-tests && \
     make -j$(nproc)
 
 #--------------------------------------------------------------------
