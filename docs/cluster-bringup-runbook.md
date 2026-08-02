@@ -271,6 +271,34 @@ Use `scripts/pnfs-fanout-diag.sh` for the fleet-parallel question and
 `scripts/pnfs-model-bench.sh` for the checkpoint-load question; they do
 not measure the same thing and neither substitutes for the other.
 
+### The rig drifts. Put every point in ONE window.
+
+The hardest lesson of 2026-08-02: **the same volume, same client and same
+fleet measured 1849 MiB/s early in a session and 773 later**, with nothing
+deliberately changed. A width sweep assembled from runs taken hours apart
+produced a confident "stripeWidth 3 and 4 collapse ~3x" that a same-window
+bidirectional sweep then failed to reproduce at all — the ascending and
+descending passes disagreed by up to 1.6x on the same width.
+
+So, for any comparison you intend to believe:
+
+- **Every point in one window**, back to back, and **run the sweep in both
+  directions**. Disagreeing passes mean the rig is not measurable right
+  now — that is a result, not noise to average away.
+- **Exactly ONE pNFS mount per client node.** Every pNFS PVC on a node
+  mounts the same MDS ip:port and shares one `nfs_client`, so idle consumer
+  pods left over from earlier runs are not free. Seven had accumulated by
+  the time the drift was noticed; that is the leading suspect and it is
+  cheap to avoid.
+- **Re-measure the baseline at the END** of a sweep. If it no longer
+  matches its own first reading, every ratio in between is void.
+
+`scripts/nodesh-daemon.sh up` makes this affordable: it drops one sleeper
+pod per node so `nodesh` execs (0.55s) instead of spawning a pod (20s),
+which is the difference between a five-width bidirectional sweep taking ten
+minutes and taking two hours. Run `down` at teardown — the sleepers are
+privileged.
+
 This is not ceremony. On 2026-08-01 a DS-scaling sweep ran three times and
 every result was void: all five data servers' **backing volumes** had been
 provisioned onto one node, so the sweep measured a single device at every
