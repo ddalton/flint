@@ -102,6 +102,49 @@ else
 fi
 echo
 
+# ── 2b. Each data server sits ON its own backing volume ─────────────────
+# Check 2 proves the VOLUMES are spread. It does not prove each DS pod is
+# on the node holding its volume — and flint PVs carry NO nodeAffinity, so
+# a rescheduled DS pod serves its disk REMOTELY over NVMe-oF, crossing the
+# network twice per read, with nothing anywhere reporting it.
+#
+# This is not hypothetical: scaling the DS StatefulSet down and back up on
+# 2026-08-02 left flint-pnfs-ds-1's pod on the BENCHMARK CLIENT node while
+# its volume stayed three nodes away. Both failure modes at once — remote
+# I/O, and a data server competing with the client for CPU — and the sweep
+# in flight looked completely normal.
+#
+# Alignment happens only at FIRST creation, when WaitForFirstConsumer binds
+# the volume to wherever the pod already landed. Once a PVC is bound, later
+# scheduling is free to put the pod anywhere. The fix is to delete the
+# StatefulSet AND its claims so both re-place together.
+echo "2b. each data server is co-located with its own volume"
+MISALIGNED=0 CHECKED=0
+for pod in $(kubectl get pods -n "$NS" -l app=flint-pnfs-ds \
+             -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+  idx=${pod##*-}
+  pnode=$(kubectl get pod -n "$NS" "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)
+  pv=$(kubectl get pvc -n "$NS" "data-flint-pnfs-ds-$idx" \
+       -o jsonpath='{.spec.volumeName}' 2>/dev/null)
+  vnode=$(kubectl get pv "$pv" \
+          -o jsonpath='{.spec.csi.volumeAttributes.flint\.csi\.storage\.io/node-name}' 2>/dev/null)
+  [ -z "$pnode" ] || [ -z "$vnode" ] && continue
+  CHECKED=$((CHECKED+1))
+  if [ "$pnode" != "$vnode" ]; then
+    bad "$pod runs on $pnode but its volume lives on $vnode — serving REMOTELY"
+    MISALIGNED=$((MISALIGNED+1))
+  fi
+done
+if [ "$MISALIGNED" = 0 ] && [ "$CHECKED" -gt 0 ]; then
+  ok "all $CHECKED data servers serve their own disk locally"
+else
+  [ "$MISALIGNED" -gt 0 ] && \
+    note "  fix: delete the flint-pnfs-ds StatefulSet AND its data-* PVCs,"
+  [ "$MISALIGNED" -gt 0 ] && \
+    note "       then let it recreate so pod and volume place together"
+fi
+echo
+
 # ── 3. The benchmark client hosts no data server ────────────────────────
 # A co-located client both serves and consumes: part of its traffic is
 # node-local (flattering the number) and it contends for the same CPUs
