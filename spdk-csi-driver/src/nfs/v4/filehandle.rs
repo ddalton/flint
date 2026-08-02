@@ -906,15 +906,55 @@ impl FileHandleManager {
         // We need to normalize . and .. without following symlinks
         let normalized = self.normalize_without_following_symlinks(&abs_path)?;
 
-        // Ensure path is within export
-        // Both paths should be canonicalized for proper comparison
-        // (to handle cases where /tmp -> /private/tmp on macOS)
-        let normalized_canon = normalized.canonicalize()
-            .unwrap_or_else(|_| normalized.clone());
+        // Ensure the path is within the export.
+        //
+        // Resolve the PARENT and re-append the leaf, rather than
+        // canonicalizing the whole path. `canonicalize()` follows a trailing
+        // symlink, and this must not: RFC 5661 §16.10.5 says LOOKUP returns
+        // the filehandle of the named object even when that object IS a
+        // symbolic link — the client follows it itself via READLINK.
+        // `handle_lookup` is careful to use `symlink_metadata` for exactly
+        // that reason, and canonicalizing here quietly undid it. Two ways it
+        // bit:
+        //
+        //   1. A symlink whose target resolves outside the export (an
+        //      ordinary `ln -s /etc/hosts x`) was judged "outside" and became
+        //      unnameable — NFS4ERR_RESOURCE from LOOKUP/LOOKUPP,
+        //      NFS4ERR_IO from CREATE (which mints the handle after the
+        //      symlink is already on disk).
+        //   2. A DANGLING leaf — canonicalize fails, so the RAW path was
+        //      compared against a CANONICALIZED export root. Those differ
+        //      whenever the export sits under a symlinked prefix (macOS
+        //      `/tmp` → `/private/tmp`), so containment failed spuriously.
+        //      pynfs's `--maketree` builds exactly this (`link -> /etc/X11`).
+        //
+        // Resolving the parent keeps the guard honest: `..` components are
+        // already gone (normalize_without_following_symlinks), and any
+        // symlinked *directory* on the way in is still resolved, so a real
+        // escape is still caught.
         let export_canon = self.export_path.canonicalize()
             .unwrap_or_else(|_| self.export_path.clone());
-            
-        if !normalized_canon.starts_with(&export_canon) {
+
+        let resolved = match (normalized.parent(), normalized.file_name()) {
+            (Some(parent), Some(leaf)) => {
+                parent.canonicalize().map(|p| p.join(leaf)).ok()
+            }
+            // No parent/leaf split — the export root itself.
+            _ => normalized.canonicalize().ok(),
+        };
+
+        let inside = match resolved {
+            Some(p) => p.starts_with(&export_canon),
+            // Parent unresolvable: fall back to a lexical check against both
+            // spellings of the export root, so a symlinked prefix can't make
+            // an in-export path look foreign.
+            None => {
+                normalized.starts_with(&export_canon)
+                    || normalized.starts_with(&self.export_path)
+            }
+        };
+
+        if !inside {
             return Err("Path outside export".to_string());
         }
 
@@ -1476,5 +1516,103 @@ mod f26_churn_bench {
             );
         }
         fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod symlink_leaf_tests {
+    use super::*;
+    use std::fs;
+
+    /// A symlink whose target resolves OUTSIDE the export must still get a
+    /// filehandle. RFC 5661 §16.10.5: LOOKUP returns the filehandle of the
+    /// named object even when that object is a symbolic link — the client
+    /// decides whether to follow it, via READLINK. `handle_lookup` is careful
+    /// to use `symlink_metadata` for exactly this reason, but `normalize_path`
+    /// then called `canonicalize()` on the full path, which DOES follow a
+    /// trailing symlink; the containment check saw the target's location and
+    /// rejected the link. Callers turn that into NFS4ERR_RESOURCE (LOOKUP /
+    /// LOOKUPP) or NFS4ERR_IO (CREATE), so an ordinary `ln -s /etc/hosts x`
+    /// inside an export made `x` unreachable.
+    #[test]
+    fn a_symlink_pointing_outside_the_export_still_gets_a_handle() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let target = root.parent().unwrap().join("flint-outside-target");
+        fs::write(&target, b"outside").unwrap();
+
+        let link = root.join("points_out");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mgr = FileHandleManager::new(root.clone());
+        let fh = mgr
+            .path_to_filehandle(&link)
+            .expect("symlink to a target outside the export must still be nameable");
+        assert_eq!(mgr.filehandle_to_path(&fh).unwrap(), link);
+
+        fs::remove_file(&target).ok();
+    }
+
+    /// A DANGLING symlink leaf must be nameable too — pynfs's `--maketree`
+    /// creates one (`link -> /etc/X11`) precisely to exercise the
+    /// NOENT-vs-SYMLINK error split, and `rsync`/`tar` trees carry them
+    /// routinely. `canonicalize()` fails on a dangling link, and the old code
+    /// then compared the RAW path against a CANONICALIZED export root — which
+    /// differs whenever the export sits under a symlinked prefix (on macOS
+    /// `/tmp` is a symlink to `/private/tmp`), so containment spuriously failed.
+    #[test]
+    fn a_dangling_symlink_leaf_is_still_nameable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let link = root.join("dangling");
+        std::os::unix::fs::symlink("/nonexistent/flint/probe/target", &link).unwrap();
+
+        let mgr = FileHandleManager::new(root.clone());
+        mgr.path_to_filehandle(&link)
+            .expect("a dangling symlink leaf must still be nameable");
+    }
+
+    /// The containment check must still REJECT an escape THROUGH a symlinked
+    /// directory. Resolving the parent (rather than the whole path) is what
+    /// keeps this working: the symlinked component is still followed, so the
+    /// leaf is judged at its real location. Only the trailing component is
+    /// left unresolved — and a client that READLINKs it and re-LOOKUPs the
+    /// target comes back through this same check.
+    #[test]
+    fn an_escape_through_a_symlinked_directory_is_still_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("export");
+        fs::create_dir_all(&root).unwrap();
+        let outside_dir = dir.path().join("outside");
+        fs::create_dir_all(&outside_dir).unwrap();
+        fs::write(outside_dir.join("secret.txt"), b"nope").unwrap();
+
+        // export/escape -> ../outside  (a symlinked DIRECTORY)
+        std::os::unix::fs::symlink(&outside_dir, root.join("escape")).unwrap();
+
+        let mgr = FileHandleManager::new(root.clone());
+        assert!(
+            mgr.path_to_filehandle(&root.join("escape").join("secret.txt")).is_err(),
+            "reaching outside the export through a symlinked directory must be refused"
+        );
+        // The symlink itself is still nameable — that is the RFC behaviour.
+        assert!(mgr.path_to_filehandle(&root.join("escape")).is_ok());
+    }
+
+    /// The containment check must still REJECT a genuine escape: a `..`
+    /// traversal that lands outside the export root.
+    #[test]
+    fn a_parent_traversal_out_of_the_export_is_still_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("export");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, b"nope").unwrap();
+
+        let mgr = FileHandleManager::new(root.clone());
+        assert!(
+            mgr.path_to_filehandle(&root.join("..").join("outside.txt")).is_err(),
+            "escaping the export via .. must be refused"
+        );
     }
 }
