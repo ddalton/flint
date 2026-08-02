@@ -54,7 +54,7 @@ try:
             print('yes' if x.get('blobstore_initialized') else 'no'); break
 except Exception: print('unknown')
 " 2>/dev/null)
-  kill $pf 2>/dev/null
+  kill $pf 2>/dev/null; wait $pf 2>/dev/null
   case "$init" in
     yes) ;;
     *)   bad "$node: blobstore not initialised (reported '$init')"; UNINIT=$((UNINIT+1));;

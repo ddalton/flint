@@ -172,8 +172,18 @@ indistinguishable from success.
 Both geometry parameters are **fixed at create**: a file's placement is
 pinned at its first layout grant and never re-striped.
 
-`mountOptions` on the class reach the kernel mount and win over the
-driver's defaults. The mount is **NFSv4.2** (`minorversion=2`) and
+**`mountOptions` on the class do NOT reliably reach the kernel mount** —
+this was previously documented here as working and it does not. Measured
+2026-08-02 on runax: a class carrying `mountOptions: ["nconnect=16"]`
+propagated correctly to `PV.spec.mountOptions: ['nconnect=16']`, and the
+kernel still mounted with the driver's own **`nconnect=4`**. So the
+class-level escape hatch cannot currently override a default the driver
+already emits, and an operator has no supported way to retune one. Treat
+any option the driver sets in `build_pnfs_mount_opts` as effectively
+fixed until this is fixed, and VERIFY with `grep /proc/mounts` rather
+than trusting the StorageClass.
+
+The mount is **NFSv4.2** (`minorversion=2`) and
 requests **`sec=sys`**; earlier releases pinned 4.1 and sent no `sec=`
 at all, which negotiated AUTH_NULL so no uid reached the server and
 every created file landed owned by root — measured, and the reason
