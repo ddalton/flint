@@ -128,5 +128,10 @@ for k, d in rows:
 served = [d for _, d in rows if d > 0.02 * tot]
 print(f"    -> {len(served)} of {len(rows)} data servers actually served")
 PY
-kubectl delete pod "$POD" --ignore-not-found --wait=false >/dev/null 2>&1
+# --wait=true, deliberately. The NFS mount lives on the NODE and survives as
+# long as ANY pod holds the PVC, so a still-terminating pod from the previous
+# run keeps the old mount alive — and with it any read_ahead_kb this script
+# set. A readahead sweep run with --wait=false silently measures the previous
+# point's setting on its next run.
+kubectl delete pod "$POD" --ignore-not-found --wait=true >/dev/null 2>&1
 kubectl delete configmap "mb-$POD" --ignore-not-found >/dev/null 2>&1

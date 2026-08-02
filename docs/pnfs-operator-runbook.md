@@ -168,6 +168,71 @@ file system`), the replacement raced the lazy unmount and inherited a
 stale staging mount: delete the pod again and let termination finish
 (`--wait=true`) before the replacement schedules.
 
+### When the roll WEDGES a node: `umount` in D state
+
+Symptom, all at once on one node: a pod stuck `Terminating` for many
+minutes, its replacement stuck `ContainerCreating` with `Multi-Attach
+error … already exclusively attached to one node`, and:
+
+    ps -eo stat,pid,comm | awk '$1 ~ /^D/'
+    #   D  44403 umount
+    #   D  38632 jbd2/nvme3n1-8
+
+**Why it hangs.** The kernel initiator is connected with
+`ctrl_loss_tmo=1800` and **`fast_io_fail_tmo=off`** (measured on a live
+node). When spdk-tgt dies the controller enters `connecting` and *queues*
+I/O for up to thirty minutes instead of failing it, so the filesystem's
+final flush never returns:
+
+    cat /proc/<umount-pid>/stack
+    #   submit_bio_wait / blkdev_issue_flush / ext4_sync_fs
+    #   sync_filesystem / generic_shutdown_super / kill_block_super
+
+**`reboot` does not rescue you** — verified: the reboot itself parks in
+`ksys_sync → iterate_supers` on the same superblock, so the node stays up
+and stuck. Clear the I/O first, then reboot if you still want to.
+
+Ladder, cheapest first. Steps 1–2 need no reboot:
+
+    # 1. Fail everything queued on the dead transport. This is the one that
+    #    matters: it completes the blocked flush with an error.
+    for c in /sys/class/nvme/nvme*/; do
+      [ "$(cat $c/state 2>/dev/null)" = connecting ] && echo 1 > $c/delete_controller
+    done
+
+    # 2. Still stuck? Abort the filesystem so it stops trying to flush a
+    #    journal whose device is gone. FS_IOC_SHUTDOWN = _IOR('X',125,u32),
+    #    flag 2 = NOLOGFLUSH.
+    python3 - "$MOUNTPOINT" <<'PY'
+    import fcntl, os, struct, sys
+    fd = os.open(sys.argv[1], os.O_RDONLY)
+    fcntl.ioctl(fd, 0x8004587D, struct.pack("I", 2))
+    PY
+
+    # 3. Only now is a reboot able to complete.
+
+After step 1 the `blkdev_issue_flush` frame leaves the stack and ext4
+remounts `ro` — that is the signal it worked. (On the run this was written
+from, an SSM reboot had already been queued and fired once step 1 released
+`ksys_sync`, so "step 1 alone finishes the umount" is *consistent with*
+what was seen but was not isolated. Steps 1–2 are still the right order:
+without them the reboot cannot proceed at all.)
+
+**The underlying gap.** F42's `fast_io_fail` bound lives on
+`LegTransportPolicy` — the SPDK-side `bdev_nvme_attach_controller` used for
+raid *legs*. The **kernel-side** initiator that a consumer's filesystem
+actually sits on comes from `ReconnectPolicy`, which emits only
+`--ctrl-loss-tmo 1800 --reconnect-delay 5` and **no fast-io-fail at all**.
+So the leg I/O is bounded and the consumer I/O is not. Until that is
+closed, `fast_io_fail_tmo` is writable at runtime and
+`FLINT_NVME_CTRL_LOSS_TMO` shortens the outer bound.
+
+**Avoiding it entirely:** do not hand-roll the csi-node DaemonSet while
+pNFS pods hold volumes. Either scale the MDS/DS down first, roll, and scale
+back up — or enable `maintenance.drainRoll`, which puts the DaemonSet on
+`OnDelete` and lets the controller's roller sequence it behind a redundancy
+barrier.
+
 ## Replica failure underneath a DS (the durability payoff)
 
 Drill: `tests/k8s/pnfs-drills/replica-under-ds.sh`. With the DS PVC on

@@ -225,6 +225,52 @@ bypasses the scheduler and a `WaitForFirstConsumer` PVC then never binds.
 
 Non-zero exit means **do not benchmark** — fix the rig first.
 
+### What the numbers mean, and which benchmark answers which question
+
+Measured on runay 2026-08-02: 5 data servers on i3en.xlarge, one DS-free
+12-vCPU client, preflight green.
+
+| workload | read | vs 1 DS (352 MiB/s) |
+|---|---|---|
+| `fio --direct=1 --iodepth=32` | 1876 MiB/s | **5.33x** |
+| checkpoint, 8 shard readers, `read()` | *see below* | |
+| checkpoint, 8 shard readers, `mmap` | 1631 | 4.6x |
+| checkpoint, 4 shard readers, `mmap` | 1283 | 3.6x |
+| checkpoint, **1 reader**, `mmap` | 681-831 | ~2.2x |
+
+**DS scaling is linear. Whether you SEE it depends entirely on how much
+the client keeps in flight.** fio with 128 outstanding 1 MiB requests
+engages every data server by construction; a single-threaded loader takes
+about 40% of the same fleet. Any "pNFS does not scale" claim sourced from
+one sequential reader is measuring the reader.
+
+Two consequences worth acting on:
+
+- **`mmap` costs about twice the CPU per byte of a plain `read()`**, and
+  ~26% of the throughput: same file, same fleet, one reader — mmap 831
+  MiB/s at 0.74 cores busy, `read()` 1123 MiB/s at 0.48. safetensors
+  mmaps by default, so a checkpoint load pays this.
+- **Readahead is a weak lever.** `read_ahead_kb` defaults to 15360 and is
+  writable per-mount. Sweeping one stream: 4 MiB 459, 15 MiB 679, 64 MiB
+  766, 128 MiB 828. Going *below* the 8 MiB stripe unit costs 32%; going
+  8.5x above the default buys 22%.
+
+The obvious-looking explanation — 15 MiB of readahead spans 2 of the 8 MiB
+stripe units, so only 2 of 5 servers can be busy — predicts 2 x 375 = 750
+against a measured 681 and is **wrong**. It was refuted by the sweep above:
+if concurrency-over-stripe-units were binding, 128 MiB of readahead would
+have roughly quadrupled throughput. Arithmetic that matches a measurement
+is not a mechanism.
+
+Also note **per-DS egress shares are not evidence of concurrency**. A
+single reader shows a perfect 20.0% from each of five servers — that is
+round-robin over the whole run, not five servers working at once. Only
+throughput separates them.
+
+Use `scripts/pnfs-fanout-diag.sh` for the fleet-parallel question and
+`scripts/pnfs-model-bench.sh` for the checkpoint-load question; they do
+not measure the same thing and neither substitutes for the other.
+
 This is not ceremony. On 2026-08-01 a DS-scaling sweep ran three times and
 every result was void: all five data servers' **backing volumes** had been
 provisioned onto one node, so the sweep measured a single device at every

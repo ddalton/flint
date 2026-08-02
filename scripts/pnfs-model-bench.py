@@ -31,6 +31,7 @@ does it; `--check-cache` warns if the read ran suspiciously fast.
 import argparse
 import mmap
 import os
+import resource
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -149,10 +150,19 @@ def main():
             done = sum(fn(p) for p in files)
         dt = time.time() - t0
 
+    # CPU accounting for the reader itself, self and children, so a
+    # single-stream number can be read as "waiting on the fleet" or "burning
+    # a core in the fault/copy path". Raising readahead 4.3x above the
+    # default bought only 13% here, which makes the difference the whole
+    # question.
+    ru = resource.getrusage(resource.RUSAGE_SELF)
+    rc = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (ru.ru_utime + ru.ru_stime + rc.ru_utime + rc.ru_stime)
     gib = done / GIB
     print(f"RESULT phase={a.phase} mode={a.mode} workers={a.workers} "
           f"shards={a.shards} gib={gib:.1f} seconds={dt:.1f} "
-          f"gibps={gib/dt:.3f} mibps={done/1048576/dt:.0f}")
+          f"gibps={gib/dt:.3f} mibps={done/1048576/dt:.0f} "
+          f"cpu_s={cpu:.1f} cores_busy={cpu/dt:.2f}")
     if a.phase == "read" and done and (done / dt) > 6 * GIB:
         print("WARNING: faster than any network path here — page cache was "
               "almost certainly NOT dropped; this number is RAM, not pNFS",
