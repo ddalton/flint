@@ -403,9 +403,25 @@ pnfs:
     dirGid: ""
     dirMode: ""
 
-    # Extra mount options appended to the driver's defaults; they win
-    # the kernel's last-one-wins parse. `sec=sys` is already the
-    # default, so this is for things like a larger nconnect.
+    # Extra mount options. Each one REPLACES the driver's default for the
+    # same option — the driver no longer emits both values and hope the
+    # kernel takes the last, which is what silently failed before
+    # 2026-08-02. So rsize=, wsize=, proto=, port=, sec=, vers= and the
+    # rest are all genuinely reachable from here now.
+    #
+    # `nconnect` is the known exception and is NOT reliably settable per
+    # class: it is a property of the client's shared nfs_client, and every
+    # pNFS PVC on a node mounts the same MDS ip:port, so the second and
+    # later mounts on a node can inherit the first mount's connection
+    # count regardless of what this asks for. To change it fleet-wide,
+    # change the driver default rather than the class.
+    #
+    # ALWAYS verify, in the consuming pod:
+    #     kubectl exec <pod> -- grep nfs4 /proc/mounts
+    # and cross-check what the driver actually asked for:
+    #     kubectl -n <ns> logs ds/flint-csi-node -c flint-csi-driver \
+    #       | grep 'pNFS\] mount -t nfs4'
+    # If those two disagree, the loss is in the kernel, not the driver.
     mountOptions: []
 
   # gRPC endpoint of an EXTERNALLY managed MDS. Ignored (and may be

@@ -172,16 +172,41 @@ indistinguishable from success.
 Both geometry parameters are **fixed at create**: a file's placement is
 pinned at its first layout grant and never re-striped.
 
-**`mountOptions` on the class do NOT reliably reach the kernel mount** —
-this was previously documented here as working and it does not. Measured
-2026-08-02 on runax: a class carrying `mountOptions: ["nconnect=16"]`
-propagated correctly to `PV.spec.mountOptions: ['nconnect=16']`, and the
-kernel still mounted with the driver's own **`nconnect=4`**. So the
-class-level escape hatch cannot currently override a default the driver
-already emits, and an operator has no supported way to retune one. Treat
-any option the driver sets in `build_pnfs_mount_opts` as effectively
-fixed until this is fixed, and VERIFY with `grep /proc/mounts` rather
-than trusting the StorageClass.
+**`mountOptions` on the class replace the driver's defaults — with one
+known exception.** Fixed 2026-08-02 after runax measured a class carrying
+`mountOptions: ["nconnect=16"]` propagating correctly to
+`PV.spec.mountOptions` while the kernel still mounted the driver's own
+`nconnect=4`. The driver used to emit *both* values and rely on the kernel
+taking the last; it now emits the operator's value **instead of** its own,
+so the string never contains the same option twice and precedence never
+enters into it. The RWX/non-pNFS path was worse — it built its option
+string as a compile-time literal and never read `mountOptions` at all —
+and is fixed the same way.
+
+The exception is **`nconnect`**: it is a property of the client's shared
+`nfs_client`, and every pNFS PVC on a node mounts the same MDS ip:port, so
+the second and later mounts on a node can inherit the first mount's
+connection count regardless of the option string. To change it fleet-wide,
+change the driver default rather than the class.
+
+**Verify every time**, in the consuming pod:
+
+```bash
+kubectl exec <pod> -- grep nfs4 /proc/mounts
+```
+
+and cross-check what the driver actually asked for:
+
+```bash
+kubectl -n <ns> logs ds/flint-csi-node -c flint-csi-driver \
+  | grep 'pNFS\] mount -t nfs4'
+```
+
+If those two disagree the loss is in the kernel, not the driver. The
+driver also now names the empty cases (`request carried NO
+volume_capability`, `Block access type`, `none supplied`) — before, a
+silent `unwrap_or_default()` made "the operator set nothing" and "kubelet
+never passed them" indistinguishable from the node.
 
 The mount is **NFSv4.2** (`minorversion=2`) and
 requests **`sec=sys`**; earlier releases pinned 4.1 and sent no `sec=`

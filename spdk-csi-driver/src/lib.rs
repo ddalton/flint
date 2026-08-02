@@ -15,6 +15,7 @@ pub mod epoch_scheduler;  // Common-epoch snapshot scheduler (incremental-rebuil
 pub mod catchup;  // Replica catch-up orchestrator / warm standby + reassembly admission (incremental-rebuild phases 3/4)
 pub mod replica_replace;  // U11: replica re-placement after permanent node loss (pre-pass of the catch-up task)
 pub mod cutover;  // Reassembly cutover: RWX NFS-pod bounce + RWO policy knob (incremental-rebuild phase 4)
+pub mod mount_opts;  // Driver-default / operator-mountOptions merge. runax 2026-08-02: class mountOptions could not override ANY default the driver emitted — the RWX path never read them at all, and the pNFS path emitted both values and bet on the kernel's last-one-wins parse.
 pub mod driver;
 pub mod minimal_models;
 pub mod minimal_disk_service;

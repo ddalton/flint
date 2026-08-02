@@ -720,48 +720,52 @@ fn parse_host_port(endpoint: &str) -> Result<(String, String), PnfsError> {
 /// client and not just pNFS — so it is deliberately not done here. See
 /// `mount_opts_tests::the_session_cap_holds_the_client_below_the_rsize_we_ask_for`,
 /// which pins the arithmetic so the fix can be verified when it lands.
+/// An operator option REPLACES the driver default in the same family rather
+/// than joining it: the assembled string never contains a family twice, so
+/// nothing here depends on the kernel's option precedence.
+///
+/// It used to. Only the version family and `sec=` suppressed their default;
+/// everything else was emitted unconditionally and the override was left to
+/// "the kernel takes the last one" — a claim written down as fact and never
+/// measured. On runax (2026-08-02) a class carrying `nconnect=16`
+/// propagated correctly to `PV.spec.mountOptions` and the kernel still
+/// mounted `nconnect=4`. The two options that worked were exactly the two
+/// that never produced a duplicate, which is why this now eliminates
+/// duplicates instead of reasoning about who wins.
+///
+/// `sec=sys` remains a DEFAULT, not a forced option. It is load-bearing —
+/// without it the client negotiates AUTH_NONE (this server's SECINFO lists
+/// it first), `Auth::unix_uid_gid` returns None, the creator-ownership
+/// stamp in OPEN/CREATE is skipped, and every file lands owned by the
+/// server process (root); ownership-sensitive workloads such as postgres
+/// then refuse to start. But an operator asking for `sec=krb5` means it.
+///
+/// NOTE THE REMAINING LIMIT, which this function cannot fix: `nconnect` is
+/// a property of the client's shared `nfs_client`, and every pNFS PVC on a
+/// node mounts the same MDS ip:port. A second mount to a server the node
+/// already talks to may inherit the first mount's connection count no
+/// matter what this string says. Verify with `/proc/mounts`, never by
+/// reading the StorageClass.
 pub fn build_pnfs_mount_opts(mds_port: &str, readonly: bool, user_flags: &[String]) -> String {
-    let pinned = |prefixes: &[&str]| {
-        user_flags.iter().any(|f| {
-            f.split(',')
-                .any(|o| prefixes.iter().any(|p| o.trim().starts_with(p)))
-        })
+    let defaults: Vec<String> = vec![
+        "minorversion=2".to_string(),
+        "sec=sys".to_string(),
+        "proto=tcp".to_string(),
+        format!("port={}", mds_port),
+        "nconnect=4".to_string(),
+        "rsize=1048576".to_string(),
+        "wsize=1048576".to_string(),
+        "noresvport".to_string(),
+    ];
+    // `ro` is FORCED, not a default: a read-only publish is a CSI decision.
+    // It used to be emitted before the operator's flags, so under
+    // last-one-wins an operator `rw` would have silently defeated it.
+    let forced: Vec<String> = if readonly {
+        vec!["ro".to_string()]
+    } else {
+        Vec::new()
     };
-    let version_pinned = pinned(&["vers=", "nfsvers=", "minorversion="]);
-    let sec_pinned = pinned(&["sec="]);
-
-    let mut opts = String::new();
-    if !version_pinned {
-        opts.push_str("minorversion=2,");
-    }
-    // sec=sys is load-bearing, exactly as on the RWX path (main.rs, the
-    // `vers=4.2,noresvport,sec=sys` literal). Without it the client
-    // negotiates AUTH_NONE — this server's SECINFO lists AUTH_NONE first
-    // (`encode_secinfo_flavors`) — and under AUTH_NONE `Auth::unix_uid_gid`
-    // returns None, so the creator-ownership stamp in OPEN/CREATE is
-    // skipped and every file lands owned by the server process (root).
-    // Ownership-sensitive workloads (postgres checks st_uid == geteuid)
-    // then refuse to start on the volume. The pNFS mount was missing this
-    // while the RWX mount had it, so a `mount | grep` on a pNFS volume
-    // showed `sec=null`.
-    if !sec_pinned {
-        opts.push_str("sec=sys,");
-    }
-    opts.push_str(&format!(
-        "proto=tcp,port={},nconnect=4,rsize=1048576,wsize=1048576,noresvport",
-        mds_port,
-    ));
-    if readonly {
-        opts.push_str(",ro");
-    }
-    for flag in user_flags {
-        let flag = flag.trim();
-        if !flag.is_empty() {
-            opts.push(',');
-            opts.push_str(flag);
-        }
-    }
-    opts
+    crate::mount_opts::merge(&defaults, user_flags, &forced)
 }
 
 
@@ -1269,14 +1273,138 @@ mod mount_opts_tests {
         assert!(opts.contains("vers=4.1"), "{opts}");
     }
 
-    /// Operator options land last so they win the kernel's last-one-wins
-    /// parse for any key we also set.
+    /// (operator spelling, the driver default it must REMOVE)
+    ///
+    /// This replaces `operator_options_are_appended_after_the_defaults`,
+    /// which asserted only that the operator's option came LAST in our own
+    /// string. That test passed for the entire life of the defect: it was
+    /// checking the driver's string concatenation, and was structurally
+    /// incapable of failing when the kernel ignored the second occurrence —
+    /// which is exactly what shipped.
+    const OVERRIDE_CASES: &[(&str, &str)] = &[
+        ("vers=4.1", "minorversion=2"),
+        ("nfsvers=4.1", "minorversion=2"),
+        ("minorversion=1", "minorversion=2"),
+        ("sec=krb5", "sec=sys"),
+        ("proto=rdma", "proto=tcp"),
+        ("port=20490", "port=2049"),
+        ("nconnect=16", "nconnect=4"),
+        ("rsize=262144", "rsize=1048576"),
+        ("wsize=262144", "wsize=1048576"),
+        ("resvport", "noresvport"),
+    ];
+
+    /// THE TEST THAT WOULD HAVE CAUGHT THE DEFECT. Against the pre-fix code
+    /// it fails on 6 of these 10 rows — proto, port, nconnect, rsize, wsize,
+    /// noresvport — and passes on the 4 version/sec rows, reproducing
+    /// exactly the asymmetry measured on runax.
     #[test]
-    fn operator_options_are_appended_after_the_defaults() {
-        let opts = build_pnfs_mount_opts("2049", false, &flags(&["nconnect=16"]));
-        let ours = opts.find("nconnect=4").expect("default present");
-        let theirs = opts.rfind("nconnect=16").expect("override present");
-        assert!(theirs > ours, "operator option must come last: {opts}");
+    fn every_driver_default_is_replaceable_by_an_operator_option() {
+        for (theirs, ours) in OVERRIDE_CASES {
+            let opts = build_pnfs_mount_opts("2049", false, &flags(&[theirs]));
+            assert!(
+                opts.split(',').any(|o| o == *theirs),
+                "operator option {theirs} missing: {opts}"
+            );
+            assert!(
+                !opts.split(',').any(|o| o == *ours),
+                "driver default {ours} survived beside operator {theirs}: {opts}"
+            );
+        }
+    }
+
+    /// Special-casing is how this bug was born — `pinned()` covered exactly
+    /// two options and every other default was unconditional. This makes an
+    /// uncovered default a build failure instead of a cluster discovery.
+    #[test]
+    fn the_override_cases_cover_every_default_the_driver_emits() {
+        use std::collections::HashSet;
+        let covered: HashSet<&str> = OVERRIDE_CASES.iter().map(|(_, ours)| *ours).collect();
+        for opt in build_pnfs_mount_opts("2049", false, &[]).split(',') {
+            assert!(
+                covered.contains(opt),
+                "driver default `{opt}` has no override case — add one to OVERRIDE_CASES"
+            );
+        }
+    }
+
+    /// The invariant that makes the fix independent of kernel precedence.
+    #[test]
+    fn the_assembled_string_never_repeats_an_option_family() {
+        use std::collections::HashSet;
+        let cases = [
+            flags(&[]),
+            flags(&["nconnect=16"]),
+            flags(&["nconnect=8", "nconnect=16"]),
+            flags(&["hard,vers=4.1,timeo=600,nconnect=16"]),
+            flags(&["rw"]),
+            flags(&["tcp"]),
+            flags(&["resvport"]),
+            flags(&["", "  ", "hard"]),
+        ];
+        for readonly in [false, true] {
+            for f in &cases {
+                let opts = build_pnfs_mount_opts("2049", readonly, f);
+                let mut seen = HashSet::new();
+                for o in opts.split(',') {
+                    let fam = crate::mount_opts::family_of(o);
+                    assert!(seen.insert(fam), "family `{fam}` emitted twice in {opts}");
+                }
+            }
+        }
+    }
+
+    /// No existing volume's mount may change. pNFS PVs remount on every pod
+    /// restart, so a refactor that shifted the default string would retune
+    /// the whole fleet silently.
+    #[test]
+    fn the_default_string_is_byte_identical_to_the_pre_merge_driver() {
+        assert_eq!(
+            build_pnfs_mount_opts("2049", false, &[]),
+            "minorversion=2,sec=sys,proto=tcp,port=2049,nconnect=4,rsize=1048576,wsize=1048576,noresvport"
+        );
+        assert_eq!(
+            build_pnfs_mount_opts("2049", true, &[]),
+            "minorversion=2,sec=sys,proto=tcp,port=2049,nconnect=4,rsize=1048576,wsize=1048576,noresvport,ro"
+        );
+    }
+
+    /// The one intentional behaviour change. `ro` used to be emitted BEFORE
+    /// the operator's flags, so under last-one-wins an operator `rw` would
+    /// have silently defeated a read-only publish.
+    #[test]
+    fn a_read_only_publish_refuses_an_operator_rw() {
+        let opts = build_pnfs_mount_opts("2049", true, &flags(&["rw", "nconnect=16"]));
+        assert!(opts.split(',').any(|o| o == "ro"), "{opts}");
+        assert!(
+            !opts.split(',').any(|o| o == "rw"),
+            "operator rw defeated the CSI readOnly publish: {opts}"
+        );
+        assert!(
+            opts.split(',').any(|o| o == "nconnect=16"),
+            "refusing rw must not refuse everything else: {opts}"
+        );
+    }
+
+    #[test]
+    fn a_repeated_operator_option_is_emitted_once_with_the_last_value() {
+        let opts = build_pnfs_mount_opts("2049", false, &flags(&["nconnect=8", "nconnect=16"]));
+        assert!(opts.split(',').any(|o| o == "nconnect=16"), "{opts}");
+        assert!(!opts.split(',').any(|o| o == "nconnect=8"), "{opts}");
+    }
+
+    #[test]
+    fn a_comma_joined_operator_entry_is_split_into_separate_options() {
+        let opts = build_pnfs_mount_opts(
+            "2049",
+            false,
+            &flags(&["hard,vers=4.1,timeo=600,nconnect=16"]),
+        );
+        for want in ["hard", "vers=4.1", "timeo=600", "nconnect=16"] {
+            assert!(opts.split(',').any(|o| o == want), "{want} missing: {opts}");
+        }
+        assert!(!opts.split(',').any(|o| o == "minorversion=2"), "{opts}");
+        assert!(!opts.split(',').any(|o| o == "nconnect=4"), "{opts}");
     }
 
     /// Read-only must survive the presence of operator options.

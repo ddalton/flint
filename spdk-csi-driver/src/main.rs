@@ -4000,17 +4000,13 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // reachable without a driver rebuild. There was no override at
             // all before: `mount_flags` was consulted nowhere on this path,
             // so every knob below was effectively a compile-time constant.
-            let user_flags: Vec<String> = req
-                .volume_capability
-                .as_ref()
-                .and_then(|vc| vc.access_type.as_ref())
-                .and_then(|at| match at {
-                    spdk_csi_driver::csi::volume_capability::AccessType::Mount(m) => {
-                        Some(m.mount_flags.clone())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default();
+            // Logged explicitly: after runax we could not tell "the operator
+            // set nothing" from "kubelet did not pass them" from "the kernel
+            // ignored them", because this read was a silent unwrap_or_default.
+            let user_flags = spdk_csi_driver::mount_opts::operator_mount_flags(
+                "pNFS",
+                req.volume_capability.as_ref(),
+            );
 
             let mount_opts =
                 spdk_csi_driver::pnfs_csi::build_pnfs_mount_opts(mds_port, readonly, &user_flags);
@@ -4074,11 +4070,18 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // AUTH_NULL (SECINFO lists it first), no uid reaches the server,
             // and every file lands owned by root — ownership-sensitive
             // workloads (postgres) refuse to start on the volume.
-            let mount_opts = if readonly {
-                "vers=4.2,noresvport,sec=sys,ro".to_string()
-            } else {
-                "vers=4.2,noresvport,sec=sys".to_string()
-            };
+            //
+            // Until 2026-08-02 this was a compile-time literal and
+            // `mount_flags` was read NOWHERE on this path, so PV
+            // `spec.mountOptions` were dropped on the floor for every RWX
+            // volume — the same defect measured on pNFS, in a stronger form
+            // (there the options at least reached the string).
+            let user_flags = spdk_csi_driver::mount_opts::operator_mount_flags(
+                "NFS_MOUNT",
+                req.volume_capability.as_ref(),
+            );
+            let mount_opts =
+                spdk_csi_driver::mount_opts::build_rwx_nfs_mount_opts(readonly, &user_flags);
             
             // PRE-MOUNT CHECKS
             eprintln!("🔍 [NFS_MOUNT] Pre-mount checks:");
