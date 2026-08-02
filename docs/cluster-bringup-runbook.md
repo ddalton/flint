@@ -280,6 +280,20 @@ produced a confident "stripeWidth 3 and 4 collapse ~3x" that a same-window
 bidirectional sweep then failed to reproduce at all — the ascending and
 descending passes disagreed by up to 1.6x on the same width.
 
+**Check the NIC is not being metered before blaming flint.** `i3en.xlarge`
+is "**up to** 25 Gbps" — burst over a much lower sustained baseline (only
+`i3en.6xlarge+` sustains it). Hours of load exhausts the credit and every
+number quietly halves. ENA exposes the counter:
+
+```bash
+./scripts/nodesh.sh <node> 'ethtool -S ens5 | grep allowance'
+#   bw_out_allowance_exceeded: 0        <- still bursting
+#   bw_out_allowance_exceeded: 918273   <- AWS is throttling you, not flint
+```
+
+Sample it beside every throughput number. A rising counter means the
+measurement is metering, not storage.
+
 So, for any comparison you intend to believe:
 
 - **Every point in one window**, back to back, and **run the sweep in both

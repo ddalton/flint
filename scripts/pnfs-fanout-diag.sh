@@ -66,7 +66,26 @@ snap() {
   "$HERE/nodesh.sh" "$CLIENT" "date +%s; echo ---STAT---; cat /proc/stat; \
      echo ---SOFTIRQS---; cat /proc/softirqs; \
      echo ---INTERRUPTS---; cat /proc/interrupts; \
+     echo ---ALLOWANCE---; ethtool -S \$(awk '\$2==\"00000000\"{print \$1; exit}' \
+       /proc/net/route) 2>/dev/null | grep allowance; \
      echo ---MOUNTSTATS---; cat /proc/1/mountstats" >"$OUT/client-$1.txt" 2>/dev/null
+}
+
+# ENA THROTTLE COUNTERS, on every data server and the client.
+# These instances are "UP TO 25 Gbps" — burst over a much lower sustained
+# baseline. Hours of load exhausts the credit and every number quietly
+# halves, which is indistinguishable from a storage regression unless you
+# look. A session on 2026-08-02 measured the same volume at 1849 MiB/s and
+# later 773, and spent hours hunting a stripe-width bug that may simply have
+# been AWS metering. A rising bw_*_allowance_exceeded means the measurement
+# is the NIC allowance, not the storage.
+allowance() {
+  for n in $DS_NODES $CLIENT; do
+    printf "%s %s\n" "$n" "$("$HERE/nodesh.sh" "$n" \
+      'IF=$(awk "\$2==\"00000000\"{print \$1; exit}" /proc/net/route)
+       ethtool -S $IF 2>/dev/null | awk "/bw_out_allowance_exceeded/{print \$2}"' \
+      2>/dev/null | head -1)"
+  done
 }
 snap before
 
