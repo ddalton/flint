@@ -182,6 +182,38 @@ ownership-sensitive workloads (postgres) would not start on a pNFS PVC.
 **Pods must use `nodeSelector`, not `nodeName`** — an explicit `nodeName`
 bypasses the scheduler and a `WaitForFirstConsumer` PVC then never binds.
 
+### Before ANY throughput or scaling measurement
+
+```bash
+./scripts/pnfs-bench-preflight.sh 5     # expected DS count
+```
+
+Non-zero exit means **do not benchmark** — fix the rig first.
+
+This is not ceremony. On 2026-08-01 a DS-scaling sweep ran three times and
+every result was void: all five data servers' **backing volumes** had been
+provisioned onto one node, so the sweep measured a single device at every
+stripe width and reported "pNFS does not scale" (1.11x). The DS *pods* were
+spread across five nodes — which is what was checked, and precisely why it
+looked right. With the rig corrected the same sweep measured **3.50x**.
+
+The trigger was ordering: `helm` ran before disk-init, so when the
+StatefulSet's PVCs bound only one node had a blobstore and everything landed
+there. **Disk-init makes a node visible to placement; a node initialised
+later never gets used.** Hence the rule already stated in §2 — disk-init must
+complete before any StorageClass or PVC exists — and hence this gate, which
+enforces it after the fact.
+
+Two more traps the preflight catches, both of which produced confident wrong
+answers the same day:
+
+- **Multi-client tests that share one volume** cannot distinguish a
+  per-volume cap from a fleet-wide one. Give each client its own volume.
+- **A client co-located with a data server** both serves and consumes: part
+  of its traffic is node-local and it contends for the same CPUs. On
+  4-vCPU nodes a client alone needs ~3.8 cores at 1 GB/s, so a co-located
+  pair is starved by construction.
+
 ### Verifying pNFS actually works
 
 ```bash

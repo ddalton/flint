@@ -237,6 +237,26 @@ impl IoOperationHandler {
         // worker's queue for the syscall's duration — no per-op
         // cross-thread handoff.
         let (buffer, eof) = fast_blocking(count as usize, || -> std::io::Result<(Vec<u8>, bool)> {
+            // PERF, MEASURED-ADJACENT, NOT YET FIXED. This memsets `count`
+            // bytes (1 MiB at the default rsize) and then immediately
+            // overwrites every one of them with read_at's result — pure
+            // waste on the data server's hottest path.
+            //
+            // It is left as-is deliberately. The obvious rewrites do not
+            // help: with_capacity+resize memsets identically, and set_len
+            // over uninitialised capacity is UB because read_at takes
+            // &mut [u8]. The real fix is a per-worker reusable buffer pool,
+            // which is genuine engineering on a path nobody has profiled.
+            //
+            // Context for whoever does profile it: a DS serves 396 MiB/s
+            // over pNFS where the same node's local block path does 845
+            // (measured on runaw, 2026-08-01, with a client that provably
+            // had headroom). That 2.13x is the one real, undiagnosed
+            // deficit in the fleet. This memset is a known contributor but
+            // almost certainly not the bulk of it — the extra full copy at
+            // ds/server.rs (encode_opaque into the reply buffer, with no
+            // writev/splice anywhere on the path) is the larger one.
+            // Instrument the DS first; do not guess which to attack.
             let mut buffer = vec![0u8; count as usize];
             let bytes_read = file.read_at(&mut buffer, offset)?;
             buffer.truncate(bytes_read);

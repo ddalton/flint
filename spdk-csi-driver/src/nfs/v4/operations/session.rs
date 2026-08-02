@@ -17,6 +17,42 @@ use crate::nfs::v4::compound::{ChannelAttrs, CompoundContext};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// Fore-channel buffer caps this server advertises in CREATE_SESSION.
+///
+/// PINNED AT EXACTLY 1 MiB, AND THAT IS LOAD-BEARING IN A WAY THAT COSTS
+/// THROUGHPUT. Linux's `nfs4_session_set_rwsize()` derives the mount's
+/// rsize/wsize by SUBTRACTING its COMPOUND overhead
+/// (`nfs41_maxread_overhead` / `nfs41_maxwrite_overhead`) from whatever the
+/// server advertises here. So a client that asks for `rsize=1048576` — which
+/// is exactly what the pNFS CSI driver's mount string asks for, see
+/// `pnfs_csi::build_pnfs_mount_opts` — cannot get it, and settles for
+/// 1047672 / 1047532. Measured on a real 6.1 client (runaw, 2026-08-01);
+/// the shortfalls are 904 and 1044 bytes, matching the kernel's constants
+/// to the byte.
+///
+/// The consequence is a DOUBLED RPC COUNT for 1 MiB direct I/O: each one
+/// splits into a full-size RPC plus a runt, and on writes that runt is a
+/// sub-page, non-page-aligned tail.
+///
+/// Raising these is the fix, but it resizes buffers for EVERY NFSv4.1
+/// client and not just the pNFS path, so it is a deliberate change with its
+/// own gate — not a constant to bump casually. They are `pub(crate)` so the
+/// relationship can be asserted in a test instead of rediscovered from a
+/// `mount` output; see
+/// `pnfs_csi::mount_opts_tests::the_session_cap_holds_the_client_below_the_rsize_we_ask_for`.
+pub(crate) const SERVER_MAX_REQUEST: u32 = 1024 * 1024;
+pub(crate) const SERVER_MAX_RESPONSE: u32 = 1024 * 1024;
+
+/// Linux NFSv4.1 COMPOUND overheads subtracted from the advertised
+/// fore-channel caps by `nfs4_session_set_rwsize()`. Recorded only so the
+/// test can state the arithmetic; the kernel owns these values, so they are
+/// test-only by construction — nothing in the server should ever branch on
+/// a peer's internal constant.
+#[cfg(test)]
+pub(crate) const LINUX_NFS41_MAXREAD_OVERHEAD: u32 = 904;
+#[cfg(test)]
+pub(crate) const LINUX_NFS41_MAXWRITE_OVERHEAD: u32 = 1044;
+
 // CREATE_SESSION flags (RFC 5661 §18.36)
 // Defined for protocol completeness; not all flags are implemented yet
 #[allow(dead_code)]
@@ -474,8 +510,6 @@ impl SessionOperationHandler {
         // Negotiate session buffer sizes. Take the *minimum* of client-requested
         // and server-maximum. We've already rejected requests below the server
         // minimum above, so the negotiated value is always >= MIN_*.
-        const SERVER_MAX_REQUEST: u32 = 1024 * 1024;
-        const SERVER_MAX_RESPONSE: u32 = 1024 * 1024;
         const SERVER_MAX_OPS: u32 = 128;
 
         let negotiated_max_request = op.fore_chan_attrs.max_request_size.min(SERVER_MAX_REQUEST);
