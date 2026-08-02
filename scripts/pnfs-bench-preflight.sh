@@ -47,16 +47,26 @@ for pod in $(kubectl get pods -n "$NS" -l app=flint-csi-node \
   init=$(curl -s -m 6 -X POST http://localhost:19097/api/disks \
            -H 'Content-Type: application/json' -d '{}' 2>/dev/null | python3 -c "
 import sys,json
+# ANY initialised data disk counts, not the FIRST one found. This used to
+# take the first non-system disk and break, which silently assumed one data
+# disk per node — true on i3en.xlarge/i4i.xlarge, false the moment the rig
+# grows. On i3en.6xlarge (TWO 7500 GB NVMe, 0000:00:1e.0 and 0000:00:1f.0)
+# initialising 1f.0 and leaving 1e.0 alone is a perfectly good rig, and the
+# old probe failed all 8 nodes on it — a preflight that blocks a healthy
+# cluster is as costly as one that passes a broken one, because the next
+# move is to distrust the preflight.
 try:
     d=json.load(sys.stdin); ds=d.get('disks') if isinstance(d,dict) else d
-    for x in ds:
-        if not x.get('is_system_disk'):
-            print('yes' if x.get('blobstore_initialized') else 'no'); break
+    data=[x for x in ds if not x.get('is_system_disk')]
+    if not data: print('no-data-disks')
+    else:
+        n=sum(1 for x in data if x.get('blobstore_initialized'))
+        print('yes' if n else 'no', f'({n}/{len(data)} data disks)')
 except Exception: print('unknown')
 " 2>/dev/null)
   kill $pf 2>/dev/null; wait $pf 2>/dev/null
   case "$init" in
-    yes) ;;
+    yes*) ;;
     *)   bad "$node: blobstore not initialised (reported '$init')"; UNINIT=$((UNINIT+1));;
   esac
 done
