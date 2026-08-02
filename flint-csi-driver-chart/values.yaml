@@ -542,22 +542,73 @@ blockDevice:
   discoveryMode: "nvme"
 
   # ublk performance tuning (only applies when backend=ublk)
-  # These settings control parallelism and throughput for high-speed NVMe disks
+  #
+  # READ THIS BEFORE TUNING EITHER KNOB. Neither one adds a CPU to the
+  # SPDK side, and the comment that used to sit here claimed otherwise
+  # ("higher values enable better parallelism across multiple cores").
+  # That was wrong, and wrong in the expensive direction: it sends you to
+  # this knob for a ceiling that lives somewhere else entirely.
+  #
+  # spdk_tgt is started with no `-m`, so it takes SPDK's default reactor
+  # mask of 0x1 — ONE core (lib/event/app.c: SPDK_APP_DPDK_DEFAULT_CORE_MASK).
+  # The node agent then calls ublk_create_target with empty params, and a
+  # NULL cpumask there means "the app's cpuset" (lib/ublk/ublk.c
+  # ublk_parse_core_mask), and ublk creates ONE POLL GROUP PER CORE IN THAT
+  # MASK. So however many queues you ask for below, a single poller thread
+  # on a single core drains all of them.
+  #
+  # What numQueues actually buys is real, just not what the old comment
+  # said: it is ublk's nr_hw_queues, so it is KERNEL-side submission
+  # parallelism — independent submission paths, less per-queue lock
+  # contention when many CPUs issue I/O at once. It is not SPDK-side
+  # polling parallelism.
+  #
+  # The knob for THAT is the reactor mask, and it is deliberately not
+  # exposed here because it is not free: an SPDK poller spins its core at
+  # 100% by design, whether or not there is I/O. Every reactor you add is
+  # a core permanently consumed on EVERY node running the csi-node
+  # DaemonSet — on an 8-vCPU data server that is 12.5% of the machine per
+  # core, always. Adding one is a fleet-wide capacity decision, and it
+  # should be made against a measurement of the block layer (fio
+  # --direct=1 straight at the ublk device, no NFS in the path), not
+  # against this file.
+  #
+  # NOTE the read path usually does not reach any of this. The pNFS data
+  # server serves bytes with buffered pread(2) and no O_DIRECT, so a read
+  # that hits the page cache never touches ublk, SPDK or the NVMe device.
+  # These settings bound writes and cache-MISS reads.
   ublk:
-    # Number of I/O queues for parallel processing
-    # Recommended: Match number of CPU cores (e.g., 8 for 8-core systems)
-    # Higher values enable better parallelism across multiple cores
+    # ublk nr_hw_queues (kernel-side submission paths, NOT SPDK cores).
+    # Clamped to the host CPU count by the node agent: the kernel EINVALs
+    # ADD_DEV when nr_hw_queues exceeds it (found live on runv — chart
+    # said 8, the node had 4 vCPUs). Each queue also costs the single
+    # poller another ring to service, so more is not automatically better.
     numQueues: 8
 
-    # Queue depth for outstanding I/O operations
-    # Higher values allow more I/O operations to be in flight simultaneously
-    # Recommended: 512-1024 for high-performance NVMe (7GB/s+)
+    # Outstanding I/Os per queue. SPDK's own ceiling is 1024
+    # (UBLK_DEV_MAX_QUEUE_DEPTH); depth x numQueues is the total the one
+    # poller can have in flight.
     queueDepth: 512
 
 # SPDK Target runtime configuration
 spdkTarget:
   # Extra arguments passed to spdk_tgt (requires "$@" in entrypoint)
   # For Kind/dev clusters, use kindMode.enabled=true instead of manual extraArgs
+  #
+  # THIS BEING EMPTY IS WHY THE WHOLE BLOCK DATA PLANE IS ONE CORE. With
+  # no `-m`/`-l`, spdk_tgt takes SPDK's default reactor mask 0x1, and that
+  # single core polls everything: the NVMe queues, the NVMe-oF TCP
+  # transport for replica legs, and every ublk queue on the node (see
+  # blockDevice.ublk above for why numQueues does not change this).
+  #
+  # `-m 0x3` would give two reactors. Do not add it casually: an SPDK
+  # poller spins its core at 100% whether or not I/O is arriving, this
+  # DaemonSet runs on every node, and the cost is therefore a permanently
+  # consumed core per reactor per node. Whether one core is even the
+  # binding constraint is UNMEASURED — on the read path it usually is not
+  # (buffered pread, page-cache hits never reach SPDK), and on writes the
+  # NIC may bind first. Measure the block layer directly before spending
+  # a core on every machine you own.
   extraArgs: []
 
   # Hugepages configuration
