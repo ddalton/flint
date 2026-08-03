@@ -115,6 +115,32 @@ spec:
       targetPort: 9091
       protocol: TCP
 ---
+{{- /*
+Multipath extras: additional ClusterIP Services onto the SAME pod.
+Each distinct ClusterIP becomes one more netaddr4 in this DS's
+GETDEVICEINFO multipath_list4 → one more trunked client transport
+(distinct IPs are required — the kernel dedupes trunk candidates by
+address). NFS only: DsControl has no reason to multipath.
+*/}}
+{{- range $j := until (int ($.Values.pnfs.server.dataServers.multipathServices | default 0)) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-pnfs-ds-{{ $i }}-mp{{ add1 $j }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: pnfs-ds
+spec:
+  selector:
+    statefulset.kubernetes.io/pod-name: flint-pnfs-ds-{{ $i }}
+  ports:
+    - name: nfs
+      port: 2049
+      targetPort: 2049
+      protocol: TCP
+---
+{{- end }}
 {{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -175,6 +201,16 @@ spec:
             # resolves to that Service's stable ClusterIP.
             - name: FLINT_DS_ADVERTISE_ADDR
               value: "$(POD_NAME).$(POD_NAMESPACE).svc.cluster.local"
+            {{- $mp := int (.Values.pnfs.server.dataServers.multipathServices | default 0) }}
+            {{- if gt $mp 0 }}
+            # Multipath extras — the "-mpJ" Services above. Registered
+            # via RegisterRequest.multipath_endpoints; the MDS resolves
+            # each name to its ClusterIP at GETDEVICEINFO-encode time
+            # and the F68b gate dials every one before accepting the
+            # registration.
+            - name: FLINT_DS_EXTRA_ADVERTISE_ADDRS
+              value: "{{- range $j := until $mp }}{{ if $j }},{{ end }}$(POD_NAME)-mp{{ add1 $j }}.$(POD_NAMESPACE).svc.cluster.local{{- end }}"
+            {{- end }}
             - name: RUST_LOG
               value: {{ .Values.pnfs.server.logLevel | default "info" | quote }}
             {{- if .Values.pnfs.controlToken.enabled }}

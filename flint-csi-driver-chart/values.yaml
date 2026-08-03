@@ -473,7 +473,7 @@ pnfs:
     # MDS + DS ship in one image (both binaries; entrypoint selects).
     image:
       name: flint-pnfs
-      tag: "1.24.1-rc2"  # MUST move in lockstep with images.flintCsiDriver. Per-PVC stripe geometry is half CSI (the class parameters and mount options) and half MDS (the layout width actually handed out at LAYOUTGET), and the MDS half lives in THIS image. Pinning this at 1.23.0 next to a fixed driver leaves stripeWidth ignored exactly as before, and the failure is silent — you get a full-width volume that reports success. The pNFS truncate-correctness release. The truncate_dirty gate exists to hide the window where a truncate has hit the MDS stub but the DSes still hold bytes past the new EOF — TLC found it did not, and closing F65 took nine further defects, every one invisible because the server's own logs scored a refused recall as an ack. Also carries the NFSv4.2 wave (see the driver image). WAS PINNED AT 1.15.0 THROUGH v1.22.0: that pin would have shipped this release's headline pNFS fixes in the changelog and NOT in the deployed image.
+      tag: "1.24.1-rc6"  # rc6: F69 cold-open stall fix (every fresh mount's first open of a file paid a hardcoded 5s client sleep because OPEN left CFH at the parent dir), GETDEVICEINFO multipath (dataServers.multipathServices), LOCK4denied wire encoding, DS clientid confirmation (trunk probes got fresh clientids). rc3-rc5 = F68b gate + F68a observability. amd64-only like rc3-rc5. MUST move in lockstep with images.flintCsiDriver. Per-PVC stripe geometry is half CSI (the class parameters and mount options) and half MDS (the layout width actually handed out at LAYOUTGET), and the MDS half lives in THIS image. Pinning this at 1.23.0 next to a fixed driver leaves stripeWidth ignored exactly as before, and the failure is silent — you get a full-width volume that reports success. The pNFS truncate-correctness release. The truncate_dirty gate exists to hide the window where a truncate has hit the MDS stub but the DSes still hold bytes past the new EOF — TLC found it did not, and closing F65 took nine further defects, every one invisible because the server's own logs scored a refused recall as an ack. Also carries the NFSv4.2 wave (see the driver image). WAS PINNED AT 1.15.0 THROUGH v1.22.0: that pin would have shipped this release's headline pNFS fixes in the changelog and NOT in the deployed image.
 
     # FILE-layout stripe unit in bytes. Pinned PER FILE at first
     # LAYOUTGET (Phase 0): changing this affects only files created
@@ -521,6 +521,18 @@ pnfs:
       # Prefer spreading DS pods across nodes (soft anti-affinity) so
       # one node loss degrades at most one DS.
       spreadAcrossNodes: true
+      # EXTRA per-pod ClusterIP Services per DS (multipath trunking).
+      # Each extra Service is one more netaddr4 in that DS's
+      # GETDEVICEINFO multipath_list4, and the Linux client opens one
+      # additional trunked transport per extra address (kernel cap: 16
+      # transports per DS total, including nconnect's). Lifts the
+      # per-connection sunrpc receive ceiling (~700-900 MiB/s/conn)
+      # for a SINGLE client without any client-side mount changes —
+      # except one: the mount must use nconnect >= 2, or the kernel
+      # caps the DS client at one transport and silently refuses every
+      # trunk candidate (nfs4_set_ds_client, v6.1-v6.8).
+      # 0 = no extra Services (primary per-pod Service only).
+      multipathServices: 0
       resources: {}
 
 # Block device configuration
