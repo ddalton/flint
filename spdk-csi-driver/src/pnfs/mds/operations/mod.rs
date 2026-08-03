@@ -226,6 +226,18 @@ impl PnfsOperationHandler {
         file_key: &str,
         ceiling: Duration,
     ) -> FallbackIoDisposition {
+        self.fallback_io_disposition_core(file_key, ceiling, fallback_proxy_enabled())
+    }
+
+    /// Fully-parameterized core: tests pass `proxy_enabled` explicitly
+    /// because the env-derived value is process-wide via OnceLock and
+    /// cannot be flipped per-test.
+    fn fallback_io_disposition_core(
+        &self,
+        file_key: &str,
+        ceiling: Duration,
+        proxy_enabled: bool,
+    ) -> FallbackIoDisposition {
         let Some(placement) = self.layout_manager.placement_for(file_key) else {
             return FallbackIoDisposition::Serve;
         };
@@ -249,12 +261,27 @@ impl PnfsOperationHandler {
             };
         }
         let now = Instant::now();
-        // Longest current outage among the file's pinned DSes.
+        // Longest current outage among the file's pinned DSes — and,
+        // for F66, whether the whole pinned set is proxy-reachable
+        // (registered, not Offline, DsControl listener advertised, and
+        // a v2 pin — legacy rotation is FH-derived and unproxyable).
         let mut worst_outage: Option<Duration> = None;
+        let mut proxy_ready = placement.file_id != 0;
         for device_id in &placement.device_ids {
             let outage = match self.device_registry.get(device_id) {
                 // Degraded still serves I/O — not an outage.
-                Some(d) if d.status != DeviceStatus::Offline => continue,
+                Some(d) if d.status != DeviceStatus::Offline => {
+                    if d.control_endpoint.is_none() {
+                        // Healthy but unproxyable: without a DsControl
+                        // listener the Proxy arm would Delay-loop
+                        // forever on a config gap. Fall back to the
+                        // pre-F66 answer for this file.
+                        proxy_ready = false;
+                    }
+                    continue;
+                }
+                // (checked before the loop: legacy pins are never
+                // proxy_ready — their rotation is FH-derived)
                 // Offline: down since its last heartbeat.
                 Some(d) => now.saturating_duration_since(d.last_heartbeat),
                 // Unknown to this MDS incarnation: anchor at boot.
@@ -263,6 +290,14 @@ impl PnfsOperationHandler {
             worst_outage = Some(worst_outage.map_or(outage, |w| w.max(outage)));
         }
         match worst_outage {
+            // F66: a healthy fleet no longer means FailFast — it means
+            // the MDS can apply the I/O to the stripes itself. The
+            // client this arm used to "spring" with NFS4ERR_IO was, in
+            // the fsx repro, a HEALTHY client whose straggler write
+            // (queued during the truncate-time no-layout window) got
+            // EIO surfaced to msync. FailFast remains for proxy-off
+            // and unproxyable configurations.
+            None if proxy_ready && proxy_enabled => FallbackIoDisposition::Proxy,
             None => FallbackIoDisposition::FailFast,
             Some(outage) if outage < ceiling => FallbackIoDisposition::Delay,
             Some(_) => FallbackIoDisposition::FailFast,
@@ -1109,6 +1144,212 @@ async fn truncate_fanout(
     all_ok
 }
 
+// ── F66: the MDS fallback-I/O proxy ─────────────────────────────────────
+// docs/plans/mds-fallback-proxy-plan.md. A layout-less client's I/O
+// through the MDS is applied to the stripes over the same DsControl
+// channel truncate_fanout proved, instead of being refused with
+// NFS4ERR_IO — which fsx showed surfacing as msync EIO on a HEALTHY
+// client (the straggler write queued during the truncate-time no-layout
+// window; LAYOUTGET succeeded 200 µs before the refused WRITE).
+
+/// Kill switch: FLINT_MDS_FALLBACK_PROXY, default ON. OFF restores the
+/// pre-F66 FailFast verbatim — the bug, but an operator diagnosing
+/// corruption must be able to remove the proxy's write channel from the
+/// suspect list in one restart. Read once; a flip requires the restart
+/// it implies anyway.
+fn fallback_proxy_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("FLINT_MDS_FALLBACK_PROXY").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    })
+}
+
+/// Dial-once client cache access, the exact pattern `ds_truncate_one`
+/// proved: transport failures evict so the next attempt re-dials.
+async fn dial_control_client(
+    clients: &DashMap<String, crate::pnfs::grpc::AuthedDsControlClient>,
+    endpoint: &str,
+) -> Result<crate::pnfs::grpc::AuthedDsControlClient, String> {
+    const DIAL_TIMEOUT: Duration = Duration::from_secs(2);
+    if let Some(c) = clients.get(endpoint).map(|c| c.clone()) {
+        return Ok(c);
+    }
+    let uri = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{}", endpoint)
+    };
+    let ep = tonic::transport::Channel::from_shared(uri)
+        .map_err(|e| format!("bad DS control endpoint '{}': {}", endpoint, e))?;
+    let channel = tokio::time::timeout(DIAL_TIMEOUT, ep.connect())
+        .await
+        .map_err(|_| format!("dial {} timed out", endpoint))?
+        .map_err(|e| format!("dial {}: {}", endpoint, e))?;
+    let c = crate::pnfs::grpc::authed_ds_control_client(channel);
+    clients.insert(endpoint.to_string(), c.clone());
+    Ok(c)
+}
+
+/// Zero-fill-and-truncate assembly for a proxied READ: pure, so the
+/// hole semantics are unit-testable without a DS. `chunks` are
+/// `(file_offset, bytes_the_DS_returned)` — SHORT and EMPTY entries are
+/// holes the DS reported raw (it does not know the file size; only the
+/// stub does, and that authority is exercised HERE and nowhere else).
+fn assemble_fallback_read(
+    chunks: &[(u64, Vec<u8>)],
+    offset: u64,
+    count: u32,
+    stub_size: u64,
+) -> (Vec<u8>, bool) {
+    let want = (count as u64).min(stub_size.saturating_sub(offset)) as usize;
+    let mut out = vec![0u8; want];
+    for (co, data) in chunks {
+        if data.is_empty() {
+            continue; // hole — stays zero
+        }
+        let start = (co - offset) as usize;
+        if start >= want {
+            continue; // chunk entirely past EOF — stub size rules
+        }
+        let n = data.len().min(want - start);
+        out[start..start + n].copy_from_slice(&data[..n]);
+    }
+    let eof = offset + want as u64 >= stub_size;
+    (out, eof)
+}
+
+impl PnfsOperationHandler {
+    /// Resolve one chunk's (device_id, control endpoint, stripe path).
+    fn proxy_target(
+        &self,
+        placement: &FilePlacement,
+        file_key: &str,
+        chunk_offset: u64,
+    ) -> Result<(String, String, String), String> {
+        if placement.file_id == 0 {
+            // Legacy pins rotate their stripe pattern by a hash of the
+            // FILEHANDLE (see the dispatcher's layout encode), which
+            // this path does not carry — an unrotated guess writes the
+            // wrong stripe file. The disposition never answers Proxy
+            // for legacy pins; this is the belt behind that gate.
+            return Err(format!(
+                "legacy path-keyed pin '{}' — proxy unsupported (FH-derived rotation)",
+                file_key
+            ));
+        }
+        let slot = placement.slot_for_offset(chunk_offset);
+        let device_id = placement.device_ids[slot].clone();
+        let info = self
+            .device_registry
+            .get(&device_id)
+            .ok_or_else(|| format!("DS {} not registered", device_id))?;
+        let endpoint = info
+            .control_endpoint
+            .ok_or_else(|| format!("DS {} advertises no DsControl listener", device_id))?;
+        let rel = if placement.file_id != 0 {
+            placement.stripe_rel_path(slot)
+        } else {
+            self.legacy_stripe_rel_path(file_key)
+        };
+        Ok((device_id, endpoint, rel))
+    }
+
+    pub(crate) async fn proxy_fallback_read_impl(
+        &self,
+        file_key: &str,
+        offset: u64,
+        count: u32,
+        stub_size: u64,
+    ) -> Result<(Vec<u8>, bool), String> {
+        const RPC_TIMEOUT: Duration = Duration::from_secs(3);
+        let placement = self
+            .layout_manager
+            .placement_for(file_key)
+            .ok_or_else(|| format!("no placement for '{}'", file_key))?;
+        // Reads past EOF need no DS at all — the stub decides.
+        let effective = (count as u64).min(stub_size.saturating_sub(offset));
+        let mut chunks: Vec<(u64, Vec<u8>)> = Vec::with_capacity(2);
+        for (co, cl) in placement.split_at_stripe_bounds(offset, effective) {
+            let (device_id, endpoint, rel) = self.proxy_target(&placement, file_key, co)?;
+            let mut client = dial_control_client(&self.ds_control_clients, &endpoint).await?;
+            let req = crate::pnfs::grpc::ReadStripeRequest {
+                device_id: device_id.clone(),
+                rel_path: rel,
+                offset: co,
+                count: cl as u32,
+            };
+            let resp = tokio::time::timeout(
+                RPC_TIMEOUT,
+                client.read_stripe(tonic::Request::new(req)),
+            )
+            .await
+            .map_err(|_| {
+                self.ds_control_clients.remove(&endpoint);
+                format!("ReadStripe to {} timed out", device_id)
+            })?
+            .map_err(|e| {
+                self.ds_control_clients.remove(&endpoint);
+                format!("ReadStripe to {}: {}", device_id, e)
+            })?
+            .into_inner();
+            if !resp.ok {
+                return Err(format!("DS {} refused ReadStripe: {}", device_id, resp.message));
+            }
+            chunks.push((co, resp.data));
+        }
+        Ok(assemble_fallback_read(&chunks, offset, count, stub_size))
+    }
+
+    pub(crate) async fn proxy_fallback_write_impl(
+        &self,
+        file_key: &str,
+        offset: u64,
+        data: bytes::Bytes,
+    ) -> Result<(), String> {
+        const RPC_TIMEOUT: Duration = Duration::from_secs(5);
+        let placement = self
+            .layout_manager
+            .placement_for(file_key)
+            .ok_or_else(|| format!("no placement for '{}'", file_key))?;
+        for (co, cl) in placement.split_at_stripe_bounds(offset, data.len() as u64) {
+            let (device_id, endpoint, rel) = self.proxy_target(&placement, file_key, co)?;
+            let mut client = dial_control_client(&self.ds_control_clients, &endpoint).await?;
+            let start = (co - offset) as usize;
+            let req = crate::pnfs::grpc::WriteStripeRequest {
+                device_id: device_id.clone(),
+                rel_path: rel,
+                offset: co,
+                data: data[start..start + cl as usize].to_vec(),
+            };
+            let resp = tokio::time::timeout(
+                RPC_TIMEOUT,
+                client.write_stripe(tonic::Request::new(req)),
+            )
+            .await
+            .map_err(|_| {
+                self.ds_control_clients.remove(&endpoint);
+                format!("WriteStripe to {} timed out", device_id)
+            })?
+            .map_err(|e| {
+                self.ds_control_clients.remove(&endpoint);
+                format!("WriteStripe to {}: {}", device_id, e)
+            })?
+            .into_inner();
+            if !resp.ok {
+                return Err(format!("DS {} refused WriteStripe: {}", device_id, resp.message));
+            }
+            info!(
+                "🔁 fallback WRITE proxied: '{}' [{}, +{}) → {} (durable)",
+                file_key, co, cl, device_id
+            );
+        }
+        Ok(())
+    }
+}
+
 // Implement PnfsOperations trait for PnfsOperationHandler
 #[tonic::async_trait]
 impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
@@ -1130,6 +1371,25 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
 
     fn fallback_io_disposition(&self, file_key: &str) -> FallbackIoDisposition {
         self.fallback_io_disposition_impl(file_key)
+    }
+
+    async fn proxy_fallback_read(
+        &self,
+        file_key: &str,
+        offset: u64,
+        count: u32,
+        stub_size: u64,
+    ) -> Result<(Vec<u8>, bool), String> {
+        self.proxy_fallback_read_impl(file_key, offset, count, stub_size).await
+    }
+
+    async fn proxy_fallback_write(
+        &self,
+        file_key: &str,
+        offset: u64,
+        data: bytes::Bytes,
+    ) -> Result<(), String> {
+        self.proxy_fallback_write_impl(file_key, offset, data).await
     }
 
     fn truncate_gate_ceiling(&self, file_key: &str) -> Option<u64> {
@@ -1326,14 +1586,118 @@ mod fallback_tests {
     }
 
     #[test]
-    fn healthy_fleet_fails_fast() {
-        // A fallback RPC arriving while every pinned DS is healthy
-        // means the CLIENT is trapped — only a fatal error springs it.
+    fn healthy_but_unproxyable_fleet_fails_fast() {
+        // F66: the healthy-fleet arm now PROXIES — but these devices
+        // advertise no DsControl listener, and a Proxy answer against
+        // an unproxyable fleet would Delay-loop the client forever on a
+        // config gap. Pre-F66 behavior (FailFast) is the honest floor.
         let (_registry, handler) = pinned_handler(&["ds-1", "ds-2"], "f.bin");
         assert_eq!(
-            handler.fallback_io_disposition_bounded("f.bin", CEILING),
+            handler.fallback_io_disposition_core("f.bin", CEILING, true),
             FallbackIoDisposition::FailFast
         );
+    }
+
+    /// Registry whose devices DO advertise DsControl listeners — the
+    /// proxy-ready shape a real fleet has (registration carries the
+    /// control endpoint).
+    fn proxyable_handler(ids: &[&str], file: &str) -> (Arc<DeviceRegistry>, PnfsOperationHandler) {
+        let registry = Arc::new(DeviceRegistry::new());
+        for id in ids {
+            let mut d = ds(id);
+            d.control_endpoint = Some(format!("{}:21491", id));
+            registry.register(d).unwrap();
+        }
+        let mgr = Arc::new(LayoutManager::new(
+            Arc::clone(&registry),
+            LayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
+        ));
+        mgr.generate_layout(owner(), vec![1], file, 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+            .unwrap();
+        let handler = PnfsOperationHandler::new(mgr, Arc::clone(&registry), "/data/exports".into());
+        (registry, handler)
+    }
+
+    #[test]
+    fn healthy_proxyable_fleet_proxies() {
+        // F66's whole point: a healthy fleet answers fallback I/O by
+        // APPLYING it, not by refusing it. The client this used to
+        // "spring" with NFS4ERR_IO was a healthy one whose straggler
+        // write got EIO surfaced to msync (the fsx failure).
+        let (_registry, handler) = proxyable_handler(&["ds-1", "ds-2"], "f.bin");
+        assert_eq!(
+            handler.fallback_io_disposition_core("f.bin", CEILING, true),
+            FallbackIoDisposition::Proxy
+        );
+    }
+
+    #[test]
+    fn kill_switch_restores_failfast() {
+        let (_registry, handler) = proxyable_handler(&["ds-1", "ds-2"], "f.bin");
+        assert_eq!(
+            handler.fallback_io_disposition_core("f.bin", CEILING, false),
+            FallbackIoDisposition::FailFast,
+            "FLINT_MDS_FALLBACK_PROXY=off must restore pre-F66 behavior verbatim"
+        );
+    }
+
+    #[test]
+    fn outage_still_beats_the_proxy() {
+        // A pinned DS down ⇒ the proxy CANNOT serve that slot's chunks;
+        // the bounded Delay→FailFast ladder owns the file, proxy or no.
+        let (registry, handler) = proxyable_handler(&["ds-1", "ds-2"], "f.bin");
+        registry.update_status("ds-2", DeviceStatus::Offline).unwrap();
+        assert_eq!(
+            handler.fallback_io_disposition_core("f.bin", CEILING, true),
+            FallbackIoDisposition::Delay
+        );
+        assert_eq!(
+            handler.fallback_io_disposition_core("f.bin", Duration::ZERO, true),
+            FallbackIoDisposition::FailFast
+        );
+    }
+
+    // ── F66 hole resolution: the stub size is the only EOF authority ──
+
+    #[test]
+    fn assemble_zero_fills_holes_and_respects_stub_size() {
+        // 100-byte file; read [40, 40+80) — only 60 bytes exist.
+        // DS returned a 20-byte fragment at 40 and a hole after.
+        let (data, eof) = assemble_fallback_read(
+            &[(40, vec![7u8; 20])], 40, 80, 100,
+        );
+        assert_eq!(data.len(), 60, "capped at stub size, not at count");
+        assert_eq!(&data[..20], &[7u8; 20][..]);
+        assert_eq!(&data[20..], &vec![0u8; 40][..], "hole reads as zeros");
+        assert!(eof);
+    }
+
+    #[test]
+    fn assemble_read_past_eof_is_empty_eof() {
+        let (data, eof) = assemble_fallback_read(&[], 200, 50, 100);
+        assert!(data.is_empty());
+        assert!(eof);
+    }
+
+    #[test]
+    fn assemble_full_read_inside_file_no_eof() {
+        let (data, eof) = assemble_fallback_read(
+            &[(0, vec![1u8; 64])], 0, 64, 1000,
+        );
+        assert_eq!(data, vec![1u8; 64]);
+        assert!(!eof, "64 of 1000 bytes is not EOF");
+    }
+
+    #[test]
+    fn assemble_absent_stripe_is_all_zeros_not_error() {
+        // The DS reported the whole chunk as a hole (absent stripe
+        // file). The MDS serves zeros up to the stub size — the sparse
+        // semantics tar --sparse depends on.
+        let (data, eof) = assemble_fallback_read(&[(0, Vec::new())], 0, 100, 100);
+        assert_eq!(data, vec![0u8; 100]);
+        assert!(eof);
     }
 
     #[test]

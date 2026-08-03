@@ -178,6 +178,56 @@ impl FilePlacement {
     pub fn stripe_rel_path(&self, slot: usize) -> String {
         format!("{:016x}.stripe{}", self.file_id, slot)
     }
+
+    /// The per-file stripe rotation the WIRE carries as
+    /// `nfl_first_stripe_index` (RFC 8881 §13.4.4): the client maps
+    /// stripe unit `u` to device `(u + this) % N`. Derived from the
+    /// file_id because every LAYOUTGET ever issued for the file must
+    /// agree (rename-stable; see the dispatcher's encode comment).
+    /// THE dispatcher's layout encode and the fallback proxy MUST both
+    /// call this — a second copy of the formula is how the F66 gate
+    /// caught a proxied write landing on the wrong stripe file: file_id
+    /// 0x…246d is ODD, so the client's unit 0 lived on device 1 while
+    /// an unrotated proxy wrote device 0, and the client's next read
+    /// found an absent stripe ⇒ zero bytes. Even file_ids agreed by
+    /// coincidence, which made the corruption look like a 50%
+    /// intermittency instead of a formula divergence.
+    ///
+    /// Legacy pins (file_id == 0) rotate by a hash of the FILEHANDLE,
+    /// which the proxy path does not carry — so legacy files are
+    /// unproxyable and the disposition keeps pre-F66 FailFast for them.
+    pub fn wire_first_stripe_index(file_id: u64, width: usize) -> u32 {
+        debug_assert!(file_id != 0, "legacy pins rotate by FH hash, not file_id");
+        (file_id % width.max(1) as u64) as u32
+    }
+
+    /// The device slot that owns FILE offset `offset` — unit index plus
+    /// the wire rotation above. v2 pins only (see
+    /// [`Self::wire_first_stripe_index`]).
+    pub fn slot_for_offset(&self, offset: u64) -> usize {
+        debug_assert!(self.stripe_size > 0, "placement with zero stripe_size");
+        let width = self.device_ids.len().max(1);
+        let unit = (offset / self.stripe_size) as usize;
+        (unit + Self::wire_first_stripe_index(self.file_id, width) as usize) % width
+    }
+
+    /// Split `[offset, offset+len)` at stripe-unit boundaries: the
+    /// chunks a fallback op must fan to, each entirely inside one
+    /// slot's stripe file. Client-sized fallback ops (≤ ~1 MiB) against
+    /// the 8 MiB default stripe unit yield exactly one chunk almost
+    /// always.
+    pub fn split_at_stripe_bounds(&self, offset: u64, len: u64) -> Vec<(u64, u64)> {
+        let mut out = Vec::with_capacity(2);
+        let mut cur = offset;
+        let end = offset.saturating_add(len);
+        while cur < end {
+            let unit_end = (cur / self.stripe_size + 1) * self.stripe_size;
+            let chunk_end = unit_end.min(end);
+            out.push((cur, chunk_end - cur));
+            cur = chunk_end;
+        }
+        out
+    }
 }
 
 /// The truncate-dirty gate key for a pinned file. Keyed by the
@@ -2560,6 +2610,86 @@ mod tests {
 
     fn ds(id: &str) -> DeviceInfo {
         DeviceInfo::new(id.to_string(), format!("{}:2049", id), vec![])
+    }
+
+    /// F66's load-bearing test: the fallback proxy must address the
+    /// same bytes to the same DS the CLIENT's layout does. The client
+    /// contract is the WIRE (RFC 8881 §13.4.4): unit `u` maps to
+    /// device `(u + nfl_first_stripe_index) % N` over the ds_addr
+    /// pattern, and flint encodes `nfl_first_stripe_index =
+    /// wire_first_stripe_index(file_id, N)` (the dispatcher calls the
+    /// same function `slot_for_offset` does — this test pins the
+    /// composition). The first version of this test compared against
+    /// `generate_stripe_layout` — flint-INTERNAL bookkeeping that does
+    /// not rotate — and passed while the fsx gate caught a proxied
+    /// write on the wrong stripe file: file_id 0x…246d is ODD, the
+    /// client's unit 0 lived on device 1, the unrotated proxy wrote
+    /// device 0, and the client's next read found an absent stripe ⇒
+    /// zero bytes. Even file_ids agreed by coincidence — a formula
+    /// divergence disguised as 50% flakiness. The reference here is
+    /// the wire model, and the odd/even file_id axis is the
+    /// regression.
+    #[test]
+    fn proxy_slot_mapping_matches_the_wire_contract() {
+        for width in 1..=5usize {
+            let stripe = 1024 * 1024u64;
+            // Both parities of file_id — the axis the fsx gate caught.
+            for file_id in [2u64, 7, 0x00b9_7e4b_e38c_246d, 0x1000] {
+                let placement = FilePlacement {
+                    stripe_size: stripe,
+                    device_ids: (0..width).map(|i| format!("ds-{}", i)).collect(),
+                    file_id,
+                };
+                let fsi = FilePlacement::wire_first_stripe_index(file_id, width) as usize;
+                assert_eq!(fsi, (file_id as usize) % width, "the wire formula itself");
+                for (off, len) in [
+                    (0u64, 16 * stripe),
+                    (stripe / 2, 5 * stripe),
+                    (3 * stripe + 17, 2 * stripe),
+                    (11 * stripe - 1, 3),
+                ] {
+                    // The client's mapping, straight from the RFC.
+                    for probe in [off, off + len / 2, off + len - 1] {
+                        let unit = (probe / stripe) as usize;
+                        let client_slot = (unit + fsi) % width;
+                        assert_eq!(
+                            placement.slot_for_offset(probe),
+                            client_slot,
+                            "width={} file_id={:#x} offset={} — proxy diverges from the wire",
+                            width, file_id, probe
+                        );
+                    }
+                    // Chunking must tile the range, each chunk in one slot.
+                    let chunks = placement.split_at_stripe_bounds(off, len);
+                    assert_eq!(chunks.iter().map(|(_, l)| l).sum::<u64>(), len);
+                    let mut cursor = off;
+                    for (co, cl) in &chunks {
+                        assert_eq!(*co, cursor, "chunks must be contiguous");
+                        assert!(*cl > 0);
+                        assert_eq!(
+                            placement.slot_for_offset(*co),
+                            placement.slot_for_offset(co + cl - 1),
+                            "a chunk must not straddle two slots"
+                        );
+                        cursor += cl;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The exact fsx-gate failure, as a unit test: width 2, the odd
+    /// file_id from the failing run. Unit 0 belongs to device 1 — an
+    /// unrotated mapping says device 0 and corrupts.
+    #[test]
+    fn odd_file_id_rotates_unit_zero_off_device_zero() {
+        let placement = FilePlacement {
+            stripe_size: 8 * 1024 * 1024,
+            device_ids: vec!["ds-host-1".into(), "ds-host-2".into()],
+            file_id: 0x00b9_7e4b_e38c_246d, // odd — the run-2/3 failure
+        };
+        assert_eq!(placement.slot_for_offset(0x1f000), 1, "unit 0 → ds-host-2 (.stripe1)");
+        assert_eq!(placement.stripe_rel_path(1), "00b97e4be38c246d.stripe1");
     }
 
     /// Per-volume stripe SIZE overrides the fleet default, and applies

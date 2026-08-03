@@ -8,16 +8,29 @@
 # retries the identical MDS READ every ~100 ms FOREVER — the loop never
 # re-drives the layout path, holds page locks, and survives DS
 # recovery. The bounded escalation answers the fallback with:
-#   - NFS4ERR_IO   while the registry thinks the fleet is healthy
-#                  (a fallback then means the CLIENT is trapped), and
-#                  once a pinned DS's outage exceeds the ceiling;
-#   - NFS4ERR_DELAY only while a pinned DS is down within the ceiling.
+#   - PROXY (F66)  while the registry thinks the fleet is healthy: the
+#                  MDS applies the I/O to the stripes via DsControl. A
+#                  dead-but-not-yet-Offline DS makes the proxy attempt
+#                  fail → NFS4ERR_DELAY until the missed heartbeat
+#                  flips the registry, after which the bounded ladder
+#                  below owns the file. (Pre-F66 this arm answered
+#                  instant NFS4ERR_IO, which also EIO'd HEALTHY
+#                  clients' truncate-window stragglers — the fsx
+#                  failure. The ceiling, not the ambiguity window, is
+#                  what bounds the wait.)
+#   - NFS4ERR_DELAY while a pinned DS is down within the ceiling;
+#   - NFS4ERR_IO   once a pinned DS's outage exceeds the ceiling (and
+#                  when the proxy is off/unconfigured).
 #
 # Phases (ceiling=60 s via FLINT_PNFS_FALLBACK_DELAY_CEILING_SECS,
 # mds.yaml heartbeatTimeout=30 s):
 #   1. Write F striped over {DS1,DS2}; remount (cold client).
 #   2. kill -9 DS1 at T0.
-#   3. T0+2   read → FAST EIO   (registry still says Active → FailFast).
+#   3. T0+2   read → PARKED     (registry still Active → Proxy; DS1 is
+#                                dead so the proxy fails → DELAY. The
+#                                dd is killed by its timeout — F66: the
+#                                ambiguity window parks, it no longer
+#                                EIOs.)
 #   4. T0+45  read → HANG       (DS1 Offline, outage 45s < 60s → Delay;
 #                                dd killed by timeout — this read's page
 #                                I/O keeps looping in the VM kernel: the
@@ -131,13 +144,21 @@ T0=$SECONDS
 
 FAIL=""
 
-# ── 3. Ambiguity window: registry still Active → FailFast ───────────
+# ── 3. Ambiguity window: registry still Active → Proxy → parked ──────
+# F66: the healthy-registry answer is the fallback PROXY. DS1 is dead,
+# so the proxy attempt fails and the MDS answers DELAY — the read PARKS
+# (dd dies by its own timeout) instead of the pre-F66 instant EIO. The
+# missed heartbeat flips DS1 Offline within 30 s and the bounded ladder
+# (steps 4-5) takes over; the CEILING is what bounds the wait now, not
+# the ambiguity window. An instant EIO here would be the F66 regression
+# — it is what turned healthy clients' truncate-window stragglers into
+# msync EIO (the fsx failure).
 sleep 2
-echo "▶ T0+2s read (registry still thinks DS1 healthy)"
+echo "▶ T0+2s read (registry still thinks DS1 healthy → proxy attempt parks)"
 rc=$(timed_read 20)
-if [ "$rc" = "0" ]; then FAIL="$FAIL\n  - T0+2 read SUCCEEDED (should EIO: DS1 is dead)";
-elif [ "$rc" -ge 124 ] 2>/dev/null; then FAIL="$FAIL\n  - T0+2 read HUNG (want fast EIO while registry says healthy)";
-else echo "  ✓ fast EIO (rc=$rc)"; fi
+if [ "$rc" = "0" ]; then FAIL="$FAIL\n  - T0+2 read SUCCEEDED (should park: DS1 is dead)";
+elif [ "$rc" -ge 124 ] 2>/dev/null; then echo "  ✓ parked (rc=$rc — proxy failed → DELAY, awaiting the registry flip)";
+else FAIL="$FAIL\n  - T0+2 read got fast rc=$rc (want PARKED — instant EIO here is the pre-F66 straggler-killer)"; fi
 
 # ── 4. Outage window: Offline + under ceiling → Delay (parks) ────────
 # Wait for the MDS's stale sweep to mark DS1 Offline (heartbeatTimeout
@@ -195,4 +216,4 @@ if [ -n "$FAIL" ]; then
   echo "  Logs: $LOG_DIR/flint-pnfs-{mds,ds1,ds2}.log"
   exit 1
 fi
-echo "✅ PASS: bounded-DELAY fallback — fast EIO in the ambiguity window, parked under the ceiling, sprung past it, self-recovered after DS restart"
+echo "✅ PASS: bounded-DELAY fallback — parked through the ambiguity window (F66 proxy attempt → DELAY), parked under the ceiling, sprung past it, self-recovered after DS restart"

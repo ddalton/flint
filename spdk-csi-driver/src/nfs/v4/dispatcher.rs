@@ -27,6 +27,15 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// COMPOUND dispatcher - processes COMPOUND requests
+/// The MDS-local stub a fallback op resolved to (F66): `file_key` is the
+/// export-relative key the pNFS handler pins placements under, `path`
+/// the local stub file — the SIZE authority for proxied reads' hole
+/// resolution and the set_len target after extending proxied writes.
+struct StubTarget {
+    file_key: String,
+    path: std::path::PathBuf,
+}
+
 pub struct CompoundDispatcher {
     /// State manager (clients, sessions, stateids, leases)
     state_mgr: Arc<StateManager>,
@@ -1386,13 +1395,47 @@ impl CompoundDispatcher {
                 // path, so a fatal completion is the only way it ever
                 // recovers (kernel-verified; see the runbook's
                 // "DELAY livelock" section).
-                match self.stub_io_disposition(context, "READ") {
+                let (disp, stub) = self.stub_io_disposition(context, "READ");
+                match disp {
                     crate::pnfs::FallbackIoDisposition::Serve => {}
                     crate::pnfs::FallbackIoDisposition::Delay => {
                         return OperationResult::Read(Nfs4Status::Delay, None);
                     }
                     crate::pnfs::FallbackIoDisposition::FailFast => {
                         return OperationResult::Read(Nfs4Status::Io, None);
+                    }
+                    // F66: healthy fleet — serve the fallback read FROM
+                    // THE STRIPES via the DsControl proxy. On transient
+                    // proxy failure answer DELAY: the client retries,
+                    // and a genuinely dead DS stops heartbeating within
+                    // the interval, after which the ordinary bounded
+                    // Delay→FailFast ladder owns the file.
+                    crate::pnfs::FallbackIoDisposition::Proxy => {
+                        if context.resolve_stateid(stateid).is_none() {
+                            return OperationResult::Read(Nfs4Status::BadStateId, None);
+                        }
+                        let (pnfs, t) = match (&self.pnfs_handler, stub) {
+                            (Some(p), Some(t)) => (p, t),
+                            _ => return OperationResult::Read(Nfs4Status::Io, None),
+                        };
+                        let stub_size =
+                            std::fs::metadata(&t.path).map(|m| m.len()).unwrap_or(0);
+                        return match pnfs
+                            .proxy_fallback_read(&t.file_key, offset, count, stub_size)
+                            .await
+                        {
+                            Ok((data, eof)) => {
+                                use crate::nfs::v4::compound::ReadResult;
+                                OperationResult::Read(
+                                    Nfs4Status::Ok,
+                                    Some(ReadResult { eof, data: Bytes::from(data) }),
+                                )
+                            }
+                            Err(e) => {
+                                warn!("🔁 fallback READ proxy for '{}' failed (DELAY): {}", t.file_key, e);
+                                OperationResult::Read(Nfs4Status::Delay, None)
+                            }
+                        };
                     }
                 }
                 let stateid = match context.resolve_stateid(stateid) {
@@ -1417,13 +1460,70 @@ impl CompoundDispatcher {
                 // the sparse stub would silently diverge from the DS
                 // stripes (worse than the read case: persistent, not
                 // transient). Same bounded escalation.
-                match self.stub_io_disposition(context, "WRITE") {
+                let (disp, stub) = self.stub_io_disposition(context, "WRITE");
+                match disp {
                     crate::pnfs::FallbackIoDisposition::Serve => {}
                     crate::pnfs::FallbackIoDisposition::Delay => {
                         return OperationResult::Write(Nfs4Status::Delay, None);
                     }
                     crate::pnfs::FallbackIoDisposition::FailFast => {
                         return OperationResult::Write(Nfs4Status::Io, None);
+                    }
+                    // F66: apply the fallback write TO THE STRIPES. The
+                    // DS fdatasyncs before answering, so FILE_SYNC is
+                    // honest — and the stub is extended in this same
+                    // dispatch, which is what LAYOUTCOMMIT would have
+                    // done for a DS-path write (without it, stat serves
+                    // the stale stub size).
+                    crate::pnfs::FallbackIoDisposition::Proxy => {
+                        if context.resolve_stateid(stateid).is_none() {
+                            return OperationResult::Write(Nfs4Status::BadStateId, None);
+                        }
+                        let (pnfs, t) = match (&self.pnfs_handler, stub) {
+                            (Some(p), Some(t)) => (p, t),
+                            _ => return OperationResult::Write(Nfs4Status::Io, None),
+                        };
+                        let len = data.len() as u64;
+                        return match pnfs
+                            .proxy_fallback_write(&t.file_key, offset, data)
+                            .await
+                        {
+                            Ok(()) => {
+                                let end = offset.saturating_add(len);
+                                let cur =
+                                    std::fs::metadata(&t.path).map(|m| m.len()).unwrap_or(0);
+                                if end > cur {
+                                    if let Err(e) = std::fs::OpenOptions::new()
+                                        .write(true)
+                                        .open(&t.path)
+                                        .and_then(|f| f.set_len(end))
+                                    {
+                                        // The stripes hold the bytes but the
+                                        // size authority failed to advance —
+                                        // surfacing an error beats lying
+                                        // about durability of the SIZE.
+                                        warn!(
+                                            "🔁 proxied WRITE landed but stub set_len({}) on {:?} failed: {}",
+                                            end, t.path, e
+                                        );
+                                        return OperationResult::Write(Nfs4Status::Io, None);
+                                    }
+                                }
+                                use crate::nfs::v4::compound::WriteResult;
+                                OperationResult::Write(
+                                    Nfs4Status::Ok,
+                                    Some(WriteResult {
+                                        count: len as u32,
+                                        committed: 2, // FILE_SYNC4 — data fdatasync'd on the DS, size advanced here
+                                        verifier: self.io_handler.write_verifier().to_be_bytes(),
+                                    }),
+                                )
+                            }
+                            Err(e) => {
+                                warn!("🔁 fallback WRITE proxy for '{}' failed (DELAY): {}", t.file_key, e);
+                                OperationResult::Write(Nfs4Status::Delay, None)
+                            }
+                        };
                     }
                 }
                 let stateid = match context.resolve_stateid(stateid) {
@@ -2107,23 +2207,28 @@ impl CompoundDispatcher {
     /// Standalone and DS roles have no pnfs_handler and serve
     /// everything; files the MDS holds that were never layouted stay
     /// fully accessible.
+    ///
+    /// Returns the resolved [`StubTarget`] alongside the disposition so
+    /// the F66 Proxy arm doesn't re-resolve: the stub is the size
+    /// authority for hole resolution on proxied reads and the set_len
+    /// target after extending proxied writes.
     fn stub_io_disposition(
         &self,
         context: &CompoundContext,
         op: &str,
-    ) -> crate::pnfs::FallbackIoDisposition {
+    ) -> (crate::pnfs::FallbackIoDisposition, Option<StubTarget>) {
         use crate::pnfs::FallbackIoDisposition as D;
         let pnfs = match &self.pnfs_handler {
             Some(p) => p,
-            None => return D::Serve,
+            None => return (D::Serve, None),
         };
         let fh = match &context.current_fh {
             Some(fh) => fh,
-            None => return D::Serve,
+            None => return (D::Serve, None),
         };
         let path = match self.file_handler.fh_manager().resolve_handle(fh) {
             Ok(p) => p,
-            Err(_) => return D::Serve,
+            Err(_) => return (D::Serve, None),
         };
         let export = self.file_handler.fh_manager().get_export_path().to_path_buf();
         let file_key = path
@@ -2132,9 +2237,9 @@ impl CompoundDispatcher {
             .to_string_lossy()
             .into_owned();
         if file_key.is_empty() {
-            return D::Serve;
+            return (D::Serve, None);
         }
-        match pnfs.fallback_io_disposition(&file_key) {
+        let disp = match pnfs.fallback_io_disposition(&file_key) {
             D::Serve => D::Serve,
             D::Delay => {
                 warn!(
@@ -2145,12 +2250,22 @@ impl CompoundDispatcher {
             }
             D::FailFast => {
                 warn!(
-                    "⛔ {} through MDS failed fast for striped file '{}' — pinned DSes healthy or outage past ceiling; NFS4ERR_IO springs the client's MDS-fallback loop (runbook: the DELAY livelock)",
+                    "⛔ {} through MDS failed fast for striped file '{}' — pinned DSes down past the ceiling, or the fallback proxy is off/unconfigured; NFS4ERR_IO is the client's recovery signal (runbook: the DELAY livelock)",
                     op, file_key
                 );
                 D::FailFast
             }
-        }
+            // F66: healthy fleet — apply the I/O to the stripes through
+            // the DsControl proxy instead of refusing a legal fallback
+            // (the straggler-EIO fsx failure). The stub path rides
+            // along: it is the size authority for hole resolution and
+            // the set_len target for extending writes.
+            D::Proxy => {
+                info!("🔁 {} through MDS for striped '{}' → fallback proxy", op, file_key);
+                D::Proxy
+            }
+        };
+        (disp, Some(StubTarget { file_key, path }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2844,7 +2959,14 @@ impl CompoundDispatcher {
         // (file_id 0) keep the historical FH-derived rotation — their
         // FHs are path-stable because their renames are refused.
         let first_stripe_index = if file_id != 0 {
-            (file_id % segments.len() as u64) as u32
+            // THE shared formula (F66): the fallback proxy targets
+            // stripes with the same rotation this encode advertises.
+            // The two diverging is a proxied write on the wrong stripe
+            // file — silent zeros on the client's next read.
+            crate::pnfs::mds::layout::FilePlacement::wire_first_stripe_index(
+                file_id,
+                segments.len(),
+            )
         } else {
             let mut h = DefaultHasher::new();
             filehandle.hash(&mut h);

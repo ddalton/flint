@@ -167,6 +167,63 @@ service DsControl {
   // that bytes beyond the new EOF can never be re-exposed by a later
   // extension (fsx-found: truncate-down left stale stripe bytes).
   rpc TruncateStripeFile(TruncateStripeFileRequest) returns (TruncateStripeFileResponse);
+
+  // F66: MDS fallback-I/O proxy (docs/plans/mds-fallback-proxy-plan.md).
+  //
+  // A pNFS client that holds no layout is ENTITLED to route I/O through
+  // the MDS (RFC 8881 — the MDS is a full NFS server for the file), and
+  // the Linux files-layout client does so routinely: every truncate
+  // returns its layouts first (PNFS_LAYOUTRET_ON_SETATTR), and a page
+  // queued during that window arrives at the MDS as a straggler AFTER
+  // the client has already re-acquired a fresh layout — the fsx repro
+  // shows LAYOUTGET succeeding 200 µs before the fallback WRITE. The
+  // MDS cannot serve striped bytes from its sparse stub, so it applies
+  // the I/O to the stripes through these two RPCs instead of answering
+  // NFS4ERR_IO to a healthy client (which surfaced as msync EIO in
+  // userspace — the fsx failure that was red at HEAD from v1.23.0).
+  //
+  // Offsets are FILE offsets: stripe files are sparse-addressed (the
+  // same invariant TruncateStripeFile's uniform new_length rests on).
+  rpc ReadStripe(ReadStripeRequest) returns (ReadStripeResponse);
+  rpc WriteStripe(WriteStripeRequest) returns (WriteStripeResponse);
+}
+
+message ReadStripeRequest {
+  // Identity guard, same as TruncateStripeFile: the DS refuses a
+  // request addressed to a device it is not.
+  string device_id = 1;
+  // Stripe file path RELATIVE to the DS data dir.
+  string rel_path = 2;
+  // FILE offset (sparse addressing — not a within-stripe offset).
+  uint64 offset = 3;
+  uint32 count = 4;
+}
+
+message ReadStripeResponse {
+  bool ok = 1;
+  string message = 2;
+  // May be SHORT of count, and is EMPTY (with ok=true) for an absent
+  // stripe file. The DS reports holes raw and MUST NOT zero-fill or
+  // infer EOF: it does not know the file size — only the MDS's stub
+  // does, and the MDS resolves holes against it. A DS that guesses is
+  // the tar --sparse bug class.
+  bytes data = 3;
+}
+
+message WriteStripeRequest {
+  string device_id = 1;
+  string rel_path = 2;
+  // FILE offset (sparse addressing).
+  uint64 offset = 3;
+  bytes data = 4;
+}
+
+message WriteStripeResponse {
+  // ok=true means the bytes are DURABLE (fdatasync completed) — the
+  // MDS replies FILE_SYNC to the client on the strength of this, so a
+  // buffered-write-then-ok would be a lie with a power-loss window.
+  bool ok = 1;
+  string message = 2;
 }
 
 message TruncateStripeFileRequest {

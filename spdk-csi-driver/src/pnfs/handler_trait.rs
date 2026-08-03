@@ -36,10 +36,29 @@ pub enum FallbackIoDisposition {
     /// A pinned DS is down, outage still within the bounded window:
     /// park the client with NFS4ERR_DELAY and wait for DS recovery.
     Delay,
-    /// Every pinned DS is healthy (client is stuck in its fallback
-    /// trap) or the outage exceeded the ceiling: fail with
-    /// NFS4ERR_IO so the client can recover.
+    /// Every pinned DS is healthy or the outage exceeded the ceiling:
+    /// fail with NFS4ERR_IO so the client can recover.
+    ///
+    /// HISTORY (F66): "healthy fleet ⇒ FailFast" used to be the FIRST
+    /// answer, on the theory that fallback I/O against a healthy fleet
+    /// means a client trapped in its MDS-fallback loop. fsx refuted the
+    /// theory: a truncate makes the Linux client RETURN its layouts
+    /// (PNFS_LAYOUTRET_ON_SETATTR), and one writeback page queued in
+    /// that window arrives as a straggler from a HEALTHY client — the
+    /// repro shows LAYOUTGET succeeding 200 µs before the refused
+    /// WRITE, and the NFS4ERR_IO surfaced as msync EIO in userspace.
+    /// Healthy-fleet fallback now proxies (below); FailFast remains
+    /// the floor for dead fleets past the ceiling and for proxy-less
+    /// configurations.
     FailFast,
+    /// F66: every pinned DS is reachable and advertises a DsControl
+    /// listener — the dispatcher applies the I/O to the stripes
+    /// through the MDS fallback proxy
+    /// (docs/plans/mds-fallback-proxy-plan.md). On a transient proxy
+    /// failure the dispatcher answers NFS4ERR_DELAY; a genuinely dead
+    /// DS stops heartbeating and the next disposition takes the
+    /// bounded Delay→FailFast ladder instead of this arm.
+    Proxy,
 }
 
 /// Trait for handling pNFS operations
@@ -103,6 +122,38 @@ pub trait PnfsOperations: Send + Sync {
         } else {
             FallbackIoDisposition::Serve
         }
+    }
+
+    /// F66: apply a fallback READ to the stripes and resolve holes
+    /// against `stub_size`, the file size only the MDS's stub knows.
+    /// Returns `(data, eof)` where data is `min(count, size - offset)`
+    /// bytes with stripe holes zero-filled, and eof is exact. Only
+    /// meaningful when [`fallback_io_disposition`] returned `Proxy`;
+    /// the default refuses so non-MDS roles never accidentally serve.
+    ///
+    /// [`fallback_io_disposition`]: PnfsOperations::fallback_io_disposition
+    async fn proxy_fallback_read(
+        &self,
+        _file_key: &str,
+        _offset: u64,
+        _count: u32,
+        _stub_size: u64,
+    ) -> Result<(Vec<u8>, bool), String> {
+        Err("fallback proxy not supported by this handler".into())
+    }
+
+    /// F66: apply a fallback WRITE to the stripes. `Ok(())` means every
+    /// chunk is DURABLE on its DS (the DS fdatasyncs before answering),
+    /// which is what lets the dispatcher reply FILE_SYNC honestly. The
+    /// dispatcher extends the stub size afterwards — the same-dispatch
+    /// equivalent of what LAYOUTCOMMIT does for DS-path writes.
+    async fn proxy_fallback_write(
+        &self,
+        _file_key: &str,
+        _offset: u64,
+        _data: bytes::Bytes,
+    ) -> Result<(), String> {
+        Err("fallback proxy not supported by this handler".into())
     }
 
     /// A file was REMOVEd through the MDS namespace: forget its pin so

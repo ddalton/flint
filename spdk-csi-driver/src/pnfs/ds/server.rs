@@ -1348,20 +1348,10 @@ impl crate::pnfs::grpc::DsControl for DsControlService {
                 crate::pnfs::grpc::TruncateStripeFileResponse { ok: false, message },
             ))
         };
-        if req.device_id != self.device_id {
-            return refuse(format!(
-                "identity mismatch: request is for '{}', this DS is '{}'",
-                req.device_id, self.device_id
-            ));
-        }
-        let rel = std::path::Path::new(&req.rel_path);
-        if req.rel_path.is_empty()
-            || rel.is_absolute()
-            || rel.components().any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return refuse(format!("suspicious stripe path {:?}", req.rel_path));
-        }
-        let target = self.data_dir.join(rel);
+        let target = match self.validate_stripe_target(&req.device_id, &req.rel_path) {
+            Ok(t) => t,
+            Err(m) => return refuse(m),
+        };
         match std::fs::OpenOptions::new().write(true).open(&target) {
             Ok(f) => match f.set_len(req.new_length) {
                 Ok(()) => {
@@ -1386,6 +1376,152 @@ impl crate::pnfs::grpc::DsControl for DsControlService {
             }
             Err(e) => refuse(format!("open {:?}: {}", target, e)),
         }
+    }
+
+    /// F66: serve a fallback READ chunk for the MDS proxy
+    /// (docs/plans/mds-fallback-proxy-plan.md §3.4).
+    ///
+    /// Returns the bytes `read_at` produced, short reads included, and
+    /// ok=true with EMPTY data for an absent stripe file — the same
+    /// explicit-hole semantics the DS's own NFS data path has
+    /// (io.rs: an absent stripe file is a hole, not an error). No
+    /// zero-fill, no EOF inference: the DS does not know the file size.
+    async fn read_stripe(
+        &self,
+        request: tonic::Request<crate::pnfs::grpc::ReadStripeRequest>,
+    ) -> std::result::Result<
+        tonic::Response<crate::pnfs::grpc::ReadStripeResponse>,
+        tonic::Status,
+    > {
+        use std::os::unix::fs::FileExt;
+        let req = request.into_inner();
+        let refuse = |message: String| {
+            warn!("🎛️ ReadStripe refused: {}", message);
+            Ok(tonic::Response::new(crate::pnfs::grpc::ReadStripeResponse {
+                ok: false,
+                message,
+                data: Vec::new(),
+            }))
+        };
+        let target = match self.validate_stripe_target(&req.device_id, &req.rel_path) {
+            Ok(t) => t,
+            Err(m) => return refuse(m),
+        };
+        // Cap defensively: fallback RPCs are client-sized (~1 MiB via
+        // SERVER_MAX_REQUEST); anything larger is a confused caller,
+        // not a bigger read.
+        if req.count as usize > 4 * 1024 * 1024 {
+            return refuse(format!("count {} exceeds the 4 MiB ceiling", req.count));
+        }
+        let ok = |data: Vec<u8>| {
+            Ok(tonic::Response::new(crate::pnfs::grpc::ReadStripeResponse {
+                ok: true,
+                message: String::new(),
+                data,
+            }))
+        };
+        match std::fs::File::open(&target) {
+            Ok(f) => {
+                let mut buf = vec![0u8; req.count as usize];
+                match f.read_at(&mut buf, req.offset) {
+                    Ok(n) => {
+                        buf.truncate(n);
+                        ok(buf)
+                    }
+                    Err(e) => refuse(format!("read_at {:?}: {}", target, e)),
+                }
+            }
+            // Absent stripe file = hole. Explicitly NOT an error: a
+            // sparse file's untouched stripes have no file at all.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ok(Vec::new()),
+            Err(e) => refuse(format!("open {:?}: {}", target, e)),
+        }
+    }
+
+    /// F66: apply a fallback WRITE chunk for the MDS proxy
+    /// (docs/plans/mds-fallback-proxy-plan.md §3.3).
+    ///
+    /// Creates the stripe file if absent (a fallback write may precede
+    /// any DS-path write), writes at the FILE offset (sparse
+    /// addressing), and — non-negotiably — fdatasyncs BEFORE answering
+    /// ok: the MDS replies FILE_SYNC to the client on the strength of
+    /// this reply, and a buffered-then-ok would put a power-loss window
+    /// behind a durability claim.
+    async fn write_stripe(
+        &self,
+        request: tonic::Request<crate::pnfs::grpc::WriteStripeRequest>,
+    ) -> std::result::Result<
+        tonic::Response<crate::pnfs::grpc::WriteStripeResponse>,
+        tonic::Status,
+    > {
+        use std::os::unix::fs::FileExt;
+        let req = request.into_inner();
+        let refuse = |message: String| {
+            warn!("🎛️ WriteStripe refused: {}", message);
+            Ok(tonic::Response::new(crate::pnfs::grpc::WriteStripeResponse {
+                ok: false,
+                message,
+            }))
+        };
+        let target = match self.validate_stripe_target(&req.device_id, &req.rel_path) {
+            Ok(t) => t,
+            Err(m) => return refuse(m),
+        };
+        // The sync write runs on a blocking thread: this is gRPC on the
+        // DS's tokio runtime, and an fdatasync on a busy disk is
+        // exactly the ms-scale op the io.rs blocking rules exist for.
+        let offset = req.offset;
+        let data = req.data;
+        let res = tokio::task::spawn_blocking(move || -> std::result::Result<(), String> {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&target)
+                .map_err(|e| format!("open {:?}: {}", target, e))?;
+            f.write_all_at(&data, offset)
+                .map_err(|e| format!("write_all_at {:?}: {}", target, e))?;
+            f.sync_data()
+                .map_err(|e| format!("fdatasync {:?}: {}", target, e))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| tonic::Status::internal(format!("write task: {}", e)))?;
+        match res {
+            Ok(()) => Ok(tonic::Response::new(crate::pnfs::grpc::WriteStripeResponse {
+                ok: true,
+                message: String::new(),
+            })),
+            Err(m) => refuse(m),
+        }
+    }
+}
+
+impl DsControlService {
+    /// The identity + containment guard every DsControl mutation and
+    /// read shares, verbatim from TruncateStripeFile (which keeps its
+    /// inline copy's behavior through this same function): refuse a
+    /// request addressed to another device (serving DS-B's volume as
+    /// DS-A corrupts silently — the registration-stamp rationale), and
+    /// refuse absolute/traversal/empty paths.
+    fn validate_stripe_target(
+        &self,
+        device_id: &str,
+        rel_path: &str,
+    ) -> std::result::Result<std::path::PathBuf, String> {
+        if device_id != self.device_id {
+            return Err(format!(
+                "identity mismatch: request is for '{}', this DS is '{}'",
+                device_id, self.device_id
+            ));
+        }
+        let rel = std::path::Path::new(rel_path);
+        if rel_path.is_empty()
+            || rel.is_absolute()
+            || rel.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!("suspicious stripe path {:?}", rel_path));
+        }
+        Ok(self.data_dir.join(rel))
     }
 }
 
@@ -1674,6 +1810,94 @@ mod ds_control_tests {
                 .await.unwrap().into_inner();
             assert!(!r.ok, "should refuse {:?}", bad);
         }
+    }
+
+    // ── F66 ReadStripe/WriteStripe: the same guards, test for test ──
+
+    fn rreq(device_id: &str, rel: &str, offset: u64, count: u32)
+        -> tonic::Request<crate::pnfs::grpc::ReadStripeRequest> {
+        tonic::Request::new(crate::pnfs::grpc::ReadStripeRequest {
+            device_id: device_id.into(), rel_path: rel.into(), offset, count,
+        })
+    }
+    fn wreq(device_id: &str, rel: &str, offset: u64, data: Vec<u8>)
+        -> tonic::Request<crate::pnfs::grpc::WriteStripeRequest> {
+        tonic::Request::new(crate::pnfs::grpc::WriteStripeRequest {
+            device_id: device_id.into(), rel_path: rel.into(), offset, data,
+        })
+    }
+
+    #[tokio::test]
+    async fn write_then_read_roundtrips_at_file_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        // Sparse addressing: write at a large FILE offset on a file
+        // that does not exist yet (create-on-write).
+        let w = s.write_stripe(wreq("ds-test-1", "cafe.stripe0", 8 << 20, vec![7u8; 4096]))
+            .await.unwrap().into_inner();
+        assert!(w.ok, "{}", w.message);
+        let r = s.read_stripe(rreq("ds-test-1", "cafe.stripe0", 8 << 20, 4096))
+            .await.unwrap().into_inner();
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(r.data, vec![7u8; 4096]);
+    }
+
+    #[tokio::test]
+    async fn absent_stripe_file_reads_as_an_explicit_hole() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = svc(dir.path())
+            .read_stripe(rreq("ds-test-1", "never-written.stripe1", 0, 65536))
+            .await.unwrap().into_inner();
+        assert!(r.ok, "absent stripe file is a HOLE, not an error: {}", r.message);
+        assert!(r.data.is_empty(), "the DS must not zero-fill — it does not know the file size");
+    }
+
+    #[tokio::test]
+    async fn short_read_is_reported_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("s.stripe0"), vec![9u8; 100]).unwrap();
+        let r = svc(dir.path())
+            .read_stripe(rreq("ds-test-1", "s.stripe0", 40, 4096))
+            .await.unwrap().into_inner();
+        assert!(r.ok);
+        assert_eq!(r.data.len(), 60, "short read passes through raw — no zero-fill, no EOF guess");
+    }
+
+    #[tokio::test]
+    async fn proxy_rpcs_refuse_foreign_device_and_bad_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("s.stripe0"), vec![1u8; 16]).unwrap();
+        let s = svc(dir.path());
+        let r = s.read_stripe(rreq("ds-OTHER", "s.stripe0", 0, 16)).await.unwrap().into_inner();
+        assert!(!r.ok && r.message.contains("identity mismatch"));
+        let w = s.write_stripe(wreq("ds-OTHER", "s.stripe0", 0, vec![2u8; 4])).await.unwrap().into_inner();
+        assert!(!w.ok && w.message.contains("identity mismatch"));
+        assert_eq!(std::fs::read(dir.path().join("s.stripe0")).unwrap(), vec![1u8; 16], "untouched");
+        for bad in ["../escape", "/etc/passwd", ""] {
+            let r = s.read_stripe(rreq("ds-test-1", bad, 0, 4)).await.unwrap().into_inner();
+            assert!(!r.ok, "read should refuse {:?}", bad);
+            let w = s.write_stripe(wreq("ds-test-1", bad, 0, vec![0u8; 4])).await.unwrap().into_inner();
+            assert!(!w.ok, "write should refuse {:?}", bad);
+        }
+    }
+
+    #[tokio::test]
+    async fn written_bytes_are_durable_before_ok() {
+        // Behavioral proxy for the fdatasync contract: the write path
+        // must go through sync_data before replying. We can't power-cut
+        // a unit test, but we CAN assert the bytes are visible through
+        // a fresh descriptor immediately after ok — which a
+        // buffered-only implementation also passes, so the real belt is
+        // the sync_data call in the handler; this test pins that the
+        // data lands where a crash-recovery reader would look.
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        let w = s.write_stripe(wreq("ds-test-1", "d.stripe1", 512, vec![0xAA; 256]))
+            .await.unwrap().into_inner();
+        assert!(w.ok, "{}", w.message);
+        let on_disk = std::fs::read(dir.path().join("d.stripe1")).unwrap();
+        assert_eq!(&on_disk[512..768], &[0xAA; 256][..]);
+        assert_eq!(&on_disk[..512], &vec![0u8; 512][..], "leading hole reads as zeros");
     }
 }
 
