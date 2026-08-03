@@ -97,10 +97,14 @@ drop_client_cache() {
 # Client mountstats for the ONE nfs4 mount. Asserting exactly one mount is
 # what makes "the READ counters" unambiguous — and it enforces the
 # one-mount-per-client rule that the pNFS nconnect caveat requires.
+# The per-op line is TAB + EIGHT SPACES + "READ:", so an anchored /^\tREAD:/
+# never matches and every field silently reads 0 — which is exactly what the
+# first runba attempt printed (RPC 0.0 KiB, inflight 0.00) while happily
+# reporting throughput beside it. Match the token, not the indentation.
 client_mountstats() {
   "$HERE/nodesh.sh" "$CLIENT" '
     awk "/^device .* fstype nfs4? /{m++} END{print \"MOUNTS \" m+0}" /proc/1/mountstats
-    awk "/^\tREAD:/{print \"READ\", \$2, \$6, \$7, \$8, \$9}" /proc/1/mountstats' \
+    awk "/[[:space:]]READ:/{print \"READ\", \$2, \$6, \$7, \$8, \$9; exit}" /proc/1/mountstats' \
     2>/dev/null
 }
 # ops=$2  bytes_recv=$6  queue_ms=$7  rtt_ms=$8  execute_ms=$9
@@ -117,23 +121,35 @@ client_tcpext() {
 # THE COUNTER THAT WAS MISSING LAST TIME: the DS is the SENDER, so loss in
 # the data direction lands in ITS RetransSegs. OutSegs is captured with it
 # so a RATE can be computed — a bare retransmit count has no denominator.
+# MUST BE READ INSIDE THE DS POD'S NETWORK NAMESPACE. flint-pnfs-ds does
+# NOT set hostNetwork, so its sockets live in the pod netns and the host's
+# /proc/net/snmp cannot see them. Measured on runba at the same instant:
+#   host netns  OutSegs=419,231    RetransSegs=1
+#   pod  netns  OutSegs=3,983,001  RetransSegs=1,757
+# The first runba attempt sampled the host and reported "0/495" for a read
+# that moved 8 GiB — off by four orders of magnitude, and pointing at the
+# wrong conclusion (no loss) with total confidence.
+DS_POD=$(kubectl get pods -n "$NS" -l app=flint-pnfs-ds \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 ds_tcp() {
-  "$HERE/nodesh.sh" "$DSNODE" '
-    nstat -az 2>/dev/null | awk "
-      /^TcpRetransSegs/{r=\$2} /^TcpOutSegs/{o=\$2}
-      END{print (r+0),(o+0)}"' 2>/dev/null | tail -1
+  kubectl exec -n "$NS" "$DS_POD" -- awk \
+    '/^Tcp:/{n++; if(n==2) print $13, $12}' /proc/net/snmp 2>/dev/null | tail -1
 }
 
 # Settles the DS-page-cache candidate for free: read_bytes counts bytes
-# this process actually pulled from the block layer. ~0 on a cache hit.
+# this process actually pulled from the BLOCK LAYER, so ~0 means the read
+# was served from page cache. rchar is the syscall-level total and is
+# captured beside it as the denominator — on runba read_bytes was 0 while
+# rchar was 34 GiB, i.e. every byte came from cache and none from disk.
 ds_io() {
   "$HERE/nodesh.sh" "$DSNODE" \
     "awk '/^read_bytes:/{print \$2}' /proc/$DS_PID/io" 2>/dev/null | tail -1
 }
 
+# Also inside the pod netns, for the same reason as ds_tcp.
 ds_sockets() {
-  "$HERE/nodesh.sh" "$DSNODE" \
-    'ss -tim "( sport = :2049 )" 2>/dev/null | tr "\n" " " | sed "s/  */ /g"' 2>/dev/null | tail -1
+  kubectl exec -n "$NS" "$DS_POD" -- sh -c \
+    'ss -tim 2>/dev/null | grep -A1 ":2049" | head -20' 2>/dev/null | tr '\n' ' '
 }
 
 # ── the consumer pod: ONE, kept warm for the whole experiment ───────────
@@ -239,6 +255,40 @@ print(f"  {arm:<6} #{n:<3} {mibps:>5} MiB/s | RPC {rpc_bytes/1024:>7.1f} KiB | i
       f"| DS retrans {dsretr}/{dsout} ({loss:.3f}%) | cli ofo {ofo} dsack {dsack}")
 PY
 }
+
+# ── INSTRUMENT SELF-TEST. Every meter must move before any of them is ──
+# ── believed. Three separate instruments have now failed by reading ────
+# ── ZERO rather than erroring — a CPU meter whose 0.00 satisfied the ───
+# ── script's own decision rule, a mountstats regex that missed the ─────
+# ── indentation, and TCP counters read in the wrong netns. In each case
+# ── the run continued and produced a confident table. Not again.
+say "── instrument self-test (one throwaway read) ──"
+_ms0=$(client_mountstats); _dt0=$(ds_tcp); _di0=$(ds_io)
+drop_client_cache >/dev/null
+kubectl exec "$POD" -- python3 /bench/bench.py read --dir /data \
+  --shards "$SHARDS" --shard-gib "$SHARD_GIB" --mode stream --workers "$WORKERS" \
+  >/dev/null 2>&1 || die "self-test read failed"
+_ms1=$(client_mountstats); _dt1=$(ds_tcp); _di1=$(ds_io)
+_ops=$(python3 -c "
+def rd(b):
+    for l in b.splitlines():
+        f=l.split()
+        if f and f[0]=='READ': return int(f[1])
+    return 0
+print(rd('''$_ms1''') - rd('''$_ms0'''))")
+_out=$(python3 -c "
+a='''$_dt0'''.split(); b='''$_dt1'''.split()
+print(int(b[1])-int(a[1]) if len(a)>1 and len(b)>1 else 0)")
+EXPECT_OPS=$((SHARDS * SHARD_GIB * 1024 / 2))   # ~1 MiB RPCs, allow 2x slack
+say "  mountstats READ ops delta = $_ops (expect >$EXPECT_OPS for $((SHARDS*SHARD_GIB)) GiB)"
+say "  DS OutSegs delta          = $_out (expect >100000)"
+[ "${_ops:-0}" -gt "$EXPECT_OPS" ] || die "mountstats READ counter is not moving (got $_ops).
+    The per-op line is TAB + spaces + 'READ:' — an anchored regex silently
+    yields 0 for every field while throughput still prints beside it."
+[ "${_out:-0}" -gt 100000 ] || die "DS OutSegs is not moving (got $_out).
+    flint-pnfs-ds is NOT hostNetwork, so its counters are in the POD netns;
+    the host's /proc/net/snmp cannot see them and reads ~500 instead of ~4M."
+say "  ✓ all meters move — proceeding"
 
 say "── arm 1: stock settings, $N_STOCK reads ──"
 for i in $(seq 1 "$N_STOCK"); do one_read stock "$i"; done
