@@ -79,7 +79,28 @@ tgt_cpu() {
 echo -n "  spdk-tgt idle floor: "
 F0=$(tgt_cpu); sleep 5; F1=$(tgt_cpu)
 FLOOR=$(python3 -c "print(f'{(${F1:-0}-${F0:-0})/100/5:.2f}')")
-echo "$FLOOR cores (a poller spins by design — only the RISE is evidence)"
+echo "$FLOOR cores"
+
+# HARD PRECONDITION — THE METER MUST PROVE ITSELF BEFORE IT IS BELIEVED.
+# A reactor on mask 0x1 busy-polls: it MUST read ~1.0 cores at idle. The
+# first runaz run reported 0.00 for every point INCLUDING this floor,
+# because `pgrep -x spdk_tgt` cannot match comm "reactor_0" — and 0.00
+# silently SATISFIED the script's own decision rule ("plateau + near-floor
+# CPU => the reactor is not the constraint"). A broken meter that reads
+# zero does not fail loudly, it agrees with you. So refuse to continue
+# unless the floor lands where physics says it must.
+FLOOR_OK=$(python3 -c "print(1 if 0.9 <= float('${FLOOR:-0}') <= 1.1 else 0)")
+if [ "$FLOOR_OK" != "1" ]; then
+  echo "  ✗ ABORT: idle floor $FLOOR cores is outside 0.9-1.1."
+  echo "    A single busy-polling SPDK reactor pins one core whether or not"
+  echo "    I/O is arriving, so anything else means THE METER IS BROKEN, not"
+  echo "    that the reactor is idle. Do not interpret the throughput column"
+  echo "    against a CPU column that cannot count. Check that spdk_tgt is"
+  echo "    running on $NODE and that the pgrep pattern still matches its"
+  echo "    argv (comm is 'reactor_0', NOT 'spdk_tgt')."
+  exit 1
+fi
+echo "  ✓ meter sane (a poller spins by design — only the RISE above this is evidence)"
 
 cat <<YAML | kubectl apply -f - >/dev/null
 apiVersion: v1
@@ -110,15 +131,27 @@ spec:
 YAML
 kubectl wait --for=condition=Ready "pod/$POD" --timeout=300s >/dev/null 2>&1 \
   || { echo "  ! pod not Ready"; exit 1; }
-# fio needs a laid-out file; --direct=1 afterwards then bypasses the page
-# cache, so every I/O really traverses ext4 -> ublk -> SPDK -> NVMe.
-kubectl exec "$POD" -- sh -c \
-  'fio --name=lay --directory=/data --rw=write --bs=1M --size=8G \
-       --ioengine=libaio --iodepth=32 --direct=1 --output-format=terse >/dev/null 2>&1' \
-  >/dev/null 2>&1
+# Lay out files for EVERY job count the sweep will use. fio derives
+# lay.0.0, lay.1.0 ... from --name and --numjobs, so a run with numjobs=4
+# needs lay.0.0..lay.3.0 to exist or it creates them INSIDE the measured
+# window. Layout is buffered on purpose (fast); the measurement is
+# --direct=1 so it bypasses the page cache and really traverses the stack.
+# THE PATH IS DERIVED, NOT ASSERTED: the first runaz probe printed
+# "ext4 -> ublk -> SPDK -> NVMe" on a rig with blockDevice.backend=nvmeof
+# and no /dev/ublk* anywhere.
+BACKEND=$(kubectl get ds -n "$NS" flint-csi-node \
+  -o jsonpath='{.spec.template.spec.containers[*].env[?(@.name=="BLOCK_DEVICE_BACKEND")].value}' \
+  2>/dev/null | tr ' ' '\n' | head -1)
+echo "  block path: ext4 -> ${BACKEND:-unknown} -> SPDK -> NVMe   (from BLOCK_DEVICE_BACKEND)"
+for nj in 1 4; do
+  kubectl exec "$POD" -- sh -c \
+    "fio --name=lay --directory=/data --rw=write --bs=1M --size=$((8 / nj))G \
+         --numjobs=$nj --ioengine=libaio --iodepth=32 --output-format=terse" \
+    >/dev/null 2>&1 || { echo "  ✗ ABORT: layout for numjobs=$nj failed"; exit 1; }
+done
 
 run() {  # rw, bs, iodepth, numjobs
-  local a b cpu res mibps
+  local a b cpu res mibps rc
   a=$(tgt_cpu)
   # --size is PER JOB in fio, so numjobs=4 --size=8G wants 32 GiB of files
   # on a 32Gi PVC that already holds the 8 GiB layout file -> ENOSPC, and
@@ -127,16 +160,29 @@ run() {  # rw, bs, iodepth, numjobs
   # every job's bandwidth rather than reading jobs[0], which is one job's
   # share and would under-report a multi-job run by 4x.
   local per=$((8 / $4))
-  res=$(kubectl exec "$POD" -- sh -c \
+  # A FAILED POINT MUST STOP THE RUN, NOT PRINT "?". On the first runaz
+  # probe fio exited 1 (ENOSPC) and the point was recorded as "? MiB/s",
+  # after which the summary claimed a ceiling "flat across block size AND
+  # queue depth" — a claim that in fact rested entirely on numjobs=1. A
+  # missing point silently narrows the conclusion it is later used to
+  # support, so refuse to continue.
+  local raw
+  raw=$(kubectl exec "$POD" -- sh -c \
     "fio --name=lay --directory=/data --rw=$1 --bs=$2 --iodepth=$3 --numjobs=$4 \
          --ioengine=libaio --direct=1 --time_based --runtime=$DUR --size=${per}G \
-         --group_reporting --output-format=json 2>/dev/null" \
-    | python3 -c "
+         --group_reporting --output-format=json" 2>/dev/null)
+  rc=$?
+  res=$(printf '%s' "$raw" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 k='read' if '$1'=='read' else 'write'
 print(int(sum(j[k]['bw_bytes'] for j in d['jobs'])/1048576))
 " 2>/dev/null)
+  if [ "$rc" != "0" ] || [ -z "$res" ]; then
+    echo "  ✗ ABORT: fio rc=$rc for $1 bs=$2 qd=$3 jobs=$4 — point unmeasurable."
+    printf '%s\n' "$raw" | tail -5
+    exit 1
+  fi
   b=$(tgt_cpu)
   cpu=$(python3 -c "print(f'{(${b:-0}-${a:-0})/100/$DUR:.2f}')")
   printf "  %-6s bs=%-5s qd=%-4s jobs=%-3s %6s MiB/s   spdk-tgt %s cores (+%s over floor)\n" \

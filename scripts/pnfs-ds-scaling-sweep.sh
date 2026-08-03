@@ -57,20 +57,35 @@ DS_COUNT=$(echo "$DS_NODES" | grep -c .)
 echo "▶ DS scaling sweep: widths 1..$MAXW on $CLIENT, ${SHARDS}x${SHARD_GIB}GiB $MODE/$WORKERS"
 echo "  data servers: $(echo "$DS_NODES" | tr '\n' ' ')"
 
-# ── NIC allowance: the instrument that says "this number is AWS" ────────
-# Summed over every DS and the client. Sampled either side of each read,
-# so a metered point is attributable to the point, not to the session.
-allowance_sum() {
-  local total=0 v
+# ── NIC allowance, DECOMPOSED and reported without a causal claim ───────
+# The previous version summed EVERY counter matching allowance_exceeded
+# (bw_in, bw_out, pps, conntrack, linklocal) across every DS *and* the
+# client, then printed
+#     ** METERED: ... this is AWS, not flint **
+# on the strength of it. Three things were wrong. It could not localise
+# anything — one number for six nodes and five different limits. It was
+# not "bw_in" despite being read as such. And the causal claim was
+# BACKWARDS: on runaz the counter ANTI-correlated with slowness, the
+# single fastest read having by far the largest delta (452,950) because
+# moving more bytes trips more shaping events. A counter that rises with
+# throughput cannot be the reason throughput is low.
+#
+# So: report bw_in and bw_out per node, name them, and let the reader
+# judge. An instrument does not get to editorialise.
+allowance_by_node() {   # prints "<node> <bw_in> <bw_out>" per line
+  local n v
   for n in $DS_NODES $CLIENT; do
     v=$("$HERE/nodesh.sh" "$n" \
       'IF=$(awk "\$2==\"00000000\"{print \$1; exit}" /proc/net/route)
-       ethtool -S $IF 2>/dev/null | awk "/allowance_exceeded/{s+=\$2} END{print s+0}"' \
+       ethtool -S $IF 2>/dev/null | awk "
+         /bw_in_allowance_exceeded/{i=\$2}
+         /bw_out_allowance_exceeded/{o=\$2}
+         END{print (i+0)\" \"(o+0)}"' \
       2>/dev/null | tail -1)
-    total=$((total + ${v:-0}))
+    printf "%s %s\n" "$n" "${v:-0 0}"
   done
-  echo "$total"
 }
+allowance_sum() { allowance_by_node | awk '{s+=$2+$3} END{print s+0}'; }
 
 # ── one PVC per width ───────────────────────────────────────────────────
 for w in $(seq 1 "$MAXW"); do
@@ -140,14 +155,23 @@ done
 # ── the sweep ───────────────────────────────────────────────────────────
 : > "$OUT/points.txt"
 measure() {  # width, pass-label
-  local w=$1 lab=$2 a0 a1 r m
+  local w=$1 lab=$2 a0 a1 r m t0 t1
+  t0=$(date +%s)
   a0=$(allowance_sum)
   r=$(bench_pod "$w" read)
   a1=$(allowance_sum)
+  t1=$(date +%s)
   m=$(mibps_of "$r")
-  printf "%s %s %s %s\n" "$lab" "$w" "${m:-0}" "$((a1 - a0))" >>"$OUT/points.txt"
-  printf "  %-4s width %-2s %6s MiB/s%s\n" "$lab" "$w" "${m:-0}" \
-    "$([ "$((a1 - a0))" -gt 0 ] && echo "   ** METERED: NIC allowance moved by $((a1 - a0)) — this is AWS, not flint **")"
+  # TIMESTAMPED. Not one line of the runaz corpus carried a clock, so no
+  # ordering claim made about it afterwards ("the fast reads came at the
+  # end of each pass") could be checked against elapsed time.
+  printf "%s %s %s %s %s\n" "$lab" "$w" "${m:-0}" "$((a1 - a0))" "$t0" >>"$OUT/points.txt"
+  # Report the counter, do NOT interpret it. On runaz the delta was
+  # LARGEST on the FASTEST read, so a big number here is evidence of bytes
+  # moved, not of a limit being hit.
+  printf "  [%s] %-4s width %-2s %6s MiB/s   Δallowance(bw_in+bw_out, all nodes)=%s  %ss\n" \
+    "$(date -r "$t0" +%H:%M:%S 2>/dev/null || date +%H:%M:%S)" \
+    "$lab" "$w" "${m:-0}" "$((a1 - a0))" "$((t1 - t0))"
 }
 
 echo
