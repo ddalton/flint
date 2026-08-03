@@ -10,10 +10,11 @@
 # WireGuard OFF. The drill HARD-FAILS (no numbers) unless:
 #   - every DS/MDS pod sits on a node other than the client's;
 #   - Cilium WireGuard is off (the 918 tunnel tax voids ceilings);
-#   - during EVERY timed I/O the client holds established TCP to EACH
-#     DS per-pod ClusterIP:2049 (the runbe proxy regime had ZERO DS
-#     conns and 4 to the MDS — conn topology is the truthful
-#     instrument; the LAYOUTGET mountstats row is INERT on 6.1);
+#   - right after EVERY timed I/O the client holds established TCP to
+#     EACH DS (per-pod svc ClusterIP OR pod IP — socket-LB rewrites
+#     the dst at connect(), so ss shows pod IPs; conn topology is the
+#     truthful instrument, the LAYOUTGET mountstats row is INERT on
+#     6.1, and DS conns linger minutes so post-transfer is race-free);
 #   - the client's PHYSICAL NIC moved ≥80% of the payload bytes in the
 #     transfer direction (catches cache-served "reads" — runbc's 2432 —
 #     and is immune to the vxlan double-count, instrument bug #10,
@@ -41,20 +42,25 @@ say() { printf "[%s] %s\n" "$(ts)" "$*"; }
 die() { printf "[%s] ✗ ABORT: %s\n" "$(ts)" "$*"; exit 1; }
 
 # ── preflight: topology ──────────────────────────────────────────────
-DS_IPS=""
-while read -r pod node; do
+# Each DS is identified by BOTH its per-pod Service ClusterIP and its
+# pod IP: cilium's socket-LB rewrites the destination at connect(), so
+# `ss` on the client shows the POD IP, never the ClusterIP the kernel
+# was handed (instrument bug #14 — the ClusterIP-only version of this
+# assertion void-aborted a healthy DS-direct run on runbg).
+DS_PAIRS=""
+while read -r pod node podip; do
   [ -n "$pod" ] || continue
   [ "$node" != "$CLIENT" ] || die "DS $pod is ON the client node $CLIENT"
   ip=$(kubectl get svc -n "$NS" "$pod" -o jsonpath='{.spec.clusterIP}') \
     || die "no per-pod svc for $pod"
-  DS_IPS="$DS_IPS $ip"
-  say "✓ $pod on $node, svc $ip"
+  DS_PAIRS="$DS_PAIRS $ip|$podip"
+  say "✓ $pod on $node, svc $ip, pod $podip"
 done <<EOF
 $(kubectl get pods -n "$NS" -l app=flint-pnfs-ds \
-  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName}{"\n"}{end}')
+  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName} {.status.podIP}{"\n"}{end}')
 EOF
-[ -n "$DS_IPS" ] || die "no DS pods"
-NDS=$(echo "$DS_IPS" | wc -w | tr -d ' ')
+[ -n "$DS_PAIRS" ] || die "no DS pods"
+NDS=$(echo "$DS_PAIRS" | wc -w | tr -d ' ')
 
 MDS_NODE=$(kubectl get pods -n "$NS" -l flint.io/role=pnfs-mds \
   -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)
@@ -102,18 +108,40 @@ nic_bytes() { # rx|tx
 }
 
 # ── the path assertion (F68a, drill side) ────────────────────────────
-assert_ds_direct() {  # label — every DS svc IP must hold ≥1 est conn
-  local est missing=0 c ip
-  est=$(nadm "ss -tn state established 2>/dev/null | awk '{print \$4}'")
-  for ip in $DS_IPS; do
-    c=$(echo "$est" | grep -c "^${ip}:2049$")
-    if [ "$c" -eq 0 ]; then missing=1; say "  ✗ NO conns to DS $ip:2049"; fi
+# A 1 Hz ss sampler runs in the nodeadmin pod for the WHOLE transfer
+# and the assertion checks the UNION of endpoints seen. Point-in-time
+# sampling loses both ways: buffered writes open their first DS conn
+# only when writeback starts (~6s in), and the kernel tears DS conns
+# down at file close (every runbg trace re-ran _nfs4_pnfs_v4_ds_connect
+# [new]) — so mid-flight races the start and post-transfer races the
+# end.
+sampler_start() {
+  nadm "rm -f /tmp/wr.samples /tmp/wr.stop
+cat > /tmp/wr-sampler.sh <<'EOS'
+#!/bin/sh
+i=0
+while [ \$i -lt 900 ] && [ ! -f /tmp/wr.stop ]; do
+  ss -tn state established 2>/dev/null | awk '{print \$4}' >> /tmp/wr.samples
+  i=\$((i+1)); sleep 1
+done
+EOS
+nohup sh /tmp/wr-sampler.sh >/dev/null 2>&1 &
+echo sampler-up"
+}
+sampler_stop() { nadm "touch /tmp/wr.stop; sleep 1.2; sort -u /tmp/wr.samples 2>/dev/null"; }
+
+assert_ds_direct() {  # label union-of-endpoints — every DS (svcIP or podIP) must appear
+  local label=$1 union=$2 missing=0 c pair svc pod
+  for pair in $DS_PAIRS; do
+    svc=${pair%|*}; pod=${pair#*|}
+    c=$(echo "$union" | grep -cE "^(${svc}|${pod}):2049$")
+    if [ "$c" -eq 0 ]; then missing=1; say "  ✗ NO conns to DS ${svc}/${pod}:2049 in any sample"; fi
   done
   if [ "$missing" = 1 ]; then
-    echo "$est" | sort | uniq -c | sort -rn | head > "$OUT/$1.conns"
-    die "$1: NOT DS-direct (proxy regime? see $OUT/$1.conns) — number VOID"
+    echo "$union" > "$OUT/$label.conns"
+    die "$label: NOT DS-direct (proxy regime? see $OUT/$label.conns) — number VOID"
   fi
-  say "  ✓ $1: DS-direct confirmed ($NDS DS endpoints active)"
+  say "  ✓ $label: DS-direct confirmed ($NDS DS endpoints seen during transfer)"
 }
 
 # ── per-width SC + PVC + consumer pod ────────────────────────────────
@@ -161,14 +189,14 @@ YAML
 }
 
 timed() {  # label pod dd-cmd nic-direction(rx|tx)
-  local label=$1 pod=$2 cmd=$3 dir=$4 out secs rate b0 b1 moved want
+  local label=$1 pod=$2 cmd=$3 dir=$4 out secs rate b0 b1 moved want union
+  sampler_start >/dev/null
   b0=$(nic_bytes "$dir")
-  ( sleep 2; assert_ds_direct "$label" ) &
-  local guard=$!
   out=$(kubectl exec "$pod" -- sh -c "$cmd" 2>&1) \
-    || { kill "$guard" 2>/dev/null; die "$label I/O failed: $out"; }
-  wait "$guard" || exit 1
+    || die "$label I/O failed: $out"
   b1=$(nic_bytes "$dir")
+  union=$(sampler_stop)
+  assert_ds_direct "$label" "$union"
   secs=$(echo "$out" | awk '/copied,/{print $(NF-2)}')
   [ -n "$secs" ] || die "$label: no dd timing in: $out"
   rate=$(awk -v g="$GIB" -v s="$secs" 'BEGIN{printf "%.0f", g*1024/s}')
