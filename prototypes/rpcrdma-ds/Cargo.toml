@@ -1,0 +1,11 @@
+[package]
+name = "rpcrdma-ds"
+version = "0.1.0"
+edition = "2021"
+description = "Prototype: flint pNFS DS speaking RPC-over-RDMA v1 (RFC 8166) — M1: session ops inline over Soft-RoCE"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+libc = "0.2"
