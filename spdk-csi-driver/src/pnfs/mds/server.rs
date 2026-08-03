@@ -116,6 +116,35 @@ impl MetadataServer {
         // Initialize device registry
         let device_registry = Arc::new(DeviceRegistry::new());
 
+        // F67: the durable file_id↔path binding rides on the stub as a
+        // user xattr, in the SAME failure domain as the namespace. Probe
+        // support once on the export root; an xattr-less filesystem
+        // under a memory state backend is exactly the "restart = silent
+        // zeros" configuration and must not boot quietly.
+        let xattr_ok =
+            crate::pnfs::mds::stub_binding::XattrStubBinding::probe(&export_path);
+        if !xattr_ok {
+            let memory_backend = matches!(
+                config.state.backend,
+                crate::pnfs::config::StateBackend::Memory
+            );
+            if memory_backend {
+                return Err(crate::pnfs::Error::Config(format!(
+                    "F67: export filesystem at {:?} does not support user xattrs and \
+                     state.backend is 'memory' — every restart would silently zero all \
+                     striped reads. Use a persistent backend or an xattr-capable export \
+                     filesystem.",
+                    export_path
+                )));
+            }
+            tracing::error!(
+                "F67: export filesystem at {:?} does not support user xattrs — placement \
+                 bindings cannot be mirrored onto stubs. Striped data will not survive \
+                 the loss of the state backend. DEGRADED.",
+                export_path
+            );
+        }
+
         // Initialize layout manager. Shares the StateManager's
         // backend so layout records persist alongside client /
         // session / stateid records.
@@ -123,11 +152,14 @@ impl MetadataServer {
         // as placements (`load_persisted_state` seeds it below).
         // `config.layout.stripe_size` stays the fleet-wide default for
         // volumes that ask for nothing.
-        let layout_manager = Arc::new(LayoutManager::new(
+        let layout_manager = Arc::new(LayoutManager::new_with_binding(
             Arc::clone(&device_registry),
             config.layout.policy,
             config.layout.stripe_size,
             state_mgr.backend(),
+            Arc::new(crate::pnfs::mds::stub_binding::XattrStubBinding::new(
+                export_path.clone(),
+            )),
         ));
 
         // Initialize pNFS operation handler
@@ -282,6 +314,17 @@ impl MetadataServer {
             );
         }
         info!("📦 MDS reloaded {} persisted placements from backend", n);
+
+        // F67 backfill: mirror restored placements onto stubs that
+        // predate the binding xattr, converging pre-F67 fleets to full
+        // coverage. Idempotent; skips stubs already bound or deleted.
+        let (bound, bind_failed) = self.layout_manager.backfill_stub_bindings();
+        if bound > 0 || bind_failed > 0 {
+            info!(
+                "🩹 F67 backfill: wrote {} stub binding(s), {} failed",
+                bound, bind_failed
+            );
+        }
 
         // Per-volume stripe geometry, seeded EAGERLY: the cache is the
         // only reader on the layout path, so a LAYOUTGET arriving before

@@ -76,6 +76,32 @@ pub const LAYOUT_SEQID_BASE: u32 = 1;
 /// up-front gate check gives) rather than a hard error.
 pub const GRANT_RACED_TRUNCATE: &str = "grant raced a truncate";
 
+/// F67 sentinel prefix: a nonzero-size stub has NO placement binding
+/// anywhere (backend and stub xattr both empty). Minting a fresh
+/// file_id here would strand any striped data behind a new identity —
+/// reads would come back as silent zeros through the DS hole path — so
+/// the grant is refused instead. Callers match with `starts_with`; the
+/// message carries the file key.
+pub const ORPHANED_DATA: &str = "F67 orphaned data";
+
+/// Rate-limited (5 s, global) ERROR for orphan-guard trips: a client
+/// retrying I/O against an orphaned file must not flood the log, but
+/// the operator must reliably see the condition and the remedy.
+fn orphan_log(file_key: &str, len: u64) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = unix_now();
+    let last = LAST.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 5 && LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        tracing::error!(
+            "🛑 F67: '{}' has {} bytes of data but no placement binding (backend and \
+             stub xattr both empty). Refusing I/O rather than serving zeros. Restore \
+             the MDS state PVC from backup, or delete the stub to abandon the data.",
+            file_key, len
+        );
+    }
+}
+
 /// How long a revoked stateid is remembered so the owner's LAYOUTRETURN
 /// can be answered NFS4_OK instead of an error. Comfortably longer than
 /// a client's recall-to-return turnaround, short enough that the set
@@ -385,6 +411,14 @@ pub struct LayoutManager {
     /// and lets recall fan-out work correctly post-restart. See
     /// `state_backend::mod.rs` for the lag-bound rationale.
     backend: Arc<dyn StateBackend>,
+
+    /// F67: the durable binding channel. Minting writes the placement
+    /// onto the stub (xattr) BEFORE the backend record; recovery reads
+    /// it back when the backend has lost the record; the orphan guard
+    /// consults stub metadata before ever re-minting over data. Tests
+    /// default to [`stub_binding::NoStubs`] (pre-F67 semantics); the
+    /// server injects the real xattr binding.
+    stub_binding: Arc<dyn super::stub_binding::StubBinding>,
 }
 
 impl LayoutState {
@@ -583,11 +617,31 @@ impl Default for VolumeGeometry {
 
 impl LayoutManager {
     /// Create a new layout manager backed by `backend`.
+    /// Test-shape constructor: no stub visibility (`NoStubs`), so the
+    /// F67 orphan guard never trips and every miss mints — the pre-F67
+    /// semantics unit tests were written against. PRODUCTION MUST use
+    /// [`Self::new_with_binding`]; the restart drill gates that wiring.
     pub fn new(
         device_registry: Arc<DeviceRegistry>,
         policy: ConfigLayoutPolicy,
         stripe_size: u64,
         backend: Arc<dyn StateBackend>,
+    ) -> Self {
+        Self::new_with_binding(
+            device_registry,
+            policy,
+            stripe_size,
+            backend,
+            Arc::new(super::stub_binding::NoStubs),
+        )
+    }
+
+    pub fn new_with_binding(
+        device_registry: Arc<DeviceRegistry>,
+        policy: ConfigLayoutPolicy,
+        stripe_size: u64,
+        backend: Arc<dyn StateBackend>,
+        stub_binding: Arc<dyn super::stub_binding::StubBinding>,
     ) -> Self {
         let policy_impl = match policy {
             ConfigLayoutPolicy::RoundRobin => LayoutPolicyImpl::RoundRobin,
@@ -613,6 +667,7 @@ impl LayoutManager {
             truncate_dirty: Arc::new(DashMap::new()),
             volume_geometry: Arc::new(DashMap::new()),
             backend,
+            stub_binding,
         }
     }
 
@@ -1191,35 +1246,147 @@ impl LayoutManager {
         }
         let device_ids: Vec<String> = devices.into_iter().map(|d| d.device_id).collect();
 
-        let placement = self
-            .placements
-            .entry(file_key.to_string())
-            .or_insert_with(|| FilePlacement {
-                // The VOLUME's stripe size, not the fleet default — the
-                // placement is what every later grant reads, so this is
-                // the single point where per-volume geometry becomes
-                // durable for the file.
-                stripe_size: geometry.stripe_size,
-                device_ids,
-                file_id: allocate_file_id(),
-            })
-            .clone();
+        // Miss-handling holds the map entry (shard lock) end to end so
+        // two racing grants cannot mint twice — the loser must observe
+        // the winner's placement, and the stub xattr must match the map
+        // (a lost race that overwrote the xattr with a DIFFERENT mint
+        // would recreate F67 at the next restart).
+        use dashmap::mapref::entry::Entry;
+        let placement = match self.placements.entry(file_key.to_string()) {
+            Entry::Occupied(e) => e.get().clone(),
+            Entry::Vacant(v) => {
+                // F67 recovery: the backend lost the record but the stub
+                // still carries the binding. Re-adopt it verbatim —
+                // file_id AND device order are identity, not preference.
+                if let Some(recovered) = self.stub_binding.read(file_key) {
+                    info!(
+                        "🩹 F67: recovered placement for '{}' from its stub binding \
+                         (file_id {:016x}, {} DSes) — backend record was missing",
+                        file_key,
+                        recovered.file_id,
+                        recovered.device_ids.len(),
+                    );
+                    self.backend
+                        .enqueue_write(WriteOp::PutPlacement(recovered.to_record(file_key)));
+                    v.insert(recovered.clone());
+                    recovered
+                } else {
+                    // F67 orphan guard: a stub with bytes and NO binding
+                    // anywhere means minting would strand data behind a
+                    // fresh identity. Refuse. (Native MDS files also land
+                    // here on their first LAYOUTGET: the refusal maps to
+                    // LAYOUTUNAVAILABLE, the client falls back to MDS
+                    // I/O, and the fallback disposition serves dense
+                    // stubs — so native files keep working while the
+                    // ambiguous sparse case fails LOUD, never as zeros.)
+                    if let Some(meta) = self.stub_binding.stub_meta(file_key) {
+                        if meta.len > 0 {
+                            orphan_log(file_key, meta.len);
+                            return Err(format!(
+                                "{ORPHANED_DATA}: '{}' has {} bytes but no placement \
+                                 binding (backend and stub xattr both empty) — refusing \
+                                 to mint a fresh file_id over existing data",
+                                file_key, meta.len
+                            ));
+                        }
+                    }
+                    let placement = FilePlacement {
+                        // The VOLUME's stripe size, not the fleet
+                        // default — the placement is what every later
+                        // grant reads, so this is the single point where
+                        // per-volume geometry becomes durable for the
+                        // file.
+                        stripe_size: geometry.stripe_size,
+                        device_ids,
+                        file_id: allocate_file_id(),
+                    };
+                    // Binding BEFORE backend record: a crash between the
+                    // two recovers from the xattr; the reverse order
+                    // would leave a backend id no stub can corroborate.
+                    // A failed binding write refuses the grant — an
+                    // unbound id must never reach the wire.
+                    if let Err(e) = self.stub_binding.write(file_key, &placement) {
+                        return Err(format!(
+                            "F67: cannot write placement binding for '{}': {} — \
+                             refusing the grant rather than issuing an unbound file_id",
+                            file_key, e
+                        ));
+                    }
+                    self.backend
+                        .enqueue_write(WriteOp::PutPlacement(placement.to_record(file_key)));
+                    info!(
+                        "📌 Pinned placement for '{}': {} DSes {:?}, stripe_size={}",
+                        file_key,
+                        placement.device_ids.len(),
+                        placement.device_ids,
+                        placement.stripe_size,
+                    );
+                    v.insert(placement.clone());
+                    placement
+                }
+            }
+        };
 
         self.stripe_groups
             .entry(composite_device_id(&placement.device_ids))
             .or_insert_with(|| placement.device_ids.clone());
 
-        self.backend
-            .enqueue_write(WriteOp::PutPlacement(placement.to_record(file_key)));
-
-        info!(
-            "📌 Pinned placement for '{}': {} DSes {:?}, stripe_size={}",
-            file_key,
-            placement.device_ids.len(),
-            placement.device_ids,
-            placement.stripe_size,
-        );
         Ok(placement)
+    }
+
+    /// F67: read-only recovery for non-grant paths (the MDS fallback
+    /// disposition). Like `placement_for`, but a map miss also consults
+    /// the stub binding so a records-lost MDS still recognizes striped
+    /// files it has not re-granted yet.
+    pub fn placement_or_recovered(&self, file_key: &str) -> Option<FilePlacement> {
+        if let Some(p) = self.placements.get(file_key) {
+            return Some(p.clone());
+        }
+        let recovered = self.stub_binding.read(file_key)?;
+        info!(
+            "🩹 F67: recovered placement for '{}' from its stub binding (fallback path)",
+            file_key
+        );
+        self.backend
+            .enqueue_write(WriteOp::PutPlacement(recovered.to_record(file_key)));
+        self.placements
+            .entry(file_key.to_string())
+            .or_insert_with(|| recovered.clone());
+        Some(recovered)
+    }
+
+    /// F67: stub visibility for the fallback disposition's orphan
+    /// check (operations has no filesystem access of its own).
+    pub fn stub_meta(&self, file_key: &str) -> Option<super::stub_binding::StubMeta> {
+        self.stub_binding.stub_meta(file_key)
+    }
+
+    /// F67 boot backfill: write the stub binding for every placement
+    /// the backend restored that does not carry one yet. Converges
+    /// pre-F67 fleets to full xattr coverage on the first boot after
+    /// upgrade. Returns (written, failed).
+    pub fn backfill_stub_bindings(&self) -> (usize, usize) {
+        let mut written = 0usize;
+        let mut failed = 0usize;
+        for entry in self.placements.iter() {
+            let (file_key, placement) = (entry.key(), entry.value());
+            if self.stub_binding.read(file_key).is_some() {
+                continue;
+            }
+            // Only bind stubs that exist — a placement whose stub is
+            // gone is a delete in flight, not backfill material.
+            if self.stub_binding.stub_meta(file_key).is_none() {
+                continue;
+            }
+            match self.stub_binding.write(file_key, placement) {
+                Ok(()) => written += 1,
+                Err(e) => {
+                    failed += 1;
+                    warn!("F67 backfill: binding write for '{}' failed: {}", file_key, e);
+                }
+            }
+        }
+        (written, failed)
     }
 
     fn persist(&self, l: &LayoutState) {
@@ -1785,6 +1952,172 @@ mod tests {
         assert_eq!(compose_file_id(0, 0, 0), 1);
         // ...and shard-0 ids keep the low-56 randomness intact.
         assert_eq!(compose_file_id(0, 0xab, 0), 0xab);
+    }
+
+    // ── F67: durable placement binding + orphan guard ───────────────────
+
+    use crate::pnfs::mds::stub_binding::{test_support::MemoryStubBinding, StubMeta};
+
+    fn f67_manager(
+        devices: &[&str],
+    ) -> (Arc<MemoryStubBinding>, LayoutManager) {
+        let registry = Arc::new(DeviceRegistry::new());
+        for id in devices {
+            registry
+                .register(DeviceInfo::new(
+                    id.to_string(),
+                    format!("{id}:2049"),
+                    vec!["nvme0n1".to_string()],
+                ))
+                .unwrap();
+        }
+        let binding = Arc::new(MemoryStubBinding::default());
+        let mgr = LayoutManager::new_with_binding(
+            registry,
+            ConfigLayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
+            Arc::clone(&binding) as Arc<dyn crate::pnfs::mds::stub_binding::StubBinding>,
+        );
+        (binding, mgr)
+    }
+
+    fn grant(mgr: &LayoutManager, file: &str) -> Result<LayoutState, String> {
+        mgr.generate_layout(test_owner(1), vec![1], file, 0, 16 * 1024 * 1024, IoMode::ReadWrite)
+    }
+
+    #[test]
+    fn orphan_guard_refuses_sparse_stub_without_binding() {
+        let (binding, mgr) = f67_manager(&["ds-1", "ds-2"]);
+        binding
+            .metas
+            .lock()
+            .unwrap()
+            .insert("/vol/orphan".into(), StubMeta { len: 4096, blocks: 0 });
+
+        let err = grant(&mgr, "/vol/orphan").unwrap_err();
+        assert!(
+            err.starts_with(ORPHANED_DATA),
+            "refusal must carry the F67 sentinel, got: {err}"
+        );
+        assert!(mgr.placement_for("/vol/orphan").is_none(), "no mint may leak");
+        assert!(
+            binding.bindings.lock().unwrap().is_empty(),
+            "no binding may be written for a refused grant"
+        );
+    }
+
+    #[test]
+    fn orphan_guard_refuses_dense_stub_too() {
+        // A dense stub is an MDS-native file. Minting a placement for
+        // it would point layouts at absent stripes — zeros — while the
+        // real data sits in the stub. The refusal maps to
+        // LAYOUTUNAVAILABLE and the client falls back to MDS I/O,
+        // where the disposition SERVES dense stubs.
+        let (binding, mgr) = f67_manager(&["ds-1"]);
+        binding
+            .metas
+            .lock()
+            .unwrap()
+            .insert("/vol/native".into(), StubMeta { len: 4096, blocks: 8 });
+
+        let err = grant(&mgr, "/vol/native").unwrap_err();
+        assert!(err.starts_with(ORPHANED_DATA), "got: {err}");
+    }
+
+    #[test]
+    fn mint_proceeds_for_absent_and_empty_stubs_and_writes_the_binding() {
+        let (binding, mgr) = f67_manager(&["ds-1", "ds-2"]);
+        // Absent stub (freshly created file, stub not visible yet).
+        grant(&mgr, "/vol/new").unwrap();
+        // Empty stub (OPEN created it, nothing written).
+        binding
+            .metas
+            .lock()
+            .unwrap()
+            .insert("/vol/empty".into(), StubMeta { len: 0, blocks: 0 });
+        grant(&mgr, "/vol/empty").unwrap();
+
+        let bindings = binding.bindings.lock().unwrap();
+        for key in ["/vol/new", "/vol/empty"] {
+            let placement = mgr.placement_for(key).expect("minted");
+            assert_eq!(
+                bindings.get(key),
+                Some(&placement),
+                "stub binding must mirror the map exactly for '{key}'"
+            );
+            assert_ne!(placement.file_id, 0);
+        }
+    }
+
+    #[test]
+    fn recovery_from_stub_binding_restores_the_exact_identity() {
+        let (binding, mgr) = f67_manager(&["ds-1", "ds-2"]);
+        // The stub remembers a binding the backend lost. Device order
+        // deliberately DIFFERS from the registry's sorted order — the
+        // recovered identity must win verbatim.
+        let remembered = FilePlacement {
+            stripe_size: 4 * 1024 * 1024,
+            device_ids: vec!["ds-2".into(), "ds-1".into()],
+            file_id: 0x00b97e4be38c246d,
+        };
+        binding
+            .metas
+            .lock()
+            .unwrap()
+            .insert("/vol/f".into(), StubMeta { len: 1 << 30, blocks: 0 });
+        binding
+            .bindings
+            .lock()
+            .unwrap()
+            .insert("/vol/f".into(), remembered.clone());
+
+        grant(&mgr, "/vol/f").unwrap();
+        assert_eq!(
+            mgr.placement_for("/vol/f"),
+            Some(remembered),
+            "recovery must restore file_id, stripe_size AND device order verbatim"
+        );
+    }
+
+    #[test]
+    fn failed_binding_write_refuses_the_grant() {
+        let (binding, mgr) = f67_manager(&["ds-1"]);
+        binding
+            .fail_writes
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let err = grant(&mgr, "/vol/f").unwrap_err();
+        assert!(err.contains("unbound"), "got: {err}");
+        assert!(
+            mgr.placement_for("/vol/f").is_none(),
+            "an unbindable placement must never enter the map"
+        );
+    }
+
+    #[test]
+    fn backfill_binds_restored_placements_once() {
+        let (binding, mgr) = f67_manager(&["ds-1", "ds-2"]);
+        mgr.load_placement_records(vec![crate::state_backend::PlacementRecord {
+            file_key: "/vol/old".into(),
+            stripe_size: 8 * 1024 * 1024,
+            device_ids: vec!["ds-1".into(), "ds-2".into()],
+            file_id: 0x77,
+            truncate_pending: None,
+            truncate_since_unix: None,
+        }]);
+        // Stub exists → backfill binds it. A second pass is a no-op.
+        binding
+            .metas
+            .lock()
+            .unwrap()
+            .insert("/vol/old".into(), StubMeta { len: 1024, blocks: 0 });
+        assert_eq!(mgr.backfill_stub_bindings(), (1, 0));
+        assert_eq!(mgr.backfill_stub_bindings(), (0, 0), "idempotent");
+        assert_eq!(
+            binding.bindings.lock().unwrap().get("/vol/old").map(|p| p.file_id),
+            Some(0x77)
+        );
     }
 
     #[test]

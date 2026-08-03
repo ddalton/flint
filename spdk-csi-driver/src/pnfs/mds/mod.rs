@@ -39,6 +39,9 @@ pub mod operations;
 /// Callback operations (CB_LAYOUTRECALL)
 pub mod callback;
 
+/// F67: durable file_id↔path binding stored on the stub (xattr)
+pub mod stub_binding;
+
 // Re-exports
 pub use device::{DeviceRegistry, DeviceInfo, DeviceStatus};
 pub use layout::{LayoutManager, IoMode, LayoutType};

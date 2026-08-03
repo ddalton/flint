@@ -238,7 +238,30 @@ impl PnfsOperationHandler {
         ceiling: Duration,
         proxy_enabled: bool,
     ) -> FallbackIoDisposition {
-        let Some(placement) = self.layout_manager.placement_for(file_key) else {
+        // F67: a map miss must consult the stub binding before deciding
+        // this file is MDS-native — a records-lost MDS still recognizes
+        // striped files by their xattr.
+        let Some(placement) = self.layout_manager.placement_or_recovered(file_key) else {
+            // No binding anywhere. Dense stub (blocks > 0) = an
+            // MDS-native file whose data IS the stub: Serve, the
+            // pre-F67 behavior. Sparse-with-size = either an all-holes
+            // native file (serving zeros would be correct) or a striped
+            // file whose binding was destroyed (serving zeros is silent
+            // corruption). Indistinguishable — so fail LOUD on the
+            // ambiguity rather than quiet on the corruption. (F67; an
+            // all-sparse native file hitting this is rare, and EIO is
+            // recoverable where zeros-for-data is not.)
+            if let Some(meta) = self.layout_manager.stub_meta(file_key) {
+                if meta.len > 0 && meta.blocks == 0 {
+                    tracing::error!(
+                        "🛑 F67: MDS fallback I/O for '{}' — {} bytes claimed, zero \
+                         blocks allocated, no placement binding. Refusing rather than \
+                         serving zeros.",
+                        file_key, meta.len
+                    );
+                    return FallbackIoDisposition::FailFast;
+                }
+            }
             return FallbackIoDisposition::Serve;
         };
         // Truncate-dirty overrides the healthy-fleet trap check: the
@@ -1595,6 +1618,66 @@ mod fallback_tests {
         assert_eq!(
             handler.fallback_io_disposition_core("f.bin", CEILING, true),
             FallbackIoDisposition::FailFast
+        );
+    }
+
+    /// F67 disposition tests: handler over a manager with a scripted
+    /// stub binding and NO placement for the file.
+    fn f67_handler(
+        metas: &[(&str, u64, u64)],
+    ) -> PnfsOperationHandler {
+        use crate::pnfs::mds::stub_binding::{test_support::MemoryStubBinding, StubMeta};
+        let registry = Arc::new(DeviceRegistry::new());
+        let binding = Arc::new(MemoryStubBinding::default());
+        for (key, len, blocks) in metas {
+            binding
+                .metas
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), StubMeta { len: *len, blocks: *blocks });
+        }
+        let mgr = Arc::new(LayoutManager::new_with_binding(
+            Arc::clone(&registry),
+            LayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            crate::state_backend::memory_backend(),
+            binding as Arc<dyn crate::pnfs::mds::stub_binding::StubBinding>,
+        ));
+        PnfsOperationHandler::new(mgr, registry, "/data/exports".into())
+    }
+
+    #[test]
+    fn f67_sparse_bindingless_stub_fails_fast_never_serves_zeros() {
+        // Bytes claimed, zero blocks allocated, no binding anywhere:
+        // either an all-holes native file (EIO is recoverable) or a
+        // striped file whose binding was destroyed (Serve would be
+        // silent corruption). Loud beats quiet.
+        let handler = f67_handler(&[("orphan.bin", 1 << 30, 0)]);
+        assert_eq!(
+            handler.fallback_io_disposition_core("orphan.bin", CEILING, true),
+            FallbackIoDisposition::FailFast
+        );
+    }
+
+    #[test]
+    fn f67_dense_bindingless_stub_still_serves() {
+        // An MDS-native file: its data IS the stub. The pre-F67 Serve
+        // answer stays — native files must keep working.
+        let handler = f67_handler(&[("native.bin", 4096, 8)]);
+        assert_eq!(
+            handler.fallback_io_disposition_core("native.bin", CEILING, true),
+            FallbackIoDisposition::Serve
+        );
+    }
+
+    #[test]
+    fn f67_absent_stub_serves() {
+        // No stub at all (metadata-only ops, races with create):
+        // nothing to protect, keep the permissive default.
+        let handler = f67_handler(&[]);
+        assert_eq!(
+            handler.fallback_io_disposition_core("nothing.bin", CEILING, true),
+            FallbackIoDisposition::Serve
         );
     }
 

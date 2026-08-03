@@ -264,6 +264,10 @@ test-pnfs-smoke: build-pnfs ## End-to-end pNFS data-path smoke test (mount + wri
 test-pnfs-pynfs: build-pnfs ## Run pynfs `pnfs` conformance subset against the MDS
 	tests/lima/pnfs/pynfs.sh
 
+.PHONY: test-pnfs-restart
+test-pnfs-restart: build-pnfs ## F67 restart drill (binding survives restart; orphan fails loud)
+	tests/lima/pnfs/restart-drill.sh
+
 .PHONY: test-pnfs-csi
 test-pnfs-csi: build-pnfs ## End-to-end pNFS CSI integration test (gRPC create → mount → I/O → delete)
 	tests/lima/pnfs/csi-e2e.sh
