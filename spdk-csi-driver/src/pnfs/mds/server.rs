@@ -408,6 +408,9 @@ impl MetadataServer {
             crate::pnfs::config::StateBackend::Memory
         );
         let layout_manager = self.layout_manager.as_ref().clone();
+        // F68b: only enabled where the MDS shares the clients' network
+        // path to the DSes (k8s chart). See MdsConfig for the trap.
+        let verify_ds_reachability = self.config.verify_ds_reachability;
         // Build the operator's `device_id → reachable endpoint` map from
         // the static config. The gRPC service uses this to override the
         // bind-address that registering DSes report (a DS only knows its
@@ -452,6 +455,7 @@ impl MetadataServer {
                 layout_manager,
                 nfs_port,
                 durable_state,
+                verify_ds_reachability,
             );
 
             // Control-plane auth: when FLINT_PNFS_CONTROL_TOKEN is set,

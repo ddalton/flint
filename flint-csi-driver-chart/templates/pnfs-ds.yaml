@@ -191,11 +191,18 @@ spec:
               name: nfs
             - containerPort: 9091
               name: ds-control
+          # F68b: the DS binds this port BEFORE registering with the
+          # MDS, so accept implies the session layer is serving — this
+          # probe is truthful. Fast cadence: every probe period the
+          # per-pod Service lacks a Ready endpoint is a window where a
+          # granted layout points at a black hole (the MDS's
+          # verifyDsReachability gate holds registration until the
+          # Service routes, so these two mechanisms close F68 together).
           readinessProbe:
             tcpSocket:
               port: 2049
-            initialDelaySeconds: 3
-            periodSeconds: 5
+            initialDelaySeconds: 1
+            periodSeconds: 2
           volumeMounts:
             - name: config
               mountPath: /etc/flint

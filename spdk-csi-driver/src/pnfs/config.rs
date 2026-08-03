@@ -79,6 +79,22 @@ pub struct MdsConfig {
     /// Failover configuration
     #[serde(default)]
     pub failover: FailoverConfig,
+
+    /// F68b: before accepting a DS registration, dial the CLIENT-path
+    /// endpoint (the one GETDEVICEINFO will advertise) and NACK if it
+    /// does not accept. A device that registers before its endpoint
+    /// routes (k8s: per-pod Service has no Ready endpoint yet) becomes
+    /// grantable while unreachable — the first client connect fails and
+    /// the kernel blacklists the deviceid for 120s
+    /// (NFS4_DEVICE_ID_NEG_ENTRY, re-armed per retry), silently
+    /// rerouting all I/O through the MDS fallback path.
+    ///
+    /// Default OFF: only enable where the MDS shares the clients'
+    /// network path to the DSes (the k8s chart does — ClusterIP
+    /// Services). On the lima rig the MDS cannot resolve
+    /// host.lima.internal, so enabling it there would NACK forever.
+    #[serde(rename = "verifyDsReachability", default)]
+    pub verify_ds_reachability: bool,
 }
 
 /// Data Server configuration

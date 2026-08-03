@@ -53,6 +53,13 @@ data:
         stripeSize: {{ int64 .Values.pnfs.server.stripeSize }}
         policy: stripe
       dataServers: []
+      # F68b: NACK a DS registration until its per-pod Service actually
+      # routes (the MDS dials the same ClusterIP endpoint clients get
+      # from GETDEVICEINFO). Without this, a device turns grantable
+      # seconds before its Service has a Ready endpoint; a client that
+      # connects in that window blacklists the deviceid for 120s and
+      # silently proxies ALL I/O via the MDS (F68).
+      verifyDsReachability: true
       state:
         backend: sqlite
         config:

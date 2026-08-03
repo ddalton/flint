@@ -153,6 +153,23 @@ impl DataServer {
         }
         info!("");
 
+        // F68b: bind the NFS listener BEFORE registering with any MDS
+        // shard. Registration makes this deviceid grantable — a client
+        // may hold a layout naming this DS moments later, and a connect
+        // attempt that fails while the port is still unbound gets the
+        // deviceid blacklisted client-side for 120s
+        // (NFS4_DEVICE_ID_NEG_ENTRY, re-armed on every failed retry)
+        // with all I/O silently rerouted through the MDS fallback path.
+        // Listener-first makes "registered" imply "accepting"; the
+        // session/compound layer is fully constructed in new() before
+        // serve() runs, so "accepting" implies "serving" and a
+        // tcpSocket readinessProbe on this port is truthful.
+        let addr = format!("{}:{}", self.config.bind.address, self.config.bind.port);
+        let listener = TcpListener::bind(&addr)
+            .await
+            .map_err(crate::pnfs::Error::Io)?;
+        info!("🚀 pNFS DS TCP server listening on {}", addr);
+
         // Register with every MDS shard
         if let Err(e) = self.register_with_mds().await {
             error!("Failed to register with MDS: {}", e);
@@ -175,21 +192,16 @@ impl DataServer {
         info!("✅ Data Server is ready to serve I/O requests");
         info!("");
 
-        // Start TCP server
-        let addr = format!("{}:{}", self.config.bind.address, self.config.bind.port);
-        self.serve_tcp(&addr).await
+        self.serve_tcp(listener).await
     }
 
-    /// Serve minimal NFS (READ/WRITE/COMMIT only) over TCP
-    async fn serve_tcp(&self, addr: &str) -> Result<()> {
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| crate::pnfs::Error::Io(e))?;
-        
-        info!("🚀 pNFS DS TCP server listening on {}", addr);
+    /// Serve minimal NFS (READ/WRITE/COMMIT only) over TCP.
+    /// The listener is bound by serve() before MDS registration (F68b)
+    /// so a granted layout can never point at an unbound port.
+    async fn serve_tcp(&self, listener: TcpListener) -> Result<()> {
         info!("   Serving: EXCHANGE_ID, CREATE_SESSION, SEQUENCE, READ, WRITE, COMMIT operations");
         info!("");
-        
+
         let mut connection_count = 0u64;
 
         loop {

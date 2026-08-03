@@ -138,6 +138,15 @@ pub struct MdsControlService {
     /// kernel mount options (found live on runn, 2026-07-06).
     nfs_port: u16,
 
+    /// F68b: dial the client-path endpoint before accepting a DS
+    /// registration; NACK if it does not accept a TCP connect. The
+    /// DS's registration retry loop (5s) becomes the wait, and the
+    /// device never turns grantable while the endpoint the clients
+    /// will be handed cannot be reached. A NACK never touches an
+    /// existing registry entry, so re-registrations of a live device
+    /// are only delayed, never degraded, by a transient dial failure.
+    verify_ds_reachability: bool,
+
     /// Whether this MDS's state backend survives a restart.
     ///
     /// False under `state.backend: memory` — which is not hypothetical:
@@ -163,6 +172,7 @@ impl MdsControlService {
         layout_manager: crate::pnfs::mds::layout::LayoutManager,
         nfs_port: u16,
         durable_state: bool,
+        verify_ds_reachability: bool,
     ) -> Self {
         Self {
             device_registry,
@@ -171,7 +181,25 @@ impl MdsControlService {
             export_path,
             layout_manager,
             nfs_port,
+            verify_ds_reachability,
             durable_state,
+        }
+    }
+
+    /// F68b reachability dial: can the endpoint clients will be handed
+    /// actually be connected to right now? Plain TCP connect with a
+    /// bounded timeout — the point is to verify the routing chain
+    /// (DNS → Service → Ready endpoint → listener), not to speak NFS.
+    async fn ds_endpoint_accepts(endpoint: &str) -> Result<(), String> {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::TcpStream::connect(endpoint),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(format!("connect failed: {}", e)),
+            Err(_) => Err("connect timed out after 2s".to_string()),
         }
     }
 }
@@ -236,6 +264,32 @@ impl MdsControl for MdsControlService {
                     Some(format!("{}:{}", host, port))
                 }
             };
+
+        // F68b: refuse to make this device grantable until the exact
+        // endpoint GETDEVICEINFO will advertise accepts a connect. In
+        // k8s the pod registers seconds before its per-pod Service has
+        // a Ready endpoint; a layout granted in that window points
+        // clients at a black hole and the kernel blacklists the
+        // deviceid for 120s, silently proxying all I/O via the MDS.
+        // The DS retries registration every 5s — this NACK is the
+        // wait-loop, and it leaves any existing registry entry intact.
+        if self.verify_ds_reachability {
+            if let Err(e) = Self::ds_endpoint_accepts(&device_info.primary_endpoint).await {
+                warn!(
+                    "🚧 F68b: NACKing registration of {} — client-path endpoint {} not yet \
+                     reachable from the MDS ({}); the DS will retry",
+                    req.device_id, device_info.primary_endpoint, e
+                );
+                return Ok(Response::new(RegisterResponse {
+                    accepted: false,
+                    message: format!(
+                        "endpoint {} not reachable yet ({}) — retry registration",
+                        device_info.primary_endpoint, e
+                    ),
+                    assigned_device_id: String::new(),
+                }));
+            }
+        }
 
         // Register with device registry
         match self.device_registry.register(device_info) {
@@ -950,6 +1004,7 @@ mod create_volume_tests {
             layout_manager,
             2049,
             false,
+            false,
         )
     }
 
@@ -1072,7 +1127,74 @@ mod create_volume_tests {
             layout_manager,
             2049,
             true,
+            false,
         )
+    }
+
+    /// F68b: with `verifyDsReachability` on, a registration whose
+    /// client-path endpoint does not accept connects is NACKed and the
+    /// registry stays empty — the device must never turn grantable
+    /// while the endpoint GETDEVICEINFO would advertise is a black
+    /// hole (the kernel blacklists such a deviceid for 120s and
+    /// silently proxies all I/O via the MDS). Once a listener exists,
+    /// the same registration is accepted.
+    #[tokio::test]
+    async fn f68b_registration_gated_on_endpoint_reachability() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(DeviceRegistry::new());
+        let layout_manager = crate::pnfs::mds::layout::LayoutManager::new(
+            Arc::clone(&registry),
+            crate::pnfs::config::LayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            Arc::new(crate::state_backend::MemoryBackend::new()),
+        );
+        // Reserve a port, then close the listener: connect-refused,
+        // deterministically, with no risk of colliding with a real
+        // service.
+        let parked = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_addr = parked.local_addr().unwrap().to_string();
+        drop(parked);
+
+        let s = MdsControlService::new(
+            Arc::clone(&registry),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            dir.path().to_path_buf(),
+            layout_manager,
+            2049,
+            false,
+            true, // verify_ds_reachability
+        );
+        let reg_req = |ep: &str| RegisterRequest {
+            device_id: "ds-f68b".into(),
+            endpoint: ep.into(),
+            multipath_endpoints: vec![],
+            mount_points: vec!["/data".into()],
+            capacity: 1 << 30,
+            used: 0,
+            protocol_version: 1,
+            identity_created_at: 0,
+            control_port: 0,
+        };
+
+        let r = s
+            .register_data_server(Request::new(reg_req(&dead_addr)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.accepted, "unreachable endpoint must NACK");
+        assert!(r.message.contains("not reachable"), "message: {}", r.message);
+        assert_eq!(registry.count(), 0, "a NACKed device must not be registered");
+
+        let live = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_addr = live.local_addr().unwrap().to_string();
+        let r = s
+            .register_data_server(Request::new(reg_req(&live_addr)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.accepted, "reachable endpoint must register: {}", r.message);
+        assert_eq!(registry.count(), 1);
     }
 
     #[tokio::test]
