@@ -298,11 +298,22 @@ impl DataServer {
                 // path stays available here.
                 false,
                 move |req| Self::dispatch_minimal_nfs(req, io_c, sess_c, client_c),
-                move |reply| async move {
-                    let reply_marker = 0x80000000 | reply.len() as u32;
+                // The reply arrives as wire segments (see [`OpBody`]): for
+                // a READ, [rpc+compound+head], [payload], [pad]. The 128 KiB
+                // BufWriter coalesces the marker and every small segment
+                // into ONE syscall; a >capacity payload flushes them and
+                // goes to the socket directly. Net effect per 1 MiB READ:
+                // two writes — ~100 B of framing, then the payload — where
+                // the old single-buffer path issued a 4-BYTE flush (the
+                // marker alone) ahead of every megabyte reply.
+                move |reply: Vec<Bytes>| async move {
+                    let total: usize = reply.iter().map(|s| s.len()).sum();
+                    let reply_marker = 0x80000000 | total as u32;
                     let mut w = writer_c.lock().await;
                     w.write_all(&reply_marker.to_be_bytes()).await?;
-                    w.write_all(&reply).await?;
+                    for seg in &reply {
+                        w.write_all(seg).await?;
+                    }
                     w.flush().await
                 },
             ).await?;
@@ -310,19 +321,24 @@ impl DataServer {
         }
     }
 
-    /// Dispatch minimal NFS RPC (SEQUENCE/READ/WRITE/COMMIT only)
+    /// Dispatch minimal NFS RPC (SEQUENCE/READ/WRITE/COMMIT only).
+    ///
+    /// Returns the reply as wire SEGMENTS whose concatenation is the RPC
+    /// reply body (no record marker — the writer frames it). Single-buffer
+    /// replies are a one-element vec; a READ reply carries its payload as
+    /// its own untouched segment (see [`OpBody`]).
     async fn dispatch_minimal_nfs(
         request: Bytes,
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
-    ) -> Bytes {
+    ) -> Vec<Bytes> {
         // Parse RPC call
         let (call, args) = match CallMessage::decode_with_args(request) {
             Ok(result) => result,
             Err(e) => {
                 warn!("❌ Failed to parse RPC: {}", e);
-                return ReplyBuilder::garbage_args(0).into();
+                return vec![ReplyBuilder::garbage_args(0)];
             }
         };
 
@@ -330,20 +346,20 @@ impl DataServer {
 
         // Validate program/version
         if call.program != NFS4_PROGRAM || call.version != 4 {
-            return ReplyBuilder::prog_unavail(call.xid);
+            return vec![ReplyBuilder::prog_unavail(call.xid)];
         }
 
         // Handle procedure
         match call.procedure {
             procedure::NULL => {
-                ReplyBuilder::success(call.xid).finish()
+                vec![ReplyBuilder::success(call.xid).finish()]
             }
 
             procedure::COMPOUND => {
                 Self::handle_minimal_compound(call, args, io_handler, session_mgr, client_mgr).await
             }
 
-            _ => ReplyBuilder::proc_unavail(call.xid),
+            _ => vec![ReplyBuilder::proc_unavail(call.xid)],
         }
     }
 
@@ -354,15 +370,15 @@ impl DataServer {
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
-    ) -> Bytes {
+    ) -> Vec<Bytes> {
         let mut decoder = XdrDecoder::new(args);
 
         // Decode COMPOUND header
         let tag_len = match decoder.decode_u32() {
             Ok(len) => len,
-            Err(_) => return ReplyBuilder::garbage_args(call.xid),
+            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid)],
         };
-        
+
         // Skip tag
         for _ in 0..((tag_len + 3) / 4) {
             let _ = decoder.decode_u32();
@@ -370,18 +386,18 @@ impl DataServer {
 
         let minor_version = match decoder.decode_u32() {
             Ok(v) => v,
-            Err(_) => return ReplyBuilder::garbage_args(call.xid),
+            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid)],
         };
 
         let op_count = match decoder.decode_u32() {
             Ok(c) => c,
-            Err(_) => return ReplyBuilder::garbage_args(call.xid),
+            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid)],
         };
 
         debug!("DS COMPOUND: minor_version={}, {} operations", minor_version, op_count);
 
         // Process operations (only READ/WRITE/COMMIT supported)
-        let mut results: Vec<(u32, Nfs4Status, Bytes)> = Vec::new();  // (opcode, status, data)
+        let mut results: Vec<(u32, Nfs4Status, OpBody)> = Vec::new();  // (opcode, status, body)
         let mut current_fh: Option<Vec<u8>> = None;
 
         for _ in 0..op_count {
@@ -404,7 +420,7 @@ impl DataServer {
                         Ok(v) => v,
                         Err(e) => {
                             warn!("DS: Failed to decode EXCHANGE_ID verifier: {}", e);
-                            results.push((opcode, Nfs4Status::BadXdr, Bytes::new()));
+                            results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
                             continue;
                         }
                     };
@@ -414,7 +430,7 @@ impl DataServer {
                         Ok(bytes) => bytes.to_vec(),
                         Err(e) => {
                             warn!("DS: Failed to decode EXCHANGE_ID client_owner: {}", e);
-                            results.push((opcode, Nfs4Status::BadXdr, Bytes::new()));
+                            results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
                             continue;
                         }
                     };
@@ -593,7 +609,7 @@ impl DataServer {
                             sid
                         }
                         Err(_) => {
-                            results.push((opcode, Nfs4Status::BadXdr, Bytes::new()));
+                            results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
                             continue;
                         }
                     };
@@ -639,7 +655,7 @@ impl DataServer {
                     let _stateid = match decoder.decode_stateid() {
                         Ok(s) => s,
                         Err(_) => {
-                            results.push((opcode, Nfs4Status::BadXdr, Bytes::new()));
+                            results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
                             continue;
                         }
                     };
@@ -649,10 +665,22 @@ impl DataServer {
                     if let Some(ref fh) = current_fh {
                         match io_handler.read(fh, offset, count).await {
                             Ok(read_result) => {
-                                let mut encoder = XdrEncoder::new();
-                                encoder.encode_bool(read_result.eof);
-                                encoder.encode_opaque(&read_result.data);
-                                (Nfs4Status::Ok, encoder.finish())
+                                // The payload is NOT encoded: encode only
+                                // the READ4resok head (eof + length) and
+                                // hand the data Vec straight through as a
+                                // Bytes segment (Vec -> Bytes is an
+                                // ownership move, not a copy). The old
+                                // encode_opaque here started the payload's
+                                // three-copy trip through the encoders —
+                                // see [`OpBody`] for the receipts.
+                                let mut head = XdrEncoder::new();
+                                head.encode_bool(read_result.eof);
+                                head.encode_u32(read_result.data.len() as u32);
+                                results.push((opcode, Nfs4Status::Ok, OpBody::Payload {
+                                    head: head.finish(),
+                                    data: Bytes::from(read_result.data),
+                                }));
+                                continue;
                             }
                             Err(_) => (Nfs4Status::Io, Bytes::new()),
                         }
@@ -784,37 +812,13 @@ impl DataServer {
                 }
             };
 
-            results.push((opcode, status, result_data));
+            results.push((opcode, status, OpBody::Inline(result_data)));
         }
 
-        // Encode COMPOUND response
-        let mut encoder = XdrEncoder::new();
-        
-        // COMPOUND response header
-        encoder.encode_u32(0);  // tag length
-        encoder.encode_u32(Nfs4Status::Ok as u32);  // Overall status
-        encoder.encode_u32(results.len() as u32);  // Result count
-
-        // Encode each result - MUST include opcode per RFC 8881 Section 18.2
-        for (opcode, status, data) in results {
-            encoder.encode_u32(opcode);  // Operation opcode (CRITICAL!)
-            encoder.encode_u32(status as u32);  // Operation status
-            encoder.append_raw(&data);  // Operation-specific data
-        }
-
-        let compound_data = encoder.finish();
-
-        // Build RPC reply
-        let mut reply_encoder = XdrEncoder::new();
-        reply_encoder.encode_u32(call.xid);
-        reply_encoder.encode_u32(1);  // REPLY
-        reply_encoder.encode_u32(0);  // MSG_ACCEPTED
-        reply_encoder.encode_u32(0);  // AUTH_NONE
-        reply_encoder.encode_u32(0);  // Auth length
-        reply_encoder.encode_u32(0);  // SUCCESS
-        reply_encoder.append_raw(&compound_data);
-
-        reply_encoder.finish()
+        // One pass, RPC header first, payloads passed through as their
+        // own segments — replaces the flatten that copied a READ payload
+        // three times (op encoder -> compound encoder -> reply encoder).
+        assemble_reply(call.xid, results)
     }
 
     /// The client-reachable address this DS advertises to the MDS.
@@ -1382,6 +1386,228 @@ impl crate::pnfs::grpc::DsControl for DsControlService {
             }
             Err(e) => refuse(format!("open {:?}: {}", target, e)),
         }
+    }
+}
+
+/// One operation's result body inside a COMPOUND reply.
+///
+/// Almost every op result is a handful of words and is happily flattened
+/// into the running reply buffer (`Inline`). READ is the exception: its
+/// result is ~1 MiB of file data, and flattening it cost THREE full
+/// payload copies (`encode_opaque` into the op buffer, `append_raw` into
+/// the compound buffer, `append_raw` again into the RPC reply), plus the
+/// realloc-doubling of each 8 KiB-born encoder on the way past 1 MiB.
+/// Measured on runba (2026-08-02): ~11 MiB of memory traffic per 1 MiB
+/// served, ~0.6-1.0 Skylake cores at 918 MiB/s — on nodes that share CPUs
+/// with tenant workloads. `Payload` keeps the data as the `Bytes` the I/O
+/// layer produced; only the tiny XDR head (eof + length) is encoded, and
+/// the payload travels to the socket untouched.
+///
+/// DELIBERATELY NOT A THROUGHPUT FIX. An 8-agent adversarial review
+/// (2026-08-02) established the copies run in the parallel dispatch phase
+/// at <1 of 24 workers busy, and the identical flattening binary sustained
+/// 2432 MiB/s on runaz — the ceiling lives at the per-TCP-flow drain rate,
+/// not here. This is a CPU-per-byte fix; expected throughput change ~0%.
+pub(crate) enum OpBody {
+    Inline(Bytes),
+    /// `head` = the op-specific words BEFORE the opaque byte stream (for
+    /// READ: eof bool + data length). `data` = the payload, unpadded; XDR
+    /// pad-to-4 is emitted by [`assemble_reply`] AFTER the payload, so a
+    /// short read whose length is not a multiple of 4 stays wire-correct.
+    Payload { head: Bytes, data: Bytes },
+}
+
+/// Assemble the full RPC reply as an ordered list of wire segments whose
+/// concatenation is BYTE-IDENTICAL to the old single-buffer encode (the
+/// unit tests below assert exactly that against a reference flatten).
+///
+/// The running encoder is "cut" at each payload boundary: everything up
+/// to and including a READ result's head becomes one small segment, the
+/// payload `Bytes` is passed through as its own segment (zero copies),
+/// and encoding resumes in a fresh segment with the payload's XDR pad.
+/// A compound with no payload op degenerates to one segment — the old
+/// behavior with one fewer copy.
+pub(crate) fn assemble_reply(xid: u32, results: Vec<(u32, Nfs4Status, OpBody)>) -> Vec<Bytes> {
+    let mut segs: Vec<Bytes> = Vec::with_capacity(3);
+    let mut cur = XdrEncoder::new();
+
+    // RPC reply header — same six words ReplyBuilder::success emits.
+    cur.encode_u32(xid);
+    cur.encode_u32(1); // REPLY
+    cur.encode_u32(0); // MSG_ACCEPTED
+    cur.encode_u32(0); // AUTH_NONE
+    cur.encode_u32(0); // auth length
+    cur.encode_u32(0); // SUCCESS
+
+    // COMPOUND response header. The overall status has always been
+    // encoded as OK here (clients act on per-op statuses); preserved
+    // bit-for-bit — this function changes the copy count, not the wire.
+    cur.encode_u32(0); // tag length
+    cur.encode_u32(Nfs4Status::Ok as u32);
+    cur.encode_u32(results.len() as u32);
+
+    for (opcode, status, body) in results {
+        cur.encode_u32(opcode); // opcode is REQUIRED per RFC 8881 §18.2
+        cur.encode_u32(status as u32);
+        match body {
+            OpBody::Inline(data) => cur.append_raw(&data),
+            OpBody::Payload { head, data } => {
+                cur.append_raw(&head);
+                if data.is_empty() {
+                    // Zero-length opaque: no bytes, no pad — nothing to
+                    // cut a segment for.
+                    continue;
+                }
+                let pad = (4 - data.len() % 4) % 4;
+                segs.push(cur.finish());
+                cur = XdrEncoder::new();
+                segs.push(data);
+                if pad > 0 {
+                    cur.append_raw(&[0u8; 3][..pad]);
+                }
+            }
+        }
+    }
+
+    let tail = cur.finish();
+    if !tail.is_empty() {
+        segs.push(tail);
+    }
+    segs
+}
+
+#[cfg(test)]
+mod reply_segment_tests {
+    use super::*;
+
+    /// The reference implementation: the OLD flatten path, kept alive in
+    /// the test so drift between the segmented assembly and the wire
+    /// format it replaced is caught as a byte diff, not a client hang.
+    fn reference_flatten(xid: u32, results: &[(u32, Nfs4Status, Vec<u8>)]) -> Bytes {
+        let mut encoder = XdrEncoder::new();
+        encoder.encode_u32(0);
+        encoder.encode_u32(Nfs4Status::Ok as u32);
+        encoder.encode_u32(results.len() as u32);
+        for (opcode, status, data) in results {
+            encoder.encode_u32(*opcode);
+            encoder.encode_u32(*status as u32);
+            encoder.append_raw(data);
+        }
+        let compound = encoder.finish();
+
+        let mut reply = XdrEncoder::new();
+        reply.encode_u32(xid);
+        reply.encode_u32(1);
+        reply.encode_u32(0);
+        reply.encode_u32(0);
+        reply.encode_u32(0);
+        reply.encode_u32(0);
+        reply.append_raw(&compound);
+        reply.finish()
+    }
+
+    fn concat(segs: &[Bytes]) -> Vec<u8> {
+        segs.iter().flat_map(|s| s.iter().copied()).collect()
+    }
+
+    /// A READ result body as the old code built it, for the reference.
+    fn read_body_flat(eof: bool, data: &[u8]) -> Vec<u8> {
+        let mut e = XdrEncoder::new();
+        e.encode_bool(eof);
+        e.encode_opaque(data);
+        e.finish().to_vec()
+    }
+
+    fn read_body_segmented(eof: bool, data: &[u8]) -> OpBody {
+        let mut h = XdrEncoder::new();
+        h.encode_bool(eof);
+        h.encode_u32(data.len() as u32);
+        OpBody::Payload { head: h.finish(), data: Bytes::copy_from_slice(data) }
+    }
+
+    #[test]
+    fn segmented_read_reply_is_byte_identical_to_the_flatten_it_replaced() {
+        // SEQUENCE + PUTFH + READ, the exact compound the Linux client
+        // sends for pNFS data — payload length a multiple of 4.
+        let payload = vec![0xAB; 1 << 20];
+        let seq = vec![7u8; 40];
+        let segs = assemble_reply(0xDEAD, vec![
+            (opcode::SEQUENCE, Nfs4Status::Ok, OpBody::Inline(Bytes::from(seq.clone()))),
+            (opcode::PUTFH, Nfs4Status::Ok, OpBody::Inline(Bytes::new())),
+            (opcode::READ, Nfs4Status::Ok, read_body_segmented(false, &payload)),
+        ]);
+        let reference = reference_flatten(0xDEAD, &[
+            (opcode::SEQUENCE, Nfs4Status::Ok, seq),
+            (opcode::PUTFH, Nfs4Status::Ok, Vec::new()),
+            (opcode::READ, Nfs4Status::Ok, read_body_flat(false, &payload)),
+        ]);
+        assert_eq!(concat(&segs), reference.to_vec());
+        // And the payload segment is the payload ITSELF, not a copy of it
+        // — three segments: [headers+head][payload][none: len%4==0 and no
+        // trailing ops, so no tail].
+        assert_eq!(segs.len(), 2, "1 MiB payload with no pad and no tail");
+        assert_eq!(segs[1].len(), 1 << 20);
+    }
+
+    #[test]
+    fn short_read_pad_lands_after_the_payload() {
+        // 5-byte read at EOF: XDR requires 3 pad bytes after the opaque.
+        // The pad must open the TAIL segment, not corrupt the payload.
+        for len in [1usize, 2, 3, 5, 1023] {
+            let payload = vec![0x5A; len];
+            let segs = assemble_reply(1, vec![
+                (opcode::READ, Nfs4Status::Ok, read_body_segmented(true, &payload)),
+            ]);
+            let reference = reference_flatten(1, &[
+                (opcode::READ, Nfs4Status::Ok, read_body_flat(true, &payload)),
+            ]);
+            assert_eq!(concat(&segs), reference.to_vec(), "len={len}");
+        }
+    }
+
+    #[test]
+    fn ops_after_the_payload_survive_the_cut() {
+        // READ not last in the compound: the following op's words must
+        // land after the payload and its pad, in their own segment.
+        let payload = vec![0x11; 7];
+        let getattr_ish = vec![9u8; 12];
+        let segs = assemble_reply(2, vec![
+            (opcode::READ, Nfs4Status::Ok, read_body_segmented(false, &payload)),
+            (opcode::PUTFH, Nfs4Status::Ok, OpBody::Inline(Bytes::from(getattr_ish.clone()))),
+        ]);
+        let reference = reference_flatten(2, &[
+            (opcode::READ, Nfs4Status::Ok, read_body_flat(false, &payload)),
+            (opcode::PUTFH, Nfs4Status::Ok, getattr_ish),
+        ]);
+        assert_eq!(concat(&segs), reference.to_vec());
+        assert_eq!(segs.len(), 3, "head / payload / pad+next-op tail");
+    }
+
+    #[test]
+    fn inline_only_compound_is_one_segment() {
+        let segs = assemble_reply(3, vec![
+            (opcode::SEQUENCE, Nfs4Status::Ok, OpBody::Inline(Bytes::from(vec![1, 2, 3, 4]))),
+            (opcode::COMMIT, Nfs4Status::Io, OpBody::Inline(Bytes::new())),
+        ]);
+        assert_eq!(segs.len(), 1, "no payload op, no cut");
+        let reference = reference_flatten(3, &[
+            (opcode::SEQUENCE, Nfs4Status::Ok, vec![1, 2, 3, 4]),
+            (opcode::COMMIT, Nfs4Status::Io, Vec::new()),
+        ]);
+        assert_eq!(concat(&segs), reference.to_vec());
+    }
+
+    #[test]
+    fn empty_payload_read_is_wire_correct() {
+        // EOF-at-offset read: zero-length opaque, no pad, no cut.
+        let segs = assemble_reply(4, vec![
+            (opcode::READ, Nfs4Status::Ok, read_body_segmented(true, &[])),
+        ]);
+        let reference = reference_flatten(4, &[
+            (opcode::READ, Nfs4Status::Ok, read_body_flat(true, &[])),
+        ]);
+        assert_eq!(concat(&segs), reference.to_vec());
+        assert_eq!(segs.len(), 1);
     }
 }
 

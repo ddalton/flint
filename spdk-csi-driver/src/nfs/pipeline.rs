@@ -204,9 +204,15 @@ impl ConnectionPipeline {
     ///
     /// Returns `Err` when the connection should be torn down: an
     /// inline write failed, or an earlier spawned write failed
-    /// (`broken`). Dispatch itself is infallible (`Bytes` in,
-    /// `Bytes` out) by construction of the RPC layer.
-    pub async fn submit<D, DF, W, WF>(
+    /// (`broken`). Dispatch itself is infallible (`Bytes` in, reply
+    /// `R` out) by construction of the RPC layer.
+    ///
+    /// The reply type `R` is the caller's: the pipeline only carries it
+    /// from `dispatch` to `write`, so a server whose replies are a list
+    /// of wire segments (the DS keeps a READ payload as its own `Bytes`
+    /// instead of flattening ~1 MiB through three encoder copies) uses
+    /// the same pipeline as one whose replies are a single flat buffer.
+    pub async fn submit<R, D, DF, W, WF>(
         &self,
         request: Bytes,
         more_queued: bool,
@@ -215,9 +221,10 @@ impl ConnectionPipeline {
         write: W,
     ) -> std::io::Result<()>
     where
+        R: Send + 'static,
         D: FnOnce(Bytes) -> DF + Send + 'static,
-        DF: Future<Output = Bytes> + Send + 'static,
-        W: FnOnce(Bytes) -> WF + Send + 'static,
+        DF: Future<Output = R> + Send + 'static,
+        W: FnOnce(R) -> WF + Send + 'static,
         WF: Future<Output = std::io::Result<()>> + Send + 'static,
     {
         if self.broken.load(Ordering::Acquire) {
