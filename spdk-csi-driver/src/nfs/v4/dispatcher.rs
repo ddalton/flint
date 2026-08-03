@@ -1733,7 +1733,7 @@ impl CompoundDispatcher {
             Operation::Lock { locktype, reclaim, offset, length, stateid, owner } => {
                 let stateid = match context.resolve_stateid(stateid) {
                     Some(s) => s,
-                    None => return OperationResult::Lock(Nfs4Status::BadStateId, None),
+                    None => return OperationResult::Lock(Nfs4Status::BadStateId, None, None),
                 };
                 // Convert u32 to LockType
                 let lock_type = if locktype == 1 {
@@ -1757,7 +1757,7 @@ impl CompoundDispatcher {
                         context.current_stateid = Some(sid);
                     }
                 }
-                OperationResult::Lock(res.status, res.stateid)
+                OperationResult::Lock(res.status, res.stateid, res.denied)
             }
 
             Operation::LockT { locktype, offset, length, owner } => {
@@ -1774,7 +1774,7 @@ impl CompoundDispatcher {
                     owner,
                 };
                 let res = self.lock_handler.handle_lockt(op, context);
-                OperationResult::LockT(res.status)
+                OperationResult::LockT(res.status, res.denied)
             }
 
             Operation::LockU { locktype, seqid, stateid, offset, length } => {

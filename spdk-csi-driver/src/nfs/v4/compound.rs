@@ -632,8 +632,8 @@ pub enum OperationResult {
     Unsupported { opcode: u32, status: Nfs4Status },
 
     // Locking operations
-    Lock(Nfs4Status, Option<StateId>),
-    LockT(Nfs4Status),
+    Lock(Nfs4Status, Option<StateId>, Option<crate::nfs::v4::operations::lockops::LockDenied>),
+    LockT(Nfs4Status, Option<crate::nfs::v4::operations::lockops::LockDenied>),
     LockU(Nfs4Status, Option<StateId>),
 }
 
@@ -682,8 +682,8 @@ impl OperationResult {
             OperationResult::Copy(s, _) => *s,
             OperationResult::Clone(s) => *s,
             OperationResult::ReadPlus(s, _) => *s,
-            OperationResult::Lock(s, _) => *s,
-            OperationResult::LockT(s) => *s,
+            OperationResult::Lock(s, _, _) => *s,
+            OperationResult::LockT(s, _) => *s,
             OperationResult::LockU(s, _) => *s,
             OperationResult::LayoutGet(s, _) => *s,
             OperationResult::GetDeviceInfo(s, _) => *s,
@@ -1981,6 +1981,34 @@ impl CompoundRequest {
 /// Shared body for SECINFO / SECINFO_NO_NAME success replies (RFC 5661
 /// §18.29.2 / §18.45.2): an array of `secinfo4`. We advertise AUTH_NONE,
 /// AUTH_SYS, and RPCSEC_GSS(Kerberos V5, svc=none).
+/// LOCK4denied (RFC 8881 §18.10.2): offset, length, locktype,
+/// lock_owner4 { clientid, owner }. A `None` here with a Denied status
+/// is a server-side inconsistency — encode a zeroed body rather than
+/// truncate the XDR stream (the client's decode offset must stay
+/// aligned for the rest of the compound).
+fn encode_lock_denied(
+    encoder: &mut XdrEncoder,
+    denied: Option<&crate::nfs::v4::operations::lockops::LockDenied>,
+) {
+    match denied {
+        Some(d) => {
+            encoder.encode_u64(d.offset);
+            encoder.encode_u64(d.length);
+            encoder.encode_u32(d.locktype as u32);
+            encoder.encode_u64(d.client_id);
+            encoder.encode_opaque(&d.owner);
+        }
+        None => {
+            warn!("LOCK denied without conflict details — encoding zeroed LOCK4denied");
+            encoder.encode_u64(0);
+            encoder.encode_u64(0);
+            encoder.encode_u32(1); // READ_LT
+            encoder.encode_u64(0);
+            encoder.encode_opaque(&[]);
+        }
+    }
+}
+
 fn encode_secinfo_flavors(encoder: &mut XdrEncoder) {
     encoder.encode_u32(3); // 3 flavors
     encoder.encode_u32(0); // AUTH_NONE
@@ -2453,18 +2481,27 @@ impl CompoundResponse {
             }
 
             // Lock operations
-            OperationResult::Lock(status, stateid) => {
+            OperationResult::Lock(status, stateid, denied) => {
                 encoder.encode_u32(opcode::LOCK);
                 encoder.encode_status(status);
                 if status == Nfs4Status::Ok {
                     if let Some(sid) = stateid {
                         encoder.encode_stateid(&sid);
                     }
+                } else if status == Nfs4Status::Denied {
+                    // RFC 8881 §18.10.2: LOCK4res carries a LOCK4denied
+                    // body on NFS4ERR_DENIED — bare status is malformed
+                    // XDR and derails the client's reply decode.
+                    encode_lock_denied(encoder, denied.as_ref());
                 }
             }
-            OperationResult::LockT(status) => {
+            OperationResult::LockT(status, denied) => {
                 encoder.encode_u32(opcode::LOCKT);
                 encoder.encode_status(status);
+                if status == Nfs4Status::Denied {
+                    // RFC 8881 §18.11.2: same LOCK4denied body as LOCK.
+                    encode_lock_denied(encoder, denied.as_ref());
+                }
             }
             OperationResult::LockU(status, stateid) => {
                 encoder.encode_u32(opcode::LOCKU);

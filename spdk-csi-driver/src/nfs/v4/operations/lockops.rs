@@ -446,6 +446,9 @@ pub struct LockDenied {
     pub offset: u64,
     pub length: u64,
     pub locktype: LockType,
+    /// Client that holds the conflicting lock — lock_owner4.clientid
+    /// on the wire (RFC 8881 §18.10.2).
+    pub client_id: u64,
     pub owner: Vec<u8>,
 }
 
@@ -620,6 +623,7 @@ impl LockOperationHandler {
                     offset: conflicting_lock.range.offset,
                     length: conflicting_lock.range.length,
                     locktype: conflicting_lock.lock_type,
+                    client_id: conflicting_lock.client_id,
                     owner: conflicting_lock.owner,
                 }),
             };
@@ -692,6 +696,7 @@ impl LockOperationHandler {
                     offset: conflicting_lock.range.offset,
                     length: conflicting_lock.range.length,
                     locktype: conflicting_lock.lock_type,
+                    client_id: conflicting_lock.client_id,
                     owner: conflicting_lock.owner,
                 }),
             };

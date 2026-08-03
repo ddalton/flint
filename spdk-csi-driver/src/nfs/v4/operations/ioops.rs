@@ -745,45 +745,47 @@ impl IoOperationHandler {
         // join the filename and look up the file's fh. For CLAIM_FH,
         // `current_fh` is already the file.
         //
-        // **We do NOT update CFH here.** A spec-strict server would
-        // (RFC 5661 §16.16: OPEN sets CFH to the opened file), but
-        // doing so unmasks a pre-existing wire-encoding bug in our
-        // LOCK4denied path that breaks pynfs COUR2 — without the
-        // courtesy-release-on-lease-expiry support, client 2's LOCK
-        // sees client 1's stale lock as a conflict and the malformed
-        // DENIED payload fails pynfs's XDR decode. CFH-update
-        // alongside courtesy release is a follow-up.
+        // F69: CFH MUST become the opened file (RFC 8881 §18.16.3).
+        // Leaving it at the directory made the trailing GETATTR in the
+        // client's atomic-open compound return the DIRECTORY's attrs;
+        // the Linux client sees type=DIR, bails with EISDIR, re-opens
+        // by handle, gets a bumped stateid seqid on a state it already
+        // discarded, and parks in a 5-second schedule_timeout — the
+        // fleet-wide cold-open stall.
         let parent_fh_data = current_fh.data.clone();
         // Also carry the target's PATH (and whether the fh resolved
         // live) so the open can be fd-anchored below (F17c). For a
         // CLAIM_FH whose object was renamed-over, the embedded path is
         // still parseable but must not be fresh-opened — only an
         // existing fd of the original inode may be reused.
-        let (target_fh_data, target_path, target_live): (Vec<u8>, Option<PathBuf>, bool) =
-            match &op.claim {
-                OpenClaim::Null(name) => {
-                    let parent_path = self.fh_mgr.resolve_handle(current_fh).ok();
-                    if let Some(pp) = parent_path {
-                        let file_path = pp.join(name);
-                        let data = self
-                            .fh_mgr
-                            .path_to_filehandle(&file_path)
-                            .map(|fh| fh.data)
-                            .unwrap_or_else(|_| parent_fh_data.clone());
-                        (data, Some(file_path), true)
-                    } else {
-                        (parent_fh_data.clone(), None, false)
+        let (target_fh_data, target_path, target_live, target_full_fh): (
+            Vec<u8>,
+            Option<PathBuf>,
+            bool,
+            Option<Nfs4FileHandle>,
+        ) = match &op.claim {
+            OpenClaim::Null(name) => {
+                let parent_path = self.fh_mgr.resolve_handle(current_fh).ok();
+                if let Some(pp) = parent_path {
+                    let file_path = pp.join(name);
+                    match self.fh_mgr.path_to_filehandle(&file_path) {
+                        Ok(fh) => (fh.data.clone(), Some(file_path), true, Some(fh)),
+                        Err(_) => (parent_fh_data.clone(), Some(file_path), true, None),
                     }
+                } else {
+                    (parent_fh_data.clone(), None, false, None)
                 }
-                OpenClaim::Fh => match self.fh_mgr.resolve_handle(current_fh) {
-                    Ok(p) => (parent_fh_data.clone(), Some(p), true),
-                    Err(_) => (
-                        parent_fh_data.clone(),
-                        FileHandleManager::parse_path_lenient(current_fh).ok(),
-                        false,
-                    ),
-                },
-            };
+            }
+            OpenClaim::Fh => match self.fh_mgr.resolve_handle(current_fh) {
+                Ok(p) => (parent_fh_data.clone(), Some(p), true, None),
+                Err(_) => (
+                    parent_fh_data.clone(),
+                    FileHandleManager::parse_path_lenient(current_fh).ok(),
+                    false,
+                    None,
+                ),
+            },
+        };
 
         // If opening for WRITE, recall any read delegations
         // share_access: 1 = READ, 2 = WRITE, 3 = BOTH
@@ -847,6 +849,14 @@ impl IoOperationHandler {
             current_fh,
             op.share_access,
         );
+
+        // F69: CFH becomes the opened file (RFC 8881 §18.16.3) so the
+        // GETFH/GETATTR the client appends to its OPEN compound
+        // describe the file, not the parent directory. CLAIM_FH opens
+        // arrive with the file already as CFH (target_full_fh=None).
+        if let Some(fh) = target_full_fh {
+            ctx.set_current_fh(fh);
+        }
 
         OpenRes {
             status: Nfs4Status::Ok,
