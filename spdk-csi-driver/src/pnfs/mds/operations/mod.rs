@@ -80,6 +80,11 @@ pub struct PnfsOperationHandler {
     /// the pre-F65 behaviour, so the truncate gate still holds; only
     /// the held-layout window reopens.
     callback_manager: std::sync::OnceLock<Arc<crate::pnfs::mds::callback::CallbackManager>>,
+
+    /// F68a data-path meter. Created here, fed by the dispatcher's
+    /// READ/WRITE fallback lanes and layout ops, drained by the MDS's
+    /// reporter task.
+    f68a: Arc<crate::pnfs::mds::f68a_meter::DataPathMeter>,
 }
 
 impl PnfsOperationHandler {
@@ -96,7 +101,13 @@ impl PnfsOperationHandler {
             export_fs_path,
             ds_control_clients: Arc::new(DashMap::new()),
             callback_manager: std::sync::OnceLock::new(),
+            f68a: Arc::new(crate::pnfs::mds::f68a_meter::DataPathMeter::default()),
         }
+    }
+
+    /// F68a: the meter, for the MDS reporter task.
+    pub fn f68a_meter_arc(&self) -> Arc<crate::pnfs::mds::f68a_meter::DataPathMeter> {
+        Arc::clone(&self.f68a)
     }
 
     /// Hand the handler the back-channel fan-out, once the dispatcher
@@ -1376,6 +1387,10 @@ impl PnfsOperationHandler {
 // Implement PnfsOperations trait for PnfsOperationHandler
 #[tonic::async_trait]
 impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
+    fn f68a_meter(&self) -> Option<Arc<crate::pnfs::mds::f68a_meter::DataPathMeter>> {
+        Some(Arc::clone(&self.f68a))
+    }
+
     fn layoutget(&self, args: LayoutGetArgs) -> Result<LayoutGetResult, LayoutGetError> {
         self.layoutget(args)
     }

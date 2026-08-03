@@ -42,6 +42,9 @@ pub mod callback;
 /// F67: durable file_id↔path binding stored on the stub (xattr)
 pub mod stub_binding;
 
+/// F68a: MDS data-path observability (the two silent fallback lanes).
+pub mod f68a_meter;
+
 // Re-exports
 pub use device::{DeviceRegistry, DeviceInfo, DeviceStatus};
 pub use layout::{LayoutManager, IoMode, LayoutType};

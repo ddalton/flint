@@ -71,6 +71,13 @@ pub enum FallbackIoDisposition {
 /// methods stay synchronous.)
 #[tonic::async_trait]
 pub trait PnfsOperations: Send + Sync {
+    /// F68a: the MDS data-path meter, if this handler carries one.
+    /// The dispatcher caches the Arc at construction and feeds it from
+    /// the READ/WRITE fallback lanes and the layout ops.
+    fn f68a_meter(&self) -> Option<std::sync::Arc<crate::pnfs::mds::f68a_meter::DataPathMeter>> {
+        None
+    }
+
     /// Handle LAYOUTGET operation (opcode 50)
     fn layoutget(&self, args: LayoutGetArgs) -> Result<LayoutGetResult, LayoutGetError>;
     

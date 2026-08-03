@@ -379,6 +379,10 @@ impl MetadataServer {
         // Start status reporter in background
         self.start_status_reporter();
 
+        // F68a: data-path reporter — one line per interval when client
+        // data crossed the MDS, WARN when it did so on a healthy fleet.
+        self.start_f68a_reporter();
+
         // Start metrics/monitoring if enabled
         if self.config.ha.enabled {
             info!("HA enabled with {} replicas", self.config.ha.replicas);
@@ -735,6 +739,57 @@ impl MetadataServer {
     }
 
     /// Get the operation handler (for integration with NFSv4 dispatcher)
+    /// F68a: turn meter deltas into log lines. Silent while idle; INFO
+    /// for modest MDS data traffic; WARN when clients push data through
+    /// the MDS while the DS fleet is healthy — the F68 signature that
+    /// every prior campaign (runbe, the runbg F68c flip) needed and did
+    /// not have. Interval and WARN threshold are env-tunable:
+    /// FLINT_F68A_INTERVAL_SECS (default 30),
+    /// FLINT_F68A_WARN_MIB (default 64, per interval).
+    fn start_f68a_reporter(&self) {
+        let meter = self.operation_handler.f68a_meter_arc();
+        let registry = Arc::clone(&self.device_registry);
+        let interval = std::env::var("FLINT_F68A_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(30);
+        let warn_bytes = std::env::var("FLINT_F68A_WARN_MIB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(64)
+            .saturating_mul(1 << 20);
+        tokio::spawn(async move {
+            let mut prev = meter.snapshot();
+            let mut tick = tokio::time::interval(Duration::from_secs(interval));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick fires immediately; skip it so the first
+            // report covers a full interval.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let cur = meter.snapshot();
+                let delta = cur.delta_since(&prev);
+                prev = cur;
+                if delta.is_zero() {
+                    continue;
+                }
+                let active = registry.count_by_status(
+                    crate::pnfs::mds::device::DeviceStatus::Active,
+                );
+                if active > 0 && delta.mds_data_bytes() >= warn_bytes {
+                    warn!(
+                        "🚨 F68a: client DATA is flowing through the MDS with {} Active DS(es) — \
+                         a healthy pNFS client does this ~never (F68 signature). Last {}s: {}",
+                        active, interval, delta.render()
+                    );
+                } else {
+                    info!("📊 F68a last {}s: {}", interval, delta.render());
+                }
+            }
+        });
+    }
+
     pub fn operation_handler(&self) -> Arc<PnfsOperationHandler> {
         Arc::clone(&self.operation_handler)
     }

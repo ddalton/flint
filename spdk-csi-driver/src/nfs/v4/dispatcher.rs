@@ -56,6 +56,10 @@ pub struct CompoundDispatcher {
     /// When None: pNFS operations return NFS4ERR_NOTSUPP
     /// When Some: pNFS operations are delegated to this handler
     pnfs_handler: Option<Arc<dyn crate::pnfs::PnfsOperations>>,
+
+    /// F68a data-path meter, cached from the pNFS handler at
+    /// construction. None ⇔ not an MDS ⇔ nothing to meter.
+    f68a: Option<Arc<crate::pnfs::mds::f68a_meter::DataPathMeter>>,
     /// Per-session back-channel writer registry. Populated by
     /// `BIND_CONN_TO_SESSION` (RFC 8881 §18.34) when a client opts
     /// the connection in as a callback path. Read by the callback
@@ -121,6 +125,7 @@ impl CompoundDispatcher {
             perf_handler,
             lock_handler,
             lock_mgr,
+            f68a: pnfs_handler.as_ref().and_then(|p| p.f68a_meter()),
             pnfs_handler,
             back_channels: Arc::new(dashmap::DashMap::new()),
             session_bound_conns: dashmap::DashMap::new(),
@@ -1425,6 +1430,9 @@ impl CompoundDispatcher {
                             .await
                         {
                             Ok((data, eof)) => {
+                                if let Some(m) = &self.f68a {
+                                    m.proxy_read(data.len() as u64);
+                                }
                                 use crate::nfs::v4::compound::ReadResult;
                                 OperationResult::Read(
                                     Nfs4Status::Ok,
@@ -1445,6 +1453,12 @@ impl CompoundDispatcher {
                 let op = ReadOp { stateid, offset, count };
                 let res = self.io_handler.handle_read(op, context).await;
                 if res.status == Nfs4Status::Ok {
+                    // F68a: on an MDS, a locally-served READ is client
+                    // data crossing the MDS — the silent lane the
+                    // runbg F68c flip rode. Meter it.
+                    if let Some(m) = &self.f68a {
+                        m.served_read(res.data.len() as u64);
+                    }
                     use crate::nfs::v4::compound::ReadResult;
                     OperationResult::Read(res.status, Some(ReadResult {
                         eof: res.eof,
@@ -1489,6 +1503,9 @@ impl CompoundDispatcher {
                             .await
                         {
                             Ok(()) => {
+                                if let Some(m) = &self.f68a {
+                                    m.proxy_write(len);
+                                }
                                 let end = offset.saturating_add(len);
                                 let cur =
                                     std::fs::metadata(&t.path).map(|m| m.len()).unwrap_or(0);
@@ -1538,6 +1555,11 @@ impl CompoundDispatcher {
                 };
                 let res = self.io_handler.handle_write(op, context).await;
                 if res.status == Nfs4Status::Ok {
+                    // F68a: locally-landed WRITE on an MDS = client
+                    // data crossing the MDS (and a stub going dense).
+                    if let Some(m) = &self.f68a {
+                        m.served_write(res.count as u64);
+                    }
                     use crate::nfs::v4::compound::WriteResult;
                     OperationResult::Write(res.status, Some(WriteResult {
                         count: res.count,
@@ -2261,7 +2283,10 @@ impl CompoundDispatcher {
             // along: it is the size authority for hole resolution and
             // the set_len target for extending writes.
             D::Proxy => {
-                info!("🔁 {} through MDS for striped '{}' → fallback proxy", op, file_key);
+                // Per-op line at debug only: the proxy lane runs at
+                // full RPC rate (runbg: ~3000 ops/s), and the F68a
+                // meter + reporter carry the signal at INFO/WARN.
+                debug!("🔁 {} through MDS for striped '{}' → fallback proxy", op, file_key);
                 D::Proxy
             }
         };
@@ -2427,9 +2452,23 @@ impl CompoundDispatcher {
             owner,
         };
         
+        // F68a: layout grants/refusals are THE discriminator for a
+        // fallback flip — they show whether a client doing MDS I/O
+        // stopped asking for layouts (client-side latch) or was
+        // refused them (server-side). Low-rate (per open), so INFO.
+        let lg_file = args.file_key.clone();
+        let lg_iomode = args.iomode;
+
         // Call pNFS handler
         match pnfs.layoutget(args) {
             Ok(result) => {
+                if let Some(m) = &self.f68a {
+                    m.layoutget_granted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                info!(
+                    "📄 LAYOUTGET granted: '{}' iomode {:?} ({} layout(s))",
+                    lg_file, lg_iomode, result.layouts.len()
+                );
                 debug!("   Available data servers: {}", result.layouts.len());
                 
                 // Encode result
@@ -2491,7 +2530,13 @@ impl CompoundDispatcher {
                 OperationResult::LayoutGet(Nfs4Status::Ok, Some(final_response))
             }
             Err(e) => {
-                warn!("❌ LAYOUTGET failed: {:?}", e);
+                if let Some(m) = &self.f68a {
+                    m.layoutget_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                warn!(
+                    "❌ LAYOUTGET refused: '{}' iomode {:?} → {:?}",
+                    lg_file, lg_iomode, e
+                );
                 let status = match e {
                     // Truncate-dirty gate: transient — the client
                     // retries (or falls back to MDS I/O, which parks on
@@ -2770,7 +2815,10 @@ impl CompoundDispatcher {
 
         match pnfs.layoutreturn(args) {
             Ok(()) => {
-                debug!("📥 LAYOUTRETURN ok (client_id={})", client_id);
+                if let Some(m) = &self.f68a {
+                    m.layouts_returned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                info!("📥 LAYOUTRETURN ok (client_id={:#x})", client_id);
                 OperationResult::LayoutReturn(Nfs4Status::Ok)
             }
             Err(e) => {
