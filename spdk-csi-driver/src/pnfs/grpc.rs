@@ -213,24 +213,41 @@ impl MdsControl for MdsControlService {
     ) -> Result<Response<RegisterResponse>, Status> {
         let req = request.into_inner();
         
-        // Override the DS-reported endpoint with the operator-configured
-        // one for this device_id. The DS only knows its bind address
+        // Override the DS-reported endpoint(s) with the operator-configured
+        // ones for this device_id. The DS only knows its bind address
         // (typically 0.0.0.0); the client needs the externally-reachable
         // endpoint the operator has set up (e.g. a Service IP, an
         // out-of-cluster IP, or in dev a hostname like host.lima.internal).
-        let effective_endpoint = self.configured_endpoints
+        //
+        // Multipath: a comma-separated configured value ("ep1,ep2,…")
+        // overrides the WHOLE address list — first entry is the primary,
+        // the rest become extra netaddr4 entries in this DS's
+        // GETDEVICEINFO multipath_list4. Without an override, the
+        // DS-reported primary + multipath_endpoints are used as-is.
+        let (effective_endpoint, extra_endpoints) = match self
+            .configured_endpoints
             .get(&req.device_id)
-            .cloned()
-            .unwrap_or_else(|| req.endpoint.clone());
+        {
+            Some(configured) => {
+                let (primary, extras) =
+                    crate::pnfs::config::split_endpoint_list(configured);
+                if primary.is_empty() {
+                    (req.endpoint.clone(), req.multipath_endpoints.clone())
+                } else {
+                    (primary, extras)
+                }
+            }
+            None => (req.endpoint.clone(), req.multipath_endpoints.clone()),
+        };
         if effective_endpoint != req.endpoint {
             info!(
-                "📝 DS Registration: device_id={}, ds-reported endpoint={} → using configured endpoint={}, capacity={} bytes",
-                req.device_id, req.endpoint, effective_endpoint, req.capacity,
+                "📝 DS Registration: device_id={}, ds-reported endpoint={} → using configured endpoint={} (+{} multipath), capacity={} bytes",
+                req.device_id, req.endpoint, effective_endpoint, extra_endpoints.len(), req.capacity,
             );
         } else {
             info!(
-                "📝 DS Registration: device_id={}, endpoint={}, capacity={} bytes",
-                req.device_id, effective_endpoint, req.capacity,
+                "📝 DS Registration: device_id={}, endpoint={} (+{} multipath), capacity={} bytes",
+                req.device_id, effective_endpoint, extra_endpoints.len(), req.capacity,
             );
         }
 
@@ -241,7 +258,7 @@ impl MdsControl for MdsControlService {
             req.mount_points.clone(),
         );
 
-        device_info.endpoints = req.multipath_endpoints.clone();
+        device_info.endpoints = extra_endpoints;
         device_info.capacity = req.capacity;
         device_info.used = req.used;
         device_info.identity_created_at = req.identity_created_at;
@@ -274,20 +291,29 @@ impl MdsControl for MdsControlService {
         // The DS retries registration every 5s — this NACK is the
         // wait-loop, and it leaves any existing registry entry intact.
         if self.verify_ds_reachability {
-            if let Err(e) = Self::ds_endpoint_accepts(&device_info.primary_endpoint).await {
-                warn!(
-                    "🚧 F68b: NACKing registration of {} — client-path endpoint {} not yet \
-                     reachable from the MDS ({}); the DS will retry",
-                    req.device_id, device_info.primary_endpoint, e
-                );
-                return Ok(Response::new(RegisterResponse {
-                    accepted: false,
-                    message: format!(
-                        "endpoint {} not reachable yet ({}) — retry registration",
-                        device_info.primary_endpoint, e
-                    ),
-                    assigned_device_id: String::new(),
-                }));
+            // Every advertised address gets the dial, not just the
+            // primary: a dead multipath endpoint won't fail the mount
+            // (the kernel logs and skips a trunk candidate it cannot
+            // connect) but it silently halves the trunking the operator
+            // paid for — NACK loud instead, same F68b philosophy.
+            for ep in std::iter::once(&device_info.primary_endpoint)
+                .chain(device_info.endpoints.iter())
+            {
+                if let Err(e) = Self::ds_endpoint_accepts(ep).await {
+                    warn!(
+                        "🚧 F68b: NACKing registration of {} — client-path endpoint {} not yet \
+                         reachable from the MDS ({}); the DS will retry",
+                        req.device_id, ep, e
+                    );
+                    return Ok(Response::new(RegisterResponse {
+                        accepted: false,
+                        message: format!(
+                            "endpoint {} not reachable yet ({}) — retry registration",
+                            ep, e
+                        ),
+                        assigned_device_id: String::new(),
+                    }));
+                }
             }
         }
 
@@ -1195,6 +1221,37 @@ mod create_volume_tests {
             .into_inner();
         assert!(r.accepted, "reachable endpoint must register: {}", r.message);
         assert_eq!(registry.count(), 1);
+
+        // Multipath: the gate dials EVERY advertised address. A live
+        // primary with a dead extra must still NACK — a broken trunk
+        // address never fails the mount, it just silently loses the
+        // bandwidth it was supposed to add.
+        let mut req = reg_req(&live_addr);
+        req.device_id = "ds-f68b-mp".into();
+        req.multipath_endpoints = vec![dead_addr.clone()];
+        let r = s
+            .register_data_server(Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.accepted, "dead multipath extra must NACK");
+        assert!(r.message.contains(&dead_addr), "message names the dead extra: {}", r.message);
+
+        // All-live multipath registers, and the registry carries the
+        // extras (they become GETDEVICEINFO netaddr4 entries).
+        let live2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live2_addr = live2.local_addr().unwrap().to_string();
+        let mut req = reg_req(&live_addr);
+        req.device_id = "ds-f68b-mp".into();
+        req.multipath_endpoints = vec![live2_addr.clone()];
+        let r = s
+            .register_data_server(Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.accepted, "all-live multipath must register: {}", r.message);
+        let d = registry.get("ds-f68b-mp").unwrap();
+        assert_eq!(d.endpoints, vec![live2_addr]);
     }
 
     #[tokio::test]

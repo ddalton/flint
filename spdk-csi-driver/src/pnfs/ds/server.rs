@@ -573,6 +573,20 @@ impl DataServer {
                     // Create session via session manager
                     match session_mgr.create_session(clientid) {
                         Ok(sessionid) => {
+                            // Confirm the client record (RFC 8881 §18.35.5).
+                            // Without this every EXCHANGE_ID finds an
+                            // UNCONFIRMED record and lawfully replaces it
+                            // with a FRESH clientid — which broke session
+                            // trunking: the kernel's multipath probe
+                            // (EXCHANGE_ID on the extra address) got a
+                            // different clientid than the live session and
+                            // nfs4_detect_session_trunking refused the
+                            // trunk. A case-5 replacement's predecessor
+                            // only holds DS sessions — tear those down.
+                            if let Some(old_id) = client_mgr.mark_confirmed(clientid) {
+                                warn!("DS: CREATE_SESSION case-5 cleanup — discarding old client {}", old_id);
+                                session_mgr.destroy_client_sessions(old_id);
+                            }
                             let mut encoder = XdrEncoder::new();
                             
                             // sessionid (16 bytes)
@@ -852,14 +866,45 @@ impl DataServer {
             .unwrap_or_else(|_| self.config.bind.address.clone())
     }
 
+    /// Additional client-path endpoints this DS advertises for
+    /// multipath trunking (`FLINT_DS_EXTRA_ADVERTISE_ADDRS`, comma-
+    /// separated `host` or `host:port`; a bare host gets the NFS bind
+    /// port). Each extra address lands in GETDEVICEINFO's
+    /// multipath_list4 for this DS, and the Linux client opens ONE
+    /// trunked transport per extra address (`rpc_clnt_add_xprt`, capped
+    /// at 16 total) — on top of nconnect on the primary. The addresses
+    /// must resolve to DISTINCT IPs: the kernel dedupes trunk
+    /// candidates by address (ignoring port), so K aliases of one IP
+    /// add nothing.
+    fn extra_advertise_addresses(&self) -> Vec<String> {
+        let bind_port = self.config.bind.port;
+        std::env::var("FLINT_DS_EXTRA_ADVERTISE_ADDRS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                // rsplit_once covers `host:port`; a bare hostname (no
+                // colon) or one with a non-numeric tail gets the bind
+                // port appended.
+                match s.rsplit_once(':') {
+                    Some((_, p)) if p.parse::<u16>().is_ok() => s.to_string(),
+                    _ => format!("{}:{}", s, bind_port),
+                }
+            })
+            .collect()
+    }
+
     /// Register with every MDS shard via gRPC. Per-shard outcomes are
     /// independent — a dead shard logs and is left to that shard's
     /// heartbeat thread to repair; it must not block registration with
     /// the healthy ones.
     async fn register_with_mds(&self) -> Result<()> {
         let endpoint = format!("{}:{}", self.advertise_address(), self.config.bind.port);
-        info!("📡 Registering with endpoint: {} (FLINT_DS_ADVERTISE_ADDR={:?}, POD_IP={:?})",
+        let extra_endpoints = self.extra_advertise_addresses();
+        info!("📡 Registering with endpoint: {} extra(multipath)={:?} (FLINT_DS_ADVERTISE_ADDR={:?}, POD_IP={:?})",
               endpoint,
+              extra_endpoints,
               std::env::var("FLINT_DS_ADVERTISE_ADDR").ok(),
               std::env::var("POD_IP").ok());
 
@@ -886,6 +931,7 @@ impl DataServer {
             match client.register(
                 self.config.device_id.clone(),
                 endpoint.clone(),
+                extra_endpoints.clone(),
                 mount_points.clone(),
                 capacity,
                 used,
@@ -985,6 +1031,7 @@ impl DataServer {
 
         // Same precedence as initial registration — see advertise_address().
         let advertise_address = self.advertise_address();
+        let extra_endpoints = self.extra_advertise_addresses();
 
         let mount_points: Vec<String> = self.config.bdevs
             .iter()
@@ -1097,6 +1144,7 @@ impl DataServer {
                     match client.register(
                         device_id.clone(),
                         endpoint.clone(),
+                        extra_endpoints.clone(),
                         mount_points.clone(),
                         capacity,
                         used,

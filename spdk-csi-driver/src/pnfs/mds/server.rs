@@ -198,14 +198,20 @@ impl MetadataServer {
 
         // Register initial data servers from config
         for ds in &config.data_servers {
+            // The endpoint field may be a comma-separated multipath
+            // list — the raw string must never become a primary
+            // endpoint (it encodes to an unparseable netaddr4).
+            let (primary, mut extras) =
+                crate::pnfs::config::split_endpoint_list(&ds.endpoint);
             let mut device_info = DeviceInfo::new(
                 ds.device_id.clone(),
-                ds.endpoint.clone(),
+                primary,
                 ds.bdevs.clone(),
             );
 
-            // Add multipath endpoints
-            device_info.endpoints = ds.multipath.clone();
+            // Add multipath endpoints (comma extras + explicit list)
+            extras.extend(ds.multipath.iter().cloned());
+            device_info.endpoints = extras;
 
             if let Err(e) = device_registry.register(device_info) {
                 warn!("Failed to register data server {}: {}", ds.device_id, e);

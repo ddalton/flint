@@ -2604,29 +2604,9 @@ impl CompoundDispatcher {
                 // Encode device address
                 let mut encoder = XdrEncoder::new();
                 encoder.encode_u32(layout_type);
-                
-                // Check if this is a striped device (has multipath addresses = multiple DSes)
-                let dev_addr_encoded = if result.device_addr.multipath.is_empty() {
-                    // Single DS device
-                    debug!("   Single DS device: {}", result.device_addr.addr);
-                    Self::encode_device_addr(&result.device_addr)
-                } else {
-                    // Striped device with multiple DSes
-                    debug!("   Striped device with {} DSes", result.device_addr.multipath.len() + 1);
-                    
-                    // Build array of DeviceAddr4 for each DS
-                    let mut addrs = vec![result.device_addr.clone()];
-                    for addr_str in &result.device_addr.multipath {
-                        addrs.push(crate::pnfs::mds::operations::DeviceAddr4 {
-                            netid: result.device_addr.netid.clone(),
-                            addr: addr_str.clone(),
-                            multipath: Vec::new(),
-                        });
-                    }
-                    
-                    Self::encode_device_addr_striped(&addrs)
-                };
-                
+
+                let dev_addr_encoded = Self::encode_device_addr(&result.device_addr);
+
                 encoder.encode_opaque(&dev_addr_encoded);
                 
                 // Notification (empty for now)
@@ -3142,91 +3122,56 @@ impl CompoundDispatcher {
     /// For N DSes in stripe pattern:
     /// - stripe_indices = [0, 1, 2, ..., N-1]  // Round-robin across all DSes
     /// - multipath_ds_list = [ [addr0], [addr1], ..., [addrN] ]  // All DS addresses
-    fn encode_device_addr_striped(addrs: &[crate::pnfs::mds::operations::DeviceAddr4]) -> Bytes {
-        use crate::nfs::xdr::XdrEncoder;
-        use crate::pnfs::protocol::endpoint_to_uaddr;
-        
-        let mut encoder = XdrEncoder::new();
-        
-        debug!("🔧 Encoding STRIPED device address with {} DSes", addrs.len());
-        
-        // PART 1: stripe_indices<> array
-        // For striping: indices point to each DS in round-robin order
-        encoder.encode_u32(addrs.len() as u32);  // stripe_indices count = number of DSes
-        for i in 0..addrs.len() {
-            encoder.encode_u32(i as u32);  // stripe_indices[i] = i
-            debug!("   stripe_index[{}] = {}", i, i);
-        }
-        
-        // PART 2: multipath_ds_list<> array
-        // This is an array of multipath_list4 (one per DS)
-        encoder.encode_u32(addrs.len() as u32);  // multipath_ds_list count = number of DSes
-        
-        for (i, addr) in addrs.iter().enumerate() {
-            // multipath_list4 for DS #i:
-            // This is an array of netaddr4 for this DS
-            encoder.encode_u32(1);  // netaddr4 count (1 address per DS for now)
-            
-            // netaddr4:
-            encoder.encode_string(&addr.netid);  // e.g., "tcp"
-            
-            // Convert endpoint to universal address format
-            // e.g., "10.42.214.18:2049" -> "10.42.214.18.8.1"
-            let uaddr = endpoint_to_uaddr(&addr.addr)
-                .unwrap_or_else(|_| addr.addr.clone());
-            encoder.encode_string(&uaddr);
-            
-            debug!("   DS[{}]: {} ({})", i, addr.addr, uaddr);
-        }
-        
-        let result = encoder.finish();
-        debug!("📦 Striped device address encoded: {} bytes", result.len());
-        result
-    }
-    
-    /// Encode device address per RFC 5661 Section 13.2.1
-    /// 
+    /// Encode device address per RFC 8881 §13.2.1.
+    ///
     /// nfsv4_1_file_layout_ds_addr4 {
     ///     uint32_t        stripe_indices<>;       // Indices into multipath_ds_list
     ///     multipath_list4 multipath_ds_list<>;    // Array of DS address sets
     /// }
-    /// 
+    ///
     /// multipath_list4 {
-    ///     netaddr4 ml_naddr<>;    // Array of addresses for one DS
+    ///     netaddr4 ml_naddr<>;    // ALL addresses for ONE DS
     /// }
-    /// 
-    /// For a simple single-DS layout:
-    /// - stripe_indices = [0]      // Use DS #0
-    /// - multipath_ds_list = [ [addr] ]  // One DS with one address
+    ///
+    /// One encoder for every shape: a single DS is a 1-entry ds_list, a
+    /// stripe group is N entries, and each entry's inner list carries
+    /// that DS's multipath addresses — the kernel opens a trunked
+    /// transport per extra address (`rpc_clnt_add_xprt`), which is the
+    /// server-side lever for single-client throughput.
     fn encode_device_addr(addr: &crate::pnfs::mds::operations::DeviceAddr4) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
         use crate::pnfs::protocol::endpoint_to_uaddr;
-        
+
         let mut encoder = XdrEncoder::new();
-        
-        // PART 1: stripe_indices<> array
-        // For simple case: one stripe index pointing to DS #0
-        encoder.encode_u32(1);  // stripe_indices count
-        encoder.encode_u32(0);  // stripe_indices[0] = 0 (use first DS)
-        
-        // PART 2: multipath_ds_list<> array
-        // This is an array of multipath_list4 (one per DS)
-        encoder.encode_u32(1);  // multipath_ds_list count (1 DS)
-        
-        // multipath_list4 for DS #0:
-        // This is an array of netaddr4 for this DS
-        encoder.encode_u32(1);  // netaddr4 count (1 address for this DS)
-        
-        // netaddr4:
-        encoder.encode_string(&addr.netid);  // e.g., "tcp"
-        
-        // Convert endpoint to universal address format
-        // e.g., "10.42.214.18:2049" -> "10.42.214.18.8.1"
-        let uaddr = endpoint_to_uaddr(&addr.addr)
-            .unwrap_or_else(|_| addr.addr.clone());
-        encoder.encode_string(&uaddr);
-        
-        encoder.finish()
+        let n = addr.ds_list.len();
+
+        // PART 1: stripe_indices<> — round-robin over the DS list.
+        encoder.encode_u32(n as u32);
+        for i in 0..n {
+            encoder.encode_u32(i as u32);
+        }
+
+        // PART 2: multipath_ds_list<> — one multipath_list4 per DS.
+        encoder.encode_u32(n as u32);
+        for (i, ds_addrs) in addr.ds_list.iter().enumerate() {
+            encoder.encode_u32(ds_addrs.len() as u32);
+            for ep in ds_addrs {
+                // netaddr4: netid + universal address
+                // ("10.42.214.18:2049" → "10.42.214.18.8.1").
+                encoder.encode_string(&addr.netid);
+                let uaddr = endpoint_to_uaddr(ep).unwrap_or_else(|_| ep.clone());
+                encoder.encode_string(&uaddr);
+            }
+            debug!("   DS[{}]: {:?}", i, ds_addrs);
+        }
+
+        let result = encoder.finish();
+        debug!(
+            "📦 Device address encoded: {} DS(es), {} bytes",
+            n,
+            result.len()
+        );
+        result
     }
 }
 
@@ -3273,6 +3218,43 @@ mod tests {
         let lock_mgr = Arc::new(LockManager::new());
         let dispatcher = CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr);
         (dispatcher, temp_dir)
+    }
+
+    /// The nfsv4_1_file_layout_ds_addr4 encoding must keep the two
+    /// dimensions apart: outer = stripe map (one entry per DS), inner =
+    /// multipath_list4 (all addresses of ONE DS). A DS with extra
+    /// addresses must NOT grow the stripe map.
+    #[test]
+    fn multipath_device_addr_encoding_shape() {
+        use crate::nfs::xdr::XdrDecoder;
+
+        let addr = crate::pnfs::mds::operations::DeviceAddr4 {
+            netid: "tcp".to_string(),
+            ds_list: vec![
+                vec!["10.0.0.1:2049".to_string(), "10.0.1.1:2049".to_string()],
+                vec!["10.0.0.2:2049".to_string()],
+            ],
+        };
+        let body = CompoundDispatcher::encode_device_addr(&addr);
+        let mut d = XdrDecoder::new(body);
+
+        // stripe_indices: exactly one index per DS, in order.
+        assert_eq!(d.decode_u32().unwrap(), 2);
+        assert_eq!(d.decode_u32().unwrap(), 0);
+        assert_eq!(d.decode_u32().unwrap(), 1);
+
+        // ds_list: DS[0] carries BOTH its addresses, DS[1] one.
+        assert_eq!(d.decode_u32().unwrap(), 2);
+
+        assert_eq!(d.decode_u32().unwrap(), 2); // DS[0] multipath count
+        assert_eq!(d.decode_string().unwrap(), "tcp");
+        assert_eq!(d.decode_string().unwrap(), "10.0.0.1.8.1");
+        assert_eq!(d.decode_string().unwrap(), "tcp");
+        assert_eq!(d.decode_string().unwrap(), "10.0.1.1.8.1");
+
+        assert_eq!(d.decode_u32().unwrap(), 1); // DS[1] multipath count
+        assert_eq!(d.decode_string().unwrap(), "tcp");
+        assert_eq!(d.decode_string().unwrap(), "10.0.0.2.8.1");
     }
 
     /// A PnfsOperations that answers only the two questions the I/O

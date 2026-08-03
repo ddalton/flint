@@ -77,11 +77,15 @@ impl RegistrationClient {
     /// Register with MDS via gRPC. `control_port` is the DS's
     /// DsControl listener port (0 = none) — the MDS pairs it with this
     /// device's client-reachable host to push synchronous commands
-    /// (stripe truncation).
+    /// (stripe truncation). `multipath_endpoints` are ADDITIONAL
+    /// client-path addresses for this same DS (each becomes an extra
+    /// netaddr4 in GETDEVICEINFO's multipath_list4; the kernel client
+    /// opens a trunked transport per extra address).
     pub async fn register(
         &mut self,
         device_id: String,
         endpoint: String,
+        multipath_endpoints: Vec<String>,
         mount_points: Vec<String>,
         capacity: u64,
         used: u64,
@@ -104,7 +108,7 @@ impl RegistrationClient {
         let request = tonic::Request::new(RegisterRequest {
             device_id: device_id.clone(),
             endpoint,
-            multipath_endpoints: vec![],
+            multipath_endpoints,
             mount_points,
             capacity,
             used,

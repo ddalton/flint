@@ -81,6 +81,14 @@ impl DsSessionManager {
         Ok(sessionid)
     }
 
+    /// Destroy every session belonging to `clientid` (case-5
+    /// EXCHANGE_ID replacement cleanup). Sessionids embed the clientid
+    /// in their first 8 bytes — see create_session().
+    pub fn destroy_client_sessions(&self, clientid: u64) {
+        let prefix = clientid.to_be_bytes();
+        self.sessions.retain(|sid, _| sid[0..8] != prefix);
+    }
+
     /// Handle SEQUENCE operation (minimal - just validate and echo back)
     ///
     /// # Arguments

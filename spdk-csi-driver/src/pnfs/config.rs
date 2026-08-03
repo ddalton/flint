@@ -176,6 +176,20 @@ pub enum LayoutPolicy {
     Locality,
 }
 
+/// Split a comma-separated endpoint list into (primary, extras).
+/// Every consumer of `DataServerInfo::endpoint` MUST go through this —
+/// registering the raw comma string as a primary endpoint produces an
+/// unparseable netaddr4 in GETDEVICEINFO.
+pub fn split_endpoint_list(s: &str) -> (String, Vec<String>) {
+    let mut parts = s
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(String::from);
+    let primary = parts.next().unwrap_or_default();
+    (primary, parts.collect())
+}
+
 /// Data server information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataServerInfo {
@@ -183,7 +197,13 @@ pub struct DataServerInfo {
     #[serde(rename = "deviceId")]
     pub device_id: String,
 
-    /// Primary endpoint (IP:port or DNS name)
+    /// Client-reachable endpoint(s), comma-separated (`host:port` or
+    /// DNS names). The first entry is the primary; any further entries
+    /// are multipath extras — each becomes an additional netaddr4 in
+    /// this DS's GETDEVICEINFO multipath_list4, and the Linux client
+    /// opens one trunked transport per extra (they must resolve to
+    /// DISTINCT IPs; the kernel dedupes trunk candidates by address).
+    /// Equivalent to listing the extras in `multipath`.
     pub endpoint: String,
 
     /// MDS-reachable DsControl endpoint override ("host:port"). The

@@ -465,16 +465,25 @@ impl PnfsOperationHandler {
             }
         }
 
+        // A DS's full client-path address list: primary first, then the
+        // multipath extras (each one an additional trunked transport on
+        // the client).
+        fn addr_list(d: &crate::pnfs::mds::device::DeviceInfo) -> Vec<String> {
+            let mut addrs = Vec::with_capacity(1 + d.endpoints.len());
+            addrs.push(d.primary_endpoint.clone());
+            addrs.extend(d.endpoints.iter().cloned());
+            addrs
+        }
+
         // Try to look up device as single DS
         let device_addr = if let Some(device_info) = self.device_registry.get_by_binary_id(&args.device_id) {
             // Single DS device found
-            debug!("✅ Found single device: id={}, primary_endpoint={}", 
-                  device_info.device_id, device_info.primary_endpoint);
+            debug!("✅ Found single device: id={}, endpoints={:?}",
+                  device_info.device_id, addr_list(&device_info));
 
             DeviceAddr4 {
                 netid: "tcp".to_string(),
-                addr: device_info.primary_endpoint.clone(),
-                multipath: device_info.endpoints.clone(),
+                ds_list: vec![addr_list(&device_info)],
             }
         } else if let Some(group) = self.layout_manager.stripe_group_devices(&args.device_id) {
             // Composite (striped) deviceid: resolve the placement's
@@ -490,10 +499,10 @@ impl PnfsOperationHandler {
                 group
             );
 
-            let mut endpoints = Vec::with_capacity(group.len());
+            let mut ds_list = Vec::with_capacity(group.len());
             for id in &group {
                 match self.device_registry.get(id) {
-                    Some(d) => endpoints.push(d.primary_endpoint.clone()),
+                    Some(d) => ds_list.push(addr_list(&d)),
                     None => {
                         warn!(
                             "❌ Stripe-group DS '{}' not registered — refusing GETDEVICEINFO",
@@ -506,8 +515,7 @@ impl PnfsOperationHandler {
 
             DeviceAddr4 {
                 netid: "tcp".to_string(),
-                addr: endpoints[0].clone(),
-                multipath: endpoints[1..].to_vec(),
+                ds_list,
             }
         } else {
             warn!(
@@ -517,8 +525,11 @@ impl PnfsOperationHandler {
             return Err(GetDeviceInfoError::NoEnt);
         };
 
-        debug!("📤 Returning device address with {} total DSes", 
-              1 + device_addr.multipath.len());
+        debug!(
+            "📤 Returning device address: {} DS(es), {:?} addr(s) each",
+            device_addr.ds_list.len(),
+            device_addr.ds_list.iter().map(Vec::len).collect::<Vec<_>>()
+        );
 
         Ok(GetDeviceInfoResult {
             device_addr,
@@ -958,12 +969,18 @@ pub struct GetDeviceInfoResult {
     pub notification: Vec<u32>,
 }
 
-/// Device address structure (RFC 8881 Section 3.3.14)
+/// Device address structure (RFC 8881 Section 3.3.14 / §13.2.1).
+///
+/// `ds_list` is stripe-ordered: one inner Vec per data server, and each
+/// inner Vec is that ONE DS's complete client-path address list — the
+/// wire's `multipath_list4` ([0] = primary, the rest are trunking
+/// extras the kernel adds a transport per). The two dimensions must
+/// never be conflated: the outer list is the stripe map, the inner
+/// list is bandwidth to a single DS.
 #[derive(Debug, Clone)]
 pub struct DeviceAddr4 {
     pub netid: String,
-    pub addr: String,
-    pub multipath: Vec<String>,
+    pub ds_list: Vec<Vec<String>>,
 }
 
 /// GETDEVICEINFO errors

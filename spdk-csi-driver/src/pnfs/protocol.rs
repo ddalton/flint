@@ -660,29 +660,6 @@ pub fn encode_file_layout(
     encoder.finish()
 }
 
-/// Encode device address for GETDEVICEINFO response
-///
-/// RFC 8881 Section 13.2.1 defines nfsv4_1_file_layout_ds_addr4
-pub fn encode_device_addr_file_layout(
-    netid: &str,
-    uaddr: &str,
-    _multipath_addrs: &[String],
-) -> Bytes {
-    let mut encoder = XdrEncoder::new();
-    
-    // Encode as multipath_list4
-    // For simplicity, we encode a single netaddr4 for now
-    // TODO: Support multiple paths for multipath
-    
-    encoder.encode_u32(1); // One address for now
-    
-    // netaddr4: netid + uaddr
-    encoder.encode_string(netid);  // e.g., "tcp" or "rdma"
-    encoder.encode_string(uaddr);  // e.g., "10.0.1.1.8.1" (IP in XDR format)
-    
-    encoder.finish()
-}
-
 /// Convert `host:port` to NFSv4 universal address format `h1.h2.h3.h4.p1.p2`
 /// (RFC 5665 §5.2.3.4).
 ///
