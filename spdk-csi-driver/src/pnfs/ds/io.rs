@@ -134,14 +134,42 @@ const ODIRECT_MIN_LEN: usize = 256 * 1024;
 ///
 /// TO FLIP THE DEFAULT, measure the DS itself — not the block layer —
 /// with this on and off against the same client.
-// Only the Linux `open_direct` calls this; on other targets O_DIRECT does
-// not exist and the stub returns None, so the fn is legitimately unused.
+///
+/// Only the Linux `open_direct`/`fd_cache_cap` consult this; on other
+/// targets O_DIRECT does not exist and the stub returns None.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn odirect_enabled() -> bool {
     matches!(
         std::env::var("FLINT_DS_ODIRECT").ok().as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
+}
+
+/// Entry cap for the fd cache.
+///
+/// WITH THE O_DIRECT PATH ON, EVERY ENTRY HOLDS TWO fds — the buffered one
+/// and its O_DIRECT companion — so the ENTRY count must halve to keep the
+/// process's FILE DESCRIPTOR footprint the same either way. Without this,
+/// `FD_CACHE_CAP` 512 entries becomes 1024 open fds and walks straight
+/// through the default `ulimit -n` of 1024: filling the cache then starts
+/// returning EMFILE ("No file descriptors available") from open(2) on a
+/// path where a READ is expected to succeed.
+///
+/// That is not hypothetical — it is how this was found. The bug is
+/// invisible on macOS, where `open_direct` always returns None and the
+/// second fd never exists, so it only appeared once the suite was
+/// cross-compiled and run on Linux with `FLINT_DS_ODIRECT=1`.
+///
+/// A performance opt-in must not change the process's resource envelope.
+#[cfg(target_os = "linux")]
+fn fd_cache_cap() -> usize {
+    if odirect_enabled() { FD_CACHE_CAP / 2 } else { FD_CACHE_CAP }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn fd_cache_cap() -> usize {
+    // No O_DIRECT here, so never a second fd per entry.
+    FD_CACHE_CAP
 }
 
 /// I/O operation handler for data server
@@ -209,7 +237,7 @@ impl IoOperationHandler {
     /// the cache is full. In-flight ops hold their own `Arc<File>`
     /// clone, so eviction never closes an fd out from under an op.
     fn insert_fd(&self, filehandle: &[u8], file: Arc<File>, writable: bool, path: PathBuf) {
-        if self.fd_cache.len() >= FD_CACHE_CAP && !self.fd_cache.contains_key(filehandle) {
+        if self.fd_cache.len() >= fd_cache_cap() && !self.fd_cache.contains_key(filehandle) {
             // Bind the victim key in its own statement: an `if let`
             // scrutinee would keep the iter shard guard alive across
             // the remove() and deadlock the shard.
@@ -991,15 +1019,16 @@ mod tests {
     #[tokio::test]
     async fn fd_cache_stays_bounded() {
         let (h, dir) = handler();
-        for i in 0..(FD_CACHE_CAP + 8) {
+        let cap = fd_cache_cap();
+        for i in 0..(cap + 8) {
             let fh = fh_for(&h, &format!("f{}", i), &dir);
             h.write(&fh, 0, bytes::Bytes::from_static(b"x"), WriteStable::Unstable).await.unwrap();
         }
         assert!(
-            h.fd_cache.len() <= FD_CACHE_CAP,
+            h.fd_cache.len() <= cap,
             "cache len {} exceeds cap {}",
             h.fd_cache.len(),
-            FD_CACHE_CAP
+            cap
         );
     }
 }
