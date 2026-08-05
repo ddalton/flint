@@ -1922,10 +1922,19 @@ mod tests {
         ctx.current_fh = Some(handler.fh_mgr.path_to_filehandle(&path).unwrap());
         let stateid = open_stateid_for(&handler, &path);
 
+        // Capture BORROWS, not the values. `async move` moves whatever the
+        // closure captured, so capturing `handler`/`ctx` by value made this
+        // closure FnOnce — and it is called three times below, which does
+        // not compile. It went unnoticed because the whole test is
+        // #[cfg(target_os = "linux")] and the suite is normally run on
+        // macOS, where it is compiled out entirely. `&T` is Copy, so the
+        // async block can move the references as many times as it likes.
+        let handler_ref = &handler;
+        let ctx_ref = &ctx;
         let seek = |what, offset| {
             let sid = stateid.clone();
             async move {
-                handler.handle_seek(SeekOp { stateid: sid, offset, what }, &ctx).await
+                handler_ref.handle_seek(SeekOp { stateid: sid, offset, what }, ctx_ref).await
             }
         };
 
