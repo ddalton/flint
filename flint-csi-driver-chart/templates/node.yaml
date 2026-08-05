@@ -111,6 +111,7 @@ spec:
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           {{- end }}
           imagePullPolicy: Always
+          {{- $spdkArgs := include "flint-csi-driver-chart.spdkTargetArgs" . | fromJsonArray }}
           {{- if and (eq (.Values.blockDevice.backend | default "ublk") "ublk") (not .Values.spdkTarget.kindMode.enabled) }}
           # ublk mode: spdk_tgt must die UNCLEANLY on pod stop — its graceful
           # SIGTERM fini STOP_DEVs every ublk disk, deleting the kernel
@@ -123,20 +124,13 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
-              /usr/local/bin/spdk-csi-start.sh {{ range .Values.spdkTarget.extraArgs }}{{ . | quote }} {{ end }}&
+              /usr/local/bin/spdk-csi-start.sh {{ range $spdkArgs }}{{ . | quote }} {{ end }}&
               C=$!
               trap 'kill -9 $C 2>/dev/null' TERM INT
               wait $C
-          {{- else if or .Values.spdkTarget.kindMode.enabled .Values.spdkTarget.extraArgs }}
+          {{- else if $spdkArgs }}
           args:
-            {{- if .Values.spdkTarget.kindMode.enabled }}
-            - "--no-huge"
-            - "-s"
-            - {{ .Values.spdkTarget.kindMode.spdkMemoryMB | quote }}
-            - "--no-pci"
-            - "--interrupt-mode"
-            {{- end }}
-            {{- range .Values.spdkTarget.extraArgs }}
+            {{- range $spdkArgs }}
             - {{ . | quote }}
             {{- end }}
           {{- end }}
@@ -376,6 +370,7 @@ spec:
           image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           {{- end }}
           imagePullPolicy: Always
+          {{- $spdkArgs := include "flint-csi-driver-chart.spdkTargetArgs" . | fromJsonArray }}
           {{- if and (eq (.Values.blockDevice.backend | default "ublk") "ublk") (not .Values.spdkTarget.kindMode.enabled) }}
           # ublk mode: spdk_tgt must die UNCLEANLY on pod stop — its graceful
           # SIGTERM fini STOP_DEVs every ublk disk, deleting the kernel
@@ -388,20 +383,13 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
-              /usr/local/bin/spdk-csi-start.sh {{ range .Values.spdkTarget.extraArgs }}{{ . | quote }} {{ end }}&
+              /usr/local/bin/spdk-csi-start.sh {{ range $spdkArgs }}{{ . | quote }} {{ end }}&
               C=$!
               trap 'kill -9 $C 2>/dev/null' TERM INT
               wait $C
-          {{- else if or .Values.spdkTarget.kindMode.enabled .Values.spdkTarget.extraArgs }}
+          {{- else if $spdkArgs }}
           args:
-            {{- if .Values.spdkTarget.kindMode.enabled }}
-            - "--no-huge"
-            - "-s"
-            - {{ .Values.spdkTarget.kindMode.spdkMemoryMB | quote }}
-            - "--no-pci"
-            - "--interrupt-mode"
-            {{- end }}
-            {{- range .Values.spdkTarget.extraArgs }}
+            {{- range $spdkArgs }}
             - {{ . | quote }}
             {{- end }}
           {{- end }}

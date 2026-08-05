@@ -33,7 +33,8 @@ work without the CRDs.
 
 === Hugepages Configuration
 
-Each node running Flint CSI requires hugepages for SPDK. Configure on each node:
+By default each node running Flint CSI reserves hugepages for SPDK. Configure
+on each node:
 
 [source,bash]
 ----
@@ -46,6 +47,36 @@ echo "vm.nr_hugepages=4096" | sudo tee -a /etc/sysctl.conf
 # Restart kubelet to detect hugepages
 sudo systemctl restart kubelet
 ----
+
+==== Running without hugepages
+
+Hugepages exist so DPDK can hand *stable physical addresses* to a device doing
+its own DMA. Flint's data paths never need one — `spdk_vtophys` is called zero
+times in `bdev_uring.c`, `lib/nvmf/tcp.c`, `lib/ublk/*` and `lib/lvol/*`,
+because the kernel performs the DMA. The only path that requires them is the
+local-PCIe userspace NVMe driver (`bdev_nvme_attach_controller`), which flint
+attempts at startup and which falls back to `bdev_uring` whenever `vfio-pci` /
+`uio_pci_generic` are unavailable.
+
+If your nodes are running the io_uring path, the reservation buys nothing and
+can be reclaimed with a single switch:
+
+[source,yaml]
+----
+spdkTarget:
+  hugepages:
+    enabled: false        # drops the reservation AND passes --no-huge -s
+    noHugeMemoryMB: 1024  # SPDK's heap ceiling; --no-huge forces --legacy-mem
+  memory:
+    limit: "2Gi"          # must stay comfortably above noHugeMemoryMB
+----
+
+Check which path a node took before disabling: `bdev_get_bdevs` naming a bdev
+`uring_nvme0n1` (rather than an NVMe controller) means hugepages are unused.
+
+NOTE: do not put `--no-huge` in `spdkTarget.extraArgs` — the chart fails the
+render if you do. Passing the flag by hand sets it on SPDK without dropping the
+kubelet resource request, and the two must move together.
 
 === Control Plane Scheduling
 

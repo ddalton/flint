@@ -624,15 +624,41 @@ spdkTarget:
   extraArgs: []
 
   # Hugepages configuration
+  #
+  # ONE SWITCH: `enabled` now drives BOTH the kubelet resource request and
+  # spdk_tgt's --no-huge flag (helper "flint-csi-driver-chart.spdkTargetArgs").
+  # It used to drive only the request, so setting it false took the hugepages
+  # away without telling SPDK and EAL init failed at startup. Do NOT put
+  # --no-huge in extraArgs — the chart fails the render if you do.
+  #
+  # Whether to keep them at all: hugepages exist so DPDK can hand STABLE
+  # PHYSICAL addresses to a device doing its own DMA. flint's data paths never
+  # need one — spdk_vtophys is called zero times in bdev_uring.c,
+  # lib/nvmf/tcp.c, lib/ublk/* and lib/lvol/*, because the kernel does the DMA.
+  # The only path that needs them back is the local-PCIe userspace NVMe driver
+  # (bdev_nvme_attach_controller), which has never attached on any cluster:
+  # every run logs "No userspace driver available" and falls back to
+  # bdev_uring. So on an io_uring cluster the 8Gi reservation below buys
+  # nothing and can be reclaimed.
   hugepages:
-    # Set to false to disable hugepages (for --no-huge mode)
+    # false ⇒ drop the reservation AND pass --no-huge -s <noHugeMemoryMB>
     enabled: true
     # Hugepage size: "2Mi" or "1Gi"
     size: "2Mi"
     # Total hugepage memory to request
     amount: "8Gi"
+    # SPDK heap size under --no-huge. Only read when enabled=false.
+    #
+    # --no-huge REQUIRES -s (SPDK lib/env_dpdk/init.c) and forces --legacy-mem,
+    # so this is a HARD CEILING the heap cannot grow past at runtime.
+    #
+    # It comes out of `memory.limit` below, NOT out of a separate kubelet
+    # resource the way hugepages do — so memory.limit must stay comfortably
+    # above this number or spdk_tgt gets OOM-killed under load.
+    noHugeMemoryMB: 1024
 
-  # Memory request/limit (separate from hugepages)
+  # Memory request/limit (separate from hugepages — but NOT separate from
+  # hugepages.noHugeMemoryMB, which is drawn from this limit. See above.)
   memory:
     request: "1Gi"
     limit: "2Gi"

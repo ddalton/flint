@@ -79,3 +79,43 @@ Custom Resource Namespace - determines where SpdkDisk, SpdkVolume, SpdkSnapshot 
 {{- .Release.Namespace }}
 {{- end }}
 {{- end -}}
+
+{{/*
+spdk_tgt's effective argument list.
+
+TWO KNOBS USED TO DISAGREE. `spdkTarget.hugepages.enabled` controlled the
+kubelet resource request and the /hugepages mount, but `--no-huge` was emitted
+ONLY under kindMode. Setting hugepages.enabled=false on a real cluster
+therefore took the hugepages away without telling SPDK, and DPDK's EAL init
+fails at startup. This template makes the one knob do both.
+
+`--no-huge` REQUIRES `-s <MB>` (SPDK lib/env_dpdk/init.c) and forces
+--legacy-mem, so the heap cannot grow at runtime and the size is fixed here.
+That memory is ordinary anonymous memory, so unlike hugepages — which are a
+separate kubelet resource — it counts against the container's memory limit.
+Keep spdkTarget.memory.limit comfortably above noHugeMemoryMB.
+
+Safe only because flint's data paths never need physical addresses:
+spdk_vtophys is called zero times in bdev_uring.c, lib/nvmf/tcp.c, lib/ublk/*
+and lib/lvol/*. The kernel does the DMA. The one path that would need
+hugepages back is the local-PCIe userspace NVMe driver
+(bdev_nvme_attach_controller), which has never once attached on any cluster.
+
+Returns a JSON array because the two call sites consume it differently: the
+ublk branch shell-quotes it onto spdk-csi-start.sh's command line, the plain
+branch renders it as a YAML list.
+*/}}
+{{- define "flint-csi-driver-chart.spdkTargetArgs" -}}
+{{- $extra := .Values.spdkTarget.extraArgs | default list -}}
+{{- if has "--no-huge" $extra -}}
+{{- fail "spdkTarget.extraArgs contains --no-huge. Set spdkTarget.hugepages.enabled=false instead — that one switch emits --no-huge -s AND drops the hugepages resource request, which passing the flag by hand does not." -}}
+{{- end -}}
+{{- $args := list -}}
+{{- if .Values.spdkTarget.kindMode.enabled -}}
+{{- $args = concat $args (list "--no-huge" "-s" (.Values.spdkTarget.kindMode.spdkMemoryMB | toString) "--no-pci" "--interrupt-mode") -}}
+{{- else if not .Values.spdkTarget.hugepages.enabled -}}
+{{- $args = concat $args (list "--no-huge" "-s" (.Values.spdkTarget.hugepages.noHugeMemoryMB | default 1024 | toString)) -}}
+{{- end -}}
+{{- $args = concat $args $extra -}}
+{{- toJson $args -}}
+{{- end -}}
