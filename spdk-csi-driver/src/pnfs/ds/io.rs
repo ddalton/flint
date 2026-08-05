@@ -85,6 +85,63 @@ struct CachedFd {
     writable: bool,
     /// Resolved local path, so out-of-band deletion can evict by path.
     path: PathBuf,
+    /// Second fd on the same file opened `O_DIRECT`, used only by the
+    /// read path and only when [`odirect_enabled`]. `None` when the
+    /// feature is off, or when the open failed — O_DIRECT is refused by
+    /// tmpfs (which is what `TempDir` is on many machines) and by some
+    /// overlay/network filesystems, so it must degrade to the buffered
+    /// fd rather than fail the READ. Kept SEPARATE from `file` on
+    /// purpose: O_DIRECT is a property of the open file description, and
+    /// `file` is shared with the write path, which has stricter
+    /// alignment requirements this change does not attempt to meet.
+    direct: Option<Arc<File>>,
+}
+
+/// Alignment O_DIRECT requires of offset, length AND buffer address.
+/// 4096 rather than the 512 most devices report, because it is correct
+/// on both and the extra slop is at most two blocks per read.
+const ODIRECT_ALIGN: usize = 4096;
+
+/// Reads below this never take the O_DIRECT path. Below ~256 KiB the
+/// buffered path's readahead beats a single unqueued direct read:
+/// measured on lima, 64 KiB O_DIRECT at qd1 managed 1309 MiB/s against
+/// buffered's 2160, and only overtook it at depth (qd64: 11907). The DS
+/// issues one blocking pread per request, so per-request depth is 1 and
+/// the crossover matters.
+const ODIRECT_MIN_LEN: usize = 256 * 1024;
+
+/// Is the O_DIRECT read path enabled? OFF unless `FLINT_DS_ODIRECT` is
+/// set to `1`/`true`/`yes`.
+///
+/// DEFAULT OFF DELIBERATELY — the evidence points both ways and the DS
+/// end-to-end case is unmeasured:
+///
+/// FOR: on runbk (i4i.4xlarge, real instance-store NVMe, 2026-08-04) a
+/// verified fully-cached buffered read of a flint PVC ran at 1470 MiB/s
+/// while O_DIRECT to the same file ran at 3173 — the page cache was a
+/// 2.1x throughput LOSS, because on NVMe this fast the per-byte copy and
+/// page-management cost exceeds DMA from the device. `Cached:` was
+/// checked (807 MB -> 17195 MB) so the warm read really was served from
+/// RAM.
+///
+/// AGAINST: (1) that win narrows to 1.22x at four concurrent streams,
+/// and the DS serves many concurrent requests, so ~1.2x is the honest
+/// expectation, not 2x. (2) The DS is documented as COPY-bound, not
+/// I/O-bound (see the PERF note in `read`, and the encode_opaque copy in
+/// `ds/server.rs`), and the read-modify-align below adds one more
+/// full-payload memmove per request. (3) None of the runbk numbers were
+/// taken through the NFS path.
+///
+/// TO FLIP THE DEFAULT, measure the DS itself — not the block layer —
+/// with this on and off against the same client.
+// Only the Linux `open_direct` calls this; on other targets O_DIRECT does
+// not exist and the stub returns None, so the fn is legitimately unused.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn odirect_enabled() -> bool {
+    matches!(
+        std::env::var("FLINT_DS_ODIRECT").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
 }
 
 /// I/O operation handler for data server
@@ -141,6 +198,13 @@ impl IoOperationHandler {
             .map(|e| (Arc::clone(&e.file), e.writable))
     }
 
+    /// The O_DIRECT companion fd for this filehandle, if one was opened.
+    fn cached_direct_fd(&self, filehandle: &[u8]) -> Option<Arc<File>> {
+        self.fd_cache
+            .get(filehandle)
+            .and_then(|e| e.direct.as_ref().map(Arc::clone))
+    }
+
     /// Insert (or replace) a cached fd, evicting an arbitrary entry if
     /// the cache is full. In-flight ops hold their own `Arc<File>`
     /// clone, so eviction never closes an fd out from under an op.
@@ -154,8 +218,94 @@ impl IoOperationHandler {
                 self.fd_cache.remove(&victim);
             }
         }
+        let direct = Self::open_direct(&path);
         self.fd_cache
-            .insert(filehandle.to_vec(), CachedFd { file, writable, path });
+            .insert(filehandle.to_vec(), CachedFd { file, writable, path, direct });
+    }
+
+    /// Open a read-only `O_DIRECT` companion fd, or `None` if the
+    /// feature is off, the platform has no O_DIRECT, or the filesystem
+    /// refuses it. Never an error: the caller falls back to buffered.
+    #[cfg(target_os = "linux")]
+    fn open_direct(path: &Path) -> Option<Arc<File>> {
+        if !odirect_enabled() {
+            return None;
+        }
+        use std::os::unix::fs::OpenOptionsExt;
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(path)
+        {
+            Ok(f) => Some(Arc::new(f)),
+            Err(e) => {
+                // EINVAL here is the normal answer from tmpfs and some
+                // overlay filesystems, not a fault. Debug, not warn.
+                debug!("O_DIRECT unavailable for {:?}: {} — using buffered", path, e);
+                None
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn open_direct(_path: &Path) -> Option<Arc<File>> {
+        None
+    }
+
+    /// Read `count` bytes at `offset` through the O_DIRECT fd, or `None`
+    /// if this request cannot take that path (caller then uses buffered).
+    ///
+    /// WHY READ-MODIFY-ALIGN RATHER THAN AN ALIGNMENT GATE. O_DIRECT
+    /// requires offset, length and buffer address all aligned. A gate
+    /// that simply skipped unaligned requests would be DEAD CODE on real
+    /// traffic: the pNFS mount negotiates `rsize=1047672`, not 1 MiB —
+    /// Linux subtracts `nfs41_maxread_overhead` from the fore-channel
+    /// limit the server advertises, and `SERVER_MAX_REQUEST` is pinned at
+    /// exactly 1024*1024 (see the note on the mount options in
+    /// `pnfs_csi.rs`). 1047672 % 4096 == 3192, so a sequential reader
+    /// lands on offsets 0, 1047672, 2095344, … — aligned exactly once,
+    /// on the first read of the file, and never again.
+    ///
+    /// So instead read the smallest aligned range that CONTAINS the
+    /// request and return the interior slice. The extra I/O is at most
+    /// two blocks; the real cost is the memmove that shifts the payload
+    /// to the front, which is why this path is opt-in on a DS already
+    /// documented as copy-bound.
+    fn odirect_read(
+        direct: &File,
+        offset: u64,
+        count: u32,
+    ) -> std::io::Result<Option<Vec<u8>>> {
+        let count = count as usize;
+        if count < ODIRECT_MIN_LEN {
+            return Ok(None);
+        }
+        let align = ODIRECT_ALIGN as u64;
+        let start = offset & !(align - 1);
+        let lead = (offset - start) as usize;
+        let span = lead + count;
+        // Round the span up to a whole number of blocks.
+        let span = (span + ODIRECT_ALIGN - 1) & !(ODIRECT_ALIGN - 1);
+
+        // Over-allocate by one alignment so an aligned window exists
+        // inside the buffer regardless of what the allocator returned.
+        // (Large allocations are usually page-aligned already, but
+        // "usually" is not a property to build correctness on.)
+        let mut buf = vec![0u8; span + ODIRECT_ALIGN];
+        let pad = {
+            let addr = buf.as_ptr() as usize;
+            (ODIRECT_ALIGN - (addr % ODIRECT_ALIGN)) % ODIRECT_ALIGN
+        };
+
+        let n = direct.read_at(&mut buf[pad..pad + span], start)?;
+
+        // Bytes of the aligned read that belong to the caller's range.
+        // A short read (EOF inside the span) can land before `lead`, in
+        // which case the caller's range is entirely past EOF.
+        let payload = n.saturating_sub(lead).min(count);
+        buf.copy_within(pad + lead..pad + lead + payload, 0);
+        buf.truncate(payload);
+        Ok(Some(buf))
     }
 
     /// Drop any cached fd(s) for `path`. Called after an out-of-band
@@ -236,7 +386,31 @@ impl IoOperationHandler {
         // cached fd needs no mutex, and the scheduler migrates this
         // worker's queue for the syscall's duration — no per-op
         // cross-thread handoff.
+        // O_DIRECT companion fd, present only when FLINT_DS_ODIRECT is on
+        // AND the filesystem accepted the flag. `None` on every other
+        // path, which is the pre-existing behaviour unchanged.
+        let direct = self.cached_direct_fd(filehandle);
+
         let (buffer, eof) = fast_blocking(count as usize, || -> std::io::Result<(Vec<u8>, bool)> {
+            if let Some(direct) = direct.as_deref() {
+                // A failure here is NOT fatal: fall through to buffered.
+                // O_DIRECT can be refused per-request (misaligned memory
+                // the allocator handed us, a filesystem that accepted the
+                // open but rejects the read), and a READ that works today
+                // must not start returning EIO because of a perf opt-in.
+                match Self::odirect_read(direct, offset, count) {
+                    Ok(Some(buffer)) => {
+                        let file_size = direct.metadata().map(|m| m.len()).unwrap_or(0);
+                        let eof = offset + (buffer.len() as u64) >= file_size;
+                        return Ok((buffer, eof));
+                    }
+                    Ok(None) => {} // below the size threshold — buffered
+                    Err(e) => {
+                        debug!("O_DIRECT read failed ({}), falling back to buffered", e);
+                    }
+                }
+            }
+
             // PERF, MEASURED-ADJACENT, NOT YET FIXED. This memsets `count`
             // bytes (1 MiB at the default rsize) and then immediately
             // overwrites every one of them with read_at's result — pure
@@ -735,6 +909,83 @@ mod tests {
         let b = IoOperationHandler::generate_verifier();
         assert_eq!(a, b, "verifier must be stable within a process");
         assert_ne!(a, [0u8; 8], "verifier must not be the fixed zero value");
+    }
+
+    /// The alignment arithmetic is the whole risk in the O_DIRECT path,
+    /// and it is exercised here on a PLAIN fd on purpose: `odirect_read`
+    /// is correct regardless of whether O_DIRECT is actually set, so the
+    /// math can be pinned on any filesystem — including the tmpfs that
+    /// `TempDir` often is, which refuses the flag outright.
+    ///
+    /// The offsets are not arbitrary. A pNFS mount negotiates
+    /// `rsize=1047672` (1 MiB minus `nfs41_maxread_overhead`), and
+    /// 1047672 % 4096 == 3192, so a sequential reader is aligned exactly
+    /// once and unaligned forever after. If read-modify-align is wrong,
+    /// it is wrong on literally every real READ but the first.
+    #[test]
+    fn odirect_read_returns_exact_bytes_at_the_rsize_offsets_a_client_uses() {
+        use std::io::Write;
+        const RSIZE: usize = 1047672;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("stripe");
+
+        // Position-dependent pattern: any shift shows up as a mismatch.
+        let total = RSIZE * 3;
+        let content: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        File::create(&path).unwrap().write_all(&content).unwrap();
+
+        let f = File::open(&path).unwrap();
+        for i in 0..3u64 {
+            let offset = i * RSIZE as u64;
+            let got = IoOperationHandler::odirect_read(&f, offset, RSIZE as u32)
+                .unwrap()
+                .expect("above the size threshold, must take the direct path");
+            let want = &content[offset as usize..offset as usize + RSIZE];
+            assert_eq!(got.len(), want.len(), "length at offset {}", offset);
+            assert_eq!(got, want, "payload at offset {} (aligned={})",
+                       offset, offset % 4096 == 0);
+        }
+        // Only the first of those was aligned — proving the test covers
+        // the read-modify-align path and not just the easy case.
+        assert_ne!((RSIZE as u64) % 4096, 0, "rsize must be unaligned for this test to mean anything");
+    }
+
+    #[test]
+    fn odirect_read_declines_below_the_threshold_so_buffered_readahead_wins() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("small");
+        std::fs::write(&path, vec![7u8; 128 * 1024]).unwrap();
+        let f = File::open(&path).unwrap();
+        assert!(
+            IoOperationHandler::odirect_read(&f, 0, 64 * 1024).unwrap().is_none(),
+            "64 KiB is below ODIRECT_MIN_LEN; a single unqueued direct read loses to readahead"
+        );
+    }
+
+    /// A read whose aligned span runs past EOF must return only the real
+    /// bytes — never the zero padding of the over-allocated buffer, which
+    /// would be the classic "reads zero instead of erroring" defect.
+    #[test]
+    fn odirect_read_past_eof_returns_only_real_bytes_not_padding() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("shortfile");
+        let len = 300 * 1024usize; // not a multiple of 4096
+        std::fs::write(&path, vec![0xABu8; len]).unwrap();
+        let f = File::open(&path).unwrap();
+
+        // Ask for more than exists, from an unaligned offset.
+        let offset = 4097u64;
+        let got = IoOperationHandler::odirect_read(&f, offset, 512 * 1024)
+            .unwrap()
+            .expect("above threshold");
+        assert_eq!(got.len(), len - offset as usize, "must stop at EOF");
+        assert!(got.iter().all(|&b| b == 0xAB), "no zero padding may leak into the payload");
+
+        // Entirely past EOF -> empty, not zeros.
+        let past = IoOperationHandler::odirect_read(&f, len as u64 + 8192, 512 * 1024)
+            .unwrap()
+            .expect("above threshold");
+        assert!(past.is_empty(), "a read wholly past EOF must be empty, got {} bytes", past.len());
     }
 
     #[tokio::test]
