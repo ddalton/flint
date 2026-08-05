@@ -10,6 +10,73 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.25.0-rc1] - 2026-08-05
+
+Release candidate. **The images this chart references do not exist yet** —
+`scripts/release.sh images` must build and push `flint-driver:1.25.0-rc1` and
+`flint-pnfs:1.25.0-rc1` before the chart can be published, and no cluster gate
+has been run against the bundle.
+
+The theme is data that was wrong rather than absent. Two of the three headline
+fixes produced a plausible-looking result instead of an error, which is why
+they survived as long as they did.
+
+**Striped reads could return silent zeros (F67).** A lost placement binding
+left the MDS unable to say where a stripe lived, and the read path filled the
+gap with zeros rather than failing. Nothing upstream could distinguish that
+from a genuinely sparse file. Found during the read-variance investigation,
+where six separate instrument bugs shared the same shape — "reads zero instead
+of erroring".
+
+**The ~5s cold-open stall was ours, not the client's (F69).** A no-create OPEN
+left the current filehandle at the parent directory. The client re-OPENed,
+received EISDIR, and waited out a 5-second kernel timeout. It had been read as
+client-side slowness for the whole campaign. Measured 6.3s -> 0.75s on lima;
+**fleet numbers have not been re-measured.**
+
+**A DS could be granted before it could be reached (F68b).** The data server
+bound its listener before registering, so a layout could hand a client an
+address that was not yet serving.
+
+**The MDS applies fallback I/O to the stripes instead of refusing it (F66)**,
+closing the straggler-EIO case where one unreachable DS failed the whole read.
+
+Also in this release:
+
+- **A READ payload reaches the socket without being copied three times.**
+  71.3% CPU reduction, measured; the cost was allocator mmap churn.
+- **Operator `mountOptions` replace the driver's defaults** instead of racing
+  them, so a class carrying rsize/wsize/vers/timeo lands intact while the
+  driver's own sec=sys and nconnect survive.
+- **pNFS multipath trunking** — GETDEVICEINFO now carries per-DS address lists,
+  with `pnfs.server.dataServers.multipathServices` provisioning K extra
+  per-pod Services. Kernel-trunk-proven. **The mount must carry `nconnect>=2`
+  or the kernel silently refuses every trunk**, and the scaling rematch is
+  still pending.
+- **`FLINT_DS_ODIRECT`** — opt-in O_DIRECT read path on the DS. **Default off,
+  and never measured against a real DS.** The supporting data is one layer up:
+  on fast NVMe a fully-cached buffered read measured *slower* than a cold one
+  and less than half O_DIRECT, narrowing to ~1.2x at four concurrent streams.
+  Treat as experimental.
+- **`spdkTarget.hugepages.enabled=false` now works.** It used to drop the
+  kubelet reservation without telling SPDK, so EAL init failed; it now also
+  emits `--no-huge -s <MB>`. Default unchanged (`true`) because no real cluster
+  has booted the `--no-huge` path. Passing `--no-huge` via `extraArgs` is now a
+  render-time error, since by hand it sets the flag without dropping the
+  reservation.
+- Chart `version` and `appVersion` agree again, and **`flint-driver` and
+  `flint-pnfs` move in lockstep** — they had drifted to 1.24.1-rc2 and
+  1.24.1-rc6, which is exactly the split `values.yaml` warns about, since the
+  MDS half of geometry lives in the same crate.
+
+### Known gaps
+
+- No cluster gate has been run on this bundle. Each change was proven on the
+  cluster it was written for; none has been regression-tested together.
+- Multipath trunking's scaling rematch is outstanding.
+- F69's fleet-level numbers are unmeasured.
+- `FLINT_DS_ODIRECT` is unmeasured on a DS.
+
 ## [1.24.0] - 2026-08-01
 
 The pNFS-as-a-PVC release. The theme is duplication: two of the three
