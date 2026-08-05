@@ -1907,15 +1907,27 @@ mod tests {
         let mut ctx = CompoundContext::new(2);
         let path = handler.fh_mgr.get_export_path().join("sparse.bin");
 
-        // A file with a LEADING hole, so SEEK_DATA(0) has a non-zero
-        // answer. On a dense file `SEEK_DATA(0) == 0` is also what a
-        // hardcoded `Ok((false, start))` returns, and the test could not
-        // tell them apart.
+        // A LEADING hole, so SEEK_DATA(0) has a non-zero answer — on a fully
+        // dense file `SEEK_DATA(0) == 0` is also what a hardcoded
+        // `Ok((false, start))` returns, and the test could not tell them apart.
+        //
+        // AND A DENSE TAIL, which assertion 2 below depends on. This used to
+        // write 4 bytes at 64 KiB and leave the rest of the set_len() range a
+        // hole, which made assertion 2 simply wrong: with a real hole running
+        // to EOF, `SEEK_HOLE(size-1)` correctly answers `size-1` — the offset
+        // is ALREADY inside a hole — not `size`. Verified against the kernel
+        // on ext4: sparse tail -> 131071, dense tail -> 131072. The "virtual
+        // hole at the end of the file" that RFC 7862 §15.11.3 guarantees is
+        // only observable when the last byte is DATA.
+        //
+        // The mistake survived because this whole test is
+        // #[cfg(target_os = "linux")] and never compiled (a FnOnce closure
+        // called three times), so its premise was never once executed.
         {
             use std::os::unix::fs::FileExt;
             let f = std::fs::File::create(&path).unwrap();
             f.set_len(128 * 1024).unwrap();
-            f.write_at(b"data", 64 * 1024).unwrap();
+            f.write_at(&vec![b'x'; 64 * 1024], 64 * 1024).unwrap();
             f.sync_all().unwrap();
         }
         let size = std::fs::metadata(&path).unwrap().len();
