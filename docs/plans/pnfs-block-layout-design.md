@@ -1,0 +1,668 @@
+---
+title: pNFS block/SCSI layout over NVMe (RFC 9561) — the fast tier
+status: designed
+type: design-impl-spec
+tags: [pnfs, block-layout, nvme, spdk, mds, tla]
+created: 2026-08-09
+governs:
+  - spdk-csi-driver/src/pnfs/mds/layout.rs
+  - spdk-csi-driver/src/nfs/v4/dispatcher.rs
+  - spdk-csi-driver/src/nfs/v4/operations/fileops.rs
+  - spdk-csi-driver/src/pnfs/mds/operations/mod.rs
+  - spdk-csi-driver/src/state_backend/sqlite.rs
+  - spdk-csi-driver/src/nvmeof_export.rs
+  - formal/FlintExtents.tla (new)
+  - formal/FlintExtentsProbe.tla (new)
+  - flint-csi-driver-chart/templates/pnfs-block-storageclass.yaml (new)
+---
+
+# pNFS block/SCSI layout over NVMe — design
+
+## 1. Summary
+
+flint grows a **second pNFS layout type**: the RFC 9561 block/SCSI layout over NVMe,
+surfaced as a per-StorageClass fast tier (`layout: pnfs-block`). The file layout stays
+as-is and remains the general-purpose RWX tier; nothing existing is removed, demoted, or
+re-plumbed. The two classes coexist under one pNFS machinery, selected per volume.
+
+What the block layout buys: it deletes the DS from the data path entirely. Today a read
+is `client → sunrpc → DS nfs server → buffered pread → page cache → ext4 → device`.
+Under block layout it is `client → NVMe/TCP → spdk-tgt → io_uring → device`. The MDS
+becomes an extent allocator; the client does raw block I/O against extents it holds
+layouts for.
+
+**Naming correction, up front**: the outline name "block layout" is how we'll talk about
+it, but RFC 9561 is a *mapping* document over RFC 8154 (§1: it "does not amend the
+existing SCSI layout document"). The wire layout type is **LAYOUT4_SCSI (= 5)**, not
+LAYOUT4_BLOCK_VOLUME. Our `LayoutType` enum currently has **BlockVolume=2 and
+Osd2Objects=3 swapped versus RFC 8881 §3.3.13** — the `layouttype4` definition, where
+the numeric values are actually assigned (real values: OSD2=2, BLOCK=3;
+`layout.rs:570-583`, with the test at `layout.rs:2857-2861` asserting the wrong values).
+The enum's own doc comment cites §12.2.3 — that's the "pNFS Client" *definition*, not
+the values; fix the citation with the enum.
+Latent today because only type 1 is served; wire-visible the moment we advertise anything
+else. **Fix the enum first, and serve type 5.**
+
+This unifies flint's two data planes. Both tiers end at spdk-tgt; durability for the
+block tier is block-level replication under the namespace instead of the file tier's
+DS-on-replicated-PVC layering. **Honest caveat on that claim**: today's raid1 is
+assembled on the *consumer* node's tgt (`driver.rs:3161-3236`) — a remote pNFS client
+cannot see it. Block-layout volumes are single-replica lvols until replication moves
+server-side (storage-node raid or MDS-level mirroring). That is real work, scoped in
+§12, not a freebie.
+
+## 2. Motivation — the taxes this deletes
+
+Every number below is measured, with its campaign named. See
+`docs/oci-registry-pnfs-architecture.md` §2/§5 for the ceiling table.
+
+- **DS buffered pread / page cache**. The DS-path bracket (local, lima/loop rigs)
+  measured the page cache at **~5.9x cpu/byte** versus O_DIRECT on the DS's read path
+  (~10-12% of DS CPU at those rates). runbk made it worse than a tax: a **fully-cached
+  RAM read ran at 1470 MiB/s, slower than cold and under half of O_DIRECT's 3173** —
+  an outright loss, not an accelerator. Block layout removes the DS's read()/page-cache
+  path from the data plane entirely.
+- **NFS READ encode/copy**. The runaz/runba copy-tax investigation cut 71.3% of DS CPU
+  by fixing one allocator/copy path — the encode/copy machinery is a first-order cost.
+  Block reads are DMA-shaped NVMe transfers; no XDR on the data path.
+- **sunrpc per-connection ceiling: ~700-900 MiB/s/conn** (runbi). nconnect trunking
+  claws it back (nconnect=4 saturated a 25Gbps-class link at 2857 MiB/s, runbd) but each
+  connection remains a single-threaded RPC pipe. NVMe/TCP queues don't have this shape.
+- **The kernel nfs_client wall: ~5-6 GB/s per client node regardless of DS count**
+  (runbh established the wall at any DS count; runbi's single-client trunking peak was
+  5634 MiB/s). One `nfs_client` instance per (server, node) is the choke. The kernel
+  blocklayout client already sidesteps sunrpc for data; the later userspace client (§4b)
+  sidesteps the kernel entirely.
+- **One data plane**. Today flint operates two: the SPDK/NVMe-oF block plane (RWO) and
+  the pNFS DS plane (files over sunrpc). Block layout ends both tiers at spdk-tgt — one
+  set of observability (`bdev_get_iostat`, `thread_get_stats` — runbk/runbm precedent),
+  one restart-coordination story, one fencing substrate.
+
+What we are *not* claiming: that the file layout is slow in absolute terms. ADR 0004
+measured 6.02x/4.00x cross-host scaling and the runbl ladder showed flint at 87-105% of
+raw device on its rig. The block tier is for workloads that hit the per-client walls
+above or that pay the DS CPU bill at fleet scale.
+
+## 3. Protocol background
+
+pNFS (RFC 8881 §12) makes layout types per-filesystem pluggable under one machinery:
+one MDS, one state model (layout stateids, CB_LAYOUTRECALL, LAYOUTCOMMIT), N layout
+classes. The MDS stays a full NFSv4.1/4.2 server for both classes — metadata, locking,
+ACLs, and fallback I/O all remain NFS. Clients mount the MDS over NFS exactly as today
+(`NodePublish` is reused as-is; the new work is device visibility, not the mount).
+
+Layout advertisement is per-filesystem via `FATTR4_FS_LAYOUT_TYPES` (attr 62). Today we
+hardcode `[1]` at **two** encoder sites — `fileops.rs:1213-1236` (snapshot encoder) and
+`fileops.rs:1394-1406` (the pseudo-root/server-capabilities encoder, the arm a mounting
+client's fsinfo GETATTR actually hits). The dispatcher's own comment
+(`dispatcher.rs:2300-2304`) already warns these sites must agree — reconcile its "three
+sites" count while there (two arms emit the array; the 1130/1376 hits are
+supported-attr bitmap words). This becomes per-volume **at every emitting site** —
+better, one shared advertisement helper, so the encoders cannot diverge. **Graceful
+degradation is native to the protocol**: a client that lacks blocklayout support (no
+`CONFIG_PNFS_BLOCK`, no device visibility) either negotiates the file layout — if we
+choose to advertise both on block-class volumes — or simply does MDS I/O. RFC 8881
+*entitles* layoutless clients to MDS I/O; F66 taught us that refusing it is the bug
+class (`docs/plans/mds-fallback-proxy-plan.md` §2 — do not re-litigate the cheap fixes).
+
+The stack of documents: RFC 8154 defines the SCSI layout — extents, volume topology,
+LAYOUTCOMMIT semantics, PR-based fencing. RFC 9561 maps it onto NVMe: NGUID/EUI64
+device identification and NVMe Reservations in place of SCSI PRs, transport-independent
+(PCIe, RDMA, TCP, FC — §1). All XDR is RFC 8154's, unchanged.
+
+## 4. Client story — two steps
+
+### 4a. Stock kernel client first
+
+`fs/nfs/blocklayout` handles LAYOUT4_SCSI with NVMe device matching **mainline since
+v6.11** (released Sep 2024; commit `3921ae0850a3`, Hellwig, authored Jul 2024). No
+blkmapd needed for SCSI/NVMe volumes — resolution is fully in-kernel. Zero client
+software to ship. The client node needs: `CONFIG_PNFS_BLOCK`, kernel nvme-tcp sessions
+to the storage nodes, and device visibility. csi-node manages the sessions (§5),
+reusing the existing `kernel_nvme_connect` machinery — it is already target-agnostic;
+only its caller hardcodes loopback (`node_agent.rs:2050-2094`). And v6.11 is a hard
+**kernel floor**, not trivia: current LTS fleets sit below it (Ubuntu 24.04 ships 6.8)
+and so do default lima images, and a below-floor client does not error — it silently
+degrades to MDS I/O, the §6 worst case, so a too-old rig "passes" while proving
+nothing. The floor plus `CONFIG_PNFS_BLOCK` are phase-2 rig prerequisites and a
+phase-3 admission check (§11).
+
+**The udev landmine (confirmed, from the v6.11 commit message itself)**: the client
+resolves devices by trying `/dev/disk/by-id/nvme-eui.<nguid>`. udev derives that link
+from the kernel wwid, whose preference is uuid > nguid > eui64 — and **SPDK always
+exposes a UUID descriptor** (`subsystem.c:2608-2616` defaults ns UUID to the bdev UUID).
+Net: with SPDK defaults, the by-id link is `nvme-uuid.*` and the client's lookup fails,
+silently degrading to MDS I/O. csi-node must ship the udev rule that creates the
+`nvme-eui.<nguid>` link (whether newer systemd does this natively is unresolved —
+verify per-distro, assume not).
+
+Second kernel constraint: `bl_set_layoutdriver` rejects a layout blksize of 0 or
+> PAGE_SIZE. **We must advertise `FATTR4_LAYOUT_BLKSIZE` ≤ 4 KiB for block-class
+volumes** — today **both** encoders hardcode 4 MiB: `fileops.rs:1237-1244` (snapshot)
+and `fileops.rs:1407-1420` (pseudo-root — the arm the mounting client's fsinfo GETATTR
+actually reads, i.e. the value `bl_set_layoutdriver` checks). Patch only the snapshot
+site and the pseudo-root still advertises 4 MiB — the exact rejection this paragraph
+warns about. Same rule as §3: every emitting site, or one shared helper. Extents can be arbitrarily large; commit
+granularity/alignment is this blksize.
+
+### 4b. Userspace client library (later)
+
+`libflint`: a userspace NFSv4.1 *metadata* client plus SPDK's userspace NVMe-oF TCP
+initiator for data. An initiator needs **no hugepages and no VFIO** — those are
+userspace-NVMe-*driver* requirements (see the SPDK-hugepages finding: the userspace
+PCIe driver has never worked on our clusters; the TCP initiator is plain sockets).
+This is the step that breaks the ~5-6 GB/s kernel nfs_client wall (runbh), because the
+kernel NFS stack leaves the data path completely.
+
+The design insight that makes libflint tractable: **block layout shrinks the userspace
+client to a metadata client.** Under the file layout, a userspace client would have to
+reimplement NFS READ/WRITE, striping, and session trunking. Under block layout the data
+client is SPDK's initiator off the shelf; we write LAYOUTGET/LAYOUTCOMMIT/GETDEVICEINFO
+handling and an extent cache. First surface: an OCI-registry storage driver
+(`docs/oci-registry-pnfs-architecture.md` is the target architecture), where the
+workload is large sequential reads of content-addressed blobs — the best case for raw
+extent reads and the workload already pitched against these ceilings.
+
+## 5. Architecture
+
+Four moving parts. ADR 0001's boundary discipline (SPDK modules don't import pNFS code)
+survives with the coupling direction it always permitted: pNFS *consumes* the SPDK
+control plane. Restate it in code review; don't let the allocator leak into
+`nvmeof_export.rs`.
+
+**MDS as extent allocator.** New sqlite state (§8): per-volume extent maps, per-client
+grant state, recall-before-reuse discipline. LAYOUTGET returns RFC 8154 extents
+(`se_vol_id, se_file_offset, se_length, se_storage_offset, se_state`) instead of stripe
+maps; LAYOUTCOMMIT — today a half-stub with a hardcoded `/data` path TODO
+(`operations/mod.rs:769-812`) — becomes load-bearing: promotion of INVALID_DATA extents
+to READ_WRITE_DATA per the client's commit list. The dispatch seam already exists and is
+documented as such: `layout_type_served` (`dispatcher.rs:2297-2330`) is the designed-in
+single choke point; it becomes a per-volume dispatch (volume geometry grows a
+`layout_class`), and `PnfsOperationHandler::layoutget` grows a second arm calling the
+allocator instead of `generate_layout`. The unused `Export.layout_types` default of
+`[2, 1]` in `pseudo.rs:42-72` is dead code with the wrong values — and it has a twin:
+`PseudoFilesystem::get_layout_types` (`pseudo.rs:241-251`) returns the same wrong
+`[2, 1]`, each referenced only by the in-file test (`test_pnfs_support`,
+`pseudo.rs:368-376`). Delete both plus their tests when wiring per-volume
+advertisement — one source of truth means zero stale ones left behind.
+
+**spdk-tgt as the target fleet.** The cross-node listener pattern (node-IP:4420 per
+subsystem, `nvmeof_export.rs:400-429`) already exists for raid legs; block layout
+generalizes "exactly one consumer node" to "every granted client node". The gap is
+policy, not mechanism: `converge_hosts` fencing (`nvmeof_export.rs:440-509`) currently
+removes any flint host NQN not in a single-consumer list, so the grant/recall lifecycle
+must drive add_host/remove_host per client. Two viable exposure shapes: subsystem-per-
+volume scaled up, or one shared per-node subsystem with `no_auto_visible` namespaces and
+per-namespace host masking (`nvmf_ns_add_host`, SPDK `nvmf_rpc.c:1858`). Start with
+subsystem-per-volume — it's the shape every existing reconcile loop understands.
+
+**Namespace identity.** RFC 9561 §2.1: GETDEVICEINFO carries the designator as
+PS_DESIGNATOR_EUI64 with the **NGUID (16 octets) preferred**; the NVMe UUID descriptor
+has no mapping and is unusable. **Set NGUID explicitly and stably** on
+`nvmf_subsystem_add_ns` (accepted in v26.05, `nvmf_rpc.c:1311-1321`) — today remote
+exports pass `ns_identity: None` and lean on the lvol UUID default. The NGUID is the
+client's *only* device identity; it must survive lvol migration, rebuild, and tgt
+restart. The `stable_ns_identity` pinning pattern (`nvmeof_export.rs:98-122`) exists for
+exactly this reason on the loopback path; block exports adopt it unconditionally.
+GETDEVICEINFO gains a `pnfs_scsi_deviceaddr4` encoder sibling (volume topology:
+BASE/SLICE/CONCAT/STRIPE trees, not netaddr4 lists) — and note `maxcount` is ignored
+today (`dispatcher.rs:2559`); topology bodies make GETDEVICEINFO TOOSMALL handling real.
+
+**csi-node session management.** Phase-split to match the exposure shape above, or the
+work items contradict it. Under subsystem-per-volume (the starting shape), sessions
+stay 1 NQN = 1 volume = 1 session — no refcounting, no multi-namespace subsystems, and
+the `find_nvme_device_by_nqn` `/dev/<ctrl>n1` hardcode (`node_agent.rs:2178`) never
+fires. What that shape costs instead, and what must be budgeted before calling it
+final: sessions and tgt qpairs scale as **volumes × client-nodes** against one
+spdk-tgt, and the grant/recall lifecycle drives per-subsystem add_host/remove_host
+churn — put a ceiling on both on the phase-2 rig. The shared refcounted session per
+(node, storage-node) with `no_auto_visible` namespaces — and the multi-namespace
+`/dev/<ctrl>n1` fix it requires — belongs to that later migration, not day one. The
+ctrl_loss_tmo / fast_io_fail / hostnqn plumbing transfers unchanged — and is mandatory
+(§6). ControllerPublish's existing pNFS no-op (`main.rs:2159-2166`) is the free
+per-node hook for hostnqn registration.
+
+**Fencing, per the RFC.** RFC 9561 §2.2 maps SCSI PRs to NVMe Reservations: the MDS
+registers its own key and holds RTYPE=4h (Exclusive Access – Registrants Only); fencing
+a client is Reservation Acquire with Preempt/Preempt-and-Abort naming the client's key;
+the client sees RESERVATION CONFLICT (0x83) and must commit, return layouts, and
+unregister (§2.2.4). Reservation keys are per Host Identifier — **fencing one client
+cuts all its paths at once**, which is what we want. Two consequences: (1) **the MDS
+must itself be an NVMe host** on each namespace to hold the reservation — it grows an
+initiator; (2) SPDK's target-side reservations are complete including
+Persist-Through-Power-Loss via per-namespace `ptpl_file` — **PTPL is mandatory**, or a
+tgt restart (the csi-node roll landmine) silently unregisters every key and unfences
+everyone. We also keep the out-of-spec belt: yanking the host NQN from the allow-list
+and draining qpairs (`nvmeof_export.rs:511-530`) is a functional fence the client sees
+as connection loss — use it as the enforcement backstop, not the primary, because
+conforming clients recover cleanly only from RESERVATION CONFLICT.
+
+## 6. What we lose — be honest
+
+- **Per-file trust granularity, permanently.** Extents are raw device ranges. RFC 8154
+  §2.1 is blunt: where clients can't be trusted to enforce extent boundaries, "pNFS
+  SCSI layouts MUST NOT be used." A layout-holding client has raw write reach over the
+  whole namespace; reservations fence *hosts*, they don't authorize *extents*.
+  Node-level trust — today a soft boundary (nodeCIDR NetworkPolicies, control token) —
+  becomes a hard, permanent property of the block class. Multi-tenant clusters keep the
+  file layout.
+- **Client prerequisites.** Every client node needs nvme-tcp reachability and sessions
+  to every storage node backing its volumes, plus the udev rule (§4a). And the
+  **ctrl_loss_tmo D-state landmine class applies to pNFS clients now**: a dead target
+  with default 1800s ctrl_loss_tmo parks I/O, wedges umount in `blkdev_issue_flush`,
+  and survives only reboot — we've paid this bill once (fixed via fast_io_fail sysfs
+  backfill, commit 560c1d1) and the same policy must ship on block-layout sessions
+  from day one.
+- **The kernel blocklayout client is niche.** I found no production RFC 9561 deployment
+  anywhere; the visible ecosystem is the mainline client plus knfsd-over-XFS.
+  (Hammerspace "Tier 0" is **not** this — it's flex-files plus LOCALIO.) We are an
+  early adopter of `bl_*` over fabrics. Budget for kernel bugs.
+- **Many-writer RWX is weaker than the file layout.** Extent grants are exclusive for
+  RW; concurrent writers serialize through recall/regrant or fall back to MDS I/O. The
+  file layout remains the answer for shared-write workloads.
+- **The ext4 freebies come home to the allocator.** Sparse files, thin provisioning,
+  and CLONE (refcounted extents) were free because stripe files lived on ext4. Now the
+  allocator owns all of them. And the MDS fallback path must do actual block I/O
+  (§8) — a new F66-class surface, *stronger* than the file layout's: the kernel client
+  routes unaligned/sub-blksize I/O through the MDS **routinely**
+  (`nfs_pageio_reset_write_mds` for sub-PAGE_SIZE direct writes), so MDS block I/O is
+  steady-state, not a straggler path. Every client failure mode (device unresolvable,
+  bio error) also **degrades to MDS I/O silently** — the F68 observability lesson
+  applies verbatim; meter the MDS block lane from day one.
+- **Observability leaves NFS.** No DS DataPathMeter, no sunrpc counters.
+  `bdev_get_iostat` (per-lvol) and `nvmf_subsystem_get_qpairs` / `nvmf_get_stats`
+  become the truth — the runbm arbiter pattern, now load-bearing in production.
+
+## 7. StorageClass and chart surface
+
+**Dispatch landmine first**: CreateVolume branches on the exact string
+`layout == "pnfs"` (`main.rs:1432`); today `layout: pnfs-block` **falls through and
+silently provisions a plain SPDK volume**. The comparison becomes a `match` with an
+explicit reject-unknown arm before anything else ships.
+
+Class sketch (`pnfs-block-storageclass.yaml`, cloned from `pnfs-storageclass.yaml`):
+
+```yaml
+provisioner: {{ .Values.driver.name }}  # renders flint.csi.storage.io (values.yaml:64)
+parameters:
+  layout: pnfs-block
+  pnfs.flint.io/extentSize: "4Mi"     # allocation granularity, NOT the wire blksize
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true            # now a REAL allocation op — see below
+```
+
+- New `pnfs.flint.io/*` keys must be added to `sc_params::ALL` (`pnfs_csi.rs:63-70`) —
+  the namespace is a closed set and unknown keys hard-fail the provision.
+- **volume_context needs a discriminator** (`pnfs.flint.io/layout: block`): every
+  downstream classifier keys on `mds-ip` presence or the `~m` shard suffix, and a block
+  volume reusing both is indistinguishable. NodeUnstage classification order is the
+  live landmine: RWX access modes resolve `NfsShared` *before* the pNFS check
+  (`main.rs:3703-3729`), which is harmless today (both branches unmount-only) but leaks
+  nvme sessions for a block class whose unstage must deref them. pnfs-block checks first.
+- **Expand**: the current pNFS expand path is a metadata-only ack keyed on the shard
+  suffix alone (`main.rs:2668-2708`). Block expand must raise the allocation ceiling
+  for real — the discriminator check goes before that early return.
+- Reuse the `check_echo` version-skew gate (`pnfs_csi.rs:196-225`) for the layout-class
+  field: an MDS predating block layout must not ack a block-class CreateVolume (proto3
+  drops unknown fields silently).
+- Values keys: `pnfs.blockStorageClass.{create,name,reclaimPolicy,extentSize,
+  mountOptions}`, `pnfs.networkPolicy.nvmeCIDRs`, an NVMe port key.
+- **NetworkPolicy**: add 4420 ingress from nvmeCIDRs (kernel initiators connect from
+  node IPs, same shape as the 2049 rule). **Hard caveat**: spdk-tgt lives in the
+  hostNetwork csi-node DaemonSet — NetworkPolicy cannot select host-network pods, so a
+  4420 policy is only enforceable if block-layout targets get a pod-networked fleet
+  (the pnfs-ds StatefulSet pattern); today 4420 is unpoliced entirely, including
+  existing raid-leg traffic. Until then, 4420 protection is security-groups/host-
+  firewall, outside the chart — say so in the runbook trust-model section.
+- The **images-lockstep warning** (values.yaml:476) extends verbatim: the allocator is
+  MDS-half, the dispatch and csi session code is driver-half; pins move together.
+- The control token covers the allocator's MdsControl surface for free; it does **not**
+  cover the NVMe data path — there the guards are hostnqn allow-lists, reservations,
+  and network isolation (DH-HMAC-CHAP and TLS exist in both SPDK v26.05 and kernels
+  ≥6.0/6.7 if we ever need in-band auth; not phase-1).
+
+## 8. MDS allocator design sketch
+
+**Schema** (rides the same CREATE-TABLE-IF-NOT-EXISTS batch, `sqlite.rs:1251-1372`;
+SCHEMA_VERSION bump per the no-migrations policy):
+
+```sql
+extents(volume TEXT, file_id INTEGER, logical_offset INTEGER, length INTEGER,
+        physical_offset INTEGER, gen INTEGER, state TEXT,  -- invalid|rw|read
+        PRIMARY KEY (volume, logical_offset))
+extent_grants(volume, logical_offset, client_id, mode, gen, PRIMARY KEY (...))
+volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
+```
+
+- **The PK does not police overlap.** `(volume, logical_offset)` admits overlapping
+  ranges — `(0, len 8)` and `(4, len 4)` are distinct PKs — so every extents-table
+  write carries an app-level disjointness assertion, unit-tested; sqlite will not catch
+  range aliasing for us, and aliasing (one physical range under two logical extents
+  after a split/merge bug) is the allocator's silent-corruption class. §9 models it as
+  `Inv_NoPhysicalAliasing`.
+- **Allocation is per-volume, inside the volume's own lvol.** This is forced by
+  sharding: shards share zero state (`mds-sharding-plan.md`), a volume pins to one
+  shard forever, so a per-volume allocator composes trivially — the volume's whole
+  extent map lives on its shard. A cluster-wide pool allocator would be the first
+  cross-shard shared state; refused.
+- **Write discipline**: extents are high-churn (split/merge per LAYOUTCOMMIT), unlike
+  every existing table (placements write once per file). The fire-and-forget
+  `enqueue_write` coalescing model keys on whole-row PK and its retry path decomposes
+  batches per-op (`sqlite.rs:384-411`) — the group-commit txn is an optimization, not
+  an atomicity contract. Extent transitions use the **awaited** discipline
+  (`put_volume_geometry` precedent) with explicit multi-row transactions via
+  `with_conn`. FlintClaims' machine-checked verdict binds here: **safety lives in a
+  record-level CAS (a sqlite transaction), never in leadership** — free→provisional is
+  a transaction, not an in-memory free-list op guarded by being "the" MDS.
+- **Grant path**: LAYOUTGET → allocate INVALID_DATA extents (or return existing
+  RW/READ ones), journal the grant durably *before* the reply, return extents. Carry
+  the C6 lesson structurally: grant is check-then-insert with a post-insert recheck —
+  never modelled or coded as atomic.
+- **LAYOUTCOMMIT**: validate, then apply. Each committed range checks `extent_grants` —
+  the (client, gen-at-grant) pair must match a live grant — and a mismatch rejects with
+  NFS4ERR_BADLAYOUT/EXPIRED. Not optional politeness: reservations fence the **NVMe
+  data path only**, the NFS control path stays open, so a fenced or lease-expired
+  client can still deliver a LAYOUTCOMMIT — and an unvalidated one promotes INVALID→RW
+  on extents that were freed and reused (the new owner's data) or resurrects a stale
+  size. Then apply the commit list (blksize-aligned per RFC 8154 §2.4.2), promote
+  INVALID→RW, update size. Replaces today's half-stub entirely.
+- **GC / recall-before-reuse**: truncate and delete produce to-free extents; an extent
+  frees only when every grant on it is returned or acked-recalled. "Holder is fenced"
+  is **not** a freeing condition yet: §9 keeps `FenceReaches` FALSE until the phase-2
+  rig proves real preempt delivery, and freeing on an unproven fence designs in the
+  corruption path (crashed client → fence issued but undelivered → extent reused → the
+  un-fenced client writes the new owner's data). Until FenceReaches is proven,
+  fenced-holder extents are **quarantined — leaked, never reused** — with a metered
+  bound and an operator release lever; when the rig proves delivery, this sentence and
+  §9's constant flip together. Reuse bumps `gen`. **This is F67's lesson generalized**: an extent map lost
+  while data survives = silent zeros served from a reused extent — and there is no stub
+  to hang an xattr on, so durability is sqlite-only and therefore must be *stronger*
+  (awaited writes, `open_durable` FULL sync on tear-away volumes).
+- **Crash recovery**: on restart, reload extents+grants; unknown space is
+  allocated-not-free (conservative); un-expired grants are honored, expired ones fenced
+  before their extents free (fence → quarantine while FenceReaches is unproven, above).
+  The MDS-HA machinery (durable-DS plan milestone B: sqlite server_id, 90s grace,
+  Recreate+RWO fence) carries the allocator state unchanged — but **reservation
+  holdership is not in sqlite**: it lives target-side, keyed to the MDS's NVMe Host
+  Identifier. The MDS ships a stable, durable hostnqn+hostid (persisted alongside
+  `server_id`), and restart re-registers and re-acquires RTYPE=4h on every block
+  volume's namespace **before any grant or free proceeds** — until it holds the
+  reservation it cannot fence anyone, and both this step and GC's fencing conditions
+  are inoperative. §9 ties MdsRestart to the reservation registry for exactly this.
+- **Fallback lane**: the disposition ladder (`fallback_io_disposition_core`,
+  `operations/mod.rs:246-339`) grows a block arm at the same dispatcher fork
+  (`dispatcher.rs:2264`): the MDS reads/writes the volume's extents itself via an
+  NVMe initiator — the only buildable option: the lvol bdevs live inside spdk-tgt's
+  process and an lvolstore has one owner, so "just open the bdev" from the MDS does not
+  exist. The initiator makes the MDS a data-path NVMe host doing I/O under the RTYPE=4h
+  reservation it itself holds (registrants' — and the holder's — writes pass by
+  definition; say so in the code). And the lane is not free-running: **it consults
+  `extent_grants` first** — a fallback read/write to a range under an outstanding RW
+  grant recalls (or refuses) before touching the device, per RFC 8154's
+  recall-conflicting-layouts-before-MDS-I/O requirement. `GrantsExclusive` is
+  client-vs-client only; this is the MDS-vs-client arm, and §9 models it with its own
+  must-violate run. Load-bearing steady-state (§6). Kill-switch
+  idiom per house style: one env var, default ON, checked once. Meter it (F68a
+  precedent) from the first commit.
+- **Cost budget**: LAYOUTGET-with-allocation **and LAYOUTCOMMIT** get A/B'd on the
+  mdsbench harness (`make test-pnfs-mdsbench`) against the Tier-1 table (8.7k
+  open/close, 3,531 w3-stat per shard) *before* the client work starts. LAYOUTCOMMIT is
+  the declared hot path (split/merge churn under awaited FULL-sync transactions) and
+  its worst case is ugly — wire blksize ≤ 4 KiB inside 4Mi extents means one commit
+  list can shatter an extent into ~1024 rows; bench that shape, not the happy path. The
+  allocator also ships a merge policy and a stated per-volume extent-count bound before
+  phase 3; nothing else bounds table growth.
+
+## 9. FlintExtents — the TLA+ module
+
+First-class deliverable, not documentation garnish. **Sequencing rule: the module and
+its drills come before any client work** — FlintTruncate exists because the one
+invariant pNFS holds in its own hands deserved a machine check, and the extent
+allocator holds a strictly larger one. Model the *implementation* (two-step grants, the
+sqlite/volatile split), never the abstraction — this corpus has paid for
+THE-ABSTRACTION-WAS-THE-BUG twice (atomic-LAYOUTGET going green on a property the code
+doesn't hold, FlintTruncateGrantRace.cfg; scalar `raidHost` unable to represent two tgt
+incarnations, FlintReplication.tla:711-730).
+
+**Conventions inherited** (formal/README.md): FlintTruncate is the skeleton — same
+layer, same three-party shape (MDS / storage / clients-that-bypass-the-MDS-on-reads),
+same headline hazard (a ghost set by a data-path read the control plane never sees).
+Boolean fix arms TRUE=belt-exists; `Inv_<Claim>` naming; safety-only spec, no fairness
+in the breadth cfgs; every cfg lists the full constant vector; `CHECK_DEADLOCK FALSE`;
+strict/mutation verdicts wired into `scripts/check-tla.sh` (substring matching, never
+`grep -q`). Borrow FlintSnapshots' version-counter style for reuse detection and
+FlintClaims' crash budget + WF bundles for the deep cfg. A `FlintExtentsProbe.tla`
+sibling ships from day one — per the A2Probe standing rule, **no strict run is citable
+without a paired non-vacuity probe TLC must violate**, and probes name the *action*
+(provenance ghost with one writer), never the situation.
+
+**State**: extents are **sets of blocks over a small physical domain**, not atomic
+identities — §8's declared hot path is split/merge per LAYOUTCOMMIT, and fixed extent
+identities make range aliasing (two logical extents overlapping one physical range
+after a split/merge bug) unrepresentable, the scalar-`raidHost` mistake re-armed. So:
+`alloc ∈ [Blocks → {free, provisional, committed}]` with extents as block-sets and
+Split/Merge actions, `owner`, `gen` (bumped on every free→provisional — the reuse
+detector; zeros from a fresh ProvisionalInvisible extent are not stale content, *bytes
+from a previous owner are*, which is exactly why `gen` and not content-emptiness
+carries the invariant), `grants` (records carrying `g` = gen-at-grant), `granting`
+(the unpublished two-step window), `fsize`, `recalls`/`fenced`, `resv` (the
+target-side reservation registry: registered keys + holder per namespace — a
+**variable**, not an assumption, because §5's PTPL-is-mandatory hazard is
+unrepresentable without target-side state a TgtRestart can erase), `durable` (the
+sqlite image; volatile state dies with MdsCrash), budgets `ops`/`crashes`. Ghosts,
+single-writer each: `staleRead`, `staleWrite`, `zeroRead`, `reuseFired`, `fenceFired`.
+
+**Fix arms**: `GrantsExclusive`, `RecallBeforeReuse`, `FenceReaches` (the
+`RecallReaches` analog — **keep FALSE in the shipped cfg until proven against real
+spdk-tgt reservation behavior on real hardware, and re-justify it every time the code
+moves** — a constant encoding an assumption silently becomes a lie), `ProvisionalInvisible`,
+`CommitGatesSize`, `CommitChecksGen`, `PersistGrants`, `PersistReservations` (PTPL),
+`RecoverConservative`, `PublishRecheck`, `RecallBlocksGrant` (the
+NFS4ERR_RECALLCONFLICT arm), `FallbackChecksGrants`, `SplitKeepsDisjoint`. Every arm
+has a run that fails without it — the matrix below; an arm with no failing run is dead
+weight by this corpus's own doctrine.
+
+**Actions**: MDS — Allocate, Split/Merge (guarded by `SplitKeepsDisjoint`),
+GrantCheck/GrantInsert (two-step; GrantCheck also refuses any range with a recall in
+flight when `RecallBlocksGrant` — the NFS4ERR_RECALLCONFLICT obligation; a grant
+landing between Recall and RecallAck re-arms the reuse hazard after the recall
+"completes"), LayoutCommit (validates (client, gen-at-grant) against the live grant
+when `CommitChecksGen` — §8's commit-time check), Recall (with the honest
+`∃ lost ⊆ Clients: FenceReaches ⇒ lost = {}` arm), RecallAck, Fence (writes `resv`),
+MdsRead/MdsWrite (the §8 fallback lane is steady-state, so the MDS is a data-path
+actor in the model, not scenery — guarded by recall-or-refuse on conflicting RW grants
+when `FallbackChecksGrants`), Truncate (recall-then-invalidate-then-free — *not*
+set_len fanout; FlintTruncate stays the file-layout truncate authority, do not
+re-model its gate), Free (guarded by RecallBeforeReuse; fenced-holder ranges
+quarantine per §8), Reuse, MdsCrash/MdsRestart (restart re-acquires the reservation
+through `resv` — fencing capability is **not** restored for free, §8 crash recovery).
+Target — TgtRestart (clears `resv` unless `PersistReservations` — spdk-tgt is the
+most-restarted component in the system, FlintReplication proved it; without this
+action the model cannot state §5's "PTPL is mandatory" at all). Client — ClientRead
+(sets `staleRead` iff grant.g ≠ gen[e]), ClientWrite (sets `staleWrite` iff
+grant.g ≠ gen[e] or client ∈ fenced — the write, not the read, is the crown-jewel
+hazard at this layer: §6 gives the client raw write reach, and a stale write corrupts
+the *new* owner's committed bytes), LayoutReturn, ClientCrash (grants unreturnable;
+only lease-expiry+fence clears them). **If two tgt incarnations can ever expose one
+extent range, the serving-target state is a SET from day one** — hence `resv` as real
+state, never a constant.
+
+**Invariants**: `Inv_NoConflictingGrants`; `Inv_RecallCompletesBeforeReuse`;
+`Inv_NoPhysicalAliasing` (no block under two live extents — the split/merge
+silent-corruption class); `Inv_NoStaleExtentRead == ~staleRead` **and**
+`Inv_NoStaleExtentWrite == ~staleWrite` — **the theorems**, descendants of
+`Inv_NoStaleServe`, and the write is first-class, not a corollary: FlintTruncate's
+read-only shape was right for its layer (the truncate hazard is stale reads) and would
+be a blind spot copied here, because the entire point of RFC 8154/9561 fencing is
+stopping *writes*, and a fenced client writing a reused extent is strictly worse than
+a stale read. Both expected NOT to hold until fencing is code-real and kept out of the
+shipped cfg exactly as FlintTruncate.cfg does (listing them would be the model
+asserting a delivery the code does not achieve); `Inv_SizeCommitCoupled` (`~zeroRead` —
+no observable size covers a provisional extent; the F67 shape);
+`Inv_CrashRecoverySound`; TypeOK + structure checks — `GenMonotone` lives **here**,
+not among the invariants: the spec is `gen`'s only writer, so it cannot fail, and an
+invariant that cannot fail proves nothing (the dropped-run-5q doctrine). Liveness only in a 2-extent deep cfg
+(`RecallResolves`, `FreedEventuallyReusable`) with the BounceStarve caveat: under a
+crash budget, "transiently unavailable forever" needs an unbudgeted limbo constant.
+
+**Cfg matrix** (every mutation single-flag; deliberate must-fail runs marked):
+
+| cfg | arms | verdict |
+|---|---|---|
+| FlintExtents.cfg | shipped world: FenceReaches=FALSE, every belt shipped-TRUE | must HOLD, listing **every invariant except NoStaleExtentRead/Write** — only those two depend on FenceReaches. Excluding CrashRecoverySound / NoConflictingGrants / NoPhysicalAliasing / RecallCompletesBeforeReuse here would leave the shipped belts with zero citable greens, since Target.cfg is uncitable by its own row |
+| FlintExtentsReuseUnderGrant.cfg | RecallBeforeReuse=FALSE | **must VIOLATE** NoStaleExtentWrite (and Read) — the F65-of-extents |
+| FlintExtentsGrantOverlap.cfg | GrantsExclusive=FALSE | **must VIOLATE** NoConflictingGrants |
+| FlintExtentsGrantRace.cfg | PublishRecheck=FALSE | **must VIOLATE** — inherit C6, don't rediscover it |
+| FlintExtentsGrantDuringRecall.cfg | RecallBlocksGrant=FALSE | **must VIOLATE** RecallCompletesBeforeReuse — the RECALLCONFLICT obligation |
+| FlintExtentsLostFence.cfg | all on except FenceReaches | **must VIOLATE** NoStaleExtentWrite — the standing residual (LostRecall analog); the harm is the **write** |
+| FlintExtentsBlindCommit.cfg | ProvisionalInvisible=FALSE | **must VIOLATE** SizeCommitCoupled |
+| FlintExtentsUngatedSize.cfg | CommitGatesSize=FALSE | **must VIOLATE** SizeCommitCoupled — no arm ships without a run that fails without it |
+| FlintExtentsForgedCommit.cfg | CommitChecksGen=FALSE | **must VIOLATE** NoStaleExtentWrite — the fenced client's control path is not fenced (§8) |
+| FlintExtentsBlindFallback.cfg | FallbackChecksGrants=FALSE | **must VIOLATE** NoStaleExtentWrite — the MDS-vs-grant arm (§8 fallback discipline) |
+| FlintExtentsTgtAmnesia.cfg | PersistReservations=FALSE | **must VIOLATE** NoStaleExtentWrite — §5's "PTPL is mandatory", with teeth |
+| FlintExtentsAliasedSplit.cfg | SplitKeepsDisjoint=FALSE | **must VIOLATE** NoPhysicalAliasing |
+| FlintExtentsCrashAmnesia.cfg / RecoverOptimist.cfg | PersistGrants / RecoverConservative =FALSE | **must VIOLATE** CrashRecoverySound |
+| FlintExtentsTarget.cfg | all arms TRUE | HOLDS — conditional green, **cite as goal only** |
+| FlintExtentsProbe*.cfg (one per ghost, ×5) | — | **must VIOLATE** `Probe*Fires` — non-vacuity, no ghost exempt |
+
+Plus a reserved MarkOverwrite-style slot for the first refuted second-belt hypothesis.
+Sizing: 2 clients × 2 files × a 4-block physical domain (extents as block-sets),
+MaxReuses≈2, MaxCrashes≤2, a GenBound-style CONSTRAINT — target 10⁴-10⁶ states,
+breadth invariants-only (temporal checking is ~94% of a flagship run's cost; a cfg
+carries the arms its claim needs and no more). The README's run count and
+`check-tla.sh`'s header count both move with this matrix — that header has a recorded
+history of miscounting, so the bump is a named deliverable, not a side effect.
+
+Layering: byte durability at an extent is an **axiom with no license — say so, don't
+dress it up.** The FlintSnapshots pattern (borrow the substrate's invariants) does not
+apply here: FlintReplication models the consumer-node raid1 machine, and §1 concedes
+block-class volumes are single-replica lvols precisely because that machine cannot
+serve remote pNFS clients — the licensor's guarantees are vacuous for this tier. A
+committed extent's bytes survive exactly as well as one lvol does, and no formal
+durability story exists until server-side replication (§12) lands, at which point
+FlintReplication (or a successor) must be re-scoped to cover it; citing a green
+FlintExtents run as a durability claim would be the axiom laundering itself. And
+control-plane reachability (recall delivery, reservation delivery) is unmodelled
+anywhere in the corpus, so FlintExtents carries it as explicit constants with failing
+runs, never delegates it.
+
+## 10. RDMA
+
+**NVMe-oF/RDMA is free at both ends.** SPDK's target compiles RDMA in our image already
+(`--with-rdma`, Dockerfile.spdk:109, rdma-core in the runtime stage) — enabling it is
+one runtime `nvmf_create_transport {"trtype":"RDMA"}` plus RDMA listeners; the SPDK
+initiator (libflint's data plane) implements it equally. RFC 9561 is explicitly
+transport-independent (§1 — "independent of the underlying transport used by the NVMe
+Controller"). No protocol work on our side at all.
+
+Fabric matrix:
+
+| Fabric | Verdict |
+|---|---|
+| On-prem RoCE / InfiniBand | Yes — standard NVMe-oF/RDMA territory |
+| Azure HBv3 (the planned rig) | Yes — **this is the planned validation site** (Azure South Central plan: Lsv4 DSes + HBv3 RDMA rig) |
+| AWS / EFA | **No** — EFA has no RC verbs; SPDK nvmf RDMA needs RC. The AWS answer is NVMe/TCP + ENA Express, full stop |
+
+Strategic note: this *demotes* the RDMA workstream's M2 for the fast tier. M2
+(RPC-over-RDMA chunked READ/WRITE, M1 proven on lima Soft-RoCE) becomes the **file-tier
+RDMA story** — still worth having for the general-purpose tier, no longer the fast
+tier's path to zero-copy. The block tier gets RDMA by flipping a transport flag.
+
+## 11. Phasing
+
+Each phase ships standalone value; none is gated on the next.
+
+1. **MDS allocator + full wire surface behind the per-volume gate, under FlintExtents
+   + drills.** Enum fix (§1), FlintExtents module + full cfg matrix green in
+   `check-tla.sh`, allocator with sqlite schema, LAYOUTGET/LAYOUTCOMMIT arms, the
+   `pnfs_scsi_deviceaddr4` GETDEVICEINFO encoder with real TOOSMALL/maxcount handling
+   (§5), per-volume FATTR4_FS_LAYOUT_TYPES + LAYOUT_BLKSIZE at every emitting site
+   (§3/§4a), mdsbench A/B. No client; the wire surface is **present but gated
+   per-volume, off by default** — not "no wire change", which would contradict the
+   next sentence: flipping pynfs's BLOCK tests requires answering block-layout ops on
+   the wire. Standalone value: the model and the allocator are testable against pynfs
+   `st_getdevicelist` on a block-class test export — the pinned baseline's 3
+   expected-fail BLOCK tests (`mds-sharding-plan.md`) flip to in-scope.
+2. **Fencing machinery + stock-kernel validation on lima/kind with nvme-tcp.** This
+   phase *builds* what it then proves — each item here belongs to no earlier phase and
+   must not fall into the gap: the MDS's NVMe initiator with stable hostnqn+hostid and
+   reservation acquire/preempt orchestration (§5 consequence 1, §8 crash recovery),
+   the grant/recall-driven add_host/remove_host rework of `converge_hosts` (§5), the
+   udev rule shipping in csi-node (§4a), per-node hostnqn registration via
+   ControllerPublish (§5). Rig prerequisite: client kernel **≥ 6.11 with
+   CONFIG_PNFS_BLOCK** — stock lima images and Ubuntu 24.04 (6.8) sit below the floor,
+   and a below-floor client silently validates MDS I/O instead of the thing under test
+   (§4a). Lima runs a full Linux server+client rig with no cluster (the v4.2
+   copy/sparse precedent); kind runs real spdk-tgt. Prove: device resolution (udev
+   rule), reads/writes/LAYOUTCOMMIT, fencing via reservations with PTPL across a tgt
+   restart, blksize ≤ 4 KiB advertisement.
+3. **Chart class + NetworkPolicy + roll-safety hardening.** `pnfs-block` SC, 4420
+   policy (with the hostNetwork caveat resolved or documented), discriminator ctx key,
+   unstage ordering fix. **Prerequisite, not optional**: today's roll orchestration is
+   blind to remote initiators — the consumer model is `volumes[].consumer`, so a "safe"
+   roll restarts a tgt under N live clients with zero signal; and the nvmeof preStop
+   deletes subsystems out from under them. The MDS layout table feeds the roller
+   (or ANA-INACCESSIBLE draining + CB_LAYOUTRECALL before preStop). The drain-roll
+   chart flag is already **ON by default since 1.22.0** (drill 3.14 passed on runap ×4
+   and again on runar) — what remains from that work is its LOCAL half (A2, rolling a
+   node that hosts consumers; design-only,
+   `docs/f62-local-half-outage-and-blind-barrier.md`), on top of the remote-initiator
+   blindness above. GA also gains a **kernel admission check**: csi-node verifies
+   kernel ≥ 6.11 + blocklayout module per node and refuses/labels block-class
+   scheduling otherwise, with the MDS block-lane meter (§6, F68 precedent) as the
+   backstop degradation detector.
+4. **Registry storage driver on the userspace library.** libflint (metadata client +
+   SPDK TCP initiator), surfaced as the OCI-registry driver per
+   `docs/oci-registry-pnfs-architecture.md`.
+5. **RDMA on the Azure rig.** HBv3 validation of NVMe-oF/RDMA end-to-end, including
+   the kernel pr_ops preempt path over the fabric (individually confirmed both sides,
+   never tested in combination — §12).
+
+## 12. Risks and open questions
+
+- **Capacity semantics become real.** The file layout inherited allocation, sparse
+  semantics, and ENOSPC from ext4. The allocator now owns: real allocation at LAYOUTGET
+  time, real expansion (§7), thin provisioning policy, and an ENOSPC story that isn't
+  "fallback FailFasts and the app sees EIO" (the current runbook residual). Undesigned
+  beyond the sketch in §8; needs its own bounds before phase 3.
+- **Kernel blocklayout maturity.** Mainline since v6.11, near-zero production soak over
+  fabrics, no known production RFC 9561 deployment to learn from. Every client bug
+  degrades silently to MDS I/O, which both masks it and moves its load to the MDS.
+  Mitigation: F68-style metering on the MDS block lane, and the phase-2 lima rig stays
+  a standing regression harness.
+- **Replication for the block tier** (§1 caveat). Server-side raid on the storage node,
+  or MDS-level mirroring across namespaces with the MDS coordinating writes — the
+  latter re-inserts the MDS into the data path and is probably disqualified. Undecided;
+  phase 1-3 ship single-replica with `reclaimPolicy` and workload guidance saying so.
+- **Fencing end-to-end**: Linux pr_ops preempt over nvme-tcp against SPDK's reservation
+  implementation is confirmed on each side, untested in combination. `FenceReaches`
+  stays FALSE in the shipped cfg until the phase-2 rig proves it — and until then GC
+  **quarantines** fenced-holder extents rather than reusing them (§8):
+  reuse-after-unproven-fence is designed out, not accepted as a residual.
+- **CoW / CLONE**: RFC 8154 §2.4.5 gives the extent vocabulary (READ_DATA source +
+  INVALID_DATA dest, client merges); the Linux client expects the *server* to
+  orchestrate CoW. Refcounted extents in the allocator are sketched but unproven;
+  snapshots/clones stay refused for the block class (inherited guard) until designed.
+- **udev landmine longevity**: whether newer systemd creates NGUID by-id links natively
+  is unresolved. We ship the rule regardless; revisit per-distro.
+- **GETDEVICEINFO body size**: volume topology bodies vs the ignored `maxcount` —
+  TOOSMALL handling becomes real; small, but wire-visible if skipped.
+- **Shared free-space accounting across shards** if we ever want a pooled allocator:
+  per-shard sqlite files can't account a shared namespace without static carving.
+  Current answer (per-volume allocation) dodges it; written down so nobody
+  reintroduces a pool "for efficiency" without meeting the sharding invariant.
+
+Cross-references: `docs/decisions/0001-keep-one-driver-defer-pnfs-split.md` (boundary
+discipline — a second layout type is arguably its revisit trigger),
+`docs/decisions/0004-pnfs-cross-host-scaling.md` (file-layout baseline + honest
+caveats), `docs/decisions/0005-pnfs-durable-ds-replication-cost.md` (lvol substrate
+cost; the local-leg read advantage does **not** transfer — block clients are always
+remote), `docs/plans/pnfs-durable-ds-plan.md` (Phase 0 pin-at-first-grant precedent;
+milestone B MDS-HA), `docs/plans/mds-fallback-proxy-plan.md` (§2 refuted cheap fixes,
+§3.6 disposition ladder), `docs/plans/mds-sharding-plan.md` (shard-local allocator
+constraint), `docs/plans/mds-performance-plan.md` (mdsbench budget),
+`docs/pnfs-operator-runbook.md` (trust model → extend to 4420; known residuals;
+truncate machinery the block class retires), `docs/oci-registry-pnfs-architecture.md`
+(§2/§5 ceilings; the registry driver target), `docs/cluster-bringup-runbook.md` (read
+it first before any live gate). Measurements land as ADR 0006+ in `docs/decisions/`
+with raw data in `docs/decisions/data/`, pass criteria declared before the run.
