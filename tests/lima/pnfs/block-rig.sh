@@ -130,7 +130,8 @@ cleanup() {
          pkill -9 -f 'of=$MNT/data.bin'; pkill -9 -f rig-writer.py;
          rm -f /var/tmp/rig-writer.pid /var/tmp/rig-writer.done /var/tmp/rig-writer.err" \
     >/dev/null 2>&1
-  vsudo "umount -lf $MNT 2>/dev/null; nvme disconnect -n $SUBNQN 2>/dev/null" >/dev/null 2>&1
+  vsudo "umount -lf $MNT 2>/dev/null; nvme disconnect -n $SUBNQN 2>/dev/null;
+         rm -rf /var/lib/kubelet/plugins/flint.csi.storage.io/block-sessions" >/dev/null 2>&1
   # Kill AND wait: a half-dead spdk_tgt still holds the core-claim lock
   # AND the 4420 listener, and a successor dies on either. Two traps
   # already paid for here: (1) -x exact comm, NEVER -f — the -f pattern
@@ -298,6 +299,27 @@ LINK=$(vsh "readlink /dev/disk/by-id/nvme-eui.$NGUID" || true)
 echo "$LINK" | grep -c "$NSDEV" >/dev/null \
   || fail "re-stage did not repair the eui link (readlink: '${LINK:-none}')"
 echo "✓ stage is idempotent and re-links (§4a repair proven through production code)"
+
+# ── 6c. session re-establishment (ctrl_loss exhaustion) ──────────────
+# A controller whose ctrl_loss_tmo expires during a long outage is
+# DELETED kernel-side, and kubelet re-runs NodeStage only after a
+# reboot — the reconcile pass (node agent, 30s; here driven once via
+# the CLI) re-establishes it from the durable session record stage
+# wrote. Simulate the exhaustion with a hard disconnect, then one pass
+# must bring the session, device, and link back.
+vsudo "nvme disconnect -n $SUBNQN" >/dev/null || fail "disconnect for the exhaustion drill"
+vsh "test -b /dev/$NSDEV" && fail "device still present after disconnect"
+RE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+     $CSI_CLI reestablish") || fail "reestablish pass errored: $RE"
+echo "$RE" | grep -c 'repaired=1' >/dev/null || fail "pass did not repair the session: $RE"
+# The device may renumber across the fresh connect — re-resolve from
+# the (re-ensured) eui link, and use THAT name from here on.
+NSDEV=$(basename "$(vsh "readlink -f /dev/disk/by-id/nvme-eui.$NGUID")")
+vsh "test -b /dev/$NSDEV" || fail "no block device behind the eui link after reestablish"
+# A second pass is a no-op (controller present → not ours to touch).
+RE2=$(vsudo "$CSI_CLI reestablish") || fail "no-op pass errored"
+echo "$RE2" | grep -c 'repaired=0' >/dev/null || fail "no-op pass repaired something: $RE2"
+echo "✓ session re-established from the durable record: /dev/$NSDEV (second pass no-op)"
 
 # ── 7. mount the VOLUME SUBDIR (the CSI shape — fsinfo must read the
 #       scsi class, not the pseudo-root's files advertisement) ────────
@@ -953,6 +975,7 @@ vsudo "umount $MNT" || fail "umount before unstage"
 UNSTAGE=$(vsudo "$CSI_CLI unstage --volume-id $VOL") || fail "pnfs-csi-cli unstage"
 echo "$UNSTAGE" | grep -c 'disconnected=true' >/dev/null || fail "unstage did not disconnect: $UNSTAGE"
 echo "$UNSTAGE" | grep -c 'link_removed=true' >/dev/null || fail "unstage left the eui link: $UNSTAGE"
+echo "$UNSTAGE" | grep -c 'record_removed=true' >/dev/null || fail "unstage left the session record: $UNSTAGE"
 vsh "test -e /dev/disk/by-id/nvme-eui.$NGUID" \
   && fail "eui link still present after unstage (the dangling-link landmine)"
 vsh "$CSI_CLI detach --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)" >/dev/null \

@@ -32,6 +32,12 @@
 //!       NGUID, tear the session down (link first, then disconnect).
 //!       No endpoint — teardown is node-local, like NodeUnstage itself.
 //!
+//!   pnfs-csi-cli reestablish
+//!     → one pass of `pnfs_block_session::reestablish_sessions` (what
+//!       the node agent runs on a timer): re-run ensure_session for
+//!       every durable record whose kernel controller is gone. Prints
+//!       `records=N repaired=N failed=N`. Node-local, no endpoint.
+//!
 //! Errors go to stderr and surface as a non-zero exit code with the
 //! `PnfsError` variant in the message, so shell scripts can grep on
 //! it. JSON output is single-line so simple `jq -r` extraction works.
@@ -48,7 +54,8 @@ fn usage() -> ! {
          pnfs-csi-cli attach --endpoint <host:port> --volume-id <id> --node <name>\n  \
          pnfs-csi-cli detach --endpoint <host:port> --volume-id <id> --node <name>\n  \
          pnfs-csi-cli stage --endpoint <host:port> --volume-id <id> --node <name>\n  \
-         pnfs-csi-cli unstage --volume-id <id>"
+         pnfs-csi-cli unstage --volume-id <id>\n  \
+         pnfs-csi-cli reestablish"
     );
     std::process::exit(2);
 }
@@ -89,6 +96,12 @@ async fn main() -> ExitCode {
             _ => usage(),
         }
         i += 2;
+    }
+    if args[1] == "reestablish" {
+        let (records, repaired, failed) =
+            spdk_csi_driver::pnfs_block_session::reestablish_sessions().await;
+        println!("records={records} repaired={repaired} failed={failed}");
+        return if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) };
     }
     let volume_id = volume_id.unwrap_or_else(|| usage());
     // Everything except unstage talks to the MDS.

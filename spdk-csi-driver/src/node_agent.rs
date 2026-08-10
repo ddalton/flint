@@ -513,6 +513,41 @@ impl NodeAgent {
             }
         });
 
+        // pnfs-block session re-establishment: a kernel controller whose
+        // ctrl_loss_tmo expired during a long tgt outage is DELETED, and
+        // nothing else re-creates it (kubelet re-runs NodeStage only
+        // after a reboot). This pass re-runs ensure_session from the
+        // durable per-volume records stage wrote. Always armed — with no
+        // block volumes ever staged the records dir is absent and each
+        // tick is a no-op stat.
+        let session_task = tokio::spawn(async move {
+            let secs = std::env::var("FLINT_PNFS_SESSION_RECONCILE_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(30);
+            if secs == 0 {
+                warn!(
+                    "[NODE_AGENT] block-session reconcile DISABLED \
+                     (FLINT_PNFS_SESSION_RECONCILE_SECS=0) — a controller lost to \
+                     ctrl_loss_tmo stays lost until reboot"
+                );
+                std::future::pending::<()>().await; // keep the select arm alive
+            }
+            let mut tick = interval(Duration::from_secs(secs));
+            tick.tick().await; // skip the immediate tick — stage just ran or will
+            loop {
+                tick.tick().await;
+                let (records, repaired, failed) =
+                    crate::pnfs_block_session::reestablish_sessions().await;
+                if repaired > 0 || failed > 0 {
+                    info!(
+                        records, repaired, failed,
+                        "[NODE_AGENT] block-session reconcile pass"
+                    );
+                }
+            }
+        });
+
         // Setup HTTP API routes
         let routes = self.setup_routes();
 
@@ -529,7 +564,7 @@ impl NodeAgent {
         // ANY arm completing here is a PARTIAL DEATH, never a shutdown, and
         // until 2026-07-30 it was SILENT.
         //
-        // The four loops are `tokio::spawn` handles, so select! dropping them
+        // The five loops are `tokio::spawn` handles, so select! dropping them
         // DETACHES (they keep running); the warp future is NOT spawned, so
         // dropping it CANCELS the HTTP server. So whichever arm wins, the
         // usual outcome is: the node agent's API on 9081 is gone while the
@@ -544,7 +579,7 @@ impl NodeAgent {
         // is a separate native sidecar, so a driver-container restart does not
         // touch the data path, and boot rehydrate is the designed recovery.
         //
-        // All five arms are infinite (`loop { interval.tick().await; ... }`, and
+        // All six arms are infinite (`loop { interval.tick().await; ... }`, and
         // warp::serve().run() never returns), so completion here always means a
         // genuine failure — there is no benign path that could crash-loop us.
         let died = tokio::select! {
@@ -553,6 +588,7 @@ impl NodeAgent {
             _ = monitor_task    => "reconcile/health monitor loop",
             _ = detector_task   => "data-path detector loop",
             _ = loss_task       => "export loss-detector loop",
+            _ = session_task    => "block-session reconcile loop",
         };
 
         error!(

@@ -65,6 +65,139 @@ pub fn install_udev_rule() -> Result<bool, String> {
     Ok(true)
 }
 
+/// Where durable per-volume session records live — what makes a
+/// session RE-ESTABLISHABLE after the kernel deletes its controller
+/// (ctrl_loss_tmo exhausted during a long tgt outage; nothing else
+/// remembers the coordinates node-side, and kubelet only re-runs
+/// NodeStage after a reboot). Default is under the kubelet plugins
+/// dir, which the chart mounts at the same path in-container as on
+/// the host; `FLINT_PNFS_SESSION_DIR` overrides (the rig).
+fn session_dir() -> std::path::PathBuf {
+    std::env::var("FLINT_PNFS_SESSION_DIR")
+        .unwrap_or_else(|_| {
+            "/var/lib/kubelet/plugins/flint.csi.storage.io/block-sessions".to_string()
+        })
+        .into()
+}
+
+/// Record filename for a subsystem NQN: the volume id it encodes
+/// (`…:block:<volume>`), falling back to a sanitized NQN. Volume ids
+/// are `pvc-<uuid>[~m<shard>]` — filesystem-safe by construction.
+fn record_name(subnqn: &str) -> String {
+    match subnqn.rsplit_once(":block:") {
+        Some((_, vol)) if !vol.is_empty() => vol.to_string(),
+        _ => subnqn.replace(['/', ':'], "_"),
+    }
+}
+
+/// Serialize a session record (KEY=VALUE lines — no serde in this
+/// module, and the values (NQNs, addresses, ports) contain no '=' or
+/// newlines by construction).
+fn render_session_record(attach: &BlockAttach) -> String {
+    format!(
+        "traddr={}\ntrsvcid={}\nsubnqn={}\nnguid={}\nhost_nqn={}\n",
+        attach.traddr, attach.trsvcid, attach.subnqn, attach.nguid, attach.host_nqn
+    )
+}
+
+/// Parse the record back. Corrupted records error (the caller logs and
+/// skips — a bad record must not kill the reconcile pass).
+fn parse_session_record(s: &str) -> Result<BlockAttach, String> {
+    let mut traddr = None;
+    let mut trsvcid = None;
+    let mut subnqn = None;
+    let mut nguid = None;
+    let mut host_nqn = None;
+    for line in s.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        match k {
+            "traddr" => traddr = Some(v.to_string()),
+            "trsvcid" => trsvcid = v.parse::<u16>().ok(),
+            "subnqn" => subnqn = Some(v.to_string()),
+            "nguid" => nguid = Some(v.to_string()),
+            "host_nqn" => host_nqn = Some(v.to_string()),
+            _ => {}
+        }
+    }
+    match (traddr, trsvcid, subnqn, nguid, host_nqn) {
+        (Some(traddr), Some(trsvcid), Some(subnqn), Some(nguid), Some(host_nqn))
+            if !traddr.is_empty() && !subnqn.is_empty() && !nguid.is_empty()
+                && !host_nqn.is_empty() =>
+        {
+            Ok(BlockAttach { traddr, trsvcid, subnqn, nguid, host_nqn })
+        }
+        _ => Err("missing or empty fields".into()),
+    }
+}
+
+fn write_session_record(attach: &BlockAttach) -> Result<(), String> {
+    let dir = session_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join(record_name(&attach.subnqn));
+    std::fs::write(&path, render_session_record(attach))
+        .map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+fn remove_session_record(subnqn: &str) -> bool {
+    std::fs::remove_file(session_dir().join(record_name(subnqn))).is_ok()
+}
+
+/// One pass of session re-establishment: for every durable record
+/// whose subsystem has NO kernel controller — the ctrl_loss-exhaustion
+/// signature; a controller merely `connecting` is left to its own
+/// reconnect policy — re-run `ensure_session` from the record. No MDS
+/// call: the admission is durable server-side, so this works through
+/// an MDS outage too, and a node that was fenced meanwhile gets a loud
+/// connect refusal rather than a silent re-entry.
+///
+/// Returns `(records, repaired, failed)`.
+pub async fn reestablish_sessions() -> (usize, usize, usize) {
+    let Ok(entries) = std::fs::read_dir(session_dir()) else {
+        return (0, 0, 0); // no dir = no block volumes ever staged here
+    };
+    let (mut records, mut repaired, mut failed) = (0usize, 0usize, 0usize);
+    for entry in entries.flatten() {
+        let Ok(content) = std::fs::read_to_string(entry.path()) else { continue };
+        records += 1;
+        let attach = match parse_session_record(&content) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!(
+                    "corrupt block-session record {:?}: {} — skipped (unstage of the \
+                     volume removes it)",
+                    entry.file_name(),
+                    e
+                );
+                failed += 1;
+                continue;
+            }
+        };
+        if controller_for_nqn(&attach.subnqn).is_some() {
+            continue; // present (live or reconnecting) — not ours to touch
+        }
+        tracing::warn!(
+            "block session for {} has NO kernel controller (ctrl_loss exhausted \
+             during an outage?) — re-establishing from the durable record",
+            attach.subnqn
+        );
+        match ensure_session(&attach).await {
+            Ok(dev) => {
+                tracing::info!("🔌 block session re-established: {} → {}", attach.subnqn, dev);
+                repaired += 1;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "block session re-establish for {} FAILED: {} — retried next pass",
+                    attach.subnqn, e
+                );
+                failed += 1;
+            }
+        }
+    }
+    (records, repaired, failed)
+}
+
 /// Establish (or repair) the volume's nvme-tcp session and return the
 /// resolved namespace device path (`/dev/nvmeXnY`).
 pub async fn ensure_session(attach: &BlockAttach) -> Result<String, String> {
@@ -128,6 +261,17 @@ pub async fn ensure_session(attach: &BlockAttach) -> Result<String, String> {
     // point at a dead name — both repaired here.
     ensure_eui_link(&attach.nguid, &dev)?;
 
+    // The durable record that makes this session survivable past
+    // ctrl_loss exhaustion (see `reestablish_sessions`). Loud, not
+    // fatal — an unwritable record dir degrades to the pre-record
+    // behaviour, never to a failed stage.
+    if let Err(e) = write_session_record(attach) {
+        eprintln!(
+            "⚠️  [pNFS-BLOCK] could not persist the session record: {e} — a \
+             controller lost to ctrl_loss_tmo will NOT be re-established on this node"
+        );
+    }
+
     Ok(dev)
 }
 
@@ -139,6 +283,12 @@ pub async fn ensure_session(attach: &BlockAttach) -> Result<String, String> {
 /// early).
 pub async fn teardown_session(subnqn: &str, nguid: &str) -> Result<String, String> {
     let mut errors: Vec<String> = Vec::new();
+    // The record goes FIRST: with it gone, a concurrently ticking
+    // `reestablish_sessions` pass cannot see "controller missing +
+    // record present" mid-teardown and resurrect the session we are
+    // taking down. A failed teardown retries with the record already
+    // gone — absent is the desired end state either way.
+    let record_removed = remove_session_record(subnqn);
     let link = eui_link_path(nguid);
     let link_removed = match std::fs::remove_file(&link) {
         Ok(()) => true,
@@ -168,7 +318,8 @@ pub async fn teardown_session(subnqn: &str, nguid: &str) -> Result<String, Strin
 
     if errors.is_empty() {
         Ok(format!(
-            "session torn down (disconnected={disconnected} link_removed={link_removed})"
+            "session torn down (disconnected={disconnected} link_removed={link_removed} \
+             record_removed={record_removed})"
         ))
     } else {
         Err(errors.join("; "))
@@ -358,6 +509,34 @@ mod tests {
         // Non-nvme names never classify as path devices.
         assert!(!is_multipath_path_device("sda"));
         assert!(!is_multipath_path_device("nvmec0n1"), "no controller digits, no verdict");
+    }
+
+    #[test]
+    fn session_records_round_trip_and_reject_corruption() {
+        let attach = BlockAttach {
+            traddr: "10.0.0.9".into(),
+            trsvcid: 4420,
+            subnqn: "nqn.2024-11.com.flint:block:pvc-x~m0".into(),
+            nguid: "aabbccdd112233445566778899aabbcc".into(),
+            host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
+        };
+        let rendered = render_session_record(&attach);
+        assert_eq!(parse_session_record(&rendered).unwrap(), attach);
+
+        // The filename is the volume id the subnqn encodes — shard pin
+        // included (one record per staged volume).
+        assert_eq!(record_name(&attach.subnqn), "pvc-x~m0");
+        assert_eq!(record_name("nqn.weird:no-block-part"), "nqn.weird_no-block-part");
+
+        // Corruption refuses instead of yielding a half-parsed attach
+        // the pass would then connect with.
+        assert!(parse_session_record("").is_err());
+        assert!(parse_session_record("traddr=10.0.0.9\ntrsvcid=x\n").is_err());
+        let truncated = rendered.lines().take(3).collect::<Vec<_>>().join("\n");
+        assert!(parse_session_record(&truncated).is_err());
+        // Unknown keys are ignored (forward compatibility).
+        let extended = format!("{rendered}future_key=whatever\n");
+        assert_eq!(parse_session_record(&extended).unwrap(), attach);
     }
 
     #[test]
