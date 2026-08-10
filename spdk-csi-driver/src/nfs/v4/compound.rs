@@ -2606,7 +2606,10 @@ impl CompoundResponse {
             OperationResult::GetDeviceInfo(status, data) => {
                 encoder.encode_u32(opcode::GETDEVICEINFO);
                 encoder.encode_status(status);
-                if status == Nfs4Status::Ok {
+                // GETDEVICEINFO4res carries a body on TOOSMALL too:
+                // gdir_mincount (RFC 8881 §18.40), so the client can
+                // retry with a big enough buffer instead of guessing.
+                if status == Nfs4Status::Ok || status == Nfs4Status::TooSmall {
                     if let Some(device_data) = data {
                         encoder.append_raw(&device_data);
                     }

@@ -912,6 +912,32 @@ impl LayoutManager {
         self.geometry_for(file_key).layout_class
     }
 
+    /// The state backend, for the dispatcher's scsi extent
+    /// transactions (the dispatcher is the async context; the trait
+    /// hands it this Arc rather than growing async allocator methods).
+    pub fn state_backend(&self) -> Arc<dyn crate::state_backend::StateBackend> {
+        Arc::clone(&self.backend)
+    }
+
+    /// Resolve a scsi deviceid — the volume's NGUID — back to its
+    /// volume by scanning the geometry cache's scsi-class entries.
+    /// O(volumes) per call and restart-proof: the identity is derived,
+    /// never remembered, so there is no registry to lose. GETDEVICEINFO
+    /// is once-per-(client, volume) and cached client-side, so the scan
+    /// never sits on a hot path.
+    pub fn scsi_volume_for_deviceid(&self, device_id: &[u8; 16]) -> Option<String> {
+        self.volume_geometry.iter().find_map(|entry| {
+            match entry.value() {
+                Some(g) if g.layout_class == LayoutClass::Scsi => {
+                    let volume = entry.key();
+                    (crate::nvmeof_export::scsi_device_id(volume) == *device_id)
+                        .then(|| volume.clone())
+                }
+                _ => None,
+            }
+        })
+    }
+
     /// Geometry for `volume`, recording `requested` if none is on file.
     ///
     /// Called from the CreateVolume already-exists path, which is a

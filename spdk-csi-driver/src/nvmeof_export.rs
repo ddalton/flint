@@ -121,6 +121,24 @@ pub fn stable_ns_identity(volume_id: &str) -> (String, String) {
     (uuid, hex)
 }
 
+/// The same 16 identity bytes as raw bytes — the pnfs-block class uses
+/// them THREE ways at once, deliberately: as the namespace NGUID on
+/// `nvmf_subsystem_add_ns`, as the GETDEVICEINFO deviceid, and as the
+/// EUI64-form designator inside the scsi device address. One identity
+/// means the kernel's blocklayout device matching (v6.11: designator
+/// bytes vs the namespace's NGUID) succeeds by construction, and a
+/// deviceid resolves back to its volume by scanning volume geometry
+/// (restart-proof: nothing has to be remembered).
+pub fn scsi_device_id(volume_id: &str) -> [u8; 16] {
+    let (_, hex) = stable_ns_identity(volume_id);
+    let mut bytes = [0u8; 16];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .expect("stable_ns_identity emits valid hex");
+    }
+    bytes
+}
+
 /// Fetch the subsystem record for `nqn`, or None if it does not exist.
 /// SPDK returns `-19 No such device` for a missing nqn; that is not an error
 /// here.

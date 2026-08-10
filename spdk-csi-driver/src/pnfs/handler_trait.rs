@@ -226,5 +226,36 @@ pub trait PnfsOperations: Send + Sync {
     // carried on each `Layout`) — a global value is exactly the
     // fleet-change re-mapping bug Phase 0 of the durable-DS plan
     // removed.
+
+    // ── pnfs-block (scsi layout) surface, design doc §5 ──────────────
+    //
+    // The dispatcher owns the scsi LAYOUTGET/COMMIT/RETURN logic (it is
+    // the async context, and the extent ops are backend transactions);
+    // the handler supplies the three sync lookups below. The files-path
+    // methods above are NEVER called for a scsi-class file — the
+    // dispatcher branches on `layout_class_for` first.
+
+    /// Which layout class serves `file_key`'s volume — the per-volume
+    /// dispatch key. Default File keeps every existing handler and
+    /// test fake on the historical path.
+    fn layout_class_for(&self, _file_key: &str) -> crate::pnfs::mds::layout::LayoutClass {
+        crate::pnfs::mds::layout::LayoutClass::File
+    }
+
+    /// The durable state backend carrying the extent allocator, when
+    /// this handler can serve block-class volumes. `None` (the
+    /// default) makes every scsi LAYOUTGET answer LAYOUTUNAVAILABLE —
+    /// a handler that cannot reach the allocator must not pretend.
+    fn extent_backend(&self) -> Option<std::sync::Arc<dyn crate::state_backend::StateBackend>> {
+        None
+    }
+
+    /// Resolve a scsi-class deviceid — which IS the volume's NGUID
+    /// (one identity for GETDEVICEINFO, the namespace, and the
+    /// reservation scope) — back to the volume name. Geometry-cache
+    /// scan; `None` = unknown device.
+    fn scsi_volume_for_deviceid(&self, _device_id: &[u8; 16]) -> Option<String> {
+        None
+    }
 }
 

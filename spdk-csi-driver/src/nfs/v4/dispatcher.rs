@@ -1731,6 +1731,15 @@ impl CompoundDispatcher {
 
             // Locking operations
             Operation::Lock { locktype, reclaim, offset, length, stateid, owner } => {
+                // Per-class refusal (libflint design §3): byte-range
+                // locks are NOTSUPP on scsi-class volumes, refused HERE
+                // where the volume identity is known (lockops has none)
+                // — the honest contract, instead of granting locks the
+                // server's own lease machinery silently drops. LOCKU is
+                // deliberately not gated: releases must always work.
+                if self.scsi_class_cfh(context) {
+                    return OperationResult::Lock(Nfs4Status::NotSupp, None, None);
+                }
                 let stateid = match context.resolve_stateid(stateid) {
                     Some(s) => s,
                     None => return OperationResult::Lock(Nfs4Status::BadStateId, None, None),
@@ -1761,6 +1770,9 @@ impl CompoundDispatcher {
             }
 
             Operation::LockT { locktype, offset, length, owner } => {
+                if self.scsi_class_cfh(context) {
+                    return OperationResult::LockT(Nfs4Status::NotSupp, None);
+                }
                 // Convert u32 to LockType
                 let lock_type = if locktype == 1 {
                     LockType::Read
@@ -2068,7 +2080,7 @@ impl CompoundDispatcher {
             }
             
             Operation::GetDeviceInfo { device_id, layout_type, maxcount, notify_types } => {
-                self.handle_getdeviceinfo(device_id, layout_type, maxcount, notify_types)
+                self.handle_getdeviceinfo(device_id, layout_type, maxcount, notify_types, context)
             }
             
             Operation::LayoutReturn { reclaim, layout_type, iomode, return_body } => {
@@ -2192,6 +2204,19 @@ impl CompoundDispatcher {
             .to_string_lossy()
             .into_owned();
         if key.is_empty() { None } else { Some(key) }
+    }
+
+    /// Whether the CURRENT filehandle lives on a scsi-class
+    /// (pnfs-block) volume. False when there is no pNFS handler, no
+    /// CFH, or the key does not resolve — every "don't know" answers
+    /// File, which keeps the historical path untouched.
+    fn scsi_class_cfh(&self, context: &CompoundContext) -> bool {
+        match (self.pnfs_handler.as_ref(), self.pnfs_current_fh_key(context)) {
+            (Some(p), Some(key)) => {
+                p.layout_class_for(&key) == crate::pnfs::mds::layout::LayoutClass::Scsi
+            }
+            _ => false,
+        }
     }
 
     /// NFS4ERR_NOTSUPP when the CURRENT filehandle names a striped file,
@@ -2321,11 +2346,17 @@ impl CompoundDispatcher {
     /// says nothing about *why*.
     ///
     /// LAYOUTRETURN deliberately does not use this — see the note there.
+    /// (Since the pnfs-block class: type 5, LAYOUT4_SCSI, is also in
+    /// the served set — but only for scsi-class VOLUMES. This function
+    /// answers "does this server speak the type at all"; the per-volume
+    /// policing — a files volume refuses 5, a scsi volume refuses 1 —
+    /// happens in the handlers, where the file's class is known.)
     fn layout_type_served(
         layout_type: u32,
     ) -> Result<crate::pnfs::mds::layout::LayoutType, Nfs4Status> {
         match layout_type {
             1 => Ok(crate::pnfs::mds::layout::LayoutType::NfsV4_1Files),
+            5 => Ok(crate::pnfs::mds::layout::LayoutType::Scsi),
             _ => Err(Nfs4Status::UnknownLayoutType),
         }
     }
@@ -2417,6 +2448,43 @@ impl CompoundDispatcher {
             session_id: owner_session_id,
             fsid: 1,
         };
+
+        // Per-volume class dispatch (design doc §5). A scsi-class
+        // volume's LAYOUTGET is phase-gated to LAYOUTUNAVAILABLE until
+        // the layout-stateid lifecycle lands with the recall tranche —
+        // granting raw extents under a stateid CB_LAYOUTRECALL cannot
+        // find would be F65 rebuilt on purpose. The client falls back
+        // to MDS I/O and the volume functions; the class is env-gated
+        // dark besides. Wrong-type requests refuse loudly either way.
+        if pnfs.layout_class_for(&file_key) == crate::pnfs::mds::layout::LayoutClass::Scsi {
+            if layout_type != 5 {
+                warn!(
+                    "❌ LAYOUTGET type {} on scsi-class volume (file '{}') — serves 5 only",
+                    layout_type, file_key
+                );
+                return OperationResult::LayoutGet(Nfs4Status::UnknownLayoutType, None);
+            }
+            if let Some(m) = &self.f68a {
+                m.layoutget_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            info!(
+                "📄 LAYOUTGET (scsi) '{}' — phase-gated LAYOUTUNAVAILABLE (extent grants \
+                 arrive with the layout-stateid/recall tranche); client uses MDS I/O",
+                file_key
+            );
+            return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+        }
+
+        // The converse policing: a files-class volume serves type 1
+        // only. Refusing here keeps the status honest
+        // (UNKNOWN_LAYOUTTYPE, not a mapped-away LAYOUTUNAVAILABLE).
+        if layout_type == 5 {
+            warn!(
+                "❌ LAYOUTGET type 5 on files-class volume (file '{}') — serves 1 only",
+                file_key
+            );
+            return OperationResult::LayoutGet(Nfs4Status::UnknownLayoutType, None);
+        }
 
         // Convert arguments
         let args = LayoutGetArgs {
@@ -2553,16 +2621,61 @@ impl CompoundDispatcher {
         }
     }
     
+    /// Frame a GETDEVICEINFO success body, honouring `maxcount`: the
+    /// client's declared ceiling for the WHOLE res body. Ignoring it —
+    /// the historical behaviour — was harmless while the files device
+    /// address was tiny; scsi volume-topology bodies made TOOSMALL
+    /// handling real (design doc §5). TOOSMALL replies carry
+    /// gdir_mincount so the client can retry sized right.
+    fn frame_getdeviceinfo_reply(
+        layout_type: u32,
+        dev_addr_encoded: &[u8],
+        maxcount: u32,
+    ) -> OperationResult {
+        use crate::nfs::xdr::XdrEncoder;
+        let padded = (dev_addr_encoded.len() + 3) & !3;
+        let total = 4 + 4 + padded + 4; // type + opaque<len,body> + empty notify bitmap
+        if maxcount > 0 && total as u64 > maxcount as u64 {
+            let mut e = XdrEncoder::new();
+            e.encode_u32(total as u32); // gdir_mincount
+            return OperationResult::GetDeviceInfo(Nfs4Status::TooSmall, Some(e.finish()));
+        }
+        let mut e = XdrEncoder::new();
+        e.encode_u32(layout_type);
+        e.encode_opaque(dev_addr_encoded);
+        e.encode_u32(0); // empty notification bitmap
+        OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(e.finish()))
+    }
+
+    /// The scsi-class device address (RFC 8154 §2.2.2, NVMe designators
+    /// per RFC 9561 §2.1): one BASE volume whose designator is the
+    /// volume's NGUID in EUI64 form — the same 16 bytes the namespace
+    /// carries on `nvmf_subsystem_add_ns`, so the kernel's device
+    /// matching succeeds by construction. `pr_key` is the caller's
+    /// reservation key (per-client, RFC 8154: GETDEVICEINFO is the key
+    /// distribution channel).
+    fn encode_scsi_device_addr(nguid: &[u8; 16], pr_key: u64) -> bytes::Bytes {
+        use crate::nfs::xdr::XdrEncoder;
+        let mut e = XdrEncoder::new();
+        e.encode_u32(1); // sda_volumes<>: one entry
+        e.encode_u32(4); // PNFS_SCSI_VOLUME_BASE
+        e.encode_u32(1); // sd_code_set = PS_CODE_SET_BINARY
+        e.encode_u32(2); // sd_designator_type = PS_DESIGNATOR_EUI64
+        e.encode_opaque(nguid); // sd_designator<>: 16 octets = NGUID form
+        e.encode_u64(pr_key); // sbv_pr_key
+        e.finish()
+    }
+
     fn handle_getdeviceinfo(
         &self,
         device_id: Vec<u8>,
         layout_type: u32,
         _maxcount: u32,
         _notify_types: Vec<u32>,
+        context: &CompoundContext,
     ) -> OperationResult {
         use crate::pnfs::mds::operations::GetDeviceInfoArgs;
         use crate::pnfs::mds::device::DeviceId;
-        use crate::nfs::xdr::XdrEncoder;
         
         // Check if pNFS handler is available
         let pnfs = match &self.pnfs_handler {
@@ -2585,7 +2698,35 @@ impl CompoundDispatcher {
             warn!("❌ Invalid device_id length: {}", device_id.len());
             return OperationResult::GetDeviceInfo(Nfs4Status::NoEnt, None);
         }
-        
+
+        // scsi-class branch: the deviceid IS the volume's NGUID, so it
+        // resolves by geometry scan — nothing remembered, restart-proof.
+        // The pr_key handed out is the caller's client id: stable,
+        // unique per client (server-minted, non-zero), and exactly what
+        // the phase-2 reservation machinery will register and preempt.
+        if layout_type == 5 {
+            let Some(volume) = pnfs.scsi_volume_for_deviceid(&dev_id) else {
+                warn!("❌ GETDEVICEINFO (scsi): unknown deviceid {:02x?}", dev_id);
+                return OperationResult::GetDeviceInfo(Nfs4Status::NoEnt, None);
+            };
+            let pr_key = match context.session_id {
+                Some(sid) => self
+                    .state_mgr
+                    .sessions
+                    .get_session(&sid)
+                    .map(|s| s.client_id)
+                    .unwrap_or(0),
+                None => 0,
+            };
+            if pr_key == 0 {
+                warn!("❌ GETDEVICEINFO (scsi) without a session — no pr_key to hand out");
+                return OperationResult::GetDeviceInfo(Nfs4Status::OpNotInSession, None);
+            }
+            let body = Self::encode_scsi_device_addr(&dev_id, pr_key);
+            info!("📡 GETDEVICEINFO (scsi): volume '{}' → BASE/NGUID device", volume);
+            return Self::frame_getdeviceinfo_reply(layout_type, &body, _maxcount);
+        }
+
         let args = GetDeviceInfoArgs {
             device_id: dev_id,
             layout_type: match Self::layout_type_served(layout_type) {
@@ -2602,19 +2743,9 @@ impl CompoundDispatcher {
         
         match pnfs.getdeviceinfo(args) {
             Ok(result) => {
-                // Encode device address
-                let mut encoder = XdrEncoder::new();
-                encoder.encode_u32(layout_type);
-
                 let dev_addr_encoded = Self::encode_device_addr(&result.device_addr);
-
-                encoder.encode_opaque(&dev_addr_encoded);
-                
-                // Notification (empty for now)
-                encoder.encode_u32(0);  // Empty notification array
-                
                 debug!("✅ GETDEVICEINFO successful");
-                OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(encoder.finish()))
+                Self::frame_getdeviceinfo_reply(layout_type, &dev_addr_encoded, _maxcount)
             }
             Err(_e) => {
                 warn!("❌ GETDEVICEINFO failed");
@@ -2759,6 +2890,16 @@ impl CompoundDispatcher {
         let lt = match layout_type {
             1 => LayoutType::NfsV4_1Files,
             4 => LayoutType::FlexFiles,  // RFC 8435 — accepted on return only
+            5 => {
+                // scsi-class returns: nothing is grantable yet (LAYOUTGET
+                // is phase-gated), so there is nothing to return — but a
+                // client's unmount-time LAYOUTRETURN ALL carries the type
+                // of the driver it loaded, and refusing it would error a
+                // benign cleanup. Accept as a no-op success; the real
+                // extent_layout_return wiring lands with the
+                // stateid/recall tranche.
+                return OperationResult::LayoutReturn(Nfs4Status::Ok);
+            }
             _ => return OperationResult::LayoutReturn(Nfs4Status::UnknownLayoutType),
         };
         let im = match iomode {
@@ -2880,6 +3021,91 @@ impl CompoundDispatcher {
         let commit_ceiling = self
             .pnfs_current_fh_key(context)
             .and_then(|k| self.pnfs_handler.as_ref().and_then(|p| p.truncate_gate_ceiling(&k)));
+
+        // pnfs-block (scsi class): the allocator half runs FIRST, and a
+        // refusal aborts before any size change — the transactional
+        // coupling FlintExtents' UngatedSize mutation exists for (the
+        // half-stub world is exactly "the size half lands while the
+        // range half refuses"). Two stores are involved (sqlite, then
+        // the stub file), so the coupling is ORDERING: size never
+        // advances on a refused commit, and a crash between the two
+        // leaves promotion-without-size — the safe direction (committed
+        // extents beyond size are simply not yet visible).
+        if let Some(key) = self.pnfs_current_fh_key(context) {
+            let scsi = self
+                .pnfs_handler
+                .as_ref()
+                .map(|p| p.layout_class_for(&key) == crate::pnfs::mds::layout::LayoutClass::Scsi)
+                .unwrap_or(false);
+            if scsi {
+                if _layout_type != 5 {
+                    warn!("❌ LAYOUTCOMMIT type {} on scsi-class volume — serves 5 only", _layout_type);
+                    return OperationResult::LayoutCommit(Nfs4Status::UnknownLayoutType, None);
+                }
+                let backend = match self.pnfs_handler.as_ref().and_then(|p| p.extent_backend()) {
+                    Some(b) => b,
+                    None => {
+                        warn!("❌ LAYOUTCOMMIT (scsi): no extent backend on this handler");
+                        return OperationResult::LayoutCommit(Nfs4Status::ServerFault, None);
+                    }
+                };
+                let client_id = match context.session_id {
+                    Some(sid) => self
+                        .state_mgr
+                        .sessions
+                        .get_session(&sid)
+                        .map(|s| s.client_id)
+                        .unwrap_or(0),
+                    None => 0,
+                };
+                if client_id == 0 {
+                    return OperationResult::LayoutCommit(Nfs4Status::OpNotInSession, None);
+                }
+                let Some(volume) =
+                    key.split('/').find(|c| !c.is_empty()).map(str::to_string)
+                else {
+                    return OperationResult::LayoutCommit(Nfs4Status::BadLayout, None);
+                };
+                // file_id = the stub's inode, the same identity the
+                // fileid attribute reports — stable across rename,
+                // fresh per re-create, which is what keys the extent
+                // tables per file.
+                use std::os::unix::fs::MetadataExt;
+                let file_id = match std::fs::metadata(&path) {
+                    Ok(m) => m.ino(),
+                    Err(e) => {
+                        warn!("❌ LAYOUTCOMMIT (scsi): stat {:?}: {}", path, e);
+                        return OperationResult::LayoutCommit(Nfs4Status::Stale, None);
+                    }
+                };
+                // Clamp the range into the allocator's i64 domain;
+                // u64::MAX means to-EOF and every real commit list fits.
+                let length = _length.min((i64::MAX as u64).saturating_sub(_offset));
+                match backend
+                    .extent_commit(&volume, file_id, client_id, _offset, length)
+                    .await
+                {
+                    Ok(Ok(promoted)) => {
+                        info!(
+                            "📥 LAYOUTCOMMIT (scsi): '{}' [{}, +{}) promoted {} extent(s)",
+                            key, _offset, length, promoted
+                        );
+                        // Fall through to the shared size path below.
+                    }
+                    Ok(Err(verdict)) => {
+                        // The (client, gen)-validation refused: a stale,
+                        // fenced, or forged commit. BADLAYOUT, and no
+                        // size change happens — that is the point.
+                        warn!("❌ LAYOUTCOMMIT (scsi) refused: '{}': {}", key, verdict);
+                        return OperationResult::LayoutCommit(Nfs4Status::BadLayout, None);
+                    }
+                    Err(e) => {
+                        warn!("❌ LAYOUTCOMMIT (scsi) backend error: '{}': {}", key, e);
+                        return OperationResult::LayoutCommit(Nfs4Status::ServerFault, None);
+                    }
+                }
+            }
+        }
 
         // The open/set_len/set_times sequence hits the export's backing
         // device — run it on the blocking pool, not an async worker.
@@ -4139,9 +4365,14 @@ mod tests {
     /// operations that emit a layout-typed body must refuse everything
     /// else rather than answer with a mislabelled one.
     #[test]
-    fn only_the_files_layout_type_is_served() {
+    fn only_the_served_layout_types_are_accepted() {
         assert_eq!(CompoundDispatcher::layout_type_served(1),
                    Ok(crate::pnfs::mds::layout::LayoutType::NfsV4_1Files));
+        // Since the pnfs-block class: LAYOUT4_SCSI is in the served set
+        // (per-volume policing — a files volume still refuses 5 — lives
+        // in the handlers, where the file's class is known).
+        assert_eq!(CompoundDispatcher::layout_type_served(5),
+                   Ok(crate::pnfs::mds::layout::LayoutType::Scsi));
 
         // Type 4 is the one that mattered: it used to be ACCEPTED here
         // and then answered NFS4_OK with a body tagged type 1.
@@ -4150,11 +4381,56 @@ mod tests {
 
         // RFC 8881 §15.1: the error is UNKNOWN_LAYOUTTYPE (10062), not
         // the generic NOTSUPP this used to return for 2 and 3.
-        for t in [0u32, 2, 3, 5, 99, u32::MAX] {
+        for t in [0u32, 2, 3, 99, u32::MAX] {
             assert_eq!(CompoundDispatcher::layout_type_served(t),
                        Err(Nfs4Status::UnknownLayoutType), "layout type {}", t);
         }
         assert_eq!(Nfs4Status::UnknownLayoutType as u32, 10062);
+    }
+
+    /// Golden bytes for the scsi device address (RFC 8154 §2.2.2): one
+    /// BASE volume, BINARY code set, EUI64-form designator carrying the
+    /// 16-byte NGUID, then the caller's pr_key. The kernel's blocklayout
+    /// driver parses this strictly; the framing is pinned here the way
+    /// tests/layoutget_encoding_test.rs pins the files layout.
+    #[test]
+    fn scsi_device_addr_encoding_shape() {
+        let nguid: [u8; 16] = *b"0123456789abcdef";
+        let body = CompoundDispatcher::encode_scsi_device_addr(&nguid, 0xDEAD_BEEF_CAFE_F00D);
+        let mut want = bytes::BytesMut::new();
+        want.extend_from_slice(&1u32.to_be_bytes());  // sda_volumes<> len
+        want.extend_from_slice(&4u32.to_be_bytes());  // PNFS_SCSI_VOLUME_BASE
+        want.extend_from_slice(&1u32.to_be_bytes());  // PS_CODE_SET_BINARY
+        want.extend_from_slice(&2u32.to_be_bytes());  // PS_DESIGNATOR_EUI64
+        want.extend_from_slice(&16u32.to_be_bytes()); // sd_designator len
+        want.extend_from_slice(&nguid);               // 16 bytes, no pad needed
+        want.extend_from_slice(&0xDEAD_BEEF_CAFE_F00Du64.to_be_bytes());
+        assert_eq!(&body[..], &want[..]);
+    }
+
+    /// maxcount is honoured, and TOOSMALL replies carry gdir_mincount.
+    #[test]
+    fn getdeviceinfo_maxcount_toosmall_carries_mincount() {
+        let body = [0u8; 40];
+        // Total = 4 (type) + 4 (opaque len) + 40 + 4 (notify) = 52.
+        match CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 51) {
+            OperationResult::GetDeviceInfo(Nfs4Status::TooSmall, Some(b)) => {
+                assert_eq!(&b[..], &52u32.to_be_bytes());
+            }
+            other => panic!("expected TooSmall with mincount, got {:?}", other),
+        }
+        match CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 52) {
+            OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(b)) => {
+                assert_eq!(b.len(), 52);
+                assert_eq!(&b[0..4], &5u32.to_be_bytes(), "echoes the layout type");
+            }
+            other => panic!("expected Ok, got {:?}", other),
+        }
+        // maxcount 0 = the client declared no ceiling.
+        assert!(matches!(
+            CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 0),
+            OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(_))
+        ));
     }
 }
 

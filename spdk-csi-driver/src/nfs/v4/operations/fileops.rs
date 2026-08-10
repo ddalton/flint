@@ -890,11 +890,21 @@ const SUPPORTED_ATTRS_BITMAP: u64 = (1u64 << FATTR4_TYPE)
 /// malformed body. Block (RFC 5663/8154/9561, type 3 — NOT 2, the old
 /// comment here had OSD2/BLOCK swapped like the LayoutType enum did)
 /// requires the extent allocator that doesn't exist yet.
-fn encode_fs_layout_types(buf: &mut BytesMut, pnfs_enabled: bool) -> bool {
+/// `scsi` = the file lives on a pnfs-block volume: advertise
+/// LAYOUT4_SCSI (5, RFC 8154/9561 — the type the kernel's v6.11 NVMe
+/// support serves) instead of FILES. Per-volume: the client mounts the
+/// volume subtree, so the fsinfo that picks its layout driver hits the
+/// volume directory and gets that volume's class.
+fn encode_fs_layout_types(buf: &mut BytesMut, pnfs_enabled: bool, scsi: bool) -> bool {
     if pnfs_enabled {
-        debug!("  FS_LAYOUT_TYPES (attr 62) → [FILES]");
         buf.put_u32(1); // array length
-        buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
+        if scsi {
+            debug!("  FS_LAYOUT_TYPES (attr 62) → [SCSI]");
+            buf.put_u32(5); // LAYOUT4_SCSI
+        } else {
+            debug!("  FS_LAYOUT_TYPES (attr 62) → [FILES]");
+            buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
+        }
         true
     } else {
         debug!("  FS_LAYOUT_TYPES (attr 62) - skipped (pNFS disabled)");
@@ -902,13 +912,18 @@ fn encode_fs_layout_types(buf: &mut BytesMut, pnfs_enabled: bool) -> bool {
     }
 }
 
-/// See `encode_fs_layout_types`. 4 MiB matches the default stripe size;
-/// gated on pNFS like FS_LAYOUT_TYPES (the previously-divergent arm
-/// emitted it unconditionally — unified 2026-08-09, deliberate).
-fn encode_layout_blksize(buf: &mut BytesMut, pnfs_enabled: bool) -> bool {
+/// See `encode_fs_layout_types`. 4 MiB matches the default stripe size
+/// for the files class; the scsi class advertises 4 KiB — RFC 8154's
+/// wire blksize is the extent-alignment unit, and §8 bounds it ≤ 4 KiB
+/// (one commit list can shatter a 4 Mi extent into blksize rows, so
+/// the unit is small by design). Gated on pNFS like FS_LAYOUT_TYPES
+/// (the previously-divergent arm emitted it unconditionally — unified
+/// 2026-08-09, deliberate).
+fn encode_layout_blksize(buf: &mut BytesMut, pnfs_enabled: bool, scsi: bool) -> bool {
     if pnfs_enabled {
-        debug!("  LAYOUT_BLKSIZE (attr 65) → 4194304");
-        buf.put_u32(4_194_304);
+        let blksize: u32 = if scsi { 4096 } else { 4_194_304 };
+        debug!("  LAYOUT_BLKSIZE (attr 65) → {}", blksize);
+        buf.put_u32(blksize);
         true
     } else {
         debug!("  LAYOUT_BLKSIZE (attr 65) - skipped (pNFS disabled)");
@@ -1010,7 +1025,7 @@ fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32], pnfs_enab
     };
 
     // Use the standard snapshot encoder for consistency
-    encode_attributes_from_snapshot(requested_attrs, &snapshot, pnfs_enabled)
+    encode_attributes_from_snapshot(requested_attrs, &snapshot, pnfs_enabled, false)
 }
 
 /// Encode attributes from a snapshot (NO VFS I/O)
@@ -1023,6 +1038,7 @@ fn encode_attributes_from_snapshot(
     requested_bitmap: &[u32],
     snapshot: &AttributeSnapshot,
     pnfs_enabled: bool,
+    scsi: bool,
 ) -> (Vec<u8>, Vec<u32>) {
     use std::collections::BTreeSet;
     
@@ -1256,8 +1272,8 @@ fn encode_attributes_from_snapshot(
                 attr_vals.put_u32((supported >> 32) as u32);
                 true
             }
-            FATTR4_FS_LAYOUT_TYPES => encode_fs_layout_types(&mut attr_vals, pnfs_enabled),
-            FATTR4_LAYOUT_BLKSIZE => encode_layout_blksize(&mut attr_vals, pnfs_enabled),
+            FATTR4_FS_LAYOUT_TYPES => encode_fs_layout_types(&mut attr_vals, pnfs_enabled, scsi),
+            FATTR4_LAYOUT_BLKSIZE => encode_layout_blksize(&mut attr_vals, pnfs_enabled, scsi),
             _ => {
                 debug!("  Attribute {} not supported in snapshot encoder", attr_id);
                 false
@@ -1407,8 +1423,8 @@ fn encode_pseudo_root_attribute(
             buf.put_u32(0);
             true
         }
-        FATTR4_FS_LAYOUT_TYPES => encode_fs_layout_types(buf, pnfs_enabled),
-        FATTR4_LAYOUT_BLKSIZE => encode_layout_blksize(buf, pnfs_enabled),
+        FATTR4_FS_LAYOUT_TYPES => encode_fs_layout_types(buf, pnfs_enabled, false),
+        FATTR4_LAYOUT_BLKSIZE => encode_layout_blksize(buf, pnfs_enabled, false),
         _ => {
             // Attribute not supported for pseudo-root
             debug!("  Pseudo-root attr {} not supported", attr_id);
@@ -1435,6 +1451,24 @@ pub struct FileOperationHandler {
 
 impl FileOperationHandler {
     /// Create a new file operation handler
+    /// Whether `path` (absolute, under the export) lives on a
+    /// scsi-class (pnfs-block) volume. Every "don't know" — no pNFS
+    /// handler, path outside the export, empty key — answers false,
+    /// keeping the historical files-class advertisement untouched.
+    fn scsi_class_for_path(&self, path: &std::path::Path) -> bool {
+        let Some(p) = &self.pnfs_handler else { return false };
+        let export = self.fh_mgr.get_export_path().to_path_buf();
+        let key = path
+            .strip_prefix(&export)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        if key.is_empty() {
+            return false;
+        }
+        p.layout_class_for(&key) == crate::pnfs::mds::layout::LayoutClass::Scsi
+    }
+
     pub fn new(fh_mgr: Arc<FileHandleManager>, pnfs_enabled: bool) -> Self {
         Self { fh_mgr, pnfs_enabled, open_files: None, pnfs_handler: None }
     }
@@ -2130,6 +2164,10 @@ impl FileOperationHandler {
                                         &op.attr_request,
                                         &snapshot,
                                         self.pnfs_enabled,
+                                        // OPEN attr fast-path: layout attrs are
+                                        // fsinfo-time reads answered per-volume by
+                                        // handle_getattr; not derived here.
+                                        false,
                                     );
                                 return GetAttrRes {
                                     status: Nfs4Status::Ok,
@@ -2192,6 +2230,10 @@ impl FileOperationHandler {
             &op.attr_request,
             &snapshot,
             self.pnfs_enabled,
+            // Per-volume advertisement: THIS is the arm a mounting
+            // client's fsinfo hits (it mounts the volume subtree, so
+            // the layout-driver pick reads the volume dir's class).
+            self.scsi_class_for_path(&path),
         );
         
         let fattr = Fattr4 {
@@ -2524,7 +2566,13 @@ impl FileOperationHandler {
             let cookie = (idx + 1) as u64;
 
             // Encode attributes based on client's request
-            let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(&op.attr_request, snapshot, self.pnfs_enabled);
+            let (attr_vals, supported_bitmap) = encode_attributes_from_snapshot(
+                &op.attr_request,
+                snapshot,
+                self.pnfs_enabled,
+                // Entries share the directory's volume, hence its class.
+                self.scsi_class_for_path(&dir_path),
+            );
 
             debug!("READDIR: Encoding '{}': {} attribute bytes, bitmap={:?}",
                    file_name, attr_vals.len(), supported_bitmap);
@@ -3299,6 +3347,10 @@ impl FileOperationHandler {
             &op.attr_request,
             &snapshot,
             self.pnfs_enabled,
+            // The pseudo-root spans every volume; it advertises the
+            // files-class fleet default. Per-volume refinement happens
+            // on the volume dirs, which is where mounts land.
+            false,
         );
         
         let fattr = Fattr4 {

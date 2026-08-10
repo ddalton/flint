@@ -1453,6 +1453,18 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         self.layout_manager.truncate_dirty_state(&gate).map(|(_, min)| min)
     }
 
+    fn layout_class_for(&self, file_key: &str) -> crate::pnfs::mds::layout::LayoutClass {
+        self.layout_manager.layout_class_for(file_key)
+    }
+
+    fn extent_backend(&self) -> Option<std::sync::Arc<dyn crate::state_backend::StateBackend>> {
+        Some(self.layout_manager.state_backend())
+    }
+
+    fn scsi_volume_for_deviceid(&self, device_id: &[u8; 16]) -> Option<String> {
+        self.layout_manager.scsi_volume_for_deviceid(device_id)
+    }
+
     fn note_remove(&self, file_key: &str) {
         if let Some(placement) = self.layout_manager.forget_placement(file_key) {
             if placement.file_id != 0 {
