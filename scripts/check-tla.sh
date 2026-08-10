@@ -3,13 +3,14 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and six runs, ALL required.
+# One hundred and nine runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
 # the count; that miscount is how this header once briefly read wrong.
 # 88 before the FlintExtents tranches, + 11 for tranche 1, + 6 for
-# tranche 2, + 1 for the FreeRequiresDelivered graduation probe.)
+# tranche 2, + 1 for the FreeRequiresDelivered graduation probe, + 3 for
+# the merge tranche.)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -788,7 +789,9 @@ strict_run   FlintTruncate FlintTruncateNoStaleServe.cfg   "truncate target stat
 # (FreeRevalidates). StaleSnapshotFree pins the refuted sketch permanently,
 # MarkOverwrite-style; the grant-side arms return in a liveness tranche as
 # progress belts.
-strict_run   FlintExtents FlintExtents.cfg "extents shipped-design strict (all belts ON incl. FreeRequiresDelivered — the 2026-08-10 graduation: BOTH stale theorems now claimed in the fences-CAN-fail world, the free trusting only target-confirmed exclusions; FenceReaches stays FALSE because the code's preempt arm is best-effort)"
+strict_run   FlintExtents FlintExtents.cfg "extents shipped-design strict (all belts ON incl. FreeRequiresDelivered and the merge arm — both stale theorems claimed in the fences-CAN-fail world with quiescent-merge gen coarsening live; FenceReaches stays FALSE because the code's preempt arm is best-effort)"
+mutation_run FlintExtents FlintExtentsMergeHeld.cfg "merge-quiescence mutation (MergeChecksHolders=FALSE: the merge coarsens gen under a live unfenced grant — the exact clause of Inv_RecallCompletesBeforeReuse, and why the code's merge window demands ZERO grant rows on every row it swallows)" "Inv_RecallCompletesBeforeReuse"
+strict_run   FlintExtents FlintExtentsMergeMin.cfg "merge gen-choice A/B (MergeTakesMin=TRUE, full theorem stack: GREEN = the machine-checked REDUNDANCY verdict — under quiescence + the shipped belts the merged-gen choice is safety-irrelevant at block granularity; the code keeps MAX as free-list monotonicity hygiene, a cross-incarnation property this representation cannot state)"
 mutation_run FlintExtents FlintExtentsReuseUnderGrant.cfg "reuse-under-grant mutation (RecallBeforeReuse=FALSE: the F65-of-extents — freed under a live grant, re-granted, and the old holder's raw NVMe write lands in the new owner's bytes)" "Inv_NoStaleExtentWrite"
 mutation_run FlintExtents FlintExtentsGrantOverlap.cfg "grant-overlap mutation (GrantsExclusive=FALSE: §8's PK-does-not-police-overlap landmine — two two-step windows race to one free block and both publish)" "Inv_NoConflictingGrants"
 mutation_run FlintExtents FlintExtentsStaleSnapshotFree.cfg "stale-snapshot-free mutation (FreeRevalidates=FALSE: THE TRANCHE-1 FINDING — the doc's original grant-side-belts-only design, refuted and pinned; the free trusts the reclaim's start-time holder snapshot and frees under a grant the snapshot never saw)" "Inv_RecallCompletesBeforeReuse"
@@ -804,6 +807,7 @@ mutation_run FlintExtentsProbe FlintExtentsProbeFence.cfg "extents fence probe (
 mutation_run FlintExtentsProbe FlintExtentsProbeRestart.cfg "extents tgt-restart probe (TgtRestart really occurs in the shipped world, so the strict green holds ACROSS a restart and TgtAmnesia is an A/B over one flag, not over reachability)" "ProbeTgtRestarts"
 mutation_run FlintExtentsProbe FlintExtentsProbeResnapshot.cfg "extents resnapshot probe (the retry re-read really finds holders the snapshot missed — the exact world FreeRevalidates refuses frees in; without this its green is a statement about a disabled guard)" "ProbeResnapshotGrows"
 mutation_run FlintExtentsProbe FlintExtentsProbeDelivered.cfg "extents delivered-free probe (ReclaimComplete really frees blocks a fenced+CONFIRMED holder still held in the graduated shipped world — without this the shipped green could be the quarantine world wearing the flip's label)" "ProbeDeliveredFreeFires"
+mutation_run FlintExtentsProbe FlintExtentsProbeMerge.cfg "extents merge probe (Merge really coarsens — unequal gens, quiescent blocks — in the shipped state space; without this the merge-armed green says nothing about merging)" "ProbeMergeFires"
 
 # ---- extents tranche 2 (2026-08-09, same day): LAYOUTCOMMIT, size, scrub. ----
 # Behind CommitEnabled=FALSE in every tranche-1 cfg — bit-identical by

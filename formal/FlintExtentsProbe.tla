@@ -49,4 +49,10 @@ ProbeTruncateFires == ~truncateFired
 \* exact event the code flip (quarantine -> clean free) ships to produce.
 ProbeDeliveredFreeFires == ~deliveredFreeFired
 
+\* For the merge-armed shipped cfg: a REAL coarsening merge (unequal
+\* gens, quiescent blocks) must be reachable, or the strict green says
+\* nothing about the gen-coarsening the code's merge performs.
+\* mergeFired's only writer is Merge.
+ProbeMergeFires == ~mergeFired
+
 ==============================================================================

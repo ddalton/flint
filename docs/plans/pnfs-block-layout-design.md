@@ -592,6 +592,36 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   > extent-count bound must therefore ALSO window the verify (check the
   > touched ranges against their neighbours, not the whole volume) — the
   > bound alone does not close a slope this steep.
+  >
+  > **MERGE POLICY SHIPPED 2026-08-10 (the debt paid; gate 106→109, bench re-run).**
+  > Three pieces, all model-gated (FlintExtents merge tranche — MergeHeld's
+  > counterexample is why quiescence is mandatory; MergeMin's green is the
+  > machine-checked proof the merged-gen choice is safety-irrelevant, MAX kept as
+  > free-list monotonicity hygiene):
+  > 1. **Windowed verify** — every hot-path transaction now checks its TOUCHED rows
+  >    against their immediate neighbours (complete by induction: a txn can only
+  >    corrupt what it touches; anchored at the empty arena). The full verifier
+  >    survives as a test/debug differential belt behind every windowed check, in
+  >    whole-volume ops, and as the row-counter drift check. Plus the bench-found
+  >    residual: the per-grant fenced-client check was an unindexed full-table scan —
+  >    `idx_grants_client` closes it.
+  > 2. **The merge** — at LAYOUTRETURN (the quiescence moment), adjacent rows of the
+  >    file that are logically AND physically contiguous, same state, with ZERO grant
+  >    rows coalesce to one row at MAX(gen); the free list coalesces on every insert
+  >    (`free_insert_coalescing`, MAX(last_gen)). A sequentially-written file's N
+  >    extents collapse to 1 the moment its layout returns — the bench's own 1024-row
+  >    shatter now un-shatters at return (8.2 ms once) and reclaims as ONE row (0.1 ms,
+  >    was 5.5 ms).
+  > 3. **The stated bound** — `volume_alloc.extent_rows` (O(1) counter, drift-checked)
+  >    against 65,536 rows/volume (FLINT_PNFS_EXTENT_ROW_BUDGET), refused as
+  >    `RowBudget` → LAYOUTUNAVAILABLE with a loud fragmentation log. SCHEMA 6→7.
+  >
+  > Re-measured (same rig, release, lima ext4): grant at 1,000 rows **~930–1,040 →
+  > ~250–270 µs** (≈ the fresh-volume shape; the 0.9 µs/row linear term is gone,
+  > residual quartile drift ≈0.14 µs/row and btree-shaped); commit-4k 101 µs;
+  > commit-1×1024 6.1 ms (unchanged — commit never merges: its rows are still
+  > granted). The 262k-row nightmare arithmetic no longer exists: the bound refuses
+  > at 65,536 and the hot paths no longer scale with the count anyway.
 
 ## 9. FlintExtents — the TLA+ module
 

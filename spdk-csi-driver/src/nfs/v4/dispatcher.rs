@@ -2909,8 +2909,13 @@ impl CompoundDispatcher {
                         Nfs4Status::LayoutTrylater
                     }
                     // Arena full: not transient — fall back to MDS I/O,
-                    // which reports ENOSPC with a real errno.
-                    E::NoSpace { .. } => Nfs4Status::LayoutUnavail,
+                    // which reports ENOSPC with a real errno. RowBudget
+                    // is its fragmentation sibling (§8's stated
+                    // extent-count bound): rows ran out, not bytes —
+                    // returns/merges may reopen it, but the client must
+                    // not spin on TRYLATER against a bound that may
+                    // never move.
+                    E::NoSpace { .. } | E::RowBudget { .. } => Nfs4Status::LayoutUnavail,
                     E::InvalidRange(_) => Nfs4Status::Inval,
                     E::CommitRejected(_) | E::Corruption(_) | E::Sql(_) => {
                         Nfs4Status::ServerFault

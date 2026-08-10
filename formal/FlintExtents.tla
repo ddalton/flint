@@ -207,8 +207,31 @@ CONSTANTS
                        \*   unobservable
   CommitGatesSize,     \* TRUE = a commit's size-advance applies only WITH
                        \*   its range promotion (one transaction)
-  CommitChecksGen      \* TRUE = LAYOUTCOMMIT validates (client,
+  CommitChecksGen,     \* TRUE = LAYOUTCOMMIT validates (client,
                        \*   gen-at-grant) against the live grant table (§8)
+  MergeEnabled,        \* merge-tranche master switch (MaintEnabled
+                       \*   pattern — FALSE keeps every prior state space
+                       \*   bit-identical). The code's merge policy: adjacent
+                       \*   same-state extent rows coalesce into one row.
+                       \*   Here at block granularity a "merge" is its one
+                       \*   semantic residue, GEN COARSENING — the merged
+                       \*   row carries ONE generation for blocks that had
+                       \*   several. The model merges ANY block pair (the
+                       \*   code only physically-contiguous neighbours):
+                       \*   a superset of code behaviours, so its green is
+                       \*   the stronger claim. The row BUDGET is pure
+                       \*   representation (row counts do not exist at
+                       \*   block granularity) and is deliberately not
+                       \*   modelled.
+  MergeChecksHolders,  \* TRUE = merge only QUIESCENT blocks (no grant
+                       \*   rows at all, fenced included). The mutation
+                       \*   coarsens gen under a live grant — which is
+                       \*   exactly "gen moved under a live unfenced
+                       \*   grant", Inv_RecallCompletesBeforeReuse.
+  MergeTakesMin        \* MUTATION (code takes MAX): the merged gen is the
+                       \*   MINIMUM of the pair. Kept as the A/B for the
+                       \*   gen-choice question; see the run's header for
+                       \*   its verdict.
 
 VARIABLES
   alloc,          \* [Blocks -> {"free","provisional"}] physical allocation
@@ -249,9 +272,11 @@ VARIABLES
   forgedCommit,   \* an INVALID commit applied (writer: LayoutCommit)
   disclosedRead,  \* a rightful read of a provisional block served a
                   \*   previous incarnation's bytes (writer: ClientRead)
-  deliveredFreeFired \* the delivered-conditional free freed blocks a
+  deliveredFreeFired, \* the delivered-conditional free freed blocks a
                   \*   fenced+delivered holder still held (writer:
                   \*   ReclaimComplete, gated on FreeRequiresDelivered)
+  mergeFired      \* Merge executed (writer: Merge, gated on
+                  \*   MergeEnabled — legacy spaces never pay)
 
 \* The tranche-2 additions, grouped so tranche-1 actions can leave them
 \* unchanged in one stroke.
@@ -262,7 +287,7 @@ vars == <<alloc, gen, grants, granting, reclaim, fenced, resv,
           fsize, everWritten, priorBytes,
           staleRead, staleWrite, reuseFired, fenceFired, tgtRestarted,
           resnapshotGrew, commitFired, truncateFired, zeroSized,
-          forgedCommit, disclosedRead, deliveredFreeFired>>
+          forgedCommit, disclosedRead, deliveredFreeFired, mergeFired>>
 
 Blocks == 1..NBlocks
 GenBound == MaxReclaims + 1        \* one initial bump + one per free
@@ -302,6 +327,7 @@ TypeOK ==
   /\ commitFired \in BOOLEAN /\ truncateFired \in BOOLEAN
   /\ zeroSized \in BOOLEAN /\ forgedCommit \in BOOLEAN
   /\ disclosedRead \in BOOLEAN /\ deliveredFreeFired \in BOOLEAN
+  /\ mergeFired \in BOOLEAN
   \* Structure: g is normalised to 0 outside held (state-space hygiene and
   \* a modelling-bug tripwire, not a claim about the code).
   /\ \A c \in Clients : \A b \in Blocks :
@@ -324,6 +350,7 @@ Init ==
   /\ commitFired = FALSE /\ truncateFired = FALSE
   /\ zeroSized = FALSE /\ forgedCommit = FALSE
   /\ disclosedRead = FALSE /\ deliveredFreeFired = FALSE
+  /\ mergeFired = FALSE
 
 (***************************************************************************)
 (* The MDS: grants                                                         *)
@@ -345,7 +372,7 @@ GrantCheck(c, R) ==
   /\ UNCHANGED <<alloc, gen, grants, reclaim, fenced, resv,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 everWritten, priorBytes, disclosedRead, deliveredFreeFired>>
+                 everWritten, priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
 
 \* LAYOUTGET step 2: the sqlite transaction.  With GrantsExclusive it
 \* re-validates disjointness INSIDE the transaction and refuses a range
@@ -379,7 +406,7 @@ GrantInsert(c) ==
                          nGrants, nReclaims, nRestarts, staleRead,
                          staleWrite, reuseFired, fenceFired, tgtRestarted,
                          resnapshotGrew, sizeVars, everWritten, priorBytes,
-                         disclosedRead, deliveredFreeFired>>
+                         disclosedRead, deliveredFreeFired, mergeFired>>
         ELSE
           LET fresh == {b \in R : alloc[b] = "free"}
               gen2 == [b \in Blocks |->
@@ -404,7 +431,7 @@ GrantInsert(c) ==
           /\ UNCHANGED <<reclaim, fenced, resv, nGrants, nReclaims,
                          nRestarts, staleRead, staleWrite, fenceFired,
                          tgtRestarted, resnapshotGrew, sizeVars,
-                         everWritten, disclosedRead, deliveredFreeFired>>
+                         everWritten, disclosedRead, deliveredFreeFired, mergeFired>>
 
 (***************************************************************************)
 (* The MDS: reclaim (recall-then-free)                                     *)
@@ -433,7 +460,7 @@ ReclaimStart(R) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
 
 \* The retry loop's separate re-read step (the F62 idiom): recompute the
 \* holder set from the live tables.  This is what eventually surfaces a
@@ -449,7 +476,7 @@ ReclaimResnapshot ==
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
 
 \* An unresponsive holder is fenced: revoked server-side (bookkeeping in
 \* `fenced` — its grant row is dead to the MDS) and preempted at the
@@ -469,7 +496,7 @@ Fence(c) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
 
 \* The free.  Every snapshotted holder has returned or been fenced; with
 \* FreeRevalidates the transaction ALSO re-validates the live tables and
@@ -513,7 +540,35 @@ ReclaimComplete ==
   /\ UNCHANGED <<gen, grants, granting, fenced, resv, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 disclosedRead>>
+                 disclosedRead, mergeFired>>
+
+\* The merge policy's one block-level residue (see MergeEnabled's
+\* header): two same-state allocated blocks coarsen to ONE generation —
+\* the code's row-coalesce carries the MAX of its constituents' gens.
+\* Gated on unequal gens: an equal-gen merge changes nothing a block can
+\* see (pure row bookkeeping), so representing it would only pad the
+\* state space with ghost flips.  The quiescence guard is the belt under
+\* test: coarsening under a LIVE grant moves gen under it, which is
+\* Inv_RecallCompletesBeforeReuse's exact clause
+\* (FlintExtentsMergeHeld.cfg).  The MIN-vs-MAX choice gets its own A/B
+\* (FlintExtentsMergeMin.cfg) — see that cfg's header for the verdict.
+Merge(b1, b2) ==
+  /\ MergeEnabled
+  /\ b1 # b2
+  /\ alloc[b1] # "free"
+  /\ alloc[b1] = alloc[b2]
+  /\ gen[b1] # gen[b2]
+  /\ MergeChecksHolders => (HeldBy(b1) = {} /\ HeldBy(b2) = {})
+  /\ LET g == IF MergeTakesMin
+                THEN (IF gen[b1] < gen[b2] THEN gen[b1] ELSE gen[b2])
+                ELSE (IF gen[b1] > gen[b2] THEN gen[b1] ELSE gen[b2])
+     IN gen' = [gen EXCEPT ![b1] = g, ![b2] = g]
+  /\ mergeFired' = TRUE
+  /\ UNCHANGED <<alloc, grants, granting, reclaim, fenced, resv, nGrants,
+                 nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
+                 fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
+                 everWritten, priorBytes, disclosedRead,
+                 deliveredFreeFired>>
 
 \* The unbelted world: RecallBeforeReuse = FALSE frees allocated blocks
 \* outright, holders or no holders — the F65-of-extents.
@@ -527,7 +582,7 @@ FreeDirect(R) ==
   /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
 
 (***************************************************************************)
 (* The MDS: commit and size (tranche 2, CommitEnabled)                     *)
@@ -581,7 +636,7 @@ LayoutCommit(c, R, n) ==
   /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, truncateFired,
-                 everWritten, priorBytes, disclosedRead, deliveredFreeFired>>
+                 everWritten, priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
 
 \* SETATTR-shrink: the size cut is metadata-only and immediate; the blocks
 \* beyond the new size stay allocated until the reclaim machinery frees
@@ -598,7 +653,7 @@ TruncateStart(n) ==
                  nGrants, nReclaims, nRestarts, staleRead, staleWrite,
                  reuseFired, fenceFired, tgtRestarted, resnapshotGrew,
                  commitFired, zeroSized, forgedCommit, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
 
 (***************************************************************************)
 (* The target                                                              *)
@@ -615,7 +670,7 @@ TgtRestart ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, nGrants,
                  nReclaims, staleRead, staleWrite, reuseFired, fenceFired,
                  resnapshotGrew, sizeVars, everWritten, priorBytes,
-                 disclosedRead, deliveredFreeFired>>
+                 disclosedRead, deliveredFreeFired, mergeFired>>
 
 (***************************************************************************)
 (* The clients — raw NVMe I/O under a held layout; the MDS is not on this  *)
@@ -638,7 +693,7 @@ ClientRead(c, b) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 everWritten, priorBytes, deliveredFreeFired>>
+                 everWritten, priorBytes, deliveredFreeFired, mergeFired>>
 
 ClientWrite(c, b) ==
   /\ grants[c].live
@@ -657,7 +712,7 @@ ClientWrite(c, b) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleRead, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 disclosedRead, deliveredFreeFired>>
+                 disclosedRead, deliveredFreeFired, mergeFired>>
 
 LayoutReturn(c) ==
   /\ grants[c].live
@@ -666,7 +721,7 @@ LayoutReturn(c) ==
   /\ UNCHANGED <<alloc, gen, granting, fenced, resv, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
 
 Next ==
   \/ \E c \in Clients, R \in Ranges : GrantCheck(c, R)
@@ -675,6 +730,7 @@ Next ==
   \/ ReclaimResnapshot
   \/ \E c \in Clients : Fence(c)
   \/ ReclaimComplete
+  \/ \E b1, b2 \in Blocks : Merge(b1, b2)
   \/ \E R \in Ranges : FreeDirect(R)
   \/ TgtRestart
   \/ \E c \in Clients, b \in Blocks : ClientRead(c, b)

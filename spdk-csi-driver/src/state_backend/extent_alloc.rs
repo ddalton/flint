@@ -60,6 +60,13 @@ pub enum ExtentAllocError {
     NotQuiescent { holders: Vec<u64> },
     /// Free list + bump watermark cannot satisfy the request.
     NoSpace { needed: u64, ceiling: u64, next_free: u64 },
+    /// The volume's extents table would exceed the stated per-volume
+    /// row bound (the merge policy's backstop — §8's "stated
+    /// extent-count bound"; nothing else bounds table growth). Space
+    /// may well remain; ROWS ran out, which is a fragmentation
+    /// statement, and the merge policy is what normally keeps it far
+    /// away.
+    RowBudget { rows: u64, budget: u64 },
     /// LAYOUTCOMMIT validation failed — the (client, gen-at-grant) pair
     /// does not match a live grant on a live extent.
     CommitRejected(&'static str),
@@ -88,6 +95,11 @@ impl std::fmt::Display for ExtentAllocError {
             Self::NoSpace { needed, ceiling, next_free } => write!(
                 f,
                 "no space: need {needed}, watermark {next_free} of ceiling {ceiling}"
+            ),
+            Self::RowBudget { rows, budget } => write!(
+                f,
+                "extent-row budget: {rows} rows at the {budget}-row per-volume bound \
+                 (fragmentation — space may remain; see FLINT_PNFS_EXTENT_ROW_BUDGET)"
             ),
             Self::CommitRejected(r) => write!(f, "commit rejected: {r}"),
             Self::InvalidRange(r) => write!(f, "invalid range: {r}"),
@@ -138,6 +150,26 @@ struct ExtentRow {
     physical_offset: i64,
     generation: i64,
     state: String,
+}
+
+/// The stated per-volume extent-row bound (§8). 65,536 rows = a 256 GiB
+/// volume fully shattered at 4 Mi granularity, or 1 TiB at a 16 Mi
+/// average extent — far beyond anything the merge policy lets a sane
+/// workload accumulate, so hitting it is a fragmentation pathology the
+/// operator should see (the refusal maps to LAYOUTUNAVAILABLE and logs
+/// loudly), not a working limit. Override:
+/// FLINT_PNFS_EXTENT_ROW_BUDGET (house style: one env var, read once).
+const DEFAULT_EXTENT_ROW_BUDGET: i64 = 65_536;
+
+fn extent_row_budget() -> i64 {
+    static BUDGET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("FLINT_PNFS_EXTENT_ROW_BUDGET")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_EXTENT_ROW_BUDGET)
+    })
 }
 
 fn checked_end(offset: u64, length: u64) -> Result<i64> {
@@ -289,6 +321,30 @@ pub fn grant(
         gaps.push((cursor, end - cursor));
     }
 
+    // The stated per-volume row bound (§8), enforced at the only place
+    // rows are minted. O(1): the counter lives in volume_alloc,
+    // maintained by every minting/deleting/merging transaction.
+    if !gaps.is_empty() {
+        let cur_rows: Option<i64> = tx
+            .query_row(
+                "SELECT extent_rows FROM volume_alloc WHERE volume = ?1",
+                params![volume],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(rows) = cur_rows {
+            let budget = extent_row_budget();
+            if rows + gaps.len() as i64 > budget {
+                return Err(ExtentAllocError::RowBudget {
+                    rows: rows as u64,
+                    budget: budget as u64,
+                });
+            }
+        }
+        // Absent arena: the allocation arm below fails with its own
+        // error; no budget verdict on a volume that cannot allocate.
+    }
+
     let mut new_rows: Vec<ExtentRow> = Vec::new();
     // Physical offsets allocated from the free list this transaction:
     // those ranges carry a previous incarnation's bytes until the wire
@@ -316,12 +372,11 @@ pub fn grant(
                 )?;
                 if f_len > g_len {
                     // The remainder keeps the old generation: it has not
-                    // been re-owned yet.
-                    tx.execute(
-                        "INSERT INTO extent_free (volume, physical_offset, length, last_gen)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![volume, f_phys + g_len, f_len - g_len, f_gen],
-                    )?;
+                    // been re-owned yet. (Coalescing is a no-op here —
+                    // free neighbours never coexist un-merged — but the
+                    // shared insert path keeps that property true by
+                    // construction rather than by argument.)
+                    free_insert_coalescing(&tx, volume, f_phys + g_len, f_len - g_len, f_gen)?;
                 }
                 reused_phys.push(f_phys);
                 (f_phys, f_gen + 1)
@@ -361,6 +416,13 @@ pub fn grant(
         });
     }
 
+    if !new_rows.is_empty() {
+        tx.execute(
+            "UPDATE volume_alloc SET extent_rows = extent_rows + ?2 WHERE volume = ?1",
+            params![volume, new_rows.len() as i64],
+        )?;
+    }
+
     // One grant row per covered extent for this client. INSERT OR IGNORE
     // makes re-grant idempotent — and an ignored row is necessarily at the
     // extent's own gen already, because gen cannot move under a live grant
@@ -377,7 +439,18 @@ pub fn grant(
         )?;
     }
 
-    verify_volume_invariants_conn(&tx, volume)?;
+    // Windowed: every row this grant touched (new placements AND
+    // existing rows that took grant rows), against their neighbours.
+    let touched: Vec<TouchedExtent> = all
+        .iter()
+        .map(|e| TouchedExtent {
+            file_id: file_id as i64,
+            logical_offset: e.logical_offset,
+            length: e.length,
+            physical_offset: e.physical_offset,
+        })
+        .collect();
+    verify_window_invariants_conn(&tx, volume, &touched)?;
     let granted = all
         .iter()
         .map(|e| GrantedExtent {
@@ -438,7 +511,18 @@ pub fn grant_read(
             params![volume, file_id as i64, e.logical_offset, client, e.generation],
         )?;
     }
-    verify_volume_invariants_conn(&tx, volume)?;
+    // Windowed: a read grant reshapes nothing — only the touched
+    // extents' grant-integrity can have changed.
+    let touched: Vec<TouchedExtent> = committed
+        .iter()
+        .map(|e| TouchedExtent {
+            file_id: file_id as i64,
+            logical_offset: e.logical_offset,
+            length: e.length,
+            physical_offset: e.physical_offset,
+        })
+        .collect();
+    verify_window_invariants_conn(&tx, volume, &touched)?;
     let granted = committed
         .iter()
         .map(|e| GrantedExtent {
@@ -459,6 +543,13 @@ pub fn grant_read(
 /// return is accepted — the return is the client's promise that no more
 /// I/O will be issued under the layout, which upgrades a pending
 /// quarantine to a clean free (see module docs).
+///
+/// The return is also THE merge trigger: it is the moment rows become
+/// quiescent (return_on_close means most files pass through here right
+/// after their writer closes), so the windowed merge runs on the
+/// returned range in the same transaction — a sequentially-written
+/// file's N contiguous extents collapse to one row the moment its
+/// layout comes back.
 pub fn layout_return(
     conn: &mut Connection,
     volume: &str,
@@ -470,7 +561,8 @@ pub fn layout_return(
     let start = as_i64(logical_offset, "offset exceeds i64")?;
     let end = checked_end(logical_offset, length)?;
     let client = as_i64(client_id, "client id exceeds i64")?;
-    let n = conn.execute(
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let n = tx.execute(
         "DELETE FROM extent_grants
          WHERE volume = ?1 AND file_id = ?2 AND client_id = ?3
            AND logical_offset IN
@@ -479,6 +571,8 @@ pub fn layout_return(
                 AND logical_offset < ?5 AND logical_offset + length > ?4)",
         params![volume, file_id as i64, client, start, end],
     )?;
+    merge_extents_window(&tx, volume, file_id as i64, start, end)?;
+    tx.commit()?;
     Ok(n)
 }
 
@@ -576,11 +670,7 @@ pub fn reclaim_complete(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let all_delivered = fenced.iter().all(|(_, d)| *d > 0);
         if fenced.is_empty() || all_delivered {
-            tx.execute(
-                "INSERT INTO extent_free (volume, physical_offset, length, last_gen)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![volume, t.physical_offset, t.length, t.generation],
-            )?;
+            free_insert_coalescing(&tx, volume, t.physical_offset, t.length, t.generation)?;
             out.freed_extents += 1;
             out.freed_bytes += t.length as u64;
             if !fenced.is_empty() {
@@ -622,7 +712,21 @@ pub fn reclaim_complete(
     }
     drop(fenced_stmt);
 
-    verify_volume_invariants_conn(&tx, volume)?;
+    tx.execute(
+        "UPDATE volume_alloc SET extent_rows = extent_rows - ?2 WHERE volume = ?1",
+        params![volume, targets.len() as i64],
+    )?;
+    // Windowed: this transaction only DELETED extents and INSERTED
+    // free/quarantine ranges over exactly the deleted placements — no
+    // extents row was added or reshaped, so there is no touched row to
+    // probe (deletions cannot create overlap, and the freed placements
+    // re-occupy space the deleted rows held). Tests and debug builds
+    // still cross-check the whole volume (bench opt-out as in
+    // verify_window_invariants_conn).
+    #[cfg(any(test, debug_assertions))]
+    if !BENCH_SKIP_FULL_VERIFY.load(std::sync::atomic::Ordering::Relaxed) {
+        verify_volume_invariants_conn(&tx, volume)?;
+    }
     tx.commit()?;
     Ok(out)
 }
@@ -699,11 +803,7 @@ pub fn release_quarantine(conn: &mut Connection, volume: &str) -> Result<u64> {
             .query_map(params![volume], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (phys, len, generation) in rows {
-            tx.execute(
-                "INSERT INTO extent_free (volume, physical_offset, length, last_gen)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![volume, phys, len, generation],
-            )?;
+            free_insert_coalescing(&tx, volume, phys, len, generation)?;
             bytes += len as u64;
         }
     }
@@ -922,6 +1022,365 @@ pub fn verify_volume_invariants(conn: &Connection, volume: &str) -> Result<()> {
     verify_volume_invariants_conn(conn, volume)
 }
 
+/// One row's-worth of state a transaction touched, for the windowed
+/// verifier. `logical` is (file_id, offset, length) of an extents row
+/// added or reshaped; `physical` is a physical placement added or
+/// reshaped in `phys_home`.
+struct TouchedExtent {
+    file_id: i64,
+    logical_offset: i64,
+    length: i64,
+    physical_offset: i64,
+}
+
+/// THE WINDOWED VERIFIER — the merge-policy tranche's answer to the
+/// cost gate's measured debt (`verify_volume_invariants` cost ~0.9 µs
+/// per VOLUME row per writing transaction; a 262k-row volume would pay
+/// ~230 ms per grant). Completeness argument, stated once: a
+/// transaction can only violate an invariant on state it TOUCHED — if
+/// the pre-state satisfied the invariants (every prior transaction
+/// verified its own window, anchored at the empty arena), then checking
+/// each touched row against its immediate neighbours is a COMPLETE
+/// check of the post-state. The full verifier remains: in every test
+/// and debug build it runs right after this one (the whole suite is a
+/// windowed-vs-full differential), and whole-volume operations
+/// (release_quarantine, the corruption tests) still call it outright.
+///
+/// Probes are all index-served: logical neighbours via the extents PK,
+/// physical neighbours via idx_extents_phys / the phys-keyed PKs of
+/// extent_free and extent_quarantine.
+fn verify_window_invariants_conn(
+    conn: &Connection,
+    volume: &str,
+    touched: &[TouchedExtent],
+) -> Result<()> {
+    if touched.is_empty() {
+        return Ok(());
+    }
+    let (next_free,): (i64,) = conn.query_row(
+        "SELECT next_free FROM volume_alloc WHERE volume = ?1",
+        params![volume],
+        |r| Ok((r.get(0)?,)),
+    )?;
+    for t in touched {
+        // 1. Logical disjointness against the two neighbours (self is
+        //    keyed at exactly logical_offset, so strict < / > excludes
+        //    it).
+        let prev: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT logical_offset, length FROM extents
+                 WHERE volume = ?1 AND file_id = ?2 AND logical_offset < ?3
+                 ORDER BY logical_offset DESC LIMIT 1",
+                params![volume, t.file_id, t.logical_offset],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((po, pl)) = prev {
+            if po + pl > t.logical_offset {
+                return Err(ExtentAllocError::Corruption(format!(
+                    "logical overlap in {volume} file {}: [{po},{}) vs [{},…)",
+                    t.file_id,
+                    po + pl,
+                    t.logical_offset
+                )));
+            }
+        }
+        let next: Option<i64> = conn
+            .query_row(
+                "SELECT logical_offset FROM extents
+                 WHERE volume = ?1 AND file_id = ?2 AND logical_offset > ?3
+                 ORDER BY logical_offset ASC LIMIT 1",
+                params![volume, t.file_id, t.logical_offset],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(no) = next {
+            if t.logical_offset + t.length > no {
+                return Err(ExtentAllocError::Corruption(format!(
+                    "logical overlap in {volume} file {}: [{},{}) vs [{no},…)",
+                    t.file_id,
+                    t.logical_offset,
+                    t.logical_offset + t.length
+                )));
+            }
+        }
+
+        // 2. Physical disjointness of the touched placement against all
+        //    three homes, excluding self by extents identity.
+        let p_end = t.physical_offset + t.length;
+        let ext_overlaps: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM extents
+             WHERE volume = ?1 AND physical_offset < ?2
+               AND physical_offset + length > ?3
+               AND NOT (file_id = ?4 AND logical_offset = ?5)",
+            params![volume, p_end, t.physical_offset, t.file_id, t.logical_offset],
+            |r| r.get(0),
+        )?;
+        if ext_overlaps > 0 {
+            return Err(ExtentAllocError::Corruption(format!(
+                "physical overlap in {volume}: extent [{},{p_end}) vs another extent",
+                t.physical_offset
+            )));
+        }
+        for home in ["extent_free", "extent_quarantine"] {
+            let n: i64 = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {home}
+                     WHERE volume = ?1 AND physical_offset < ?2
+                       AND physical_offset + length > ?3"
+                ),
+                params![volume, p_end, t.physical_offset],
+                |r| r.get(0),
+            )?;
+            if n > 0 {
+                return Err(ExtentAllocError::Corruption(format!(
+                    "physical overlap in {volume}: extent [{},{p_end}) vs {home}",
+                    t.physical_offset
+                )));
+            }
+        }
+
+        // 3. Watermark containment for the touched placement.
+        if p_end > next_free {
+            return Err(ExtentAllocError::Corruption(format!(
+                "extent range [{},{p_end}) beyond watermark {next_free} in {volume}",
+                t.physical_offset
+            )));
+        }
+
+        // 4. Grant integrity on the touched extent: unfenced rows match
+        //    its generation (the transactional form of the model's
+        //    Inv_RecallCompletesBeforeReuse).
+        let stale: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM extent_grants g JOIN extents e
+                ON e.volume = g.volume AND e.file_id = g.file_id
+               AND e.logical_offset = g.logical_offset
+             WHERE g.volume = ?1 AND g.file_id = ?2 AND g.logical_offset = ?3
+               AND g.fenced = 0 AND g.gen <> e.gen",
+            params![volume, t.file_id, t.logical_offset],
+            |r| r.get(0),
+        )?;
+        if stale > 0 {
+            return Err(ExtentAllocError::Corruption(format!(
+                "unfenced grant at stale gen on {volume} file {} offset {}",
+                t.file_id, t.logical_offset
+            )));
+        }
+    }
+
+    // The differential belt: every test and debug build re-checks the
+    // WHOLE volume, so any incompleteness in the windowing shows up as
+    // a full-verifier failure in the existing corpus. The bench opts
+    // out (BENCH_SKIP_FULL_VERIFY) — it exists to measure the
+    // PRODUCTION path, and the belt here is the exact O(rows) slope
+    // the windowing removed; leaving it on would bench the belt.
+    #[cfg(any(test, debug_assertions))]
+    if !BENCH_SKIP_FULL_VERIFY.load(std::sync::atomic::Ordering::Relaxed) {
+        verify_volume_invariants_conn(conn, volume)?;
+    }
+
+    Ok(())
+}
+
+/// See the differential-belt note in `verify_window_invariants_conn`.
+/// Only `extent_bench` flips it, only in its own single-test process.
+#[cfg(any(test, debug_assertions))]
+pub(crate) static BENCH_SKIP_FULL_VERIFY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Insert into the free list, coalescing with physically-adjacent free
+/// rows. `last_gen` of a coalesced row is the MAX of its constituents —
+/// reuse mints max+1, which dominates every constituent's history, so
+/// the stale-holder detector stays monotone across merges (the
+/// cross-incarnation half of the gen argument; the block model's
+/// MergeMin run machine-checks the intra-incarnation half).
+fn free_insert_coalescing(
+    conn: &Connection,
+    volume: &str,
+    physical_offset: i64,
+    length: i64,
+    last_gen: i64,
+) -> rusqlite::Result<()> {
+    let mut phys = physical_offset;
+    let mut len = length;
+    let mut generation = last_gen;
+    // Absorb the row ending exactly at our start.
+    let prev: Option<(i64, i64, i64)> = conn
+        .query_row(
+            "SELECT physical_offset, length, last_gen FROM extent_free
+             WHERE volume = ?1 AND physical_offset < ?2
+             ORDER BY physical_offset DESC LIMIT 1",
+            params![volume, phys],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    if let Some((pp, pl, pg)) = prev {
+        if pp + pl == phys {
+            conn.execute(
+                "DELETE FROM extent_free WHERE volume = ?1 AND physical_offset = ?2",
+                params![volume, pp],
+            )?;
+            phys = pp;
+            len += pl;
+            generation = generation.max(pg);
+        }
+    }
+    // Absorb the row starting exactly at our end.
+    let next: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT length, last_gen FROM extent_free
+             WHERE volume = ?1 AND physical_offset = ?2",
+            params![volume, phys + len],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((nl, ng)) = next {
+        conn.execute(
+            "DELETE FROM extent_free WHERE volume = ?1 AND physical_offset = ?2",
+            params![volume, phys + len],
+        )?;
+        len += nl;
+        generation = generation.max(ng);
+    }
+    conn.execute(
+        "INSERT INTO extent_free (volume, physical_offset, length, last_gen)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![volume, phys, len, generation],
+    )?;
+    Ok(())
+}
+
+/// THE MERGE POLICY (§8, model-gated — FlintExtents' merge tranche):
+/// coalesce adjacent extents of one file when they are logically AND
+/// physically contiguous, in the same state, and QUIESCENT — zero grant
+/// rows, fenced included, on every row swallowed (MergeHeld.cfg is the
+/// machine-checked reason: coarsening under a live grant moves gen
+/// under it). The merged row carries MAX(gen) — MergeMin.cfg proved the
+/// choice safety-irrelevant under quiescence, so MAX is monotonicity
+/// hygiene for the free-list's cross-incarnation history. Windowed:
+/// only rows overlapping [start, end) plus one neighbour each side are
+/// considered, so the pass costs O(rows-in-window), never O(volume).
+/// Returns rows merged away (the caller decrements the row counter).
+fn merge_extents_window(
+    conn: &Connection,
+    volume: &str,
+    file_id: i64,
+    start: i64,
+    end: i64,
+) -> Result<u64> {
+    // The window plus one row either side (a boundary row may merge
+    // outward).
+    let mut rows: Vec<ExtentRow> = Vec::new();
+    if let Some(prev) = conn
+        .query_row(
+            "SELECT logical_offset, length, physical_offset, gen, state FROM extents
+             WHERE volume = ?1 AND file_id = ?2 AND logical_offset < ?3
+             ORDER BY logical_offset DESC LIMIT 1",
+            params![volume, file_id, start],
+            |r| {
+                Ok(ExtentRow {
+                    logical_offset: r.get(0)?,
+                    length: r.get(1)?,
+                    physical_offset: r.get(2)?,
+                    generation: r.get(3)?,
+                    state: r.get(4)?,
+                })
+            },
+        )
+        .optional()?
+    {
+        rows.push(prev);
+    }
+    rows.extend(overlapping_extents(conn, volume, file_id as u64, start, end)?);
+    if let Some(next) = conn
+        .query_row(
+            "SELECT logical_offset, length, physical_offset, gen, state FROM extents
+             WHERE volume = ?1 AND file_id = ?2 AND logical_offset >= ?3
+             ORDER BY logical_offset ASC LIMIT 1",
+            params![volume, file_id, end],
+            |r| {
+                Ok(ExtentRow {
+                    logical_offset: r.get(0)?,
+                    length: r.get(1)?,
+                    physical_offset: r.get(2)?,
+                    generation: r.get(3)?,
+                    state: r.get(4)?,
+                })
+            },
+        )
+        .optional()?
+    {
+        rows.push(next);
+    }
+    if rows.len() < 2 {
+        return Ok(0);
+    }
+
+    // A row is mergeable only when NOTHING references it.
+    let held = |off: i64| -> rusqlite::Result<bool> {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM extent_grants
+             WHERE volume = ?1 AND file_id = ?2 AND logical_offset = ?3",
+            params![volume, file_id, off],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    };
+
+    let mut merged_away = 0u64;
+    let mut run_start = 0usize;
+    let mut i = 1usize;
+    let mut touched: Vec<TouchedExtent> = Vec::new();
+    while i <= rows.len() {
+        let extend = i < rows.len() && {
+            let a = &rows[i - 1];
+            let b = &rows[i];
+            a.logical_offset + a.length == b.logical_offset
+                && a.physical_offset + a.length == b.physical_offset
+                && a.state == b.state
+                && !held(a.logical_offset)?
+                && !held(b.logical_offset)?
+        };
+        if !extend {
+            if i - run_start >= 2 {
+                let head = &rows[run_start];
+                let total: i64 = rows[run_start..i].iter().map(|e| e.length).sum();
+                let gen_max =
+                    rows[run_start..i].iter().map(|e| e.generation).max().unwrap();
+                for e in &rows[run_start + 1..i] {
+                    conn.execute(
+                        "DELETE FROM extents
+                         WHERE volume = ?1 AND file_id = ?2 AND logical_offset = ?3",
+                        params![volume, file_id, e.logical_offset],
+                    )?;
+                    merged_away += 1;
+                }
+                conn.execute(
+                    "UPDATE extents SET length = ?4, gen = ?5
+                     WHERE volume = ?1 AND file_id = ?2 AND logical_offset = ?3",
+                    params![volume, file_id, head.logical_offset, total, gen_max],
+                )?;
+                touched.push(TouchedExtent {
+                    file_id,
+                    logical_offset: head.logical_offset,
+                    length: total,
+                    physical_offset: head.physical_offset,
+                });
+            }
+            run_start = i;
+        }
+        i += 1;
+    }
+    if merged_away > 0 {
+        conn.execute(
+            "UPDATE volume_alloc SET extent_rows = extent_rows - ?2 WHERE volume = ?1",
+            params![volume, merged_away as i64],
+        )?;
+        verify_window_invariants_conn(conn, volume, &touched)?;
+    }
+    Ok(merged_away)
+}
+
 fn verify_volume_invariants_conn(conn: &Connection, volume: &str) -> Result<()> {
     // 1. Logical disjointness per file.
     {
@@ -1000,6 +1459,26 @@ fn verify_volume_invariants_conn(conn: &Connection, volume: &str) -> Result<()> 
             if next_free > ceiling {
                 return Err(ExtentAllocError::Corruption(format!(
                     "watermark {next_free} beyond ceiling {ceiling} in {volume}"
+                )));
+            }
+            // Row-counter drift check (the O(1) budget counter vs the
+            // O(rows) truth — full-verifier only, deliberately: the
+            // COUNT here is the very slope the windowed verifier
+            // removed from the hot paths).
+            let counted: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM extents WHERE volume = ?1",
+                params![volume],
+                |r| r.get(0),
+            )?;
+            let recorded: i64 = conn.query_row(
+                "SELECT extent_rows FROM volume_alloc WHERE volume = ?1",
+                params![volume],
+                |r| r.get(0),
+            )?;
+            if counted != recorded {
+                return Err(ExtentAllocError::Corruption(format!(
+                    "extent_rows counter drift in {volume}: recorded {recorded}, \
+                     counted {counted}"
                 )));
             }
             if let Some((p, l, tag)) = phys.iter().find(|(p, l, _)| p + l > next_free) {
@@ -1215,6 +1694,212 @@ mod tests {
         assert_eq!(out.freed_extents, 1);
         assert_eq!(out.quarantined_extents, 0);
         assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (0, 0));
+    }
+
+    /// THE MERGE POLICY: a sequentially-written file's N contiguous
+    /// extents collapse to ONE row at LAYOUTRETURN (the quiescence
+    /// moment), gen = MAX, counter maintained, and the merged row still
+    /// reclaims cleanly.
+    #[test]
+    fn merge_collapses_a_sequential_file_at_return() {
+        let mut conn = setup();
+        // Four sequential grants = four rows, physically contiguous by
+        // construction (bump allocation).
+        for i in 0..4u64 {
+            grant(&mut conn, VOL, F, C1, i * 8192, 8192, false).unwrap();
+        }
+        let rows = |c: &Connection| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM extents WHERE volume = ?1",
+                params![VOL],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(rows(&conn), 4);
+
+        assert_eq!(layout_return(&mut conn, VOL, F, C1, 0, 4 * 8192).unwrap(), 4);
+        assert_eq!(rows(&conn), 1, "four contiguous quiescent rows merged to one");
+        let (len, st): (i64, String) = conn
+            .query_row(
+                "SELECT length, state FROM extents WHERE volume = ?1 AND logical_offset = 0",
+                params![VOL],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(len, 4 * 8192);
+        assert_eq!(st, "invalid");
+        // The counter followed (the full verifier cross-checks it, but
+        // assert the visible value too).
+        let recorded: i64 = conn
+            .query_row(
+                "SELECT extent_rows FROM volume_alloc WHERE volume = ?1",
+                params![VOL],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 1);
+        // And the merged row reclaims like any other.
+        let out = reclaim_complete(&mut conn, VOL, F, 0, 4 * 8192, 99).unwrap();
+        assert_eq!(out.freed_extents, 1);
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// Merge refusals, all three: a live grant on either row, a state
+    /// boundary, and physical discontiguity each block coalescing.
+    #[test]
+    fn merge_respects_holders_state_and_physical_contiguity() {
+        let mut conn = setup();
+        // Two contiguous rows; C2 still holds the second — returning
+        // C1's rows must NOT merge across C2's held row.
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        grant(&mut conn, VOL, F, C2, 8192, 8192, false).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extents WHERE volume = ?1",
+                params![VOL],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "no merge under a live grant (MergeHeld.cfg's teeth)");
+
+        // C2 commits its row then returns: state 'rw' vs 'invalid' —
+        // still no merge across the state boundary.
+        commit_extents(&mut conn, VOL, F, C2, 8192, 8192).unwrap();
+        layout_return(&mut conn, VOL, F, C2, 8192, 8192).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extents WHERE volume = ?1",
+                params![VOL],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "no merge across a state boundary");
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// Logically-adjacent rows whose PHYSICAL placements are not
+    /// adjacent stay separate — an extent is a physical mapping, and
+    /// merging would fabricate one.
+    #[test]
+    fn merge_requires_physical_contiguity() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        // A second file's grant lands physically between them.
+        grant(&mut conn, VOL, 99, C1, 0, 4096, false).unwrap();
+        grant(&mut conn, VOL, F, C1, 8192, 8192, false).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, 2 * 8192).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extents WHERE volume = ?1 AND file_id = ?2",
+                params![VOL, F as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "logical neighbours with a physical gap stay separate");
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// The stated per-volume row bound: grants refuse at the budget with
+    /// the fragmentation error, and dropping rows (as a merge/reclaim
+    /// does) reopens room. The shattered volume is manufactured as REAL
+    /// rows (1-byte extents via a recursive CTE) with the counter
+    /// maintained — the full verifier's drift check runs inside every
+    /// grant here and would refuse a faked counter (it caught this
+    /// test's first draft doing exactly that).
+    #[test]
+    fn row_budget_refuses_and_merge_reopens() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        // 65,535 one-byte extents of another file, physically packed
+        // after the real grant, inside the watermark.
+        let fake = DEFAULT_EXTENT_ROW_BUDGET - 1;
+        conn.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < ?3 - 1)
+             INSERT INTO extents
+               (volume, file_id, logical_offset, length, physical_offset, gen, state)
+             SELECT ?1, ?2, i, 1, 8192 + i, 1, 'invalid' FROM n",
+            params![VOL, 99i64, fake],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE volume_alloc SET extent_rows = extent_rows + ?2, next_free = next_free + ?2
+             WHERE volume = ?1",
+            params![VOL, fake],
+        )
+        .unwrap();
+        verify_volume_invariants(&conn, VOL).expect("the shattered volume is consistent");
+
+        match grant(&mut conn, VOL, F, C1, 1 << 19, 8192, false) {
+            Err(ExtentAllocError::RowBudget { rows, budget }) => {
+                assert_eq!(rows, DEFAULT_EXTENT_ROW_BUDGET as u64);
+                assert_eq!(budget, DEFAULT_EXTENT_ROW_BUDGET as u64);
+            }
+            other => panic!("expected RowBudget, got {other:?}"),
+        }
+        // A re-grant of an EXISTING extent mints nothing — no budget
+        // verdict on a zero-mint request.
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).expect("zero-mint grant passes");
+        // Room reopens when rows genuinely go (the merge/reclaim shape).
+        conn.execute(
+            "DELETE FROM extents WHERE volume = ?1 AND file_id = 99",
+            params![VOL],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE volume_alloc SET extent_rows = extent_rows - ?2 WHERE volume = ?1",
+            params![VOL, fake],
+        )
+        .unwrap();
+        grant(&mut conn, VOL, F, C1, 1 << 19, 8192, false).expect("room after merge");
+    }
+
+    /// Free-list coalescing: freeing contiguous ranges one at a time
+    /// leaves ONE free row, last_gen = MAX — and the windowed verifier
+    /// still catches a manufactured overlap (its teeth, the corrupted-
+    /// table method).
+    #[test]
+    fn free_list_coalesces_and_windowed_verify_has_teeth() {
+        let mut conn = setup();
+        for i in 0..3u64 {
+            grant(&mut conn, VOL, F, C1, i * 8192, 8192, false).unwrap();
+            layout_return(&mut conn, VOL, F, C1, i * 8192, 8192).unwrap();
+        }
+        // The three returns merged the rows; reclaim frees the (merged)
+        // extents — the free list should coalesce to a single row.
+        reclaim_complete(&mut conn, VOL, F, 0, 3 * 8192, 7).unwrap();
+        let (free_rows, free_len): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(length), 0) FROM extent_free WHERE volume = ?1",
+                params![VOL],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(free_rows, 1, "contiguous frees coalesce");
+        assert_eq!(free_len, 3 * 8192);
+
+        // Windowed-verifier teeth: manufacture a physical overlap inside
+        // the window a fresh grant will touch — the grant transaction
+        // must refuse with Corruption, not persist it.
+        conn.execute(
+            "INSERT INTO extents
+               (volume, file_id, logical_offset, length, physical_offset, gen, state)
+             VALUES (?1, ?2, 900000, 8192, 0, 1, 'invalid')",
+            params![VOL, F as i64],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE volume_alloc SET extent_rows = extent_rows + 1 WHERE volume = ?1",
+            params![VOL],
+        )
+        .unwrap();
+        match grant(&mut conn, VOL, F, C2, 0, 8192, false) {
+            Err(ExtentAllocError::Corruption(m)) => {
+                assert!(m.contains("physical overlap"), "{m}")
+            }
+            other => panic!("expected Corruption, got {other:?}"),
+        }
     }
 
     /// THE FLIP (FreeRequiresDelivered, model-gated): a fenced holder

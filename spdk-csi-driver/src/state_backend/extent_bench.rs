@@ -31,8 +31,11 @@
 //!               fresh file each op (the w2-opencl analog)
 //!   grant-4k    the §8 shatter: 1024 blksize-sized grants on ONE file
 //!               (we advertise layout_blksize=4096, so this table shape
-//!               is client-reachable) — first/last quartiles exposed
-//!               because grant's in-transaction verify is O(volume rows)
+//!               is client-reachable) — first/last quartiles exposed as
+//!               the slope detector. Historically grant's full-volume
+//!               verify was O(rows) (~0.9 µs/row/txn, the cost-gate
+//!               debt); the merge tranche windowed it, and the
+//!               quartile spread is the evidence it stays flat
 //!   commit-1    the worst-case single LAYOUTCOMMIT: one commit over all
 //!               1024 shattered rows (1024 validates + 1024 promotes)
 //!   commit-4k   steady-state small commits: 1024 individual 4KiB
@@ -77,6 +80,12 @@ fn row(name: &str, n: usize, t: &Timings, note: &str) {
 #[tokio::test]
 #[ignore = "perf bench, not a correctness gate — run explicitly per the module doc"]
 async fn mdsbench_block_allocator_cost() {
+    // Measure the PRODUCTION verify path: the test-build differential
+    // belt re-runs the full O(rows) verifier after every windowed check
+    // — precisely the slope this bench exists to price — so it must be
+    // off here (and only here; this test runs alone via `--ignored`).
+    crate::state_backend::extent_alloc::BENCH_SKIP_FULL_VERIFY
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let dir = tempfile::tempdir().unwrap(); // honours TMPDIR (lima: /var/tmp, ext4)
     let backend: Arc<dyn StateBackend> =
         Arc::new(SqliteBackend::open(dir.path().join("state.db")).unwrap());
@@ -122,7 +131,7 @@ async fn mdsbench_block_allocator_cost() {
     row("grant-open", 1000, &open, "per-open LAYOUTGET shape (SELECT + 4Mi grant txn)");
     println!(
         "{:>14} first-quartile mean {q1:.1} µs vs last {q4:.1} µs  \
-         (verify is O(volume rows): 1 → 1000 extents)",
+         (slope detector: 1 → 1000 extents; the windowed verify must keep this flat)",
         ""
     );
 
@@ -142,7 +151,7 @@ async fn mdsbench_block_allocator_cost() {
     row("grant-4k", 1024, &shatter, "blksize-sized grants shattering ONE file");
     println!(
         "{:>14} first-quartile mean {q1:.1} µs vs last {q4:.1} µs  \
-         (the O(rows) verify tail §8's merge policy must bound)",
+         (slope detector at row-count depth; residual drift is btree-shaped, not the old linear verify)",
         ""
     );
 
@@ -189,10 +198,15 @@ async fn mdsbench_block_allocator_cost() {
         .extent_reclaim_complete("v-shatter", 1, 0, i64::MAX as u64, 0)
         .await.unwrap().unwrap();
     let reclaim_ms = ti.elapsed().as_secs_f64() * 1e3;
-    assert_eq!(out.freed_extents, 1024, "returned holder frees clean");
+    // The RETURN merged the 1024 contiguous quiescent rows (the merge
+    // policy's whole point — the shatter un-shatters at quiescence), so
+    // the reclaim frees ONE row carrying all the bytes.
+    assert_eq!(out.freed_extents, 1, "the shattered file merged at return");
+    assert_eq!(out.freed_bytes, 1024 * 4096, "…carrying every byte");
     println!(
         "return+free  {:>6} ops  {:>9.1} ms total  \
-         (LAYOUTRETURN {return_ms:.1} ms + reclaim_complete {reclaim_ms:.1} ms, 1024 rows)",
+         (LAYOUTRETURN incl. 1024-row merge {return_ms:.1} ms + reclaim_complete \
+         {reclaim_ms:.1} ms of the ONE merged row)",
         2,
         return_ms + reclaim_ms
     );

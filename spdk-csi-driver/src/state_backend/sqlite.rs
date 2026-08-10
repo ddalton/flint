@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// One request to the writer thread.
 enum Req {
@@ -1736,11 +1736,32 @@ CREATE TABLE IF NOT EXISTS extent_grants (
     PRIMARY KEY (volume, file_id, logical_offset, client_id)
 );
 
+-- extent_rows: the volume's live extents-table row count, maintained by
+-- every minting/deleting/merging transaction (cross-checked against
+-- COUNT(*) by the full verifier). O(1) budget enforcement — the stated
+-- per-volume extent-count bound the design owes before phase 3; a
+-- COUNT(*) at check time would itself be the O(rows) slope the windowed
+-- verifier just removed.
 CREATE TABLE IF NOT EXISTS volume_alloc (
     volume TEXT PRIMARY KEY,
     size_ceiling INTEGER NOT NULL,
-    next_free INTEGER NOT NULL
+    next_free INTEGER NOT NULL,
+    extent_rows INTEGER NOT NULL DEFAULT 0
 );
+
+-- The windowed verifier's physical-neighbour probes need indexed access
+-- by physical_offset on extents (extent_free/extent_quarantine already
+-- key on it).
+CREATE INDEX IF NOT EXISTS idx_extents_phys
+    ON extents (volume, physical_offset);
+
+-- The per-grant fenced-client check and fence_client's sweep filter on
+-- (volume, client_id[, fenced]) — the grants PK leads with file_id and
+-- cannot serve them, leaving a full-table scan per LAYOUTGET that the
+-- bench measured as the residual O(rows) slope after the verify was
+-- windowed.
+CREATE INDEX IF NOT EXISTS idx_grants_client
+    ON extent_grants (volume, client_id, fenced);
 
 -- Free list with reuse-generation memory: re-allocation of a freed range
 -- mints last_gen + 1, which is the stale-holder detector the whole model
