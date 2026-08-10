@@ -564,19 +564,26 @@ pub enum IoMode {
     Any = 3,
 }
 
-/// Layout type as per RFC 8881 Section 12.2.3
+/// Layout type as per RFC 8881 Section 3.3.13 (`layouttype4`).
+///
+/// The OSD2/BLOCK values were SWAPPED against the RFC until 2026-08-09
+/// (found while designing the pnfs-block class, see
+/// docs/plans/pnfs-block-layout-design.md §1). Harmless while only
+/// type 1 is served and the wire decoder maps only 1 and 4 — fatal the
+/// day type 3 ships. Do not "fix" these back from memory; the RFC
+/// assigns LAYOUT4_OSD2_OBJECTS = 0x2, LAYOUT4_BLOCK_VOLUME = 0x3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LayoutType {
     /// NFSv4.1 Files layout (RFC 8881 Chapter 13)
     NfsV4_1Files = 1,
-    
-    /// Block/volume layout (RFC 5663) - future
-    BlockVolume = 2,
-    
+
     /// Object layout (RFC 5664) - future
-    Osd2Objects = 3,
-    
+    Osd2Objects = 2,
+
+    /// Block/volume layout (RFC 5663; RFC 8154/9561 SCSI/NVMe) - future
+    BlockVolume = 3,
+
     /// Flexible File Layout (RFC 8435) - for independent DS storage
     /// Each DS has its own storage, filehandles are DS-specific
     FlexFiles = 4,
@@ -2855,9 +2862,12 @@ mod tests {
 
     #[test]
     fn test_layout_type_values() {
+        // RFC 8881 §3.3.13 layouttype4. This test previously pinned the
+        // OSD2/BLOCK values SWAPPED — it asserted the bug. Checked
+        // against the RFC, not against the enum, on 2026-08-09.
         assert_eq!(LayoutType::NfsV4_1Files as u32, 1);
-        assert_eq!(LayoutType::BlockVolume as u32, 2);
-        assert_eq!(LayoutType::Osd2Objects as u32, 3);
+        assert_eq!(LayoutType::Osd2Objects as u32, 2);
+        assert_eq!(LayoutType::BlockVolume as u32, 3);
         assert_eq!(LayoutType::FlexFiles as u32, 4);
     }
 
