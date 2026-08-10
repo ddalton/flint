@@ -1419,6 +1419,27 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         println!("🎯 [CONTROLLER] Creating volume: {}", volume_id);
 
         // -------------------------------------------------------------
+        // Layout dispatch gate. `layout` is a closed set: absent (the
+        // SPDK class never sets it) or a value this driver knows. An
+        // UNKNOWN value must hard-fail here — the old exact-string `if`
+        // fell through to the SPDK path, so `layout: pnfs-block` (or a
+        // typo like `pNFS`) silently provisioned a plain SPDK volume
+        // that reported success. Every future layout class
+        // (docs/plans/pnfs-block-layout-design.md §7) gets an explicit
+        // arm; nothing falls through by default.
+        // -------------------------------------------------------------
+        match req.parameters.get("layout").map(String::as_str) {
+            None | Some("pnfs") => {} // known: fall into the branches below
+            Some(other) => {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "StorageClass parameter layout: {other:?} is not supported by \
+                     this driver (supported: \"pnfs\", or omit for SPDK volumes). \
+                     Refusing rather than silently provisioning a non-{other} volume",
+                )));
+            }
+        }
+
+        // -------------------------------------------------------------
         // pNFS branch — runs BEFORE all SPDK / nfsEmptyDir paths so a
         // misconfigured StorageClass can't accidentally consume SPDK
         // resources. Selected by `parameters.layout: pnfs`.
