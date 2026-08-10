@@ -451,11 +451,30 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   The MDS-HA machinery (durable-DS plan milestone B: sqlite server_id, 90s grace,
   Recreate+RWO fence) carries the allocator state unchanged — but **reservation
   holdership is not in sqlite**: it lives target-side, keyed to the MDS's NVMe Host
-  Identifier. The MDS ships a stable, durable hostnqn+hostid (persisted alongside
-  `server_id`), and restart re-registers and re-acquires RTYPE=4h on every block
-  volume's namespace **before any grant or free proceeds** — until it holds the
-  reservation it cannot fence anyone, and both this step and GC's fencing conditions
-  are inoperative. §9 ties MdsRestart to the reservation registry for exactly this.
+  Identifier. The MDS ships a stable, durable hostnqn+hostid (`identity.rs`
+  `BLOCK_MDS_HOST_ID` / `BLOCK_MDS_PR_KEY`, compile-time constants — the durable part).
+  > **RIG-PROVEN 2026-08-10** (`make test-pnfs-fence-restart-rig` = block-rig.sh
+  > `FENCE=1 RESTART=1`): fence a live client, then kill+restart the MDS with the fence
+  > active — the fence is UNCHANGED. Two corrections to the sketch above:
+  >  1. **"re-register and re-acquire RTYPE=4h on every block volume on restart" is
+  >     WRONG**, and only because the fence rig taught us the kernel registers no key:
+  >     the MDS therefore holds EA-RO **only during a fence**, never continuously
+  >     (continuous 4h would fence every non-registrant client, i.e. all of them,
+  >     always). So there is no standing per-volume reservation to re-acquire.
+  >  2. What must survive is the **per-fence** reservation plus the sqlite eviction, and
+  >     both do with **no action on restart**: startup `reconcile_all` re-converges the
+  >     allow-list from `block_hosts` (the fenced client's row was deleted by the fence
+  >     → it stays OFF the list; verified the list came back as `[:mds:resv-fence]`
+  >     only), and the reservation persisted target-side. The post-restart re-fence
+  >     reports `registered=false acquired=false`, `gen` unchanged, MDS key still the
+  >     4h holder — the restarted MDS reclaimed holdership through its stable identity,
+  >     a **no-op re-acquire**, which is the correct behaviour for an MDS-only restart.
+  >
+  > Still owed (needs the tgt in the loop, not just the MDS): a tgt restart drops the
+  > reservation from memory, so **PTPL-survives-tgt-restart** is the separate proof, and
+  > the together-restart case is where an actual re-acquire (recovering from PTPL loss)
+  > would earn its keep — but that needs a durable "this client is fenced" signal, which
+  > does not exist yet (the eviction is a deletion, not a positive record).
 - **Fallback lane**: the disposition ladder (`fallback_io_disposition_core`,
   `operations/mod.rs:246-339`) grows a block arm at the same dispatcher fork
   (`dispatcher.rs:2264`): the MDS reads/writes the volume's extents itself via an
