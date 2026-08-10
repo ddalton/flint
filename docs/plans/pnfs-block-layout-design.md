@@ -136,6 +136,32 @@ silently degrading to MDS I/O. csi-node must ship the udev rule that creates the
 `nvme-eui.<nguid>` link (whether newer systemd does this natively is unresolved —
 verify per-distro, assume not).
 
+> **RIG-PROVEN 2026-08-09** (`tests/lima/pnfs/block-rig.sh`, Ubuntu 24.04 +
+> kernel 7.0, systemd 255): CONFIRMED — udev creates only `nvme-uuid.*`; the
+> rule (or a link) is required. Assume not, on every current distro. Four more
+> kernel-side facts the rig established, each a server obligation:
+> (1) **fs_layout_types is read ONCE per superblock**, at the client's fsinfo
+> probe — a scsi volume sharing the export root's fsid inherits the root's
+> files-class advertisement and asks type-1 layouts forever. Block volumes are
+> therefore advertised as their OWN synthetic filesystem
+> (`fsid = (SCSI_FSID_MAJOR, hash(volume))`, fileops.rs) so the mount crossing
+> re-probes on the volume dir; a free consequence is client-side EXDEV on
+> cross-volume rename/link of scsi files.
+> (2) **PTPL is kernel-enforced from the first I/O**, not merely restart
+> hygiene: `nvme_pr_register` sets CPTPL=PERSIST unconditionally and SPDK
+> answers INVALID_FIELD on a namespace without a `ptpl_file` — the client then
+> marks the device unavailable (120 s negative cache) and every I/O degrades to
+> the MDS path. `nvmf_subsystem_add_ns` must carry `ptpl_file` (blockExport
+> `ptplDir`).
+> (3) **Read layouts refuse RW_DATA/INVALID_DATA outright** (`verify_extent`)
+> and demand gapless tiling of the layout window: LAYOUTGET(READ) is a
+> NON-ALLOCATING query (`extent_alloc::grant_read`) presenting committed
+> extents as READ_DATA and every hole as NONE_DATA.
+> (4) **The namespace record carries the lvol's CANONICAL (UUID-form) bdev
+> name**, not the `lvs/vol` alias — an alias-only match in the reconciler saw
+> "wrong bdev" every pass and bounced the namespace under live initiators
+> (~0.5 s device-node gap per reconcile).
+
 Second kernel constraint: `bl_set_layoutdriver` rejects a layout blksize of 0 or
 > PAGE_SIZE. **We must advertise `FATTR4_LAYOUT_BLKSIZE` ≤ 4 KiB for block-class
 volumes** — today **both** encoders hardcode 4 MiB: `fileops.rs:1237-1244` (snapshot)

@@ -93,6 +93,16 @@ pub struct ExportSpec<'a> {
     /// refuses to reattach. `None` = SPDK default (bdev UUID), correct
     /// for replica exports whose backing lvol identity is stable.
     pub ns_identity: Option<(&'a str, &'a str)>,
+    /// Reservation persist-through-power-loss file for the namespace.
+    /// MANDATORY for pnfs-block exports (design doc §5), and not for the
+    /// restart-durability reason alone — RIG-PROVEN: the ≥6.x kernel's
+    /// `nvme_pr_register` sets CPTPL=PERSIST unconditionally, and SPDK
+    /// answers INVALID_FIELD on a non-PTPL-capable namespace, so a
+    /// blocklayout client cannot register its reservation key AT ALL
+    /// against a namespace created without this — every I/O silently
+    /// degrades to the (refused) MDS path. `None` = raid-leg/loopback
+    /// exports, whose consumers never issue PR commands.
+    pub ptpl_file: Option<&'a str>,
 }
 
 /// Deterministic (UUID, NGUID) for a volume's kernel-facing namespace,
@@ -379,6 +389,9 @@ pub async fn ensure_export(
         if let Some((uuid, nguid)) = spec.ns_identity {
             ns_obj["uuid"] = json!(uuid);
             ns_obj["nguid"] = json!(nguid);
+        }
+        if let Some(ptpl) = spec.ptpl_file {
+            ns_obj["ptpl_file"] = json!(ptpl);
         }
         let add = json!({
             "method": "nvmf_subsystem_add_ns",
@@ -746,6 +759,7 @@ mod tests {
             trsvcid: 4420,
             allowed_hosts: None,
             ns_identity: None,
+            ptpl_file: None,
         }
     }
 

@@ -128,10 +128,23 @@ pub struct BlockExportConfig {
     /// Listener port; 4420 is the NVMe-oF IANA default.
     #[serde(default = "default_nvmf_trsvcid")]
     pub trsvcid: u16,
+
+    /// Directory ON THE TGT HOST for per-namespace reservation PTPL
+    /// files. Mandatory: the ≥6.x kernel blocklayout client registers
+    /// its reservation key with CPTPL=PERSIST unconditionally, and SPDK
+    /// refuses that on a namespace without a ptpl_file — no PTPL, no
+    /// client I/O at all (rig-proven). Point at a path that survives
+    /// tgt restarts in production; the default suits the lima rig.
+    #[serde(rename = "ptplDir", default = "default_ptpl_dir")]
+    pub ptpl_dir: String,
 }
 
 fn default_nvmf_trsvcid() -> u16 {
     4420
+}
+
+fn default_ptpl_dir() -> String {
+    "/var/tmp".to_string()
 }
 
 /// Data Server configuration

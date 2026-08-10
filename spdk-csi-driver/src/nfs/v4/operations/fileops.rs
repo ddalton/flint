@@ -751,6 +751,22 @@ const FATTR4_LINK_SUPPORT: u32 = 5;
 const FATTR4_SYMLINK_SUPPORT: u32 = 6;
 const FATTR4_NAMED_ATTR: u32 = 7;
 const FATTR4_FSID: u32 = 8;
+
+/// fsid major for scsi-class (pnfs-block) volumes — synthetic, chosen to
+/// collide with no st_dev-derived value ("flint_bl" in ASCII). Each block
+/// volume is its own filesystem: (SCSI_FSID_MAJOR, hash(volume)).
+const SCSI_FSID_MAJOR: u64 = 0x666c_696e_745f_626c;
+
+/// Stable per-volume fsid minor. DefaultHasher is deterministic across
+/// processes and builds (the `stable_ns_identity` precedent) — the fsid
+/// must not change across MDS restarts or the client remounts see a
+/// "different" filesystem.
+fn block_volume_fsid_minor(volume: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ("flint-block-fsid", volume).hash(&mut h);
+    h.finish()
+}
 const FATTR4_UNIQUE_HANDLES: u32 = 9;
 const FATTR4_LEASE_TIME: u32 = 10;
 const FATTR4_RDATTR_ERROR: u32 = 11;
@@ -1025,7 +1041,7 @@ fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32], pnfs_enab
     };
 
     // Use the standard snapshot encoder for consistency
-    encode_attributes_from_snapshot(requested_attrs, &snapshot, pnfs_enabled, false)
+    encode_attributes_from_snapshot(requested_attrs, &snapshot, pnfs_enabled, None)
 }
 
 /// Encode attributes from a snapshot (NO VFS I/O)
@@ -1038,8 +1054,22 @@ fn encode_attributes_from_snapshot(
     requested_bitmap: &[u32],
     snapshot: &AttributeSnapshot,
     pnfs_enabled: bool,
-    scsi: bool,
+    // None = files-class (the historical advertisement). Some(minor) =
+    // the path lives on a scsi-class volume whose SYNTHETIC fsid minor
+    // is `minor` — block volumes are advertised as their OWN filesystem
+    // (rig-proven, kernel 7.0): the client reads fs_layout_types ONCE
+    // per superblock at its fsinfo probe, so a scsi volume sharing the
+    // export root's fsid inherits the root's files-class advertisement
+    // and asks for type-1 layouts forever. A distinct fsid makes the
+    // volume dir a filesystem crossing; the client probes fsinfo on the
+    // volume itself and binds the scsi layout driver for that
+    // superblock alone. Free consequence: cross-volume renames/links of
+    // scsi files now refuse client-side with EXDEV — the refusal the
+    // extents machine wanted anyway (bytes cannot follow a file out of
+    // its volume's lvol).
+    scsi_fsid: Option<u64>,
 ) -> (Vec<u8>, Vec<u32>) {
+    let scsi = scsi_fsid.is_some();
     use std::collections::BTreeSet;
     
     // Parse bitmap to get list of requested attribute IDs in order
@@ -1085,8 +1115,16 @@ fn encode_attributes_from_snapshot(
                 true
             }
             FATTR4_FSID => {
-                attr_vals.put_u64(snapshot.fsid_major);
-                attr_vals.put_u64(snapshot.fsid_minor);
+                match scsi_fsid {
+                    Some(minor) => {
+                        attr_vals.put_u64(SCSI_FSID_MAJOR);
+                        attr_vals.put_u64(minor);
+                    }
+                    None => {
+                        attr_vals.put_u64(snapshot.fsid_major);
+                        attr_vals.put_u64(snapshot.fsid_minor);
+                    }
+                }
                 true
             }
             FATTR4_RDATTR_ERROR => {
@@ -1452,11 +1490,14 @@ pub struct FileOperationHandler {
 impl FileOperationHandler {
     /// Create a new file operation handler
     /// Whether `path` (absolute, under the export) lives on a
-    /// scsi-class (pnfs-block) volume. Every "don't know" — no pNFS
-    /// handler, path outside the export, empty key — answers false,
-    /// keeping the historical files-class advertisement untouched.
-    fn scsi_class_for_path(&self, path: &std::path::Path) -> bool {
-        let Some(p) = &self.pnfs_handler else { return false };
+    /// scsi-class (pnfs-block) volume — and if so, the volume's
+    /// synthetic fsid minor (see `encode_attributes_from_snapshot`'s
+    /// `scsi_fsid` doc for why the class rides on the fsid). Every
+    /// "don't know" — no pNFS handler, path outside the export, empty
+    /// key — answers None, keeping the historical files-class
+    /// advertisement untouched.
+    fn scsi_fsid_for_path(&self, path: &std::path::Path) -> Option<u64> {
+        let p = self.pnfs_handler.as_ref()?;
         let export = self.fh_mgr.get_export_path().to_path_buf();
         let key = path
             .strip_prefix(&export)
@@ -1464,9 +1505,13 @@ impl FileOperationHandler {
             .to_string_lossy()
             .into_owned();
         if key.is_empty() {
-            return false;
+            return None;
         }
-        p.layout_class_for(&key) == crate::pnfs::mds::layout::LayoutClass::Scsi
+        if p.layout_class_for(&key) != crate::pnfs::mds::layout::LayoutClass::Scsi {
+            return None;
+        }
+        let volume = key.split('/').find(|c| !c.is_empty())?;
+        Some(block_volume_fsid_minor(volume))
     }
 
     pub fn new(fh_mgr: Arc<FileHandleManager>, pnfs_enabled: bool) -> Self {
@@ -2167,7 +2212,7 @@ impl FileOperationHandler {
                                         // OPEN attr fast-path: layout attrs are
                                         // fsinfo-time reads answered per-volume by
                                         // handle_getattr; not derived here.
-                                        false,
+                                        None,
                                     );
                                 return GetAttrRes {
                                     status: Nfs4Status::Ok,
@@ -2230,10 +2275,11 @@ impl FileOperationHandler {
             &op.attr_request,
             &snapshot,
             self.pnfs_enabled,
-            // Per-volume advertisement: THIS is the arm a mounting
-            // client's fsinfo hits (it mounts the volume subtree, so
-            // the layout-driver pick reads the volume dir's class).
-            self.scsi_class_for_path(&path),
+            // Per-volume advertisement, riding the fsid: a mount of the
+            // volume subtree crosses into the volume's own (synthetic)
+            // filesystem, and THAT is the fsinfo probe that picks the
+            // client's layout driver.
+            self.scsi_fsid_for_path(&path),
         );
         
         let fattr = Fattr4 {
@@ -2570,8 +2616,12 @@ impl FileOperationHandler {
                 &op.attr_request,
                 snapshot,
                 self.pnfs_enabled,
-                // Entries share the directory's volume, hence its class.
-                self.scsi_class_for_path(&dir_path),
+                // Per ENTRY, not per directory: a listing of the export
+                // root enumerates the volume dirs themselves, and a
+                // scsi volume's entry must already carry its own fsid
+                // or READDIRPLUS would report it as part of the parent
+                // filesystem it is not in.
+                self.scsi_fsid_for_path(&dir_path.join(file_name)),
             );
 
             debug!("READDIR: Encoding '{}': {} attribute bytes, bitmap={:?}",
@@ -3349,8 +3399,8 @@ impl FileOperationHandler {
             self.pnfs_enabled,
             // The pseudo-root spans every volume; it advertises the
             // files-class fleet default. Per-volume refinement happens
-            // on the volume dirs, which is where mounts land.
-            false,
+            // at the fsid crossing into each scsi volume dir.
+            None,
         );
         
         let fattr = Fattr4 {

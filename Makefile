@@ -304,6 +304,10 @@ test-pnfs-fsx: build-pnfs ## fsx + fsstress torture (data integrity across names
 test-pnfs-mdsbench: build-pnfs ## MDS metadata-perf bench (LABEL=, MDS_ENV= for A/B; not in the gate)
 	tests/lima/pnfs/mdsbench.sh
 
+.PHONY: test-pnfs-block-rig
+test-pnfs-block-rig: ## pnfs-block kernel-client rig: stock ≥6.11 kernel does raw NVMe extent I/O (needs cross-built MDS + ~/rig-spdk, see script header)
+	tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh

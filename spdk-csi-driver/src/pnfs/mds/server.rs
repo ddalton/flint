@@ -212,6 +212,7 @@ impl MetadataServer {
                     be.lvstore.clone(),
                     be.traddr.clone(),
                     be.trsvcid,
+                    be.ptpl_dir.clone(),
                 ));
             layout_manager.attach_block_export(reconciler);
             info!(

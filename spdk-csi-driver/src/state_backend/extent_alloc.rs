@@ -393,6 +393,67 @@ pub fn grant(
     Ok(granted)
 }
 
+/// READ-layout query: the committed extents overlapping the range, with a
+/// grant row per extent for this client — and NO allocation, ever. A
+/// reader must not mint space (the kernel's 1 GiB-window LAYOUTGET on a
+/// 64 MiB file would otherwise allocate ~1 GiB of arena for zeros), and
+/// it must not see uncommitted extents (INVALID rows carry either nothing
+/// or a prior owner's bytes; the wire layer presents the gaps as
+/// NONE_DATA, which reads as zeros client-side — kernel-verified:
+/// `verify_extent` refuses RW_DATA/INVALID_DATA in a read layout
+/// outright). The grant rows are what make readers VISIBLE to
+/// FreeRevalidates — a truncate cannot free an extent out from under a
+/// layout-holding reader.
+pub fn grant_read(
+    conn: &mut Connection,
+    volume: &str,
+    file_id: u64,
+    client_id: u64,
+    logical_offset: u64,
+    length: u64,
+) -> Result<Vec<GrantedExtent>> {
+    let start = as_i64(logical_offset, "offset exceeds i64")?;
+    let end = checked_end(logical_offset, length)?;
+    let client = as_i64(client_id, "client id exceeds i64")?;
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let fenced_rows: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM extent_grants WHERE volume = ?1 AND client_id = ?2 AND fenced = 1",
+        params![volume, client],
+        |r| r.get(0),
+    )?;
+    if fenced_rows > 0 {
+        return Err(ExtentAllocError::FencedClient);
+    }
+
+    let committed: Vec<ExtentRow> = overlapping_extents(&tx, volume, file_id, start, end)?
+        .into_iter()
+        .filter(|e| e.state == "rw")
+        .collect();
+    for e in &committed {
+        tx.execute(
+            "INSERT OR IGNORE INTO extent_grants
+               (volume, file_id, logical_offset, client_id, mode, gen, fenced)
+             VALUES (?1, ?2, ?3, ?4, 'read', ?5, 0)",
+            params![volume, file_id as i64, e.logical_offset, client, e.generation],
+        )?;
+    }
+    verify_volume_invariants_conn(&tx, volume)?;
+    let granted = committed
+        .iter()
+        .map(|e| GrantedExtent {
+            logical_offset: e.logical_offset as u64,
+            length: e.length as u64,
+            physical_offset: e.physical_offset as u64,
+            generation: e.generation as u64,
+            committed: true,
+            needs_scrub: false,
+        })
+        .collect();
+    tx.commit()?;
+    Ok(granted)
+}
+
 /// LAYOUTRETURN: drop this client's grant rows on extents overlapping the
 /// range. Returns the number of grant rows removed. A fenced client's
 /// return is accepted — the return is the client's promise that no more
@@ -1177,6 +1238,45 @@ mod tests {
         let (evicted, remaining) = host_evict(&mut conn, VOL, C2).unwrap();
         assert!(evicted.is_empty(), "double-evict is a clean no-op");
         assert_eq!(remaining, vec![h2]);
+    }
+
+    /// READ grants never allocate, never show uncommitted extents, and
+    /// leave holder rows that block a reclaim (reader visibility — the
+    /// FreeRevalidates belt covers readers too).
+    #[test]
+    fn read_grant_is_nonallocating_committed_only_and_visible_to_reclaim() {
+        let mut conn = setup();
+        // C1 writes two 4k extents, commits only the first, returns.
+        // (Commit promotes whole extents, so the split shapes the state.)
+        grant(&mut conn, VOL, F, C1, 0, 4096, false).unwrap();
+        grant(&mut conn, VOL, F, C1, 4096, 4096, false).unwrap();
+        commit_extents(&mut conn, VOL, F, C1, 0, 4096).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+
+        // C2 asks to READ a huge window: only the committed extent comes
+        // back, and nothing was allocated for the rest of the window.
+        let r = grant_read(&mut conn, VOL, F, C2, 0, 1 << 20).unwrap();
+        assert_eq!(r.len(), 1, "uncommitted extents must not appear in a read grant");
+        assert_eq!((r[0].logical_offset, r[0].length), (0, 4096));
+        assert!(r[0].committed);
+        let (_, next_free): (i64, i64) = conn
+            .query_row(
+                "SELECT size_ceiling, next_free FROM volume_alloc WHERE volume = ?1",
+                params![VOL],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(next_free, 8192, "a read must never move the watermark");
+
+        // The reader's grant row blocks the free until it returns.
+        assert!(matches!(
+            reclaim_complete(&mut conn, VOL, F, 0, 1 << 20, 0),
+            Err(ExtentAllocError::NotQuiescent { .. })
+        ));
+        layout_return(&mut conn, VOL, F, C2, 0, 1 << 20).unwrap();
+        let out = reclaim_complete(&mut conn, VOL, F, 0, 1 << 20, 0).unwrap();
+        assert_eq!(out.freed_extents, 2);
+        verify_volume_invariants(&conn, VOL).unwrap();
     }
 
     #[test]

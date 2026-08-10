@@ -1160,7 +1160,7 @@ mod create_volume_tests {
         assert_eq!(sub["allow_any_host"], false, "default-closed");
         drop(subs);
         assert!(
-            tgt.bdevs.lock().unwrap().contains("lvs_test/pvc-blk4"),
+            tgt.bdevs.lock().unwrap().contains_key("lvs_test/pvc-blk4"),
             "backing lvol exists"
         );
 
@@ -1352,6 +1352,7 @@ mod create_volume_tests {
                     "lvs_test".into(),
                     "10.0.0.9".into(),
                     4420,
+                    "/var/tmp".into(),
                 ),
             ));
         }

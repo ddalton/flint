@@ -587,6 +587,18 @@ pub trait StateBackend: Send + Sync {
         fresh_only: bool,
     ) -> StateBackendResult<Result<Vec<extent_alloc::GrantedExtent>, extent_alloc::ExtentAllocError>>;
 
+    /// READ-layout query: committed extents overlapping the range, with
+    /// grant rows for holder visibility — never allocates, never returns
+    /// uncommitted extents (the wire layer presents gaps as NONE_DATA).
+    async fn extent_grant_read(
+        &self,
+        volume: &str,
+        file_id: u64,
+        client_id: u64,
+        logical_offset: u64,
+        length: u64,
+    ) -> StateBackendResult<Result<Vec<extent_alloc::GrantedExtent>, extent_alloc::ExtentAllocError>>;
+
     /// LAYOUTCOMMIT's allocator half: promote INVALID→RW under a live
     /// (client, gen)-matching grant. Returns extents promoted.
     async fn extent_commit(

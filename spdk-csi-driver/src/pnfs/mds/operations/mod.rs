@@ -2022,6 +2022,7 @@ mod fallback_tests {
             "lvs_test".into(),
             "10.0.0.9".into(),
             4420,
+            "/var/tmp".into(),
         ));
         reconciler.ensure("volB", Some(1 << 20)).await.unwrap();
         lm.attach_block_export(reconciler);

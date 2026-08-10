@@ -350,6 +350,24 @@ impl StateBackend for MemoryBackend {
         Ok(Ok(0))
     }
 
+    async fn extent_grant_read(
+        &self,
+        _volume: &str,
+        _file_id: u64,
+        _client_id: u64,
+        _logical_offset: u64,
+        _length: u64,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::GrantedExtent>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        Err(StateBackendError::Storage(
+            "read grant on the memory backend — block-class volumes require sqlite".into(),
+        ))
+    }
+
     async fn block_host_admit(
         &self,
         _volume: &str,

@@ -84,6 +84,16 @@ pub struct CompoundDispatcher {
     >,
 }
 
+/// One pnfs_scsi_layout4 extent as encoded on the wire (RFC 8154
+/// §2.3.2). States: READ_WRITE_DATA=0, READ_DATA=1, INVALID_DATA=2,
+/// NONE_DATA=3.
+struct ScsiSegment {
+    file_offset: u64,
+    length: u64,
+    storage_offset: u64,
+    state: u32,
+}
+
 impl CompoundDispatcher {
     /// Create a new COMPOUND dispatcher (standalone NFS mode)
     pub fn new(
@@ -2637,27 +2647,79 @@ impl CompoundDispatcher {
     /// zeros client-side, which is what makes an uncommitted grant
     /// unobservable).
     fn encode_scsi_layout(
-        extents: &[crate::state_backend::extent_alloc::GrantedExtent],
+        segments: &[ScsiSegment],
         device_id: &[u8; 16],
     ) -> bytes::Bytes {
         use crate::nfs::xdr::XdrEncoder;
         let mut e = XdrEncoder::new();
-        e.encode_u32(extents.len() as u32);
-        for x in extents {
+        e.encode_u32(segments.len() as u32);
+        for s in segments {
             e.encode_fixed_opaque(device_id); // se_vol_id (deviceid4, fixed 16)
-            e.encode_u64(x.logical_offset); // se_file_offset
-            e.encode_u64(x.length); // se_length
-            e.encode_u64(x.physical_offset); // se_storage_offset
-            // PNFS_SCSI_READ_WRITE_DATA = 0, PNFS_SCSI_INVALID_DATA = 2
-            e.encode_u32(if x.committed { 0 } else { 2 });
+            e.encode_u64(s.file_offset); // se_file_offset
+            e.encode_u64(s.length); // se_length
+            e.encode_u64(s.storage_offset); // se_storage_offset
+            e.encode_u32(s.state); // pnfs_scsi_extent_state4
         }
         e.finish()
+    }
+
+    /// Build a READ layout's segment list: committed extents as
+    /// READ_DATA, every gap — leading, interior, trailing — as NONE_DATA
+    /// (reads as zeros client-side). Kernel-verified constraints
+    /// (`verify_extent`, v6.14/v7.0): a read layout REFUSES
+    /// RW_DATA/INVALID_DATA outright, and extents must tile the layout
+    /// range contiguously from its offset — which is why the holes must
+    /// be filled rather than skipped.
+    fn scsi_read_segments(
+        extents: &[crate::state_backend::extent_alloc::GrantedExtent],
+        offset: u64,
+        length: u64,
+    ) -> Vec<ScsiSegment> {
+        const READ_DATA: u32 = 1;
+        const NONE_DATA: u32 = 3;
+        let end = offset.saturating_add(length);
+        let mut segs = Vec::new();
+        let mut cursor = offset;
+        for x in extents {
+            // Clip to the requested window; the allocator returns whole
+            // extents, which may start before `offset` or run past `end`.
+            let x_start = x.logical_offset.max(offset);
+            let x_end = (x.logical_offset + x.length).min(end);
+            if x_end <= x_start {
+                continue;
+            }
+            if x_start > cursor {
+                segs.push(ScsiSegment {
+                    file_offset: cursor,
+                    length: x_start - cursor,
+                    storage_offset: 0,
+                    state: NONE_DATA,
+                });
+            }
+            segs.push(ScsiSegment {
+                file_offset: x_start,
+                length: x_end - x_start,
+                storage_offset: x.physical_offset + (x_start - x.logical_offset),
+                state: READ_DATA,
+            });
+            cursor = x_end;
+        }
+        if cursor < end {
+            segs.push(ScsiSegment {
+                file_offset: cursor,
+                length: end - cursor,
+                storage_offset: 0,
+                state: NONE_DATA,
+            });
+        }
+        segs
     }
 
     /// The scsi-class LAYOUTGET: allocate extents (fresh space only —
     /// reuse stays locked until the MDS initiator can write_zeroes,
     /// per GrantedExtent::needs_scrub), mint the recall handle, encode
-    /// pnfs_scsi_layout4.
+    /// pnfs_scsi_layout4. READ iomode takes the non-allocating query
+    /// and the READ_DATA/NONE_DATA presentation instead.
     #[allow(clippy::too_many_arguments)]
     async fn handle_layoutget_scsi(
         &self,
@@ -2756,7 +2818,17 @@ impl CompoundDispatcher {
             return OperationResult::LayoutGet(Nfs4Status::LayoutTrylater, None);
         }
 
-        match backend.extent_grant(&volume, file_id, client_id, offset, want, true).await {
+        // The two iomodes take different allocator paths on purpose: a
+        // WRITE grant allocates fresh space; a READ grant must never
+        // allocate (a kernel's big-window LAYOUTGET on a small file
+        // would mint arena for zeros) and must present committed bytes
+        // only — the kernel refuses RW/INVALID states in read layouts.
+        let grant_result = if im == IoMode::Read {
+            backend.extent_grant_read(&volume, file_id, client_id, offset, want).await
+        } else {
+            backend.extent_grant(&volume, file_id, client_id, offset, want, true).await
+        };
+        match grant_result {
             Ok(Ok(extents)) => {
                 if extents.iter().any(|x| x.needs_scrub) {
                     // fresh_only=true makes this unreachable; if it ever
@@ -2780,27 +2852,49 @@ impl CompoundDispatcher {
                 if let Some(m) = &self.f68a {
                     m.layoutget_granted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                let span_start =
-                    extents.iter().map(|x| x.logical_offset).min().unwrap_or(offset);
-                let span_end = extents
-                    .iter()
-                    .map(|x| x.logical_offset + x.length)
-                    .max()
-                    .unwrap_or(offset + want);
+                let (lo_offset, lo_length, segments) = if im == IoMode::Read {
+                    // The read layout covers exactly the requested window;
+                    // holes read as zeros via NONE_DATA fillers.
+                    (offset, want, Self::scsi_read_segments(&extents, offset, want))
+                } else {
+                    let span_start =
+                        extents.iter().map(|x| x.logical_offset).min().unwrap_or(offset);
+                    let span_end = extents
+                        .iter()
+                        .map(|x| x.logical_offset + x.length)
+                        .max()
+                        .unwrap_or(offset + want);
+                    let segs = extents
+                        .iter()
+                        .map(|x| ScsiSegment {
+                            file_offset: x.logical_offset,
+                            length: x.length,
+                            storage_offset: x.physical_offset,
+                            // READ_WRITE_DATA = 0, INVALID_DATA = 2
+                            state: if x.committed { 0 } else { 2 },
+                        })
+                        .collect();
+                    (span_start, span_end - span_start, segs)
+                };
                 info!(
-                    "📄 LAYOUTGET (scsi) granted: '{}' [{}, {}) {} extent(s), client {}",
-                    file_key, span_start, span_end, extents.len(), client_id
+                    "📄 LAYOUTGET (scsi) granted: '{}' {:?} [{}, {}) {} segment(s), client {}",
+                    file_key,
+                    im,
+                    lo_offset,
+                    lo_offset + lo_length,
+                    segments.len(),
+                    client_id
                 );
                 let device_id = crate::nvmeof_export::scsi_device_id(&volume);
                 let mut e = XdrEncoder::new();
                 e.encode_bool(true); // return_on_close (matches the handle)
                 e.encode_fixed_opaque(&stateid);
                 e.encode_u32(1); // one layout4
-                e.encode_u64(span_start);
-                e.encode_u64(span_end - span_start);
+                e.encode_u64(lo_offset);
+                e.encode_u64(lo_length);
                 e.encode_u32(iomode);
                 e.encode_u32(5); // LAYOUT4_SCSI
-                e.encode_opaque(&Self::encode_scsi_layout(&extents, &device_id));
+                e.encode_opaque(&Self::encode_scsi_layout(&segments, &device_id));
                 OperationResult::LayoutGet(Nfs4Status::Ok, Some(e.finish()))
             }
             Ok(Err(verdict)) => {
@@ -4777,6 +4871,59 @@ mod tests {
             None,
             "non-UTF8 owners refuse"
         );
+    }
+
+    /// READ-layout segment tiling, against the kernel's `verify_extent`
+    /// law: no RW/INVALID states, and segments must tile the layout
+    /// window contiguously — leading, interior, and trailing holes as
+    /// NONE_DATA, committed extents clipped into the window as
+    /// READ_DATA with the storage offset shifted by the clip.
+    #[test]
+    fn read_segments_tile_the_window_with_none_data_holes() {
+        use crate::state_backend::extent_alloc::GrantedExtent;
+        let ext = |lo: u64, len: u64, phys: u64| GrantedExtent {
+            logical_offset: lo,
+            length: len,
+            physical_offset: phys,
+            generation: 1,
+            committed: true,
+            needs_scrub: false,
+        };
+        // Window [4096, 4096+24576); committed extents [0,8192) (clipped)
+        // and [16384, 20480) — leading part-overlap, interior hole,
+        // trailing hole.
+        let segs = CompoundDispatcher::scsi_read_segments(
+            &[ext(0, 8192, 100_000), ext(16384, 4096, 200_000)],
+            4096,
+            24576,
+        );
+        let flat: Vec<(u64, u64, u64, u32)> = segs
+            .iter()
+            .map(|s| (s.file_offset, s.length, s.storage_offset, s.state))
+            .collect();
+        assert_eq!(
+            flat,
+            vec![
+                (4096, 4096, 104_096, 1), // clipped READ_DATA, phys shifted
+                (8192, 8192, 0, 3),       // interior hole
+                (16384, 4096, 200_000, 1),
+                (20480, 8192, 0, 3),      // trailing hole
+            ]
+        );
+        // Contiguity — the exact thing verify_extent polices.
+        let mut cursor = 4096;
+        for (off, len, _, state) in &flat {
+            assert_eq!(*off, cursor, "gapless tiling");
+            assert_ne!(*state, 0, "no RW_DATA in a read layout");
+            assert_ne!(*state, 2, "no INVALID_DATA in a read layout");
+            cursor = off + len;
+        }
+        assert_eq!(cursor, 4096 + 24576, "window fully covered");
+
+        // Empty file: the whole window is one NONE_DATA hole.
+        let segs = CompoundDispatcher::scsi_read_segments(&[], 0, 4096);
+        assert_eq!(segs.len(), 1);
+        assert_eq!((segs[0].file_offset, segs[0].length, segs[0].state), (0, 4096, 3));
     }
 }
 

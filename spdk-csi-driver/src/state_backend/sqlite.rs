@@ -1242,6 +1242,33 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn extent_grant_read(
+        &self,
+        volume: &str,
+        file_id: u64,
+        client_id: u64,
+        logical_offset: u64,
+        length: u64,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::GrantedExtent>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::grant_read(
+                conn,
+                &v,
+                file_id,
+                client_id,
+                logical_offset,
+                length,
+            )
+        })
+        .await
+    }
+
     async fn block_host_admit(
         &self,
         volume: &str,

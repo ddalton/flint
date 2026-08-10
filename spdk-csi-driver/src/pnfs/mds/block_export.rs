@@ -43,6 +43,12 @@ pub struct BlockExportReconciler {
     /// the nodes' `nvme connect`.
     traddr: String,
     trsvcid: u16,
+    /// Directory (ON THE TGT HOST) for per-namespace reservation PTPL
+    /// files. Mandatory-by-kernel: see `ExportSpec::ptpl_file`. Must
+    /// outlive tgt restarts in production (a lost PTPL file silently
+    /// unregisters every client's reservation key — the csi-node roll
+    /// landmine, reservation edition).
+    ptpl_dir: String,
     /// Per-volume serialization of converge passes (see module doc).
     locks: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
@@ -54,6 +60,7 @@ impl BlockExportReconciler {
         lvstore: String,
         traddr: String,
         trsvcid: u16,
+        ptpl_dir: String,
     ) -> Self {
         Self {
             rpc,
@@ -61,6 +68,7 @@ impl BlockExportReconciler {
             lvstore,
             traddr,
             trsvcid,
+            ptpl_dir,
             locks: dashmap::DashMap::new(),
         }
     }
@@ -106,12 +114,42 @@ impl BlockExportReconciler {
         self.ensure(volume, None).await
     }
 
+    /// Every name the lvol answers to, from a live `bdev_get_bdevs`
+    /// record: its bdev name (UUID-form for lvols), its uuid, and its
+    /// aliases. The namespace record in `nvmf_get_subsystems` carries
+    /// the bdev NAME, not the `lvs/vol` alias this module addresses the
+    /// lvol by — matching on the alias alone made every converge pass
+    /// see "a namespace pointing at a different bdev" and take
+    /// ensure_export's remove-and-re-add repair arm, yanking the
+    /// namespace out from under live initiators once per reconcile
+    /// (rig-found: the device node vanished for ~0.5s at every admit,
+    /// and the client's layout-time open raced straight into the gap).
+    fn lvol_identities(resp: &serde_json::Value) -> Vec<String> {
+        let mut ids = Vec::new();
+        if let Some(b) = resp
+            .get("result")
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+        {
+            for key in ["name", "uuid"] {
+                if let Some(v) = b.get(key).and_then(|v| v.as_str()) {
+                    ids.push(v.to_string());
+                }
+            }
+            if let Some(aliases) = b.get("aliases").and_then(|a| a.as_array()) {
+                ids.extend(aliases.iter().filter_map(|a| a.as_str().map(String::from)));
+            }
+        }
+        ids
+    }
+
     async fn ensure_locked(&self, volume: &str, size_bytes: Option<u64>) -> Result<(), String> {
         let bdev = self.bdev_name(volume);
 
         // ---- lvol ----
         let probe = json!({ "method": "bdev_get_bdevs", "params": { "name": bdev } });
-        let lvol_present = self.rpc.rpc(&probe).await.is_ok();
+        let mut probe_resp = self.rpc.rpc(&probe).await;
+        let lvol_present = probe_resp.is_ok();
         if !lvol_present {
             let Some(bytes) = size_bytes else {
                 return Err(format!(
@@ -142,16 +180,20 @@ impl BlockExportReconciler {
                     return Err(format!("bdev_lvol_create {}: {}", bdev, e));
                 }
             }
+            probe_resp = self.rpc.rpc(&probe).await;
         }
+        let lvol_ids = probe_resp.as_ref().map(Self::lvol_identities).unwrap_or_default();
+        let lvol_id_refs: Vec<&str> = lvol_ids.iter().map(String::as_str).collect();
 
         // ---- subsystem / namespace / listener / hosts ----
         let hosts = self.desired_hosts(volume).await?;
         let nqn = crate::identity::block_volume_export_nqn(volume);
         let (uuid, nguid) = crate::nvmeof_export::stable_ns_identity(volume);
+        let ptpl = format!("{}/flint-ptpl-{}.json", self.ptpl_dir, volume);
         let spec = ExportSpec {
             nqn: &nqn,
             bdev_name: &bdev,
-            bdev_aliases: &[],
+            bdev_aliases: &lvol_id_refs,
             trtype: "TCP",
             traddr: &self.traddr,
             trsvcid: self.trsvcid,
@@ -164,6 +206,7 @@ impl BlockExportReconciler {
             // This is the identity GETDEVICEINFO advertises; it must
             // survive lvol rebuild and tgt restart.
             ns_identity: Some((&uuid, &nguid)),
+            ptpl_file: Some(&ptpl),
         };
         ensure_export(self.rpc.as_ref(), &spec)
             .await
@@ -240,9 +283,15 @@ pub(crate) mod tests {
     /// Scriptable transport: records every RPC, answers from a mutable
     /// world (bdevs + subsystems present). `pub(crate)`: the grpc and
     /// operations tests drive their integration seams against it too.
+    /// Models the real-SPDK trap rig-found on the live tgt: an lvol's
+    /// CANONICAL bdev name is UUID-form, the `lvs/vol` alias is only an
+    /// alias, and namespace records carry the CANONICAL name — a
+    /// reconciler matching on the alias alone bounces the namespace on
+    /// every pass.
     pub(crate) struct FakeTgt {
         pub(crate) calls: Mutex<Vec<Value>>,
-        pub(crate) bdevs: Mutex<std::collections::HashSet<String>>,
+        /// alias → canonical (UUID-form) bdev name.
+        pub(crate) bdevs: Mutex<std::collections::HashMap<String, String>>,
         pub(crate) subsystems: Mutex<std::collections::HashMap<String, Value>>,
     }
 
@@ -290,20 +339,25 @@ pub(crate) mod tests {
             match method {
                 "bdev_get_bdevs" => {
                     let name = p["name"].as_str().unwrap_or("");
-                    if self.bdevs.lock().unwrap().contains(name) {
-                        Ok(json!({ "result": [{ "name": name }] }))
-                    } else {
-                        Err("No such device".into())
+                    let bdevs = self.bdevs.lock().unwrap();
+                    match bdevs.get(name) {
+                        Some(canonical) => Ok(json!({ "result": [{
+                            "name": canonical,
+                            "uuid": canonical,
+                            "aliases": [name],
+                        }] })),
+                        None => Err("No such device".into()),
                     }
                 }
                 "bdev_lvol_create" => {
-                    let name = format!(
+                    let alias = format!(
                         "{}/{}",
                         p["lvs_name"].as_str().unwrap(),
                         p["lvol_name"].as_str().unwrap()
                     );
-                    self.bdevs.lock().unwrap().insert(name);
-                    Ok(json!({ "result": "uuid-1" }))
+                    let canonical = format!("uuid-of-{}", p["lvol_name"].as_str().unwrap());
+                    self.bdevs.lock().unwrap().insert(alias, canonical.clone());
+                    Ok(json!({ "result": canonical }))
                 }
                 "bdev_lvol_delete" => {
                     self.bdevs.lock().unwrap().remove(p["name"].as_str().unwrap_or(""));
@@ -332,6 +386,17 @@ pub(crate) mod tests {
                 }
                 "nvmf_subsystem_add_ns" => {
                     let nqn = p["nqn"].as_str().unwrap();
+                    // Real SPDK resolves the alias and the ns record then
+                    // carries the CANONICAL bdev name — model that, or the
+                    // alias-only ns_matches bug is untestable here.
+                    let requested = p["namespace"]["bdev_name"].as_str().unwrap_or("");
+                    let canonical = self
+                        .bdevs
+                        .lock()
+                        .unwrap()
+                        .get(requested)
+                        .cloned()
+                        .unwrap_or_else(|| requested.to_string());
                     let mut subs = self.subsystems.lock().unwrap();
                     let s = subs.get_mut(nqn).ok_or("no subsystem")?;
                     s["namespaces"]
@@ -339,9 +404,10 @@ pub(crate) mod tests {
                         .unwrap()
                         .push(json!({
                             "nsid": 1,
-                            "bdev_name": p["namespace"]["bdev_name"],
+                            "bdev_name": canonical,
                             "uuid": p["namespace"]["uuid"],
                             "nguid": p["namespace"]["nguid"],
+                            "ptpl_file": p["namespace"]["ptpl_file"],
                         }));
                     Ok(json!({ "result": 1 }))
                 }
@@ -392,6 +458,7 @@ pub(crate) mod tests {
             "lvs_test".into(),
             "10.0.0.9".into(),
             4420,
+            "/var/tmp".into(),
         )
     }
 
@@ -421,6 +488,11 @@ pub(crate) mod tests {
         let (uuid, nguid) = crate::nvmeof_export::stable_ns_identity("pvc-1");
         assert_eq!(add_ns["params"]["namespace"]["nguid"], nguid.as_str());
         assert_eq!(add_ns["params"]["namespace"]["uuid"], uuid.as_str());
+        assert_eq!(
+            add_ns["params"]["namespace"]["ptpl_file"], "/var/tmp/flint-ptpl-pvc-1.json",
+            "PTPL is mandatory-by-kernel: without it the client's CPTPL=PERSIST \
+             pr_register gets INVALID_FIELD and no I/O ever leaves the client"
+        );
 
         let listener =
             tgt.call_with_method(&calls, "nvmf_subsystem_add_listener").expect("listener");
@@ -467,6 +539,7 @@ pub(crate) mod tests {
             "lvs_test".into(),
             "10.0.0.9".into(),
             4420,
+            "/var/tmp".into(),
         );
         r.ensure("pvc-h", Some(1024 * 1024)).await.expect("provision");
         let nqn = crate::identity::block_volume_export_nqn("pvc-h");
