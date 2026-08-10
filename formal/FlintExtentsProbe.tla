@@ -33,4 +33,11 @@ ProbeTgtRestarts == ~tgtRestarted
 \* stale-snapshot-free mutation exploits, witnessed through an action.
 ProbeResnapshotGrows == ~resnapshotGrew
 
+\* For FlintExtentsCommit.cfg (tranche 2): commits and truncates must
+\* really execute in that world, or its greens are about a file nobody
+\* ever committed to or shrank.  commitFired's only writer is
+\* LayoutCommit; truncateFired's only writer is TruncateStart.
+ProbeCommitFires == ~commitFired
+ProbeTruncateFires == ~truncateFired
+
 ==============================================================================

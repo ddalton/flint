@@ -499,6 +499,19 @@ weight by this corpus's own doctrine.
 > allocator implementation MUST put the holder re-validation inside the free
 > transaction; a bookkeeping-only free is machine-refuted.
 
+> **TRANCHE-2 AMENDMENT (2026-08-09, same day — LAYOUTCOMMIT/size/scrub are
+> now modelled, behind `CommitEnabled`).** Three more corrections of this
+> section's sketch, recorded in the matrix rows below, plus one
+> self-correction: adding the committed state broke tranche 1's own
+> `GrantInsert` disjointness predicate ("provisional ∧ held" stopped seeing
+> committed-and-held blocks — TLC produced two live grants overlapping a
+> committed block in 6 states). The predicate now reads "not free ∧ held";
+> the general lesson is that a validation predicate ENUMERATING states goes
+> stale the day the state set grows. The implementation
+> (`extent_alloc.rs`) had the honest form already — its conflict check joins
+> grant rows through overlapping extent rows regardless of state — so this
+> was a model-only defect, caught by the model's own growth.
+
 **Actions**: MDS — Allocate, Split/Merge (guarded by `SplitKeepsDisjoint`),
 GrantCheck/GrantInsert (two-step; GrantCheck also refuses any range with a recall in
 flight when `RecallBlocksGrant` — the NFS4ERR_RECALLCONFLICT obligation; a grant
@@ -553,9 +566,9 @@ crash budget, "transiently unavailable forever" needs an unbudgeted limbo consta
 | FlintExtentsGrantDuringRecall.cfg | RecallBlocksGrant=FALSE | ~~must VIOLATE~~ **superseded likewise** — the RECALLCONFLICT obligation is a progress belt; liveness tranche |
 | FlintExtentsStaleSnapshotFree.cfg | FreeRevalidates=FALSE | **must VIOLATE** RecallCompletesBeforeReuse — the tranche-1 finding, pinned (SHIPPED 2026-08-09) |
 | FlintExtentsLostFence.cfg | all on except FenceReaches | **must VIOLATE** NoStaleExtentWrite — the standing residual (LostRecall analog); the harm is the **write** |
-| FlintExtentsBlindCommit.cfg | ProvisionalInvisible=FALSE | **must VIOLATE** SizeCommitCoupled |
-| FlintExtentsUngatedSize.cfg | CommitGatesSize=FALSE | **must VIOLATE** SizeCommitCoupled — no arm ships without a run that fails without it |
-| FlintExtentsForgedCommit.cfg | CommitChecksGen=FALSE | **must VIOLATE** NoStaleExtentWrite — the fenced client's control path is not fenced (§8) |
+| FlintExtentsBlindProvision.cfg | ProvisionalInvisible=FALSE | **must VIOLATE** NoPriorOwnerDisclosure (SHIPPED 2026-08-09 — the sketch's "BlindCommit → SizeCommitCoupled" row misnamed both the hazard and the harm: the arm is scrub-at-allocation, and the disclosure is deleted-data resurrection, intra-volume by construction) |
+| FlintExtentsUngatedSize.cfg | CommitGatesSize=FALSE | **must VIOLATE** SizeCommitCoupled (SHIPPED 2026-08-09 — restated TRANSACTIONALLY: the sketched "no observable size covers a provisional extent" is false on legal hole-filling; the theorem is that a size-advance never applies without its range promotion, and the mutation is the half-stub) |
+| FlintExtentsForgedCommit.cfg | CommitChecksGen=FALSE | **must VIOLATE** NoForgedCommit (SHIPPED 2026-08-09 — ~~NoStaleExtentWrite~~ was impossible: a commit writes no bytes; the harm is bookkeeping corruption — the fenced client's control path promoting extents it no longer owns — stated as its own theorem) |
 | FlintExtentsBlindFallback.cfg | FallbackChecksGrants=FALSE | **must VIOLATE** NoStaleExtentWrite — the MDS-vs-grant arm (§8 fallback discipline) |
 | FlintExtentsTgtAmnesia.cfg | PersistReservations=FALSE | **must VIOLATE** NoStaleExtentWrite — §5's "PTPL is mandatory", with teeth |
 | FlintExtentsAliasedSplit.cfg | SplitKeepsDisjoint=FALSE | **must VIOLATE** NoPhysicalAliasing |

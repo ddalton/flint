@@ -130,16 +130,46 @@
 (*      a green here as a durability claim would be the axiom laundering   *)
 (*      itself.                                                            *)
 (*                                                                         *)
-(* OWED (the allocator tranche, in lockstep with the sqlite schema):       *)
-(* LAYOUTCOMMIT and the "committed" alloc state (+ CommitGatesSize,        *)
-(* CommitChecksGen, ProvisionalInvisible, fsize, the zeroRead ghost /      *)
-(* Inv_SizeCommitCoupled — the F67 shape); MdsCrash/MdsRestart + durable   *)
-(* (PersistGrants, RecoverConservative); the MDS fallback lane             *)
-(* (FallbackChecksGrants — the MDS as data-path actor); Split/Merge +      *)
-(* SplitKeepsDisjoint + Inv_NoPhysicalAliasing; PublishRecheck /           *)
-(* RecallBlocksGrant with LIVENESS teeth; quarantine as distinct state.    *)
-(* The check-tla.sh matrix grows with each; the header count moves with    *)
-(* it, as a named deliverable.                                             *)
+(* TRANCHE 2 (2026-08-09, same day): LAYOUTCOMMIT, size coupling, and the  *)
+(* provisioning scrub — behind CommitEnabled = FALSE so every tranche-1    *)
+(* state space stays bit-identical (the MaintEnabled pattern; verified by  *)
+(* distinct-count match on the flagship).  THREE MORE SPEC CORRECTIONS,    *)
+(* each the same species as tranche 1's — the doc's sketch named a harm    *)
+(* the mechanism cannot produce, or a predicate legal behaviour violates:  *)
+(*                                                                         *)
+(*   a. Inv_SizeCommitCoupled is NOT "no provisional extent within fsize"  *)
+(*      — hole-filling writes allocate INVALID extents inside fsize        *)
+(*      legitimately (and read as zeros either way, which is what a hole   *)
+(*      reads as).  The honest invariant is TRANSACTIONAL: a commit's      *)
+(*      size-advance applies only WITH its range promotion.  The zeroSized *)
+(*      ghost fires when the size half lands while the range half was      *)
+(*      refused — which is precisely the half-stub shape the current       *)
+(*      operations/mod.rs LAYOUTCOMMIT stub would have (F67's silent-zeros *)
+(*      lineage: size says data, extents say INVALID).                     *)
+(*   b. ForgedCommit (CommitChecksGen = FALSE) cannot violate              *)
+(*      Inv_NoStaleExtentWrite as the doc's matrix claimed: a commit       *)
+(*      writes no bytes — it corrupts BOOKKEEPING, promoting extents the   *)
+(*      committer no longer owns (the new owner's uncommitted state served *)
+(*      as committed data).  It gets its own theorem, Inv_NoForgedCommit.  *)
+(*   c. ProvisionalInvisible is the SCRUB-AT-ALLOCATION belt.  All reuse   *)
+(*      is intra-volume (the allocator is per-volume, §8), so the          *)
+(*      disclosure is not cross-tenant — it is deleted-data resurrection:  *)
+(*      a fresh INVALID extent on a reused range carries the previous      *)
+(*      incarnation's bytes, violating the new-extent-reads-zeros          *)
+(*      contract (a deleted secrets file resurfacing inside a new file).   *)
+(*      A same-incarnation orphan handoff (returned-uncommitted extent     *)
+(*      re-granted to another client of the same live file) is DELIBERATE- *)
+(*      LY not a disclosure: both clients hold the file RW.  The dirt      *)
+(*      tracking (everWritten/priorBytes) is pinned all-FALSE whenever the *)
+(*      belt is on, so belted state spaces never pay for it.               *)
+(*                                                                         *)
+(* OWED (later tranches): MdsCrash/MdsRestart + durable (PersistGrants,    *)
+(* RecoverConservative); the MDS fallback lane (FallbackChecksGrants — the *)
+(* MDS as data-path actor); Split/Merge + SplitKeepsDisjoint +             *)
+(* Inv_NoPhysicalAliasing; PublishRecheck / RecallBlocksGrant with         *)
+(* LIVENESS teeth; quarantine as distinct state.  The check-tla.sh matrix  *)
+(* grows with each; the header count moves with it, as a named             *)
+(* deliverable.                                                            *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -153,7 +183,16 @@ CONSTANTS
   RecallBeforeReuse,   \* TRUE = frees only through the reclaim machinery
   FreeRevalidates,     \* TRUE = the free transaction re-validates holders
   FenceReaches,        \* TRUE = every fence lands as a target exclusion
-  PersistReservations  \* TRUE = PTPL: exclusions survive TgtRestart
+  PersistReservations, \* TRUE = PTPL: exclusions survive TgtRestart
+  CommitEnabled,       \* tranche-2 master switch — FALSE keeps tranche-1
+                       \*   state spaces bit-identical (MaintEnabled pattern)
+  ProvisionalInvisible,\* TRUE = fresh provisional extents are scrubbed at
+                       \*   allocation: the prior incarnation's bytes are
+                       \*   unobservable
+  CommitGatesSize,     \* TRUE = a commit's size-advance applies only WITH
+                       \*   its range promotion (one transaction)
+  CommitChecksGen      \* TRUE = LAYOUTCOMMIT validates (client,
+                       \*   gen-at-grant) against the live grant table (§8)
 
 VARIABLES
   alloc,          \* [Blocks -> {"free","provisional"}] physical allocation
@@ -169,18 +208,42 @@ VARIABLES
   resv,           \* SUBSET Clients — clients PREEMPTED at the target
                   \*   (EARO: their reads and writes are refused there)
   nGrants, nReclaims, nRestarts,   \* budgets
+  fsize,          \* observable file size in blocks (files are prefixes;
+                  \*   0 = empty; pinned 0 while ~CommitEnabled)
+  everWritten,    \* [Blocks -> BOOLEAN] bytes have ever landed on the
+                  \*   physical block — tracked ONLY when
+                  \*   ~ProvisionalInvisible (scrubbing makes the history
+                  \*   irrelevant, and pinning it FALSE keeps belted state
+                  \*   spaces free of it)
+  priorBytes,     \* [Blocks -> BOOLEAN] this provisional incarnation still
+                  \*   carries a PREVIOUS incarnation's bytes: set at
+                  \*   unscrubbed reuse, cleared by the new owner's own
+                  \*   write and by the free
   \* Ghosts, single-writer each (the A2Probe standing rule):
   staleRead,      \* ClientRead crossed an ownership generation
   staleWrite,     \* ClientWrite crossed an ownership generation — THE theorem
   reuseFired,     \* GrantInsert re-cycled a previously-owned block
   fenceFired,     \* Fence executed
   tgtRestarted,   \* TgtRestart executed
-  resnapshotGrew  \* ReclaimResnapshot found holders the snapshot missed
+  resnapshotGrew, \* ReclaimResnapshot found holders the snapshot missed
+  commitFired,    \* LayoutCommit executed (probe witness)
+  truncateFired,  \* TruncateStart executed (probe witness)
+  zeroSized,      \* a size-advance applied while its range promotion was
+                  \*   refused — the F67 shape (writer: LayoutCommit)
+  forgedCommit,   \* an INVALID commit applied (writer: LayoutCommit)
+  disclosedRead   \* a rightful read of a provisional block served a
+                  \*   previous incarnation's bytes (writer: ClientRead)
+
+\* The tranche-2 additions, grouped so tranche-1 actions can leave them
+\* unchanged in one stroke.
+sizeVars == <<fsize, commitFired, truncateFired, zeroSized, forgedCommit>>
 
 vars == <<alloc, gen, grants, granting, reclaim, fenced, resv,
           nGrants, nReclaims, nRestarts,
+          fsize, everWritten, priorBytes,
           staleRead, staleWrite, reuseFired, fenceFired, tgtRestarted,
-          resnapshotGrew>>
+          resnapshotGrew, commitFired, truncateFired, zeroSized,
+          forgedCommit, disclosedRead>>
 
 Blocks == 1..NBlocks
 GenBound == MaxReclaims + 1        \* one initial bump + one per free
@@ -199,7 +262,7 @@ HeldBy(b) == {c \in Clients : grants[c].live /\ b \in grants[c].held}
 LiveHolders(R) == {c \in Clients : grants[c].live /\ grants[c].held \cap R # {}}
 
 TypeOK ==
-  /\ alloc \in [Blocks -> {"free", "provisional"}]
+  /\ alloc \in [Blocks -> {"free", "provisional", "committed"}]
   /\ gen \in [Blocks -> 0..GenBound]
   /\ grants \in [Clients ->
        [live : BOOLEAN, held : SUBSET Blocks, g : [Blocks -> 0..GenBound]]]
@@ -211,9 +274,15 @@ TypeOK ==
   /\ nGrants \in 0..MaxGrants
   /\ nReclaims \in 0..MaxReclaims
   /\ nRestarts \in 0..MaxTgtRestarts
+  /\ fsize \in 0..NBlocks
+  /\ everWritten \in [Blocks -> BOOLEAN]
+  /\ priorBytes \in [Blocks -> BOOLEAN]
   /\ staleRead \in BOOLEAN /\ staleWrite \in BOOLEAN
   /\ reuseFired \in BOOLEAN /\ fenceFired \in BOOLEAN
   /\ tgtRestarted \in BOOLEAN /\ resnapshotGrew \in BOOLEAN
+  /\ commitFired \in BOOLEAN /\ truncateFired \in BOOLEAN
+  /\ zeroSized \in BOOLEAN /\ forgedCommit \in BOOLEAN
+  /\ disclosedRead \in BOOLEAN
   \* Structure: g is normalised to 0 outside held (state-space hygiene and
   \* a modelling-bug tripwire, not a claim about the code).
   /\ \A c \in Clients : \A b \in Blocks :
@@ -227,9 +296,15 @@ Init ==
   /\ reclaim = NoReclaim
   /\ fenced = {} /\ resv = {}
   /\ nGrants = 0 /\ nReclaims = 0 /\ nRestarts = 0
+  /\ fsize = 0
+  /\ everWritten = [b \in Blocks |-> FALSE]
+  /\ priorBytes = [b \in Blocks |-> FALSE]
   /\ staleRead = FALSE /\ staleWrite = FALSE
   /\ reuseFired = FALSE /\ fenceFired = FALSE
   /\ tgtRestarted = FALSE /\ resnapshotGrew = FALSE
+  /\ commitFired = FALSE /\ truncateFired = FALSE
+  /\ zeroSized = FALSE /\ forgedCommit = FALSE
+  /\ disclosedRead = FALSE
 
 (***************************************************************************)
 (* The MDS: grants                                                         *)
@@ -250,7 +325,8 @@ GrantCheck(c, R) ==
   /\ nGrants' = nGrants + 1
   /\ UNCHANGED <<alloc, gen, grants, reclaim, fenced, resv,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
-                 fenceFired, tgtRestarted, resnapshotGrew>>
+                 fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
+                 everWritten, priorBytes, disclosedRead>>
 
 \* LAYOUTGET step 2: the sqlite transaction.  With GrantsExclusive it
 \* re-validates disjointness INSIDE the transaction and refuses a range
@@ -270,14 +346,21 @@ GrantCheck(c, R) ==
 GrantInsert(c) ==
   /\ granting[c].open
   /\ LET R == granting[c].blks
-         occupied == \E b \in R : alloc[b] = "provisional" /\ HeldBy(b) # {}
+         \* An ALLOCATED block (provisional or committed — any state with
+         \* extent rows in the tables) with a live holder refuses.  This
+         \* read "provisional /\ held" until tranche 2 added the committed
+         \* state, whereupon TLC produced two live grants overlapping a
+         \* committed block in 6 states: a predicate enumerating states
+         \* goes stale the day the state set grows; "not free" does not.
+         occupied == \E b \in R : alloc[b] # "free" /\ HeldBy(b) # {}
      IN IF GrantsExclusive /\ occupied
         THEN \* transaction refuses; the window closes, nothing published
           /\ granting' = [granting EXCEPT ![c] = NoWindow]
           /\ UNCHANGED <<alloc, gen, grants, reclaim, fenced, resv,
                          nGrants, nReclaims, nRestarts, staleRead,
                          staleWrite, reuseFired, fenceFired, tgtRestarted,
-                         resnapshotGrew>>
+                         resnapshotGrew, sizeVars, everWritten, priorBytes,
+                         disclosedRead>>
         ELSE
           LET fresh == {b \in R : alloc[b] = "free"}
               gen2 == [b \in Blocks |->
@@ -291,9 +374,18 @@ GrantInsert(c) ==
                 g |-> [b \in Blocks |-> IF b \in R THEN gen2[b] ELSE 0]]]
           /\ granting' = [granting EXCEPT ![c] = NoWindow]
           /\ reuseFired' = (reuseFired \/ \E b \in fresh : gen[b] > 0)
+          \* The provisioning scrub, or its absence: with the belt on,
+          \* fresh extents are zeroed at allocation and the previous
+          \* incarnation's bytes are gone; without it, a reused range
+          \* enters its new life still carrying them.
+          /\ priorBytes' = IF ProvisionalInvisible THEN priorBytes
+                           ELSE [b \in Blocks |->
+                                  IF b \in fresh THEN everWritten[b]
+                                  ELSE priorBytes[b]]
           /\ UNCHANGED <<reclaim, fenced, resv, nGrants, nReclaims,
                          nRestarts, staleRead, staleWrite, fenceFired,
-                         tgtRestarted, resnapshotGrew>>
+                         tgtRestarted, resnapshotGrew, sizeVars,
+                         everWritten, disclosedRead>>
 
 (***************************************************************************)
 (* The MDS: reclaim (recall-then-free)                                     *)
@@ -307,14 +399,22 @@ ReclaimStart(R) ==
   /\ RecallBeforeReuse
   /\ nReclaims < MaxReclaims
   /\ ~reclaim.active
-  /\ R \subseteq {b \in Blocks : alloc[b] = "provisional"}
+  \* Provisional blocks are reclaimable outright (returned-uncommitted
+  \* space); COMMITTED blocks only once the size no longer covers them —
+  \* committed data inside the file is never GC'd out from under it, and
+  \* the only way a committed block leaves the file is TruncateStart
+  \* cutting the size first.
+  /\ R \subseteq {b \in Blocks :
+       \/ alloc[b] = "provisional"
+       \/ (alloc[b] = "committed" /\ b > fsize)}
   /\ R # {}
   /\ reclaim' = [active |-> TRUE, blks |-> R,
                  waiting |-> LiveHolders(R) \ fenced]
   /\ nReclaims' = nReclaims + 1
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
-                 tgtRestarted, resnapshotGrew>>
+                 tgtRestarted, resnapshotGrew, sizeVars, everWritten,
+                 priorBytes, disclosedRead>>
 
 \* The retry loop's separate re-read step (the F62 idiom): recompute the
 \* holder set from the live tables.  This is what eventually surfaces a
@@ -329,7 +429,8 @@ ReclaimResnapshot ==
              (resnapshotGrew \/ (reclaim.waiting = {} /\ w2 # {}))
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
-                 fenceFired, tgtRestarted>>
+                 fenceFired, tgtRestarted, sizeVars, everWritten,
+                 priorBytes, disclosedRead>>
 
 \* An unresponsive holder is fenced: revoked server-side (bookkeeping in
 \* `fenced` — its grant row is dead to the MDS) and preempted at the
@@ -348,7 +449,8 @@ Fence(c) ==
   /\ fenceFired' = TRUE
   /\ UNCHANGED <<alloc, gen, grants, granting, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired,
-                 tgtRestarted, resnapshotGrew>>
+                 tgtRestarted, resnapshotGrew, sizeVars, everWritten,
+                 priorBytes, disclosedRead>>
 
 \* The free.  Every snapshotted holder has returned or been fenced; with
 \* FreeRevalidates the transaction ALSO re-validates the live tables and
@@ -363,9 +465,15 @@ ReclaimComplete ==
   /\ alloc' = [b \in Blocks |->
                 IF b \in reclaim.blks THEN "free" ELSE alloc[b]]
   /\ reclaim' = NoReclaim
+  \* Canonicalise: a freed block's dirt flag is recomputed at its next
+  \* reuse from everWritten; holding it at FALSE meanwhile keeps free
+  \* blocks from splitting states on a value nothing reads.
+  /\ priorBytes' = [b \in Blocks |->
+                     IF b \in reclaim.blks THEN FALSE ELSE priorBytes[b]]
   /\ UNCHANGED <<gen, grants, granting, fenced, resv, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
-                 tgtRestarted, resnapshotGrew>>
+                 tgtRestarted, resnapshotGrew, sizeVars, everWritten,
+                 disclosedRead>>
 
 \* The unbelted world: RecallBeforeReuse = FALSE frees allocated blocks
 \* outright, holders or no holders — the F65-of-extents.
@@ -378,7 +486,79 @@ FreeDirect(R) ==
   /\ nReclaims' = nReclaims + 1
   /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
-                 tgtRestarted, resnapshotGrew>>
+                 tgtRestarted, resnapshotGrew, sizeVars, everWritten,
+                 priorBytes, disclosedRead>>
+
+(***************************************************************************)
+(* The MDS: commit and size (tranche 2, CommitEnabled)                     *)
+(***************************************************************************)
+
+\* LAYOUTCOMMIT, carrying newsize.  ONE implementation transaction commits
+\* the range promotion AND the size advance; the two arms split exactly
+\* the ways that transaction can be miswritten.  `valid` is §8's check:
+\* the (client, gen-at-grant) pair must match a live unfenced grant row.
+\* A fenced client REACHES this action freely — reservations fence the
+\* NVMe data path only, the NFS control path stays open — which is the
+\* entire reason CommitChecksGen exists.
+\*
+\*   valid, any arms          -> both halves apply (the one honest commit)
+\*   invalid, both belts      -> the whole transaction refuses (disabled)
+\*   invalid, ~CommitGatesSize-> the HALF-STUB: the range half refuses but
+\*                               the size half lands — fsize now claims
+\*                               data the extents say is INVALID, F67's
+\*                               silent-zeros shape (ghost: zeroSized)
+\*   invalid, ~CommitChecksGen-> the FORGED COMMIT: both halves apply for
+\*                               a committer who no longer owns the range
+\*                               (ghost: forgedCommit)
+LayoutCommit(c, R, n) ==
+  /\ CommitEnabled
+  /\ grants[c].live
+  /\ R # {} /\ R \subseteq grants[c].held
+  /\ n >= fsize /\ n <= NBlocks
+  /\ LET valid == c \notin fenced
+                  /\ \A b \in R : grants[c].g[b] = gen[b]
+     IN IF valid
+        THEN /\ alloc' = [b \in Blocks |->
+                           IF b \in R THEN "committed" ELSE alloc[b]]
+             /\ fsize' = n
+             /\ commitFired' = TRUE
+             /\ UNCHANGED <<zeroSized, forgedCommit>>
+        ELSE IF CommitChecksGen /\ CommitGatesSize
+        THEN FALSE          \* refused whole: a disabled action
+        ELSE IF CommitChecksGen
+        THEN \* ~CommitGatesSize: the half-stub world
+             /\ fsize' = n
+             /\ zeroSized' = (zeroSized \/ n > fsize)
+             /\ commitFired' = TRUE
+             /\ UNCHANGED <<alloc, forgedCommit>>
+        ELSE \* ~CommitChecksGen: the forged commit applies whole
+             /\ alloc' = [b \in Blocks |->
+                           IF b \in R THEN "committed" ELSE alloc[b]]
+             /\ fsize' = n
+             /\ forgedCommit' = TRUE
+             /\ commitFired' = TRUE
+             /\ UNCHANGED zeroSized
+  /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
+                 nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
+                 fenceFired, tgtRestarted, resnapshotGrew, truncateFired,
+                 everWritten, priorBytes, disclosedRead>>
+
+\* SETATTR-shrink: the size cut is metadata-only and immediate; the blocks
+\* beyond the new size stay allocated until the reclaim machinery frees
+\* them through the belted path.  FlintTruncate remains the authority on
+\* the file-layout truncate GATE — deliberately not re-modelled here; what
+\* this action supplies is the only legal route by which a committed block
+\* leaves the file (size first, then recall-then-free).
+TruncateStart(n) ==
+  /\ CommitEnabled
+  /\ n < fsize
+  /\ fsize' = n
+  /\ truncateFired' = TRUE
+  /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
+                 nGrants, nReclaims, nRestarts, staleRead, staleWrite,
+                 reuseFired, fenceFired, tgtRestarted, resnapshotGrew,
+                 commitFired, zeroSized, forgedCommit, everWritten,
+                 priorBytes, disclosedRead>>
 
 (***************************************************************************)
 (* The target                                                              *)
@@ -394,7 +574,8 @@ TgtRestart ==
   /\ nRestarts' = nRestarts + 1
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, nGrants,
                  nReclaims, staleRead, staleWrite, reuseFired, fenceFired,
-                 resnapshotGrew>>
+                 resnapshotGrew, sizeVars, everWritten, priorBytes,
+                 disclosedRead>>
 
 (***************************************************************************)
 (* The clients — raw NVMe I/O under a held layout; the MDS is not on this  *)
@@ -406,18 +587,37 @@ ClientRead(c, b) ==
   /\ b \in grants[c].held
   /\ c \notin resv                      \* EARO refuses a preempted host
   /\ staleRead' = (staleRead \/ gen[b] # grants[c].g[b])
+  \* The RIGHTFUL owner reading its own fresh provisional extent, which —
+  \* unscrubbed — still carries a previous incarnation's bytes: the
+  \* deleted-data-resurrection read. Distinct from staleRead (that is the
+  \* OLD owner reaching into the new world); requiring gen-match keeps the
+  \* two ghosts attributable.
+  /\ disclosedRead' = (disclosedRead \/
+       (gen[b] = grants[c].g[b] /\ alloc[b] = "provisional"
+        /\ priorBytes[b]))
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleWrite, reuseFired,
-                 fenceFired, tgtRestarted, resnapshotGrew>>
+                 fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
+                 everWritten, priorBytes>>
 
 ClientWrite(c, b) ==
   /\ grants[c].live
   /\ b \in grants[c].held
   /\ c \notin resv
   /\ staleWrite' = (staleWrite \/ gen[b] # grants[c].g[b])
+  \* Dirt tracking, active only when the scrub belt is off (with it on,
+  \* history is irrelevant and the flags stay pinned FALSE — belted state
+  \* spaces never pay for them). A rightful write overwrites whatever the
+  \* previous incarnation left, so it clears the block's priorBytes.
+  /\ everWritten' = IF ProvisionalInvisible THEN everWritten
+                    ELSE [everWritten EXCEPT ![b] = TRUE]
+  /\ priorBytes' = IF gen[b] = grants[c].g[b]
+                     THEN [priorBytes EXCEPT ![b] = FALSE]
+                     ELSE priorBytes
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleRead, reuseFired,
-                 fenceFired, tgtRestarted, resnapshotGrew>>
+                 fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
+                 disclosedRead>>
 
 LayoutReturn(c) ==
   /\ grants[c].live
@@ -425,7 +625,8 @@ LayoutReturn(c) ==
   /\ reclaim' = [reclaim EXCEPT !.waiting = @ \ {c}]
   /\ UNCHANGED <<alloc, gen, granting, fenced, resv, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
-                 tgtRestarted, resnapshotGrew>>
+                 tgtRestarted, resnapshotGrew, sizeVars, everWritten,
+                 priorBytes, disclosedRead>>
 
 Next ==
   \/ \E c \in Clients, R \in Ranges : GrantCheck(c, R)
@@ -439,6 +640,8 @@ Next ==
   \/ \E c \in Clients, b \in Blocks : ClientRead(c, b)
   \/ \E c \in Clients, b \in Blocks : ClientWrite(c, b)
   \/ \E c \in Clients : LayoutReturn(c)
+  \/ \E c \in Clients, R \in Ranges, n \in 0..NBlocks : LayoutCommit(c, R, n)
+  \/ \E n \in 0..NBlocks : TruncateStart(n)
 
 Spec == Init /\ [][Next]_vars
 
@@ -480,7 +683,21 @@ Inv_RecallCompletesBeforeReuse ==
 Inv_NoStaleExtentWrite == ~staleWrite
 Inv_NoStaleExtentRead == ~staleRead
 
+(***************************************************************************)
+(* Tranche-2 theorems.  SizeCommitCoupled is TRANSACTIONAL, not the        *)
+(* doc-sketched state predicate ("no provisional extent within fsize") —   *)
+(* hole-filling writes make that one false on legal behaviour.  What must  *)
+(* hold is that no size-advance ever applies without its range promotion:  *)
+(* F67's silent-zeros shape is exactly a size that claims data the extent  *)
+(* map does not back.                                                      *)
+(***************************************************************************)
+Inv_SizeCommitCoupled == ~zeroSized
+Inv_NoForgedCommit == ~forgedCommit
+Inv_NoPriorOwnerDisclosure == ~disclosedRead
+
 Inv == TypeOK /\ Inv_NoConflictingGrants /\ Inv_RecallCompletesBeforeReuse
-InvTarget == Inv /\ Inv_NoStaleExtentWrite /\ Inv_NoStaleExtentRead
+InvCommit == Inv /\ Inv_SizeCommitCoupled /\ Inv_NoForgedCommit
+                 /\ Inv_NoPriorOwnerDisclosure
+InvTarget == InvCommit /\ Inv_NoStaleExtentWrite /\ Inv_NoStaleExtentRead
 
 ================================================================================

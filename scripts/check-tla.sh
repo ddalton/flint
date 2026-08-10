@@ -3,12 +3,13 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Ninety-nine runs, ALL required.
+# One hundred and five runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
 # the count; that miscount is how this header once briefly read wrong.
-# 88 before the FlintExtents tranche, + 11 with it.)
+# 88 before the FlintExtents tranches, + 11 for tranche 1, + 6 for
+# tranche 2.)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -802,5 +803,27 @@ mutation_run FlintExtentsProbe FlintExtentsProbeReuse.cfg "extents reuse probe (
 mutation_run FlintExtentsProbe FlintExtentsProbeFence.cfg "extents fence probe (Fence really executes — a state space where every holder politely returns never exercises the machinery the module exists for)" "ProbeFenceFires"
 mutation_run FlintExtentsProbe FlintExtentsProbeRestart.cfg "extents tgt-restart probe (TgtRestart really occurs in the shipped world, so the strict green holds ACROSS a restart and TgtAmnesia is an A/B over one flag, not over reachability)" "ProbeTgtRestarts"
 mutation_run FlintExtentsProbe FlintExtentsProbeResnapshot.cfg "extents resnapshot probe (the retry re-read really finds holders the snapshot missed — the exact world FreeRevalidates refuses frees in; without this its green is a statement about a disabled guard)" "ProbeResnapshotGrows"
+
+# ---- extents tranche 2 (2026-08-09, same day): LAYOUTCOMMIT, size, scrub. ----
+# Behind CommitEnabled=FALSE in every tranche-1 cfg — bit-identical by
+# construction, VERIFIED by distinct-count match on the flagship (1,958,126
+# before and after). Three more spec corrections, same species as tranche 1's
+# (a harm the mechanism cannot produce, or a predicate legal behaviour
+# violates): SizeCommitCoupled is TRANSACTIONAL (hole-filling makes the
+# sketched state predicate false on legal behaviour); ForgedCommit violates
+# its own theorem, never NoStaleExtentWrite (a commit writes no bytes);
+# BlindCommit is renamed BlindProvision (the hazard is scrub-at-allocation —
+# deleted-data resurrection, not cross-tenant: reuse is intra-volume).
+# AND ONE SELF-CORRECTION: adding the committed state broke tranche 1's
+# GrantInsert `occupied` predicate ("provisional /\ held" stopped seeing
+# committed-and-held blocks — two live grants overlapped in 6 states); a
+# predicate enumerating states goes stale the day the state set grows, so it
+# now reads "not free /\ held". The Rust transaction had it right already.
+strict_run   FlintExtents FlintExtentsCommit.cfg "extents commit strict (CommitEnabled + all three commit belts on the shipped base: size never advances without its range promotion, no invalid commit applies, no fresh provisional extent serves a prior incarnation's bytes)"
+mutation_run FlintExtents FlintExtentsUngatedSize.cfg "half-stub mutation (CommitGatesSize=FALSE: the size half of LAYOUTCOMMIT lands while the range half refuses — F67's silent-zeros lineage, and exactly what shipping the size path before the extent path would produce)" "Inv_SizeCommitCoupled"
+mutation_run FlintExtents FlintExtentsForgedCommit.cfg "forged-commit mutation (CommitChecksGen=FALSE: reservations fence only the NVMe data path, the NFS control path stays open, and an unvalidated LAYOUTCOMMIT promotes extents the committer no longer owns)" "Inv_NoForgedCommit"
+mutation_run FlintExtents FlintExtentsBlindProvision.cfg "unscrubbed-provision mutation (ProvisionalInvisible=FALSE: a fresh INVALID extent on a reused range still carries the previous incarnation's bytes — deleted-data resurrection; the code belt is extent_alloc's needs_scrub contract)" "Inv_NoPriorOwnerDisclosure"
+mutation_run FlintExtentsProbe FlintExtentsProbeCommit.cfg "extents commit probe (LayoutCommit really executes in the commit-strict world)" "ProbeCommitFires"
+mutation_run FlintExtentsProbe FlintExtentsProbeTruncate.cfg "extents truncate probe (TruncateStart really executes — and with it the committed-block reclaim path it alone unlocks)" "ProbeTruncateFires"
 
 echo "TLA GATE PASSED"

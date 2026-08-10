@@ -1,6 +1,6 @@
 # Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, and the block-layout extent allocator
 
-Five modules, one gate (`scripts/check-tla.sh`, ninety-nine TLC runs).
+Five modules, one gate (`scripts/check-tla.sh`, one hundred and five TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -173,12 +173,31 @@ the very rows the transaction validates against).  Safety belongs to the
 **free side** (`FreeRevalidates`: the free transaction re-validates the
 grants table, sqlite-native); `FlintExtentsStaleSnapshotFree.cfg` pins
 the refuted sketch permanently, MarkOverwrite-style.  Owed in later
-tranches: LAYOUTCOMMIT + the committed state (CommitGatesSize /
-CommitChecksGen / ProvisionalInvisible, the zeroRead ghost), MdsCrash +
-durable, the MDS fallback lane, Split/Merge + `Inv_NoPhysicalAliasing`,
-and the grant-side arms as *liveness* belts.  Four non-vacuity probes
-(`FlintExtentsProbe.tla`) ship with it under the A2Probe standing rule —
-reuse, fence, tgt-restart and resnapshot all witnessed as actions.
+tranches: MdsCrash + durable, the MDS fallback lane, Split/Merge +
+`Inv_NoPhysicalAliasing`, and the grant-side arms as *liveness* belts.
+Six non-vacuity probes (`FlintExtentsProbe.tla`) ship under the A2Probe
+standing rule — reuse, fence, tgt-restart, resnapshot, commit and
+truncate all witnessed as actions.
+
+**Tranche 2** (same day, behind `CommitEnabled` — tranche-1 state spaces
+bit-identical, verified by flagship distinct-count match): LAYOUTCOMMIT
+with newsize, the committed state, TruncateStart, and the provisioning
+scrub.  Three more spec corrections, each a harm the sketch misnamed or a
+predicate legal behaviour violates: `Inv_SizeCommitCoupled` is
+**transactional** (a size-advance never applies without its range
+promotion — the sketched "no provisional extent within fsize" is false on
+legal hole-filling; the mutation is the half-stub, F67's silent-zeros
+lineage); ForgedCommit violates its own `Inv_NoForgedCommit` (a commit
+writes no bytes — its harm is bookkeeping corruption, never
+NoStaleExtentWrite); BlindCommit is renamed **BlindProvision**
+(`ProvisionalInvisible` is scrub-at-allocation; the disclosure is
+deleted-data resurrection, intra-volume by construction).  Plus one
+self-correction TLC forced: the committed state broke tranche 1's
+`occupied` predicate ("provisional ∧ held" no longer saw
+committed-and-held blocks — two live grants overlapped in 6 states); it
+now reads "not free ∧ held", because a predicate enumerating states goes
+stale the day the state set grows.  The Rust transaction had it right
+already.
 
 Verification of snapshots is layered deliberately:
 
@@ -192,7 +211,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs ninety-nine configs, ALL required:
+on first use).  It runs one hundred and five configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -686,17 +705,20 @@ reason this module was blind to an unbounded belt, and it took the
 because a kubelet OOM loop is not a data-loss event — to make the world
 expressible at all.
 
-The FlintExtents tranche adds eleven runs (catalogued in
-`scripts/check-tla.sh` next to their invocations): two strict —
+The FlintExtents tranches add seventeen runs (catalogued in
+`scripts/check-tla.sh` next to their invocations): three strict —
 `FlintExtents.cfg` (shipped design, ~1.96M distinct states: no
 conflicting grants, no reuse under a live unfenced grant; stale theorems
-NOT claimed) and `FlintExtentsTarget.cfg` (FenceReaches + PTPL: both
-theorems hold — cite as a goal only); five mutations, each single-flag —
-`ReuseUnderGrant` (the F65-of-extents), `GrantOverlap` (§8's
-PK-does-not-police-overlap), `StaleSnapshotFree` (the tranche-1 finding,
-pinned), `LostFence` (the standing residual — must keep failing until
-fencing is proven on hardware), `TgtAmnesia` ("PTPL is mandatory" with
-teeth); and four action-witness probes.
+NOT claimed), `FlintExtentsCommit.cfg` (the commit/size/scrub belts on
+the shipped base, ~1.82M) and `FlintExtentsTarget.cfg` (FenceReaches +
+PTPL over ALL machinery: both stale theorems hold — cite as a goal
+only); eight mutations, each single-flag — `ReuseUnderGrant` (the
+F65-of-extents), `GrantOverlap` (§8's PK-does-not-police-overlap),
+`StaleSnapshotFree` (the tranche-1 finding, pinned), `LostFence` (the
+standing residual — must keep failing until fencing is proven on
+hardware), `TgtAmnesia` ("PTPL is mandatory" with teeth), `UngatedSize`
+(the half-stub), `ForgedCommit` (the unfenced control path),
+`BlindProvision` (the unscrubbed reuse); and six action-witness probes.
 
 The mutation runs are the models' own regression tests; a model that
 cannot rediscover the bug classes it exists for proves nothing.

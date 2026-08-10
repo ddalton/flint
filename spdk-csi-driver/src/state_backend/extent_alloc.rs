@@ -111,6 +111,15 @@ pub struct GrantedExtent {
     /// `false` = INVALID_DATA (provisional: client must write before it
     /// may read); `true` = READ_WRITE_DATA (committed).
     pub committed: bool,
+    /// The range was just re-allocated from the free list and still
+    /// carries a previous incarnation's bytes — the wire layer MUST
+    /// write_zeroes it before the layout leaves the MDS (the model's
+    /// ProvisionalInvisible belt; FlintExtentsBlindProvision.cfg is the
+    /// world where nobody does — deleted-data resurrection). Virgin
+    /// bump-allocated space reads zeros already (thin-lvol unwritten
+    /// clusters), and existing extents are the same incarnation, so both
+    /// carry `false`.
+    pub needs_scrub: bool,
 }
 
 /// What a completed free did with each target extent.
@@ -273,6 +282,10 @@ pub fn grant(
     }
 
     let mut new_rows: Vec<ExtentRow> = Vec::new();
+    // Physical offsets allocated from the free list this transaction:
+    // those ranges carry a previous incarnation's bytes until the wire
+    // layer write_zeroes them (GrantedExtent::needs_scrub).
+    let mut reused_phys: Vec<i64> = Vec::new();
     for (g_start, g_len) in gaps {
         // First fit from the free list; reuse bumps the generation.
         let hit: Option<(i64, i64, i64)> = tx
@@ -299,6 +312,7 @@ pub fn grant(
                         params![volume, f_phys + g_len, f_len - g_len, f_gen],
                     )?;
                 }
+                reused_phys.push(f_phys);
                 (f_phys, f_gen + 1)
             }
             None => {
@@ -361,6 +375,7 @@ pub fn grant(
             physical_offset: e.physical_offset as u64,
             generation: e.generation as u64,
             committed: e.state == "rw",
+            needs_scrub: reused_phys.contains(&e.physical_offset),
         })
         .collect();
     tx.commit()?;
@@ -775,6 +790,7 @@ mod tests {
         assert_eq!(g1.len(), 1);
         assert_eq!(g1[0].generation, 1);
         assert!(!g1[0].committed);
+        assert!(!g1[0].needs_scrub, "virgin bump-allocated space reads zeros already");
         let g2 = grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
         assert_eq!(g1, g2, "re-grant returns the same extents, no new allocation");
         verify_volume_invariants(&conn, VOL).unwrap();
@@ -841,6 +857,11 @@ mod tests {
         let g2 = grant(&mut conn, VOL, F, C2, 0, 8192).unwrap();
         assert_eq!(g2[0].physical_offset, phys1, "free list reuses the range");
         assert_eq!(g2[0].generation, 2, "reuse bumps the generation");
+        assert!(
+            g2[0].needs_scrub,
+            "a reused range carries the prior incarnation's bytes until zeroed \
+             (FlintExtentsBlindProvision.cfg is the world where nobody does)"
+        );
         // c1's LAYOUTCOMMIT arrives late (control path is never fenced by
         // the reservation): it must refuse — c1 has no grant row on the
         // reincarnated extent.
@@ -885,6 +906,7 @@ mod tests {
         let g3 = grant(&mut conn, VOL, F, C2, 32768, 8192).unwrap();
         assert_eq!(g3[0].physical_offset, phys1, "released range is first-fit reused");
         assert_eq!(g3[0].generation, 2, "reuse after release still bumps the generation");
+        assert!(g3[0].needs_scrub, "a released quarantine range is still a reuse");
         verify_volume_invariants(&conn, VOL).unwrap();
     }
 
