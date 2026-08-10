@@ -334,6 +334,21 @@ extent_grants(volume, logical_offset, client_id, mode, gen, PRIMARY KEY (...))
 volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
 ```
 
+> **IMPLEMENTED 2026-08-09** (`state_backend/extent_alloc.rs`, tables in
+> `SCHEMA_SQL`, SCHEMA_VERSION 2) with three corrections to the sketch above:
+> (1) the PKs gain `file_id` — logical offsets are file-relative, so two files
+> in one volume collide at offset 0 under the sketched key; (2) two tables the
+> sketch omitted: `extent_free` (the free list, carrying `last_gen` so reuse
+> mints `last_gen + 1` — without it a bump-only allocator never reuses and the
+> gen detector is dead weight) and `extent_quarantine` (the fenced-holder
+> quarantine below, as real rows with a meter and an operator release lever);
+> (3) per the FlintExtents tranche-1 finding, `reclaim_complete` re-validates
+> holders INSIDE the free transaction and refuses (`NotQuiescent`) — the
+> recall snapshot is advisory, never load-bearing. `verify_volume_invariants`
+> runs at the end of every writing transaction (logical + physical
+> disjointness, watermark containment, grant referential/generation
+> integrity) and is itself tested against a deliberately corrupted table.
+
 - **The PK does not police overlap.** `(volume, logical_offset)` admits overlapping
   ranges — `(0, len 8)` and `(4, len 4)` are distinct PKs — so every extents-table
   write carries an app-level disjointness assertion, unit-tested; sqlite will not catch

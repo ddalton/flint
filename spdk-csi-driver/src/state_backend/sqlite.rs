@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// One request to the writer thread.
 enum Req {
@@ -1248,7 +1248,7 @@ fn decode_placement_row(
 
 // ── Schema ────────────────────────────────────────────────────────────
 
-const SCHEMA_SQL: &str = r#"
+pub(crate) const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_version (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     version INTEGER NOT NULL
@@ -1367,6 +1367,83 @@ CREATE TABLE IF NOT EXISTS fh_mappings (
 CREATE TABLE IF NOT EXISTS server_identity (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     server_id INTEGER NOT NULL
+);
+
+-- ---------------------------------------------------------------------------
+-- Block-layout extent allocator (pnfs-block design doc §8; FlintExtents.tla
+-- is the machine-checked spec — see state_backend/extent_alloc.rs, which owns
+-- every write to these tables). Allocation is per-volume, inside the volume's
+-- own lvol; offsets/lengths are bytes.
+--
+-- THE PKs DO NOT POLICE OVERLAP: (…, logical_offset) admits overlapping
+-- ranges as distinct rows, so every write path in extent_alloc.rs carries an
+-- app-level disjointness assertion (verify_volume_invariants), unit-tested
+-- against a deliberately corrupted table. sqlite will not catch range
+-- aliasing for us, and aliasing is the allocator's silent-corruption class
+-- (Inv_NoPhysicalAliasing in the model).
+--
+-- (§8's sketch keyed extents on (volume, logical_offset) alone — under-keyed:
+-- logical offsets are file-relative, so two files in one volume collide at
+-- offset 0. file_id joins every PK here.)
+
+-- state: 'invalid' (provisional — allocated, never committed; reads before
+-- a commit see zeros, never device bytes) | 'rw' (committed).
+CREATE TABLE IF NOT EXISTS extents (
+    volume TEXT NOT NULL,
+    file_id INTEGER NOT NULL,
+    logical_offset INTEGER NOT NULL,
+    length INTEGER NOT NULL,
+    physical_offset INTEGER NOT NULL,
+    gen INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (volume, file_id, logical_offset)
+);
+
+-- gen is gen-at-grant: LAYOUTCOMMIT validates it against extents.gen, which
+-- is what makes a fenced client's CONTROL path fenced too (§8 — reservations
+-- fence only the NVMe data path; an unvalidated commit would promote
+-- invalid->rw on a reused extent, i.e. the new owner's data).
+CREATE TABLE IF NOT EXISTS extent_grants (
+    volume TEXT NOT NULL,
+    file_id INTEGER NOT NULL,
+    logical_offset INTEGER NOT NULL,
+    client_id INTEGER NOT NULL,
+    mode TEXT NOT NULL,
+    gen INTEGER NOT NULL,
+    fenced INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (volume, file_id, logical_offset, client_id)
+);
+
+CREATE TABLE IF NOT EXISTS volume_alloc (
+    volume TEXT PRIMARY KEY,
+    size_ceiling INTEGER NOT NULL,
+    next_free INTEGER NOT NULL
+);
+
+-- Free list with reuse-generation memory: re-allocation of a freed range
+-- mints last_gen + 1, which is the stale-holder detector the whole model
+-- rests on (zeros from a fresh extent are not stale content; bytes from a
+-- previous owner are).
+CREATE TABLE IF NOT EXISTS extent_free (
+    volume TEXT NOT NULL,
+    physical_offset INTEGER NOT NULL,
+    length INTEGER NOT NULL,
+    last_gen INTEGER NOT NULL,
+    PRIMARY KEY (volume, physical_offset)
+);
+
+-- Fenced-holder ranges are QUARANTINED — leaked, never reused — until the
+-- phase-2 rig proves real preempt delivery (FenceReaches stays FALSE in the
+-- model's shipped cfg; freeing on an unproven fence designs in the
+-- corruption path). Metered; released only by the operator lever.
+CREATE TABLE IF NOT EXISTS extent_quarantine (
+    volume TEXT NOT NULL,
+    physical_offset INTEGER NOT NULL,
+    length INTEGER NOT NULL,
+    gen INTEGER NOT NULL,
+    fenced_clients TEXT NOT NULL,
+    quarantined_unix INTEGER NOT NULL,
+    PRIMARY KEY (volume, physical_offset)
 );
 "#;
 
@@ -1750,7 +1827,8 @@ mod tests {
         match err {
             StateBackendError::Storage(msg) => {
                 assert!(
-                    msg.contains("schema is 51") && msg.contains("delete the state file"),
+                    msg.contains(&format!("schema is {}", SCHEMA_VERSION + 50))
+                        && msg.contains("delete the state file"),
                     "got: {}",
                     msg,
                 );

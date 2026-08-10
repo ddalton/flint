@@ -29,6 +29,7 @@
 //!   regardless.
 //! * In-flight RPC futures — they time out client-side and retry.
 
+pub mod extent_alloc;
 pub mod memory;
 pub mod sqlite;
 
