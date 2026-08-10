@@ -39,15 +39,18 @@ pub struct Export {
     /// Export creation time (for attributes)
     pub create_time: u64,
     
-    /// pNFS: Layout type support (for future)
-    /// - LAYOUT4_NFSV4_1_FILES (1): File-based layouts
-    /// - LAYOUT4_BLOCK_VOLUME (2): Block layouts (SPDK/NVMe)
-    /// - LAYOUT4_SCSI (3): SCSI layouts
-    pub layout_types: Vec<u32>,
-    
     /// pNFS: Whether this export supports direct data access
     pub supports_pnfs: bool,
 }
+
+// NOTE: an `Export.layout_types` field and a
+// `PseudoFilesystem::get_layout_types` method used to live here, both
+// defaulting to `[2, 1]` with 2 mislabeled "BLOCK" (RFC 8881 §3.3.13:
+// OSD2=2, BLOCK=3). Neither ever reached the wire — the real
+// advertisement is `encode_fs_layout_types` in operations/fileops.rs,
+// the single source of truth. Deleted 2026-08-09 so a stale second
+// "source of truth" can't be resurrected; per-volume advertisement for
+// the pnfs-block class extends the fileops.rs helper, not this struct.
 
 impl Export {
     /// Create a new export
@@ -62,11 +65,6 @@ impl Export {
             name,
             path,
             create_time,
-            // For SPDK/NVMe backend, block layouts are ideal
-            layout_types: vec![
-                2, // LAYOUT4_BLOCK_VOLUME - Direct block access
-                1, // LAYOUT4_NFSV4_1_FILES - Fallback for compatibility
-            ],
             supports_pnfs: true, // SPDK enables high-performance pNFS
         }
     }
@@ -138,7 +136,7 @@ impl PseudoFilesystem {
         info!("   Path: {:?}", export.path);
         info!("   ID: {}", id);
         if export.supports_pnfs {
-            info!("   pNFS: Enabled (layout types: {:?})", export.layout_types);
+            info!("   pNFS: Enabled");
         }
         
         let mut exports = self.exports.write().unwrap();
@@ -236,20 +234,7 @@ impl PseudoFilesystem {
     pub fn supports_pnfs(&self) -> bool {
         self.pnfs_enabled
     }
-    
-    /// Get supported layout types (for pNFS)
-    pub fn get_layout_types(&self) -> Vec<u32> {
-        if !self.pnfs_enabled {
-            return vec![];
-        }
-        
-        // For SPDK/NVMe backend:
-        vec![
-            2, // LAYOUT4_BLOCK_VOLUME - Direct block device access
-            1, // LAYOUT4_NFSV4_1_FILES - File-based fallback
-        ]
-    }
-    
+
     /// Get maximum layouts per LAYOUTGET (for pNFS)
     pub fn get_max_layouts(&self) -> u32 {
         self.pnfs_max_layouts
@@ -367,12 +352,11 @@ mod tests {
     #[test]
     fn test_pnfs_support() {
         let pseudo_fs = PseudoFilesystem::new(TEST_INSTANCE);
-        
         assert!(pseudo_fs.supports_pnfs());
-        
-        let layout_types = pseudo_fs.get_layout_types();
-        assert!(layout_types.contains(&1)); // FILES
-        assert!(layout_types.contains(&2)); // BLOCK
+        // The layout-type advertisement itself is fileops.rs's
+        // encode_fs_layout_types — the deleted get_layout_types here
+        // returned [2,1] with the values mislabeled and never reached
+        // the wire.
     }
 }
 

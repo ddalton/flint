@@ -870,6 +870,52 @@ const SUPPORTED_ATTRS_BITMAP: u64 = (1u64 << FATTR4_TYPE)
 /// Encode NFSv4 attributes for pseudo-root (RFC 7530 Section 7)
 ///
 /// Returns (attribute_values, supported_bitmap) with synthetic values
+/// Single source of truth for the two pNFS advertisement attributes.
+///
+/// TWO GETATTR encoders emit these — `encode_attributes_from_snapshot`
+/// and the pseudo-root arm in `encode_pseudo_root_attribute` — and the
+/// pseudo-root arm is the one a mounting client's fsinfo actually hits
+/// (it's what reaches `bl_set_layoutdriver`/`nfs4_set_layoutdriver` on
+/// the client). They diverged once: the snapshot arm emitted
+/// LAYOUT_BLKSIZE unconditionally while the pseudo-root arm gated it on
+/// pNFS being enabled. These helpers exist so the two arms cannot
+/// diverge again; per-volume advertisement for the pnfs-block class
+/// (docs/plans/pnfs-block-layout-design.md §3/§4a) lands HERE, once.
+///
+/// We advertise only LAYOUT4_NFSV4_1_FILES (value 1, RFC 8881 §3.3.13).
+/// The Linux client picks the *first* type it implements from this
+/// list, in array order. FFLv4 (RFC 8435, type 4) needs a different
+/// `ff_layout4` body we don't generate — advertising it once made the
+/// kernel silently fall back to MDS-direct I/O after parsing a
+/// malformed body. Block (RFC 5663/8154/9561, type 3 — NOT 2, the old
+/// comment here had OSD2/BLOCK swapped like the LayoutType enum did)
+/// requires the extent allocator that doesn't exist yet.
+fn encode_fs_layout_types(buf: &mut BytesMut, pnfs_enabled: bool) -> bool {
+    if pnfs_enabled {
+        debug!("  FS_LAYOUT_TYPES (attr 62) → [FILES]");
+        buf.put_u32(1); // array length
+        buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
+        true
+    } else {
+        debug!("  FS_LAYOUT_TYPES (attr 62) - skipped (pNFS disabled)");
+        false
+    }
+}
+
+/// See `encode_fs_layout_types`. 4 MiB matches the default stripe size;
+/// gated on pNFS like FS_LAYOUT_TYPES (the previously-divergent arm
+/// emitted it unconditionally — unified 2026-08-09, deliberate).
+fn encode_layout_blksize(buf: &mut BytesMut, pnfs_enabled: bool) -> bool {
+    if pnfs_enabled {
+        debug!("  LAYOUT_BLKSIZE (attr 65) → 4194304");
+        buf.put_u32(4_194_304);
+        true
+    } else {
+        debug!("  LAYOUT_BLKSIZE (attr 65) - skipped (pNFS disabled)");
+        false
+    }
+}
+
 fn encode_pseudo_root_attributes(
     requested_bitmap: &[u32],
     attrs: &crate::nfs::v4::pseudo::PseudoRootAttrs,
@@ -1210,38 +1256,8 @@ fn encode_attributes_from_snapshot(
                 attr_vals.put_u32((supported >> 32) as u32);
                 true
             }
-            FATTR4_FS_LAYOUT_TYPES => {
-                // RFC 8881 §5.12 — list of pNFS layout types this fs supports.
-                // The Linux client picks the *first* type it implements from
-                // this list, in array order. We advertise only LAYOUT4_NFSV4_1_FILES
-                // (RFC 5661 §13) because:
-                //   * Our LAYOUTGET / GETDEVICEINFO path is implemented for
-                //     this type with the encode_file_layout_striped helper.
-                //   * FFLv4 (RFC 8435) requires a different `ff_layout4` body
-                //     shape (mirrors-of-DSes) and a per-DS filehandle that
-                //     we don't yet generate; advertising it caused the kernel
-                //     to silently fall back to MDS-direct I/O after parsing
-                //     a malformed body.
-                //   * BLOCK_VOLUME (type 2) requires SCSI/RDMA backing we
-                //     don't have at all.
-                if pnfs_enabled {
-                    debug!("  Attr {}: FS_LAYOUT_TYPES (attr 62) → [FILES]", attr_id);
-                    attr_vals.put_u32(1);
-                    attr_vals.put_u32(1); // LAYOUT4_NFSV4_1_FILES
-                    true
-                } else {
-                    debug!("  Attr {}: FS_LAYOUT_TYPES - skipped (pNFS disabled)", attr_id);
-                    false
-                }
-            }
-            FATTR4_LAYOUT_BLKSIZE => {
-                // RFC 8881 Section 5.12 - Preferred layout block size (stripe size)
-                // Attribute 65 (Linux kernel numbering)
-                debug!("  Attr {}: LAYOUT_BLKSIZE (attr 65)", attr_id);
-                attr_vals.put_u32(4194304); // 4 MB
-                debug!("    → Layout block size: 4194304 bytes (4 MB)");
-                true
-            }
+            FATTR4_FS_LAYOUT_TYPES => encode_fs_layout_types(&mut attr_vals, pnfs_enabled),
+            FATTR4_LAYOUT_BLKSIZE => encode_layout_blksize(&mut attr_vals, pnfs_enabled),
             _ => {
                 debug!("  Attribute {} not supported in snapshot encoder", attr_id);
                 false
@@ -1391,33 +1407,8 @@ fn encode_pseudo_root_attribute(
             buf.put_u32(0);
             true
         }
-        FATTR4_FS_LAYOUT_TYPES => {
-            // See the matching block in encode_attributes_from_snapshot for
-            // why we advertise [FILES] only.
-            if pnfs_enabled {
-                debug!("  Encoding FS_LAYOUT_TYPES (attr 62) → [FILES]");
-                buf.put_u32(1);
-                buf.put_u32(1); // LAYOUT4_NFSV4_1_FILES
-                true
-            } else {
-                debug!("  FS_LAYOUT_TYPES (attr 62) - skipped (pNFS disabled)");
-                false
-            }
-        }
-        FATTR4_LAYOUT_BLKSIZE => {
-            // RFC 8881 Section 5.12 - Preferred layout block size
-            // Only advertise if pNFS is enabled
-            if pnfs_enabled {
-                // Attribute 65 (Linux kernel numbering)
-                debug!("  Encoding LAYOUT_BLKSIZE (attr 65) for pNFS pseudo-root");
-                buf.put_u32(4194304); // 4 MB stripe size
-                debug!("    → Layout block size: 4194304 bytes (4 MB)");
-                true
-            } else {
-                debug!("  LAYOUT_BLKSIZE (attr 65) - skipped (pNFS disabled)");
-                false
-            }
-        }
+        FATTR4_FS_LAYOUT_TYPES => encode_fs_layout_types(buf, pnfs_enabled),
+        FATTR4_LAYOUT_BLKSIZE => encode_layout_blksize(buf, pnfs_enabled),
         _ => {
             // Attribute not supported for pseudo-root
             debug!("  Pseudo-root attr {} not supported", attr_id);

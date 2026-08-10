@@ -2298,9 +2298,10 @@ impl CompoundDispatcher {
     /// actually serves, for the operations that *emit* a layout-typed
     /// body: LAYOUTGET and GETDEVICEINFO.
     ///
-    /// We advertise `[LAYOUT4_NFSV4_1_FILES]` and nothing else — all
-    /// three `FATTR4_FS_LAYOUT_TYPES` sites in `operations/fileops.rs`
-    /// emit the one-element array `[1]` — and both replies are encoded
+    /// We advertise `[LAYOUT4_NFSV4_1_FILES]` and nothing else — both
+    /// `FATTR4_FS_LAYOUT_TYPES` encoder arms in `operations/fileops.rs`
+    /// call the shared `encode_fs_layout_types`, which emits the
+    /// one-element array `[1]` — and both replies are encoded
     /// as files-layout structures (`nfsv4_1_file_layout4`,
     /// `nfsv4_1_file_layout_ds_addr4`).
     ///
