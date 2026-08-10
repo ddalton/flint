@@ -757,6 +757,16 @@ impl LayoutManager {
         self.block_export.get().cloned()
     }
 
+    /// Is this volume scsi-class per the geometry cache? The attach
+    /// path's class gate: admitting a host onto a files-class volume
+    /// would build an nvme session to a subsystem that does not exist.
+    pub fn volume_is_scsi(&self, volume: &str) -> bool {
+        self.volume_geometry
+            .get(volume)
+            .map(|e| matches!(e.value(), Some(g) if g.layout_class == LayoutClass::Scsi))
+            .unwrap_or(false)
+    }
+
     /// Every volume the geometry cache knows to be scsi-class — the
     /// startup reconcile's work list. The cache is loaded eagerly by
     /// `load_volume_geometry`, so this is complete once startup seeding

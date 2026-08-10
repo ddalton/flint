@@ -1633,6 +1633,35 @@ impl SpdkCsiDriver {
         }
     }
 
+    /// The `pnfs.flint.io/layout` volumeAttribute of the PV whose
+    /// volumeHandle is `volume_id` — `Ok(Some("block"))` for pnfs-block
+    /// PVs, `Ok(None)` when the PV exists without the key (files-class).
+    /// `Err` when the PV cannot be found or read, which the caller must
+    /// treat as "unknown", not "not block" — the lookup goes BY HANDLE
+    /// (list scan): pnfs handles carry the `~m` shard pin while PV
+    /// names do not, so a name-keyed `get` would 404 on every one.
+    pub async fn pnfs_layout_of_handle(&self, volume_id: &str) -> Result<Option<String>, String> {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        let list = pvs
+            .list(&Default::default())
+            .await
+            .map_err(|e| format!("PV list failed: {e}"))?;
+        for pv in list.items {
+            let Some(csi) = pv.spec.as_ref().and_then(|s| s.csi.as_ref()) else { continue };
+            if csi.volume_handle != volume_id {
+                continue;
+            }
+            return Ok(csi
+                .volume_attributes
+                .as_ref()
+                .and_then(|attrs| attrs.get(crate::pnfs_csi::ctx_keys::LAYOUT))
+                .cloned());
+        }
+        Err(format!("no PV with volumeHandle {volume_id}"))
+    }
+
     async fn get_volume_info_from_pv(&self, volume_id: &str) -> Result<VolumeInfo, Box<dyn std::error::Error + Send + Sync>> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::Api;

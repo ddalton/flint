@@ -843,6 +843,7 @@ pub fn drop_volume(conn: &mut Connection, volume: &str) -> Result<u64> {
         "extent_quarantine",
         "volume_alloc",
         "block_hosts",
+        "block_node_attach",
         "fenced_clients",
     ] {
         n += tx.execute(&format!("DELETE FROM {table} WHERE volume = ?1"), params![volume])?
@@ -883,6 +884,13 @@ pub fn host_admit(
 /// with another live client stays in `remaining` — host-level fencing
 /// cannot split two NFS clients on one node, same as NVMe reservations
 /// (per Host Identifier).
+///
+/// The evicted NQNs' NODE-attach rows go in the same transaction: an
+/// attach row surviving its client's fence would keep the NQN on the
+/// allow-list, and the fenced node could simply reconnect — the exact
+/// door the durable eviction exists to close (the rig's R4 assertion).
+/// A node whose fence is later lifted re-attaches through the normal
+/// ControllerPublish path.
 pub fn host_evict(
     conn: &mut Connection,
     volume: &str,
@@ -900,9 +908,76 @@ pub fn host_evict(
         "DELETE FROM block_hosts WHERE volume = ?1 AND client_id = ?2",
         params![volume, client_id as i64],
     )?;
+    for nqn in &evicted {
+        tx.execute(
+            "DELETE FROM block_node_attach WHERE volume = ?1 AND host_nqn = ?2",
+            params![volume, nqn],
+        )?;
+    }
     let remaining = hosts_for_volume_conn(&tx, volume)?;
     tx.commit()?;
     Ok((evicted, remaining))
+}
+
+/// Record that the NODE `node_name` (NVMe identity `host_nqn`) has the
+/// volume attached (CSI ControllerPublish) and return the full desired
+/// allow-list after the upsert. This is the admission that runs BEFORE
+/// any NFS traffic exists — the nvme session must be up before the
+/// client's first LAYOUTGET resolves the device, and `block_hosts` rows
+/// can't carry it because their key (the NFS client_id) is minted at
+/// EXCHANGE_ID, later still.
+///
+/// Refused while ANY fence record on the volume names this NQN: attach
+/// would re-admit a fenced node through a side door the per-client guard
+/// (`is_fenced`) cannot see, because the attaching node has no client_id
+/// yet. Idempotent; a re-attach refreshes node_name (host rename).
+pub fn node_attach(
+    conn: &mut Connection,
+    volume: &str,
+    host_nqn: &str,
+    node_name: &str,
+    now_unix: i64,
+) -> Result<Vec<String>> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let fenced: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM fenced_clients WHERE volume = ?1 AND host_nqn = ?2",
+        params![volume, host_nqn],
+        |r| r.get(0),
+    )?;
+    if fenced > 0 {
+        return Err(ExtentAllocError::FencedClient);
+    }
+    tx.execute(
+        "INSERT INTO block_node_attach (volume, host_nqn, node_name, attached_unix)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (volume, host_nqn) DO UPDATE SET node_name = ?3",
+        params![volume, host_nqn, node_name, now_unix],
+    )?;
+    let hosts = hosts_for_volume_conn(&tx, volume)?;
+    tx.commit()?;
+    Ok(hosts)
+}
+
+/// Drop the node's attach row (CSI ControllerUnpublish) and return
+/// `(row_removed, remaining_desired_list)`. Idempotent — detaching an
+/// absent row is a replay, not an error. The NQN can survive in
+/// `remaining` via `block_hosts` rows: a client that earned a
+/// LAYOUTGET-time admission keeps it until its own lifecycle (return /
+/// lease sweep / fence) ends it — detach only withdraws the node-level
+/// grant it made.
+pub fn node_detach(
+    conn: &mut Connection,
+    volume: &str,
+    host_nqn: &str,
+) -> Result<(bool, Vec<String>)> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let removed = tx.execute(
+        "DELETE FROM block_node_attach WHERE volume = ?1 AND host_nqn = ?2",
+        params![volume, host_nqn],
+    )? > 0;
+    let remaining = hosts_for_volume_conn(&tx, volume)?;
+    tx.commit()?;
+    Ok((removed, remaining))
 }
 
 /// The volume's full desired allow-list (distinct, ordered for stable
@@ -1087,8 +1162,14 @@ pub fn unfence_record(conn: &mut Connection, volume: &str, client_id: u64) -> Re
 }
 
 fn hosts_for_volume_conn(conn: &Connection, volume: &str) -> Result<Vec<String>> {
+    // Client-earned admissions ∪ node-level attaches — UNION dedups, so a
+    // node that both attached and earned a LAYOUTGET admission appears
+    // once. Either row alone keeps the NQN desired.
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT host_nqn FROM block_hosts WHERE volume = ?1 ORDER BY host_nqn",
+        "SELECT host_nqn FROM block_hosts WHERE volume = ?1
+         UNION
+         SELECT host_nqn FROM block_node_attach WHERE volume = ?1
+         ORDER BY host_nqn",
     )?;
     let hosts = stmt
         .query_map(params![volume], |r| r.get(0))?
@@ -2310,6 +2391,87 @@ mod tests {
         assert_eq!(remaining, vec![h2]);
     }
 
+    /// Node-level attach (ControllerPublish): shapes the desired list on
+    /// its own, unions with client-earned rows, detaches idempotently,
+    /// and detach never touches a client-earned admission.
+    #[test]
+    fn node_attach_and_detach_shape_the_desired_list() {
+        let mut conn = setup();
+        let h1 = "nqn.2024-11.com.flint:node:a".to_string();
+        let h2 = "nqn.2024-11.com.flint:node:b".to_string();
+
+        assert_eq!(node_attach(&mut conn, VOL, &h1, "node-a", 0).unwrap(), vec![h1.clone()]);
+        assert_eq!(
+            node_attach(&mut conn, VOL, &h1, "node-a", 5).unwrap(),
+            vec![h1.clone()],
+            "re-attach is idempotent"
+        );
+
+        // The same NQN earns a client admission too (its LAYOUTGET) —
+        // the union stays DISTINCT.
+        host_admit(&mut conn, VOL, C1, &h1, 0).unwrap();
+        assert_eq!(hosts_for_volume(&conn, VOL).unwrap(), vec![h1.clone()]);
+
+        // Detach withdraws only the node-level grant; the client-earned
+        // row keeps the NQN desired.
+        let (removed, remaining) = node_detach(&mut conn, VOL, &h1).unwrap();
+        assert!(removed);
+        assert_eq!(remaining, vec![h1.clone()], "client admission keeps the NQN");
+        let (removed, _) = node_detach(&mut conn, VOL, &h1).unwrap();
+        assert!(!removed, "double-detach is a clean replay");
+
+        // A second node's attach stands alone after the first's detach.
+        node_attach(&mut conn, VOL, &h2, "node-b", 0).unwrap();
+        host_evict(&mut conn, VOL, C1).unwrap();
+        assert_eq!(hosts_for_volume(&conn, VOL).unwrap(), vec![h2]);
+    }
+
+    /// The attach-side fence guard: a fence record naming the NQN
+    /// refuses node_attach outright. Attach is the one admission door
+    /// the per-client `is_fenced` guard cannot see (the attaching node
+    /// has no client_id yet), so it carries its own.
+    #[test]
+    fn a_fenced_nqn_cannot_node_attach() {
+        let mut conn = setup();
+        let nqn = "nqn.2024-11.com.flint:node:a".to_string();
+        host_admit(&mut conn, VOL, C1, &nqn, 0).unwrap();
+        fence_record(&mut conn, VOL, C1, 100).unwrap();
+
+        assert!(
+            matches!(
+                node_attach(&mut conn, VOL, &nqn, "node-a", 0),
+                Err(ExtentAllocError::FencedClient)
+            ),
+            "attach must not re-admit a fenced NQN through the side door"
+        );
+        // A different node attaches fine; and once the fence clears,
+        // the refused node does too.
+        node_attach(&mut conn, VOL, "nqn.2024-11.com.flint:node:b", "node-b", 0).unwrap();
+        unfence_record(&mut conn, VOL, C1).unwrap();
+        node_attach(&mut conn, VOL, &nqn, "node-a", 0).unwrap();
+    }
+
+    /// The fence's eviction purges the fenced NQN's attach row in the
+    /// same transaction — an attach row surviving the fence would keep
+    /// the NQN on the allow-list and the fenced node could reconnect
+    /// (the rig's R4 assertion, defeated durably).
+    #[test]
+    fn host_evict_purges_the_attach_row_too() {
+        let mut conn = setup();
+        let nqn = "nqn.2024-11.com.flint:node:a".to_string();
+        node_attach(&mut conn, VOL, &nqn, "node-a", 0).unwrap();
+        host_admit(&mut conn, VOL, C1, &nqn, 0).unwrap();
+
+        let (evicted, remaining) = host_evict(&mut conn, VOL, C1).unwrap();
+        assert_eq!(evicted, vec![nqn.clone()]);
+        assert!(
+            remaining.is_empty(),
+            "the attach row must not keep the fenced NQN desired: {remaining:?}"
+        );
+        let (removed, _) = node_detach(&mut conn, VOL, &nqn).unwrap();
+        assert!(!removed, "the eviction already swept the attach row");
+    }
+
     /// READ grants never allocate, never show uncommitted extents, and
     /// leave holder rows that block a reclaim (reader visibility — the
     /// FreeRevalidates belt covers readers too).
@@ -2353,6 +2515,7 @@ mod tests {
     fn drop_volume_sweeps_host_rows_too() {
         let mut conn = setup();
         host_admit(&mut conn, VOL, C1, "nqn.2024-11.com.flint:node:a", 0).unwrap();
+        node_attach(&mut conn, VOL, "nqn.2024-11.com.flint:node:b", "node-b", 0).unwrap();
         grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         fence_record(&mut conn, VOL, C1, 0).unwrap();
         assert!(drop_volume(&mut conn, VOL).unwrap() > 0);

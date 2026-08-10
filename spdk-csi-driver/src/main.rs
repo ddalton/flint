@@ -2215,9 +2215,58 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         // 2026-07-06, first cluster with a real attacher in the loop).
         // -------------------------------------------------------------
         if req.volume_context.contains_key(spdk_csi_driver::pnfs_csi::ctx_keys::MDS_IP) {
-            println!("📡 [pNFS] Volume {} needs no attach — returning no-op publish", volume_id);
             publish_context.insert("volumeType".to_string(), "pnfs".to_string());
             publish_context.insert("volumeId".to_string(), volume_id.clone());
+
+            // Block-class volumes DO have per-node attach state (design
+            // doc §5, "per-node hostnqn registration via
+            // ControllerPublish"): the MDS must admit the node's NQN
+            // onto the export allow-list BEFORE NodeStage's `nvme
+            // connect` — the allow-list is default-closed, and the
+            // LAYOUTGET-time admission arrives too late (the session
+            // must exist before the kernel's first device resolution).
+            // The answered session coordinates ride publish_context to
+            // NodeStage, which is exactly what publish_context is for.
+            let is_block = req.volume_context
+                .get(spdk_csi_driver::pnfs_csi::ctx_keys::LAYOUT)
+                .map(String::as_str)
+                == Some("block");
+            if is_block {
+                let Some(shards) = self.pnfs_csi.as_ref() else {
+                    return Err(tonic::Status::failed_precondition(
+                        "pnfs-block volume but pNFS is not enabled on this controller \
+                         (FLINT_PNFS_MDS_ENDPOINT unset)",
+                    ));
+                };
+                let (shard, client, bare_id) = shards.route(&volume_id).map_err(|e| {
+                    tonic::Status::failed_precondition(format!("pNFS sharding: {e}"))
+                })?;
+                match client.attach_block_node(bare_id, &node_id).await {
+                    Ok(attach) => {
+                        println!(
+                            "🔌 [pNFS-BLOCK] node {} admitted to '{}' (shard {}): {}:{} {}",
+                            node_id, bare_id, shard, attach.traddr, attach.trsvcid,
+                            attach.subnqn
+                        );
+                        attach.stamp(&mut publish_context);
+                    }
+                    // Transport errors retry (the attacher re-drives);
+                    // an MDS refusal — a fenced node above all — is a
+                    // real verdict that belongs on the VolumeAttachment.
+                    Err(spdk_csi_driver::pnfs_csi::PnfsError::Transport(m)) => {
+                        return Err(tonic::Status::unavailable(format!(
+                            "AttachBlockNode transport (retryable): {m}"
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(tonic::Status::failed_precondition(format!(
+                            "AttachBlockNode refused: {e}"
+                        )));
+                    }
+                }
+            } else {
+                println!("📡 [pNFS] Volume {} needs no attach — returning no-op publish", volume_id);
+            }
             return Ok(tonic::Response::new(
                 spdk_csi_driver::csi::ControllerPublishVolumeResponse { publish_context },
             ));
@@ -2493,6 +2542,63 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         let node_id = req.node_id.clone();
         
         println!("📥 [CONTROLLER] Unpublishing volume {} from node {:?}", volume_id, node_id);
+
+        // -------------------------------------------------------------
+        // pNFS branch — a shard-pinned id (`~m<shard>`) is only ever
+        // minted by the pNFS create path (same classifier as
+        // DeleteVolume; this RPC carries no volume_context). pNFS
+        // volumes own no SPDK objects, so this returns early either
+        // way; block-class volumes first withdraw the node's host
+        // admission (the DetachBlockNode inverse of the publish-time
+        // attach) so a departed node's NQN does not stay on the export
+        // allow-list forever.
+        // -------------------------------------------------------------
+        if spdk_csi_driver::pnfs_csi::parse_shard_suffix(&volume_id).is_some() {
+            if let Some(shards) = self.pnfs_csi.as_ref() {
+                if !node_id.is_empty() {
+                    // Class from the live PV. Unreadable/absent PV ⇒ skip
+                    // the detach rather than fail the unpublish: if the
+                    // volume is mid-delete, DeleteVolume's drop_volume
+                    // sweeps the attach rows; if not, the next fence or
+                    // reconcile pass converges. Loud either way.
+                    match self.driver.pnfs_layout_of_handle(&volume_id).await {
+                        Ok(Some(layout)) if layout == "block" => {
+                            let (shard, client, bare_id) =
+                                shards.route(&volume_id).map_err(|e| {
+                                    tonic::Status::failed_precondition(format!(
+                                        "pNFS sharding: {e}"
+                                    ))
+                                })?;
+                            match client.detach_block_node(bare_id, &node_id).await {
+                                Ok(detail) => println!(
+                                    "🔌 [pNFS-BLOCK] shard {}: {}",
+                                    shard, detail
+                                ),
+                                // A dead MDS must not orphan the admission
+                                // silently — Unavailable makes the attacher
+                                // re-drive until the detach lands.
+                                Err(e) => {
+                                    return Err(tonic::Status::unavailable(format!(
+                                        "DetachBlockNode (retryable): {e}"
+                                    )));
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => println!(
+                            "⚠️ [pNFS] cannot classify {} for detach ({}) — skipping \
+                             host-admission withdrawal (drop_volume or the next \
+                             reconcile converges it)",
+                            volume_id, e
+                        ),
+                    }
+                }
+            }
+            println!("✅ [CONTROLLER] pNFS volume {} unpublished", volume_id);
+            return Ok(tonic::Response::new(
+                spdk_csi_driver::csi::ControllerUnpublishVolumeResponse {},
+            ));
+        }
 
         // Get volume information
         let volume_info = match self.driver.get_volume_info(&volume_id).await {
@@ -2973,12 +3079,49 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("📦 [NODE_STAGE] Ephemeral volume detected (no PV exists)");
         }
 
-        // pNFS volumes: nothing to stage — the kernel NFS mount happens
-        // per-pod in NodePublishVolume (same shape as the "nfs" branch
-        // below, but detected from volume_context so it holds even if a
-        // future publish path forgets the volumeType marker).
+        // pNFS volumes: the kernel NFS mount happens per-pod in
+        // NodePublishVolume (same shape as the "nfs" branch below, but
+        // detected from volume_context so it holds even if a future
+        // publish path forgets the volumeType marker). BLOCK-class
+        // volumes stage their nvme session here first — it must exist
+        // before any publish can trigger the kernel's first LAYOUTGET,
+        // whose device resolution otherwise fails once and silently
+        // degrades the volume to MDS I/O for 120 s at a time (§4a).
         if volume_context.contains_key(spdk_csi_driver::pnfs_csi::ctx_keys::MDS_IP) {
-            println!("📡 [NODE_STAGE] pNFS volume — skipping staging (mount happens in NodePublishVolume)");
+            match spdk_csi_driver::pnfs_csi::BlockAttach::from_publish_context(&publish_context)
+            {
+                Ok(Some(attach)) => {
+                    println!(
+                        "🔌 [NODE_STAGE] pnfs-block volume — establishing nvme session to {} at {}:{}",
+                        attach.subnqn, attach.traddr, attach.trsvcid
+                    );
+                    match spdk_csi_driver::pnfs_block_session::ensure_session(&attach).await {
+                        Ok(dev) => println!(
+                            "✅ [NODE_STAGE] session up: {} (eui link ensured for {})",
+                            dev, attach.nguid
+                        ),
+                        // Retryable: kubelet re-drives NodeStage; the
+                        // connect/admission race (attach converged but
+                        // tgt momentarily behind) resolves itself.
+                        Err(e) => {
+                            return Err(tonic::Status::unavailable(format!(
+                                "pnfs-block session for {volume_id}: {e}"
+                            )));
+                        }
+                    }
+                }
+                Ok(None) => println!(
+                    "📡 [NODE_STAGE] pNFS volume — no session to stage (files layout)"
+                ),
+                Err(e) => {
+                    // Present-but-unusable keys: fail loudly rather than
+                    // stage a volume whose every I/O would silently
+                    // proxy through the MDS.
+                    return Err(tonic::Status::invalid_argument(format!(
+                        "pnfs-block publish_context for {volume_id}: {e}"
+                    )));
+                }
+            }
             std::fs::create_dir_all(&staging_target_path)
                 .map_err(|e| tonic::Status::internal(format!("Failed to create staging directory: {}", e)))?;
             return Ok(tonic::Response::new(spdk_csi_driver::csi::NodeStageVolumeResponse {}));
@@ -3736,6 +3879,38 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             spdk_csi_driver::identity::storage_id_of_handle(&volume_id).to_string();
 
         println!("📤 [NODE] Unstaging volume {} from {}", actual_volume_id, staging_target_path);
+
+        // pnfs-block session teardown, keyed on the SESSION's existence
+        // rather than on PV classification — the PV may already be gone
+        // in a teardown storm, and the kernel controller for the
+        // volume's derived block-subsystem NQN is the ground truth for
+        // "this node staged it". The `:block:` NQN prefix is unique to
+        // pnfs-block exports, so nothing else ever matches. Kubelet
+        // orders NodeUnstage after every NodeUnpublish, so the NFS
+        // mounts (and with them any layout-driven I/O) are gone by now.
+        {
+            let bare = spdk_csi_driver::pnfs_csi::parse_shard_suffix(&actual_volume_id)
+                .map(|(b, _)| b)
+                .unwrap_or(&actual_volume_id);
+            let subnqn = spdk_csi_driver::identity::block_volume_export_nqn(bare);
+            if spdk_csi_driver::pnfs_block_session::controller_for_nqn(&subnqn).is_some() {
+                let (_uuid, nguid) = spdk_csi_driver::nvmeof_export::stable_ns_identity(bare);
+                match spdk_csi_driver::pnfs_block_session::teardown_session(&subnqn, &nguid)
+                    .await
+                {
+                    Ok(detail) => {
+                        println!("🔌 [NODE] pnfs-block {}: {}", bare, detail)
+                    }
+                    // Retryable: a half-torn session must not be
+                    // reported unstaged — kubelet re-drives.
+                    Err(e) => {
+                        return Err(tonic::Status::unavailable(format!(
+                            "pnfs-block session teardown for {bare}: {e}"
+                        )));
+                    }
+                }
+            }
+        }
 
         // RWX/ROX consumers mount NFS — at PUBLISH time, per pod target;
         // the staging path never holds the NFS mount — and own no SPDK

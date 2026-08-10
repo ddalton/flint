@@ -13,15 +13,17 @@
 #   spdk_tgt (--no-huge, aio file bdev, lvstore lvs_rig)
 #   flint-pnfs-mds (sqlite state, blockExport → the tgt socket)
 #   kernel client: mounts 127.0.0.1:/<vol> vers=4.2 (the CSI shape),
-#     nvme-tcp session to 127.0.0.1:4420 as flint_host_nqn($(hostname))
+#     nvme-tcp session STAGED BY `pnfs-csi-cli stage` — the production
+#     csi-node path (AttachBlockNode admission + ensure_session), not a
+#     bash reimplementation of it
 #
 # Prerequisites (see reference_linux_test_crossbuild + this session):
 #   - VM kernel ≥ 6.11 with blocklayoutdriver (HWE kernel installed)
 #   - ~/rig-spdk/{spdk_tgt,scripts,py,grpcurl} (extracted from the
 #     arm64 spdk-tgt image; grpcurl static linux_arm64)
-#   - cross-built release MDS:
+#   - cross-built release MDS + CSI CLI:
 #       cargo build --release --target aarch64-unknown-linux-musl \
-#         --bin flint-pnfs-mds   (zig-shim recipe)
+#         --bin flint-pnfs-mds --bin pnfs-csi-cli   (zig-shim recipe)
 #
 # PROOFS asserted, in order of strength:
 #   1. sha256(cold read via NFS) == sha256(source) — data integrity
@@ -78,6 +80,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 LIMA_VM="${LIMA_VM:-flint-nfs-client}"
 RIG_TOOLS="${RIG_TOOLS:-$HOME/rig-spdk}"          # same absolute path inside the VM
 MDS_BIN="$REPO_ROOT/spdk-csi-driver/target/aarch64-unknown-linux-musl/release/flint-pnfs-mds"
+CSI_CLI="$REPO_ROOT/spdk-csi-driver/target/aarch64-unknown-linux-musl/release/pnfs-csi-cli"
 CFG="$REPO_ROOT/tests/lima/pnfs/mds-block.yaml"
 PROTO_DIR="$REPO_ROOT/spdk-csi-driver/proto"
 
@@ -133,6 +136,7 @@ cleanup() {
 
 # ── 0. preflight ──────────────────────────────────────────────────────
 [ -x "$MDS_BIN" ] || { echo "✗ missing $MDS_BIN — cross-build it first (see header)"; exit 1; }
+[ -x "$CSI_CLI" ] || { echo "✗ missing $CSI_CLI — cross-build it first (see header)"; exit 1; }
 KREL=$(vsh "uname -r")
 KMAJ=${KREL%%.*}; KMIN=$(echo "$KREL" | cut -d. -f2)
 if [ "$KMAJ" -lt 6 ] || { [ "$KMAJ" -eq 6 ] && [ "$KMIN" -lt 11 ]; }; then
@@ -212,57 +216,56 @@ for s in json.load(sys.stdin):
 [ -n "$NGUID" ] || fail "no namespace/NGUID on $SUBNQN"
 echo "✓ volume created: class=scsi, subsystem live, NGUID=$NGUID"
 
-# ── 5. pre-admit this node + nvme connect ────────────────────────────
-# Production admits at first LAYOUTGET (grant-driven) — but the kernel
-# resolves the device from block devices that must ALREADY exist, so
-# the node's session is established out of band first (csi-node's job
-# later; the rig plays that role here).
+# ── 5. stage the node session — THE PRODUCTION PATH ──────────────────
+# AttachBlockNode (per-node hostnqn admission, the ControllerPublish
+# verb — the allow-list is default-closed, so this must precede the
+# connect) + pnfs_block_session::ensure_session (connect as the
+# MDS-admitted NQN, fast_io_fail sysfs backfill, §4a eui link,
+# NGUID-matched head-device resolution). The same code csi-node runs at
+# NodeStage, driven through pnfs-csi-cli so the rig proves shipped code
+# instead of a bash reimplementation of it. Low ctrl-loss / fast-io-fail
+# stays the §6 mandate AND this drill's D-state safety belt.
 HOSTNQN="nqn.2024-11.com.flint:node:$(vsh hostname)"
-vsh "$RPC nvmf_subsystem_add_host $SUBNQN $HOSTNQN" || fail "pre-admit add_host"
 vsudo "modprobe nvme-tcp && modprobe blocklayoutdriver"
-# Low ctrl-loss / fast-io-fail is the design §6 mandate for block-layout
-# sessions AND the D-state safety belt for this drill: when the fence
-# severs the raw path, a default (1800s) ctrl-loss-tmo parks O_DIRECT
-# writes in uninterruptible I/O and only a reboot clears them. This
-# nvme-cli has no --fast-io-fail-tmo flag; the design's own answer is a
-# sysfs backfill (commit 560c1d1), applied just below once the ctrl
-# appears.
-vsudo "nvme connect -t tcp -a 127.0.0.1 -s 4420 -n $SUBNQN --hostnqn=$HOSTNQN \
-       --ctrl-loss-tmo=10 --reconnect-delay=2" \
-  || fail "nvme connect"
-# fast_io_fail_tmo via sysfs: error the I/O in ~5s instead of retrying
-# to ctrl-loss. Best-effort — older kernels lack the attribute.
-vsudo "for c in /sys/class/nvme/nvme*; do
-         [ -w \$c/fast_io_fail_tmo ] && echo 5 > \$c/fast_io_fail_tmo 2>/dev/null
-       done; true"
-# Find the namespace HEAD device by NGUID. Never the per-controller
-# path device (nvme0c0n1) — under native multipath that gendisk is
-# hidden and bdev_file_open_by_path refuses it; the kernel blocklayout
-# open would fail with the device "present".
-NSDEV=""
-for i in $(seq 1 20); do
-  NSDEV=$(vsh "for b in /sys/class/block/nvme*; do
-      case \$(basename \$b) in nvme*c*n*) continue;; esac
-      g=\$(cat \$b/nguid 2>/dev/null | tr -d -- -)
-      [ \"\$g\" = \"$NGUID\" ] && basename \$b && break
-    done" | head -1)
-  [ -n "$NSDEV" ] && break
-  sleep 0.5
-done
-[ -n "$NSDEV" ] || fail "no namespace head device carries NGUID $NGUID"
-echo "✓ connected: /dev/$NSDEV as $HOSTNQN"
+STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=10 FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+        $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)") \
+  || fail "pnfs-csi-cli stage (attach or session)"
+NSDEV=$(basename "$(echo "$STAGE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)")
+[ -n "$NSDEV" ] || fail "stage reported no device: $STAGE"
+# Three coordinate assertions close the drift loops: the MDS-admitted
+# NQN must equal the co_ownerid derivation LAYOUTGET admission uses;
+# the attach-answered NGUID must equal what the tgt's namespace really
+# carries (section 4's truth); and fast_io_fail must have LANDED, not
+# merely been attempted (a rejected sysfs write is silent).
+echo "$STAGE" | grep -c "\"hostNqn\":\"$HOSTNQN\"" >/dev/null \
+  || fail "MDS-admitted NQN diverges from the co_ownerid derivation: $STAGE"
+STAGE_NGUID=$(echo "$STAGE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nguid"])' 2>/dev/null)
+[ "$STAGE_NGUID" = "$NGUID" ] || fail "attach NGUID '$STAGE_NGUID' != target namespace NGUID '$NGUID'"
+FIF=$(vsh "cat /sys/class/nvme/*/fast_io_fail_tmo 2>/dev/null | head -1 | tr -d ' '" || true)
+[ "${FIF:-}" = "5" ] || fail "fast_io_fail_tmo not applied by ensure_session (got '${FIF:-none}')"
+echo "✓ staged (production path): /dev/$NSDEV as $HOSTNQN, fast_io_fail=5s"
 
-# ── 6. the §4a udev landmine — observe, then close ───────────────────
-# Settle first: checking before udev finishes and then ln -sf'ing a
-# fallback would CLOBBER the good link with whatever we guessed.
-vsudo "udevadm settle -t 10" || true
+# ── 6. the §4a udev landmine — observe, then prove the repair ────────
+# ensure_session already closed it. To OBSERVE the landmine we remove
+# the link, replay the udev add event, and check what udev creates on
+# its own; then a second stage — idempotent: the live controller is
+# reused, no second connect — must repair the link. That re-stage IS
+# the production shape of every kubelet NodeStage retry.
+vsudo "rm -f /dev/disk/by-id/nvme-eui.$NGUID"
+vsudo "udevadm trigger --action=add /dev/$NSDEV 2>/dev/null; udevadm settle -t 10" || true
 NATIVE=$(vsh "ls /dev/disk/by-id/ 2>/dev/null | grep -c '^nvme-eui\.$NGUID\$'" || true)
 if [ "${NATIVE:-0}" = "0" ]; then
-  echo "· udev did NOT create nvme-eui.$NGUID (§4a landmine CONFIRMED on $KREL) — linking"
-  vsudo "ln -sf /dev/$NSDEV /dev/disk/by-id/nvme-eui.$NGUID"
+  echo "· udev did NOT create nvme-eui.$NGUID (§4a landmine CONFIRMED on $KREL)"
 else
   echo "· udev created nvme-eui.$NGUID natively (§4a landmine ABSENT on $KREL — update the doc)"
 fi
+vsudo "env FLINT_NVME_CTRL_LOSS_TMO=10 FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+       $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)" >/dev/null \
+  || fail "re-stage (link repair) failed"
+LINK=$(vsh "readlink /dev/disk/by-id/nvme-eui.$NGUID" || true)
+echo "$LINK" | grep -c "$NSDEV" >/dev/null \
+  || fail "re-stage did not repair the eui link (readlink: '${LINK:-none}')"
+echo "✓ stage is idempotent and re-links (§4a repair proven through production code)"
 
 # ── 7. mount the VOLUME SUBDIR (the CSI shape — fsinfo must read the
 #       scsi class, not the pseudo-root's files advertisement) ────────
@@ -402,6 +405,21 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
   RET=$(vsudo "dmesg | grep -c '_pnfs_return_layout'" || true)
   echo "✓ durable+functional fence: MDS recorded it; client reconnect refused (${RECONN}×); client returned its layout on error (${RET} dmesg frames)"
 
+  # F6. the ADMISSION side door is closed too: AttachBlockNode (the
+  # ControllerPublish verb) for the fenced node is refused at the MDS —
+  # and the fence must have swept the node-attach row stage created, or
+  # the NQN would still be on the allow-list despite the eviction.
+  # Without the NQN-level guard, a rescheduled pod on the SAME node
+  # would re-admit the NQN the fence just removed.
+  ATT=$(vsh "$CSI_CLI attach --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname) 2>&1; true")
+  echo "$ATT" | grep -ci 'fenced' >/dev/null \
+    || fail "attach of a fenced node was NOT refused: $ATT"
+  NAROWS=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM block_node_attach WHERE volume='$VOL'\"" || echo "?")
+  [ "${NAROWS:-1}" = "0" ] \
+    || fail "the fence left $NAROWS node-attach row(s) — the fenced NQN would stay admitted"
+  echo "✓ fenced node's AttachBlockNode refused; its node-attach row swept by the fence"
+
   # The fence is proven. Reap the (fenced) writer and STOP here — the
   # FENCE drill deliberately does NOT go on to the destructive REMOVE
   # reclaim below. Reclaim-after-fence is a distinct property, already
@@ -500,32 +518,18 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
     [ "${FCOUNT:-1}" = "0" ] || fail "fenced_clients still holds $FCOUNT row(s) after unfence"
     echo "✓ durable record cleared (fenced_clients drained)"
 
-    # U3. the transport path back: the rig re-plays csi-node's pre-admit
-    # (production re-admits at the client's next LAYOUTGET; the raw
-    # add_host only reopens the transport so that LAYOUTGET can find a
-    # resolvable device). The connect itself must now SUCCEED — at F5 /
-    # R4 this exact command was refused. Fresh-boot kernel: re-apply the
-    # fast_io_fail backfill and the §4a eui link.
-    vsh "$RPC nvmf_subsystem_add_host $SUBNQN $HOSTNQN" || fail "re-admit add_host"
-    vsudo "nvme connect -t tcp -a 127.0.0.1 -s 4420 -n $SUBNQN --hostnqn=$HOSTNQN \
-           --ctrl-loss-tmo=10 --reconnect-delay=2" \
-      || fail "the unfenced client could not reconnect"
-    vsudo "for c in /sys/class/nvme/nvme*; do
-             [ -w \$c/fast_io_fail_tmo ] && echo 5 > \$c/fast_io_fail_tmo 2>/dev/null
-           done; true"
-    NSDEV=""
-    for i in $(seq 1 20); do
-      NSDEV=$(vsh "for b in /sys/class/block/nvme*; do
-          case \$(basename \$b) in nvme*c*n*) continue;; esac
-          g=\$(cat \$b/nguid 2>/dev/null | tr -d -- -)
-          [ \"\$g\" = \"$NGUID\" ] && basename \$b
-        done" | tail -1)
-      [ -n "$NSDEV" ] && break
-      sleep 0.5
-    done
-    [ -n "$NSDEV" ] || fail "no namespace device after the unfenced reconnect"
-    vsudo "udevadm settle -t 10; ln -sf /dev/$NSDEV /dev/disk/by-id/nvme-eui.$NGUID"
-    echo "✓ unfenced client reconnected: /dev/$NSDEV (was refused while fenced)"
+    # U3. the transport path back — through the PRODUCTION path:
+    # `pnfs-csi-cli stage` = AttachBlockNode (refused at F6 while the
+    # fence stood; it must succeed now that U1 cleared it) +
+    # ensure_session (connect as the admitted NQN, fast_io_fail
+    # backfill, §4a link — all from scratch on this fresh-boot kernel).
+    # At F5 / R4 the connect inside this exact path was refused.
+    STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=10 FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+            $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)") \
+      || fail "the unfenced client could not re-stage (attach or connect refused)"
+    NSDEV=$(basename "$(echo "$STAGE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)")
+    [ -n "$NSDEV" ] || fail "re-stage reported no device: $STAGE"
+    echo "✓ unfenced client re-staged (production path): /dev/$NSDEV (was refused while fenced)"
 
     # U4. THE INVERSE OF F3: mount, write O_DIRECT, and the device
     # counter moves again. The RELEASE is what this requires: the
@@ -814,6 +818,26 @@ QUAR=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
 [ "${LEFT:-1}" = "0" ] || fail "extent rows never drained after REMOVE ($LEFT left, quarantine=$QUAR)"
 [ "${QUAR:-1}" = "0" ] || fail "REMOVE quarantined $QUAR range(s) — expected clean frees via LAYOUTRETURN"
 echo "✓ REMOVE reclaimed every extent cleanly (0 rows, 0 quarantined)"
+
+# ── 11. unstage + detach — the teardown half of session management ───
+# NodeUnstage's inverse (unstage: link removed, session disconnected)
+# then ControllerUnpublish's (detach: the durable node-attach row goes,
+# and a replay reports itself instead of erroring).
+vsudo "umount $MNT" || fail "umount before unstage"
+UNSTAGE=$(vsudo "$CSI_CLI unstage --volume-id $VOL") || fail "pnfs-csi-cli unstage"
+echo "$UNSTAGE" | grep -c 'disconnected=true' >/dev/null || fail "unstage did not disconnect: $UNSTAGE"
+echo "$UNSTAGE" | grep -c 'link_removed=true' >/dev/null || fail "unstage left the eui link: $UNSTAGE"
+vsh "test -e /dev/disk/by-id/nvme-eui.$NGUID" \
+  && fail "eui link still present after unstage (the dangling-link landmine)"
+vsh "$CSI_CLI detach --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)" >/dev/null \
+  || fail "pnfs-csi-cli detach"
+NAROWS=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+  \"SELECT COUNT(*) FROM block_node_attach WHERE volume='$VOL'\"" || echo "?")
+[ "${NAROWS:-1}" = "0" ] || fail "detach left $NAROWS node-attach row(s)"
+DETACH2=$(vsh "$CSI_CLI detach --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)") \
+  || fail "detach replay errored"
+echo "$DETACH2" | grep -c 'replay' >/dev/null || fail "detach replay did not self-identify: $DETACH2"
+echo "✓ unstage+detach: session down, link gone, attach row swept, replay clean"
 
 echo
 if [ "${FENCE:-0}" = "1" ]; then

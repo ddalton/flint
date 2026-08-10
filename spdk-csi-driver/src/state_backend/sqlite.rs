@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// One request to the writer thread.
 enum Req {
@@ -1311,6 +1311,38 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn block_node_attach(
+        &self,
+        volume: &str,
+        host_nqn: &str,
+        node_name: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<Vec<String>, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        let v = volume.to_string();
+        let h = host_nqn.to_string();
+        let n = node_name.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::node_attach(conn, &v, &h, &n, now_unix)
+        })
+        .await
+    }
+
+    async fn block_node_detach(
+        &self,
+        volume: &str,
+        host_nqn: &str,
+    ) -> StateBackendResult<
+        Result<(bool, Vec<String>), crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        let v = volume.to_string();
+        let h = host_nqn.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::node_detach(conn, &v, &h)
+        })
+        .await
+    }
+
     async fn block_fence_record(
         &self,
         volume: &str,
@@ -1828,6 +1860,24 @@ CREATE TABLE IF NOT EXISTS block_hosts (
     PRIMARY KEY (volume, client_id)
 );
 
+-- Node-level admissions (CSI ControllerPublish, design doc §5 "per-node
+-- hostnqn registration"). block_hosts rows are keyed by NFS client_id,
+-- which does not EXIST at attach time — the node's kernel client is
+-- minted at its first EXCHANGE_ID, after the nvme session the admission
+-- exists to permit. So attach records the NODE itself, keyed by its
+-- host NQN, and the desired allow-list is the union of both tables.
+-- The fence path deletes a fenced client's attach rows along with its
+-- client rows (same transaction) — otherwise the attach row would keep
+-- the fenced NQN on the allow-list, reopening the reconnect door the
+-- durable eviction exists to close.
+CREATE TABLE IF NOT EXISTS block_node_attach (
+    volume TEXT NOT NULL,
+    host_nqn TEXT NOT NULL,
+    node_name TEXT NOT NULL,
+    attached_unix INTEGER NOT NULL,
+    PRIMARY KEY (volume, host_nqn)
+);
+
 -- fenced_clients: the durable, POSITIVE record of which clients are
 -- fenced on which volume. Every other trace of a fence is fragile: the
 -- fenced grant rows clear when a conforming client returns its layout
@@ -1885,8 +1935,11 @@ mod tests {
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
-                "CREATE TABLE schema_version (id INTEGER PRIMARY KEY, version INTEGER NOT NULL);
-                 INSERT INTO schema_version (id, version) VALUES (1, 8);",
+                &format!(
+                    "CREATE TABLE schema_version (id INTEGER PRIMARY KEY, version INTEGER NOT NULL);
+                     INSERT INTO schema_version (id, version) VALUES (1, {});",
+                    SCHEMA_VERSION + 1
+                ),
             )
             .unwrap();
         }
@@ -1896,7 +1949,8 @@ mod tests {
             .expect("a database from another build must be refused");
         let msg = err.to_string();
         assert!(
-            msg.contains("schema is 8") && msg.contains("delete the state file"),
+            msg.contains(&format!("schema is {}", SCHEMA_VERSION + 1))
+                && msg.contains("delete the state file"),
             "the error has to tell an operator what to DO; got: {}",
             msg,
         );

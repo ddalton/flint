@@ -248,6 +248,35 @@ ctrl_loss_tmo / fast_io_fail / hostnqn plumbing transfers unchanged — and is m
 (§6). ControllerPublish's existing pNFS no-op (`main.rs:2159-2166`) is the free
 per-node hook for hostnqn registration.
 
+> **SESSION MGMT SHIPPED 2026-08-10** (rig-proven — `block-rig.sh` now STAGES
+> through the production code via `pnfs-csi-cli stage`, not a bash replay). The
+> lifecycle: **ControllerPublish → `AttachBlockNode`** (per-node hostnqn
+> admission BEFORE any NFS traffic exists — the allow-list is default-closed and
+> the LAYOUTGET-time admission arrives after the connect it would permit; durable
+> `block_node_attach` rows, schema v8, keyed by NQN because the NFS client_id is
+> minted at EXCHANGE_ID, later still), answering the session coordinates that
+> ride publish_context; **NodeStage → `pnfs_block_session::ensure_session`**
+> (connect as the MDS-admitted NQN verbatim, ReconnectPolicy + fast_io_fail
+> sysfs backfill, NGUID-matched head-device resolution — never the controller
+> dir: under native multipath it holds only hidden `nvmeXcYnZ` path devices —
+> and the §4a eui link, idempotently re-linked on every re-stage);
+> **NodeUnstage** → level-triggered teardown keyed on the derived `:block:` NQN
+> having a live kernel controller (works with the PV already gone); 
+> **ControllerUnpublish → `DetachBlockNode`** (idempotent; client-earned
+> admissions untouched). The fence interlock is load-bearing in both directions:
+> the fence's eviction sweeps the NQN's attach rows in the SAME transaction, and
+> attach refuses while any fence record names the NQN (fence-rig F6 asserts
+> both). **The rig immediately earned its keep**: the admission fast path
+> skipped the per-client `block_hosts` row when a stage-time attach already had
+> the NQN desired — leaving the fence NOTHING to capture or evict, so the
+> attach row kept the fenced NQN admitted and the fenced client reconnected
+> (F5 failed live). Fixed — the row is always written, only the RPC converge is
+> skipped — and unit-pinned
+> (`a_node_attach_must_not_swallow_the_per_client_admission_row`). OWED from
+> here: the packaged udev RULE (chart tranche; the managed link covers staged
+> volumes), session re-establishment after ctrl_loss exhaustion (reconcile-loop
+> tranche), and the admission-model tranche for the same-node zombie residual.
+
 **Fencing, per the RFC.** RFC 9561 §2.2 maps SCSI PRs to NVMe Reservations: the MDS
 registers its own key and holds RTYPE=4h (Exclusive Access – Registrants Only); fencing
 a client is Reservation Acquire with Preempt/Preempt-and-Abort naming the client's key;

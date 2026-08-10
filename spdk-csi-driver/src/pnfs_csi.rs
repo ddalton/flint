@@ -548,6 +548,150 @@ impl PnfsCsi {
         }
         Ok(resp.size_bytes)
     }
+
+    /// Per-node host admission for a block-class volume
+    /// (ControllerPublish). The MDS admits the node's NQN onto the
+    /// export allow-list and returns the nvme session coordinates the
+    /// node stages with. An MDS predating the verb answers
+    /// UNIMPLEMENTED, which surfaces here as a Transport error — the
+    /// attach fails loudly instead of the node connecting into a
+    /// refusal it cannot diagnose.
+    pub async fn attach_block_node(
+        &self,
+        volume_id: &str,
+        node_name: &str,
+    ) -> Result<BlockAttach, PnfsError> {
+        let mut client = self.dial().await?;
+        let resp = client
+            .attach_block_node(crate::pnfs::grpc::AttachBlockNodeRequest {
+                volume_id: volume_id.to_string(),
+                node_name: node_name.to_string(),
+            })
+            .await
+            .map_err(|e| PnfsError::Transport(format!("AttachBlockNode: {}", e)))?
+            .into_inner();
+        if !resp.attached {
+            return Err(PnfsError::Mds(if resp.message.is_empty() {
+                "MDS rejected AttachBlockNode (no message)".into()
+            } else {
+                resp.message
+            }));
+        }
+        // A converged attach with empty coordinates cannot be staged —
+        // refuse here, where the message still names the cause.
+        if resp.traddr.is_empty()
+            || resp.trsvcid == 0
+            || resp.trsvcid > u16::MAX as u32
+            || resp.subnqn.is_empty()
+            || resp.nguid.is_empty()
+            || resp.host_nqn.is_empty()
+        {
+            return Err(PnfsError::Mds(format!(
+                "AttachBlockNode answered attached=true with unusable session \
+                 coordinates (traddr={:?} trsvcid={} subnqn={:?}) — MDS bug or \
+                 version skew",
+                resp.traddr, resp.trsvcid, resp.subnqn,
+            )));
+        }
+        Ok(BlockAttach {
+            traddr: resp.traddr,
+            trsvcid: resp.trsvcid as u16,
+            subnqn: resp.subnqn,
+            nguid: resp.nguid,
+            host_nqn: resp.host_nqn,
+        })
+    }
+
+    /// The inverse (ControllerUnpublish). Idempotent on the MDS.
+    pub async fn detach_block_node(
+        &self,
+        volume_id: &str,
+        node_name: &str,
+    ) -> Result<String, PnfsError> {
+        let mut client = self.dial().await?;
+        let resp = client
+            .detach_block_node(crate::pnfs::grpc::DetachBlockNodeRequest {
+                volume_id: volume_id.to_string(),
+                node_name: node_name.to_string(),
+            })
+            .await
+            .map_err(|e| PnfsError::Transport(format!("DetachBlockNode: {}", e)))?
+            .into_inner();
+        if !resp.detached {
+            return Err(PnfsError::Mds(if resp.message.is_empty() {
+                "MDS rejected DetachBlockNode (no message)".into()
+            } else {
+                resp.message
+            }));
+        }
+        Ok(resp.message)
+    }
+}
+
+/// nvme-tcp session coordinates for a staged block volume, as the MDS
+/// answered them. The producer half of the `pnfs.flint.io/nvme-*`
+/// publish-context keys (`block_ctx_keys`); `from_publish_context` is
+/// the consumer half, used by NodeStage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockAttach {
+    pub traddr: String,
+    pub trsvcid: u16,
+    pub subnqn: String,
+    pub nguid: String,
+    pub host_nqn: String,
+}
+
+/// Publish-context keys ControllerPublish stamps for block volumes and
+/// NodeStage reads back. Distinct from `ctx_keys` (volume_context,
+/// stamped at provision): these are per-(volume, node) session facts
+/// that only exist once the attach admitted the node.
+pub mod block_ctx_keys {
+    pub const TRADDR: &str = "pnfs.flint.io/nvme-traddr";
+    pub const TRSVCID: &str = "pnfs.flint.io/nvme-trsvcid";
+    pub const SUBNQN: &str = "pnfs.flint.io/nvme-subnqn";
+    pub const NGUID: &str = "pnfs.flint.io/nvme-nguid";
+    pub const HOST_NQN: &str = "pnfs.flint.io/nvme-host-nqn";
+}
+
+impl BlockAttach {
+    /// Stamp into a publish_context map (ControllerPublish).
+    pub fn stamp(&self, ctx: &mut HashMap<String, String>) {
+        ctx.insert(block_ctx_keys::TRADDR.into(), self.traddr.clone());
+        ctx.insert(block_ctx_keys::TRSVCID.into(), self.trsvcid.to_string());
+        ctx.insert(block_ctx_keys::SUBNQN.into(), self.subnqn.clone());
+        ctx.insert(block_ctx_keys::NGUID.into(), self.nguid.clone());
+        ctx.insert(block_ctx_keys::HOST_NQN.into(), self.host_nqn.clone());
+    }
+
+    /// Read back from NodeStage's publish_context. `None` when the keys
+    /// are absent (a files-class volume, or an attach that predates the
+    /// stamp); `Err` when they are present but unusable (a truncated or
+    /// hand-edited VolumeAttachment) — staging must fail loudly then,
+    /// not silently skip the session and degrade every I/O to MDS
+    /// proxying.
+    pub fn from_publish_context(
+        ctx: &HashMap<String, String>,
+    ) -> Result<Option<Self>, String> {
+        if !ctx.contains_key(block_ctx_keys::SUBNQN) {
+            return Ok(None);
+        }
+        let get = |key: &str| -> Result<String, String> {
+            match ctx.get(key).map(|s| s.trim()) {
+                Some(v) if !v.is_empty() => Ok(v.to_string()),
+                _ => Err(format!("publish_context is missing {}", key)),
+            }
+        };
+        let trsvcid: u16 = get(block_ctx_keys::TRSVCID)?
+            .parse()
+            .map_err(|_| format!("{} is not a port number", block_ctx_keys::TRSVCID))?;
+        Ok(Some(Self {
+            traddr: get(block_ctx_keys::TRADDR)?,
+            trsvcid,
+            subnqn: get(block_ctx_keys::SUBNQN)?,
+            nguid: get(block_ctx_keys::NGUID)?,
+            host_nqn: get(block_ctx_keys::HOST_NQN)?,
+        }))
+    }
 }
 
 /// The MDS shard set (mds-sharding-plan.md Phase 1).
@@ -828,9 +972,12 @@ mod tests {
         canned_create: Mutex<Option<CreateVolumeResponse>>,
         canned_delete: Mutex<Option<DeleteVolumeResponse>>,
         canned_expand: Mutex<Option<ExpandVolumeResponse>>,
+        canned_attach: Mutex<Option<crate::pnfs::grpc::AttachBlockNodeResponse>>,
         last_create_volume_id: Mutex<Option<String>>,
         last_delete_volume_id: Mutex<Option<String>>,
         last_create_request: Mutex<Option<CreateVolumeRequest>>,
+        last_attach: Mutex<Option<(String, String)>>,
+        last_detach: Mutex<Option<(String, String)>>,
     }
 
     impl MockMds {
@@ -839,9 +986,12 @@ mod tests {
                 canned_create: Mutex::new(Some(create)),
                 canned_delete: Mutex::new(Some(delete)),
                 canned_expand: Mutex::new(None),
+                canned_attach: Mutex::new(None),
                 last_create_request: Mutex::new(None),
                 last_create_volume_id: Mutex::new(None),
                 last_delete_volume_id: Mutex::new(None),
+                last_attach: Mutex::new(None),
+                last_detach: Mutex::new(None),
             }
         }
     }
@@ -906,6 +1056,25 @@ mod tests {
             &self, _: Request<crate::pnfs::grpc::UnfenceBlockClientRequest>,
         ) -> Result<Response<crate::pnfs::grpc::UnfenceBlockClientResponse>, Status> {
             unimplemented!("not exercised in pnfs_csi tests")
+        }
+        async fn attach_block_node(
+            &self, req: Request<crate::pnfs::grpc::AttachBlockNodeRequest>,
+        ) -> Result<Response<crate::pnfs::grpc::AttachBlockNodeResponse>, Status> {
+            let req = req.into_inner();
+            *self.last_attach.lock().unwrap() = Some((req.volume_id, req.node_name));
+            let canned = self.canned_attach.lock().unwrap().clone()
+                .expect("canned_attach not set");
+            Ok(Response::new(canned))
+        }
+        async fn detach_block_node(
+            &self, req: Request<crate::pnfs::grpc::DetachBlockNodeRequest>,
+        ) -> Result<Response<crate::pnfs::grpc::DetachBlockNodeResponse>, Status> {
+            let req = req.into_inner();
+            *self.last_detach.lock().unwrap() = Some((req.volume_id, req.node_name));
+            Ok(Response::new(crate::pnfs::grpc::DetachBlockNodeResponse {
+                detached: true,
+                message: String::new(),
+            }))
         }
     }
 
@@ -1025,6 +1194,92 @@ mod tests {
             mock.last_delete_volume_id.lock().unwrap().as_deref(),
             Some("pvc-todelete"),
         );
+    }
+
+    #[tokio::test]
+    async fn attach_block_node_round_trips_and_stamps_the_publish_context() {
+        let mock = std::sync::Arc::new(MockMds::new(
+            CreateVolumeResponse {
+                created: true, export_path: "/srv".into(), volume_file: "v".into(),
+                message: String::new(), nfs_port: 2049, directory: true,
+                effective_stripe_size: 0, effective_stripe_width: 0,
+                effective_layout_class: String::new(),
+            },
+            DeleteVolumeResponse { deleted: true, message: String::new() },
+        ));
+        *mock.canned_attach.lock().unwrap() = Some(crate::pnfs::grpc::AttachBlockNodeResponse {
+            attached: true,
+            message: String::new(),
+            traddr: "10.0.0.9".into(),
+            trsvcid: 4420,
+            subnqn: "nqn.2024-11.com.flint:block:pvc-b".into(),
+            nguid: "aabbccdd".into(),
+            host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
+        });
+        let addr = start_mock_mds(mock.clone()).await;
+        let p = PnfsCsi::new(&addr);
+
+        let attach = p.attach_block_node("pvc-b", "w1").await.expect("attach");
+        assert_eq!(
+            mock.last_attach.lock().unwrap().as_ref(),
+            Some(&("pvc-b".to_string(), "w1".to_string())),
+            "the MDS sees the BARE volume id and the node name"
+        );
+
+        // Producer → consumer round trip: what ControllerPublish stamps
+        // is exactly what NodeStage reads back.
+        let mut ctx = HashMap::new();
+        attach.stamp(&mut ctx);
+        let read = BlockAttach::from_publish_context(&ctx)
+            .expect("stamped context must parse")
+            .expect("stamped context must classify as block");
+        assert_eq!(read, attach);
+
+        // A files-class publish_context (no keys) is None, not an error.
+        assert_eq!(BlockAttach::from_publish_context(&HashMap::new()).unwrap(), None);
+        // A truncated context (subnqn present, port missing) is an ERROR
+        // — staging must fail loudly, not silently skip the session.
+        let mut broken = ctx.clone();
+        broken.remove(block_ctx_keys::TRSVCID);
+        assert!(BlockAttach::from_publish_context(&broken).is_err());
+
+        // Detach round trip.
+        p.detach_block_node("pvc-b", "w1").await.expect("detach");
+        assert_eq!(
+            mock.last_detach.lock().unwrap().as_ref(),
+            Some(&("pvc-b".to_string(), "w1".to_string())),
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_with_unusable_coordinates_is_refused_client_side() {
+        // attached=true with no traddr — an MDS bug or version skew.
+        // The client must refuse HERE, where the message names the
+        // cause, instead of letting NodeStage fail on `nvme connect ''`.
+        let mock = std::sync::Arc::new(MockMds::new(
+            CreateVolumeResponse {
+                created: true, export_path: "/srv".into(), volume_file: "v".into(),
+                message: String::new(), nfs_port: 2049, directory: true,
+                effective_stripe_size: 0, effective_stripe_width: 0,
+                effective_layout_class: String::new(),
+            },
+            DeleteVolumeResponse { deleted: true, message: String::new() },
+        ));
+        *mock.canned_attach.lock().unwrap() = Some(crate::pnfs::grpc::AttachBlockNodeResponse {
+            attached: true,
+            message: String::new(),
+            traddr: String::new(),
+            trsvcid: 0,
+            subnqn: String::new(),
+            nguid: String::new(),
+            host_nqn: String::new(),
+        });
+        let addr = start_mock_mds(mock).await;
+        let err = PnfsCsi::new(&addr).attach_block_node("pvc-b", "w1").await.unwrap_err();
+        match err {
+            PnfsError::Mds(m) => assert!(m.contains("unusable"), "{m}"),
+            other => panic!("expected Mds error, got {:?}", other),
+        }
     }
 
     #[tokio::test]

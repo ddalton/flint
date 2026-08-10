@@ -68,6 +68,24 @@ service MdsControl {
   // a failed release converges. The client's next LAYOUTGET re-admits
   // it to the export allow-list; nothing is proactively restored.
   rpc UnfenceBlockClient(UnfenceBlockClientRequest) returns (UnfenceBlockClientResponse);
+
+  // Per-node host admission for a block-class volume — the
+  // ControllerPublish half of csi-node session management (design doc
+  // §5, "per-node hostnqn registration via ControllerPublish"). Admits
+  // flint_host_nqn(node_name) onto the volume's export allow-list
+  // BEFORE any NFS traffic exists (the nvme session must be up before
+  // the kernel's first LAYOUTGET resolves the device; the allow-list is
+  // default-closed), durably (tgt-restart replay reconverges it), and
+  // returns the session coordinates the csi-node connects with.
+  // Idempotent. Refused while the node's NQN is fenced on the volume.
+  rpc AttachBlockNode(AttachBlockNodeRequest) returns (AttachBlockNodeResponse);
+
+  // The inverse (ControllerUnpublish): drop the node's attach row and
+  // reconverge. Idempotent — a replay, or a detach after a fence
+  // already evicted the row, succeeds with a "no attach record" detail.
+  // Client-earned admissions (LAYOUTGET-time block_hosts rows) are NOT
+  // touched; only their own lifecycle ends them.
+  rpc DetachBlockNode(DetachBlockNodeRequest) returns (DetachBlockNodeResponse);
 }
 
 message FenceBlockClientRequest {
@@ -103,6 +121,42 @@ message UnfenceBlockClientResponse {
   // device and the lever must be retried.
   bool unfenced = 1;
   string detail = 2;
+}
+
+message AttachBlockNodeRequest {
+  string volume_id = 1;
+  // The Kubernetes node name == the node's kernel hostname (fleet
+  // discipline; the same equality LAYOUTGET-time admission relies on
+  // when it derives the NQN from the kernel's co_ownerid).
+  string node_name = 2;
+}
+
+message AttachBlockNodeResponse {
+  bool attached = 1;
+  // Error detail when attached=false. Empty on success.
+  string message = 2;
+  // nvme-tcp session coordinates: the csi-node runs
+  //   nvme connect -t tcp -a <traddr> -s <trsvcid> -n <subnqn>
+  //     --hostnqn <host_nqn>
+  // and then resolves /dev/disk/by-id/nvme-eui.<nguid> (creating the
+  // link itself when udev did not — the §4a landmine).
+  string traddr = 3;
+  uint32 trsvcid = 4;
+  string subnqn = 5;
+  string nguid = 6;
+  // The NQN the MDS admitted. Connect with EXACTLY this string — it is
+  // what keeps the controller, node, and MDS derivations from drifting.
+  string host_nqn = 7;
+}
+
+message DetachBlockNodeRequest {
+  string volume_id = 1;
+  string node_name = 2;
+}
+
+message DetachBlockNodeResponse {
+  bool detached = 1;
+  string message = 2;
 }
 
 // CreateVolume request from CSI driver to MDS.

@@ -1648,6 +1648,145 @@ pub async fn unfence_block_client(
     Ok(summary)
 }
 
+/// Everything a csi-node needs to build the volume's nvme session —
+/// `AttachBlockNode`'s answer, resolved MDS-side so the node carries no
+/// export-layout knowledge of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockAttachInfo {
+    pub traddr: String,
+    pub trsvcid: u16,
+    pub subnqn: String,
+    pub nguid: String,
+    /// The NQN the MDS admitted. The node MUST connect with exactly
+    /// this string — it is also what LAYOUTGET-time admission derives
+    /// from the kernel's co_ownerid, so returning it keeps the three
+    /// derivations (controller, node, MDS) from ever drifting.
+    pub host_nqn: String,
+}
+
+/// Per-node host admission for a block-class volume — the
+/// ControllerPublish half of csi-node session management (design doc
+/// §5). Runs BEFORE any NFS traffic exists: the node's `nvme connect`
+/// must succeed before the kernel's first LAYOUTGET tries to resolve
+/// the device, and the default-closed allow-list refuses unadmitted
+/// hosts. Records the attach durably (tgt-restart replay converges it
+/// back), converges the allow-list, and returns the session
+/// coordinates. Refused while the node's NQN is fenced on the volume —
+/// attach is the one admission door the per-client fence guard cannot
+/// see, so it carries its own NQN-level guard.
+pub async fn attach_block_node(
+    layout_manager: &crate::pnfs::mds::layout::LayoutManager,
+    context: &str,
+    volume: &str,
+    node_name: &str,
+) -> Result<BlockAttachInfo, String> {
+    if !layout_manager.volume_is_scsi(volume) {
+        return Err(format!(
+            "volume '{volume}' is not block-class — nothing to attach (files-class \
+             volumes need no nvme session)"
+        ));
+    }
+    let Some(rec) = layout_manager.block_export() else {
+        // Unlike the fence's rows-only degradation, attach without a
+        // reconciler is refused outright: the caller needs listener
+        // coordinates that only the reconciler holds, and handing back
+        // a durable row with no way to connect would fail later and
+        // farther from the cause.
+        return Err("no block export attached — this MDS cannot serve block volumes".into());
+    };
+    let host_nqn = crate::nvmeof_export::flint_host_nqn(node_name);
+    let backend = layout_manager.state_backend();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match backend
+        .block_node_attach(volume, &host_nqn, node_name, now_unix)
+        .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(crate::state_backend::extent_alloc::ExtentAllocError::FencedClient)) => {
+            return Err(format!(
+                "node {node_name} ({host_nqn}) is fenced on '{volume}' — refusing \
+                 attach (clear the fence with UnfenceBlockClient to re-admit)"
+            ));
+        }
+        Ok(Err(e)) => return Err(format!("node attach refused: {e}")),
+        Err(e) => return Err(format!("node attach failed: {e}")),
+    }
+    rec.reconcile_hosts(volume).await.map_err(|e| {
+        // The durable row stands; a retry (or the next reconcile pass)
+        // converges. Surfacing the error makes the CSI attacher retry
+        // rather than letting the node connect into a refusal.
+        format!("attach recorded but allow-list did not converge: {e}")
+    })?;
+    let (traddr, trsvcid) = rec.listener();
+    let (_uuid, nguid) = crate::nvmeof_export::stable_ns_identity(volume);
+    info!(
+        "🔌 {}: node {} ({}) attached to '{}' — allow-list converged",
+        context, node_name, host_nqn, volume
+    );
+    Ok(BlockAttachInfo {
+        traddr: traddr.to_string(),
+        trsvcid,
+        subnqn: crate::identity::block_volume_export_nqn(volume),
+        nguid,
+        host_nqn,
+    })
+}
+
+/// The inverse: drop the node's attach row (ControllerUnpublish) and
+/// converge. Idempotent — a replay or a detach after a fence already
+/// evicted the row reports "no attach record". The NQN can stay on the
+/// allow-list through client-earned `block_hosts` rows; only their own
+/// lifecycle (return / lease sweep / fence) removes those.
+pub async fn detach_block_node(
+    layout_manager: &crate::pnfs::mds::layout::LayoutManager,
+    context: &str,
+    volume: &str,
+    node_name: &str,
+) -> Result<String, String> {
+    let host_nqn = crate::nvmeof_export::flint_host_nqn(node_name);
+    let backend = layout_manager.state_backend();
+    let (removed, remaining) = match backend.block_node_detach(volume, &host_nqn).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(format!("node detach refused: {e}")),
+        Err(e) => return Err(format!("node detach failed: {e}")),
+    };
+    let mut summary = if removed {
+        format!("node {node_name} ({host_nqn}) detached from '{volume}'")
+    } else {
+        format!("node {node_name} held no attach record on '{volume}' (replay)")
+    };
+    if removed {
+        if let Some(rec) = layout_manager.block_export() {
+            match rec.reconcile_hosts(volume).await {
+                Ok(()) => {
+                    if remaining.iter().any(|h| h == &host_nqn) {
+                        summary.push_str("; NQN kept (client-earned admission stands)");
+                    } else {
+                        summary.push_str("; allow-list converged");
+                    }
+                }
+                Err(e) => {
+                    // Row is gone; the next converge pass (any admit /
+                    // fence / reconcile on the volume) sweeps the tgt.
+                    // Loud, not fatal: failing the detach would wedge
+                    // ControllerUnpublish on a tgt blip for a node that
+                    // has already disconnected.
+                    tracing::error!(
+                        "{}: detach of {} recorded but allow-list did not converge: {}",
+                        context, host_nqn, e
+                    );
+                    summary.push_str("; allow-list DID NOT CONVERGE (next pass repairs)");
+                }
+            }
+        }
+    }
+    info!("🔌 {}: {}", context, summary);
+    Ok(summary)
+}
+
 /// ONE pass of the lease sweep — the reaper the dispatcher's
 /// LAYOUTRETURN comments have promised since the scsi arm shipped
 /// ("grant rows left for the reclaim sweep"). Client-lease expiry in
@@ -1994,17 +2133,20 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
             Ok(Err(e)) => return Err(format!("fence check refused: {e}")),
             Err(e) => return Err(format!("fence check failed: {e}")),
         }
-        // Fast path: already on the durable desired list → assume the
-        // tgt converged when the row was written and skip the RPC pass.
-        // A tgt restart CAN diverge from this assumption; until the
-        // periodic reconcile loop exists, the startup replay and the
-        // runbook's roll-after-tgt-restart rule are the repair.
-        match backend.block_hosts(volume).await {
-            Ok(Ok(hosts)) if hosts.iter().any(|h| h == host_nqn) => return Ok(()),
-            Ok(Ok(_)) => {}
+        // Was the NQN already desired? Only the RPC converge may be
+        // skipped on that answer — never the per-client row below. The
+        // desired list is a UNION of client rows and NODE-attach rows,
+        // and skipping the row when a stage-time attach already held
+        // the NQN left the fence with nothing to capture or evict: the
+        // attach row kept the fenced NQN on the allow-list and the
+        // fenced client simply reconnected (the fence rig's F5 caught
+        // this live — the exact side door the attach-row purge exists
+        // to close, entered through the fast path).
+        let already_desired = match backend.block_hosts(volume).await {
+            Ok(Ok(hosts)) => hosts.iter().any(|h| h == host_nqn),
             Ok(Err(e)) => return Err(format!("block_hosts read refused: {e}")),
             Err(e) => return Err(format!("block_hosts read failed: {e}")),
-        }
+        };
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -2016,6 +2158,14 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(format!("host admit refused: {e}")),
             Err(e) => return Err(format!("host admit failed: {e}")),
+        }
+        // Steady state: the tgt already carries the NQN — assume it
+        // converged when the first admission wrote it and skip the RPC
+        // pass. A tgt restart CAN diverge from this assumption; until
+        // the periodic reconcile loop exists, the startup replay and
+        // the runbook's roll-after-tgt-restart rule are the repair.
+        if already_desired {
+            return Ok(());
         }
         match self.layout_manager.block_export() {
             Some(reconciler) => reconciler.reconcile_hosts(volume).await,
@@ -2458,6 +2608,47 @@ mod fallback_tests {
         // Clearing the fence re-opens admission (the release path).
         backend.block_unfence("volG", 5).await.unwrap().unwrap();
         handler.admit_block_host("volG", 5, &nqn).await.expect("re-admits after unfence");
+    }
+
+    /// The F5 regression the fence rig caught LIVE: a stage-time NODE
+    /// attach puts the NQN on the desired list BEFORE the client's
+    /// first LAYOUTGET, and the admission fast path then skipped the
+    /// per-client row entirely — leaving the fence nothing to capture
+    /// or evict, so the attach row kept the fenced NQN on the
+    /// allow-list and the fenced client simply reconnected. The
+    /// production order (attach → LAYOUTGET admit → fence) must end
+    /// with the NQN fully off the desired list.
+    #[tokio::test]
+    async fn a_node_attach_must_not_swallow_the_per_client_admission_row() {
+        use crate::pnfs::handler_trait::PnfsOperations;
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let registry = Arc::new(DeviceRegistry::new());
+        let lm = Arc::new(LayoutManager::new(
+            Arc::clone(&registry),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        ));
+        let handler = PnfsOperationHandler::new(lm, registry, "/data/exports".into());
+        let nqn = crate::nvmeof_export::flint_host_nqn("node-h");
+
+        // ControllerPublish's admission first, then the client's
+        // LAYOUTGET-time admit with the NQN already desired.
+        backend.block_node_attach("volH", &nqn, "node-h", 0).await.unwrap().unwrap();
+        handler.admit_block_host("volH", 5, &nqn).await.expect("admit");
+
+        // The fence captures the nqn — impossible without the
+        // per-client row — and its eviction sweeps BOTH rows.
+        let captured = backend.block_fence_record("volH", 5, 0).await.unwrap().unwrap();
+        assert_eq!(captured, nqn, "fence must capture the nqn from the per-client row");
+        let (evicted, remaining) =
+            backend.block_host_evict("volH", 5).await.unwrap().unwrap();
+        assert_eq!(evicted, vec![nqn.clone()]);
+        assert!(
+            remaining.is_empty(),
+            "the attach row must not keep the fenced NQN desired: {remaining:?}"
+        );
     }
 
     /// THE LEASE SWEEP, end to end against a real (scripted) target: a

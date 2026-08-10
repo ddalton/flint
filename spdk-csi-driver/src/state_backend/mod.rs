@@ -679,6 +679,26 @@ pub trait StateBackend: Send + Sync {
         volume: &str,
     ) -> StateBackendResult<Result<Vec<String>, extent_alloc::ExtentAllocError>>;
 
+    /// Record a NODE's attachment (CSI ControllerPublish) on the
+    /// volume's desired allow-list — the pre-NFS admission that lets the
+    /// csi-node's `nvme connect` succeed before the first LAYOUTGET.
+    /// Refused (`FencedClient`) while any fence record names the NQN.
+    async fn block_node_attach(
+        &self,
+        volume: &str,
+        host_nqn: &str,
+        node_name: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<Vec<String>, extent_alloc::ExtentAllocError>>;
+
+    /// Drop a node's attach row (ControllerUnpublish). Returns
+    /// `(row_removed, remaining_desired_list)`; idempotent.
+    async fn block_node_detach(
+        &self,
+        volume: &str,
+        host_nqn: &str,
+    ) -> StateBackendResult<Result<(bool, Vec<String>), extent_alloc::ExtentAllocError>>;
+
     /// Write the durable fence record (the positive `fenced_clients`
     /// row). Captures the client's host_nqn from `block_hosts` — so it
     /// must run BEFORE the eviction — and returns it for the log.

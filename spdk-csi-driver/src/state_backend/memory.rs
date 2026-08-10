@@ -403,6 +403,31 @@ impl StateBackend for MemoryBackend {
         Ok(Ok(Vec::new()))
     }
 
+    async fn block_node_attach(
+        &self,
+        _volume: &str,
+        _host_nqn: &str,
+        _node_name: &str,
+        _now_unix: i64,
+    ) -> StateBackendResult<Result<Vec<String>, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        Err(StateBackendError::Storage(
+            "block node attach on the memory backend — block-class volumes require sqlite".into(),
+        ))
+    }
+
+    async fn block_node_detach(
+        &self,
+        _volume: &str,
+        _host_nqn: &str,
+    ) -> StateBackendResult<
+        Result<(bool, Vec<String>), crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        // Detach replays are tolerated everywhere; a backend that can
+        // hold no block volumes has nothing to detach.
+        Ok(Ok((false, Vec::new())))
+    }
+
     async fn block_fence_record(
         &self,
         _volume: &str,

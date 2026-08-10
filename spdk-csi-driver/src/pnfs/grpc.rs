@@ -1142,6 +1142,101 @@ impl MdsControl for MdsControlService {
         }
     }
 
+    /// Per-node host admission (`operations::attach_block_node`) — the
+    /// ControllerPublish hook. Durable attach row → allow-list converge
+    /// → session coordinates back to the csi-node.
+    async fn attach_block_node(
+        &self,
+        request: Request<AttachBlockNodeRequest>,
+    ) -> Result<Response<AttachBlockNodeResponse>, Status> {
+        let req = request.into_inner();
+        let refuse = |message: String| {
+            Ok(Response::new(AttachBlockNodeResponse {
+                attached: false,
+                message,
+                traddr: String::new(),
+                trsvcid: 0,
+                subnqn: String::new(),
+                nguid: String::new(),
+                host_nqn: String::new(),
+            }))
+        };
+        if req.volume_id.is_empty()
+            || req.volume_id.contains('/')
+            || req.volume_id.contains('\0')
+        {
+            return refuse("volume_id must be non-empty and contain no '/' or NUL".into());
+        }
+        if req.node_name.trim().is_empty() {
+            return refuse("node_name must be non-empty".into());
+        }
+        let ctx = format!("AttachBlockNode '{}'", req.volume_id);
+        match crate::pnfs::mds::operations::attach_block_node(
+            &self.layout_manager,
+            &ctx,
+            &req.volume_id,
+            req.node_name.trim(),
+        )
+        .await
+        {
+            Ok(info) => Ok(Response::new(AttachBlockNodeResponse {
+                attached: true,
+                message: String::new(),
+                traddr: info.traddr,
+                trsvcid: info.trsvcid as u32,
+                subnqn: info.subnqn,
+                nguid: info.nguid,
+                host_nqn: info.host_nqn,
+            })),
+            Err(e) => {
+                warn!("{}: {}", ctx, e);
+                refuse(e)
+            }
+        }
+    }
+
+    /// The inverse (`operations::detach_block_node`) — the
+    /// ControllerUnpublish hook. Idempotent.
+    async fn detach_block_node(
+        &self,
+        request: Request<DetachBlockNodeRequest>,
+    ) -> Result<Response<DetachBlockNodeResponse>, Status> {
+        let req = request.into_inner();
+        if req.volume_id.is_empty()
+            || req.volume_id.contains('/')
+            || req.volume_id.contains('\0')
+        {
+            return Ok(Response::new(DetachBlockNodeResponse {
+                detached: false,
+                message: "volume_id must be non-empty and contain no '/' or NUL".into(),
+            }));
+        }
+        if req.node_name.trim().is_empty() {
+            return Ok(Response::new(DetachBlockNodeResponse {
+                detached: false,
+                message: "node_name must be non-empty".into(),
+            }));
+        }
+        let ctx = format!("DetachBlockNode '{}'", req.volume_id);
+        match crate::pnfs::mds::operations::detach_block_node(
+            &self.layout_manager,
+            &ctx,
+            &req.volume_id,
+            req.node_name.trim(),
+        )
+        .await
+        {
+            Ok(detail) => Ok(Response::new(DetachBlockNodeResponse {
+                detached: true,
+                message: detail,
+            })),
+            Err(e) => {
+                warn!("{}: {}", ctx, e);
+                Ok(Response::new(DetachBlockNodeResponse { detached: false, message: e }))
+            }
+        }
+    }
+
     /// Handle DS unregistration
     async fn unregister_data_server(
         &self,
@@ -1542,6 +1637,165 @@ mod create_volume_tests {
         assert!(u.unfenced, "{}", u.detail);
         assert!(u.detail.contains("released=true"), "{}", u.detail);
         assert!(!nvme.state.lock().unwrap().registrants.iter().any(|(_, _, h)| *h));
+    }
+
+    /// AttachBlockNode end to end (the ControllerPublish hook): the
+    /// node's NQN lands on the tgt's allow-list BEFORE any NFS traffic
+    /// exists, and the answer carries exactly the session coordinates
+    /// the export was built with. Detach withdraws it; both replay.
+    #[tokio::test]
+    async fn attach_block_node_admits_and_returns_session_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, tgt) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-att", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        let r = s
+            .attach_block_node(Request::new(AttachBlockNodeRequest {
+                volume_id: "pvc-att".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.attached, "{}", r.message);
+        let host = crate::nvmeof_export::flint_host_nqn("node-w1");
+        let subnqn = crate::identity::block_volume_export_nqn("pvc-att");
+        let (_uuid, nguid) = crate::nvmeof_export::stable_ns_identity("pvc-att");
+        assert_eq!(r.host_nqn, host, "the node must connect as exactly this NQN");
+        assert_eq!(r.subnqn, subnqn);
+        assert_eq!(r.nguid, nguid, "the identity the kernel resolves by-id with");
+        let rec = s.layout_manager.block_export().unwrap();
+        let (traddr, trsvcid) = rec.listener();
+        assert_eq!((r.traddr.as_str(), r.trsvcid as u16), (traddr, trsvcid));
+        assert!(tgt.hosts_of(&subnqn).contains(&host), "allow-list converged");
+
+        // Idempotent replay (the CSI attacher retries routinely).
+        let again = s
+            .attach_block_node(Request::new(AttachBlockNodeRequest {
+                volume_id: "pvc-att".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(again.attached, "{}", again.message);
+
+        // Detach: the NQN leaves the tgt; a second detach is a replay.
+        let d = s
+            .detach_block_node(Request::new(DetachBlockNodeRequest {
+                volume_id: "pvc-att".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(d.detached, "{}", d.message);
+        assert!(!tgt.hosts_of(&subnqn).contains(&host), "allow-list re-converged");
+        let d = s
+            .detach_block_node(Request::new(DetachBlockNodeRequest {
+                volume_id: "pvc-att".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(d.detached, "{}", d.message);
+        assert!(d.message.contains("replay"), "{}", d.message);
+
+        // A files-class volume has no subsystem to admit into.
+        assert!(s.create_volume(Request::new(cvreq("vol-files", 1 << 20))).await.unwrap().into_inner().created);
+        let r = s
+            .attach_block_node(Request::new(AttachBlockNodeRequest {
+                volume_id: "vol-files".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.attached);
+        assert!(r.message.contains("not block-class"), "{}", r.message);
+    }
+
+    /// The fence closes the attach door and reopens it only at unfence:
+    /// a fenced node's AttachBlockNode is refused (the side door the
+    /// per-client guard cannot see), and the fence lever's eviction
+    /// sweeps a pre-existing attach row off the allow-list.
+    #[tokio::test]
+    async fn attach_is_refused_while_the_node_nqn_is_fenced() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, tgt) =
+            svc_sqlite_at(dir.path(), true, nvme.addr.ip().to_string(), nvme.addr.port());
+        let mut req = cvreq("pvc-fatt", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        // The node attaches (ControllerPublish), THEN its kernel client
+        // earns a LAYOUTGET admission — the production order.
+        let host = crate::nvmeof_export::flint_host_nqn("node-w2");
+        let subnqn = crate::identity::block_volume_export_nqn("pvc-fatt");
+        let r = s
+            .attach_block_node(Request::new(AttachBlockNodeRequest {
+                volume_id: "pvc-fatt".into(),
+                node_name: "node-w2".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.attached, "{}", r.message);
+        let backend = s.layout_manager.state_backend();
+        backend.block_host_admit("pvc-fatt", 91, &host, 0).await.unwrap().unwrap();
+
+        // Fence the client: BOTH its client row and the node's attach
+        // row must leave the allow-list, or the fenced node reconnects.
+        let f = s
+            .fence_block_client(Request::new(FenceBlockClientRequest {
+                volume_id: "pvc-fatt".into(),
+                client_id: 91,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(f.fenced, "{}", f.detail);
+        assert!(
+            !tgt.hosts_of(&subnqn).contains(&host),
+            "the attach row must not keep the fenced NQN admitted"
+        );
+
+        // Attach while fenced: refused, with the recovery lever named.
+        let r = s
+            .attach_block_node(Request::new(AttachBlockNodeRequest {
+                volume_id: "pvc-fatt".into(),
+                node_name: "node-w2".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.attached, "a fenced NQN must not re-attach");
+        assert!(r.message.contains("fenced"), "{}", r.message);
+
+        // Unfence reopens the door.
+        let u = s
+            .unfence_block_client(Request::new(UnfenceBlockClientRequest {
+                volume_id: "pvc-fatt".into(),
+                client_id: 91,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(u.unfenced, "{}", u.detail);
+        let r = s
+            .attach_block_node(Request::new(AttachBlockNodeRequest {
+                volume_id: "pvc-fatt".into(),
+                node_name: "node-w2".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.attached, "post-unfence attach must succeed: {}", r.message);
+        assert!(tgt.hosts_of(&subnqn).contains(&host));
     }
 
     /// Expanding a directory volume must SUCCEED. It stores no

@@ -43,6 +43,7 @@ pub mod nfs;  // NFSv4.2 server for RWX volume support
 pub mod rwx_nfs;  // ReadWriteMany (RWX) support via NFS pods (isolated module - zero regression)
 pub mod pnfs;  // pNFS (Parallel NFS) support - metadata/data server separation (experimental)
 pub mod pnfs_csi;  // CSI driver-side client to the pNFS MDS (used by main.rs when layout: pnfs)
+pub mod pnfs_block_session;  // csi-node nvme session management for pnfs-block volumes (§5)
 pub mod reserved_devices;  // Device reservation for direct SPDK access (device plugin use)
 pub mod state_backend;  // Persistence trait + impls for NFSv4/pNFS server state (Phase B)
 

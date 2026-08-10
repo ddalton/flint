@@ -84,6 +84,14 @@ impl BlockExportReconciler {
         format!("{}/{}", self.lvstore, volume)
     }
 
+    /// The listener coordinates kernel initiators dial — what
+    /// `AttachBlockNode` hands the csi-node for its `nvme connect`.
+    /// Reconciler config, not per-volume: one tgt per MDS shard
+    /// (phase 1), so the shard's listener is every volume's listener.
+    pub fn listener(&self) -> (&str, u16) {
+        (&self.traddr, self.trsvcid)
+    }
+
     /// Desired allow-list, read fresh from sqlite. A read failure is a
     /// hard error — converging onto an EMPTY list on a read failure
     /// would evict every live client of the volume. The MDS's own fence
