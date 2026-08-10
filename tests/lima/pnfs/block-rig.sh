@@ -402,6 +402,115 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
   vsudo "nvme disconnect -n $SUBNQN 2>/dev/null; true"
   vsudo "[ -f /var/tmp/rig-writer.pid ] && kill -9 \$(cat /var/tmp/rig-writer.pid) 2>/dev/null; true"
 
+  # ── T. TGT_RESTART=1: does PTPL survive a TARGET restart? ───────────
+  # The landmine (design §5): a tgt restart drops every reservation from
+  # memory — without PTPL it silently unfences everyone. PTPL persists
+  # the reservation to the per-namespace ptpl_file; on ns re-add SPDK
+  # reloads it (subsystem.c nvmf_ns_reservation_restore, verifying the
+  # reloaded lvol's bdev UUID). This is the together-restart: kill BOTH
+  # the tgt and the MDS, bring the tgt back on the SAME disk image (the
+  # lvstore+lvol auto-load from the superblock), then the MDS reconcile
+  # re-adds the ns with the same ptpl_file — and the reservation must
+  # come back with it. Since the tgt's memory was wiped, a restored
+  # reservation can ONLY have come from disk.
+  if [ "${TGT_RESTART:-0}" = "1" ]; then
+    echo "▶ TGT_RESTART: PTPL must survive a target restart (together-restart)"
+    PTPL_FILE="$RIG/flint-ptpl-$VOL.json"
+    vsh "test -s $PTPL_FILE" \
+      || fail "no non-empty ptpl_file at $PTPL_FILE — PTPL was never persisted; a tgt restart WOULD unfence"
+    echo "· ptpl_file persisted: $(vsh "wc -c < $PTPL_FILE")B, rtype=$(vsh "grep -o '\"rtype\"[: ]*[0-9]*' $PTPL_FILE | head -1")"
+
+    # Kill BOTH (together-restart). MDS first so it stops reconciling.
+    vsudo "pkill -9 -x flint-pnfs-mds"
+    vsudo "[ -f /var/tmp/spdk-rig.pid ] && kill -9 \$(cat /var/tmp/spdk-rig.pid) 2>/dev/null;
+           pkill -9 -x reactor_0; pkill -9 -x spdk_tgt"
+    for i in $(seq 1 20); do
+      vsh "pgrep -x reactor_0 || pgrep -x spdk_tgt || pgrep -x flint-pnfs-mds" >/dev/null || break
+      sleep 0.5
+    done
+    vsudo "rm -f /var/tmp/spdk_cpu_lock_*"
+
+    # Bring the tgt back on the SAME disk image + SAME ptpl_dir — touch
+    # NEITHER (that is the whole point). aio re-create auto-loads the
+    # lvstore + lvol; NO bdev_lvol_create_lvstore (that would wipe).
+    vsudo "nohup $RIG_TOOLS/spdk_tgt --no-huge -s 512 -r $SOCK -m 0x1 --wait-for-rpc >>$RIG/spdk.log 2>&1 &
+           echo \$! > /var/tmp/spdk-rig.pid; sleep 0.5"
+    for i in $(seq 1 20); do
+      vsh "$RPC rpc_get_methods >/dev/null 2>&1" && break
+      [ "$i" = 20 ] && fail "tgt RPC never came back after restart ($RIG/spdk.log)"
+      sleep 0.5
+    done
+    vsudo "chmod 0777 $SOCK"
+    vsh "$RPC iobuf_set_options --small-pool-count 4096 --large-pool-count 1024" || fail "iobuf (tgt restart)"
+    vsh "$RPC iscsi_set_options -a 1 -c 1 -q 1 -x 1 -k 1 -u 24 -j 1 -z 1" || fail "iscsi (tgt restart)"
+    vsh "$RPC framework_start_init" || fail "framework_start_init (tgt restart)"
+    for i in $(seq 1 60); do
+      vsh "$RPC framework_wait_init >/dev/null 2>&1" && break
+      [ "$i" = 60 ] && fail "subsystems never initialized (tgt restart)"
+      sleep 0.5
+    done
+    vsh "$RPC bdev_aio_create /var/tmp/rig-disk.img rigdisk 4096" >/dev/null || fail "bdev_aio_create (tgt restart)"
+    for i in $(seq 1 40); do
+      vsh "$RPC bdev_get_bdevs --name lvs_rig/$VOL >/dev/null 2>&1" && break
+      [ "$i" = 40 ] && fail "the lvstore/lvol did NOT auto-load from the reattached disk image"
+      sleep 0.5
+    done
+    vsh "$RPC nvmf_create_transport -t TCP" || fail "nvmf_create_transport (tgt restart)"
+    echo "✓ tgt restarted; lvstore+lvol auto-loaded from the same disk image (memory wiped)"
+
+    # MDS back → startup reconcile re-adds subsystem+ns(ptpl_file), and
+    # the ns-add is where SPDK restores the reservation from disk.
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    for i in $(seq 1 20); do
+      vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
+      [ "$i" = 20 ] && fail "MDS gRPC never came back after tgt restart"
+      sleep 0.5
+    done
+    # Wait for the ns to be re-created (the restore point).
+    for i in $(seq 1 40); do
+      vsh "$RPC nvmf_get_subsystems" | python3 -c "
+import json,sys
+for s in json.load(sys.stdin):
+    if s.get('nqn')=='$SUBNQN' and s.get('namespaces'): sys.exit(0)
+sys.exit(1)" && break
+      [ "$i" = 40 ] && fail "subsystem/ns not re-created after tgt restart"
+      sleep 0.5
+    done
+    echo "✓ MDS restarted; export re-converged (ns re-added with ptpl_file → SPDK restore point)"
+
+    # THE PROOF. Re-fence. The tgt's memory was wiped, so the ONLY way
+    # the MDS is already the registrant + EA-RO holder is the ptpl_file.
+    MARK=$(vsh "wc -l < $RIG/mds.log")
+    FR3=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+          -d '{\"volumeId\":\"$VOL\",\"clientId\":\"$CID\"}' \
+          127.0.0.1:50051 pnfs.control.MdsControl/FenceBlockClient") \
+      || fail "post-tgt-restart FenceBlockClient RPC failed"
+    echo "$FR3" | grep -c '"fenced": true' >/dev/null || fail "post-tgt-restart fence refused: $FR3"
+    RESV3=$(vsh "tail -n +$MARK $RIG/mds.log | grep 'registered=' | tail -1" || true)
+    echo "$RESV3" | grep -q 'registered=false' \
+      || fail "PTPL did NOT survive the tgt restart — the MDS had to RE-REGISTER (reservation was lost): ${RESV3:-<none>}"
+    echo "$RESV3" | grep -q 'acquired=false' \
+      || fail "PTPL did NOT survive — the MDS had to RE-ACQUIRE EA-RO (reservation was lost): ${RESV3:-<none>}"
+    echo "$RESV3" | grep -q 'rtype=0x4' \
+      || fail "restored reservation is not EA-RO: ${RESV3:-<none>}"
+    echo "$RESV3" | grep -q '0x666c696e745f6d64(holder)' \
+      || fail "the MDS key is not the reservation holder after tgt restart: ${RESV3:-<none>}"
+    echo "✓ PTPL SURVIVED the tgt restart: ${RESV3}"
+
+    CONN=$(vsudo "nvme connect -t tcp -a 127.0.0.1 -s 4420 -n $SUBNQN --hostnqn=$HOSTNQN --ctrl-loss-tmo=3 2>&1; true")
+    echo "$CONN" | grep -qiE 'not allowed|Connect command failed|Input/output|Operation not permitted|refused' \
+      || { vsudo "nvme disconnect -n $SUBNQN 2>/dev/null"; fail "the fenced client RE-CONNECTED after tgt restart: $CONN"; }
+    vsudo "nvme disconnect -n $SUBNQN 2>/dev/null; true"
+    echo "✓ fenced client still refused at the device after the tgt restart"
+
+    echo
+    echo "✅ ptpl-survives-tgt-restart PASSED — a target restart wiped the tgt's"
+    echo "   memory, yet the fence came back: the MDS reconcile re-added the ns with"
+    echo "   its ptpl_file and SPDK RESTORED the EA-RO reservation from disk (no"
+    echo "   re-register, no re-acquire). Without PTPL this restart unfences everyone."
+    exit 0
+  fi
+
   # ── R. RESTART=1: does the fence SURVIVE an MDS restart? ────────────
   # Reservation holdership is target-side, keyed to the MDS's STABLE
   # NVMe Host Identifier (identity.rs BLOCK_MDS_HOST_ID / _PR_KEY are

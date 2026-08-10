@@ -470,11 +470,22 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   >     4h holder — the restarted MDS reclaimed holdership through its stable identity,
   >     a **no-op re-acquire**, which is the correct behaviour for an MDS-only restart.
   >
-  > Still owed (needs the tgt in the loop, not just the MDS): a tgt restart drops the
-  > reservation from memory, so **PTPL-survives-tgt-restart** is the separate proof, and
-  > the together-restart case is where an actual re-acquire (recovering from PTPL loss)
-  > would earn its keep — but that needs a durable "this client is fenced" signal, which
-  > does not exist yet (the eviction is a deletion, not a positive record).
+  > **PTPL-survives-tgt-restart RIG-PROVEN 2026-08-10** (`make test-pnfs-ptpl-rig` =
+  > block-rig.sh `FENCE=1 TGT_RESTART=1`): the together-restart — kill BOTH tgt and MDS,
+  > bring the tgt back on the SAME disk image (the lvstore+lvol auto-load from the
+  > superblock), MDS reconcile re-adds the ns with its `ptpl_file`, and SPDK's
+  > `nvmf_ns_reservation_restore` reloads the EA-RO reservation from disk (bdev-UUID
+  > checked against the reloaded lvol). The tgt's memory was wiped, so the post-restart
+  > re-fence reporting `registered=false acquired=false rtype=0x4` MDS-holder can ONLY be
+  > the ptpl_file — proven. (The generation counter resets to 0 on reload; the
+  > reservation *type and holder* restore intact, which is what fences.) Without PTPL
+  > this restart is the "silently unfences everyone" landmine — the `ptpl_file` on
+  > persistent storage (`blockExport.ptplDir`) is what closes it.
+  >
+  > Still genuinely owed: the PTPL-LOSS recovery path (ptpl_file lost, not just the tgt
+  > memory) needs a durable "this client is fenced" POSITIVE record so a restart can
+  > re-fence from scratch — today the eviction is a row deletion, not a record, and the
+  > per-fence reservation is the only fenced-state that exists.
 - **Fallback lane**: the disposition ladder (`fallback_io_disposition_core`,
   `operations/mod.rs:246-339`) grows a block arm at the same dispatcher fork
   (`dispatcher.rs:2264`): the MDS reads/writes the volume's extents itself via an

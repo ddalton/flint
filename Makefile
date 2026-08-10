@@ -316,6 +316,10 @@ test-pnfs-fence-rig: ## FenceReaches drill: MDS reservation preempt stops a LIVE
 test-pnfs-fence-restart-rig: ## MdsRestart re-acquire: the fence SURVIVES an MDS restart via stable identity + durable eviction (block-rig FENCE=1 RESTART=1)
 	FENCE=1 RESTART=1 tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-ptpl-rig
+test-pnfs-ptpl-rig: ## PTPL survives a TGT restart: reservation restored from ptpl_file on ns re-add, fence survives (block-rig FENCE=1 TGT_RESTART=1)
+	FENCE=1 TGT_RESTART=1 tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh
