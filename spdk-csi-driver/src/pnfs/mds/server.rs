@@ -416,7 +416,43 @@ impl MetadataServer {
                     "🧱 block-export startup replay: {} scsi volume(s)",
                     volumes.len()
                 );
-                tokio::spawn(async move { reconciler.reconcile_all(&volumes).await });
+                let backend = self.layout_manager.state_backend();
+                tokio::spawn(async move {
+                    reconciler.reconcile_all(&volumes).await;
+                    // Re-establish any ACTIVE fence. reconcile_all just
+                    // re-added each namespace with its ptpl_file, so SPDK
+                    // has already restored the reservations the ptpl_file
+                    // carried; this loop re-acquires EA-RO for volumes
+                    // whose fence the ptpl_file did NOT carry (ptpl loss,
+                    // or a fresh disk that never had it). The durable
+                    // `fenced_clients` record is the source of truth, so
+                    // the fence survives even total target-state loss —
+                    // the PTPL-loss recovery path. fence_preempt is
+                    // idempotent: when the reservation DID survive it is a
+                    // no-op (registered=false acquired=false).
+                    match backend.block_fenced_all().await {
+                        Ok(Ok(fenced)) if !fenced.is_empty() => {
+                            info!(
+                                "⛔ startup: re-establishing {} fenced client(s) from the \
+                                 durable record",
+                                fenced.len()
+                            );
+                            for (v, c) in fenced {
+                                match reconciler.fence_preempt(&v, c).await {
+                                    Ok(s) => info!("⛔ startup re-fence '{}' client {}: {}", v, c, s),
+                                    Err(e) => tracing::error!(
+                                        "startup re-fence '{}' client {} FAILED: {} — the client \
+                                         may reach the device until the next reconcile/roll",
+                                        v, c, e
+                                    ),
+                                }
+                            }
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => tracing::error!("startup fenced-set read refused: {}", e),
+                        Err(e) => tracing::error!("startup fenced-set read failed: {}", e),
+                    }
+                });
             }
         }
 

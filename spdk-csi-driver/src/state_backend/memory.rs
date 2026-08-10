@@ -403,6 +403,45 @@ impl StateBackend for MemoryBackend {
         Ok(Ok(Vec::new()))
     }
 
+    async fn block_fence_record(
+        &self,
+        _volume: &str,
+        _client_id: u64,
+        _now_unix: i64,
+    ) -> StateBackendResult<Result<String, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        Err(StateBackendError::Storage(
+            "block fence record on the memory backend — block-class volumes require sqlite".into(),
+        ))
+    }
+
+    async fn block_is_fenced(
+        &self,
+        _volume: &str,
+        _client_id: u64,
+    ) -> StateBackendResult<Result<bool, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        // A backend that can hold no block volumes fences no one.
+        Ok(Ok(false))
+    }
+
+    async fn block_fenced_all(
+        &self,
+    ) -> StateBackendResult<
+        Result<Vec<(String, u64)>, crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        Ok(Ok(Vec::new()))
+    }
+
+    async fn block_unfence(
+        &self,
+        _volume: &str,
+        _client_id: u64,
+    ) -> StateBackendResult<Result<bool, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        Ok(Ok(false))
+    }
+
     async fn put_fh_mapping(&self, m: &FhMappingRecord) -> StateBackendResult<()> {
         self.fh_mappings.insert(m.file_id, m.clone());
         Ok(())

@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// One request to the writer thread.
 enum Req {
@@ -1310,6 +1310,55 @@ impl StateBackend for SqliteBackend {
         })
         .await
     }
+
+    async fn block_fence_record(
+        &self,
+        volume: &str,
+        client_id: u64,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<String, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::fence_record(conn, &v, client_id, now_unix)
+        })
+        .await
+    }
+
+    async fn block_is_fenced(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<Result<bool, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::is_fenced(conn, &v, client_id)
+        })
+        .await
+    }
+
+    async fn block_fenced_all(
+        &self,
+    ) -> StateBackendResult<
+        Result<Vec<(String, u64)>, crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        self.with_conn_mut(move |conn| crate::state_backend::extent_alloc::fenced_all(conn))
+            .await
+    }
+
+    async fn block_unfence(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<Result<bool, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::unfence_record(conn, &v, client_id)
+        })
+        .await
+    }
 }
 
 // ── Row decoders ──────────────────────────────────────────────────────
@@ -1719,6 +1768,26 @@ CREATE TABLE IF NOT EXISTS block_hosts (
     client_id INTEGER NOT NULL,
     host_nqn TEXT NOT NULL,
     admitted_unix INTEGER NOT NULL,
+    PRIMARY KEY (volume, client_id)
+);
+
+-- fenced_clients: the durable, POSITIVE record of which clients are
+-- fenced on which volume. Every other trace of a fence is fragile: the
+-- fenced grant rows clear when a conforming client returns its layout
+-- (return-after-fence), the block_hosts eviction is a row DELETION (an
+-- absence, not a record), and the NVMe reservation lives target-side and
+-- dies with the ptpl_file on a tgt restart. This table is the MDS-side
+-- source of truth a restart re-establishes the fence from: it (a) stops
+-- admit_block_host from re-admitting a fenced client, and (b) tells
+-- startup which volumes still need their EA-RO reservation re-acquired
+-- (the PTPL-loss recovery path). host_nqn is captured at fence time
+-- (block_hosts is gone by the time anyone reads this) for the release
+-- path and observability.
+CREATE TABLE IF NOT EXISTS fenced_clients (
+    volume TEXT NOT NULL,
+    client_id INTEGER NOT NULL,
+    host_nqn TEXT NOT NULL,
+    fenced_unix INTEGER NOT NULL,
     PRIMARY KEY (volume, client_id)
 );
 "#;

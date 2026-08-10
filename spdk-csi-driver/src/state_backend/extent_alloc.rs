@@ -702,6 +702,7 @@ pub fn drop_volume(conn: &mut Connection, volume: &str) -> Result<u64> {
         "extent_quarantine",
         "volume_alloc",
         "block_hosts",
+        "fenced_clients",
     ] {
         n += tx.execute(&format!("DELETE FROM {table} WHERE volume = ?1"), params![volume])?
             as u64;
@@ -767,6 +768,78 @@ pub fn host_evict(
 /// comparison in tests and logs).
 pub fn hosts_for_volume(conn: &Connection, volume: &str) -> Result<Vec<String>> {
     hosts_for_volume_conn(conn, volume)
+}
+
+/// Write the durable fence record for `client_id` on `volume` (the
+/// positive record — see the `fenced_clients` schema comment). Captures
+/// the client's `host_nqn` from `block_hosts` IN THE SAME TRANSACTION,
+/// so it must run BEFORE `host_evict` deletes that row; returns the
+/// captured nqn (empty if the client held no admission) for the caller's
+/// log. Idempotent: re-fencing refreshes the timestamp.
+pub fn fence_record(
+    conn: &mut Connection,
+    volume: &str,
+    client_id: u64,
+    now_unix: i64,
+) -> Result<String> {
+    let client = as_i64(client_id, "client id exceeds i64")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let host_nqn: String = tx
+        .query_row(
+            "SELECT host_nqn FROM block_hosts WHERE volume = ?1 AND client_id = ?2",
+            params![volume, client],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    tx.execute(
+        "INSERT INTO fenced_clients (volume, client_id, host_nqn, fenced_unix)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (volume, client_id) DO UPDATE SET fenced_unix = ?4",
+        params![volume, client, host_nqn, now_unix],
+    )?;
+    tx.commit()?;
+    Ok(host_nqn)
+}
+
+/// Is `client_id` fenced on `volume`? The admission guard: a fenced
+/// client's fresh LAYOUTGET must not re-admit it to the allow-list.
+pub fn is_fenced(conn: &Connection, volume: &str, client_id: u64) -> Result<bool> {
+    let client = as_i64(client_id, "client id exceeds i64")?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM fenced_clients WHERE volume = ?1 AND client_id = ?2",
+        params![volume, client],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Every `(volume, client_id)` fence record, for startup re-establishment
+/// (re-acquire EA-RO on each fenced volume — the PTPL-loss recovery
+/// path). Ordered for deterministic replay.
+pub fn fenced_all(conn: &Connection) -> Result<Vec<(String, u64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT volume, client_id FROM fenced_clients ORDER BY volume, client_id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let v: String = r.get(0)?;
+            let c: i64 = r.get(1)?;
+            Ok((v, c as u64))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Clear a client's fence (the release / lease-recovery path). Returns
+/// whether a row was removed.
+pub fn unfence_record(conn: &mut Connection, volume: &str, client_id: u64) -> Result<bool> {
+    let client = as_i64(client_id, "client id exceeds i64")?;
+    let n = conn.execute(
+        "DELETE FROM fenced_clients WHERE volume = ?1 AND client_id = ?2",
+        params![volume, client],
+    )?;
+    Ok(n > 0)
 }
 
 fn hosts_for_volume_conn(conn: &Connection, volume: &str) -> Result<Vec<String>> {
@@ -1284,10 +1357,63 @@ mod tests {
         let mut conn = setup();
         host_admit(&mut conn, VOL, C1, "nqn.2024-11.com.flint:node:a", 0).unwrap();
         grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        fence_record(&mut conn, VOL, C1, 0).unwrap();
         assert!(drop_volume(&mut conn, VOL).unwrap() > 0);
         assert!(
             hosts_for_volume(&conn, VOL).unwrap().is_empty(),
             "a re-created same-name volume must not inherit admissions"
         );
+        assert!(
+            !is_fenced(&conn, VOL, C1).unwrap(),
+            "nor a re-created same-name volume inherit a fence"
+        );
+    }
+
+    /// The durable fence record: written, queried by the admission guard,
+    /// captures the host_nqn from block_hosts at fence time, and clears.
+    #[test]
+    fn fence_record_is_the_durable_positive_signal() {
+        let mut conn = setup();
+        let nqn = "nqn.2024-11.com.flint:node:a".to_string();
+        host_admit(&mut conn, VOL, C1, &nqn, 0).unwrap();
+        assert!(!is_fenced(&conn, VOL, C1).unwrap(), "not fenced before the record");
+
+        // Recording captures the client's nqn (still in block_hosts) —
+        // this is why it must run BEFORE the eviction.
+        let captured = fence_record(&mut conn, VOL, C1, 100).unwrap();
+        assert_eq!(captured, nqn, "the record grabs the nqn before eviction removes it");
+        assert!(is_fenced(&conn, VOL, C1).unwrap(), "the guard sees the fence");
+        assert!(!is_fenced(&conn, VOL, C2).unwrap(), "another client is untouched");
+
+        // The eviction can now remove the block_hosts row; the fence
+        // record (and its captured nqn) outlives it.
+        host_evict(&mut conn, VOL, C1).unwrap();
+        assert!(is_fenced(&conn, VOL, C1).unwrap(), "the fence survives the eviction");
+        assert_eq!(
+            fenced_all(&conn).unwrap(),
+            vec![(VOL.to_string(), C1)],
+            "startup replay sees the fenced (volume, client)"
+        );
+
+        // Re-fencing refreshes, does not duplicate (PK on volume,client).
+        fence_record(&mut conn, VOL, C1, 200).unwrap();
+        assert_eq!(fenced_all(&conn).unwrap().len(), 1, "idempotent by PK");
+
+        // Clearing removes it — the release / lease-recovery path.
+        assert!(unfence_record(&mut conn, VOL, C1).unwrap(), "a row was cleared");
+        assert!(!is_fenced(&conn, VOL, C1).unwrap(), "unfenced");
+        assert!(!unfence_record(&mut conn, VOL, C1).unwrap(), "double-clear is a no-op");
+        assert!(fenced_all(&conn).unwrap().is_empty());
+    }
+
+    /// A fence recorded for a client that held NO admission (fenced by
+    /// the operator before it ever mounted) still records — with an
+    /// empty captured nqn, which is fine: the guard keys on client_id.
+    #[test]
+    fn fence_record_without_a_prior_admission_is_empty_nqn() {
+        let mut conn = setup();
+        let captured = fence_record(&mut conn, VOL, C1, 0).unwrap();
+        assert_eq!(captured, "", "no block_hosts row → empty nqn");
+        assert!(is_fenced(&conn, VOL, C1).unwrap());
     }
 }

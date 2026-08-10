@@ -381,7 +381,7 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
   # eviction reached the client — its nvme-tcp path can no longer
   # reconnect (the allow-list refuses its hostnqn). Together these are
   # the fence being durable at the MDS and enforced at the client.
-  vsh "grep -q 'fenced (durable rows)' $RIG/mds.log" \
+  vsh "grep -q 'fenced (durable' $RIG/mds.log" \
     || fail "MDS never recorded the durable fence"
   RECONN=$(vsudo "dmesg | grep -c 'is not allowed, hostnqn'" || true)
   [ "${RECONN:-0}" -ge 1 ] \
@@ -404,17 +404,28 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
 
   # ── T. TGT_RESTART=1: does PTPL survive a TARGET restart? ───────────
   # The landmine (design §5): a tgt restart drops every reservation from
-  # memory — without PTPL it silently unfences everyone. PTPL persists
-  # the reservation to the per-namespace ptpl_file; on ns re-add SPDK
-  # reloads it (subsystem.c nvmf_ns_reservation_restore, verifying the
-  # reloaded lvol's bdev UUID). This is the together-restart: kill BOTH
-  # the tgt and the MDS, bring the tgt back on the SAME disk image (the
-  # lvstore+lvol auto-load from the superblock), then the MDS reconcile
-  # re-adds the ns with the same ptpl_file — and the reservation must
-  # come back with it. Since the tgt's memory was wiped, a restored
-  # reservation can ONLY have come from disk.
+  # memory — without PTPL it silently unfences everyone. Two ways the
+  # fence can come back, both PROVEN here by the STARTUP re-fence line:
+  #   TGT_RESTART=1        — the ptpl_file survives, so SPDK restores the
+  #                          reservation on ns re-add (nvmf_ns_reservation
+  #                          _restore); startup re-fence is a no-op
+  #                          (registered=false acquired=false).
+  #   TGT_RESTART=1 +      — the ptpl_file is DELETED (ptpl loss / a fresh
+  #   PTPL_LOSS=1            disk), so nothing restores from disk; the
+  #                          MDS's durable fenced_clients record drives a
+  #                          real re-acquire at startup (registered=true
+  #                          acquired=true). This is the whole point of
+  #                          the durable record: the fence survives even
+  #                          TOTAL target-state loss.
+  # Either way it is the together-restart: kill BOTH, bring the tgt back
+  # on the SAME disk image (lvstore+lvol auto-load), MDS reconcile +
+  # startup fenced-set replay re-establish the fence.
   if [ "${TGT_RESTART:-0}" = "1" ]; then
-    echo "▶ TGT_RESTART: PTPL must survive a target restart (together-restart)"
+    if [ "${PTPL_LOSS:-0}" = "1" ]; then
+      echo "▶ TGT_RESTART + PTPL_LOSS: the durable record must re-fence when ptpl is GONE"
+    else
+      echo "▶ TGT_RESTART: PTPL must survive a target restart (together-restart)"
+    fi
     PTPL_FILE="$RIG/flint-ptpl-$VOL.json"
     vsh "test -s $PTPL_FILE" \
       || fail "no non-empty ptpl_file at $PTPL_FILE — PTPL was never persisted; a tgt restart WOULD unfence"
@@ -429,6 +440,14 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
       sleep 0.5
     done
     vsudo "rm -f /var/tmp/spdk_cpu_lock_*"
+
+    # PTPL_LOSS: destroy the on-disk reservation. Now NOTHING target-side
+    # carries the fence across the restart — only the MDS's durable
+    # fenced_clients record (in sqlite) does.
+    if [ "${PTPL_LOSS:-0}" = "1" ]; then
+      vsudo "rm -f $PTPL_FILE"
+      vsh "test -e $PTPL_FILE" && fail "ptpl_file not deleted" || echo "· ptpl_file DELETED — target-side reservation is now unrecoverable"
+    fi
 
     # Bring the tgt back on the SAME disk image + SAME ptpl_dir — touch
     # NEITHER (that is the whole point). aio re-create auto-loads the
@@ -458,56 +477,70 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
     vsh "$RPC nvmf_create_transport -t TCP" || fail "nvmf_create_transport (tgt restart)"
     echo "✓ tgt restarted; lvstore+lvol auto-loaded from the same disk image (memory wiped)"
 
-    # MDS back → startup reconcile re-adds subsystem+ns(ptpl_file), and
-    # the ns-add is where SPDK restores the reservation from disk.
+    # MDS back → startup reconcile re-adds the ns (SPDK restores the
+    # reservation from ptpl_file IF it survived), THEN the startup
+    # fenced-set replay re-acquires EA-RO for every fenced volume from
+    # the durable record. The STARTUP re-fence line is the proof, and it
+    # discriminates the two paths.
     vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
     for i in $(seq 1 20); do
       vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
       [ "$i" = 20 ] && fail "MDS gRPC never came back after tgt restart"
       sleep 0.5
     done
-    # Wait for the ns to be re-created (the restore point).
-    for i in $(seq 1 40); do
-      vsh "$RPC nvmf_get_subsystems" | python3 -c "
-import json,sys
-for s in json.load(sys.stdin):
-    if s.get('nqn')=='$SUBNQN' and s.get('namespaces'): sys.exit(0)
-sys.exit(1)" && break
-      [ "$i" = 40 ] && fail "subsystem/ns not re-created after tgt restart"
+    # Wait for the startup fenced-set replay to run (it logs one line per
+    # re-established fence). This is the code path under test.
+    STARTUP=""
+    for i in $(seq 1 60); do
+      STARTUP=$(vsh "grep 'startup re-fence' $RIG/mds.log | tail -1" || true)
+      [ -n "$STARTUP" ] && break
       sleep 0.5
     done
-    echo "✓ MDS restarted; export re-converged (ns re-added with ptpl_file → SPDK restore point)"
+    [ -n "$STARTUP" ] || fail "the startup fenced-set replay never ran — the durable record was not consulted"
+    echo "✓ MDS restarted; startup fenced-set replay ran from the durable record"
 
-    # THE PROOF. Re-fence. The tgt's memory was wiped, so the ONLY way
-    # the MDS is already the registrant + EA-RO holder is the ptpl_file.
-    MARK=$(vsh "wc -l < $RIG/mds.log")
-    FR3=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
-          -d '{\"volumeId\":\"$VOL\",\"clientId\":\"$CID\"}' \
-          127.0.0.1:50051 pnfs.control.MdsControl/FenceBlockClient") \
-      || fail "post-tgt-restart FenceBlockClient RPC failed"
-    echo "$FR3" | grep -c '"fenced": true' >/dev/null || fail "post-tgt-restart fence refused: $FR3"
-    RESV3=$(vsh "tail -n +$MARK $RIG/mds.log | grep 'registered=' | tail -1" || true)
-    echo "$RESV3" | grep -q 'registered=false' \
-      || fail "PTPL did NOT survive the tgt restart — the MDS had to RE-REGISTER (reservation was lost): ${RESV3:-<none>}"
-    echo "$RESV3" | grep -q 'acquired=false' \
-      || fail "PTPL did NOT survive — the MDS had to RE-ACQUIRE EA-RO (reservation was lost): ${RESV3:-<none>}"
-    echo "$RESV3" | grep -q 'rtype=0x4' \
-      || fail "restored reservation is not EA-RO: ${RESV3:-<none>}"
-    echo "$RESV3" | grep -q '0x666c696e745f6d64(holder)' \
-      || fail "the MDS key is not the reservation holder after tgt restart: ${RESV3:-<none>}"
-    echo "✓ PTPL SURVIVED the tgt restart: ${RESV3}"
+    # THE PROOF, read off the STARTUP re-fence line:
+    if [ "${PTPL_LOSS:-0}" = "1" ]; then
+      # ptpl was deleted → nothing restored from disk → the durable
+      # record drove a REAL re-acquire.
+      echo "$STARTUP" | grep -q 'registered=true' \
+        || fail "PTPL_LOSS: expected the durable record to RE-REGISTER, but it did not: ${STARTUP}"
+      echo "$STARTUP" | grep -q 'acquired=true' \
+        || fail "PTPL_LOSS: expected the durable record to RE-ACQUIRE EA-RO, but it did not: ${STARTUP}"
+      RESULT="the durable fenced_clients record RE-ESTABLISHED the fence after ptpl LOSS"
+    else
+      # ptpl survived → SPDK restored on ns re-add → startup re-fence is
+      # a no-op.
+      echo "$STARTUP" | grep -q 'registered=false' \
+        || fail "PTPL did NOT survive — the MDS had to re-register (reservation was lost): ${STARTUP}"
+      echo "$STARTUP" | grep -q 'acquired=false' \
+        || fail "PTPL did NOT survive — the MDS had to re-acquire EA-RO: ${STARTUP}"
+      RESULT="PTPL restored the reservation from disk (startup re-fence was a no-op)"
+    fi
+    echo "$STARTUP" | grep -q 'rtype=0x4' \
+      || fail "reservation is not EA-RO after the restart: ${STARTUP}"
+    echo "$STARTUP" | grep -q '0x666c696e745f6d64(holder)' \
+      || fail "the MDS key is not the reservation holder after the restart: ${STARTUP}"
+    echo "✓ ${RESULT}: ${STARTUP}"
 
     CONN=$(vsudo "nvme connect -t tcp -a 127.0.0.1 -s 4420 -n $SUBNQN --hostnqn=$HOSTNQN --ctrl-loss-tmo=3 2>&1; true")
     echo "$CONN" | grep -qiE 'not allowed|Connect command failed|Input/output|Operation not permitted|refused' \
-      || { vsudo "nvme disconnect -n $SUBNQN 2>/dev/null"; fail "the fenced client RE-CONNECTED after tgt restart: $CONN"; }
+      || { vsudo "nvme disconnect -n $SUBNQN 2>/dev/null"; fail "the fenced client RE-CONNECTED after the restart: $CONN"; }
     vsudo "nvme disconnect -n $SUBNQN 2>/dev/null; true"
-    echo "✓ fenced client still refused at the device after the tgt restart"
+    echo "✓ fenced client still refused at the device after the restart"
 
     echo
-    echo "✅ ptpl-survives-tgt-restart PASSED — a target restart wiped the tgt's"
-    echo "   memory, yet the fence came back: the MDS reconcile re-added the ns with"
-    echo "   its ptpl_file and SPDK RESTORED the EA-RO reservation from disk (no"
-    echo "   re-register, no re-acquire). Without PTPL this restart unfences everyone."
+    if [ "${PTPL_LOSS:-0}" = "1" ]; then
+      echo "✅ durable-fenced-record PASSED — the tgt restarted AND its ptpl_file was"
+      echo "   destroyed, yet the fence came back: the MDS's durable fenced_clients"
+      echo "   record survived in sqlite and re-acquired the EA-RO reservation at"
+      echo "   startup. The fence survives TOTAL target-state loss."
+    else
+      echo "✅ ptpl-survives-tgt-restart PASSED — a target restart wiped the tgt's"
+      echo "   memory, yet the fence came back: the MDS reconcile re-added the ns with"
+      echo "   its ptpl_file and SPDK RESTORED the EA-RO reservation from disk (the"
+      echo "   startup re-fence found it already held). Without PTPL this unfences all."
+    fi
     exit 0
   fi
 

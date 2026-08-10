@@ -482,10 +482,17 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   > this restart is the "silently unfences everyone" landmine — the `ptpl_file` on
   > persistent storage (`blockExport.ptplDir`) is what closes it.
   >
-  > Still genuinely owed: the PTPL-LOSS recovery path (ptpl_file lost, not just the tgt
-  > memory) needs a durable "this client is fenced" POSITIVE record so a restart can
-  > re-fence from scratch — today the eviction is a row deletion, not a record, and the
-  > per-fence reservation is the only fenced-state that exists.
+  > **PTPL-LOSS recovery RIG-PROVEN 2026-08-10** (`make test-pnfs-fenced-record-rig` =
+  > `FENCE=1 TGT_RESTART=1 PTPL_LOSS=1`): the durable `fenced_clients` sqlite table (the
+  > POSITIVE record the block_hosts eviction could not be — an absence, not a record) now
+  > closes it. `fence_block_client` writes the record FIRST (capturing the host_nqn before
+  > eviction removes it); `admit_block_host` refuses a fenced client's re-admission; and
+  > MDS startup, after `reconcile_all`, replays `block_fenced_all()` to re-acquire EA-RO on
+  > every still-fenced volume. Proven by deleting the ptpl_file AND restarting the tgt: the
+  > startup re-fence reports `registered=true acquired=true` (a fresh reservation, gen=1) —
+  > the fence was rebuilt from sqlite alone, surviving TOTAL target-state loss. `SCHEMA_VERSION`
+  > 4→5; `drop_volume` sweeps the new table; `block_unfence` is the release/lease-recovery
+  > hook (the fence is otherwise permanent — see the volume-wide-EA-RO note in §6/§8).
 - **Fallback lane**: the disposition ladder (`fallback_io_disposition_core`,
   `operations/mod.rs:246-339`) grows a block arm at the same dispatcher fork
   (`dispatcher.rs:2264`): the MDS reads/writes the volume's extents itself via an

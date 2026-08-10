@@ -1446,12 +1446,33 @@ pub async fn fence_block_client(
     client_id: u64,
 ) -> Result<String, String> {
     let backend = layout_manager.state_backend();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // The durable fence RECORD comes FIRST — before the grant-row fence,
+    // the reservation, and the eviction. It is the one trace of the
+    // fence that survives everything: the grant rows clear on the
+    // client's return-after-fence, the eviction is a deletion, and the
+    // reservation dies with the ptpl_file. Capturing it first means a
+    // crash anywhere after this point still leaves a positive record the
+    // next startup re-establishes the fence from (and it grabs the
+    // host_nqn while block_hosts still holds it, pre-eviction).
+    let fenced_nqn = match backend.block_fence_record(volume, client_id, now_unix).await {
+        Ok(Ok(nqn)) => nqn,
+        Ok(Err(e)) => return Err(format!("fence record refused: {e}")),
+        Err(e) => return Err(format!("fence record failed: {e}")),
+    };
     match backend.extent_fence_client(volume, client_id).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => return Err(format!("fence rows refused: {e}")),
         Err(e) => return Err(format!("fence rows failed: {e}")),
     }
-    let mut summary = format!("client {client_id} fenced (durable rows)");
+    let mut summary = if fenced_nqn.is_empty() {
+        format!("client {client_id} fenced (durable record + rows)")
+    } else {
+        format!("client {client_id} ({fenced_nqn}) fenced (durable record + rows)")
+    };
 
     let Some(rec) = layout_manager.block_export() else {
         summary.push_str("; no block export attached — rows only");
@@ -1717,6 +1738,24 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         host_nqn: &str,
     ) -> Result<(), String> {
         let backend = self.layout_manager.state_backend();
+        // Fence guard FIRST: a fenced client must not be re-admitted by
+        // its own fresh LAYOUTGET. The reservation blocks it at the
+        // device regardless, but re-admitting it to the allow-list would
+        // let its nvme session reconnect (a confusing half-state) and
+        // undoes the durable eviction. This is the whole point of the
+        // positive `fenced_clients` record — the block_hosts absence
+        // could not distinguish "fenced" from "never admitted".
+        match backend.block_is_fenced(volume, client_id).await {
+            Ok(Ok(true)) => {
+                return Err(format!(
+                    "client {client_id} is fenced on '{volume}' — refusing admission \
+                     (clear the fence to re-admit)"
+                ))
+            }
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => return Err(format!("fence check refused: {e}")),
+            Err(e) => return Err(format!("fence check failed: {e}")),
+        }
         // Fast path: already on the durable desired list → assume the
         // tgt converged when the row was written and skip the RPC pass.
         // A tgt restart CAN diverge from this assumption; until the
@@ -2107,6 +2146,16 @@ mod fallback_tests {
         want.sort();
         assert_eq!(hosts, want, "the tgt allow-list converged (fence lane always kept)");
 
+        // The durable POSITIVE record was written for the fenced client
+        // (survives ptpl loss + restart) and NOT for the healthy one.
+        assert!(backend.block_is_fenced("volB", 7).await.unwrap().unwrap(), "7 fenced");
+        assert!(!backend.block_is_fenced("volB", 9).await.unwrap().unwrap(), "9 healthy");
+        assert_eq!(
+            backend.block_fenced_all().await.unwrap().unwrap(),
+            vec![("volB".to_string(), 7u64)],
+            "startup would re-establish exactly this fence"
+        );
+
         // The PRIMARY fence reached the target: victim key preempted,
         // MDS key holds EA-RO.
         let st = nvme.state.lock().unwrap();
@@ -2118,6 +2167,52 @@ mod fallback_tests {
             "MDS key holds the reservation"
         );
         assert_eq!(st.rtype, crate::pnfs::mds::resv_fence::RTYPE_EA_REG_ONLY);
+    }
+
+    /// The admission guard: a fenced client's fresh LAYOUTGET must not
+    /// re-admit it. Without the positive record, `admit_block_host`
+    /// could not tell "fenced" from "never seen" (block_hosts is an
+    /// absence either way) and would happily re-admit — undoing the
+    /// eviction and letting the client reconnect its nvme session.
+    #[tokio::test]
+    async fn admit_block_host_refuses_a_fenced_client() {
+        use crate::pnfs::handler_trait::PnfsOperations;
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let registry = Arc::new(DeviceRegistry::new());
+        let lm = Arc::new(LayoutManager::new(
+            Arc::clone(&registry),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        ));
+        lm.set_volume_geometry(
+            "volG",
+            crate::pnfs::mds::layout::VolumeGeometry {
+                stripe_size: 0,
+                stripe_width: 0,
+                layout_class: crate::pnfs::mds::layout::LayoutClass::Scsi,
+            },
+        )
+        .await;
+        lm.register_extent_arena("volG", 1 << 20).await.unwrap();
+        let handler = PnfsOperationHandler::new(lm, registry, "/data/exports".into());
+        let nqn = crate::nvmeof_export::flint_host_nqn("node-g");
+
+        // Healthy: admits (no reconciler attached → records durably).
+        handler.admit_block_host("volG", 5, &nqn).await.expect("healthy admit");
+
+        // Fence it, then a fresh admit (its next LAYOUTGET) is refused.
+        backend.block_fence_record("volG", 5, 0).await.unwrap().unwrap();
+        let err = handler.admit_block_host("volG", 5, &nqn).await.unwrap_err();
+        assert!(err.contains("fenced"), "got: {err}");
+
+        // A DIFFERENT client on the same volume still admits.
+        handler.admit_block_host("volG", 6, &nqn).await.expect("other client admits");
+
+        // Clearing the fence re-opens admission (the release path).
+        backend.block_unfence("volG", 5).await.unwrap().unwrap();
+        handler.admit_block_host("volG", 5, &nqn).await.expect("re-admits after unfence");
     }
 
     /// Registry with `ids` registered + a handler whose layout manager

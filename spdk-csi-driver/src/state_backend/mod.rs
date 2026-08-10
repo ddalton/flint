@@ -678,6 +678,38 @@ pub trait StateBackend: Send + Sync {
         &self,
         volume: &str,
     ) -> StateBackendResult<Result<Vec<String>, extent_alloc::ExtentAllocError>>;
+
+    /// Write the durable fence record (the positive `fenced_clients`
+    /// row). Captures the client's host_nqn from `block_hosts` — so it
+    /// must run BEFORE the eviction — and returns it for the log.
+    async fn block_fence_record(
+        &self,
+        volume: &str,
+        client_id: u64,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<String, extent_alloc::ExtentAllocError>>;
+
+    /// Is this client fenced on this volume? The admission guard.
+    async fn block_is_fenced(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<Result<bool, extent_alloc::ExtentAllocError>>;
+
+    /// Every `(volume, client_id)` fence record — startup replay reads
+    /// this to re-acquire EA-RO on each still-fenced volume.
+    async fn block_fenced_all(
+        &self,
+    ) -> StateBackendResult<Result<Vec<(String, u64)>, extent_alloc::ExtentAllocError>>;
+
+    /// Clear a client's fence (release / lease recovery). `true` if a
+    /// record was removed.
+    async fn block_unfence(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<Result<bool, extent_alloc::ExtentAllocError>>;
+
     async fn delete_volume_geometry(&self, volume: &str) -> StateBackendResult<()>;
 
     // id↔path mappings behind v2 (id-based) metadata filehandles.
