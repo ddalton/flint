@@ -257,5 +257,27 @@ pub trait PnfsOperations: Send + Sync {
     fn scsi_volume_for_deviceid(&self, _device_id: &[u8; 16]) -> Option<String> {
         None
     }
+
+    /// Mint and register the recall handle for a scsi grant (the
+    /// stateid CB_LAYOUTRECALL and LAYOUTRETURN address; the allocator's
+    /// grant rows remain the authority on what the client holds).
+    /// `None` = this handler has no layout state machine and must not
+    /// grant.
+    fn register_scsi_layout(
+        &self,
+        _owner: crate::pnfs::mds::layout::LayoutOwner,
+        _filehandle: Vec<u8>,
+        _file_key: &str,
+        _iomode: crate::pnfs::mds::layout::IoMode,
+    ) -> Option<[u8; 16]> {
+        None
+    }
+
+    /// Remove a scsi layout by stateid, yielding `(client_id,
+    /// file_ident)` so the caller can drop the allocator grant rows.
+    /// `None` = unknown stateid (benign on the return path).
+    fn take_scsi_layout(&self, _stateid: &[u8; 16]) -> Option<(u64, String)> {
+        None
+    }
 }
 

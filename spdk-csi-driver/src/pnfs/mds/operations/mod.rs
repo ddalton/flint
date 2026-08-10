@@ -1465,6 +1465,22 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         self.layout_manager.scsi_volume_for_deviceid(device_id)
     }
 
+    fn register_scsi_layout(
+        &self,
+        owner: crate::pnfs::mds::layout::LayoutOwner,
+        filehandle: Vec<u8>,
+        file_key: &str,
+        iomode: crate::pnfs::mds::layout::IoMode,
+    ) -> Option<[u8; 16]> {
+        Some(self.layout_manager.register_scsi_layout(owner, filehandle, file_key, iomode))
+    }
+
+    fn take_scsi_layout(&self, stateid: &[u8; 16]) -> Option<(u64, String)> {
+        self.layout_manager
+            .take_scsi_layout(stateid)
+            .map(|l| (l.owner.client_id, l.file_ident))
+    }
+
     fn note_remove(&self, file_key: &str) {
         if let Some(placement) = self.layout_manager.forget_placement(file_key) {
             if placement.file_id != 0 {

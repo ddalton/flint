@@ -1543,6 +1543,55 @@ impl LayoutManager {
     /// issued to. RFC 8881 §12.5 ties every layout to a specific client
     /// for recall and return-by-clientid semantics; CB_LAYOUTRECALL routes
     /// through the owner's session.
+    /// Register a scsi-class grant in the layout state machine, minting
+    /// the stateid CB_LAYOUTRECALL and LAYOUTRETURN address. The extent
+    /// list itself is deliberately NOT state here — the allocator's
+    /// grant rows (extent_grants) are the authority on what the client
+    /// holds; this entry is the RECALL HANDLE: stateid ↔ (owner,
+    /// file_ident), which is everything the recall/return lifecycle
+    /// needs to find and revoke the grant. `file_ident` is the file_key
+    /// itself: scsi files have no placement, hence no truncate_gate_key
+    /// — their truncate path is extent reclaim, not the DS fanout gate,
+    /// so there is no C6 publish-recheck here either (nothing to race).
+    pub fn register_scsi_layout(
+        &self,
+        owner: LayoutOwner,
+        filehandle: Vec<u8>,
+        file_key: &str,
+        iomode: IoMode,
+    ) -> [u8; 16] {
+        let stateid = Self::generate_stateid();
+        let layout = LayoutState {
+            stateid,
+            owner,
+            filehandle,
+            file_ident: file_key.to_string(),
+            segments: Vec::new(),
+            iomode,
+            return_on_close: true,
+        };
+        self.persist(&layout);
+        self.layouts.insert(state_key(&stateid), layout);
+        self.by_owner
+            .entry(owner.client_id)
+            .or_insert_with(Vec::new)
+            .push(stateid);
+        stateid
+    }
+
+    /// Remove a scsi layout by stateid, returning it so the caller can
+    /// drop the allocator's grant rows for its file. `None` = unknown
+    /// stateid (already returned, revoked, or never granted) — the
+    /// BadStateId shape, benign on the return path.
+    pub fn take_scsi_layout(&self, stateid: &[u8; 16]) -> Option<LayoutState> {
+        let (_, layout) = self.layouts.remove(&state_key(stateid))?;
+        self.persist_delete(*stateid);
+        if let Some(mut v) = self.by_owner.get_mut(&layout.owner.client_id) {
+            v.retain(|s| s != stateid);
+        }
+        Some(layout)
+    }
+
     pub fn generate_layout(
         &self,
         owner: LayoutOwner,
@@ -3284,6 +3333,29 @@ mod tests {
     /// Deleting a volume must drop its geometry, or a volume re-created
     /// at the same name would inherit the previous StorageClass's
     /// geometry instead of its own.
+    #[tokio::test]
+    async fn scsi_layout_register_take_round_trip() {
+        let backend: Arc<dyn StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let registry = Arc::new(DeviceRegistry::new());
+        let mgr = stripe_mgr_on(&registry, 8 * 1024 * 1024, Arc::clone(&backend));
+        let owner = LayoutOwner { client_id: 7, session_id: [1; 16], fsid: 1 };
+        let sid = mgr.register_scsi_layout(
+            owner,
+            vec![0xab],
+            "volA/model.bin",
+            IoMode::ReadWrite,
+        );
+        let taken = mgr.take_scsi_layout(&sid).expect("registered handle is takeable");
+        assert_eq!(taken.owner.client_id, 7);
+        assert_eq!(taken.file_ident, "volA/model.bin", "recall handle keys on the file_key");
+        assert!(taken.segments.is_empty(), "extents live in the allocator, not here");
+        assert!(
+            mgr.take_scsi_layout(&sid).is_none(),
+            "second take is the benign BadStateId shape"
+        );
+    }
+
     #[tokio::test]
     async fn deleting_a_volume_forgets_its_geometry() {
         let backend: Arc<dyn StateBackend> = crate::state_backend::memory_backend();

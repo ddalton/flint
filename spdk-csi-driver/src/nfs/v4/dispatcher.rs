@@ -2076,7 +2076,7 @@ impl CompoundDispatcher {
             Operation::LayoutGet { signal_layout_avail, layout_type, iomode, offset, length, minlength, stateid, maxcount } => {
                 debug!("🚨🚨🚨 LAYOUTGET OPERATION DISPATCHED IN DISPATCHER.RS 🚨🚨🚨");
                 debug!("   offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
-                self.handle_layoutget(signal_layout_avail, layout_type, iomode, offset, length, minlength, stateid, maxcount, context)
+                self.handle_layoutget(signal_layout_avail, layout_type, iomode, offset, length, minlength, stateid, maxcount, context).await
             }
             
             Operation::GetDeviceInfo { device_id, layout_type, maxcount, notify_types } => {
@@ -2084,7 +2084,7 @@ impl CompoundDispatcher {
             }
             
             Operation::LayoutReturn { reclaim, layout_type, iomode, return_body } => {
-                self.handle_layoutreturn(reclaim, layout_type, iomode, return_body, context)
+                self.handle_layoutreturn(reclaim, layout_type, iomode, return_body, context).await
             }
 
             Operation::LayoutCommit {
@@ -2361,7 +2361,7 @@ impl CompoundDispatcher {
         }
     }
 
-    fn handle_layoutget(
+    async fn handle_layoutget(
         &self,
         _signal_layout_avail: bool,
         layout_type: u32,
@@ -2390,7 +2390,7 @@ impl CompoundDispatcher {
         debug!("📥 LAYOUTGET: offset={}, length={}, iomode={}, layout_type={}", offset, length, iomode, layout_type);
         
         // Get current filehandle
-        let (filehandle, file_key) = match context.current_fh {
+        let (filehandle, file_key, fs_path) = match context.current_fh {
             Some(ref fh) => {
                 // Export-relative path — the stable identity that keys
                 // the file's pinned stripe placement. Raw FH bytes
@@ -2414,7 +2414,7 @@ impl CompoundDispatcher {
                     // so the placement table stays unambiguous.
                     file_key = "/".to_string();
                 }
-                (fh.data.clone(), file_key)
+                (fh.data.clone(), file_key, path)
             }
             None => {
                 warn!("❌ LAYOUTGET: No current filehandle");
@@ -2449,13 +2449,11 @@ impl CompoundDispatcher {
             fsid: 1,
         };
 
-        // Per-volume class dispatch (design doc §5). A scsi-class
-        // volume's LAYOUTGET is phase-gated to LAYOUTUNAVAILABLE until
-        // the layout-stateid lifecycle lands with the recall tranche —
-        // granting raw extents under a stateid CB_LAYOUTRECALL cannot
-        // find would be F65 rebuilt on purpose. The client falls back
-        // to MDS I/O and the volume functions; the class is env-gated
-        // dark besides. Wrong-type requests refuse loudly either way.
+        // Per-volume class dispatch (design doc §5): the scsi grant
+        // path. The allocator's grant rows are the authority on what
+        // the client holds; the layout state machine entry minted here
+        // is the RECALL HANDLE (stateid ↔ owner/file), so nothing is
+        // ever granted that CB_LAYOUTRECALL cannot find.
         if pnfs.layout_class_for(&file_key) == crate::pnfs::mds::layout::LayoutClass::Scsi {
             if layout_type != 5 {
                 warn!(
@@ -2464,15 +2462,12 @@ impl CompoundDispatcher {
                 );
                 return OperationResult::LayoutGet(Nfs4Status::UnknownLayoutType, None);
             }
-            if let Some(m) = &self.f68a {
-                m.layoutget_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            info!(
-                "📄 LAYOUTGET (scsi) '{}' — phase-gated LAYOUTUNAVAILABLE (extent grants \
-                 arrive with the layout-stateid/recall tranche); client uses MDS I/O",
-                file_key
-            );
-            return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+            return self
+                .handle_layoutget_scsi(
+                    pnfs, &file_key, &fs_path, filehandle, iomode, offset, length,
+                    _minlength, context,
+                )
+                .await;
         }
 
         // The converse policing: a files-class volume serves type 1
@@ -2621,6 +2616,178 @@ impl CompoundDispatcher {
         }
     }
     
+    /// The scsi layout body (RFC 8154 §2.4, `pnfs_scsi_layout4`): the
+    /// extent list, each extent carrying the volume deviceid, the
+    /// file/storage offsets, and its state — INVALID_DATA until the
+    /// client's LAYOUTCOMMIT promotes it (reads of INVALID extents are
+    /// zeros client-side, which is what makes an uncommitted grant
+    /// unobservable).
+    fn encode_scsi_layout(
+        extents: &[crate::state_backend::extent_alloc::GrantedExtent],
+        device_id: &[u8; 16],
+    ) -> bytes::Bytes {
+        use crate::nfs::xdr::XdrEncoder;
+        let mut e = XdrEncoder::new();
+        e.encode_u32(extents.len() as u32);
+        for x in extents {
+            e.encode_fixed_opaque(device_id); // se_vol_id (deviceid4, fixed 16)
+            e.encode_u64(x.logical_offset); // se_file_offset
+            e.encode_u64(x.length); // se_length
+            e.encode_u64(x.physical_offset); // se_storage_offset
+            // PNFS_SCSI_READ_WRITE_DATA = 0, PNFS_SCSI_INVALID_DATA = 2
+            e.encode_u32(if x.committed { 0 } else { 2 });
+        }
+        e.finish()
+    }
+
+    /// The scsi-class LAYOUTGET: allocate extents (fresh space only —
+    /// reuse stays locked until the MDS initiator can write_zeroes,
+    /// per GrantedExtent::needs_scrub), mint the recall handle, encode
+    /// pnfs_scsi_layout4.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_layoutget_scsi(
+        &self,
+        pnfs: &std::sync::Arc<dyn crate::pnfs::PnfsOperations>,
+        file_key: &str,
+        fs_path: &std::path::Path,
+        filehandle: Vec<u8>,
+        iomode: u32,
+        offset: u64,
+        length: u64,
+        minlength: u64,
+        context: &CompoundContext,
+    ) -> OperationResult {
+        use crate::nfs::xdr::XdrEncoder;
+        use crate::pnfs::mds::layout::{IoMode, LayoutOwner};
+
+        let refused = |m: &Option<std::sync::Arc<crate::pnfs::mds::f68a_meter::DataPathMeter>>| {
+            if let Some(m) = m {
+                m.layoutget_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+
+        let im = match iomode {
+            1 => IoMode::Read,
+            2 => IoMode::ReadWrite,
+            // ANY is a LAYOUTRETURN concept; a grant must pick.
+            _ => return OperationResult::LayoutGet(Nfs4Status::BadIoMode, None),
+        };
+        let Some(backend) = pnfs.extent_backend() else {
+            refused(&self.f68a);
+            warn!("❌ LAYOUTGET (scsi) '{}': handler has no extent backend", file_key);
+            return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+        };
+        let Some(volume) = file_key.split('/').find(|c| !c.is_empty()).map(str::to_string)
+        else {
+            return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+        };
+        let (client_id, session_id) = match context.session_id {
+            Some(sid) => (
+                self.state_mgr.sessions.get_session(&sid).map(|s| s.client_id).unwrap_or(0),
+                sid.0,
+            ),
+            None => return OperationResult::LayoutGet(Nfs4Status::OpNotInSession, None),
+        };
+        if client_id == 0 {
+            return OperationResult::LayoutGet(Nfs4Status::OpNotInSession, None);
+        }
+        // file_id = the stub's inode — the identity the fileid attr
+        // reports and the extent tables key on.
+        use std::os::unix::fs::MetadataExt;
+        let file_id = match std::fs::metadata(fs_path) {
+            Ok(m) => m.ino(),
+            Err(e) => {
+                warn!("❌ LAYOUTGET (scsi): stat {:?}: {}", fs_path, e);
+                return OperationResult::LayoutGet(Nfs4Status::Stale, None);
+            }
+        };
+        // Grant window: the desired length capped at 1 GiB per grant
+        // (to-EOF requests would otherwise allocate the whole arena),
+        // floored at minlength (RFC: the server must satisfy at least
+        // that), clamped into the allocator's i64 domain. NoSpace past
+        // the ceiling is the allocator's honest answer.
+        let i64_room = (i64::MAX as u64).saturating_sub(offset);
+        let want = length.min(1 << 30).max(minlength).min(i64_room);
+        if want == 0 {
+            return OperationResult::LayoutGet(Nfs4Status::Inval, None);
+        }
+
+        match backend.extent_grant(&volume, file_id, client_id, offset, want, true).await {
+            Ok(Ok(extents)) => {
+                if extents.iter().any(|x| x.needs_scrub) {
+                    // fresh_only=true makes this unreachable; if it ever
+                    // fires, refusing beats shipping a prior owner's
+                    // bytes (BlindProvision, in the flesh).
+                    tracing::error!(
+                        "LAYOUTGET (scsi) '{}': fresh_only grant returned needs_scrub \
+                         extents — refusing",
+                        file_key
+                    );
+                    refused(&self.f68a);
+                    return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+                }
+                let owner = LayoutOwner { client_id, session_id, fsid: 1 };
+                let Some(stateid) =
+                    pnfs.register_scsi_layout(owner, filehandle, file_key, im)
+                else {
+                    refused(&self.f68a);
+                    return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+                };
+                if let Some(m) = &self.f68a {
+                    m.layoutget_granted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let span_start =
+                    extents.iter().map(|x| x.logical_offset).min().unwrap_or(offset);
+                let span_end = extents
+                    .iter()
+                    .map(|x| x.logical_offset + x.length)
+                    .max()
+                    .unwrap_or(offset + want);
+                info!(
+                    "📄 LAYOUTGET (scsi) granted: '{}' [{}, {}) {} extent(s), client {}",
+                    file_key, span_start, span_end, extents.len(), client_id
+                );
+                let device_id = crate::nvmeof_export::scsi_device_id(&volume);
+                let mut e = XdrEncoder::new();
+                e.encode_bool(true); // return_on_close (matches the handle)
+                e.encode_fixed_opaque(&stateid);
+                e.encode_u32(1); // one layout4
+                e.encode_u64(span_start);
+                e.encode_u64(span_end - span_start);
+                e.encode_u32(iomode);
+                e.encode_u32(5); // LAYOUT4_SCSI
+                e.encode_opaque(&Self::encode_scsi_layout(&extents, &device_id));
+                OperationResult::LayoutGet(Nfs4Status::Ok, Some(e.finish()))
+            }
+            Ok(Err(verdict)) => {
+                refused(&self.f68a);
+                use crate::state_backend::extent_alloc::ExtentAllocError as E;
+                warn!("❌ LAYOUTGET (scsi) refused: '{}': {}", file_key, verdict);
+                let status = match verdict {
+                    // Held by another client: transient once the recall
+                    // machinery drives conflicting holders; the client
+                    // retries or falls back to MDS I/O meanwhile.
+                    E::Conflict { .. } | E::NotQuiescent { .. } | E::FencedClient => {
+                        Nfs4Status::LayoutTrylater
+                    }
+                    // Arena full: not transient — fall back to MDS I/O,
+                    // which reports ENOSPC with a real errno.
+                    E::NoSpace { .. } => Nfs4Status::LayoutUnavail,
+                    E::InvalidRange(_) => Nfs4Status::Inval,
+                    E::CommitRejected(_) | E::Corruption(_) | E::Sql(_) => {
+                        Nfs4Status::ServerFault
+                    }
+                };
+                OperationResult::LayoutGet(status, None)
+            }
+            Err(e) => {
+                refused(&self.f68a);
+                warn!("❌ LAYOUTGET (scsi) backend error: '{}': {}", file_key, e);
+                OperationResult::LayoutGet(Nfs4Status::ServerFault, None)
+            }
+        }
+    }
+
     /// Frame a GETDEVICEINFO success body, honouring `maxcount`: the
     /// client's declared ceiling for the WHOLE res body. Ignoring it —
     /// the historical behaviour — was harmless while the files device
@@ -2840,7 +3007,7 @@ impl CompoundDispatcher {
         mk(status)
     }
 
-    fn handle_layoutreturn(
+    async fn handle_layoutreturn(
         &self,
         reclaim: bool,
         layout_type: u32,
@@ -2891,14 +3058,93 @@ impl CompoundDispatcher {
             1 => LayoutType::NfsV4_1Files,
             4 => LayoutType::FlexFiles,  // RFC 8435 — accepted on return only
             5 => {
-                // scsi-class returns: nothing is grantable yet (LAYOUTGET
-                // is phase-gated), so there is nothing to return — but a
-                // client's unmount-time LAYOUTRETURN ALL carries the type
-                // of the driver it loaded, and refusing it would error a
-                // benign cleanup. Accept as a no-op success; the real
-                // extent_layout_return wiring lands with the
-                // stateid/recall tranche.
-                return OperationResult::LayoutReturn(Nfs4Status::Ok);
+                let Some(pnfs) = &self.pnfs_handler else {
+                    return OperationResult::LayoutReturn(Nfs4Status::Ok);
+                };
+                match return_body {
+                    LayoutReturn4Body::File { offset, length, stateid, .. } => {
+                        let mut sid = [0u8; 16];
+                        sid[0..4].copy_from_slice(&stateid.seqid.to_be_bytes());
+                        sid[4..16].copy_from_slice(&stateid.other);
+                        let Some((owner_client, file_ident)) = pnfs.take_scsi_layout(&sid)
+                        else {
+                            // Already returned or server-side revoked —
+                            // the benign shape, same as the files path
+                            // after a revoke.
+                            debug!("LAYOUTRETURN (scsi): unknown stateid — treating as done");
+                            return OperationResult::LayoutReturn(Nfs4Status::Ok);
+                        };
+                        // Drop the allocator's grant rows: this is the
+                        // client's quiescence promise, and what lets a
+                        // reclaim of these extents complete cleanly
+                        // instead of quarantining.
+                        let Some(backend) = pnfs.extent_backend() else {
+                            return OperationResult::LayoutReturn(Nfs4Status::Ok);
+                        };
+                        let volume = file_ident
+                            .split('/')
+                            .find(|c| !c.is_empty())
+                            .unwrap_or("")
+                            .to_string();
+                        let export =
+                            self.file_handler.fh_manager().get_export_path().to_path_buf();
+                        use std::os::unix::fs::MetadataExt;
+                        let file_id = std::fs::metadata(export.join(&file_ident))
+                            .map(|m| m.ino())
+                            .unwrap_or(0);
+                        if volume.is_empty() || file_id == 0 {
+                            // File already removed: the grant rows will be
+                            // swept by the reclaim/lease path. Loud, not
+                            // fatal — the return itself succeeds.
+                            warn!(
+                                "LAYOUTRETURN (scsi): '{}' unresolvable — grant rows \
+                                 left for the reclaim sweep",
+                                file_ident
+                            );
+                            return OperationResult::LayoutReturn(Nfs4Status::Ok);
+                        }
+                        match backend
+                            .extent_layout_return(&volume, file_id, owner_client, offset, length.min((i64::MAX as u64).saturating_sub(offset)))
+                            .await
+                        {
+                            Ok(Ok(n)) => {
+                                info!(
+                                    "📄 LAYOUTRETURN (scsi): '{}' dropped {} grant row(s), \
+                                     client {}",
+                                    file_ident, n, owner_client
+                                );
+                            }
+                            Ok(Err(e)) => {
+                                tracing::error!(
+                                    "LAYOUTRETURN (scsi) '{}': allocator refused: {} — \
+                                     grant rows leak until the reclaim sweep",
+                                    file_ident, e
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "LAYOUTRETURN (scsi) '{}': backend error: {} — \
+                                     grant rows leak until the reclaim sweep",
+                                    file_ident, e
+                                );
+                            }
+                        }
+                        return OperationResult::LayoutReturn(Nfs4Status::Ok);
+                    }
+                    LayoutReturn4Body::Fsid | LayoutReturn4Body::All => {
+                        // Bulk scsi returns (unmount): per-stateid rows are
+                        // dropped as each File return arrives; a client
+                        // that skips straight to ALL leaves grant rows for
+                        // the lease/reclaim sweep. Accept — refusing would
+                        // error a benign cleanup — and say so.
+                        warn!(
+                            "LAYOUTRETURN (scsi) {:?}: bulk return accepted; any \
+                             remaining grant rows await the lease/reclaim sweep (owed)",
+                            if matches!(return_body, LayoutReturn4Body::All) { "ALL" } else { "FSID" }
+                        );
+                        return OperationResult::LayoutReturn(Nfs4Status::Ok);
+                    }
+                }
             }
             _ => return OperationResult::LayoutReturn(Nfs4Status::UnknownLayoutType),
         };
