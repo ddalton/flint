@@ -1,6 +1,6 @@
-# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, and the pNFS truncate gate
+# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, and the block-layout extent allocator
 
-Four modules, one gate (`scripts/check-tla.sh`, eighty-eight TLC runs).
+Five modules, one gate (`scripts/check-tla.sh`, ninety-nine TLC runs).
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -151,6 +151,35 @@ offending read is a client-behaviour question the model does not settle —
 it settles that flint does not stop it, which is the only half flint can
 fix.
 
+`FlintExtents.tla` (2026-08-09) models the **block-layout extent
+allocator** — tranche 1: the grant lifecycle, recall/fence, physical
+reuse, and target-side reservation state.  It is the corpus's first
+module written **before its code exists** (spec:
+`docs/plans/pnfs-block-layout-design.md` §9): the allocator must be
+implemented against these runs, not vice versa.  The theorem is the
+**write** — a block-layout client holds raw LBAs and writes them with the
+MDS nowhere on the path, so a stale holder after physical reuse corrupts
+the *new* owner's bytes; `Inv_NoStaleExtentWrite` is co-equal with the
+read theorem, not a corollary.  Both are deliberately absent from the
+shipped cfg while `FenceReaches = FALSE` (spdk-tgt reservation
+enforcement unproven on real hardware — `LostFence` keeps that honest),
+exactly the `FlintTruncate.cfg` pattern.  Tranche 1's finding arrived
+before any code: the design's grant-side belts (PublishRecheck /
+RecallBlocksGrant) **cannot** close the grant-vs-reclaim races — a grant
+published after the reclaim's holder snapshot escapes it, the reclaim can
+complete-and-free between that grant's insert and any recheck, and
+grant-time validation cannot see freed blocks at all (the free destroys
+the very rows the transaction validates against).  Safety belongs to the
+**free side** (`FreeRevalidates`: the free transaction re-validates the
+grants table, sqlite-native); `FlintExtentsStaleSnapshotFree.cfg` pins
+the refuted sketch permanently, MarkOverwrite-style.  Owed in later
+tranches: LAYOUTCOMMIT + the committed state (CommitGatesSize /
+CommitChecksGen / ProvisionalInvisible, the zeroRead ghost), MdsCrash +
+durable, the MDS fallback lane, Split/Merge + `Inv_NoPhysicalAliasing`,
+and the grant-side arms as *liveness* belts.  Four non-vacuity probes
+(`FlintExtentsProbe.tla`) ship with it under the A2Probe standing rule —
+reuse, fence, tgt-restart and resnapshot all witnessed as actions.
+
 Verification of snapshots is layered deliberately:
 
 1. **SPDK blobstore internals** — not modeled; audited by citation (the
@@ -163,7 +192,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs eighty-eight configs, ALL required:
+on first use).  It runs ninety-nine configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
@@ -656,6 +685,18 @@ reason this module was blind to an unbounded belt, and it took the
 `WriterLimbo` constant — a flapping node costs no failure budget,
 because a kubelet OOM loop is not a data-loss event — to make the world
 expressible at all.
+
+The FlintExtents tranche adds eleven runs (catalogued in
+`scripts/check-tla.sh` next to their invocations): two strict —
+`FlintExtents.cfg` (shipped design, ~1.96M distinct states: no
+conflicting grants, no reuse under a live unfenced grant; stale theorems
+NOT claimed) and `FlintExtentsTarget.cfg` (FenceReaches + PTPL: both
+theorems hold — cite as a goal only); five mutations, each single-flag —
+`ReuseUnderGrant` (the F65-of-extents), `GrantOverlap` (§8's
+PK-does-not-police-overlap), `StaleSnapshotFree` (the tranche-1 finding,
+pinned), `LostFence` (the standing residual — must keep failing until
+fencing is proven on hardware), `TgtAmnesia` ("PTPL is mandatory" with
+teeth); and four action-witness probes.
 
 The mutation runs are the models' own regression tests; a model that
 cannot rediscover the bug classes it exists for proves nothing.

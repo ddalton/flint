@@ -462,6 +462,28 @@ NFS4ERR_RECALLCONFLICT arm), `FallbackChecksGrants`, `SplitKeepsDisjoint`. Every
 has a run that fails without it — the matrix below; an arm with no failing run is dead
 weight by this corpus's own doctrine.
 
+> **TRANCHE-1 AMENDMENT (2026-08-09, FlintExtents.tla now exists — the module
+> corrected this section before any allocator code was written).** The arm set
+> above is **insufficient as sketched**: `PublishRecheck` and `RecallBlocksGrant`
+> cannot close the grant-vs-reclaim races. A grant that passes its gate check
+> before a reclaim starts and publishes after the reclaim's holder snapshot is
+> invisible to that snapshot, and the reclaim can complete-and-free **between the
+> grant's insert and any recheck** (FlintTruncate survives the analogous
+> interleave only because its "free" — the set_len fanout — destroys the content;
+> an extent free destroys nothing, the harm arrives with the next owner). Nor can
+> any grant-time check compensate: the transaction validates against extent/grant
+> rows, and a freed block has left the tables — the free is precisely the step
+> that destroys the evidence. Safety therefore belongs to the **free side**: the
+> free transaction re-validates the grants table and refuses while a live
+> unfenced grant covers any block — the **`FreeRevalidates`** arm, sqlite-native
+> (the free and the grant insert execute over the same tables).
+> `FlintExtentsStaleSnapshotFree.cfg` pins the refuted grant-side-only design
+> permanently. `PublishRecheck` and `RecallBlocksGrant` remain owed, demoted to
+> **progress** arms (without them the reclaim wedges behind grants it must then
+> fence) — their teeth are liveness runs, deferred with that tranche. The
+> allocator implementation MUST put the holder re-validation inside the free
+> transaction; a bookkeeping-only free is machine-refuted.
+
 **Actions**: MDS — Allocate, Split/Merge (guarded by `SplitKeepsDisjoint`),
 GrantCheck/GrantInsert (two-step; GrantCheck also refuses any range with a recall in
 flight when `RecallBlocksGrant` — the NFS4ERR_RECALLCONFLICT obligation; a grant
@@ -512,8 +534,9 @@ crash budget, "transiently unavailable forever" needs an unbudgeted limbo consta
 | FlintExtents.cfg | shipped world: FenceReaches=FALSE, every belt shipped-TRUE | must HOLD, listing **every invariant except NoStaleExtentRead/Write** — only those two depend on FenceReaches. Excluding CrashRecoverySound / NoConflictingGrants / NoPhysicalAliasing / RecallCompletesBeforeReuse here would leave the shipped belts with zero citable greens, since Target.cfg is uncitable by its own row |
 | FlintExtentsReuseUnderGrant.cfg | RecallBeforeReuse=FALSE | **must VIOLATE** NoStaleExtentWrite (and Read) — the F65-of-extents |
 | FlintExtentsGrantOverlap.cfg | GrantsExclusive=FALSE | **must VIOLATE** NoConflictingGrants |
-| FlintExtentsGrantRace.cfg | PublishRecheck=FALSE | **must VIOLATE** — inherit C6, don't rediscover it |
-| FlintExtentsGrantDuringRecall.cfg | RecallBlocksGrant=FALSE | **must VIOLATE** RecallCompletesBeforeReuse — the RECALLCONFLICT obligation |
+| FlintExtentsGrantRace.cfg | PublishRecheck=FALSE | ~~must VIOLATE~~ **superseded by the tranche-1 amendment**: with FreeRevalidates carrying safety, this arm has no safety teeth — returns as a *liveness* mutation (reclaim starvation) in the liveness tranche |
+| FlintExtentsGrantDuringRecall.cfg | RecallBlocksGrant=FALSE | ~~must VIOLATE~~ **superseded likewise** — the RECALLCONFLICT obligation is a progress belt; liveness tranche |
+| FlintExtentsStaleSnapshotFree.cfg | FreeRevalidates=FALSE | **must VIOLATE** RecallCompletesBeforeReuse — the tranche-1 finding, pinned (SHIPPED 2026-08-09) |
 | FlintExtentsLostFence.cfg | all on except FenceReaches | **must VIOLATE** NoStaleExtentWrite — the standing residual (LostRecall analog); the harm is the **write** |
 | FlintExtentsBlindCommit.cfg | ProvisionalInvisible=FALSE | **must VIOLATE** SizeCommitCoupled |
 | FlintExtentsUngatedSize.cfg | CommitGatesSize=FALSE | **must VIOLATE** SizeCommitCoupled — no arm ships without a run that fails without it |

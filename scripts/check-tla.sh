@@ -3,14 +3,20 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Eighty-eight runs, ALL required.
+# Ninety-nine runs, ALL required.
 #
-# (Counted as invocations. `grep -c '^strict_run'` also matches the three
-# function DEFINITIONS below — that miscount is how this header briefly read
-# 'eighty-eight'.)
+# (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
+# with the trailing spaces, so the three function DEFINITIONS don't inflate
+# the count; that miscount is how this header once briefly read wrong.
+# 88 before the FlintExtents tranche, + 11 with it.)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
+#
+# FlintExtents.tla — the block-layout extent allocator (tranche 1: grant/
+# fence/reuse core, modelling code that DOES NOT EXIST YET — the module
+# comes before the allocator, deliberately); documented at the bottom of
+# this file, next to its runs.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -760,5 +766,41 @@ mutation_run FlintTruncate FlintTruncateGrantRace.cfg      "audit C6 REGRESSION 
 # green so the remaining work has a specification. Cite it as a goal; citing it
 # as a property of shipped code would be exactly the mistake the audit caught.
 strict_run   FlintTruncate FlintTruncateNoStaleServe.cfg   "truncate target state (recall fires AND is honoured AND the publish rechecks) — Inv_NoStaleServe holds"
+
+# ---- the block-layout extent allocator, tranche 1 (2026-08-09). ----
+# docs/plans/pnfs-block-layout-design.md §9. Models code that DOES NOT EXIST
+# YET — the module and its runs come first, and the allocator must be
+# implemented against them. The theorem is the WRITE: a block-layout client
+# holds raw LBAs and writes them with the MDS nowhere on the path, so a stale
+# holder after reuse corrupts the NEW owner's bytes. Both stale theorems are
+# deliberately absent from the shipped cfg (FenceReaches=FALSE until spdk-tgt
+# reservation enforcement is proven on real hardware — LostFence is the run
+# that keeps that honest), exactly the FlintTruncate.cfg pattern.
+#
+# TRANCHE-1 FINDING, made before any code: the design's grant-side belts
+# (PublishRecheck / RecallBlocksGrant) CANNOT close the grant-vs-reclaim
+# races — a grant published after the reclaim's holder snapshot escapes it,
+# and the reclaim can complete-and-free between that grant's insert and any
+# recheck. Nothing at grant-time can see a freed block either (the free
+# destroys the very rows the transaction validates against). Safety belongs
+# to the FREE side: the free transaction re-validates the grants table
+# (FreeRevalidates). StaleSnapshotFree pins the refuted sketch permanently,
+# MarkOverwrite-style; the grant-side arms return in a liveness tranche as
+# progress belts.
+strict_run   FlintExtents FlintExtents.cfg "extents shipped-design strict (all belts ON, FenceReaches=FALSE: no conflicting grants, no reuse under a live unfenced grant; the stale theorems are NOT claimed — see LostFence)"
+mutation_run FlintExtents FlintExtentsReuseUnderGrant.cfg "reuse-under-grant mutation (RecallBeforeReuse=FALSE: the F65-of-extents — freed under a live grant, re-granted, and the old holder's raw NVMe write lands in the new owner's bytes)" "Inv_NoStaleExtentWrite"
+mutation_run FlintExtents FlintExtentsGrantOverlap.cfg "grant-overlap mutation (GrantsExclusive=FALSE: §8's PK-does-not-police-overlap landmine — two two-step windows race to one free block and both publish)" "Inv_NoConflictingGrants"
+mutation_run FlintExtents FlintExtentsStaleSnapshotFree.cfg "stale-snapshot-free mutation (FreeRevalidates=FALSE: THE TRANCHE-1 FINDING — the doc's original grant-side-belts-only design, refuted and pinned; the free trusts the reclaim's start-time holder snapshot and frees under a grant the snapshot never saw)" "Inv_RecallCompletesBeforeReuse"
+mutation_run FlintExtents FlintExtentsLostFence.cfg "lost-fence residual (shipped constants, the theorem listed: a fence that silently fails to land at the target while the MDS proceeds — must keep FAILING until FenceReaches is proven on real spdk-tgt reservations and re-justified TRUE)" "Inv_NoStaleExtentWrite"
+mutation_run FlintExtents FlintExtentsTgtAmnesia.cfg "tgt-amnesia mutation (PersistReservations=FALSE with FenceReaches=TRUE: §5's 'PTPL is mandatory' with teeth — the fence lands, spdk-tgt restarts, the exclusion dies with the process, single-flag attributable)" "Inv_NoStaleExtentWrite"
+strict_run   FlintExtents FlintExtentsTarget.cfg "extents TARGET state (FenceReaches + PTPL on top of the shipped belts: both stale theorems hold) — cite as a goal ONLY; as a property of shipped code it would be exactly the mistake the F65 audit caught"
+
+# Non-vacuity probes (the A2Probe standing rule: no strict green is citable
+# without a paired probe TLC must VIOLATE, and a probe names the ACTION via a
+# single-writer ghost, never the situation).
+mutation_run FlintExtentsProbe FlintExtentsProbeReuse.cfg "extents reuse probe (GrantInsert really re-cycles a previously-owned block in the shipped state space — without this the strict green could mean nothing was ever reused)" "ProbeReuseFires"
+mutation_run FlintExtentsProbe FlintExtentsProbeFence.cfg "extents fence probe (Fence really executes — a state space where every holder politely returns never exercises the machinery the module exists for)" "ProbeFenceFires"
+mutation_run FlintExtentsProbe FlintExtentsProbeRestart.cfg "extents tgt-restart probe (TgtRestart really occurs in the shipped world, so the strict green holds ACROSS a restart and TgtAmnesia is an A/B over one flag, not over reachability)" "ProbeTgtRestarts"
+mutation_run FlintExtentsProbe FlintExtentsProbeResnapshot.cfg "extents resnapshot probe (the retry re-read really finds holders the snapshot missed — the exact world FreeRevalidates refuses frees in; without this its green is a statement about a disabled guard)" "ProbeResnapshotGrows"
 
 echo "TLA GATE PASSED"
