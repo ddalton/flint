@@ -1648,6 +1648,130 @@ pub async fn unfence_block_client(
     Ok(summary)
 }
 
+/// ONE pass of the lease sweep — the reaper the dispatcher's
+/// LAYOUTRETURN comments have promised since the scsi arm shipped
+/// ("grant rows left for the reclaim sweep"). Client-lease expiry in
+/// this server is otherwise LAZY (a top-of-COMPOUND check) and its
+/// cascade never touches layouts: a volume whose only client died is
+/// never reaped at all, and its grant rows would block every other
+/// client's grants forever.
+///
+/// `alive` is the lease verdict (injected so tests need no lease
+/// machinery; the spawn site passes `leases.is_valid`). Candidates come
+/// from BOTH durable grant rows (survive MDS restarts) and in-memory
+/// layout handles (files-class layouts hold no grant rows). For each
+/// dead client:
+///
+///   1. `return_all_for_client` — drop its layout handles (files and
+///      scsi), cancelling recall state.
+///   2. Per volume with grant rows: `fence_block_client` (idempotent;
+///      cuts the possibly-only-partitioned client's raw path and marks
+///      DELIVERED on a confirmed preempt) → `block_revoke_client` (the
+///      bulk return, REFUSED unless the fence confirmed — an
+///      unconfirmed fence leaves the rows for the next tick) →
+///      `unfence_block_client` (auto-release, so a rescheduled RWO
+///      pod's replacement client recovers without an operator; the
+///      sibling-fence check keeps shared volumes fenced while any other
+///      fence stands).
+///
+/// Post-release the standing zombie barrier is the durable HOST
+/// eviction (the dead client's NQN row is gone; reconnect refused).
+/// That barrier is per-Host-Identifier — RFC 8154's own granularity —
+/// so a replacement pod on the SAME node re-admits the NQN a same-node
+/// zombie could ride. Documented residual, not closable at this layer;
+/// the block model cannot state it without an admission tranche (noted
+/// in §9's OWED list rather than shipped as a vacuous green).
+///
+/// Returns the number of (volume, client) pairs fully swept.
+pub async fn lease_sweep_pass(
+    layout_manager: &crate::pnfs::mds::layout::LayoutManager,
+    alive: &(dyn Fn(u64) -> bool + Sync),
+) -> u64 {
+    let backend = layout_manager.state_backend();
+
+    // Dead layout-handle owners first (files-class and scsi handles).
+    for c in layout_manager.owner_clients() {
+        if alive(c) {
+            continue;
+        }
+        let dropped = layout_manager.return_all_for_client(c);
+        if !dropped.is_empty() {
+            warn!(
+                "💀 lease sweep: revoked {} layout handle(s) of expired client {}",
+                dropped.len(),
+                c
+            );
+        }
+    }
+
+    // Durable grant rows: the fence → revoke → release chain.
+    let pairs = match backend.block_grant_clients().await {
+        Ok(Ok(pairs)) => pairs,
+        Ok(Err(e)) => {
+            tracing::error!("lease sweep: grant-client enumeration refused: {}", e);
+            return 0;
+        }
+        Err(e) => {
+            tracing::error!("lease sweep: grant-client enumeration failed: {}", e);
+            return 0;
+        }
+    };
+    let mut swept = 0u64;
+    for (volume, c) in pairs {
+        if alive(c) {
+            continue;
+        }
+        warn!(
+            "💀 lease sweep: client {} of '{}' holds grant rows past its lease — fencing",
+            c, volume
+        );
+        let ctx = format!("lease sweep '{volume}'");
+        match fence_block_client(layout_manager, &ctx, &volume, c).await {
+            Ok(s) => info!("💀 {}: {}", ctx, s),
+            Err(e) => {
+                tracing::error!("{}: fence of {} failed: {} — retrying next tick", ctx, c, e);
+                continue;
+            }
+        }
+        match backend.block_revoke_client(&volume, c).await {
+            Ok(Ok(rows)) => {
+                info!(
+                    "💀 {}: revoked {} grant row(s) of client {} (bulk return)",
+                    ctx, rows, c
+                );
+            }
+            Ok(Err(crate::state_backend::extent_alloc::ExtentAllocError::UnconfirmedFence)) => {
+                warn!(
+                    "💀 {}: fence of client {} not yet CONFIRMED at the target — rows \
+                     kept (quarantine discipline), retrying next tick",
+                    ctx, c
+                );
+                continue;
+            }
+            Ok(Err(e)) => {
+                tracing::error!("{}: revoke of {} refused: {}", ctx, c, e);
+                continue;
+            }
+            Err(e) => {
+                tracing::error!("{}: revoke of {} failed: {}", ctx, c, e);
+                continue;
+            }
+        }
+        match unfence_block_client(layout_manager, &ctx, &volume, c).await {
+            Ok(s) => info!("💀 {}: {}", ctx, s),
+            Err(e) => {
+                // The revoke landed; only the release lags. The unfence
+                // lever's own retry semantics apply (record already
+                // cleared or not — either way next tick converges).
+                tracing::error!("{}: unfence of {} failed: {} — retrying next tick", ctx, c, e);
+                continue;
+            }
+        }
+        swept += 1;
+    }
+    swept
+}
+
 /// The scsi reclaim driver — §8's GC, FlintExtents' reclaim machine in
 /// code: recall every layout handle on the file (server-side revoke
 /// regardless of delivery, the F65 shape — an unreachable client is
@@ -2334,6 +2458,132 @@ mod fallback_tests {
         // Clearing the fence re-opens admission (the release path).
         backend.block_unfence("volG", 5).await.unwrap().unwrap();
         handler.admit_block_host("volG", 5, &nqn).await.expect("re-admits after unfence");
+    }
+
+    /// THE LEASE SWEEP, end to end against a real (scripted) target: a
+    /// dead client's grant rows are fenced, bulk-returned, and the
+    /// reservation auto-released — a live client on another volume is
+    /// untouched, and an UNCONFIRMED fence (no reachable target) keeps
+    /// its rows for the next tick.
+    #[tokio::test]
+    async fn lease_sweep_fences_revokes_and_releases_the_dead_client() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let registry = Arc::new(DeviceRegistry::new());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        let _ = registry;
+        for v in ["volS", "volT"] {
+            lm.set_volume_geometry(
+                v,
+                crate::pnfs::mds::layout::VolumeGeometry {
+                    stripe_size: 0,
+                    stripe_width: 0,
+                    layout_class: crate::pnfs::mds::layout::LayoutClass::Scsi,
+                },
+            )
+            .await;
+            lm.register_extent_arena(v, 1 << 20).await.unwrap();
+        }
+        let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
+        let reconciler = Arc::new(crate::pnfs::mds::block_export::BlockExportReconciler::new(
+            Arc::clone(&tgt)
+                as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        ));
+        reconciler.ensure("volS", Some(1 << 20)).await.unwrap();
+        reconciler.ensure("volT", Some(1 << 20)).await.unwrap();
+        lm.attach_block_export(reconciler);
+
+        // Client 7 (DEAD): admitted + granted on volS. Client 9 (ALIVE):
+        // admitted + granted on volT.
+        let h7 = crate::nvmeof_export::flint_host_nqn("node-7");
+        let h9 = crate::nvmeof_export::flint_host_nqn("node-9");
+        backend.block_host_admit("volS", 7, &h7, 0).await.unwrap().unwrap();
+        backend.block_host_admit("volT", 9, &h9, 0).await.unwrap().unwrap();
+        backend.extent_grant("volS", 41, 7, 0, 8192, true).await.unwrap().unwrap();
+        backend.extent_grant("volT", 42, 9, 0, 8192, true).await.unwrap().unwrap();
+        // And a dead files-layout-style handle owner (no grant rows).
+        lm.register_scsi_layout(
+            crate::pnfs::mds::layout::LayoutOwner {
+                client_id: 7,
+                session_id: [0u8; 16],
+                fsid: 1,
+            },
+            vec![1, 2, 3],
+            "volS/f",
+            IoMode::ReadWrite,
+        );
+
+        let swept = lease_sweep_pass(&lm, &|c| c == 9).await;
+        assert_eq!(swept, 1, "exactly the dead pair swept");
+
+        // Dead client 7: handle gone, rows gone, record cleared,
+        // reservation released, host evicted.
+        assert!(lm.owner_clients().is_empty() || !lm.owner_clients().contains(&7));
+        let pairs = backend.block_grant_clients().await.unwrap().unwrap();
+        assert_eq!(pairs, vec![("volT".to_string(), 9)], "only the live pair remains");
+        assert!(!backend.block_is_fenced("volS", 7).await.unwrap().unwrap(), "auto-unfenced");
+        {
+            let st = nvme.state.lock().unwrap();
+            assert!(!st.registrants.iter().any(|(_, _, h)| *h), "reservation released");
+        }
+        let hosts = backend.block_hosts("volS").await.unwrap().unwrap();
+        assert!(hosts.is_empty(), "dead client's host evicted: {hosts:?}");
+
+        // Live client 9 untouched.
+        assert!(backend.block_hosts("volT").await.unwrap().unwrap().contains(&h9));
+
+        // Replay: nothing left to sweep.
+        assert_eq!(lease_sweep_pass(&lm, &|c| c == 9).await, 0);
+    }
+
+    /// An unreachable target leaves the fence UNCONFIRMED: the sweep
+    /// must keep the dead client's rows (quarantine discipline) and
+    /// retry, never bulk-return them.
+    #[tokio::test]
+    async fn lease_sweep_keeps_rows_while_the_fence_is_unconfirmed() {
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        lm.set_volume_geometry(
+            "volU",
+            crate::pnfs::mds::layout::VolumeGeometry {
+                stripe_size: 0,
+                stripe_width: 0,
+                layout_class: crate::pnfs::mds::layout::LayoutClass::Scsi,
+            },
+        )
+        .await;
+        lm.register_extent_arena("volU", 1 << 20).await.unwrap();
+        // NO block export attached: the fence is rows-only, never
+        // confirmed at any target.
+        backend.extent_grant("volU", 43, 7, 0, 8192, true).await.unwrap().unwrap();
+
+        let swept = lease_sweep_pass(&lm, &|_| false).await;
+        assert_eq!(swept, 0, "unconfirmed fence: nothing fully swept");
+        let pairs = backend.block_grant_clients().await.unwrap().unwrap();
+        assert_eq!(
+            pairs,
+            vec![("volU".to_string(), 7)],
+            "rows KEPT for the next tick — bulk-returning on an unconfirmed fence \
+             would be LostFence's corruption"
+        );
+        assert!(backend.block_is_fenced("volU", 7).await.unwrap().unwrap(), "fence stands");
     }
 
     /// Registry with `ids` registered + a handler whose layout manager

@@ -485,6 +485,13 @@ impl MetadataServer {
         let heartbeat_timeout = Duration::from_secs(self.config.failover.heartbeat_timeout);
         self.start_heartbeat_monitor(heartbeat_timeout);
 
+        // The lease sweep: the reaper for clients that die holding
+        // layouts/grant rows. Client expiry is otherwise LAZY (checked
+        // at the top of incoming COMPOUNDs), so a volume whose ONLY
+        // client died is never reaped — its grant rows would block
+        // every successor forever.
+        self.start_lease_sweep();
+
         // Start status reporter in background
         self.start_status_reporter();
 
@@ -645,6 +652,56 @@ impl MetadataServer {
 
 
     /// Start heartbeat monitoring in the background
+    /// The client-lease sweep (`operations::lease_sweep_pass` is the
+    /// pass; this is the pacing). One env knob, house style:
+    /// FLINT_PNFS_LEASE_SWEEP_SECS — interval in seconds, default 30
+    /// (the cadence StateManager::cleanup_expired's own doc always
+    /// asked for), 0 disables the sweep outright (the kill switch).
+    ///
+    /// Boot hold: a full lease time + grace period. Restored clients
+    /// get fresh leases at state reload, so nothing can be HONESTLY
+    /// expired before one whole lease window has passed — sweeping
+    /// earlier would fence clients that are mid-reclaim. The in-grace
+    /// check stays in the loop as the belt.
+    fn start_lease_sweep(&self) {
+        let secs = std::env::var("FLINT_PNFS_LEASE_SWEEP_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        if secs == 0 {
+            warn!("lease sweep DISABLED (FLINT_PNFS_LEASE_SWEEP_SECS=0) — dead clients' \
+                   layouts and grant rows will leak until re-enabled");
+            return;
+        }
+        let layout_manager = Arc::clone(&self.layout_manager);
+        let leases = Arc::clone(&self.state_mgr.leases);
+        tokio::spawn(async move {
+            let hold = Duration::from_secs(u64::from(leases.lease_time()))
+                + leases.grace_remaining();
+            info!(
+                "Lease sweep holds for {}s (one lease window past grace), then every {}s",
+                hold.as_secs(),
+                secs
+            );
+            tokio::time::sleep(hold).await;
+            let mut tick = interval(Duration::from_secs(secs));
+            loop {
+                tick.tick().await;
+                if leases.in_grace_period() {
+                    continue;
+                }
+                let swept = crate::pnfs::mds::operations::lease_sweep_pass(
+                    &layout_manager,
+                    &|c| leases.is_valid(c),
+                )
+                .await;
+                if swept > 0 {
+                    info!("💀 lease sweep: {} (volume, client) pair(s) fully swept", swept);
+                }
+            }
+        });
+    }
+
     fn start_heartbeat_monitor(&self, timeout: Duration) {
         let device_registry = Arc::clone(&self.device_registry);
         let layout_manager = Arc::clone(&self.layout_manager);

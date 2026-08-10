@@ -67,6 +67,13 @@ pub enum ExtentAllocError {
     /// statement, and the merge policy is what normally keeps it far
     /// away.
     RowBudget { rows: u64, budget: u64 },
+    /// `revoke_client` refused: the client's fence is absent or not
+    /// CONFIRMED at the target. Revoking (bulk-returning) the rows of a
+    /// client whose exclusion is unproven would clear the very
+    /// bookkeeping that makes its extents quarantine — LostFence's
+    /// corruption through a side door. The sweep retries after the next
+    /// fence attempt confirms.
+    UnconfirmedFence,
     /// LAYOUTCOMMIT validation failed — the (client, gen-at-grant) pair
     /// does not match a live grant on a live extent.
     CommitRejected(&'static str),
@@ -100,6 +107,10 @@ impl std::fmt::Display for ExtentAllocError {
                 f,
                 "extent-row budget: {rows} rows at the {budget}-row per-volume bound \
                  (fragmentation — space may remain; see FLINT_PNFS_EXTENT_ROW_BUDGET)"
+            ),
+            Self::UnconfirmedFence => write!(
+                f,
+                "revoke refused: the client's fence is absent or unconfirmed at the target"
             ),
             Self::CommitRejected(r) => write!(f, "commit rejected: {r}"),
             Self::InvalidRange(r) => write!(f, "invalid range: {r}"),
@@ -983,6 +994,87 @@ pub fn mark_fence_delivered(
     Ok(n > 0)
 }
 
+/// Every DISTINCT (volume, client_id) pair holding grant rows — the
+/// lease sweep's other candidate source (a client can hold rows whose
+/// in-memory layout handle died with a previous MDS incarnation, so
+/// enumerating layout owners alone would miss it). Served by
+/// idx_grants_client.
+pub fn grant_clients(conn: &Connection) -> Result<Vec<(String, u64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT volume, client_id FROM extent_grants
+         ORDER BY volume, client_id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let v: String = r.get(0)?;
+            let c: i64 = r.get(1)?;
+            Ok((v, c as u64))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// The lease sweep's bulk return: delete EVERY grant row the client
+/// holds on the volume — read and rw, fenced included — as if the
+/// client had returned each layout, which it never will (its lease
+/// expired). Extents are deliberately untouched, mirroring
+/// `layout_return`: provisional rows become re-grantable orphans,
+/// committed rows are the file's data; freeing stays reclaim's job.
+/// Touched files get the windowed merge (the rows just became
+/// quiescent — a dead writer's file coalesces here instead of never).
+///
+/// GATED, in-transaction, on a CONFIRMED fence (`fenced_clients` row
+/// with `delivered_unix > 0`): the fenced grant rows are the very
+/// bookkeeping that makes an unconfirmed-fence client's extents
+/// quarantine rather than free — deleting them without the target-side
+/// exclusion proven would be LostFence's corruption through a side
+/// door. `UnconfirmedFence` tells the sweep to retry after the next
+/// fence attempt confirms. Idempotent: a revoked client has no rows,
+/// and the delete of nothing is 0.
+pub fn revoke_client(conn: &mut Connection, volume: &str, client_id: u64) -> Result<u64> {
+    let client = as_i64(client_id, "client id exceeds i64")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let delivered: Option<i64> = tx
+        .query_row(
+            "SELECT delivered_unix FROM fenced_clients
+             WHERE volume = ?1 AND client_id = ?2",
+            params![volume, client],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if !matches!(delivered, Some(d) if d > 0) {
+        return Err(ExtentAllocError::UnconfirmedFence);
+    }
+
+    // The windows to merge (file_id, min_off, max_end), captured before
+    // the rows go.
+    let files: Vec<(i64, i64, i64)> = {
+        let mut stmt = tx.prepare(
+            "SELECT g.file_id, MIN(g.logical_offset), MAX(e.logical_offset + e.length)
+             FROM extent_grants g JOIN extents e
+               ON e.volume = g.volume AND e.file_id = g.file_id
+              AND e.logical_offset = g.logical_offset
+             WHERE g.volume = ?1 AND g.client_id = ?2
+             GROUP BY g.file_id",
+        )?;
+        let rows = stmt
+            .query_map(params![volume, client], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let removed = tx.execute(
+        "DELETE FROM extent_grants WHERE volume = ?1 AND client_id = ?2",
+        params![volume, client],
+    )? as u64;
+    for (file_id, min_off, max_end) in files {
+        merge_extents_window(&tx, volume, file_id, min_off, max_end)?;
+    }
+    tx.commit()?;
+    Ok(removed)
+}
+
 /// Clear a client's fence (the release / lease-recovery path). Returns
 /// whether a row was removed.
 pub fn unfence_record(conn: &mut Connection, volume: &str, client_id: u64) -> Result<bool> {
@@ -1694,6 +1786,77 @@ mod tests {
         assert_eq!(out.freed_extents, 1);
         assert_eq!(out.quarantined_extents, 0);
         assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (0, 0));
+    }
+
+    /// THE LEASE SWEEP's transaction: revoke refuses without a
+    /// CONFIRMED fence, then bulk-returns every row the client held
+    /// (read and rw), merges the dead writer's file, and replays as a
+    /// no-op.
+    #[test]
+    fn revoke_requires_a_delivered_fence_then_bulk_returns_and_merges() {
+        let mut conn = setup();
+        // The dead writer: two contiguous provisional extents plus a
+        // committed one. (A read grant on its own rw extent would be
+        // the same PK row — mode is not keyed — so three rows is the
+        // client's whole footprint.)
+        for i in 0..3u64 {
+            grant(&mut conn, VOL, F, C1, i * 8192, 8192, false).unwrap();
+        }
+        commit_extents(&mut conn, VOL, F, C1, 2 * 8192, 8192).unwrap();
+
+        // No fence at all → refused.
+        match revoke_client(&mut conn, VOL, C1) {
+            Err(ExtentAllocError::UnconfirmedFence) => {}
+            other => panic!("expected UnconfirmedFence, got {other:?}"),
+        }
+        // Fenced but UNCONFIRMED → still refused.
+        fence_record(&mut conn, VOL, C1, 100).unwrap();
+        fence_client(&mut conn, VOL, C1).unwrap();
+        match revoke_client(&mut conn, VOL, C1) {
+            Err(ExtentAllocError::UnconfirmedFence) => {}
+            other => panic!("expected UnconfirmedFence, got {other:?}"),
+        }
+
+        // Confirmed → the bulk return: every row goes (3 rw + 1 read),
+        // and the two contiguous same-state provisional extents merge.
+        assert!(mark_fence_delivered(&mut conn, VOL, C1, 200).unwrap());
+        let removed = revoke_client(&mut conn, VOL, C1).unwrap();
+        assert_eq!(removed, 3, "every row the client held");
+        let grants_left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extent_grants WHERE volume = ?1",
+                params![VOL],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(grants_left, 0);
+        let extents_left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extents WHERE volume = ?1",
+                params![VOL],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            extents_left, 2,
+            "two provisional rows merged to one; the committed row stays apart (state boundary)"
+        );
+        // Extents were NOT freed — the return shape, not the reclaim
+        // shape: the committed row is file data, the merged provisional
+        // row is a re-grantable orphan.
+        let (free_rows,): (i64,) = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extent_free WHERE volume = ?1",
+                params![VOL],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(free_rows, 0, "revoke returns, never frees");
+        // Replay: nothing left, still Ok(0).
+        assert_eq!(revoke_client(&mut conn, VOL, C1).unwrap(), 0);
+        // The orphan is genuinely re-grantable by a successor client.
+        grant(&mut conn, VOL, F, C2, 0, 2 * 8192, false).expect("orphan re-granted");
+        verify_volume_invariants(&conn, VOL).unwrap();
     }
 
     /// THE MERGE POLICY: a sequentially-written file's N contiguous

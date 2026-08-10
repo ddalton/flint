@@ -457,6 +457,32 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
 - **Crash recovery**: on restart, reload extents+grants; unknown space is
   allocated-not-free (conservative); un-expired grants are honored, expired ones fenced
   before their extents free (fence → quarantine while FenceReaches is unproven, above).
+
+  > **LEASE SWEEP SHIPPED 2026-08-10** — "expired ones fenced" now has a mechanism.
+  > Client-lease expiry in this server was LAZY-only (a top-of-COMPOUND check whose
+  > cascade never touched layouts): a volume whose ONLY client died was never reaped,
+  > its grant rows blocking every successor forever, files-class layout handles leaking
+  > the same way. `start_lease_sweep` (default 30s, FLINT_PNFS_LEASE_SWEEP_SECS, 0 =
+  > kill switch; boot hold = one lease window past grace) runs
+  > `operations::lease_sweep_pass`: candidates from durable grant rows
+  > (`block_grant_clients` — survives MDS restarts) ∪ in-memory layout owners; a dead
+  > client gets `return_all_for_client` (handles) and, per volume, **fence →
+  > `revoke_client` (the bulk return, REFUSED in-transaction unless the fence is
+  > CONFIRMED — `UnconfirmedFence` keeps the rows for the next tick, since deleting a
+  > fenced row without proven exclusion is LostFence's corruption through a side door)
+  > → auto-unfence** (release + record cleared, so a rescheduled RWO pod's replacement
+  > client recovers with NO operator step; the sibling-fence check keeps shared volumes
+  > fenced while any other fence stands). Revoke mirrors LAYOUTRETURN semantics —
+  > extents stay (provisional rows become re-grantable orphans, committed rows are file
+  > data), and the dead writer's file gets the windowed merge. **Residual, stated:**
+  > post-release the standing zombie barrier is the durable host eviction, which is
+  > per-Host-Identifier (RFC 8154's own granularity) — a replacement pod on the SAME
+  > node re-admits the NQN a same-node zombie could ride; not closable at this layer,
+  > and the block model cannot state it without an admission tranche (§9 OWED, not a
+  > vacuous green). **Owed:** a live rig mode for the timer path (partition the client
+  > with the stack up — e.g. DROP the NFS port in-VM — and watch expiry → sweep →
+  > successor recovery); the pass itself is unit-proven end to end against real sqlite
+  > + a scripted target.
   The MDS-HA machinery (durable-DS plan milestone B: sqlite server_id, 90s grace,
   Recreate+RWO fence) carries the allocator state unchanged — but **reservation
   holdership is not in sqlite**: it lives target-side, keyed to the MDS's NVMe Host

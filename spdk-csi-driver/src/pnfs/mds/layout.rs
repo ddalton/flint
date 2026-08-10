@@ -1972,6 +1972,18 @@ impl LayoutManager {
         true
     }
 
+    /// Every client id currently holding at least one layout (files or
+    /// scsi — both live in `by_owner`). The lease sweep's candidate
+    /// enumeration: a holder whose lease is gone is a dead client whose
+    /// layouts nothing else will ever return.
+    pub fn owner_clients(&self) -> Vec<u64> {
+        self.by_owner
+            .iter()
+            .filter(|e| !e.value().is_empty())
+            .map(|e| *e.key())
+            .collect()
+    }
+
     /// Return all layouts held by `client_id` (RFC 8881 §18.44.3
     /// `LAYOUTRETURN4_ALL`). Returns the list of stateids that were
     /// released so the caller can cancel any in-flight CB_LAYOUTRECALL

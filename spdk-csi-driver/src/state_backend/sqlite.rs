@@ -1361,6 +1361,28 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn block_grant_clients(
+        &self,
+    ) -> StateBackendResult<
+        Result<Vec<(String, u64)>, crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        self.with_conn_mut(move |conn| crate::state_backend::extent_alloc::grant_clients(conn))
+            .await
+    }
+
+    async fn block_revoke_client(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::revoke_client(conn, &v, client_id)
+        })
+        .await
+    }
+
     async fn block_unfence(
         &self,
         volume: &str,

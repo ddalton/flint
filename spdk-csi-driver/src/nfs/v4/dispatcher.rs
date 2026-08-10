@@ -2917,9 +2917,12 @@ impl CompoundDispatcher {
                     // never move.
                     E::NoSpace { .. } | E::RowBudget { .. } => Nfs4Status::LayoutUnavail,
                     E::InvalidRange(_) => Nfs4Status::Inval,
-                    E::CommitRejected(_) | E::Corruption(_) | E::Sql(_) => {
-                        Nfs4Status::ServerFault
-                    }
+                    // Never produced by a grant — revoke_client is the
+                    // lease sweep's transaction, not a wire op.
+                    E::UnconfirmedFence
+                    | E::CommitRejected(_)
+                    | E::Corruption(_)
+                    | E::Sql(_) => Nfs4Status::ServerFault,
                 };
                 OperationResult::LayoutGet(status, None)
             }
@@ -3261,11 +3264,13 @@ impl CompoundDispatcher {
                             .unwrap_or(0);
                         if volume.is_empty() || file_id == 0 {
                             // File already removed: the grant rows will be
-                            // swept by the reclaim/lease path. Loud, not
+                            // swept by REMOVE's reclaim, or — if this
+                            // client never returns again — by the lease
+                            // sweep (start_lease_sweep). Loud, not
                             // fatal — the return itself succeeds.
                             warn!(
                                 "LAYOUTRETURN (scsi): '{}' unresolvable — grant rows \
-                                 left for the reclaim sweep",
+                                 left for the reclaim/lease sweep",
                                 file_ident
                             );
                             return OperationResult::LayoutReturn(Nfs4Status::Ok);
@@ -3284,7 +3289,7 @@ impl CompoundDispatcher {
                             Ok(Err(e)) => {
                                 tracing::error!(
                                     "LAYOUTRETURN (scsi) '{}': allocator refused: {} — \
-                                     grant rows leak until the reclaim sweep",
+                                     grant rows leak until the reclaim/lease sweep",
                                     file_ident, e
                                 );
                             }

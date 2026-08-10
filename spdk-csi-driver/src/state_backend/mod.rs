@@ -714,6 +714,21 @@ pub trait StateBackend: Send + Sync {
         now_unix: i64,
     ) -> StateBackendResult<Result<bool, extent_alloc::ExtentAllocError>>;
 
+    /// Every distinct (volume, client_id) pair holding grant rows —
+    /// the lease sweep's durable candidate source.
+    async fn block_grant_clients(
+        &self,
+    ) -> StateBackendResult<Result<Vec<(String, u64)>, extent_alloc::ExtentAllocError>>;
+
+    /// The lease sweep's bulk return: delete every grant row the client
+    /// holds on the volume, gated in-transaction on a CONFIRMED fence
+    /// (refused as `UnconfirmedFence` otherwise). Returns rows removed.
+    async fn block_revoke_client(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
+
     /// Clear a client's fence (release / lease recovery). `true` if a
     /// record was removed.
     async fn block_unfence(

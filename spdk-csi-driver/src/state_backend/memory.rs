@@ -444,6 +444,25 @@ impl StateBackend for MemoryBackend {
         Ok(Ok(false))
     }
 
+    async fn block_grant_clients(
+        &self,
+    ) -> StateBackendResult<
+        Result<Vec<(String, u64)>, crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        Ok(Ok(Vec::new()))
+    }
+
+    async fn block_revoke_client(
+        &self,
+        _volume: &str,
+        _client_id: u64,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        // No block volumes here (see block_fence_record) — nothing to
+        // revoke, and the fence gate could never have been confirmed.
+        Ok(Ok(0))
+    }
+
     async fn block_unfence(
         &self,
         _volume: &str,
