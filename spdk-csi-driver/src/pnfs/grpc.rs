@@ -1090,6 +1090,58 @@ impl MdsControl for MdsControlService {
         }
     }
 
+    /// The fence lever's inverse (`operations::unfence_block_client`):
+    /// clear the durable record, then release the volume's EA-RO
+    /// reservation once no client remains fenced on it. Operator-run
+    /// after the fenced client is verified recovered (or gone) — the
+    /// MDS never unfences on its own.
+    async fn unfence_block_client(
+        &self,
+        request: Request<UnfenceBlockClientRequest>,
+    ) -> Result<Response<UnfenceBlockClientResponse>, Status> {
+        let req = request.into_inner();
+        if req.volume_id.is_empty()
+            || req.volume_id.contains('/')
+            || req.volume_id.contains('\0')
+        {
+            return Ok(Response::new(UnfenceBlockClientResponse {
+                unfenced: false,
+                detail: "volume_id must be non-empty and contain no '/' or NUL".into(),
+            }));
+        }
+        if req.client_id == 0 {
+            return Ok(Response::new(UnfenceBlockClientResponse {
+                unfenced: false,
+                detail: "client_id 0 is never minted — refusing an unfence that could \
+                         only be a caller bug"
+                    .into(),
+            }));
+        }
+        warn!(
+            "🔓 UnfenceBlockClient: lifting the fence on client {} of volume {} \
+             (operator lever)",
+            req.client_id, req.volume_id
+        );
+        let ctx = format!("UnfenceBlockClient '{}'", req.volume_id);
+        match crate::pnfs::mds::operations::unfence_block_client(
+            &self.layout_manager,
+            &ctx,
+            &req.volume_id,
+            req.client_id,
+        )
+        .await
+        {
+            Ok(detail) => {
+                info!("🔓 {}: {}", ctx, detail);
+                Ok(Response::new(UnfenceBlockClientResponse { unfenced: true, detail }))
+            }
+            Err(e) => {
+                warn!("{}: {}", ctx, e);
+                Ok(Response::new(UnfenceBlockClientResponse { unfenced: false, detail: e }))
+            }
+        }
+    }
+
     /// Handle DS unregistration
     async fn unregister_data_server(
         &self,
@@ -1336,6 +1388,147 @@ mod create_volume_tests {
             .unwrap()
             .into_inner();
         assert!(!r.fenced);
+    }
+
+    /// The unfence lever end to end: fence a client, then
+    /// UnfenceBlockClient — the durable record clears (admission
+    /// reopens), and the EA-RO reservation is RELEASED at the target
+    /// so non-registrant I/O flows again.
+    #[tokio::test]
+    async fn unfence_block_client_lever_clears_the_record_and_releases_the_reservation() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        nvme.state.lock().unwrap().registrants.push((77, [0xcc; 16], false));
+
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _tgt) =
+            svc_sqlite_at(dir.path(), true, nvme.addr.ip().to_string(), nvme.addr.port());
+        let mut req = cvreq("pvc-unf", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        let backend = s.layout_manager.state_backend();
+        let host = crate::nvmeof_export::flint_host_nqn("node-victim");
+        backend.block_host_admit("pvc-unf", 77, &host, 0).await.unwrap().unwrap();
+        let r = s
+            .fence_block_client(Request::new(FenceBlockClientRequest {
+                volume_id: "pvc-unf".into(),
+                client_id: 77,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.fenced, "{}", r.detail);
+        assert!(nvme.state.lock().unwrap().registrants.iter().any(|(_, _, h)| *h));
+
+        let u = s
+            .unfence_block_client(Request::new(UnfenceBlockClientRequest {
+                volume_id: "pvc-unf".into(),
+                client_id: 77,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(u.unfenced, "{}", u.detail);
+        assert!(u.detail.contains("released=true"), "{}", u.detail);
+        // Record cleared → the admission guard reopens.
+        assert!(!backend.block_is_fenced("pvc-unf", 77).await.unwrap().unwrap());
+        // Target: reservation gone, MDS registration kept.
+        {
+            let st = nvme.state.lock().unwrap();
+            assert!(!st.registrants.iter().any(|(_, _, h)| *h), "no holder");
+            assert_eq!(st.rtype, 0);
+        }
+
+        // Replay: no record, nothing held — still a success, no-op.
+        let again = s
+            .unfence_block_client(Request::new(UnfenceBlockClientRequest {
+                volume_id: "pvc-unf".into(),
+                client_id: 77,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(again.unfenced, "{}", again.detail);
+        assert!(again.detail.contains("replay"), "{}", again.detail);
+        assert!(again.detail.contains("released=false"), "{}", again.detail);
+
+        // Guardrails, same as the fence lever's.
+        let g = s
+            .unfence_block_client(Request::new(UnfenceBlockClientRequest {
+                volume_id: "pvc-unf".into(),
+                client_id: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!g.unfenced);
+        let g = s
+            .unfence_block_client(Request::new(UnfenceBlockClientRequest {
+                volume_id: "a/b".into(),
+                client_id: 1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!g.unfenced);
+    }
+
+    /// The reservation is VOLUME-WIDE (kernel clients register no key,
+    /// so EA-RO blocks every non-registrant): unfencing one client
+    /// while a sibling's fence stands must KEEP it, and only the last
+    /// unfence releases.
+    #[tokio::test]
+    async fn unfence_keeps_the_reservation_while_a_sibling_is_still_fenced() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _tgt) =
+            svc_sqlite_at(dir.path(), true, nvme.addr.ip().to_string(), nvme.addr.port());
+        let mut req = cvreq("pvc-two", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        for c in [81u64, 82] {
+            let r = s
+                .fence_block_client(Request::new(FenceBlockClientRequest {
+                    volume_id: "pvc-two".into(),
+                    client_id: c,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(r.fenced, "{}", r.detail);
+        }
+
+        let u = s
+            .unfence_block_client(Request::new(UnfenceBlockClientRequest {
+                volume_id: "pvc-two".into(),
+                client_id: 81,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(u.unfenced, "{}", u.detail);
+        assert!(u.detail.contains("KEPT"), "{}", u.detail);
+        assert!(u.detail.contains("[82]"), "{}", u.detail);
+        assert!(
+            nvme.state.lock().unwrap().registrants.iter().any(|(_, _, h)| *h),
+            "the sibling's fence still holds the reservation"
+        );
+        let backend = s.layout_manager.state_backend();
+        assert!(!backend.block_is_fenced("pvc-two", 81).await.unwrap().unwrap());
+        assert!(backend.block_is_fenced("pvc-two", 82).await.unwrap().unwrap());
+
+        let u = s
+            .unfence_block_client(Request::new(UnfenceBlockClientRequest {
+                volume_id: "pvc-two".into(),
+                client_id: 82,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(u.unfenced, "{}", u.detail);
+        assert!(u.detail.contains("released=true"), "{}", u.detail);
+        assert!(!nvme.state.lock().unwrap().registrants.iter().any(|(_, _, h)| *h));
     }
 
     /// Expanding a directory volume must SUCCEED. It stores no

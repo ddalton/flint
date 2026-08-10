@@ -91,6 +91,16 @@ impl ResvView {
     }
 }
 
+/// What a release session actually did. `released=false` is the
+/// idempotent no-op: no reservation was held, so there was nothing to
+/// release (a replayed release, or a volume whose fence was already
+/// lifted).
+#[derive(Debug)]
+pub struct ReleaseOutcome {
+    pub released: bool,
+    pub after: ResvView,
+}
+
 /// What a fence session actually did — each step is conditional on the
 /// reported state, so re-running a fence is idempotent by construction.
 #[derive(Debug)]
@@ -124,6 +134,7 @@ const FCTYPE_PROPERTY_GET: u8 = 0x04;
 const OPC_RESV_REGISTER: u8 = 0x0d;
 const OPC_RESV_REPORT: u8 = 0x0e;
 const OPC_RESV_ACQUIRE: u8 = 0x11;
+const OPC_RESV_RELEASE: u8 = 0x15;
 
 /// SQE byte 1: PSDT=01b — "SGL for data transfer", what the kernel host
 /// sets on every NVM command over fabrics.
@@ -301,6 +312,23 @@ fn resv_acquire_data(crkey: u64, prkey: u64) -> [u8; 16] {
     d[0..8].copy_from_slice(&crkey.to_le_bytes());
     d[8..16].copy_from_slice(&prkey.to_le_bytes());
     d
+}
+
+/// RRELA 0 = Release (1 = Clear, which we never send: Clear also wipes
+/// every registration and its blast radius is the whole namespace).
+/// `rtype` must NAME the held reservation type — SPDK refuses a
+/// mismatch with Invalid Field, so the caller passes the reported one.
+/// Data is the 8-byte CRKEY alone (unlike acquire's 16).
+fn resv_release_sqe(cid: u16, nsid: u32, rrela: u8, rtype: u8) -> [u8; 64] {
+    let mut s = [0u8; 64];
+    s[0] = OPC_RESV_RELEASE;
+    s[1] = FLAGS_SGL;
+    s[2..4].copy_from_slice(&cid.to_le_bytes());
+    s[4..8].copy_from_slice(&nsid.to_le_bytes());
+    sgl_in_capsule(&mut s, 8);
+    let cdw10 = (rrela as u32) | ((rtype as u32) << 8);
+    s[40..44].copy_from_slice(&cdw10.to_le_bytes());
+    s
 }
 
 fn cqe_status(cqe: &[u8; 16]) -> u16 {
@@ -696,6 +724,60 @@ impl ResvEndpoint {
         }
         Ok(FenceOutcome { registered, acquired, preempted, after })
     }
+
+    /// THE unfence: drop the EA-RO reservation the fence acquired, so
+    /// non-registrant I/O (every kernel blocklayout client — none of
+    /// them registers a key) flows again. Report-first and conditional,
+    /// like the fence: no holder is the idempotent no-op, and a FOREIGN
+    /// holder is a loud error rather than a release attempt — SPDK
+    /// treats a non-holder's release as a silent no-op, which here
+    /// would report "released" over a reservation still standing.
+    /// The MDS's registration stays: it costs nothing, keeps the ptpl
+    /// entry warm, and the next fence skips its register step.
+    pub async fn release(&self, our_key: u64) -> Result<ReleaseOutcome, String> {
+        tokio::time::timeout(OP_DEADLINE, self.release_inner(our_key))
+            .await
+            .map_err(|_| format!("release session to {} timed out", self.subnqn))?
+    }
+
+    async fn release_inner(&self, our_key: u64) -> Result<ReleaseOutcome, String> {
+        let mut s = self.open_session().await?;
+        let before = self.report_on(&mut s).await?;
+        tracing::debug!("resv release {}: report before = {}", self.subnqn, before.summary());
+        match before.holder_key() {
+            None => return Ok(ReleaseOutcome { released: false, after: before }),
+            Some(k) if k != our_key => {
+                return Err(format!(
+                    "reservation holder is {k:#x}, not the MDS — refusing to release a \
+                     foreign reservation ({})",
+                    before.summary()
+                ));
+            }
+            Some(_) => {}
+        }
+        // RTYPE must name the held type (SPDK: Invalid Field on
+        // mismatch) — take it from the report, not a constant, so a
+        // future fence with a different type still releases.
+        let (cqe, _) = s
+            .io
+            .roundtrip(
+                resv_release_sqe(0, self.nsid, 0, before.rtype),
+                &our_key.to_le_bytes(),
+            )
+            .await?;
+        let st = cqe_status(&cqe);
+        if st != 0 {
+            return Err(status_err("Reservation Release", st));
+        }
+        let after = self.report_on(&mut s).await?;
+        if after.holder_key().is_some() {
+            return Err(format!(
+                "reservation STILL HELD after the release — resv state: {}",
+                after.summary()
+            ));
+        }
+        Ok(ReleaseOutcome { released: true, after })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +865,20 @@ pub(crate) mod tests {
             "NUMD 0-based"
         );
         assert_eq!(u32::from_le_bytes([rep[44], rep[45], rep[46], rep[47]]), 1, "EDS");
+
+        let rel = resv_release_sqe(4, 1, 0, RTYPE_EA_REG_ONLY);
+        assert_eq!(rel[0], 0x15);
+        assert_eq!(rel[1], 0x40, "PSDT=SGL");
+        assert_eq!(
+            u32::from_le_bytes([rel[40], rel[41], rel[42], rel[43]]),
+            4 << 8,
+            "RRELA=release, IEKEY=0, RTYPE=EA-RO"
+        );
+        assert_eq!(
+            u32::from_le_bytes([rel[32], rel[33], rel[34], rel[35]]),
+            8,
+            "release data is the 8-byte CRKEY alone"
+        );
     }
 
     #[test]
@@ -985,6 +1081,37 @@ pub(crate) mod tests {
                         _ => cqe[14..16].copy_from_slice(&(0x02u16 << 1).to_le_bytes()),
                     }
                 }
+                (OPC_RESV_RELEASE, _) => {
+                    // Mirrors SPDK nvmf_ns_reservation_release: CRKEY
+                    // must match a registrant (else conflict), RTYPE
+                    // must match the held type (else invalid field),
+                    // no-holder release is a success no-op, and only
+                    // the holder's release clears the reservation.
+                    let cdw10 = u32::from_le_bytes(sqe[40..44].try_into().unwrap());
+                    let rrela = (cdw10 & 0x7) as u8;
+                    let rtype = ((cdw10 >> 8) & 0xff) as u8;
+                    let crkey = u64::from_le_bytes(data[0..8].try_into().unwrap());
+                    let mut st = state.lock().unwrap();
+                    if rrela != 0 {
+                        cqe[14..16].copy_from_slice(&(0x02u16 << 1).to_le_bytes());
+                    } else if !st.registrants.iter().any(|(k, _, _)| *k == crkey) {
+                        cqe[14..16]
+                            .copy_from_slice(&(SC_RESERVATION_CONFLICT << 1).to_le_bytes());
+                    } else if st.registrants.iter().any(|(_, _, h)| *h) {
+                        if rtype != st.rtype {
+                            cqe[14..16].copy_from_slice(&(0x02u16 << 1).to_le_bytes());
+                        } else if st.registrants.iter().any(|(k, _, h)| *k == crkey && *h) {
+                            st.rtype = 0;
+                            for r in st.registrants.iter_mut() {
+                                r.2 = false;
+                            }
+                        }
+                        // Non-holder registrant: success no-op (SPDK:
+                        // "not the reservation holder, this isn't an
+                        // error").
+                    }
+                    // No holder at all: success no-op.
+                }
                 _ => cqe[14..16].copy_from_slice(&(0x01u16 << 1).to_le_bytes()),
             }
 
@@ -1079,6 +1206,47 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("own reservation key"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn release_after_a_fence_drops_the_reservation_and_keeps_the_registration() {
+        let tgt = FakeNvmeTarget::spawn().await;
+        tgt.state.lock().unwrap().registrants.push((42, [0xcc; 16], false));
+
+        let ep = endpoint(tgt.addr);
+        ep.fence_preempt(crate::identity::BLOCK_MDS_PR_KEY, 42).await.expect("fence");
+
+        let out = ep.release(crate::identity::BLOCK_MDS_PR_KEY).await.expect("release");
+        assert!(out.released);
+        assert_eq!(out.after.holder_key(), None, "no holder after the release");
+        assert!(
+            out.after.has_key(crate::identity::BLOCK_MDS_PR_KEY),
+            "the MDS registration STAYS — only the reservation goes"
+        );
+        assert_eq!(out.after.rtype, 0);
+
+        // Replay: nothing held → the idempotent no-op.
+        let again = ep.release(crate::identity::BLOCK_MDS_PR_KEY).await.expect("replay");
+        assert!(!again.released);
+        assert_eq!(again.after.holder_key(), None);
+    }
+
+    #[tokio::test]
+    async fn release_refuses_a_foreign_holder() {
+        let tgt = FakeNvmeTarget::spawn().await;
+        {
+            let mut st = tgt.state.lock().unwrap();
+            st.registrants.push((0xbeef, [0xee; 16], true));
+            st.rtype = RTYPE_EA_REG_ONLY;
+        }
+        let err = endpoint(tgt.addr)
+            .release(crate::identity::BLOCK_MDS_PR_KEY)
+            .await
+            .unwrap_err();
+        assert!(err.contains("foreign"), "{err}");
+        // And it did not touch the foreign reservation.
+        let st = tgt.state.lock().unwrap();
+        assert!(st.registrants.iter().any(|(k, _, h)| *k == 0xbeef && *h));
     }
 
     #[tokio::test]

@@ -324,6 +324,10 @@ test-pnfs-ptpl-rig: ## PTPL survives a TGT restart: reservation restored from pt
 test-pnfs-fenced-record-rig: ## Durable fenced record: fence survives a tgt restart WITH the ptpl_file destroyed — re-acquired from sqlite (block-rig FENCE=1 TGT_RESTART=1 PTPL_LOSS=1)
 	FENCE=1 TGT_RESTART=1 PTPL_LOSS=1 tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-unfence-rig
+test-pnfs-unfence-rig: ## The fence is REVERSIBLE: UnfenceBlockClient releases the reservation and the frozen device counter moves again (block-rig FENCE=1 UNFENCE=1)
+	FENCE=1 UNFENCE=1 tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh

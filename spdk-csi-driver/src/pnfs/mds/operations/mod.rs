@@ -1534,6 +1534,90 @@ pub async fn fence_block_client(
     Ok(summary)
 }
 
+/// Lift one client's fence — the inverse of `fence_block_client`, in
+/// the SAFE order:
+///
+///  1. **Clear the durable record** (`block_unfence`) FIRST. A crash
+///     anywhere after leaves the reservation standing with no record —
+///     the fence persists at the device (safe direction), and a retry
+///     of this lever converges (no record → the release runs again).
+///     Clearing also reopens `admit_block_host`, so the client's next
+///     LAYOUTGET re-admits it durably.
+///  2. **Release the EA-RO reservation** — but ONLY when no OTHER
+///     client is still fenced on the volume. The reservation is
+///     volume-wide (EA-RO + kernel clients registering no key means it
+///     blocks every non-registrant), so it must outlive any single
+///     client's unfence while a sibling's fence stands.
+///
+/// The client's fenced GRANT rows are deliberately untouched: they
+/// clear through the client's own LAYOUTRETURN (the return-after-fence
+/// clean free) or quarantine on reclaim. Un-marking them would
+/// resurrect stale holders that block every free; deleting them would
+/// clean-free extents under a client that may still believe it holds
+/// them.
+pub async fn unfence_block_client(
+    layout_manager: &crate::pnfs::mds::layout::LayoutManager,
+    context: &str,
+    volume: &str,
+    client_id: u64,
+) -> Result<String, String> {
+    let backend = layout_manager.state_backend();
+    let cleared = match backend.block_unfence(volume, client_id).await {
+        Ok(Ok(cleared)) => cleared,
+        Ok(Err(e)) => return Err(format!("unfence record refused: {e}")),
+        Err(e) => return Err(format!("unfence record failed: {e}")),
+    };
+    let mut summary = if cleared {
+        format!("client {client_id} unfenced (durable record cleared)")
+    } else {
+        // Idempotent replay, or a release retry after a crashed first
+        // attempt — proceed to the release either way.
+        format!("client {client_id} held no fence record (replay)")
+    };
+
+    let still_fenced: Vec<u64> = match backend.block_fenced_all().await {
+        Ok(Ok(all)) => all
+            .into_iter()
+            .filter(|(v, _)| v == volume)
+            .map(|(_, c)| c)
+            .collect(),
+        Ok(Err(e)) => return Err(format!("fenced-set read refused: {e}")),
+        Err(e) => return Err(format!("fenced-set read failed: {e}")),
+    };
+    if !still_fenced.is_empty() {
+        summary.push_str(&format!(
+            "; reservation KEPT — client(s) {still_fenced:?} still fenced on '{volume}'"
+        ));
+        return Ok(summary);
+    }
+
+    let Some(rec) = layout_manager.block_export() else {
+        summary.push_str("; no block export attached — record only");
+        return Ok(summary);
+    };
+    match rec.fence_release(volume).await {
+        Ok(s) => {
+            info!("✅ {}: reservation release — {}", context, s);
+            summary.push_str(&format!("; {s}"));
+        }
+        Err(e) => {
+            // LOUD and non-fatal, but unlike the fence's best-effort
+            // arms this failure leaves the client still BLOCKED at the
+            // device — the record is already cleared, so a retry of
+            // the lever re-runs the release and converges.
+            tracing::error!(
+                "{}: reservation release on '{}' FAILED: {} — the volume stays fenced \
+                 at the device; retry UnfenceBlockClient to converge",
+                context,
+                volume,
+                e
+            );
+            summary.push_str("; release FAILED (volume still blocked — retry; see log)");
+        }
+    }
+    Ok(summary)
+}
+
 /// The scsi reclaim driver — §8's GC, FlintExtents' reclaim machine in
 /// code: recall every layout handle on the file (server-side revoke
 /// regardless of delivery, the F65 shape — an unreachable client is

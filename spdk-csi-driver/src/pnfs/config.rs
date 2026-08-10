@@ -723,7 +723,18 @@ impl PnfsConfig {
                         })?;
                     }
                 }
-                let backend = crate::state_backend::SqliteBackend::open(&path)
+                // open_durable (synchronous=FULL), not open (NORMAL):
+                // for block-class volumes this DB is not bookkeeping,
+                // it is the volume's data map (§5 — extent rows lost
+                // over live data = F67's silent zeros) and the fence's
+                // only positive record. NORMAL's commits are durable at
+                // the CHECKPOINT, not at commit — the unfence rig
+                // power-cycled the MDS node moments after a fence and
+                // the "durable" record was gone. FULL fsyncs the WAL
+                // per commit batch; the writer thread's group commit
+                // amortizes it (same trade the standalone server has
+                // shipped since v1.7).
+                let backend = crate::state_backend::SqliteBackend::open_durable(&path)
                     .map_err(|e| format!("open sqlite at {}: {}", path, e))?;
                 Ok(std::sync::Arc::new(backend))
             }

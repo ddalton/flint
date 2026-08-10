@@ -57,6 +57,19 @@
 #   the base rig (clean REMOVE) and the allocator unit tests; forcing it
 #   here only silly-renames a file the fenced writer still holds open.
 #
+# FENCE=1 UNFENCE=1 — the fence is REVERSIBLE (§U), via the real
+#   operator flow: fence a mid-write client, REBOOT the node (a fenced
+#   in-flight O_DIRECT pwrite parks in D-state — rig-found; no umount,
+#   lazy or not, gets past it), let the restarted stack re-establish
+#   the fence from the durable record, then UnfenceBlockClient clears
+#   the record + RELEASES the EA-RO reservation, the evicted client
+#   reconnects, and its O_DIRECT write moves the counter the fence
+#   froze.
+# FENCE=1 RESTART=1 — the fence survives an MDS restart (§R).
+# FENCE=1 TGT_RESTART=1 [PTPL_LOSS=1] — the fence survives a tgt
+#   restart via ptpl (or, with the ptpl_file destroyed, via the durable
+#   fenced_clients record) (§T).
+#
 # Exit 0 = every proof held.
 
 set -uo pipefail
@@ -401,6 +414,155 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
   # a memory-tight VM. Keeping the two drills separate is the fix.
   vsudo "nvme disconnect -n $SUBNQN 2>/dev/null; true"
   vsudo "[ -f /var/tmp/rig-writer.pid ] && kill -9 \$(cat /var/tmp/rig-writer.pid) 2>/dev/null; true"
+
+  # ── U. UNFENCE=1: the fence is REVERSIBLE ───────────────────────────
+  # The inverse of the whole F-drill, run the way an operator actually
+  # runs it: fence the wedged node, REBOOT it, then unfence. The reboot
+  # is not rig convenience — it is the only reliable client recovery:
+  # an O_DIRECT writer fenced MID-WRITE can park its pwrite in D-state
+  # client-side (rig-found: the F4 "blocked" branch left a pwrite even
+  # `umount -lf` wedged behind, with nvme-delete-wq in D). Since the
+  # whole stack lives in the VM, the reboot doubles as a together-
+  # restart of tgt+MDS — composing the ALREADY-PROVEN T-mode property
+  # (the fence re-establishes from ptpl + the durable record) in front
+  # of the release under test. The money proof inverts F3: the device
+  # counter moves again under a fresh O_DIRECT write.
+  if [ "${UNFENCE:-0}" = "1" ]; then
+    echo "▶ UNFENCE: node reboot, fence re-established, then record → reservation → bytes"
+    # U0. reboot the client node (the whole VM — force: the D-state
+    # writer blocks a graceful shutdown indefinitely).
+    limactl stop -f "$LIMA_VM" || fail "limactl stop"
+    limactl start "$LIMA_VM" || fail "limactl start"
+    vsudo "modprobe nvme-tcp && modprobe blocklayoutdriver" || fail "modprobe after reboot"
+    vsudo "rm -f /var/tmp/spdk_cpu_lock_*; rm -f /dev/disk/by-id/nvme-eui.*"
+
+    # Same tgt resurrection as §T: SAME disk image, SAME ptpl_dir —
+    # lvstore+lvol auto-load; NO create_lvstore (that would wipe).
+    vsudo "nohup $RIG_TOOLS/spdk_tgt --no-huge -s 512 -r $SOCK -m 0x1 --wait-for-rpc >>$RIG/spdk.log 2>&1 &
+           echo \$! > /var/tmp/spdk-rig.pid; sleep 0.5"
+    for i in $(seq 1 20); do
+      vsh "$RPC rpc_get_methods >/dev/null 2>&1" && break
+      [ "$i" = 20 ] && fail "tgt RPC never came back after the reboot ($RIG/spdk.log)"
+      sleep 0.5
+    done
+    vsudo "chmod 0777 $SOCK"
+    vsh "$RPC iobuf_set_options --small-pool-count 4096 --large-pool-count 1024" || fail "iobuf (reboot)"
+    vsh "$RPC iscsi_set_options -a 1 -c 1 -q 1 -x 1 -k 1 -u 24 -j 1 -z 1" || fail "iscsi (reboot)"
+    vsh "$RPC framework_start_init" || fail "framework_start_init (reboot)"
+    for i in $(seq 1 60); do
+      vsh "$RPC framework_wait_init >/dev/null 2>&1" && break
+      [ "$i" = 60 ] && fail "subsystems never initialized (reboot)"
+      sleep 0.5
+    done
+    vsh "$RPC bdev_aio_create /var/tmp/rig-disk.img rigdisk 4096" >/dev/null || fail "bdev_aio_create (reboot)"
+    for i in $(seq 1 40); do
+      vsh "$RPC bdev_get_bdevs --name lvs_rig/$VOL >/dev/null 2>&1" && break
+      [ "$i" = 40 ] && fail "the lvstore/lvol did NOT auto-load after the reboot"
+      sleep 0.5
+    done
+    vsh "$RPC nvmf_create_transport -t TCP" || fail "nvmf_create_transport (reboot)"
+
+    # MDS back; its startup replay must RE-ESTABLISH the fence from the
+    # durable record before the lever lifts it (the §T-proven property,
+    # here as a precondition: what the release releases is real).
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    for i in $(seq 1 20); do
+      vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
+      [ "$i" = 20 ] && fail "MDS gRPC never came back after the reboot"
+      sleep 0.5
+    done
+    STARTUP=""
+    for i in $(seq 1 60); do
+      STARTUP=$(vsh "grep 'startup re-fence' $RIG/mds.log | tail -1" || true)
+      [ -n "$STARTUP" ] && break
+      sleep 0.5
+    done
+    [ -n "$STARTUP" ] || fail "no startup re-fence after the reboot — the durable record was not consulted"
+    echo "$STARTUP" | grep -q '0x666c696e745f6d64(holder)' \
+      || fail "the fence did not re-establish across the reboot: ${STARTUP}"
+    echo "✓ node rebooted; stack restarted; fence re-established: ${STARTUP}"
+
+    # U1. the lever: record cleared AND the reservation released.
+    UR=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+          -d '{\"volumeId\":\"$VOL\",\"clientId\":\"$CID\"}' \
+          127.0.0.1:50051 pnfs.control.MdsControl/UnfenceBlockClient") \
+      || fail "UnfenceBlockClient RPC failed"
+    echo "$UR" | grep -c '"unfenced": true' >/dev/null || fail "unfence lever refused: $UR"
+    REL_LINE=$(vsh "grep -o 'released=.*' $RIG/mds.log | tail -1" || true)
+    echo "$REL_LINE" | grep -q 'released=true' \
+      || fail "the reservation was NOT released — ${REL_LINE:-<no release line>}"
+    echo "✓ unfence lever accepted (client $CID): ${REL_LINE}"
+
+    # U2. the durable record is gone (and stays gone — nothing for a
+    # future startup replay to re-fence from).
+    FCOUNT=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+      \"SELECT COUNT(*) FROM fenced_clients WHERE volume='$VOL'\"" || echo "?")
+    [ "${FCOUNT:-1}" = "0" ] || fail "fenced_clients still holds $FCOUNT row(s) after unfence"
+    echo "✓ durable record cleared (fenced_clients drained)"
+
+    # U3. the transport path back: the rig re-plays csi-node's pre-admit
+    # (production re-admits at the client's next LAYOUTGET; the raw
+    # add_host only reopens the transport so that LAYOUTGET can find a
+    # resolvable device). The connect itself must now SUCCEED — at F5 /
+    # R4 this exact command was refused. Fresh-boot kernel: re-apply the
+    # fast_io_fail backfill and the §4a eui link.
+    vsh "$RPC nvmf_subsystem_add_host $SUBNQN $HOSTNQN" || fail "re-admit add_host"
+    vsudo "nvme connect -t tcp -a 127.0.0.1 -s 4420 -n $SUBNQN --hostnqn=$HOSTNQN \
+           --ctrl-loss-tmo=10 --reconnect-delay=2" \
+      || fail "the unfenced client could not reconnect"
+    vsudo "for c in /sys/class/nvme/nvme*; do
+             [ -w \$c/fast_io_fail_tmo ] && echo 5 > \$c/fast_io_fail_tmo 2>/dev/null
+           done; true"
+    NSDEV=""
+    for i in $(seq 1 20); do
+      NSDEV=$(vsh "for b in /sys/class/block/nvme*; do
+          case \$(basename \$b) in nvme*c*n*) continue;; esac
+          g=\$(cat \$b/nguid 2>/dev/null | tr -d -- -)
+          [ \"\$g\" = \"$NGUID\" ] && basename \$b
+        done" | tail -1)
+      [ -n "$NSDEV" ] && break
+      sleep 0.5
+    done
+    [ -n "$NSDEV" ] || fail "no namespace device after the unfenced reconnect"
+    vsudo "udevadm settle -t 10; ln -sf /dev/$NSDEV /dev/disk/by-id/nvme-eui.$NGUID"
+    echo "✓ unfenced client reconnected: /dev/$NSDEV (was refused while fenced)"
+
+    # U4. THE INVERSE OF F3: mount, write O_DIRECT, and the device
+    # counter moves again. The RELEASE is what this requires: the
+    # rebooted client is a fresh NFSv4 identity (new clientid — the
+    # admission guard is a same-incarnation belt, unit-tested, not
+    # provable here), but no clientid change can dodge a held EA-RO —
+    # the reservation blocks by NVMe host registration, and this host
+    # registers no key. Only the release lets the raw write through. A
+    # fallback-path write cannot fake it — the scsi zeros-belt refuses
+    # MDS I/O, so dd would EIO instead of moving the lvol counter
+    # (which the tgt restart zeroed: everything it counts now is
+    # post-release traffic).
+    vsudo "mkdir -p $MNT && mount -t nfs4 -o vers=4.2,proto=tcp,port=20490 127.0.0.1:/$VOL $MNT" \
+      || fail "post-unfence mount failed"
+    REWRITE_MIB=8
+    vsudo "dd if=/dev/urandom of=$MNT/data.bin bs=1M count=$REWRITE_MIB \
+           oflag=direct conv=notrunc status=none && sync $MNT/data.bin" \
+      || fail "post-unfence O_DIRECT write FAILED — the client is still fenced somewhere"
+    W_AFTER=$(lvol_written)
+    NEED_RW=$((REWRITE_MIB * 1024 * 1024))
+    [ "${W_AFTER:-0}" -ge "$NEED_RW" ] \
+      || fail "device saw only ${W_AFTER}B written after unfence (need ≥$NEED_RW) — the write did not go raw"
+    HOSTROWS=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+      \"SELECT COUNT(*) FROM block_hosts WHERE volume='$VOL'\"" || echo 0)
+    [ "${HOSTROWS:-0}" -ge 1 ] \
+      || fail "no block_hosts row after the recovery write — the LAYOUTGET admission never ran"
+    echo "✓ bytes flow again: ${W_AFTER}B written raw post-release; durable re-admission recorded"
+
+    echo
+    echo "✅ unfence-rig PASSED — the fence is REVERSIBLE, through the REAL operator"
+    echo "   flow: fence a mid-write client, reboot the node (the only recovery from"
+    echo "   its D-state pwrite), watch the restarted stack RE-ESTABLISH the fence"
+    echo "   from the durable record, then UnfenceBlockClient cleared the record,"
+    echo "   RELEASED the EA-RO reservation, the evicted client reconnected, and its"
+    echo "   O_DIRECT write moved the device counter the fence had frozen. On $KREL."
+    exit 0
+  fi
 
   # ── T. TGT_RESTART=1: does PTPL survive a TARGET restart? ───────────
   # The landmine (design §5): a tgt restart drops every reservation from

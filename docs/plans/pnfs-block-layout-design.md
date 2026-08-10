@@ -493,6 +493,41 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   > the fence was rebuilt from sqlite alone, surviving TOTAL target-state loss. `SCHEMA_VERSION`
   > 4→5; `drop_volume` sweeps the new table; `block_unfence` is the release/lease-recovery
   > hook (the fence is otherwise permanent — see the volume-wide-EA-RO note in §6/§8).
+  >
+  > **UNFENCE (reservation release) RIG-PROVEN 2026-08-10** (`make test-pnfs-unfence-rig`
+  > = `FENCE=1 UNFENCE=1`): the fence is REVERSIBLE. `UnfenceBlockClient` (the operator
+  > lever — the MDS never unfences on its own) clears the durable record FIRST (a crash
+  > after leaves the fence standing, the safe direction; a lever retry converges), then
+  > releases the EA-RO reservation via NVMe Reservation Release (RRELA=0, RTYPE from the
+  > report, CRKEY=MDS key; the MDS *registration* stays) — but ONLY when no other client
+  > remains fenced on the volume: the reservation is volume-wide (kernel clients register
+  > no key, so EA-RO blocks every non-registrant), so it must outlive any single unfence
+  > while a sibling's fence stands. Fenced GRANT rows are deliberately untouched — they
+  > clear via the client's own return-after-fence or quarantine on reclaim. The rig runs
+  > the REAL operator flow: fence a mid-write client, **reboot the node**, then unfence —
+  > because rig-found, a client fenced with an O_DIRECT pwrite in flight can park that
+  > pwrite in D-state (the F4 "blocked" branch: a burst of belt-refused fallback WRITEs,
+  > then silence), and NO umount — lazy, forced, or both — gets past it; the reboot is the
+  > only reliable client recovery, so the runbook step is fence → reboot → unfence. The
+  > reboot doubles as a together-restart, so the drill first watches the fence
+  > RE-ESTABLISH from the durable record (§T's property as a precondition), then: the
+  > lever answered `released=true`, `fenced_clients` drained, the evicted hostnqn
+  > reconnected (refused minutes earlier), and a fresh O_DIRECT write put ≥8 MiB through
+  > the device counter the fence had frozen, with the durable re-admission row back in
+  > `block_hosts`. Re-admission is grant-driven (the client's next LAYOUTGET) — nothing is
+  > proactively restored.
+  >
+  > **Rig-found while proving it: the "durable" record was not power-loss durable.** The
+  > MDS opened its state DB with `synchronous=NORMAL` (`config.rs build_state_backend`),
+  > whose commits are durable at the *checkpoint*, not at commit — the drill's node
+  > power-off moments after a fence came back with `fenced_clients` EMPTY: the fence
+  > silently lifted, exactly the class of loss this section's own "durability is
+  > sqlite-only and therefore must be stronger" sentence predicts (and, worse, the same
+  > window applies to the extent map itself — a power-lost `extents` commit over
+  > committed data is F67's silent zeros). Fixed: the pNFS MDS now uses `open_durable`
+  > (synchronous=FULL, per-commit WAL fsync, group-commit amortized) — the same trade the
+  > standalone server has shipped since v1.7. The mdsbench cost gate should re-run at the
+  > next release to price the fsync on the files-layout hot path.
 - **Fallback lane**: the disposition ladder (`fallback_io_disposition_core`,
   `operations/mod.rs:246-339`) grows a block arm at the same dispatcher fork
   (`dispatcher.rs:2264`): the MDS reads/writes the volume's extents itself via an

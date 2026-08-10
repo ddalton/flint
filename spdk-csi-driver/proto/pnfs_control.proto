@@ -50,11 +50,23 @@ service MdsControl {
   // unresponsive or about to be — the reclaim driver runs the same
   // sequence on its own when a recall goes unanswered. Idempotent.
   //
-  // The durable arm binds to the client's GRANT rows: a client holding
-  // no grants gets the device-path arms (preempt + eviction) only, and
-  // its next LAYOUTGET would re-admit it — fencing is for holders, not
-  // a standing ban list.
+  // The fence STANDS until UnfenceBlockClient clears it: the durable
+  // fenced_clients record survives MDS restarts, tgt restarts, and
+  // ptpl loss (the startup replay re-acquires the reservation from it),
+  // and the admission guard refuses the client's own LAYOUTGET-driven
+  // re-admission while it exists.
   rpc FenceBlockClient(FenceBlockClientRequest) returns (FenceBlockClientResponse);
+
+  // Lift a client's fence: clear the durable fenced_clients record
+  // (reopening LAYOUTGET-driven admission) and, when NO other client
+  // remains fenced on the volume, release the MDS's EA-RO reservation
+  // so non-registrant I/O flows again. The reservation is volume-wide
+  // — kernel blocklayout clients register no key, so EA-RO blocks
+  // every one of them — which is why it outlives any single client's
+  // unfence while a sibling's fence stands. Idempotent; a retry after
+  // a failed release converges. The client's next LAYOUTGET re-admits
+  // it to the export allow-list; nothing is proactively restored.
+  rpc UnfenceBlockClient(UnfenceBlockClientRequest) returns (UnfenceBlockClientResponse);
 }
 
 message FenceBlockClientRequest {
@@ -73,6 +85,22 @@ message FenceBlockClientResponse {
   // allow-list arms are best-effort on top; `detail` says what each
   // did.
   bool fenced = 1;
+  string detail = 2;
+}
+
+message UnfenceBlockClientRequest {
+  string volume_id = 1;
+  // The fenced client's NFSv4 client id — the same u64
+  // FenceBlockClient took.
+  uint64 client_id = 2;
+}
+
+message UnfenceBlockClientResponse {
+  // True when the durable record is cleared (or was already absent —
+  // the idempotent replay). `detail` says what the release arm did;
+  // "release FAILED" there means the volume is STILL blocked at the
+  // device and the lever must be retried.
+  bool unfenced = 1;
   string detail = 2;
 }
 

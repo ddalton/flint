@@ -278,6 +278,45 @@ impl BlockExportReconciler {
         ))
     }
 
+    /// The fence's inverse (the UnfenceBlockClient release arm): drop
+    /// the EA-RO reservation the MDS holds on the volume's namespace,
+    /// so non-registrant I/O — every kernel blocklayout client — flows
+    /// again. The caller decides WHETHER releasing is safe (no other
+    /// client still fenced on the volume); this method only delivers
+    /// it. Same converge-first shape as `fence_preempt`: the fence
+    /// lane's host must be on the allow-list to connect.
+    pub async fn fence_release(&self, volume: &str) -> Result<String, String> {
+        let lock = self.lock_for(volume);
+        let _g = lock.lock().await;
+        self.ensure_locked(volume, None).await?;
+        let nqn = crate::identity::block_volume_export_nqn(volume);
+        let nsid = get_subsystem(self.rpc.as_ref(), &nqn)
+            .await
+            .map_err(|e| format!("nvmf_get_subsystems {}: {}", nqn, e))?
+            .and_then(|s| {
+                s.get("namespaces")?
+                    .as_array()?
+                    .first()?
+                    .get("nsid")?
+                    .as_u64()
+            })
+            .ok_or_else(|| format!("{} carries no namespace to release on", nqn))?;
+        let ep = super::resv_fence::ResvEndpoint {
+            traddr: self.traddr.clone(),
+            trsvcid: self.trsvcid,
+            subnqn: nqn,
+            hostnqn: crate::identity::block_mds_host_nqn(),
+            hostid: crate::identity::BLOCK_MDS_HOST_ID,
+            nsid: nsid as u32,
+        };
+        let out = ep.release(crate::identity::BLOCK_MDS_PR_KEY).await?;
+        Ok(format!(
+            "released={} resv: {}",
+            out.released,
+            out.after.summary()
+        ))
+    }
+
     /// DeleteVolume's teardown: subsystem first (severs every data path),
     /// then the lvol. Both tolerate absence — the sweep is unconditional
     /// and a crashed earlier attempt may have finished half of it.
@@ -680,6 +719,48 @@ pub(crate) mod tests {
             "MDS key holds the reservation"
         );
         assert_eq!(st.rtype, crate::pnfs::mds::resv_fence::RTYPE_EA_REG_ONLY);
+    }
+
+    /// The release seam: after a fence, `fence_release` drops the
+    /// reservation (non-registrants may I/O again) but keeps the MDS
+    /// registration, and a replay is the idempotent no-op.
+    #[tokio::test]
+    async fn fence_release_drops_the_reservation_and_replays_as_a_noop() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        nvme.state.lock().unwrap().registrants.push((42, [0xcc; 16], false));
+
+        let tgt = Arc::new(FakeTgt::new());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            crate::state_backend::memory_backend(),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        );
+        r.ensure("pvc-r", Some(1024 * 1024)).await.expect("provision");
+        r.fence_preempt("pvc-r", 42).await.expect("fence");
+        {
+            let st = nvme.state.lock().unwrap();
+            assert!(st.registrants.iter().any(|(_, _, h)| *h), "fence holds");
+        }
+
+        let summary = r.fence_release("pvc-r").await.expect("release");
+        assert!(summary.contains("released=true"), "got: {summary}");
+        {
+            let st = nvme.state.lock().unwrap();
+            assert!(!st.registrants.iter().any(|(_, _, h)| *h), "no holder");
+            assert_eq!(st.rtype, 0);
+            assert!(
+                st.registrants
+                    .iter()
+                    .any(|(k, _, _)| *k == crate::identity::BLOCK_MDS_PR_KEY),
+                "MDS registration kept"
+            );
+        }
+
+        let again = r.fence_release("pvc-r").await.expect("replay");
+        assert!(again.contains("released=false"), "got: {again}");
     }
 
     #[tokio::test]
