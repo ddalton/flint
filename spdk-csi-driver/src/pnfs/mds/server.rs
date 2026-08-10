@@ -404,82 +404,29 @@ impl MetadataServer {
         self.load_persisted_state().await?;
 
         // pnfs-block startup replay: converge every known scsi volume's
-        // export chain (the geometry cache was just seeded above). This
-        // repairs the together-restart shape — MDS pod restart takes the
-        // colocated tgt with it, and sqlite is the only durable record of
-        // what the tgt should serve. Spawned + loud-on-failure: a down
-        // tgt must not stop the MDS from serving its file-class volumes.
-        if let Some(reconciler) = self.layout_manager.block_export() {
+        // export chain (the geometry cache was just seeded above) and
+        // re-establish active fences from the durable record — the
+        // together-restart repair (MDS pod restart takes the colocated
+        // tgt with it; sqlite is the only durable record of what the
+        // tgt should serve) and the PTPL-loss recovery path. Spawned +
+        // loud-on-failure: a down tgt must not stop the MDS from
+        // serving its file-class volumes. The SAME pass then repeats on
+        // a timer (start_export_reconcile below) — that is what repairs
+        // a tgt-ONLY restart, where no MDS startup ever runs.
+        if self.layout_manager.block_export().is_some() {
             let volumes = self.layout_manager.scsi_volumes();
             if !volumes.is_empty() {
                 info!(
                     "🧱 block-export startup replay: {} scsi volume(s)",
                     volumes.len()
                 );
-                let backend = self.layout_manager.state_backend();
+                let lm = Arc::clone(&self.layout_manager);
                 tokio::spawn(async move {
-                    reconciler.reconcile_all(&volumes).await;
-                    // Re-establish any ACTIVE fence. reconcile_all just
-                    // re-added each namespace with its ptpl_file, so SPDK
-                    // has already restored the reservations the ptpl_file
-                    // carried; this loop re-acquires EA-RO for volumes
-                    // whose fence the ptpl_file did NOT carry (ptpl loss,
-                    // or a fresh disk that never had it). The durable
-                    // `fenced_clients` record is the source of truth, so
-                    // the fence survives even total target-state loss —
-                    // the PTPL-loss recovery path. fence_preempt is
-                    // idempotent: when the reservation DID survive it is a
-                    // no-op (registered=false acquired=false).
-                    match backend.block_fenced_all().await {
-                        Ok(Ok(fenced)) if !fenced.is_empty() => {
-                            info!(
-                                "⛔ startup: re-establishing {} fenced client(s) from the \
-                                 durable record",
-                                fenced.len()
-                            );
-                            for (v, c) in fenced {
-                                match reconciler.fence_preempt(&v, c).await {
-                                    Ok(s) => {
-                                        info!("⛔ startup re-fence '{}' client {}: {}", v, c, s);
-                                        // Confirmed at the target — mark
-                                        // DELIVERED so the reclaim may
-                                        // free this client's extents
-                                        // (closes the crash window where
-                                        // the original fence never got
-                                        // to mark it). Loud-only on
-                                        // failure: unmarked = quarantine,
-                                        // the safe side.
-                                        let now = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs() as i64)
-                                            .unwrap_or(0);
-                                        match backend.block_fence_delivered(&v, c, now).await {
-                                            Ok(Ok(_)) => {}
-                                            Ok(Err(e)) => tracing::error!(
-                                                "startup delivered-mark '{}' client {}: {}",
-                                                v, c, e
-                                            ),
-                                            Err(e) => tracing::error!(
-                                                "startup delivered-mark '{}' client {}: {}",
-                                                v, c, e
-                                            ),
-                                        }
-                                    }
-                                    Err(e) => tracing::error!(
-                                        "startup re-fence '{}' client {} FAILED: {} — the client \
-                                         may reach the device until the next reconcile/roll",
-                                        v, c, e
-                                    ),
-                                }
-                            }
-                        }
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => tracing::error!("startup fenced-set read refused: {}", e),
-                        Err(e) => tracing::error!("startup fenced-set read failed: {}", e),
-                    }
+                    crate::pnfs::mds::operations::export_reconcile_pass(&lm, "startup").await;
                 });
             }
         }
+        self.start_export_reconcile();
 
         // Start heartbeat monitor in the background
         let heartbeat_timeout = Duration::from_secs(self.config.failover.heartbeat_timeout);
@@ -663,6 +610,60 @@ impl MetadataServer {
     /// expired before one whole lease window has passed — sweeping
     /// earlier would fence clients that are mid-reclaim. The in-grace
     /// check stays in the loop as the belt.
+    /// The periodic export reconcile loop — the repair for a tgt-ONLY
+    /// restart. An MDS restart replays exports at startup; a tgt that
+    /// restarts UNDER a running MDS came back with empty memory and,
+    /// until this loop existed, stayed empty until an operator rolled
+    /// the MDS (the runbook rule this retires). Every tick re-runs the
+    /// same `export_reconcile_pass` startup uses: level-triggered, so a
+    /// converged tgt sees probes and zero mutations; a wiped one gets
+    /// its subsystems, namespaces (with ptpl_file — which restores the
+    /// reservations ptpl carried), listeners, allow-lists, and any
+    /// ptpl-lost fences rebuilt within one interval.
+    ///
+    /// `FLINT_PNFS_EXPORT_RECONCILE_SECS` (default 30; 0 disables with
+    /// a loud warning). The first tick is skipped — the startup replay
+    /// just ran.
+    fn start_export_reconcile(&self) {
+        if self.layout_manager.block_export().is_none() {
+            return;
+        }
+        let secs = std::env::var("FLINT_PNFS_EXPORT_RECONCILE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        if secs == 0 {
+            warn!(
+                "export reconcile loop DISABLED (FLINT_PNFS_EXPORT_RECONCILE_SECS=0) — \
+                 a tgt-only restart will serve NOTHING until the MDS is rolled"
+            );
+            return;
+        }
+        let layout_manager = Arc::clone(&self.layout_manager);
+        tokio::spawn(async move {
+            info!(
+                "🧱 export reconcile loop: every {}s (a tgt-only restart repairs \
+                 without an MDS roll)",
+                secs
+            );
+            let mut tick = interval(Duration::from_secs(secs));
+            tick.tick().await; // consume the immediate tick — startup replay just ran
+            loop {
+                tick.tick().await;
+                let (vols, refenced) = crate::pnfs::mds::operations::export_reconcile_pass(
+                    &layout_manager,
+                    "reconcile",
+                )
+                .await;
+                tracing::debug!(
+                    "export reconcile pass: {} volume(s), {} fence(s) re-established",
+                    vols,
+                    refenced
+                );
+            }
+        });
+    }
+
     fn start_lease_sweep(&self) {
         let secs = std::env::var("FLINT_PNFS_LEASE_SWEEP_SECS")
             .ok()

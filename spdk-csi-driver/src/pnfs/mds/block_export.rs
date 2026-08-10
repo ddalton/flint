@@ -380,7 +380,9 @@ impl BlockExportReconciler {
                     e
                 );
             } else {
-                tracing::info!("block-export reconcile of '{}' converged", v);
+                // debug, not info: this line is per-volume per-pass and
+                // the periodic reconcile loop runs it every tick.
+                tracing::debug!("block-export reconcile of '{}' converged", v);
             }
         }
     }

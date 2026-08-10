@@ -592,6 +592,26 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   > (synchronous=FULL, per-commit WAL fsync, group-commit amortized) — the same trade the
   > standalone server has shipped since v1.7. The mdsbench cost gate should re-run at the
   > next release to price the fsync on the files-layout hot path.
+  >
+  > **PERIODIC RECONCILE LOOP SHIPPED 2026-08-10, RIG-PROVEN**
+  > (`make test-pnfs-reconcile-rig` = block-rig.sh `RECONCILE=1`): the tgt-ONLY
+  > restart — the one restart shape no startup replay can see, because the MDS never
+  > restarts — finally repairs itself, retiring the runbook's roll-the-MDS rule. One
+  > shared `export_reconcile_pass` (startup replay and the loop call the same body, so
+  > they cannot drift) re-converges every scsi volume's export chain from sqlite and
+  > re-establishes every active fence from the durable `fenced_clients` record,
+  > marking DELIVERED on confirmation — the crash-window closure is now continuous,
+  > not boot-only. `FLINT_PNFS_EXPORT_RECONCILE_SECS` (default 30 s; 0 = loud kill
+  > switch); level-triggered, so a converged tgt sees probes and zero mutations.
+  > Proven: kill the tgt under a live mounted client, restart it empty on the same
+  > disk, and within one interval the loop rebuilt subsystem/namespace/allow-list
+  > (MDS pid asserted UNCHANGED), the client's surviving kernel controller
+  > reconnected on its own, wrote 8 MiB raw through the zeroed device counter, and
+  > the run fell through to a clean REMOVE reclaim + unstage/detach on the repaired
+  > stack. The client-side residual stands unchanged: a controller whose
+  > ctrl_loss_tmo expired during the outage is deleted kernel-side and nothing
+  > re-establishes it (csi-node re-stage machinery, still owed) — the production
+  > 1800 s default makes that window generous.
 - **Fallback lane**: the disposition ladder (`fallback_io_disposition_core`,
   `operations/mod.rs:246-339`) grows a block arm at the same dispatcher fork
   (`dispatcher.rs:2264`): the MDS reads/writes the volume's extents itself via an

@@ -1787,6 +1787,86 @@ pub async fn detach_block_node(
     Ok(summary)
 }
 
+/// ONE pass of export convergence: re-converge every scsi volume's
+/// export chain from durable state, then re-establish every ACTIVE
+/// fence from the durable `fenced_clients` record. This is BOTH the
+/// startup replay (context `"startup"`) and the periodic reconcile
+/// loop (context `"reconcile"`) — one body, so the two can never
+/// drift.
+///
+/// The periodic caller is what finally repairs a **tgt-ONLY restart**
+/// (the MDS keeps running; the tgt comes back with empty memory):
+/// until it existed, the startup replay and the runbook's
+/// roll-the-MDS-after-a-tgt-restart rule were the only repair.
+/// `reconcile_all` re-adds each namespace with its ptpl_file — which
+/// is also what lets SPDK restore the reservations the ptpl carried —
+/// and the fence arm re-acquires EA-RO where the ptpl did NOT survive,
+/// marking the fence DELIVERED on confirmation (the crash-window
+/// closure, now continuous instead of boot-only). `fence_preempt` is
+/// idempotent: when the reservation survived, the pass is a no-op
+/// (`registered=false acquired=false`).
+///
+/// Returns `(volumes reconciled, fences re-established)`.
+pub async fn export_reconcile_pass(
+    layout_manager: &crate::pnfs::mds::layout::LayoutManager,
+    context: &str,
+) -> (usize, usize) {
+    let Some(reconciler) = layout_manager.block_export() else {
+        return (0, 0);
+    };
+    let volumes = layout_manager.scsi_volumes();
+    if volumes.is_empty() {
+        // No scsi volumes ⇒ no fences either: a fence record exists
+        // only for a volume with geometry, and DeleteVolume sweeps
+        // both together (drop_volume).
+        return (0, 0);
+    }
+    reconciler.reconcile_all(&volumes).await;
+
+    let backend = layout_manager.state_backend();
+    let mut refenced = 0usize;
+    match backend.block_fenced_all().await {
+        Ok(Ok(fenced)) if !fenced.is_empty() => {
+            for (v, c) in fenced {
+                match reconciler.fence_preempt(&v, c).await {
+                    Ok(s) => {
+                        info!("⛔ {} re-fence '{}' client {}: {}", context, v, c, s);
+                        refenced += 1;
+                        // Confirmed at the target — mark DELIVERED so
+                        // the reclaim may free this client's extents.
+                        // Loud-only on failure: unmarked = quarantine,
+                        // the safe side.
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        match backend.block_fence_delivered(&v, c, now).await {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => tracing::error!(
+                                "{} delivered-mark '{}' client {}: {}",
+                                context, v, c, e
+                            ),
+                            Err(e) => tracing::error!(
+                                "{} delivered-mark '{}' client {}: {}",
+                                context, v, c, e
+                            ),
+                        }
+                    }
+                    Err(e) => tracing::error!(
+                        "{} re-fence '{}' client {} FAILED: {} — the client may reach \
+                         the device until the next reconcile pass",
+                        context, v, c, e
+                    ),
+                }
+            }
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::error!("{} fenced-set read refused: {}", context, e),
+        Err(e) => tracing::error!("{} fenced-set read failed: {}", context, e),
+    }
+    (volumes.len(), refenced)
+}
+
 /// ONE pass of the lease sweep — the reaper the dispatcher's
 /// LAYOUTRETURN comments have promised since the scsi arm shipped
 /// ("grant rows left for the reclaim sweep"). Client-lease expiry in
@@ -2736,6 +2816,98 @@ mod fallback_tests {
 
         // Replay: nothing left to sweep.
         assert_eq!(lease_sweep_pass(&lm, &|c| c == 9).await, 0);
+    }
+
+    /// The periodic reconcile pass repairs a tgt-ONLY restart: the tgt
+    /// comes back with empty memory (no subsystems, no reservations —
+    /// the ptpl-loss shape, since the fake persists nothing) while the
+    /// MDS keeps running. One pass must rebuild the export chain from
+    /// sqlite AND re-acquire the standing fence, marking it DELIVERED.
+    #[tokio::test]
+    async fn export_reconcile_pass_repairs_a_wiped_tgt_and_refences() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        lm.set_volume_geometry(
+            "volR",
+            crate::pnfs::mds::layout::VolumeGeometry {
+                stripe_size: 0,
+                stripe_width: 0,
+                layout_class: crate::pnfs::mds::layout::LayoutClass::Scsi,
+            },
+        )
+        .await;
+        lm.register_extent_arena("volR", 1 << 20).await.unwrap();
+        let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
+        let reconciler = Arc::new(crate::pnfs::mds::block_export::BlockExportReconciler::new(
+            Arc::clone(&tgt)
+                as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        ));
+        reconciler.ensure("volR", Some(1 << 20)).await.unwrap();
+        lm.attach_block_export(reconciler);
+
+        // A live node attach + a fenced client (delivered via the real
+        // preempt against the scripted target).
+        let live = crate::nvmeof_export::flint_host_nqn("node-live");
+        backend.block_node_attach("volR", &live, "node-live", 0).await.unwrap().unwrap();
+        backend.block_host_admit("volR", 7, &crate::nvmeof_export::flint_host_nqn("node-dead"), 0)
+            .await.unwrap().unwrap();
+        backend.extent_grant("volR", 41, 7, 0, 8192, true).await.unwrap().unwrap();
+        fence_block_client(&lm, "test", "volR", 7).await.unwrap();
+        let nqn = crate::identity::block_volume_export_nqn("volR");
+        assert!(tgt.hosts_of(&nqn).contains(&live));
+
+        // The tgt restarts: memory wiped — subsystems gone AND the
+        // reservation gone (ptpl-loss shape).
+        tgt.subsystems.lock().unwrap().clear();
+        {
+            let mut st = nvme.state.lock().unwrap();
+            st.registrants.clear();
+            st.rtype = 0;
+        }
+        // Un-mark delivered so the pass's re-mark is observable.
+        assert!(tgt.hosts_of(&nqn).is_empty(), "tgt is really empty");
+
+        let (vols, refenced) = export_reconcile_pass(&lm, "reconcile").await;
+        assert_eq!((vols, refenced), (1, 1));
+
+        // Export chain rebuilt from sqlite: subsystem back, live node
+        // re-admitted, fenced client still OUT, fence lane present.
+        let hosts = tgt.hosts_of(&nqn);
+        assert!(hosts.contains(&live), "live attach re-admitted: {hosts:?}");
+        assert!(
+            !hosts.contains(&crate::nvmeof_export::flint_host_nqn("node-dead")),
+            "fenced client must stay evicted: {hosts:?}"
+        );
+        assert!(hosts.contains(&crate::identity::block_mds_host_nqn()));
+        // The fence is re-acquired at the target.
+        {
+            let st = nvme.state.lock().unwrap();
+            assert!(
+                st.registrants.iter().any(|(k, _, h)| *k == crate::identity::BLOCK_MDS_PR_KEY && *h),
+                "EA-RO re-acquired from the durable record"
+            );
+        }
+
+        // A pass with no block export attached is a clean no-op.
+        let bare = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        assert_eq!(export_reconcile_pass(&bare, "reconcile").await, (0, 0));
     }
 
     /// An unreachable target leaves the fence UNCONFIRMED: the sweep

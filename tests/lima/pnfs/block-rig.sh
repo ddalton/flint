@@ -71,6 +71,11 @@
 # FENCE=1 TGT_RESTART=1 [PTPL_LOSS=1] — the fence survives a tgt
 #   restart via ptpl (or, with the ptpl_file destroyed, via the durable
 #   fenced_clients record) (§T).
+# RECONCILE=1 — a tgt-ONLY restart repairs WITHOUT an MDS roll (§C):
+#   the periodic export reconcile loop rebuilds the export chain from
+#   sqlite (MDS pid asserted unchanged), the client's surviving kernel
+#   controller reconnects, raw bytes flow again, and the run falls
+#   through to REMOVE reclaim + unstage/detach on the repaired stack.
 #
 # Exit 0 = every proof held.
 
@@ -87,6 +92,16 @@ PROTO_DIR="$REPO_ROOT/spdk-csi-driver/proto"
 VOL=rigvol
 VOL_BYTES=$((512 * 1024 * 1024))
 IO_MIB=64
+# ctrl-loss for staged sessions: the FENCE drills want it LOW (the
+# D-state safety belt), but the RECONCILE drill needs the kernel
+# controller to SURVIVE the tgt restart whose repair it proves — the
+# production default is 1800s, so a long value IS the production shape.
+CTRL_LOSS=10
+[ "${RECONCILE:-0}" = "1" ] && CTRL_LOSS=120
+# The periodic export reconcile loop, tightened for rig timescales
+# (production default 30s). Set on every MDS launch so all modes run
+# the production loop; only RECONCILE=1 depends on it.
+RECON_SECS=5
 SUBNQN="nqn.2024-11.com.flint:block:$VOL"
 SOCK=/var/tmp/spdk-rig.sock
 RIG=/var/tmp/flint-rig
@@ -191,7 +206,7 @@ echo "✓ spdk_tgt up: aio(1G) → lvs_rig, TCP transport"
 
 # ── 3. MDS ────────────────────────────────────────────────────────────
 MDS_LOG="${MDS_LOG:-info}"
-vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 RUST_LOG='$MDS_LOG' nohup $MDS_BIN --config $CFG >$RIG/mds.log 2>&1 & sleep 0.5"
+vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS RUST_LOG='$MDS_LOG' nohup $MDS_BIN --config $CFG >$RIG/mds.log 2>&1 & sleep 0.5"
 for i in $(seq 1 20); do
   vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
   [ "$i" = 20 ] && fail "MDS gRPC never came up"
@@ -227,7 +242,7 @@ echo "✓ volume created: class=scsi, subsystem live, NGUID=$NGUID"
 # stays the §6 mandate AND this drill's D-state safety belt.
 HOSTNQN="nqn.2024-11.com.flint:node:$(vsh hostname)"
 vsudo "modprobe nvme-tcp && modprobe blocklayoutdriver"
-STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=10 FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
         $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)") \
   || fail "pnfs-csi-cli stage (attach or session)"
 NSDEV=$(basename "$(echo "$STAGE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)")
@@ -259,7 +274,7 @@ if [ "${NATIVE:-0}" = "0" ]; then
 else
   echo "· udev created nvme-eui.$NGUID natively (§4a landmine ABSENT on $KREL — update the doc)"
 fi
-vsudo "env FLINT_NVME_CTRL_LOSS_TMO=10 FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
        $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)" >/dev/null \
   || fail "re-stage (link repair) failed"
 LINK=$(vsh "readlink /dev/disk/by-id/nvme-eui.$NGUID" || true)
@@ -305,12 +320,13 @@ BELT=$(vsh "grep -c 'MDS I/O on scsi-class file' $RIG/mds.log" || true)
 [ "${BELT:-0}" = "0" ] || fail "zeros-belt fired $BELT time(s) — the client fell back to MDS I/O"
 echo "✓ device counters: ${WR}B written / ${RD}B read; $GRANTS LAYOUTGET grant(s); zero MDS-path I/O"
 
+lvol_written() {
+  vsh "$RPC bdev_get_iostat --name lvs_rig/$VOL" | python3 -c "
+import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
+}
+
 # ── F. FENCE=1: the FenceReaches drill ───────────────────────────────
 if [ "${FENCE:-0}" = "1" ]; then
-  lvol_written() {
-    vsh "$RPC bdev_get_iostat --name lvs_rig/$VOL" | python3 -c "
-import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
-  }
   # F0. a HELD-OPEN O_DIRECT re-writer (rig-writer.py — see its header).
   # The held fd is the point: it keeps the layout (and its grant row)
   # live so there is something to fence, where a per-write dd-loop would
@@ -483,7 +499,7 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
     # MDS back; its startup replay must RE-ESTABLISH the fence from the
     # durable record before the lever lifts it (the §T-proven property,
     # here as a precondition: what the release releases is real).
-    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
     for i in $(seq 1 20); do
       vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
       [ "$i" = 20 ] && fail "MDS gRPC never came back after the reboot"
@@ -524,7 +540,7 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
     # ensure_session (connect as the admitted NQN, fast_io_fail
     # backfill, §4a link — all from scratch on this fresh-boot kernel).
     # At F5 / R4 the connect inside this exact path was refused.
-    STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=10 FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+    STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
             $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)") \
       || fail "the unfenced client could not re-stage (attach or connect refused)"
     NSDEV=$(basename "$(echo "$STAGE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)")
@@ -648,7 +664,7 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
     # fenced-set replay re-acquires EA-RO for every fenced volume from
     # the durable record. The STARTUP re-fence line is the proof, and it
     # discriminates the two paths.
-    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
     for i in $(seq 1 20); do
       vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
       [ "$i" = 20 ] && fail "MDS gRPC never came back after tgt restart"
@@ -728,7 +744,7 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
     done
     # Same launch as §3, APPENDING to the log so the pre-restart fence
     # lines survive for the assertions.
-    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
     for i in $(seq 1 20); do
       vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
       [ "$i" = 20 ] && fail "MDS gRPC never came back after restart"
@@ -802,6 +818,99 @@ for s in json.load(sys.stdin):
   exit 0
 fi
 
+# ── C. RECONCILE=1: a tgt-ONLY restart repairs WITHOUT an MDS roll ───
+# The gap this proves closed: an MDS restart replays exports at
+# startup, but a tgt that restarted UNDER a running MDS came back
+# empty and STAYED empty — the runbook's answer was "roll the MDS".
+# Now the periodic export reconcile loop (FLINT_PNFS_EXPORT_RECONCILE_
+# SECS, here $RECON_SECS s) must rebuild subsystem/namespace/listener/
+# allow-list from sqlite within one interval, with the MDS pid
+# UNCHANGED, and the client's surviving kernel controller (CTRL_LOSS
+# raised for this mode — the production shape; the 1800s default dwarfs
+# any tgt restart) reconnects and writes raw again. Falls through to
+# the REMOVE reclaim + unstage/detach, so the whole chain is proven
+# healthy POST-repair, not merely present.
+if [ "${RECONCILE:-0}" = "1" ]; then
+  MDS_PID=$(vsh "pgrep -x flint-pnfs-mds" | head -1)
+  [ -n "$MDS_PID" ] || fail "no running MDS to hold steady"
+  echo "▶ RECONCILE: killing the tgt ONLY (MDS pid $MDS_PID keeps running)"
+  vsudo "[ -f /var/tmp/spdk-rig.pid ] && kill -9 \$(cat /var/tmp/spdk-rig.pid) 2>/dev/null;
+         pkill -9 -x reactor_0; pkill -9 -x spdk_tgt"
+  for i in $(seq 1 20); do
+    vsh "pgrep -x reactor_0 || pgrep -x spdk_tgt" >/dev/null || break
+    [ "$i" = 20 ] && fail "old tgt never died"
+    sleep 0.5
+  done
+  vsudo "rm -f /var/tmp/spdk_cpu_lock_* $SOCK ${SOCK}.lock"
+
+  # Same-disk restart: lvstore+lvol auto-load; NO create_lvstore.
+  vsudo "nohup $RIG_TOOLS/spdk_tgt --no-huge -s 512 -r $SOCK -m 0x1 --wait-for-rpc >>$RIG/spdk.log 2>&1 &
+         echo \$! > /var/tmp/spdk-rig.pid; sleep 0.5"
+  for i in $(seq 1 20); do
+    vsh "$RPC rpc_get_methods >/dev/null 2>&1" && break
+    [ "$i" = 20 ] && fail "tgt RPC never came back ($RIG/spdk.log)"
+    sleep 0.5
+  done
+  vsudo "chmod 0777 $SOCK"
+  vsh "$RPC iobuf_set_options --small-pool-count 4096 --large-pool-count 1024" || fail "iobuf (restart)"
+  vsh "$RPC iscsi_set_options -a 1 -c 1 -q 1 -x 1 -k 1 -u 24 -j 1 -z 1" || fail "iscsi (restart)"
+  vsh "$RPC framework_start_init" || fail "framework_start_init (restart)"
+  for i in $(seq 1 60); do
+    vsh "$RPC framework_wait_init >/dev/null 2>&1" && break
+    [ "$i" = 60 ] && fail "subsystems never initialized (restart)"
+    sleep 0.5
+  done
+  vsh "$RPC bdev_aio_create /var/tmp/rig-disk.img rigdisk 4096" >/dev/null || fail "bdev_aio_create (restart)"
+  for i in $(seq 1 40); do
+    vsh "$RPC bdev_get_bdevs --name lvs_rig/$VOL >/dev/null 2>&1" && break
+    [ "$i" = 40 ] && fail "the lvstore/lvol did NOT auto-load after the restart"
+    sleep 0.5
+  done
+  vsh "$RPC nvmf_create_transport -t TCP" || fail "nvmf_create_transport (restart)"
+  echo "✓ tgt back on the same disk, EMPTY of subsystems — the MDS was not touched"
+
+  # C1. the LOOP repairs: subsystem + allow-list reappear within a few
+  # intervals, with nobody restarting the MDS.
+  REPAIRED=0
+  for i in $(seq 1 12); do
+    HOSTS=$(vsh "$RPC nvmf_get_subsystems 2>/dev/null" | python3 -c "
+import json,sys
+try:
+    for s in json.load(sys.stdin):
+        if s.get('nqn') == '$SUBNQN':
+            print(' '.join(h['nqn'] for h in s.get('hosts', []))); break
+except Exception: pass
+" || true)
+    if echo "$HOSTS" | grep -c "$HOSTNQN" >/dev/null; then REPAIRED=1; break; fi
+    sleep 5
+  done
+  [ "$REPAIRED" = "1" ] || fail "the reconcile loop never rebuilt $SUBNQN (+$HOSTNQN) — hosts: '${HOSTS:-none}'"
+  MDS_PID2=$(vsh "pgrep -x flint-pnfs-mds" | head -1)
+  [ "$MDS_PID2" = "$MDS_PID" ] || fail "MDS pid changed ($MDS_PID → $MDS_PID2) — this proved a restart, not the loop"
+  echo "✓ reconcile loop rebuilt the export from sqlite (MDS pid $MDS_PID unchanged): [$HOSTS]"
+
+  # C2. bytes flow again through the SURVIVING controller: the kernel
+  # initiator reconnects on its own (reconnect-delay=2, ctrl-loss
+  # $CTRL_LOSS) once the allow-list is back; the restart zeroed the
+  # device counter, so everything it counts now is post-repair traffic.
+  RESUME_MIB=8
+  WROTE=0
+  for i in $(seq 1 12); do
+    if vsudo "dd if=/dev/urandom of=$MNT/data.bin bs=1M count=$RESUME_MIB \
+              oflag=direct conv=notrunc status=none && sync $MNT/data.bin" 2>/dev/null; then
+      WROTE=1; break
+    fi
+    sleep 5
+  done
+  [ "$WROTE" = "1" ] || fail "post-repair O_DIRECT write never succeeded — the client did not recover"
+  W_AFTER=$(lvol_written)
+  NEED_RW=$((RESUME_MIB * 1024 * 1024))
+  [ "${W_AFTER:-0}" -ge "$NEED_RW" ] \
+    || fail "device saw only ${W_AFTER}B post-repair (need ≥$NEED_RW) — the write did not go raw"
+  echo "✓ client recovered without any node-side action: ${W_AFTER}B written raw post-repair"
+  echo "· falling through to REMOVE reclaim + unstage/detach on the repaired stack"
+fi
+
 # ── 10. REMOVE → clean reclaim (return, not quarantine) ──────────────
 # Every extent frees via the client's LAYOUTRETURN — zero quarantine
 # tolerated.
@@ -840,7 +949,12 @@ echo "$DETACH2" | grep -c 'replay' >/dev/null || fail "detach replay did not sel
 echo "✓ unstage+detach: session down, link gone, attach row swept, replay clean"
 
 echo
-if [ "${FENCE:-0}" = "1" ]; then
+if [ "${RECONCILE:-0}" = "1" ]; then
+  echo "✅ reconcile-rig PASSED — a tgt-ONLY restart was repaired by the periodic"
+  echo "   export reconcile loop with the MDS untouched (pid unchanged): exports"
+  echo "   rebuilt from sqlite, the client reconnected on its own, raw bytes flowed,"
+  echo "   and REMOVE reclaim + unstage/detach ran clean on the repaired stack."
+elif [ "${FENCE:-0}" = "1" ]; then
   echo "✅ fence-rig PASSED — a reservation preempt from the MDS stopped a live"
   echo "   raw-path writer's bytes at the device on kernel $KREL (FenceReaches PROVEN"
   echo "   for this tgt), and the failure surfaced to userspace as an error."
