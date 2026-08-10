@@ -438,10 +438,19 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   is **not** a freeing condition yet: §9 keeps `FenceReaches` FALSE until the phase-2
   rig proves real preempt delivery, and freeing on an unproven fence designs in the
   corruption path (crashed client → fence issued but undelivered → extent reused → the
-  un-fenced client writes the new owner's data). Until FenceReaches is proven,
-  fenced-holder extents are **quarantined — leaked, never reused** — with a metered
-  bound and an operator release lever; when the rig proves delivery, this sentence and
-  §9's constant flip together. Reuse bumps `gen`. **This is F67's lesson generalized**: an extent map lost
+  un-fenced client writes the new owner's data). **FLIPPED 2026-08-10** (the rig proved
+  delivery; the model re-gated): fenced-holder extents now **free cleanly when the
+  fence was CONFIRMED at the target** (`fenced_clients.delivered_unix`, set only on a
+  verified preempt — post-report MDS-holder, victim absent; also set by the startup
+  re-fence, closing the crash window) and **quarantine only when it was not** —
+  the code's preempt arm is best-effort and can fail at runtime, so the belt is
+  per-fence confirmation, never a global assumption. Model:
+  `FreeRequiresDelivered` — the shipped cfg claims both stale theorems in the
+  fences-CAN-fail world (`FenceReaches` stays FALSE there, deliberately: "every fence
+  lands" would still be a lie about the code); `FlintExtentsLostFence.cfg` is the
+  permanent single-flag A/B, and `ProbeDeliveredFreeFires` licenses the green
+  (the fenced-free really fires). The metered quarantine bound and operator release
+  lever stay, now scoped to unconfirmed fences. Reuse bumps `gen`. **This is F67's lesson generalized**: an extent map lost
   while data survives = silent zeros served from a reused extent — and there is no stub
   to hang an xattr on, so durability is sqlite-only and therefore must be *stronger*
   (awaited writes, `open_durable` FULL sync on tear-away volumes).

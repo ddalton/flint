@@ -433,6 +433,17 @@ impl StateBackend for MemoryBackend {
         Ok(Ok(Vec::new()))
     }
 
+    async fn block_fence_delivered(
+        &self,
+        _volume: &str,
+        _client_id: u64,
+        _now_unix: i64,
+    ) -> StateBackendResult<Result<bool, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        // No fence records exist here to mark (see block_fence_record).
+        Ok(Ok(false))
+    }
+
     async fn block_unfence(
         &self,
         _volume: &str,

@@ -40,4 +40,13 @@ ProbeResnapshotGrows == ~resnapshotGrew
 ProbeCommitFires == ~commitFired
 ProbeTruncateFires == ~truncateFired
 
+\* For the graduated shipped cfg (FreeRequiresDelivered = TRUE): its green
+\* on the stale theorems is worthless if the new guard closed the fenced-
+\* free path outright — "safe because nothing fenced ever frees" would be
+\* the quarantine world wearing the flip's label.  deliveredFreeFired's
+\* only writer is ReclaimComplete, and it fires only when the free
+\* proceeds over a fenced holder whose exclusion was confirmed — the
+\* exact event the code flip (quarantine -> clean free) ships to produce.
+ProbeDeliveredFreeFires == ~deliveredFreeFired
+
 ==============================================================================

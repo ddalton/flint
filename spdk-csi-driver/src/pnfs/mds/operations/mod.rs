@@ -1423,9 +1423,10 @@ impl PnfsOperationHandler {
 /// order:
 ///
 ///  1. **Durable fence rows** (`extent_fence_client`): the allocator
-///     refuses the client all future grants; its extents quarantine on
-///     reclaim. The only hard error — without the rows the fence never
-///     happened.
+///     refuses the client all future grants. On reclaim its extents
+///     FREE cleanly when the fence was confirmed at the target (the
+///     delivered mark below) and QUARANTINE when it was not. The only
+///     hard error — without the rows the fence never happened.
 ///  2. **The PRIMARY fence** (§5, RFC 9561 §2.2): reservation preempt
 ///     at the target, as the MDS's own NVMe host. Per-command and
 ///     target-side — delivery does not depend on the client being
@@ -1436,9 +1437,13 @@ impl PnfsOperationHandler {
 ///     client of the volume survives in the remaining list.
 ///
 /// Steps 2 and 3 are best-effort and LOUD. Their failure never blocks
-/// the fence verdict: the extents quarantine either way (`FenceReaches`
-/// is proven per-tgt by the fence rig, never assumed here). Returns a
-/// one-line summary for the caller's log; the fence rig greps it.
+/// the fence verdict — it only downgrades the reclaim's disposition:
+/// a CONFIRMED preempt marks the fence DELIVERED (extents free
+/// cleanly; the rig proved a confirmed exclusion is real), an
+/// unconfirmed one leaves them quarantining (freeing on an unconfirmed
+/// fence is FlintExtentsLostFence.cfg's machine-checked corruption).
+/// Returns a one-line summary for the caller's log; the fence rig
+/// greps it.
 pub async fn fence_block_client(
     layout_manager: &crate::pnfs::mds::layout::LayoutManager,
     context: &str,
@@ -1487,11 +1492,36 @@ pub async fn fence_block_client(
         Ok(s) => {
             info!("⛔ {}: reservation preempt — {}", context, s);
             summary.push_str("; reservation preempted");
+            // The preempt was CONFIRMED (post-report verified: MDS key
+            // holds EA-RO, victim absent) — mark the fence DELIVERED.
+            // This is what licenses the reclaim to FREE this client's
+            // extents instead of quarantining them
+            // (FreeRequiresDelivered, model-gated). A failed mark just
+            // means quarantine later — the safe side — so it is loud
+            // but never blocks the fence.
+            match backend.block_fence_delivered(volume, client_id, now_unix).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        "{}: delivered-mark for client {} refused: {} — its extents \
+                         will quarantine instead of freeing",
+                        context, client_id, e
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "{}: delivered-mark for client {} failed: {} — its extents \
+                         will quarantine instead of freeing",
+                        context, client_id, e
+                    );
+                }
+            }
         }
         Err(e) => {
             tracing::error!(
                 "{}: reservation preempt of client {} FAILED: {} — falling back to \
-                 the allow-list fence only",
+                 the allow-list fence only; extents stay QUARANTINE-only (the fence \
+                 is unconfirmed, so the reclaim will never free them)",
                 context,
                 client_id,
                 e
@@ -2167,9 +2197,12 @@ mod fallback_tests {
 
     /// The functional-fence backstop: a fence during reclaim evicts the
     /// fenced client's host admission (durable rows) and converges the
-    /// allow-list; the surviving client's admission is untouched. The
-    /// quarantine result above is unchanged by any of this — eviction is
-    /// a belt, never a freeing condition.
+    /// allow-list; the surviving client's admission is untouched. With a
+    /// real (scripted) target attached the preempt CONFIRMS, so this
+    /// reclaim now FREES the fenced holder's extent (the delivered flip)
+    /// — the volA sibling above, fencing with no export attached
+    /// (unconfirmed), is the quarantine side. Eviction itself is still a
+    /// belt, never the freeing condition: CONFIRMED DELIVERY is.
     #[tokio::test]
     async fn scsi_reclaim_fence_evicts_the_fenced_hosts_admission() {
         let backend: Arc<dyn crate::state_backend::StateBackend> =
@@ -2219,7 +2252,11 @@ mod fallback_tests {
         let out = reclaim_scsi_extents(&lm, None, "volB/f", 42, 0)
             .await
             .expect("fence path converges");
-        assert_eq!(out.quarantined_extents, 1, "eviction never turns into a free");
+        assert_eq!(
+            out.freed_extents, 1,
+            "confirmed preempt ⇒ delivered ⇒ the reclaim frees (the flip)"
+        );
+        assert_eq!(out.quarantined_extents, 0, "no quarantine for a confirmed fence");
 
         let remaining = backend.block_hosts("volB").await.unwrap().unwrap();
         assert_eq!(remaining, vec![h9.clone()], "client 7's admission rows are gone");

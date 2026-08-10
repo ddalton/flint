@@ -43,9 +43,10 @@ service MdsControl {
   rpc ExpandVolume(ExpandVolumeRequest) returns (ExpandVolumeResponse);
 
   // Fence one block-layout (scsi) client of a volume: durable fence
-  // rows in the allocator (no further grants; its extents quarantine),
-  // reservation preempt at the NVMe target (the client's next raw
-  // read/write gets RESERVATION CONFLICT), and eviction from the
+  // rows in the allocator (no further grants; its extents free on
+  // reclaim once the preempt is CONFIRMED, quarantine while it is
+  // not), reservation preempt at the NVMe target (the client's next
+  // raw read/write gets RESERVATION CONFLICT), and eviction from the
   // export allow-list. The operator/roller lever for a client that is
   // unresponsive or about to be — the reclaim driver runs the same
   // sequence on its own when a recall goes unanswered. Idempotent.

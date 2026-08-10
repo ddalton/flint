@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// One request to the writer thread.
 enum Req {
@@ -1347,6 +1347,20 @@ impl StateBackend for SqliteBackend {
             .await
     }
 
+    async fn block_fence_delivered(
+        &self,
+        volume: &str,
+        client_id: u64,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<bool, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::mark_fence_delivered(conn, &v, client_id, now_unix)
+        })
+        .await
+    }
+
     async fn block_unfence(
         &self,
         volume: &str,
@@ -1783,11 +1797,22 @@ CREATE TABLE IF NOT EXISTS block_hosts (
 -- (the PTPL-loss recovery path). host_nqn is captured at fence time
 -- (block_hosts is gone by the time anyone reads this) for the release
 -- path and observability.
+--
+-- delivered_unix (the FreeRequiresDelivered belt, model-gated): nonzero
+-- only after the reservation preempt was CONFIRMED at the target
+-- (post-report: MDS key holds EA-RO, victim absent). The reclaim frees
+-- a fenced holder's extents ONLY against a delivered fence; an
+-- unconfirmed fence quarantines them, exactly as before the flip —
+-- FlintExtentsLostFence.cfg is the machine-checked corruption that
+-- freeing on an unconfirmed fence would be. NOT reset on re-fence: the
+-- reservation it records persists (ptpl + startup re-establishment)
+-- until UnfenceBlockClient releases it, which deletes this row whole.
 CREATE TABLE IF NOT EXISTS fenced_clients (
     volume TEXT NOT NULL,
     client_id INTEGER NOT NULL,
     host_nqn TEXT NOT NULL,
     fenced_unix INTEGER NOT NULL,
+    delivered_unix INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (volume, client_id)
 );
 "#;

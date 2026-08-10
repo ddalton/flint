@@ -1357,6 +1357,19 @@ mod create_volume_tests {
             .unwrap();
         assert!(refused.is_err(), "a fenced client must be refused grants");
 
+        // THE FLIP, end to end: the lever's preempt was CONFIRMED
+        // against the (scripted) target, so the fence is marked
+        // DELIVERED and the reclaim FREES the victim's extents — clean,
+        // no quarantine, no leak (pre-flip this quarantined
+        // unconditionally).
+        let out = backend
+            .extent_reclaim_complete("pvc-fence", 42, 0, (i64::MAX as u64) - 1, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.freed_extents, 1, "delivered fence frees on reclaim");
+        assert_eq!(out.quarantined_extents, 0, "no quarantine for a confirmed fence");
+
         // Replay: the lever is idempotent (fence rows upsert, preempt
         // skips, evict finds nothing).
         let again = s

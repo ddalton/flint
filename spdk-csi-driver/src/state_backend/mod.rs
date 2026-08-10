@@ -702,6 +702,18 @@ pub trait StateBackend: Send + Sync {
         &self,
     ) -> StateBackendResult<Result<Vec<(String, u64)>, extent_alloc::ExtentAllocError>>;
 
+    /// Mark a client's fence DELIVERED — the reservation preempt was
+    /// confirmed at the target. Licenses the reclaim to FREE the
+    /// client's fenced extents instead of quarantining them
+    /// (FreeRequiresDelivered). `true` if an undelivered record was
+    /// marked.
+    async fn block_fence_delivered(
+        &self,
+        volume: &str,
+        client_id: u64,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<bool, extent_alloc::ExtentAllocError>>;
+
     /// Clear a client's fence (release / lease recovery). `true` if a
     /// record was removed.
     async fn block_unfence(

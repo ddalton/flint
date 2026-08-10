@@ -519,11 +519,20 @@ pub fn reclaim_snapshot(
 /// The free transaction. Every target extent must be quiescent: any live
 /// unfenced grant refuses the whole free (`NotQuiescent` — the
 /// machine-checked FreeRevalidates belt; the caller's snapshot is not
-/// consulted, deliberately). Quiescent extents partition: fenced grant
-/// rows present → QUARANTINE (the fence's delivery is unproven, so the
-/// range is leaked, metered, operator-released); no rows at all → clean
-/// free into the free list with its generation remembered for the reuse
-/// bump.
+/// consulted, deliberately). Quiescent extents partition three ways:
+/// no grant rows at all → clean free into the free list; fenced rows
+/// whose fences were ALL CONFIRMED at the target (`fenced_clients.
+/// delivered_unix` — set only on a verified preempt) → clean free too,
+/// the 2026-08-10 graduation (FreeRequiresDelivered, model-gated: the
+/// rig proved a confirmed exclusion is real, so the fenced holder can
+/// never touch these bytes again); any UNCONFIRMED fence → QUARANTINE,
+/// exactly as before the flip (freeing on an unconfirmed fence is
+/// FlintExtentsLostFence.cfg's machine-checked corruption — the
+/// never-excluded client's raw write lands in the new owner's bytes).
+/// A stale delivered bit after ptpl loss is belted by the durable
+/// eviction: the fenced client is off the allow-list and the admission
+/// guard refuses its return, so freeing stays safe even in the
+/// restart window before the startup re-fence lands.
 pub fn reclaim_complete(
     conn: &mut Connection,
     volume: &str,
@@ -547,16 +556,26 @@ pub fn reclaim_complete(
     }
 
     let mut out = FreeOutcome::default();
+    // Each fenced holder joined with its fence record's delivered bit
+    // (COALESCE 0: no record — e.g. post-unfence lingering rows — is
+    // UNDELIVERED, the conservative side).
     let mut fenced_stmt = tx.prepare(
-        "SELECT client_id FROM extent_grants
-         WHERE volume = ?1 AND file_id = ?2 AND logical_offset = ?3 AND fenced = 1
-         ORDER BY client_id",
+        "SELECT g.client_id,
+                COALESCE((SELECT f.delivered_unix FROM fenced_clients f
+                          WHERE f.volume = g.volume AND f.client_id = g.client_id), 0)
+         FROM extent_grants g
+         WHERE g.volume = ?1 AND g.file_id = ?2 AND g.logical_offset = ?3
+           AND g.fenced = 1
+         ORDER BY g.client_id",
     )?;
     for t in &targets {
-        let fenced: Vec<i64> = fenced_stmt
-            .query_map(params![volume, file_id as i64, t.logical_offset], |r| r.get(0))?
+        let fenced: Vec<(i64, i64)> = fenced_stmt
+            .query_map(params![volume, file_id as i64, t.logical_offset], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        if fenced.is_empty() {
+        let all_delivered = fenced.iter().all(|(_, d)| *d > 0);
+        if fenced.is_empty() || all_delivered {
             tx.execute(
                 "INSERT INTO extent_free (volume, physical_offset, length, last_gen)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -564,10 +583,21 @@ pub fn reclaim_complete(
             )?;
             out.freed_extents += 1;
             out.freed_bytes += t.length as u64;
+            if !fenced.is_empty() {
+                // Delivered-fence clean free: the grant rows go with the
+                // extent (the quarantine branch's discipline; leaving
+                // them would refuse the client future grants forever on
+                // rows whose extents no longer exist).
+                tx.execute(
+                    "DELETE FROM extent_grants
+                     WHERE volume = ?1 AND file_id = ?2 AND logical_offset = ?3",
+                    params![volume, file_id as i64, t.logical_offset],
+                )?;
+            }
         } else {
             let csv = fenced
                 .iter()
-                .map(|c| c.to_string())
+                .map(|(c, _)| c.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
             tx.execute(
@@ -829,6 +859,28 @@ pub fn fenced_all(conn: &Connection) -> Result<Vec<(String, u64)>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// Mark a client's fence DELIVERED: the reservation preempt was
+/// confirmed at the target (post-report verified — MDS key holds EA-RO,
+/// victim absent). This is what licenses the reclaim to FREE the
+/// client's fenced extents instead of quarantining them (the
+/// FreeRequiresDelivered belt, machine-checked: freeing on an
+/// unconfirmed fence is FlintExtentsLostFence.cfg's corruption).
+/// Returns whether a fence record existed to mark.
+pub fn mark_fence_delivered(
+    conn: &mut Connection,
+    volume: &str,
+    client_id: u64,
+    now_unix: i64,
+) -> Result<bool> {
+    let client = as_i64(client_id, "client id exceeds i64")?;
+    let n = conn.execute(
+        "UPDATE fenced_clients SET delivered_unix = ?3
+         WHERE volume = ?1 AND client_id = ?2 AND delivered_unix = 0",
+        params![volume, client, now_unix],
+    )?;
+    Ok(n > 0)
 }
 
 /// Clear a client's fence (the release / lease-recovery path). Returns
@@ -1114,10 +1166,12 @@ mod tests {
 
     /// TLC trace family: FlintExtentsLostFence.cfg / TgtAmnesia.cfg — the
     /// worlds where a fence is believed and is not (or stops being) real.
-    /// The code's mitigation, mandated by §8 while FenceReaches is
-    /// unproven: fenced-holder ranges quarantine (leaked, metered), never
+    /// The code's mitigation, per the FreeRequiresDelivered belt: an
+    /// UNCONFIRMED fence's ranges (no delivered mark — here the fence
+    /// never ran a preempt at all) quarantine (leaked, metered), never
     /// enter the free list, and only the operator lever releases them —
-    /// after which reuse still bumps the generation.
+    /// after which reuse still bumps the generation. The delivered
+    /// (confirmed) side frees cleanly — see the tests below.
     #[test]
     fn fenced_holder_extents_quarantine_not_free_and_the_lever_releases() {
         let mut conn = setup();
@@ -1161,6 +1215,101 @@ mod tests {
         assert_eq!(out.freed_extents, 1);
         assert_eq!(out.quarantined_extents, 0);
         assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (0, 0));
+    }
+
+    /// THE FLIP (FreeRequiresDelivered, model-gated): a fenced holder
+    /// whose fence was CONFIRMED at the target frees cleanly — no
+    /// quarantine, no leak, grant rows swept, range first-fit reusable
+    /// at gen+1 with the scrub contract intact.
+    #[test]
+    fn delivered_fence_extents_free_cleanly_and_reuse() {
+        let mut conn = setup();
+        let g1 = grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        let phys1 = g1[0].physical_offset;
+        fence_record(&mut conn, VOL, C1, 100).unwrap();
+        assert_eq!(fence_client(&mut conn, VOL, C1).unwrap(), 1);
+        assert!(mark_fence_delivered(&mut conn, VOL, C1, 200).unwrap());
+        // Marking is one-shot: an already-delivered fence is a no-op.
+        assert!(!mark_fence_delivered(&mut conn, VOL, C1, 300).unwrap());
+        // And marking without a record is a no-op, not an error.
+        assert!(!mark_fence_delivered(&mut conn, VOL, C2, 200).unwrap());
+
+        let out = reclaim_complete(&mut conn, VOL, F, 0, 8192, 1234).unwrap();
+        assert_eq!(out.freed_extents, 1, "delivered fence frees");
+        assert_eq!(out.freed_bytes, 8192);
+        assert_eq!(out.quarantined_extents, 0, "no quarantine, no leak");
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (0, 0));
+        // The fenced grant rows went with the extent — nothing left to
+        // refuse over.
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extent_grants WHERE volume = ?1",
+                params![VOL],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "grant rows swept with the free");
+        // The range is genuinely reusable: first-fit, gen bumped, scrub.
+        let g2 = grant(&mut conn, VOL, F, C2, 32768, 8192, false).unwrap();
+        assert_eq!(g2[0].physical_offset, phys1, "freed range first-fit reused");
+        assert_eq!(g2[0].generation, 2, "reuse bumps the generation");
+        assert!(g2[0].needs_scrub, "reuse still scrubs (ProvisionalInvisible)");
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// The partition is PER-EXTENT and per-fence: in one reclaim pass, a
+    /// delivered fence's extent frees while an undelivered fence's
+    /// extent quarantines.
+    #[test]
+    fn mixed_delivery_partitions_per_extent() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        grant(&mut conn, VOL, F, C2, 16384, 8192, false).unwrap();
+        for c in [C1, C2] {
+            fence_record(&mut conn, VOL, c, 100).unwrap();
+            fence_client(&mut conn, VOL, c).unwrap();
+        }
+        // Only C1's fence is confirmed at the target.
+        assert!(mark_fence_delivered(&mut conn, VOL, C1, 200).unwrap());
+
+        let out =
+            reclaim_complete(&mut conn, VOL, F, 0, (i64::MAX as u64) - 1, 1234).unwrap();
+        assert_eq!(out.freed_extents, 1, "C1's extent (delivered) freed");
+        assert_eq!(out.quarantined_extents, 1, "C2's extent (unconfirmed) quarantined");
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (1, 8192));
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// One undelivered fence poisons a SHARED extent: with two fenced
+    /// holders on the same rows, `all delivered` is what frees — any
+    /// unconfirmed exclusion quarantines the whole extent (freeing past
+    /// it is FlintExtentsLostFence's machine-checked corruption). The
+    /// second holder row is manufactured directly: in the live schema
+    /// multi-holder extents arise through the READ-grant tiling, whose
+    /// ceremony would obscure what this test pins.
+    #[test]
+    fn a_shared_extent_frees_only_when_every_fence_is_delivered() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        conn.execute(
+            "INSERT INTO extent_grants
+               (volume, file_id, logical_offset, client_id, mode, gen, fenced)
+             SELECT volume, file_id, logical_offset, ?1, mode, gen, 0
+             FROM extent_grants WHERE volume = ?2 AND client_id = ?3",
+            params![C2 as i64, VOL, C1 as i64],
+        )
+        .unwrap();
+        for c in [C1, C2] {
+            fence_record(&mut conn, VOL, c, 100).unwrap();
+            fence_client(&mut conn, VOL, c).unwrap();
+        }
+        assert!(mark_fence_delivered(&mut conn, VOL, C1, 200).unwrap());
+
+        // C2's fence unconfirmed → the shared extent quarantines whole.
+        let out = reclaim_complete(&mut conn, VOL, F, 0, 8192, 1234).unwrap();
+        assert_eq!(out.freed_extents, 0);
+        assert_eq!(out.quarantined_extents, 1);
+        verify_volume_invariants(&conn, VOL).unwrap();
     }
 
     #[test]

@@ -83,17 +83,29 @@
 (*                        F65-of-extents.                                  *)
 (*   FreeRevalidates      the free transaction re-validates holders        *)
 (*                        (tranche-1 finding, above).                      *)
-(*   FenceReaches         a fence lands as a real exclusion at the target. *)
-(*                        KEEP FALSE IN THE SHIPPED CFG until proven       *)
-(*                        against real spdk-tgt reservation behaviour on   *)
-(*                        real hardware, and re-justify it every time the  *)
-(*                        code moves — a constant encoding an assumption   *)
-(*                        silently becomes a lie.  This is RecallReaches'  *)
-(*                        analog and carries the same residual: both       *)
-(*                        theorems are EXPECTED FALSE while it is FALSE,   *)
-(*                        and the shipped cfg does not list them, exactly  *)
-(*                        as FlintTruncate.cfg does not list               *)
-(*                        Inv_NoStaleServe.                                *)
+(*   FenceReaches         EVERY fence lands as a real exclusion at the    *)
+(*                        target.  STAYS FALSE IN THE SHIPPED CFG — and    *)
+(*                        now for a sharper reason than unproven           *)
+(*                        hardware: the fence rig (2026-08-10, real        *)
+(*                        kernel + real spdk-tgt) proved a CONFIRMED      *)
+(*                        preempt really excludes, but the code's preempt  *)
+(*                        arm is best-effort and can FAIL at runtime (tgt  *)
+(*                        unreachable), so "every fence lands" remains a   *)
+(*                        lie about the code.  The graduation is           *)
+(*                        FreeRequiresDelivered below: trust CONFIRMED     *)
+(*                        exclusions (rig-proven mechanism), never         *)
+(*                        unconfirmed ones.                                *)
+(*   FreeRequiresDelivered the free transaction additionally requires      *)
+(*                        every FENCED holder to be in resv — the code's   *)
+(*                        delivered bit (set only on a verified preempt:   *)
+(*                        post-report holder==MDS key, victim absent).     *)
+(*                        An unconfirmed fence refuses the free = the      *)
+(*                        code QUARANTINES that extent.  This is what      *)
+(*                        lets the shipped cfg claim both stale theorems   *)
+(*                        in the fences-CAN-fail world — a strictly        *)
+(*                        stronger claim than Target.cfg's FenceReaches    *)
+(*                        ideal.  LostFence (the single-flag A/B) pins     *)
+(*                        the hole it closes.                              *)
 (*   PersistReservations  PTPL: the exclusion registry survives            *)
 (*                        TgtRestart.  §5 calls PTPL mandatory;            *)
 (*                        FlintExtentsTgtAmnesia.cfg is that sentence      *)
@@ -183,6 +195,10 @@ CONSTANTS
   RecallBeforeReuse,   \* TRUE = frees only through the reclaim machinery
   FreeRevalidates,     \* TRUE = the free transaction re-validates holders
   FenceReaches,        \* TRUE = every fence lands as a target exclusion
+  FreeRequiresDelivered, \* TRUE = the free additionally requires every
+                       \*   FENCED holder's exclusion CONFIRMED at the
+                       \*   target (in resv) — the code's delivered bit;
+                       \*   an unconfirmed fence quarantines instead
   PersistReservations, \* TRUE = PTPL: exclusions survive TgtRestart
   CommitEnabled,       \* tranche-2 master switch — FALSE keeps tranche-1
                        \*   state spaces bit-identical (MaintEnabled pattern)
@@ -231,8 +247,11 @@ VARIABLES
   zeroSized,      \* a size-advance applied while its range promotion was
                   \*   refused — the F67 shape (writer: LayoutCommit)
   forgedCommit,   \* an INVALID commit applied (writer: LayoutCommit)
-  disclosedRead   \* a rightful read of a provisional block served a
+  disclosedRead,  \* a rightful read of a provisional block served a
                   \*   previous incarnation's bytes (writer: ClientRead)
+  deliveredFreeFired \* the delivered-conditional free freed blocks a
+                  \*   fenced+delivered holder still held (writer:
+                  \*   ReclaimComplete, gated on FreeRequiresDelivered)
 
 \* The tranche-2 additions, grouped so tranche-1 actions can leave them
 \* unchanged in one stroke.
@@ -243,7 +262,7 @@ vars == <<alloc, gen, grants, granting, reclaim, fenced, resv,
           fsize, everWritten, priorBytes,
           staleRead, staleWrite, reuseFired, fenceFired, tgtRestarted,
           resnapshotGrew, commitFired, truncateFired, zeroSized,
-          forgedCommit, disclosedRead>>
+          forgedCommit, disclosedRead, deliveredFreeFired>>
 
 Blocks == 1..NBlocks
 GenBound == MaxReclaims + 1        \* one initial bump + one per free
@@ -282,7 +301,7 @@ TypeOK ==
   /\ tgtRestarted \in BOOLEAN /\ resnapshotGrew \in BOOLEAN
   /\ commitFired \in BOOLEAN /\ truncateFired \in BOOLEAN
   /\ zeroSized \in BOOLEAN /\ forgedCommit \in BOOLEAN
-  /\ disclosedRead \in BOOLEAN
+  /\ disclosedRead \in BOOLEAN /\ deliveredFreeFired \in BOOLEAN
   \* Structure: g is normalised to 0 outside held (state-space hygiene and
   \* a modelling-bug tripwire, not a claim about the code).
   /\ \A c \in Clients : \A b \in Blocks :
@@ -304,7 +323,7 @@ Init ==
   /\ tgtRestarted = FALSE /\ resnapshotGrew = FALSE
   /\ commitFired = FALSE /\ truncateFired = FALSE
   /\ zeroSized = FALSE /\ forgedCommit = FALSE
-  /\ disclosedRead = FALSE
+  /\ disclosedRead = FALSE /\ deliveredFreeFired = FALSE
 
 (***************************************************************************)
 (* The MDS: grants                                                         *)
@@ -326,7 +345,7 @@ GrantCheck(c, R) ==
   /\ UNCHANGED <<alloc, gen, grants, reclaim, fenced, resv,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 everWritten, priorBytes, disclosedRead>>
+                 everWritten, priorBytes, disclosedRead, deliveredFreeFired>>
 
 \* LAYOUTGET step 2: the sqlite transaction.  With GrantsExclusive it
 \* re-validates disjointness INSIDE the transaction and refuses a range
@@ -360,7 +379,7 @@ GrantInsert(c) ==
                          nGrants, nReclaims, nRestarts, staleRead,
                          staleWrite, reuseFired, fenceFired, tgtRestarted,
                          resnapshotGrew, sizeVars, everWritten, priorBytes,
-                         disclosedRead>>
+                         disclosedRead, deliveredFreeFired>>
         ELSE
           LET fresh == {b \in R : alloc[b] = "free"}
               gen2 == [b \in Blocks |->
@@ -385,7 +404,7 @@ GrantInsert(c) ==
           /\ UNCHANGED <<reclaim, fenced, resv, nGrants, nReclaims,
                          nRestarts, staleRead, staleWrite, fenceFired,
                          tgtRestarted, resnapshotGrew, sizeVars,
-                         everWritten, disclosedRead>>
+                         everWritten, disclosedRead, deliveredFreeFired>>
 
 (***************************************************************************)
 (* The MDS: reclaim (recall-then-free)                                     *)
@@ -414,7 +433,7 @@ ReclaimStart(R) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead>>
+                 priorBytes, disclosedRead, deliveredFreeFired>>
 
 \* The retry loop's separate re-read step (the F62 idiom): recompute the
 \* holder set from the live tables.  This is what eventually surfaces a
@@ -430,7 +449,7 @@ ReclaimResnapshot ==
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, sizeVars, everWritten,
-                 priorBytes, disclosedRead>>
+                 priorBytes, disclosedRead, deliveredFreeFired>>
 
 \* An unresponsive holder is fenced: revoked server-side (bookkeeping in
 \* `fenced` — its grant row is dead to the MDS) and preempted at the
@@ -450,7 +469,7 @@ Fence(c) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead>>
+                 priorBytes, disclosedRead, deliveredFreeFired>>
 
 \* The free.  Every snapshotted holder has returned or been fenced; with
 \* FreeRevalidates the transaction ALSO re-validates the live tables and
@@ -462,6 +481,18 @@ ReclaimComplete ==
   /\ reclaim.waiting = {}
   /\ FreeRevalidates =>
        \A b \in reclaim.blks : HeldBy(b) \subseteq fenced
+  \* The DELIVERED belt (the 2026-08-10 graduation): a fenced holder's
+  \* blocks free only when its exclusion was CONFIRMED at the target
+  \* (`resv` — the code's delivered bit, set on a verified preempt).  An
+  \* UNDELIVERED fence refuses the free — in code that extent
+  \* quarantines, which this model renders as "never freed".  Orthogonal
+  \* to FreeRevalidates on purpose: each mutation stays single-flag
+  \* attributable.  This is what lets the shipped cfg claim the stale
+  \* theorems WITHOUT FenceReaches — the fence may fail to land, and the
+  \* free machinery still never reuses a block out from under a client
+  \* the target has not actually excluded.
+  /\ FreeRequiresDelivered =>
+       \A b \in reclaim.blks : (HeldBy(b) \cap fenced) \subseteq resv
   /\ alloc' = [b \in Blocks |->
                 IF b \in reclaim.blks THEN "free" ELSE alloc[b]]
   /\ reclaim' = NoReclaim
@@ -470,6 +501,15 @@ ReclaimComplete ==
   \* blocks from splitting states on a value nothing reads.
   /\ priorBytes' = [b \in Blocks |->
                      IF b \in reclaim.blks THEN FALSE ELSE priorBytes[b]]
+  \* Probe witness: the delivered-conditional free actually FREED blocks
+  \* a fenced+delivered holder still held — the exact event the code
+  \* flip (quarantine -> clean free) exists to produce.  Gated on the
+  \* arm so unbelted state spaces never pay for it.  (Parenthesized per
+  \* the tranche-1 precedence trap.)
+  /\ deliveredFreeFired' =
+       (deliveredFreeFired \/
+         (FreeRequiresDelivered /\
+           (\E b \in reclaim.blks : (HeldBy(b) \cap fenced \cap resv) # {})))
   /\ UNCHANGED <<gen, grants, granting, fenced, resv, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
@@ -487,7 +527,7 @@ FreeDirect(R) ==
   /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead>>
+                 priorBytes, disclosedRead, deliveredFreeFired>>
 
 (***************************************************************************)
 (* The MDS: commit and size (tranche 2, CommitEnabled)                     *)
@@ -541,7 +581,7 @@ LayoutCommit(c, R, n) ==
   /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, truncateFired,
-                 everWritten, priorBytes, disclosedRead>>
+                 everWritten, priorBytes, disclosedRead, deliveredFreeFired>>
 
 \* SETATTR-shrink: the size cut is metadata-only and immediate; the blocks
 \* beyond the new size stay allocated until the reclaim machinery frees
@@ -558,7 +598,7 @@ TruncateStart(n) ==
                  nGrants, nReclaims, nRestarts, staleRead, staleWrite,
                  reuseFired, fenceFired, tgtRestarted, resnapshotGrew,
                  commitFired, zeroSized, forgedCommit, everWritten,
-                 priorBytes, disclosedRead>>
+                 priorBytes, disclosedRead, deliveredFreeFired>>
 
 (***************************************************************************)
 (* The target                                                              *)
@@ -575,7 +615,7 @@ TgtRestart ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, nGrants,
                  nReclaims, staleRead, staleWrite, reuseFired, fenceFired,
                  resnapshotGrew, sizeVars, everWritten, priorBytes,
-                 disclosedRead>>
+                 disclosedRead, deliveredFreeFired>>
 
 (***************************************************************************)
 (* The clients — raw NVMe I/O under a held layout; the MDS is not on this  *)
@@ -598,7 +638,7 @@ ClientRead(c, b) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 everWritten, priorBytes>>
+                 everWritten, priorBytes, deliveredFreeFired>>
 
 ClientWrite(c, b) ==
   /\ grants[c].live
@@ -617,7 +657,7 @@ ClientWrite(c, b) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleRead, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 disclosedRead>>
+                 disclosedRead, deliveredFreeFired>>
 
 LayoutReturn(c) ==
   /\ grants[c].live
@@ -626,7 +666,7 @@ LayoutReturn(c) ==
   /\ UNCHANGED <<alloc, gen, granting, fenced, resv, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead>>
+                 priorBytes, disclosedRead, deliveredFreeFired>>
 
 Next ==
   \/ \E c \in Clients, R \in Ranges : GrantCheck(c, R)
@@ -673,12 +713,15 @@ Inv_RecallCompletesBeforeReuse ==
 (***************************************************************************)
 (* THE THEOREMS — descendants of Inv_NoStaleServe, and the WRITE is        *)
 (* first-class: a stale write corrupts the NEW owner's bytes, which is     *)
-(* strictly worse than a stale read.  Both are EXPECTED FALSE while        *)
-(* FenceReaches = FALSE (the shipped world) and are deliberately NOT       *)
-(* listed in FlintExtents.cfg — listing them would be the model asserting  *)
-(* a delivery the design has not demonstrated on hardware.                 *)
-(* FlintExtentsTarget.cfg is the conditional green: what shipping the      *)
-(* block layout REQUIRES, not what any code yet does.                      *)
+(* strictly worse than a stale read.  GRADUATED 2026-08-10: the shipped    *)
+(* cfg now claims BOTH, licensed not by FenceReaches (still FALSE there —  *)
+(* the code's preempt arm can fail at runtime) but by                      *)
+(* FreeRequiresDelivered: the free trusts only target-CONFIRMED            *)
+(* exclusions, whose realness the fence rig proved on real hardware        *)
+(* (device counters froze under a live raw-path writer;                    *)
+(* make test-pnfs-fence-rig and its restart/ptpl/unfence descendants).     *)
+(* FlintExtentsLostFence.cfg is the permanent single-flag A/B pinning the  *)
+(* hole; FlintExtentsTarget.cfg remains the FenceReaches ideal world.      *)
 (***************************************************************************)
 Inv_NoStaleExtentWrite == ~staleWrite
 Inv_NoStaleExtentRead == ~staleRead

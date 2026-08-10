@@ -439,7 +439,32 @@ impl MetadataServer {
                             );
                             for (v, c) in fenced {
                                 match reconciler.fence_preempt(&v, c).await {
-                                    Ok(s) => info!("⛔ startup re-fence '{}' client {}: {}", v, c, s),
+                                    Ok(s) => {
+                                        info!("⛔ startup re-fence '{}' client {}: {}", v, c, s);
+                                        // Confirmed at the target — mark
+                                        // DELIVERED so the reclaim may
+                                        // free this client's extents
+                                        // (closes the crash window where
+                                        // the original fence never got
+                                        // to mark it). Loud-only on
+                                        // failure: unmarked = quarantine,
+                                        // the safe side.
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs() as i64)
+                                            .unwrap_or(0);
+                                        match backend.block_fence_delivered(&v, c, now).await {
+                                            Ok(Ok(_)) => {}
+                                            Ok(Err(e)) => tracing::error!(
+                                                "startup delivered-mark '{}' client {}: {}",
+                                                v, c, e
+                                            ),
+                                            Err(e) => tracing::error!(
+                                                "startup delivered-mark '{}' client {}: {}",
+                                                v, c, e
+                                            ),
+                                        }
+                                    }
                                     Err(e) => tracing::error!(
                                         "startup re-fence '{}' client {} FAILED: {} — the client \
                                          may reach the device until the next reconcile/roll",
