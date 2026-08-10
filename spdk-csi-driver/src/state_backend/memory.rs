@@ -298,6 +298,58 @@ impl StateBackend for MemoryBackend {
         ))
     }
 
+    async fn extent_reclaim_snapshot(
+        &self,
+        _volume: &str,
+        _file_id: u64,
+        _logical_offset: u64,
+        _length: u64,
+    ) -> StateBackendResult<Result<Vec<u64>, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        Err(StateBackendError::Storage(
+            "extent snapshot on the memory backend — block-class volumes require sqlite".into(),
+        ))
+    }
+
+    async fn extent_fence_client(
+        &self,
+        _volume: &str,
+        _client_id: u64,
+    ) -> StateBackendResult<Result<usize, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        Err(StateBackendError::Storage(
+            "extent fence on the memory backend — block-class volumes require sqlite".into(),
+        ))
+    }
+
+    async fn extent_reclaim_complete(
+        &self,
+        _volume: &str,
+        _file_id: u64,
+        _logical_offset: u64,
+        _length: u64,
+        _now_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::FreeOutcome,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        Err(StateBackendError::Storage(
+            "extent reclaim on the memory backend — block-class volumes require sqlite".into(),
+        ))
+    }
+
+    async fn extent_drop_volume(
+        &self,
+        _volume: &str,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        // Dropping rows that cannot exist is a clean no-op: DeleteVolume
+        // calls this unconditionally, and memory-backed MDSes never had
+        // a block-class volume to begin with (provision refuses).
+        Ok(Ok(0))
+    }
+
     async fn put_fh_mapping(&self, m: &FhMappingRecord) -> StateBackendResult<()> {
         self.fh_mappings.insert(m.file_id, m.clone());
         Ok(())

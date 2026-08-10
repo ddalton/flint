@@ -909,6 +909,30 @@ impl MdsControl for MdsControlService {
             mgr.forget_volume_geometry(&req.volume_id);
         };
 
+        // Sweep every extent-allocator row for the volume, class or no
+        // class (dropping zero rows is free, and it also cleans a
+        // class-confused state). Without this a re-created same-name
+        // volume inherits the old arena and extent rows: stale grants
+        // blocking every reclaim, and a watermark claiming space the
+        // new lvol never allocated.
+        match self
+            .layout_manager
+            .state_backend()
+            .extent_drop_volume(&req.volume_id)
+            .await
+        {
+            Ok(Ok(0)) => {}
+            Ok(Ok(n)) => info!("🗑  DeleteVolume {}: dropped {} extent row(s)", req.volume_id, n),
+            Ok(Err(e)) => warn!(
+                "DeleteVolume {}: extent sweep refused: {} — rows leak until re-create",
+                req.volume_id, e
+            ),
+            Err(e) => warn!(
+                "DeleteVolume {}: extent sweep failed: {} — rows leak until re-create",
+                req.volume_id, e
+            ),
+        }
+
         let removed = match std::fs::symlink_metadata(&file_path) {
             Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&file_path),
             Ok(_) => std::fs::remove_file(&file_path),

@@ -1111,7 +1111,8 @@ impl CompoundDispatcher {
                         if size_applied {
                             if let (Some(pnfs), Some(size)) = (&self.pnfs_handler, requested_size) {
                                 if let Some(key) = self.pnfs_current_fh_key(context) {
-                                    pnfs.note_truncate(&key, size).await;
+                                    let ino = self.ino_for_key(&key);
+                                    pnfs.note_truncate(&key, size, ino).await;
                                 }
                             }
                         }
@@ -1312,7 +1313,8 @@ impl CompoundDispatcher {
                     if res.status == Nfs4Status::Ok && size_applied {
                         if let (Some(pnfs), Some(size)) = (&self.pnfs_handler, requested_size) {
                             if let Some(key) = self.pnfs_current_fh_key(context) {
-                                pnfs.note_truncate(&key, size).await;
+                                let ino = self.ino_for_key(&key);
+                                pnfs.note_truncate(&key, size, ino).await;
                             }
                         }
                     }
@@ -1877,8 +1879,11 @@ impl CompoundDispatcher {
 
             Operation::Remove(name) => {
                 use crate::nfs::v4::operations::fileops::RemoveOp;
-                // Resolve the victim's pNFS key BEFORE the fs remove.
+                // Resolve the victim's pNFS key AND its inode BEFORE the
+                // fs remove — the extent tables key on the inode, and it
+                // is unrecoverable after the unlink.
                 let removed_key = self.pnfs_file_key(context.current_fh.as_ref(), &name);
+                let removed_ino = removed_key.as_deref().map(|k| self.ino_for_key(k)).unwrap_or(0);
                 let op = RemoveOp { target: name };
                 let res = self.file_handler.handle_remove(op, context).await;
                 if res.status == Nfs4Status::Ok {
@@ -1886,7 +1891,7 @@ impl CompoundDispatcher {
                     // future same-name file gets a fresh placement and
                     // can never read this file's stripes.
                     if let (Some(pnfs), Some(key)) = (&self.pnfs_handler, removed_key) {
-                        pnfs.note_remove(&key);
+                        pnfs.note_remove(&key, removed_ino);
                     }
                 }
                 OperationResult::Remove(res.status, res.change_info)
@@ -2204,6 +2209,15 @@ impl CompoundDispatcher {
             .to_string_lossy()
             .into_owned();
         if key.is_empty() { None } else { Some(key) }
+    }
+
+    /// The inode of `key`'s stub — the identity the extent tables key
+    /// on. 0 = unresolvable (already removed): the hooks treat that as
+    /// "leak to the sweep, loudly".
+    fn ino_for_key(&self, key: &str) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        let export = self.file_handler.fh_manager().get_export_path().to_path_buf();
+        std::fs::metadata(export.join(key)).map(|m| m.ino()).unwrap_or(0)
     }
 
     /// Whether the CURRENT filehandle lives on a scsi-class

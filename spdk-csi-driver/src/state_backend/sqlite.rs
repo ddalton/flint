@@ -1170,6 +1170,77 @@ impl StateBackend for SqliteBackend {
         })
         .await
     }
+
+    async fn extent_reclaim_snapshot(
+        &self,
+        volume: &str,
+        file_id: u64,
+        logical_offset: u64,
+        length: u64,
+    ) -> StateBackendResult<Result<Vec<u64>, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::reclaim_snapshot(
+                conn,
+                &v,
+                file_id,
+                logical_offset,
+                length,
+            )
+        })
+        .await
+    }
+
+    async fn extent_fence_client(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<Result<usize, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::fence_client(conn, &v, client_id)
+        })
+        .await
+    }
+
+    async fn extent_reclaim_complete(
+        &self,
+        volume: &str,
+        file_id: u64,
+        logical_offset: u64,
+        length: u64,
+        now_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::FreeOutcome,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::reclaim_complete(
+                conn,
+                &v,
+                file_id,
+                logical_offset,
+                length,
+                now_unix,
+            )
+        })
+        .await
+    }
+
+    async fn extent_drop_volume(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::drop_volume(conn, &v)
+        })
+        .await
+    }
 }
 
 // ── Row decoders ──────────────────────────────────────────────────────

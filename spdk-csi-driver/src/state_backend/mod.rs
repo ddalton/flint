@@ -602,6 +602,40 @@ pub trait StateBackend: Send + Sync {
         logical_offset: u64,
         length: u64,
     ) -> StateBackendResult<Result<usize, extent_alloc::ExtentAllocError>>;
+
+    /// The recall snapshot: live unfenced holders over the range —
+    /// advisory only; the free re-validates regardless.
+    async fn extent_reclaim_snapshot(
+        &self,
+        volume: &str,
+        file_id: u64,
+        logical_offset: u64,
+        length: u64,
+    ) -> StateBackendResult<Result<Vec<u64>, extent_alloc::ExtentAllocError>>;
+
+    /// Server-side revocation bookkeeping for an unresponsive holder.
+    async fn extent_fence_client(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<Result<usize, extent_alloc::ExtentAllocError>>;
+
+    /// The free transaction (FreeRevalidates inside; fenced-holder
+    /// ranges quarantine).
+    async fn extent_reclaim_complete(
+        &self,
+        volume: &str,
+        file_id: u64,
+        logical_offset: u64,
+        length: u64,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<extent_alloc::FreeOutcome, extent_alloc::ExtentAllocError>>;
+
+    /// DeleteVolume's sweep of every allocator row for the volume.
+    async fn extent_drop_volume(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
     async fn delete_volume_geometry(&self, volume: &str) -> StateBackendResult<()>;
 
     // id↔path mappings behind v2 (id-based) metadata filehandles.

@@ -1401,6 +1401,125 @@ impl PnfsOperationHandler {
     }
 }
 
+/// The scsi reclaim driver — §8's GC, FlintExtents' reclaim machine in
+/// code: recall every layout handle on the file (server-side revoke
+/// regardless of delivery, the F65 shape — an unreachable client is
+/// bound by the FENCE, not the recall), then drive the free through the
+/// belted path: complete → NotQuiescent{holders} → fence → retry.
+/// Bounded at 3 rounds because convergence is real — returned holders
+/// free clean, fenced holders quarantine, and the only thing that can
+/// extend the loop is a NEW grant racing in (the FreeRevalidates belt
+/// refusing is the machine-checked behaviour, not a bug). A
+/// non-converged reclaim leaves the rows for the next attempt and says
+/// so loudly.
+///
+/// `from` = first byte to reclaim: 0 for REMOVE, new_size for a
+/// truncate-shrink. Returns the outcome, `None` = gave up (rows leak
+/// to the next sweep).
+pub async fn reclaim_scsi_extents(
+    layout_manager: &crate::pnfs::mds::layout::LayoutManager,
+    callbacks: Option<&Arc<crate::pnfs::mds::callback::CallbackManager>>,
+    file_key: &str,
+    file_id: u64,
+    from: u64,
+) -> Option<crate::state_backend::extent_alloc::FreeOutcome> {
+    use crate::state_backend::extent_alloc::ExtentAllocError;
+
+    let backend = layout_manager.state_backend();
+    let volume = file_key.split('/').find(|c| !c.is_empty())?.to_string();
+    let length = (i64::MAX as u64).saturating_sub(from);
+    if length == 0 {
+        return None;
+    }
+
+    // 1. Recall + revoke every handle on the file. The helper revokes
+    //    server-side whatever the delivery outcome; a client with no
+    //    back channel simply never hears, which is exactly why step 2
+    //    fences instead of waiting.
+    if let Some(cb) = callbacks {
+        let recalls = layout_manager.recall_layouts_for_file(file_key);
+        if !recalls.is_empty() {
+            let pairs: Vec<(crate::nfs::v4::protocol::SessionId, _, _)> = recalls
+                .into_iter()
+                .map(|(sid, stateid, fh)| (crate::nfs::v4::protocol::SessionId(sid), stateid, fh))
+                .collect();
+            crate::pnfs::mds::callback::recall_layouts_for_truncate(
+                cb,
+                layout_manager,
+                file_key,
+                from,
+                &pairs,
+            )
+            .await;
+        }
+    } else {
+        debug!("reclaim of '{}': no callback manager — holders will be fenced", file_key);
+    }
+
+    // 2. Fence-and-free. The snapshot the recall worked from is
+    //    advisory; the free transaction re-validates (FreeRevalidates)
+    //    and names the live holders it refuses over — those are the
+    //    unresponsive, and fencing them is what unblocks the free.
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    for round in 0..3 {
+        match backend
+            .extent_reclaim_complete(&volume, file_id, from, length, now_unix)
+            .await
+        {
+            Ok(Ok(out)) => {
+                if out.freed_extents + out.quarantined_extents > 0 {
+                    info!(
+                        "♻️  reclaim '{}' [{}, ∞): freed {} extent(s)/{}B, quarantined \
+                         {} extent(s)/{}B (round {})",
+                        file_key,
+                        from,
+                        out.freed_extents,
+                        out.freed_bytes,
+                        out.quarantined_extents,
+                        out.quarantined_bytes,
+                        round,
+                    );
+                }
+                return Some(out);
+            }
+            Ok(Err(ExtentAllocError::NotQuiescent { holders })) => {
+                for c in holders {
+                    warn!(
+                        "♻️  reclaim '{}': fencing unresponsive client {} (round {})",
+                        file_key, c, round
+                    );
+                    match backend.extent_fence_client(&volume, c).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            tracing::error!("reclaim '{}': fence of {} refused: {}", file_key, c, e)
+                        }
+                        Err(e) => {
+                            tracing::error!("reclaim '{}': fence of {} failed: {}", file_key, c, e)
+                        }
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::error!("reclaim '{}': allocator refused: {} — giving up", file_key, e);
+                return None;
+            }
+            Err(e) => {
+                tracing::error!("reclaim '{}': backend error: {} — giving up", file_key, e);
+                return None;
+            }
+        }
+    }
+    warn!(
+        "♻️  reclaim '{}' [{}, ∞) did not converge in 3 rounds (grants kept racing in) — \
+         rows left for the next sweep",
+        file_key, from
+    );
+    None
+}
+
 // Implement PnfsOperations trait for PnfsOperationHandler
 #[tonic::async_trait]
 impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
@@ -1481,7 +1600,29 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
             .map(|l| (l.owner.client_id, l.file_ident))
     }
 
-    fn note_remove(&self, file_key: &str) {
+    fn note_remove(&self, file_key: &str, file_id: u64) {
+        if self.layout_manager.layout_class_for(file_key)
+            == crate::pnfs::mds::layout::LayoutClass::Scsi
+        {
+            if file_id == 0 {
+                warn!(
+                    "REMOVE of scsi file '{}' with unknown file_id — extents leak \
+                     until the reclaim sweep",
+                    file_key
+                );
+                return;
+            }
+            // The stub is already gone; the extents are reclaimed in the
+            // background (recall → fence → free). Spawned because this
+            // hook is sync and the reclaim does backend round-trips.
+            let lm = self.layout_manager.clone();
+            let cb = self.callback_manager.get().cloned();
+            let key = file_key.to_string();
+            tokio::spawn(async move {
+                reclaim_scsi_extents(&lm, cb.as_ref(), &key, file_id, 0).await;
+            });
+            return;
+        }
         if let Some(placement) = self.layout_manager.forget_placement(file_key) {
             if placement.file_id != 0 {
                 self.layout_manager.enqueue_stripe_cleanup(&placement, file_key);
@@ -1492,7 +1633,29 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         }
     }
 
-    async fn note_truncate(&self, file_key: &str, new_size: u64) {
+    async fn note_truncate(&self, file_key: &str, new_size: u64, file_id: u64) {
+        if self.layout_manager.layout_class_for(file_key)
+            == crate::pnfs::mds::layout::LayoutClass::Scsi
+        {
+            // scsi truncate is EXTENT RECLAIM, not the DS set_len fanout
+            // — there is no stripe gate here (FlintTruncate stays the
+            // files-layout authority; the extents machine is
+            // FlintExtents'). Awaited: the SETATTR reply must not
+            // outrun the recall, or a client could re-grant the range
+            // it is about to lose and read its own stale extents back.
+            if file_id == 0 {
+                warn!(
+                    "truncate of scsi file '{}' with unknown file_id — extents beyond \
+                     {} leak until the reclaim sweep",
+                    file_key, new_size
+                );
+                return;
+            }
+            let cb = self.callback_manager.get().cloned();
+            reclaim_scsi_extents(&self.layout_manager, cb.as_ref(), file_key, file_id, new_size)
+                .await;
+            return;
+        }
         let Some(placement) = self.layout_manager.placement_for(file_key) else {
             // Not striped — the MDS stub IS the file; nothing to push.
             return;
@@ -1637,6 +1800,51 @@ mod fallback_tests {
 
     fn owner() -> LayoutOwner {
         LayoutOwner { client_id: 1, session_id: [0u8; 16], fsid: 1 }
+    }
+
+    /// The reclaim driver end to end over a real sqlite allocator, no
+    /// callback manager (holders can never hear a recall): the
+    /// unresponsive holder is FENCED and its extents QUARANTINE; a
+    /// holder that already returned frees CLEAN. The model's fence/free
+    /// split (LostFence's mitigation and the return-after-fence
+    /// upgrade), driven by the code that will run on REMOVE/truncate.
+    #[tokio::test]
+    async fn scsi_reclaim_fences_the_unresponsive_and_frees_the_returned() {
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        lm.set_volume_geometry(
+            "volA",
+            crate::pnfs::mds::layout::VolumeGeometry {
+                stripe_size: 0,
+                stripe_width: 0,
+                layout_class: crate::pnfs::mds::layout::LayoutClass::Scsi,
+            },
+        )
+        .await;
+        lm.register_extent_arena("volA", 1 << 20).await.unwrap();
+
+        // Client 7 holds a grant on file 42 and never answers.
+        backend.extent_grant("volA", 42, 7, 0, 8192, true).await.unwrap().unwrap();
+        let out = reclaim_scsi_extents(&lm, None, "volA/f", 42, 0)
+            .await
+            .expect("fence path converges");
+        assert_eq!(out.quarantined_extents, 1, "unresponsive holder ⇒ quarantine");
+        assert_eq!(out.freed_extents, 0);
+
+        // Client 9 returned its layout before the reclaim: clean free.
+        backend.extent_grant("volA", 43, 9, 0, 8192, true).await.unwrap().unwrap();
+        backend.extent_layout_return("volA", 43, 9, 0, 8192).await.unwrap().unwrap();
+        let out = reclaim_scsi_extents(&lm, None, "volA/g", 43, 0)
+            .await
+            .expect("clean path converges");
+        assert_eq!(out.freed_extents, 1, "returned holder ⇒ clean free");
+        assert_eq!(out.quarantined_extents, 0);
     }
 
     /// Registry with `ids` registered + a handler whose layout manager

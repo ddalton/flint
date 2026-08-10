@@ -167,7 +167,10 @@ pub trait PnfsOperations: Send + Sync {
     /// a future same-name file gets a fresh placement (and fresh
     /// file_id ⇒ fresh DS stripe paths), and enqueue best-effort DS
     /// stripe cleanup.
-    fn note_remove(&self, _file_key: &str) {}
+    /// `_file_id` is the removed stub's inode (captured BEFORE the
+    /// unlink — the extent tables key on it, and it is unrecoverable
+    /// after). 0 = unknown; a scsi reclaim then leaks to the sweep.
+    fn note_remove(&self, _file_key: &str, _file_id: u64) {}
 
     /// A size-changing SETATTR (or OPEN with a size createattr) was
     /// applied to `file_key`'s MDS stub. For a striped file the stub
@@ -177,7 +180,7 @@ pub trait PnfsOperations: Send + Sync {
     /// Implementations push `set_len(new_size)` to every pinned DS
     /// before returning; on failure they park the file behind a
     /// LAYOUTGET/fallback gate until a background retry confirms.
-    async fn note_truncate(&self, _file_key: &str, _new_size: u64) {}
+    async fn note_truncate(&self, _file_key: &str, _new_size: u64, _file_id: u64) {}
 
     /// The deepest size change currently unconfirmed on this file's
     /// pinned DSes, if the truncate gate is armed.

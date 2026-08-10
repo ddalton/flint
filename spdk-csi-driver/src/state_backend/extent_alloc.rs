@@ -625,6 +625,23 @@ pub fn release_quarantine(conn: &mut Connection, volume: &str) -> Result<u64> {
     Ok(bytes)
 }
 
+/// DeleteVolume's sweep: drop every extent-allocator row for the
+/// volume — extents, grants, free list, quarantine, and the arena
+/// itself. Without this, a re-created volume of the same name would
+/// inherit the old arena and extent rows: stale grants blocking every
+/// reclaim, and a watermark claiming space the new lvol never
+/// allocated. Returns rows dropped, for the delete path's log.
+pub fn drop_volume(conn: &mut Connection, volume: &str) -> Result<u64> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut n = 0u64;
+    for table in ["extent_grants", "extents", "extent_free", "extent_quarantine", "volume_alloc"] {
+        n += tx.execute(&format!("DELETE FROM {table} WHERE volume = ?1"), params![volume])?
+            as u64;
+    }
+    tx.commit()?;
+    Ok(n)
+}
+
 /// The quarantine meter: (ranges, bytes) currently leaked for the volume.
 pub fn quarantine_stats(conn: &Connection, volume: &str) -> Result<(u64, u64)> {
     let (n, bytes): (i64, Option<i64>) = conn.query_row(
