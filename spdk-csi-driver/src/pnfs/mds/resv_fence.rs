@@ -136,6 +136,13 @@ const SGL_IN_CAPSULE: u8 = 0x01;
 /// PDUs (controller-to-host transfers).
 const SGL_TRANSPORT: u8 = 0x5a;
 
+/// C2HData PDU flag: the completion is carried INLINE in this data PDU
+/// and no separate CapsuleResp follows (SPDK sets this on the last data
+/// PDU of a read/report — `tcp.c` `SPDK_NVME_TCP_C2H_DATA_FLAGS_SUCCESS`,
+/// bit 3). Missing this is a hang: the host waits forever for a response
+/// capsule the target never sends.
+const C2H_DATA_FLAGS_SUCCESS: u8 = 1 << 3;
+
 /// NVMe status codes we name in errors (generic SCT).
 const SC_RESERVATION_CONFLICT: u16 = 0x83;
 
@@ -433,14 +440,34 @@ impl Queue {
                     return Ok((cqe, data_in));
                 }
                 PDU_C2H_DATA => {
-                    // Header (24 bytes total) carries the data offset in
-                    // pdo; we accumulate in arrival order (single
-                    // command in flight, offsets are monotonic).
+                    // Header: common(8) + cccid(2)@8 + datao(4)@12 +
+                    // datal(4)@16. Data sits at `pdo` from the PDU start
+                    // and runs `datal` bytes (any trailing padding is
+                    // NOT data). `rest` begins at PDU offset 8.
+                    let flags = common[1];
                     let pdo = common[3] as usize;
-                    if pdo < 8 || pdo > plen {
-                        return Err(format!("C2HData pdo {pdo} out of range"));
+                    if rest.len() < 12 {
+                        return Err("short C2HData header".into());
                     }
-                    data_in.extend_from_slice(&rest[pdo - 8..]);
+                    let datal =
+                        u32::from_le_bytes([rest[8], rest[9], rest[10], rest[11]]) as usize;
+                    if pdo < 8 || pdo - 8 + datal > rest.len() {
+                        return Err(format!("C2HData datao/datal out of range (pdo={pdo}, datal={datal})"));
+                    }
+                    data_in.extend_from_slice(&rest[pdo - 8..pdo - 8 + datal]);
+                    // SPDK sets SUCCESS on the last data PDU and sends NO
+                    // separate CapsuleResp — the completion is implicit
+                    // (all-zero status). Synthesize it and return, or the
+                    // read hangs forever waiting for a capsule.
+                    if flags & C2H_DATA_FLAGS_SUCCESS != 0 {
+                        let cccid = u16::from_le_bytes([rest[0], rest[1]]);
+                        if cccid != cid {
+                            return Err(format!("C2HData SUCCESS for cccid {cccid}, expected {cid}"));
+                        }
+                        let mut cqe = [0u8; 16];
+                        cqe[12..14].copy_from_slice(&cid.to_le_bytes());
+                        return Ok((cqe, data_in));
+                    }
                 }
                 PDU_C2H_TERM => {
                     return Err(format!(
@@ -568,8 +595,11 @@ impl ResvEndpoint {
         our_key: u64,
         victim_key: u64,
     ) -> Result<FenceOutcome, String> {
+        tracing::debug!("resv fence {}: opening session", self.subnqn);
         let mut s = self.open_session().await?;
+        tracing::debug!("resv fence {}: session up, reading report", self.subnqn);
         let before = self.report_on(&mut s).await?;
+        tracing::debug!("resv fence {}: report before = {}", self.subnqn, before.summary());
 
         let mut registered = false;
         if !before.has_key(our_key) {
@@ -959,22 +989,28 @@ pub(crate) mod tests {
             }
 
             if let Some(body) = c2h {
+                // Real SPDK sets SUCCESS on the last data PDU and sends
+                // NO trailing CapsuleResp — model that exactly, or the
+                // host's inline-completion path goes untested (the very
+                // bug the lima rig caught: a hang on the report).
                 let mut hdr = [0u8; 24];
                 hdr[0] = PDU_C2H_DATA;
+                hdr[1] = C2H_DATA_FLAGS_SUCCESS | (1 << 2); // SUCCESS | LAST_PDU
                 hdr[2] = 24;
                 hdr[3] = 24; // pdo
                 hdr[4..8].copy_from_slice(&((24 + body.len()) as u32).to_le_bytes());
-                hdr[8..10].copy_from_slice(&cid.to_le_bytes());
-                hdr[16..20].copy_from_slice(&(body.len() as u32).to_le_bytes());
+                hdr[8..10].copy_from_slice(&cid.to_le_bytes()); // cccid
+                hdr[16..20].copy_from_slice(&(body.len() as u32).to_le_bytes()); // datal
                 s.write_all(&hdr).await?;
                 s.write_all(&body).await?;
+            } else {
+                let mut resp = [0u8; 24];
+                resp[0] = PDU_CAPSULE_RESP;
+                resp[2] = 24;
+                resp[4..8].copy_from_slice(&24u32.to_le_bytes());
+                resp[8..24].copy_from_slice(&cqe);
+                s.write_all(&resp).await?;
             }
-            let mut resp = [0u8; 24];
-            resp[0] = PDU_CAPSULE_RESP;
-            resp[2] = 24;
-            resp[4..8].copy_from_slice(&24u32.to_le_bytes());
-            resp[8..24].copy_from_slice(&cqe);
-            s.write_all(&resp).await?;
         }
     }
 

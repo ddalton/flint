@@ -263,6 +263,32 @@ and draining qpairs (`nvmeof_export.rs:511-530`) is a functional fence the clien
 as connection loss — use it as the enforcement backstop, not the primary, because
 conforming clients recover cleanly only from RESERVATION CONFLICT.
 
+> **RIG-PROVEN 2026-08-10** (`tests/lima/pnfs/block-rig.sh FENCE=1`, i.e.
+> `make test-pnfs-fence-rig`; kernel 7.0; `resv_fence.rs` is the MDS's own minimal
+> NVMe/TCP initiator). A live O_DIRECT writer on the raw path was fenced by the MDS,
+> and the volume's `bdev_get_iostat` `bytes_written` **froze at the fence and stayed
+> frozen** — FenceReaches, on the device counters, against a client mid-write. Three
+> kernel facts the rig established, each a correction to the paragraph above:
+>  1. **The kernel client registers NO reservation key.** `nvme resv-report` on the
+>     client is empty and SPDK logs `Can't register zeroed new key` — the kernel's own
+>     `pr_register` sends a zero key and SPDK rejects it. So "Reservation Acquire with
+>     Preempt naming the client's key" is a **no-op in practice**: there is no client
+>     key to preempt. The fence is the MDS *acquiring* RTYPE=4h, which fences the client
+>     as a **non-registrant** (SPDK's per-command `nvmf_ns_reservation_request_check`
+>     refuses non-registrant READ *and* WRITE under 4h). `fence_preempt` keeps the
+>     preempt arm for a *foreign/stale* holder, but EA-RO acquisition is the load-bearing
+>     step.
+>  2. **The conforming client returns its layout on the write error** (`_pnfs_return_layout`
+>     fires on the RESERVATION CONFLICT), which frees the grant **clean** — the
+>     return-after-fence upgrade, observed live, no quarantine needed.
+>  3. The functional backstop reaches the client concretely: after host eviction the
+>     client's nvme-tcp **reconnect is refused** (`Connect … is not allowed`).
+>
+> Wire bug the rig caught (invisible to the in-process fake until it was taught to
+> reproduce SPDK): the target sets the **C2HData SUCCESS flag** on the last data PDU of
+> a read/report and sends **no** separate response capsule, so the initiator must
+> complete on the inline flag or it hangs forever on the reservation report.
+
 ## 6. What we lose — be honest
 
 - **Per-file trust granularity, permanently.** Extents are raw device ranges. RFC 8154
@@ -743,11 +769,20 @@ Each phase ships standalone value; none is gated on the next.
   or MDS-level mirroring across namespaces with the MDS coordinating writes — the
   latter re-inserts the MDS into the data path and is probably disqualified. Undecided;
   phase 1-3 ship single-replica with `reclaimPolicy` and workload guidance saying so.
-- **Fencing end-to-end**: Linux pr_ops preempt over nvme-tcp against SPDK's reservation
-  implementation is confirmed on each side, untested in combination. `FenceReaches`
-  stays FALSE in the shipped cfg until the phase-2 rig proves it — and until then GC
-  **quarantines** fenced-holder extents rather than reusing them (§8):
-  reuse-after-unproven-fence is designed out, not accepted as a residual.
+- **Fencing end-to-end**: ~~confirmed on each side, untested in combination~~ **PROVEN
+  in combination 2026-08-10** (§5 RIG-PROVEN box; `make test-pnfs-fence-rig`): a real
+  Linux client mid-write was stopped at the device by the MDS's NVMe reservation, with
+  the mechanism turning out to be EA-RO acquisition against a non-registrant kernel, not
+  key-preempt. **This proves FenceReaches *for this tgt/kernel pairing on the rig*; it
+  does NOT flip the shipped cfg.** The `FenceReaches` constant stays FALSE until the
+  formal-model gate is re-run with it TRUE (the FlintExtentsLostFence residual re-modeled
+  and the 99-run gate green) — a separate, deliberate step, not taken here. Until that
+  flip GC still **quarantines** fenced-holder extents rather than reusing them (§8):
+  reuse-after-unproven-fence stays designed out. What the rig changes is the *confidence*
+  that the flip is safe to pursue, and it becomes the standing regression harness that
+  keeps the fence path honest between now and then. Open sub-item: the rig proves reach
+  on ONE tgt; multi-namespace / multi-tgt preempt and the MdsRestart re-acquire
+  (reservation holdership is target-side, not in sqlite) still need their own drills.
 - **CoW / CLONE**: RFC 8154 §2.4.5 gives the extent vocabulary (READ_DATA source +
   INVALID_DATA dest, client merges); the Linux client expects the *server* to
   orchestrate CoW. Refcounted extents in the allocator are sketched but unproven;

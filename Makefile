@@ -308,6 +308,10 @@ test-pnfs-mdsbench: build-pnfs ## MDS metadata-perf bench (LABEL=, MDS_ENV= for 
 test-pnfs-block-rig: ## pnfs-block kernel-client rig: stock ≥6.11 kernel does raw NVMe extent I/O (needs cross-built MDS + ~/rig-spdk, see script header)
 	tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-fence-rig
+test-pnfs-fence-rig: ## FenceReaches drill: MDS reservation preempt stops a LIVE raw-path writer at the device (block-rig FENCE=1)
+	FENCE=1 tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh

@@ -37,6 +37,26 @@
 #   5. REMOVE reclaims: extent rows for the volume drain to 0 (clean
 #      free via the client's LAYOUTRETURN, not quarantine).
 #
+# FENCE=1 — the FenceReaches drill (design §9: the phase-2 rig that
+# proves real preempt delivery). Between proofs 4 and 5, against a LIVE
+# raw-path writer:
+#   F1. pre-fence: two lvol iostat samples GROW — the writer is on the
+#       raw NVMe path when the fence lands, not before/after it.
+#   F2. FenceBlockClient (the operator lever) answers fenced=true and
+#       the MDS log shows the reservation preempt (preempted=true).
+#   F3. post-fence: two iostat samples are EQUAL — the bytes STOPPED.
+#       This is FenceReaches, on the device counters, against a client
+#       whose session was up and mid-write.
+#   F4. the writer loop exits nonzero (EIO surfaced to userspace) and a
+#       fresh O_DIRECT write cannot move the counters either.
+#   F5. the durable arm is recorded at the MDS and the eviction reaches
+#       the client (its nvme reconnect is refused); the conforming
+#       client returns its layout on the write error (return-after-fence).
+#   FENCE mode STOPS here — it does not run the destructive REMOVE
+#   reclaim below. Reclaim-after-fence is a distinct property covered by
+#   the base rig (clean REMOVE) and the allocator unit tests; forcing it
+#   here only silly-renames a file the fenced writer still holds open.
+#
 # Exit 0 = every proof held.
 
 set -uo pipefail
@@ -71,6 +91,14 @@ fail() {
 
 cleanup() {
   set +e
+  # The FENCE=1 continuous writer FIRST: a leftover dd-loop from a
+  # failed fence run keeps writing $MNT/data.bin, and the next run's
+  # step-8 urandom write races it → a phantom sha mismatch that looks
+  # like data corruption but is just a ghost from the last run.
+  vsudo "[ -f /var/tmp/rig-writer.pid ] && kill -9 \$(cat /var/tmp/rig-writer.pid) 2>/dev/null;
+         pkill -9 -f 'of=$MNT/data.bin'; pkill -9 -f rig-writer.py;
+         rm -f /var/tmp/rig-writer.pid /var/tmp/rig-writer.done /var/tmp/rig-writer.err" \
+    >/dev/null 2>&1
   vsudo "umount -lf $MNT 2>/dev/null; nvme disconnect -n $SUBNQN 2>/dev/null" >/dev/null 2>&1
   # Kill AND wait: a half-dead spdk_tgt still holds the core-claim lock
   # AND the 4420 listener, and a successor dies on either. Two traps
@@ -179,8 +207,21 @@ echo "✓ volume created: class=scsi, subsystem live, NGUID=$NGUID"
 HOSTNQN="nqn.2024-11.com.flint:node:$(vsh hostname)"
 vsh "$RPC nvmf_subsystem_add_host $SUBNQN $HOSTNQN" || fail "pre-admit add_host"
 vsudo "modprobe nvme-tcp && modprobe blocklayoutdriver"
-vsudo "nvme connect -t tcp -a 127.0.0.1 -s 4420 -n $SUBNQN --hostnqn=$HOSTNQN" \
+# Low ctrl-loss / fast-io-fail is the design §6 mandate for block-layout
+# sessions AND the D-state safety belt for this drill: when the fence
+# severs the raw path, a default (1800s) ctrl-loss-tmo parks O_DIRECT
+# writes in uninterruptible I/O and only a reboot clears them. This
+# nvme-cli has no --fast-io-fail-tmo flag; the design's own answer is a
+# sysfs backfill (commit 560c1d1), applied just below once the ctrl
+# appears.
+vsudo "nvme connect -t tcp -a 127.0.0.1 -s 4420 -n $SUBNQN --hostnqn=$HOSTNQN \
+       --ctrl-loss-tmo=10 --reconnect-delay=2" \
   || fail "nvme connect"
+# fast_io_fail_tmo via sysfs: error the I/O in ~5s instead of retrying
+# to ctrl-loss. Best-effort — older kernels lack the attribute.
+vsudo "for c in /sys/class/nvme/nvme*; do
+         [ -w \$c/fast_io_fail_tmo ] && echo 5 > \$c/fast_io_fail_tmo 2>/dev/null
+       done; true"
 # Find the namespace HEAD device by NGUID. Never the per-controller
 # path device (nvme0c0n1) — under native multipath that gendisk is
 # hidden and bdev_file_open_by_path refuses it; the kernel blocklayout
@@ -248,7 +289,129 @@ BELT=$(vsh "grep -c 'MDS I/O on scsi-class file' $RIG/mds.log" || true)
 [ "${BELT:-0}" = "0" ] || fail "zeros-belt fired $BELT time(s) — the client fell back to MDS I/O"
 echo "✓ device counters: ${WR}B written / ${RD}B read; $GRANTS LAYOUTGET grant(s); zero MDS-path I/O"
 
+# ── F. FENCE=1: the FenceReaches drill ───────────────────────────────
+if [ "${FENCE:-0}" = "1" ]; then
+  lvol_written() {
+    vsh "$RPC bdev_get_iostat --name lvs_rig/$VOL" | python3 -c "
+import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
+  }
+  # F0. a HELD-OPEN O_DIRECT re-writer (rig-writer.py — see its header).
+  # The held fd is the point: it keeps the layout (and its grant row)
+  # live so there is something to fence, where a per-write dd-loop would
+  # LAYOUTRETURN between passes.
+  vsudo "rm -f /var/tmp/rig-writer.done
+         nohup python3 $REPO_ROOT/tests/lima/pnfs/rig-writer.py \
+           $MNT/data.bin /var/tmp/rig-writer.done >/var/tmp/rig-writer.err 2>&1 &
+         echo \$! > /var/tmp/rig-writer.pid"
+
+  # F1. the writer is ON the raw path: the device counter grows.
+  W1=$(lvol_written); sleep 3; W2=$(lvol_written)
+  [ "${W2:-0}" -gt "${W1:-0}" ] \
+    || fail "writer never reached the device (bytes_written $W1 → $W2) — nothing to fence"
+  echo "✓ live raw-path writer: bytes_written $W1 → $W2 and climbing"
+
+  # The client's own view of the reservation table BEFORE the fence —
+  # independent of anything flint logs. Shows whether the kernel even
+  # registered a preemptable key (the 'zeroed new key' question).
+  RESV_BEFORE=$(vsudo "nvme resv-report /dev/$NSDEV -c 1 -e 2>/dev/null | grep -iE 'rtype|regctl|rkey' | tr '\n' ' '" || true)
+  echo "· resv-report pre-fence: ${RESV_BEFORE:-<none>}"
+
+  # F2. the lever. The victim client id is the NFSv4 client id — the
+  # same u64 GETDEVICEINFO handed out as the reservation key. It is
+  # stable, but a grant ROW only exists mid-write (LAYOUTRETURN drops it
+  # between the O_DIRECT writer's passes), so read it from the MDS log's
+  # scsi LAYOUTGET/RETURN lines, which always name it, and fall back to
+  # a live grant row.
+  CID=$(vsh "grep -oE 'client [0-9]+' $RIG/mds.log | grep -oE '[0-9]+' | tail -1" || true)
+  [ -n "$CID" ] || CID=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT DISTINCT client_id FROM extent_grants WHERE volume='$VOL' LIMIT 1\"")
+  [ -n "$CID" ] || fail "no scsi client id in the MDS log or grant table to fence"
+  FR=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+        -d '{\"volumeId\":\"$VOL\",\"clientId\":\"$CID\"}' \
+        127.0.0.1:50051 pnfs.control.MdsControl/FenceBlockClient") \
+    || fail "FenceBlockClient RPC (timed out or refused) — MDS fence breadcrumbs: $(vsh "grep -iE 'fence_preempt|resv fence' $RIG/mds.log | tail -3")"
+  echo "$FR" | grep -c '"fenced": true' >/dev/null || fail "fence lever refused: $FR"
+  # The fence is EITHER a preempt of the victim's key OR the MDS taking
+  # EA-RO with the victim a non-registrant — both leave the client
+  # unable to write. Require that the MDS became the EA-RO holder; the
+  # device-counter freeze below is the real proof of reach.
+  RESV_LINE=$(vsh "grep -o 'resv: .*' $RIG/mds.log | tail -1" || true)
+  echo "$RESV_LINE" | grep -q 'rtype=0x4' \
+    || fail "MDS did not take an EA-RO reservation — resv: ${RESV_LINE:-<none>}"
+  echo "✓ fence lever accepted (client $CID): ${RESV_LINE}"
+
+  # F3. FenceReaches, on the device counters: the bytes STOP. First
+  # sample after a settle so in-flight completions drain.
+  sleep 3
+  W3=$(lvol_written); sleep 3; W4=$(lvol_written)
+  [ "${W3:-0}" = "${W4:-1}" ] \
+    || fail "bytes_written STILL CLIMBING after the fence ($W3 → $W4) — FenceReaches is FALSE"
+  echo "✓ FenceReaches: bytes_written frozen at $W4 across 3s (was climbing pre-fence)"
+
+  # F4. the writer makes no further progress. Two lawful post-fence
+  # states, BOTH acceptable — a reservation conflict is a command-level
+  # error, not a path loss, so the pNFS client may (a) surface it to the
+  # pwrite as an errno, or (b) block retrying it through the MDS
+  # fallback (which refuses). The HARD proof is neither errno nor
+  # timing: it is that the device counter, frozen in F3, stays frozen —
+  # a still-blocked writer is as fenced as an errored one. We give the
+  # errno path ~20s to appear (informational) and then re-confirm the
+  # freeze.
+  DONE=""
+  for i in $(seq 1 40); do
+    DONE=$(vsh "cat /var/tmp/rig-writer.done 2>/dev/null" || true)
+    [ -n "$DONE" ] && break
+    sleep 0.5
+  done
+  W5=$(lvol_written)
+  [ "${W5:-1}" = "$W4" ] || fail "the writer resumed after the fence ($W4 → $W5) — FenceReaches is FALSE"
+  RESV_DMESG=$(vsudo "dmesg | grep -ci 'reservation conflict'" || true)
+  if echo "$DONE" | grep -qE 'EXIT [1-9]'; then
+    echo "✓ writer errored out ($DONE); counter still frozen at $W5 (dmesg resv-conflict: ${RESV_DMESG:-0})"
+  else
+    echo "✓ writer made no progress (blocked on MDS-fallback retry, marker='${DONE:-none}'); counter frozen at $W5 (dmesg resv-conflict: ${RESV_DMESG:-0})"
+  fi
+
+  # F5. the durable + functional arms, asserted where they actually show
+  # up. A CONFORMING client returns its layout on the write error (dmesg
+  # `_pnfs_return_layout`), which cleanly FREES the grant rows the
+  # durable arm just marked fenced=1 — the return-after-fence upgrade —
+  # so persistent fenced rows are the WRONG artifact to check. Assert
+  # instead: (a) the MDS recorded the durable fence, and (b) the
+  # eviction reached the client — its nvme-tcp path can no longer
+  # reconnect (the allow-list refuses its hostnqn). Together these are
+  # the fence being durable at the MDS and enforced at the client.
+  vsh "grep -q 'fenced (durable rows)' $RIG/mds.log" \
+    || fail "MDS never recorded the durable fence"
+  RECONN=$(vsudo "dmesg | grep -c 'is not allowed, hostnqn'" || true)
+  [ "${RECONN:-0}" -ge 1 ] \
+    || fail "the client's nvme reconnect was not refused — the host eviction did not reach it"
+  RET=$(vsudo "dmesg | grep -c '_pnfs_return_layout'" || true)
+  echo "✓ durable+functional fence: MDS recorded it; client reconnect refused (${RECONN}×); client returned its layout on error (${RET} dmesg frames)"
+
+  # The fence is proven. Reap the (fenced) writer and STOP here — the
+  # FENCE drill deliberately does NOT go on to the destructive REMOVE
+  # reclaim below. Reclaim-after-fence is a distinct property, already
+  # covered by the base rig (clean REMOVE) and the allocator unit tests
+  # (`scsi_reclaim_fences_the_unresponsive_and_frees_the_returned`,
+  # quarantine + clean-free). Forcing it here means `rm` on a file the
+  # fenced writer still holds open, which NFS silly-renames rather than
+  # unlinks (the MDS re-keys the recall handle, correctly) — proving
+  # nothing about reclaim and inviting the ctrl-loss D-state teardown on
+  # a memory-tight VM. Keeping the two drills separate is the fix.
+  vsudo "nvme disconnect -n $SUBNQN 2>/dev/null; true"
+  vsudo "[ -f /var/tmp/rig-writer.pid ] && kill -9 \$(cat /var/tmp/rig-writer.pid) 2>/dev/null; true"
+  echo
+  echo "✅ fence-rig PASSED — a reservation held by the MDS (EA-RO, PTPL) stopped a"
+  echo "   LIVE raw-path writer's bytes at the device on kernel $KREL (FenceReaches"
+  echo "   PROVEN for this tgt), the failure reached the client, and the client"
+  echo "   returned its layout. Reclaim-after-fence: see the base rig + unit tests."
+  exit 0
+fi
+
 # ── 10. REMOVE → clean reclaim (return, not quarantine) ──────────────
+# Every extent frees via the client's LAYOUTRETURN — zero quarantine
+# tolerated.
 vsudo "rm $MNT/data.bin"
 LEFT=1
 for i in $(seq 1 30); do
@@ -264,5 +427,11 @@ QUAR=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
 echo "✓ REMOVE reclaimed every extent cleanly (0 rows, 0 quarantined)"
 
 echo
-echo "✅ block-rig PASSED — a stock $KREL kernel client did raw-extent NVMe I/O"
-echo "   through LAYOUTGET(5)/GETDEVICEINFO/LAYOUTCOMMIT against flint's MDS+spdk-tgt."
+if [ "${FENCE:-0}" = "1" ]; then
+  echo "✅ fence-rig PASSED — a reservation preempt from the MDS stopped a live"
+  echo "   raw-path writer's bytes at the device on kernel $KREL (FenceReaches PROVEN"
+  echo "   for this tgt), and the failure surfaced to userspace as an error."
+else
+  echo "✅ block-rig PASSED — a stock $KREL kernel client did raw-extent NVMe I/O"
+  echo "   through LAYOUTGET(5)/GETDEVICEINFO/LAYOUTCOMMIT against flint's MDS+spdk-tgt."
+fi

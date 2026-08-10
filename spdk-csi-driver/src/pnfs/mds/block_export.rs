@@ -238,7 +238,9 @@ impl BlockExportReconciler {
         // allow-list to connect (`desired_hosts` always includes it),
         // and reconverging is the idempotent way to get it there for
         // volumes provisioned before the fence lane existed.
+        tracing::debug!("fence_preempt {}: converging export", volume);
         self.ensure_locked(volume, None).await?;
+        tracing::debug!("fence_preempt {}: converged, resolving nsid", volume);
         let nqn = crate::identity::block_volume_export_nqn(volume);
         // The namespace id, read from the live subsystem rather than
         // assumed: subsystem-per-volume means exactly one, but the
@@ -255,6 +257,7 @@ impl BlockExportReconciler {
                     .as_u64()
             })
             .ok_or_else(|| format!("{} carries no namespace to fence on", nqn))?;
+        tracing::debug!("fence_preempt {}: nsid={}, opening NVMe session", volume, nsid);
         let ep = super::resv_fence::ResvEndpoint {
             traddr: self.traddr.clone(),
             trsvcid: self.trsvcid,
