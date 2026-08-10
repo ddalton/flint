@@ -41,6 +41,39 @@ service MdsControl {
   // acknowledgement. Legacy sparse-file volumes DO have a real size and
   // are grown in place. Shrinking is always refused.
   rpc ExpandVolume(ExpandVolumeRequest) returns (ExpandVolumeResponse);
+
+  // Fence one block-layout (scsi) client of a volume: durable fence
+  // rows in the allocator (no further grants; its extents quarantine),
+  // reservation preempt at the NVMe target (the client's next raw
+  // read/write gets RESERVATION CONFLICT), and eviction from the
+  // export allow-list. The operator/roller lever for a client that is
+  // unresponsive or about to be — the reclaim driver runs the same
+  // sequence on its own when a recall goes unanswered. Idempotent.
+  //
+  // The durable arm binds to the client's GRANT rows: a client holding
+  // no grants gets the device-path arms (preempt + eviction) only, and
+  // its next LAYOUTGET would re-admit it — fencing is for holders, not
+  // a standing ban list.
+  rpc FenceBlockClient(FenceBlockClientRequest) returns (FenceBlockClientResponse);
+}
+
+message FenceBlockClientRequest {
+  // The pNFS volume (PVC volume id) whose export the client is fenced
+  // from.
+  string volume_id = 1;
+
+  // The NFSv4 client id — the same u64 GETDEVICEINFO hands the client
+  // as its reservation key (`sbv_pr_key`). Readable from the MDS's
+  // state backend (`extent_grants.client_id`) or its grant log lines.
+  uint64 client_id = 2;
+}
+
+message FenceBlockClientResponse {
+  // True when the durable fence rows are in place. The preempt and
+  // allow-list arms are best-effort on top; `detail` says what each
+  // did.
+  bool fenced = 1;
+  string detail = 2;
 }
 
 // CreateVolume request from CSI driver to MDS.

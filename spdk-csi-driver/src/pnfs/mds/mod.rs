@@ -49,6 +49,9 @@ pub mod f68a_meter;
 /// pinned NGUID, grant-driven host admission (design doc §5).
 pub mod block_export;
 
+/// The MDS-as-NVMe-host reservation fence lane (RFC 9561 §2.2 preempt).
+pub mod resv_fence;
+
 // Re-exports
 pub use device::{DeviceRegistry, DeviceInfo, DeviceStatus};
 pub use layout::{LayoutManager, IoMode, LayoutType};

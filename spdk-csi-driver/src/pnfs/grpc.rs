@@ -1037,6 +1037,59 @@ impl MdsControl for MdsControlService {
         }
     }
 
+    /// The operator/roller fence lever. Same three-layer sequence the
+    /// reclaim driver runs when a recall goes unanswered
+    /// (`operations::fence_block_client`): durable fence rows →
+    /// reservation preempt → allow-list eviction. The lever exists
+    /// because the moments that need a fence most — a wedged client
+    /// node, a DS roll with remote initiators the roller cannot see —
+    /// are exactly the moments no reclaim is running.
+    async fn fence_block_client(
+        &self,
+        request: Request<FenceBlockClientRequest>,
+    ) -> Result<Response<FenceBlockClientResponse>, Status> {
+        let req = request.into_inner();
+        if req.volume_id.is_empty()
+            || req.volume_id.contains('/')
+            || req.volume_id.contains('\0')
+        {
+            return Ok(Response::new(FenceBlockClientResponse {
+                fenced: false,
+                detail: "volume_id must be non-empty and contain no '/' or NUL".into(),
+            }));
+        }
+        if req.client_id == 0 {
+            return Ok(Response::new(FenceBlockClientResponse {
+                fenced: false,
+                detail: "client_id 0 is never minted — refusing a fence that could \
+                         only be a caller bug"
+                    .into(),
+            }));
+        }
+        warn!(
+            "⛔ FenceBlockClient: fencing client {} of volume {} (operator lever)",
+            req.client_id, req.volume_id
+        );
+        let ctx = format!("FenceBlockClient '{}'", req.volume_id);
+        match crate::pnfs::mds::operations::fence_block_client(
+            &self.layout_manager,
+            &ctx,
+            &req.volume_id,
+            req.client_id,
+        )
+        .await
+        {
+            Ok(detail) => {
+                info!("⛔ {}: {}", ctx, detail);
+                Ok(Response::new(FenceBlockClientResponse { fenced: true, detail }))
+            }
+            Err(e) => {
+                warn!("{}: {}", ctx, e);
+                Ok(Response::new(FenceBlockClientResponse { fenced: false, detail: e }))
+            }
+        }
+    }
+
     /// Handle DS unregistration
     async fn unregister_data_server(
         &self,
@@ -1192,6 +1245,99 @@ mod create_volume_tests {
         assert!(tgt.bdevs.lock().unwrap().is_empty(), "lvol torn down");
     }
 
+    /// The operator fence lever end to end: create a block volume,
+    /// admit a client, then FenceBlockClient — fence rows land, the
+    /// preempt arm runs against a real (scripted) NVMe/TCP target, and
+    /// the client's host leaves the allow-list while the fence lane's
+    /// own admission stays.
+    #[tokio::test]
+    async fn fence_block_client_lever_runs_all_three_layers() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        nvme.state.lock().unwrap().registrants.push((77, [0xcc; 16], false));
+
+        let dir = tempfile::tempdir().unwrap();
+        let (s, tgt) =
+            svc_sqlite_at(dir.path(), true, nvme.addr.ip().to_string(), nvme.addr.port());
+        let mut req = cvreq("pvc-fence", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        let backend = s.layout_manager.state_backend();
+        let host = crate::nvmeof_export::flint_host_nqn("node-victim");
+        backend.block_host_admit("pvc-fence", 77, &host, 0).await.unwrap().unwrap();
+        s.layout_manager.block_export().unwrap().reconcile_hosts("pvc-fence").await.unwrap();
+        let nqn = crate::identity::block_volume_export_nqn("pvc-fence");
+        assert!(tgt.hosts_of(&nqn).contains(&host));
+        // The victim HOLDS a grant — the durable fence binds to grant
+        // rows (`fence_client` flips them), which is the realistic
+        // shape: a client worth fencing is a holder.
+        backend.extent_grant("pvc-fence", 42, 77, 0, 8192, true).await.unwrap().unwrap();
+
+        let r = s
+            .fence_block_client(Request::new(FenceBlockClientRequest {
+                volume_id: "pvc-fence".into(),
+                client_id: 77,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.fenced, "{}", r.detail);
+        assert!(r.detail.contains("reservation preempted"), "{}", r.detail);
+        assert!(r.detail.contains("host evicted"), "{}", r.detail);
+
+        // Allow-list: victim gone, fence lane kept.
+        let hosts = tgt.hosts_of(&nqn);
+        assert!(!hosts.contains(&host), "victim evicted: {hosts:?}");
+        assert!(hosts.contains(&crate::identity::block_mds_host_nqn()));
+        // Target reservation state: victim key preempted, MDS key holds.
+        {
+            let st = nvme.state.lock().unwrap();
+            assert!(!st.registrants.iter().any(|(k, _, _)| *k == 77));
+            assert!(st
+                .registrants
+                .iter()
+                .any(|(k, _, h)| *k == crate::identity::BLOCK_MDS_PR_KEY && *h));
+        }
+        // Allocator: the fenced client gets no further grants.
+        let refused = backend
+            .extent_grant("pvc-fence", 42, 77, 0, 8192, true)
+            .await
+            .unwrap();
+        assert!(refused.is_err(), "a fenced client must be refused grants");
+
+        // Replay: the lever is idempotent (fence rows upsert, preempt
+        // skips, evict finds nothing).
+        let again = s
+            .fence_block_client(Request::new(FenceBlockClientRequest {
+                volume_id: "pvc-fence".into(),
+                client_id: 77,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(again.fenced, "{}", again.detail);
+
+        // Guardrails: client 0 and a path-shaped volume are refused.
+        let r = s
+            .fence_block_client(Request::new(FenceBlockClientRequest {
+                volume_id: "pvc-fence".into(),
+                client_id: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.fenced);
+        let r = s
+            .fence_block_client(Request::new(FenceBlockClientRequest {
+                volume_id: "a/b".into(),
+                client_id: 1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.fenced);
+    }
+
     /// Expanding a directory volume must SUCCEED. It stores no
     /// per-volume size — capacity is pool-side at the data servers — so
     /// there is genuinely nothing to do, and refusing left the PVC stuck
@@ -1334,6 +1480,20 @@ mod create_volume_tests {
         export: &std::path::Path,
         with_block_export: bool,
     ) -> (MdsControlService, Arc<crate::pnfs::mds::block_export::tests::FakeTgt>) {
+        // No test on this path opens an NVMe/TCP fence session; the
+        // listener address is never dialed.
+        svc_sqlite_at(export, with_block_export, "10.0.0.9".into(), 4420)
+    }
+
+    /// `svc_sqlite` with the export's NVMe listener coordinates under
+    /// test control — the fence-lever test points them at a scripted
+    /// in-process NVMe target so the preempt arm really runs.
+    fn svc_sqlite_at(
+        export: &std::path::Path,
+        with_block_export: bool,
+        traddr: String,
+        trsvcid: u16,
+    ) -> (MdsControlService, Arc<crate::pnfs::mds::block_export::tests::FakeTgt>) {
         let registry = Arc::new(DeviceRegistry::new());
         let backend: Arc<dyn crate::state_backend::StateBackend> =
             Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
@@ -1350,8 +1510,8 @@ mod create_volume_tests {
                     Arc::clone(&tgt) as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
                     backend,
                     "lvs_test".into(),
-                    "10.0.0.9".into(),
-                    4420,
+                    traddr,
+                    trsvcid,
                     "/var/tmp".into(),
                 ),
             ));

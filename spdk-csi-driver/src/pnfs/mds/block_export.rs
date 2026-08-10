@@ -86,10 +86,19 @@ impl BlockExportReconciler {
 
     /// Desired allow-list, read fresh from sqlite. A read failure is a
     /// hard error — converging onto an EMPTY list on a read failure
-    /// would evict every live client of the volume.
+    /// would evict every live client of the volume. The MDS's own fence
+    /// lane host is ALWAYS desired: it must be able to connect and
+    /// preempt at the exact moment clients are being thrown out, so no
+    /// eviction/reconcile pass may ever sweep it.
     async fn desired_hosts(&self, volume: &str) -> Result<Vec<String>, String> {
         match self.backend.block_hosts(volume).await {
-            Ok(Ok(hosts)) => Ok(hosts),
+            Ok(Ok(mut hosts)) => {
+                let mds = crate::identity::block_mds_host_nqn();
+                if !hosts.contains(&mds) {
+                    hosts.push(mds);
+                }
+                Ok(hosts)
+            }
             Ok(Err(e)) => Err(format!("block_hosts read refused: {e}")),
             Err(e) => Err(format!("block_hosts read failed: {e}")),
         }
@@ -211,6 +220,59 @@ impl BlockExportReconciler {
         ensure_export(self.rpc.as_ref(), &spec)
             .await
             .map_err(|e| format!("ensure_export {}: {}", nqn, e))
+    }
+
+    /// The PRIMARY fence (§5, RFC 9561 §2.2): connect to the volume's
+    /// export as the MDS's own NVMe host and preempt the victim's
+    /// reservation key. Target-side and per-command: the victim's next
+    /// read or write gets RESERVATION CONFLICT no matter what state its
+    /// connections, sessions, or kernel are in — client reachability is
+    /// irrelevant to delivery, which is the whole point (the client
+    /// being fenced is precisely the one that stopped answering).
+    /// Returns a one-line summary of the resulting reservation state
+    /// for the caller's log (the rig greps it).
+    pub async fn fence_preempt(&self, volume: &str, victim_key: u64) -> Result<String, String> {
+        let lock = self.lock_for(volume);
+        let _g = lock.lock().await;
+        // Converge first: the fence lane's host NQN must be on the
+        // allow-list to connect (`desired_hosts` always includes it),
+        // and reconverging is the idempotent way to get it there for
+        // volumes provisioned before the fence lane existed.
+        self.ensure_locked(volume, None).await?;
+        let nqn = crate::identity::block_volume_export_nqn(volume);
+        // The namespace id, read from the live subsystem rather than
+        // assumed: subsystem-per-volume means exactly one, but the
+        // repair arms can re-mint it and auto-assignment is a tgt
+        // detail, not our invariant.
+        let nsid = get_subsystem(self.rpc.as_ref(), &nqn)
+            .await
+            .map_err(|e| format!("nvmf_get_subsystems {}: {}", nqn, e))?
+            .and_then(|s| {
+                s.get("namespaces")?
+                    .as_array()?
+                    .first()?
+                    .get("nsid")?
+                    .as_u64()
+            })
+            .ok_or_else(|| format!("{} carries no namespace to fence on", nqn))?;
+        let ep = super::resv_fence::ResvEndpoint {
+            traddr: self.traddr.clone(),
+            trsvcid: self.trsvcid,
+            subnqn: nqn,
+            hostnqn: crate::identity::block_mds_host_nqn(),
+            hostid: crate::identity::BLOCK_MDS_HOST_ID,
+            nsid: nsid as u32,
+        };
+        let out = ep
+            .fence_preempt(crate::identity::BLOCK_MDS_PR_KEY, victim_key)
+            .await?;
+        Ok(format!(
+            "victim={victim_key:#x} preempted={} (registered={} acquired={}) resv: {}",
+            out.preempted,
+            out.registered,
+            out.acquired,
+            out.after.summary()
+        ))
     }
 
     /// DeleteVolume's teardown: subsystem first (severs every data path),
@@ -543,12 +605,21 @@ pub(crate) mod tests {
         );
         r.ensure("pvc-h", Some(1024 * 1024)).await.expect("provision");
         let nqn = crate::identity::block_volume_export_nqn("pvc-h");
-        assert!(tgt.hosts_of(&nqn).is_empty(), "default-closed, nobody admitted");
+        let mds = crate::identity::block_mds_host_nqn();
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        assert_eq!(
+            tgt.hosts_of(&nqn),
+            vec![mds.clone()],
+            "default-closed: no client admitted, only the MDS fence lane"
+        );
 
         let h1 = crate::nvmeof_export::flint_host_nqn("node-a");
         backend.block_host_admit("pvc-h", 71, &h1, 0).await.unwrap().unwrap();
         r.reconcile_hosts("pvc-h").await.expect("admit converge");
-        assert_eq!(tgt.hosts_of(&nqn), vec![h1.clone()]);
+        assert_eq!(sorted(tgt.hosts_of(&nqn)), sorted(vec![h1.clone(), mds.clone()]));
 
         // Second client on ANOTHER node; evicting the first must not
         // touch the second's admission.
@@ -559,7 +630,53 @@ pub(crate) mod tests {
         let (evicted, _) = backend.block_host_evict("pvc-h", 71).await.unwrap().unwrap();
         assert_eq!(evicted, vec![h1.clone()]);
         r.reconcile_hosts("pvc-h").await.expect("evict converge");
-        assert_eq!(tgt.hosts_of(&nqn), vec![h2], "evicted h1, kept h2");
+        assert_eq!(
+            sorted(tgt.hosts_of(&nqn)),
+            sorted(vec![h2, mds]),
+            "evicted h1, kept h2 — and NEVER the fence lane's own admission"
+        );
+    }
+
+    /// The whole primary-fence seam: converge (which admits the MDS's
+    /// fence-lane host), resolve the live nsid, then preempt the
+    /// victim's key over a real (scripted) NVMe/TCP conversation.
+    #[tokio::test]
+    async fn fence_preempt_converges_then_preempts_over_nvme_tcp() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        // The victim client (id 42) registered its pr_key kernel-style.
+        nvme.state.lock().unwrap().registrants.push((42, [0xcc; 16], false));
+
+        let tgt = Arc::new(FakeTgt::new());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            crate::state_backend::memory_backend(),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        );
+        r.ensure("pvc-f", Some(1024 * 1024)).await.expect("provision");
+
+        let summary = r.fence_preempt("pvc-f", 42).await.expect("fence converges");
+        assert!(summary.contains("preempted=true"), "got: {summary}");
+        assert!(summary.contains("holder"), "got: {summary}");
+
+        // The fence lane identified itself as the MDS host on the wire,
+        // and its NQN is on the export allow-list it connected through.
+        let nqn = crate::identity::block_volume_export_nqn("pvc-f");
+        assert!(
+            tgt.hosts_of(&nqn).contains(&crate::identity::block_mds_host_nqn()),
+            "fence lane host missing from the allow-list"
+        );
+        let st = nvme.state.lock().unwrap();
+        assert!(!st.registrants.iter().any(|(k, _, _)| *k == 42), "victim key gone");
+        assert!(
+            st.registrants
+                .iter()
+                .any(|(k, _, h)| *k == crate::identity::BLOCK_MDS_PR_KEY && *h),
+            "MDS key holds the reservation"
+        );
+        assert_eq!(st.rtype, crate::pnfs::mds::resv_fence::RTYPE_EA_REG_ONLY);
     }
 
     #[tokio::test]

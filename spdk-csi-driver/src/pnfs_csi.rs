@@ -897,6 +897,11 @@ mod tests {
                 .expect("canned_delete not set");
             Ok(Response::new(canned))
         }
+        async fn fence_block_client(
+            &self, _: Request<crate::pnfs::grpc::FenceBlockClientRequest>,
+        ) -> Result<Response<crate::pnfs::grpc::FenceBlockClientResponse>, Status> {
+            unimplemented!("not exercised in pnfs_csi tests")
+        }
     }
 
     /// Spin up a tonic server on an ephemeral port and return the

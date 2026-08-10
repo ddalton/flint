@@ -471,6 +471,27 @@ pub fn node_host_nqn(node_name: &str) -> String {
     format!("nqn.2024-11.com.flint:node:{}", node_name)
 }
 
+/// The MDS's own NVMe host identity — the reservation fence lane
+/// (`resv_fence.rs`). Deliberately NOT under `:node:`: host eviction
+/// only ever removes `:node:` hosts, so the fence lane's admission is
+/// structurally outside its own reach, and `block_export::desired_hosts`
+/// includes it unconditionally so no reconcile pass sweeps it either.
+pub fn block_mds_host_nqn() -> String {
+    "nqn.2024-11.com.flint:mds:resv-fence".to_string()
+}
+
+/// The MDS's reservation key (ASCII "flint_md"). Client keys are NFSv4
+/// client ids (epoch-derived u64s); a collision with this constant would
+/// need an epoch of exactly 2024-06-14 AND ~2×10⁹ minted clients, and
+/// `fence_preempt` refuses `victim == ours` outright as the belt.
+pub const BLOCK_MDS_PR_KEY: u64 = 0x666c_696e_745f_6d64;
+
+/// The MDS's NVMe Host Identifier. DETERMINISTIC on purpose: the target
+/// binds registrations to (hostid, key), so a random id would strand
+/// the previous registration on every MDS restart and grow the
+/// registrant list without bound.
+pub const BLOCK_MDS_HOST_ID: [u8; 16] = *b"flint-mds-resvfn";
+
 /// SPDK initiator controller name for an attached subsystem:
 /// `nvme_<nqn with ':' and '.' → '_'>`; its first namespace bdev is
 /// `<name>n1` (driver.rs consumer attach, hot_rejoin E_f attach, and the

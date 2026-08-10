@@ -1419,6 +1419,100 @@ impl PnfsOperationHandler {
     }
 }
 
+/// Fence one block-layout client of a volume — all three layers, in
+/// order:
+///
+///  1. **Durable fence rows** (`extent_fence_client`): the allocator
+///     refuses the client all future grants; its extents quarantine on
+///     reclaim. The only hard error — without the rows the fence never
+///     happened.
+///  2. **The PRIMARY fence** (§5, RFC 9561 §2.2): reservation preempt
+///     at the target, as the MDS's own NVMe host. Per-command and
+///     target-side — delivery does not depend on the client being
+///     reachable, which is the point: the client being fenced is
+///     precisely the one that stopped answering.
+///  3. **The functional-fence backstop**: yank the client's host NQN
+///     from the export allow-list. An NQN shared with another live
+///     client of the volume survives in the remaining list.
+///
+/// Steps 2 and 3 are best-effort and LOUD. Their failure never blocks
+/// the fence verdict: the extents quarantine either way (`FenceReaches`
+/// is proven per-tgt by the fence rig, never assumed here). Returns a
+/// one-line summary for the caller's log; the fence rig greps it.
+pub async fn fence_block_client(
+    layout_manager: &crate::pnfs::mds::layout::LayoutManager,
+    context: &str,
+    volume: &str,
+    client_id: u64,
+) -> Result<String, String> {
+    let backend = layout_manager.state_backend();
+    match backend.extent_fence_client(volume, client_id).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => return Err(format!("fence rows refused: {e}")),
+        Err(e) => return Err(format!("fence rows failed: {e}")),
+    }
+    let mut summary = format!("client {client_id} fenced (durable rows)");
+
+    let Some(rec) = layout_manager.block_export() else {
+        summary.push_str("; no block export attached — rows only");
+        return Ok(summary);
+    };
+
+    // Preempt BEFORE evicting: the preempt session converges the
+    // allow-list from sqlite, and the victim's rows still being there
+    // keeps its (now-doomed) admission stable while the reservation is
+    // taken away under it.
+    match rec.fence_preempt(volume, client_id).await {
+        Ok(s) => {
+            info!("⛔ {}: reservation preempt — {}", context, s);
+            summary.push_str("; reservation preempted");
+        }
+        Err(e) => {
+            tracing::error!(
+                "{}: reservation preempt of client {} FAILED: {} — falling back to \
+                 the allow-list fence only",
+                context,
+                client_id,
+                e
+            );
+            summary.push_str("; preempt FAILED (see log)");
+        }
+    }
+
+    match backend.block_host_evict(volume, client_id).await {
+        Ok(Ok((evicted, _))) if !evicted.is_empty() => {
+            if let Err(e) = rec.reconcile_hosts(volume).await {
+                tracing::error!(
+                    "{}: host eviction of {:?} did not converge: {} — the fenced \
+                     client may still reach the device until the next reconcile",
+                    context,
+                    evicted,
+                    e
+                );
+                summary.push_str("; host eviction DID NOT CONVERGE");
+            } else {
+                info!(
+                    "♻️  {}: evicted {:?} from the export allow-list (functional fence)",
+                    context, evicted
+                );
+                summary.push_str("; host evicted");
+            }
+        }
+        Ok(Ok(_)) => {
+            // The NQN stays: another live client of the volume shares it.
+        }
+        Ok(Err(e)) => {
+            tracing::error!("{}: host-evict rows for {} refused: {}", context, client_id, e);
+            summary.push_str("; host-evict refused");
+        }
+        Err(e) => {
+            tracing::error!("{}: host-evict rows for {} failed: {}", context, client_id, e);
+            summary.push_str("; host-evict failed");
+        }
+    }
+    Ok(summary)
+}
+
 /// The scsi reclaim driver — §8's GC, FlintExtents' reclaim machine in
 /// code: recall every layout handle on the file (server-side revoke
 /// regardless of delivery, the F65 shape — an unreachable client is
@@ -1509,52 +1603,11 @@ pub async fn reclaim_scsi_extents(
                         "♻️  reclaim '{}': fencing unresponsive client {} (round {})",
                         file_key, c, round
                     );
-                    match backend.extent_fence_client(&volume, c).await {
-                        Ok(Ok(_)) => {
-                            // Functional-fence backstop (§5): yank the
-                            // client's host from the export allow-list and
-                            // drain its qpairs. BELT ONLY — the fenced
-                            // extents still quarantine (FenceReaches stays
-                            // unproven; the allow-list flip is best-effort
-                            // enforcement, not a freeing condition). An NQN
-                            // shared with another live client of the volume
-                            // survives in the remaining list and is not
-                            // removed.
-                            match backend.block_host_evict(&volume, c).await {
-                                Ok(Ok((evicted, _))) if !evicted.is_empty() => {
-                                    if let Some(rec) = layout_manager.block_export() {
-                                        if let Err(e) = rec.reconcile_hosts(&volume).await {
-                                            tracing::error!(
-                                                "reclaim '{}': host eviction of {:?} did not \
-                                                 converge: {} — the fenced client may still \
-                                                 reach the device until the next reconcile",
-                                                file_key, evicted, e
-                                            );
-                                        } else {
-                                            info!(
-                                                "♻️  reclaim '{}': evicted {:?} from the \
-                                                 export allow-list (functional fence)",
-                                                file_key, evicted
-                                            );
-                                        }
-                                    }
-                                }
-                                Ok(Ok(_)) => {}
-                                Ok(Err(e)) => tracing::error!(
-                                    "reclaim '{}': host-evict rows for {} refused: {}",
-                                    file_key, c, e
-                                ),
-                                Err(e) => tracing::error!(
-                                    "reclaim '{}': host-evict rows for {} failed: {}",
-                                    file_key, c, e
-                                ),
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            tracing::error!("reclaim '{}': fence of {} refused: {}", file_key, c, e)
-                        }
+                    let ctx = format!("reclaim '{}'", file_key);
+                    match fence_block_client(layout_manager, &ctx, &volume, c).await {
+                        Ok(s) => info!("♻️  {}: {}", ctx, s),
                         Err(e) => {
-                            tracing::error!("reclaim '{}': fence of {} failed: {}", file_key, c, e)
+                            tracing::error!("{}: fence of {}: {}", ctx, c, e)
                         }
                     }
                 }
@@ -2014,14 +2067,19 @@ mod fallback_tests {
         )
         .await;
         lm.register_extent_arena("volB", 1 << 20).await.unwrap();
+        // The scripted NVMe/TCP target: the reclaim fence's PRIMARY arm
+        // (reservation preempt) runs against it for real. The victim
+        // (client 7) has its pr_key registered, kernel-style.
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        nvme.state.lock().unwrap().registrants.push((7, [0xcc; 16], false));
         let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
         let reconciler = Arc::new(crate::pnfs::mds::block_export::BlockExportReconciler::new(
             Arc::clone(&tgt)
                 as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
             Arc::clone(&backend),
             "lvs_test".into(),
-            "10.0.0.9".into(),
-            4420,
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
             "/var/tmp".into(),
         ));
         reconciler.ensure("volB", Some(1 << 20)).await.unwrap();
@@ -2043,7 +2101,23 @@ mod fallback_tests {
         let remaining = backend.block_hosts("volB").await.unwrap().unwrap();
         assert_eq!(remaining, vec![h9.clone()], "client 7's admission rows are gone");
         let nqn = crate::identity::block_volume_export_nqn("volB");
-        assert_eq!(tgt.hosts_of(&nqn), vec![h9], "the tgt allow-list converged");
+        let mut hosts = tgt.hosts_of(&nqn);
+        hosts.sort();
+        let mut want = vec![h9, crate::identity::block_mds_host_nqn()];
+        want.sort();
+        assert_eq!(hosts, want, "the tgt allow-list converged (fence lane always kept)");
+
+        // The PRIMARY fence reached the target: victim key preempted,
+        // MDS key holds EA-RO.
+        let st = nvme.state.lock().unwrap();
+        assert!(!st.registrants.iter().any(|(k, _, _)| *k == 7), "victim key preempted");
+        assert!(
+            st.registrants
+                .iter()
+                .any(|(k, _, h)| *k == crate::identity::BLOCK_MDS_PR_KEY && *h),
+            "MDS key holds the reservation"
+        );
+        assert_eq!(st.rtype, crate::pnfs::mds::resv_fence::RTYPE_EA_REG_ONLY);
     }
 
     /// Registry with `ids` registered + a handler whose layout manager
