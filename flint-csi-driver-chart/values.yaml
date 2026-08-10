@@ -424,6 +424,38 @@ pnfs:
     # If those two disagree, the loss is in the kernel, not the driver.
     mountOptions: []
 
+  # ── pnfs-block (RFC 8154/9561 scsi layout) ────────────────────────
+  # Block-class volumes: the client kernel (>= 6.11 with
+  # CONFIG_PNFS_BLOCK) does RAW NVMe/TCP extent I/O against an
+  # spdk-tgt; the MDS allocates extents and stays out of the data
+  # path. Single-replica tier — no replication yet (design doc §12);
+  # a lost storage node is lost data, and the class guidance is
+  # re-hydratable or scratch datasets until the mirror tranche ships.
+  blockLayout:
+    # Master switch. Injects FLINT_PNFS_BLOCK_LAYOUT=1 into the CSI
+    # controller (which otherwise refuses `layout: pnfs-block` classes
+    # loudly) AND into the csi-node, which then installs the §4a udev
+    # rule on every node (/etc/udev/rules.d, mounted by the chart):
+    # udev only creates nvme-uuid.* links against SPDK namespaces, and
+    # without the eui link the kernel client silently degrades every
+    # I/O to MDS proxying. Requires an MDS with blockExport configured
+    # (pnfs.server.mds.blockExport below, or the equivalent on an
+    # external MDS) — provisioning fails loudly otherwise.
+    enabled: false
+
+    storageClass:
+      create: false
+      name: flint-pnfs-block
+      # Single-replica: Retain, so data outlives an accidental claim
+      # delete. Flip to Delete for scratch classes.
+      reclaimPolicy: Retain
+      volumeBindingMode: WaitForFirstConsumer
+      # Same replace-not-race semantics as the pnfs class above. The
+      # kernel floor caveat applies to the NODES, not the mount
+      # options: a < 6.11 client mounts fine and silently proxies
+      # everything through the MDS.
+      mountOptions: []
+
   # gRPC endpoint of an EXTERNALLY managed MDS. Ignored (and may be
   # left empty) when pnfs.server.enabled is true — the controller then
   # defaults to the in-chart flint-pnfs-mds Service.
@@ -504,6 +536,40 @@ pnfs:
         storageClassName: ""   # "" → storageClass.name
         size: 10Gi
       resources: {}
+
+      # ── Block-layout export surface (scsi-class volumes) ──────────
+      # The MDS drives a COLOCATED spdk-tgt over its unix RPC socket:
+      # per-volume lvols, subsystems, namespaces (NGUID-pinned, with
+      # reservation PTPL files), listeners, and host allow-lists.
+      # Phase-1 shape: ONE tgt per MDS shard, and lvols are NODE-LOCAL
+      # — so when this is enabled the MDS pod MUST be pinned
+      # (nodeSelector below) to the node whose csi-node spdk-tgt and
+      # lvstore back the block volumes. An unpinned MDS that
+      # reschedules elsewhere finds no socket and, worse, a fresh
+      # lvstore under committed extents is refused by design (F67).
+      blockExport:
+        enabled: false
+        # The colocated tgt's RPC socket, via the /var/tmp hostPath
+        # the chart mounts into the MDS pod when this is enabled.
+        spdkSocket: /var/tmp/spdk.sock
+        # lvolstore backing per-volume lvols. REQUIRED — must be an
+        # lvstore that exists on the pinned node's tgt.
+        lvstore: ""
+        # Address kernel initiators dial for nvme-tcp — the PINNED
+        # NODE's IP (the tgt listens via hostNetwork). REQUIRED.
+        traddr: ""
+        trsvcid: 4420
+        # Directory ON THE TGT NODE for per-namespace reservation PTPL
+        # files. Mandatory-by-kernel (the client's pr_register sets
+        # CPTPL unconditionally; SPDK refuses without a ptpl_file) and
+        # it must SURVIVE tgt restarts — the chart mounts this
+        # hostPath into the spdk-tgt container. Deliberately NOT under
+        # /var/tmp: systemd-tmpfiles ages that dir out, and an aged
+        # ptpl file is a silently weakened fence.
+        ptplDir: /var/lib/flint-pnfs-ptpl
+        # Pin the MDS to the tgt/lvstore node, e.g.
+        #   kubernetes.io/hostname: ip-172-31-1-23
+        nodeSelector: {}
 
     dataServers:
       # DS fleet width. Scaling UP is safe (new files stripe wider;

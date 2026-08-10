@@ -590,8 +590,20 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   > window applies to the extent map itself — a power-lost `extents` commit over
   > committed data is F67's silent zeros). Fixed: the pNFS MDS now uses `open_durable`
   > (synchronous=FULL, per-commit WAL fsync, group-commit amortized) — the same trade the
-  > standalone server has shipped since v1.7. The mdsbench cost gate should re-run at the
-  > next release to price the fsync on the files-layout hot path.
+  > standalone server has shipped since v1.7.
+  >
+  > **FULL re-priced 2026-08-10** (mdsbench wire A/B `FLINT_PNFS_STATE_SYNC=normal`
+  > vs default + extent-bench `FLINT_BENCH_SYNC=full`, release aarch64 in lima):
+  > **on the files-layout wire path FULL is free** — w1-create 475 vs 465 ops/s,
+  > w2-opencl 7,187 vs 7,138, w3-stat 2,709 vs 2,940, w4-mixed 1,333 vs 1,000
+  > (all within run-to-run noise; the dispatch/XDR cost dominates and the writer
+  > thread's group commit absorbs the fsyncs). The cost is visible only in the
+  > SERIAL allocator transactions (no concurrency to amortize — the worst case):
+  > grant-open 251→875 µs, grant-4k 224→426, commit-4k 108→258, while batched
+  > shapes barely move (commit-1 over 1024 rows 6.3→7.1 ms, return+free +6%).
+  > Verdict: the §8 GO stands — a 4 MiB grant at 875 µs is still under half of
+  > one files-layout create cycle, and the shapes that would hurt (per-4k
+  > commits) amortize whenever more than one txn is in flight.
   >
   > **PERIODIC RECONCILE LOOP SHIPPED 2026-08-10, RIG-PROVEN**
   > (`make test-pnfs-reconcile-rig` = block-rig.sh `RECONCILE=1`): the tgt-ONLY

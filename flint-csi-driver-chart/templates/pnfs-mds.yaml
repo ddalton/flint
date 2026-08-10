@@ -64,6 +64,19 @@ data:
         backend: sqlite
         config:
           path: /data/state/state.db
+      {{- with .Values.pnfs.server.mds.blockExport }}
+      {{- if .enabled }}
+      # pnfs-block export surface: the MDS drives the COLOCATED
+      # csi-node spdk-tgt (socket via the shared hostPath) — one tgt
+      # per shard, pinned by blockExport.nodeSelector.
+      blockExport:
+        spdkSocket: {{ .spdkSocket }}
+        lvstore: {{ required "pnfs.server.mds.blockExport.lvstore is required when blockExport is enabled" .lvstore }}
+        traddr: {{ required "pnfs.server.mds.blockExport.traddr is required when blockExport is enabled (the pinned node's IP)" .traddr | quote }}
+        trsvcid: {{ .trsvcid }}
+        ptplDir: {{ .ptplDir }}
+      {{- end }}
+      {{- end }}
       failover:
         heartbeatTimeout: {{ .Values.pnfs.server.mds.heartbeatTimeout }}
         policy: recall_affected
@@ -194,6 +207,15 @@ spec:
       {{- with $.Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
+      {{- if ($.Values.pnfs.server.mds.blockExport).enabled }}
+      {{- with $.Values.pnfs.server.mds.blockExport.nodeSelector }}
+      # blockExport: pin to the tgt/lvstore node — lvols are
+      # node-local, and a rescheduled MDS elsewhere finds no socket
+      # (and a fresh lvstore under committed extents is refused, F67).
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: mds
           image: "{{ $.Values.images.repository }}/{{ $.Values.pnfs.server.image.name }}:{{ required "pnfs.server.image.tag is required when pnfs.server.enabled" $.Values.pnfs.server.image.tag }}"
@@ -231,6 +253,14 @@ spec:
               mountPath: /etc/flint
             - name: data
               mountPath: /data
+            {{- if ($.Values.pnfs.server.mds.blockExport).enabled }}
+            # The colocated tgt's RPC socket: the csi-node DaemonSet
+            # mounts the same hostPath at /var/tmp when
+            # pnfs.blockLayout is enabled, so blockExport.spdkSocket
+            # (/var/tmp/spdk.sock) resolves in both pods.
+            - name: spdk-socket
+              mountPath: /var/tmp
+            {{- end }}
           {{- with $.Values.pnfs.server.mds.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -242,5 +272,11 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ $pvc }}
+        {{- if ($.Values.pnfs.server.mds.blockExport).enabled }}
+        - name: spdk-socket
+          hostPath:
+            path: /var/lib/flint-spdk
+            type: DirectoryOrCreate
+        {{- end }}
 {{- end }}
 {{- end }}

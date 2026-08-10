@@ -274,6 +274,23 @@ if [ "${NATIVE:-0}" = "0" ]; then
 else
   echo "· udev created nvme-eui.$NGUID natively (§4a landmine ABSENT on $KREL — update the doc)"
 fi
+
+# The PACKAGED rule (the file the driver binary embeds and installs on
+# every node when pnfs-block is enabled): with it installed, udev must
+# create the link NATIVELY — the property the stage-time managed link
+# cannot provide (device re-adds while staged re-link with no flint
+# involvement). Then remove it, so the VM stays pristine and the
+# managed-link repair below is tested against a bare udev.
+RULE_SRC="$REPO_ROOT/spdk-csi-driver/files/99-flint-pnfs-eui.rules"
+[ -f "$RULE_SRC" ] || fail "packaged udev rule missing at $RULE_SRC"
+vsudo "cp $RULE_SRC /etc/udev/rules.d/99-flint-pnfs-eui.rules; udevadm control --reload
+       udevadm trigger --action=add /dev/$NSDEV; udevadm settle -t 10"
+RLINK=$(vsh "readlink /dev/disk/by-id/nvme-eui.$NGUID" || true)
+echo "$RLINK" | grep -c "$NSDEV" >/dev/null \
+  || fail "the PACKAGED udev rule did not create nvme-eui.$NGUID (readlink: '${RLINK:-none}')"
+vsudo "rm -f /etc/udev/rules.d/99-flint-pnfs-eui.rules /dev/disk/by-id/nvme-eui.$NGUID
+       udevadm control --reload"
+echo "✓ packaged udev rule creates the eui link natively (then removed — VM stays pristine)"
 vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
        $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)" >/dev/null \
   || fail "re-stage (link repair) failed"

@@ -77,6 +77,14 @@ spec:
               value: "{{ .Values.healthCheck.csiDriverPort | default 9809 }}"
             - name: NODE_AGENT_PORT
               value: "{{ .Values.healthCheck.nodeAgentPort | default 9081 }}"
+            {{- if (.Values.pnfs.blockLayout).enabled }}
+            # pnfs-block: the node installs the §4a udev rule at start
+            # (rules dir mounted below) and stages nvme sessions for
+            # block-class volumes. A node can be a block CLIENT even in
+            # nfs-only mode — the volume's tgt is on the MDS's node.
+            - name: FLINT_PNFS_BLOCK_LAYOUT
+              value: "1"
+            {{- end }}
           ports:
             - name: healthz
               containerPort: {{ .Values.healthCheck.csiDriverPort | default 9809 }}
@@ -100,6 +108,10 @@ spec:
               mountPropagation: "Bidirectional"
             - name: plugin-dir
               mountPath: /csi
+            {{- if (.Values.pnfs.blockLayout).enabled }}
+            - name: udev-rules-dir
+              mountPath: /etc/udev/rules.d
+            {{- end }}
       {{- else if .Values.deployment.nodeMode | default "three-container" | eq "three-container" }}
       # SPDK sidecar container - starts before main containers and keeps running
       initContainers:
@@ -284,6 +296,15 @@ spec:
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
+            {{- if (.Values.pnfs.blockLayout).enabled }}
+            # Reservation PTPL files (pnfs-block): the MDS names paths
+            # under blockExport.ptplDir in nvmf_subsystem_add_ns and THIS
+            # process opens them — same path in-container and on the
+            # host, persistent across tgt restarts (a lost ptpl_file
+            # silently unregisters every reservation).
+            - name: pnfs-ptpl-dir
+              mountPath: /var/lib/flint-pnfs-ptpl
+            {{- end }}
       containers:
         # CSI Driver Container (Node Mode) - Includes integrated node agent on port {{ .Values.healthCheck.nodeAgentPort | default 9081 }}
         - name: flint-csi-driver
@@ -316,6 +337,13 @@ spec:
               value: "{{ .Values.blockDevice.ublk.queueDepth | default 256 }}"
             - name: NODE_AGENT_PORT
               value: "{{ .Values.healthCheck.nodeAgentPort | default 9081 }}"
+            {{- if (.Values.pnfs.blockLayout).enabled }}
+            # pnfs-block: install the §4a udev rule at start (rules dir
+            # mounted below) and stage nvme sessions for block-class
+            # volumes.
+            - name: FLINT_PNFS_BLOCK_LAYOUT
+              value: "1"
+            {{- end }}
             # F36c last-writer-set assembly gate
             # (docs/f36c-assembly-freshness-gate.md). "disabled" restores
             # pre-F36c serve-anything degraded assembly; the defer bound is
@@ -357,6 +385,10 @@ spec:
               readOnly: true
             - name: spdk-socket
               mountPath: /var/tmp
+            {{- if (.Values.pnfs.blockLayout).enabled }}
+            - name: udev-rules-dir
+              mountPath: /etc/udev/rules.d
+            {{- end }}
           # Note: Node agent functionality is integrated into flint-csi-driver container above
           # The separate node-agent container has been removed to prevent port conflicts
       {{- else if .Values.deployment.nodeMode | eq "two-container" }}
@@ -594,6 +626,29 @@ spec:
           emptyDir:
             medium: HugePages
         {{- end }}
+        {{- if (.Values.pnfs.blockLayout).enabled }}
+        # hostPath, NOT emptyDir, when pnfs-block is on: the MDS pod
+        # (pnfs-mds.yaml, blockExport) drives THIS node's tgt over the
+        # RPC socket, and an emptyDir is pod-private. SPDK's cpu-lock
+        # files under /var/tmp now persist across pod restarts — their
+        # flocks release on process death, so a WAITED restart is safe
+        # (the roller waits; kubelet's container restart does too).
+        - name: spdk-socket
+          hostPath:
+            path: /var/lib/flint-spdk
+            type: DirectoryOrCreate
+        - name: pnfs-ptpl-dir
+          hostPath:
+            path: /var/lib/flint-pnfs-ptpl
+            type: DirectoryOrCreate
+        {{- else }}
         - name: spdk-socket
           emptyDir: {}
+        {{- end }}
+        {{- end }}
+        {{- if (.Values.pnfs.blockLayout).enabled }}
+        - name: udev-rules-dir
+          hostPath:
+            path: /etc/udev/rules.d
+            type: Directory
         {{- end }}

@@ -1,0 +1,17 @@
+# flint pnfs-block (pnfs-block-layout-design.md section 4a): the kernel
+# blocklayout client (fs/nfs/blocklayout, v6.11+) resolves the device a
+# layout names via /dev/disk/by-id/nvme-eui.<nguid> — but udev derives
+# by-id links from the kernel wwid, whose preference is uuid > nguid >
+# eui64, and SPDK always exposes a UUID descriptor. So the eui link
+# never exists natively (confirmed on systemd 255 / kernel 7.0) and the
+# client silently degrades every I/O to MDS proxying, 120 s of negative
+# cache at a time. This rule creates the link from the namespace's
+# nguid attribute (which sysfs prints dashed; the kernel's lookup wants
+# bare hex, hence the tr). Path devices (nvmeXcYnZ, hidden under native
+# multipath) are excluded — only the head gendisk is openable.
+#
+# Shipped by the flint csi-node DaemonSet when pnfs-block is enabled;
+# proven live by tests/lima/pnfs/block-rig.sh (trigger, and fresh links
+# across disconnect/reconnect — the case a stage-time managed link
+# cannot cover).
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="nvme*n*", KERNEL!="nvme*c*n*", ENV{DEVTYPE}=="disk", ATTR{nguid}=="?*", PROGRAM="/bin/sh -c 'echo nvme-eui.$$(echo %s{nguid} | tr -d -)'", SYMLINK+="disk/by-id/%c"

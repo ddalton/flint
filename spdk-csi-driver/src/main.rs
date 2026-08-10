@@ -433,6 +433,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cleanup any ghost mounts from previous runs (only in node mode)
     if mode == "node" || mode == "all" {
         cleanup_ghost_mounts().await;
+
+        // pnfs-block §4a: install the eui by-id udev rule on the host
+        // when the block layout is enabled (the chart mounts
+        // /etc/udev/rules.d and sets the env). udevd auto-reloads its
+        // rules dirs, so future connects get the link natively; a
+        // failure is loud but non-fatal — the stage-time managed link
+        // still covers every staged volume.
+        if std::env::var("FLINT_PNFS_BLOCK_LAYOUT").as_deref() == Ok("1") {
+            match spdk_csi_driver::pnfs_block_session::install_udev_rule() {
+                Ok(true) => println!("🔗 [NODE] pnfs-block udev rule installed (§4a)"),
+                Ok(false) => println!("🔗 [NODE] pnfs-block udev rule already current"),
+                Err(e) => eprintln!(
+                    "⚠️  [NODE] could not install the pnfs-block udev rule: {e} — \
+                     staged volumes keep their managed by-id links, but device \
+                     re-adds while staged will not re-link natively"
+                ),
+            }
+        }
     }
     
     // Start node agent (if in node mode)

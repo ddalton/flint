@@ -33,6 +33,38 @@ use crate::pnfs_csi::BlockAttach;
 /// is the KERNEL's lookup path — `fs/nfs/blocklayout` hardcodes it.
 const BY_ID_DIR: &str = "/dev/disk/by-id";
 
+/// The §4a udev rule, embedded so the binary is the single source of
+/// truth (the chart mounts the host rules dir; this code writes it).
+/// Proven live on the rig VM (kernel 7.0/systemd 255): `udevadm test`
+/// computes the exact `nvme-eui.<bare-hex>` link, a trigger creates
+/// it, device removal cleans it (udev-owned — no dangling links), and
+/// a FRESH connect re-creates it with no flint involvement — the case
+/// the stage-time managed link cannot cover (device re-adds while
+/// staged).
+const UDEV_RULE: &str = include_str!("../files/99-flint-pnfs-eui.rules");
+const UDEV_RULE_PATH: &str = "/etc/udev/rules.d/99-flint-pnfs-eui.rules";
+
+/// Install (or refresh) the §4a udev rule on the host. Called at node
+/// startup when the block layout is enabled; the chart mounts the
+/// host's `/etc/udev/rules.d` into the node container. udevd watches
+/// its rules dirs via inotify and reloads on its own, and existing
+/// staged sessions already carry the managed link — so no udevadm is
+/// needed, and future add/change events (fresh connects, reconnect
+/// renumbering) get the link natively. Returns whether a write
+/// happened; an unwritable rules dir is a loud error the caller
+/// surfaces without failing startup (the managed link still covers
+/// every staged volume).
+pub fn install_udev_rule() -> Result<bool, String> {
+    let path = std::path::Path::new(UDEV_RULE_PATH);
+    match std::fs::read_to_string(path) {
+        Ok(current) if current == UDEV_RULE => return Ok(false),
+        _ => {}
+    }
+    std::fs::write(path, UDEV_RULE)
+        .map_err(|e| format!("writing {}: {e} (is /etc/udev/rules.d mounted?)", UDEV_RULE_PATH))?;
+    Ok(true)
+}
+
 /// Establish (or repair) the volume's nvme-tcp session and return the
 /// resolved namespace device path (`/dev/nvmeXnY`).
 pub async fn ensure_session(attach: &BlockAttach) -> Result<String, String> {
@@ -326,6 +358,26 @@ mod tests {
         // Non-nvme names never classify as path devices.
         assert!(!is_multipath_path_device("sda"));
         assert!(!is_multipath_path_device("nvmec0n1"), "no controller digits, no verdict");
+    }
+
+    #[test]
+    fn the_embedded_udev_rule_has_its_load_bearing_pieces() {
+        // Not a udev parser — pins the pieces whose loss would be
+        // silent: the eui prefix the kernel looks up, the dash strip
+        // (sysfs prints dashed, the kernel wants bare hex), the
+        // path-device exclusion, and udev's literal-$ escape ($$ —
+        // a single $ would be eaten as a udev substitution).
+        assert!(UDEV_RULE.contains("nvme-eui."));
+        assert!(UDEV_RULE.contains("tr -d -"));
+        assert!(UDEV_RULE.contains("KERNEL!=\"nvme*c*n*\""));
+        assert!(UDEV_RULE.contains("$$(echo %s{nguid}"));
+        assert!(UDEV_RULE.contains("SYMLINK+=\"disk/by-id/%c\""));
+        // Exactly one rule line (comments aside) — a second line is a
+        // merge accident.
+        assert_eq!(
+            UDEV_RULE.lines().filter(|l| l.starts_with("ACTION==")).count(),
+            1
+        );
     }
 
     #[test]

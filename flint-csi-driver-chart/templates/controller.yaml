@@ -187,6 +187,13 @@ spec:
                   name: {{ .Values.pnfs.controlToken.existingSecret | default "flint-pnfs-control-token" }}
                   key: token
             {{- end }}
+            {{- if (.Values.pnfs.blockLayout).enabled }}
+            # pnfs-block: accept `layout: pnfs-block` classes. Without
+            # this the controller refuses them loudly (phase-1 gate,
+            # pnfs-block-layout-design.md §7).
+            - name: FLINT_PNFS_BLOCK_LAYOUT
+              value: "1"
+            {{- end }}
             {{- end }}
           args:
             - "--v={{ .Values.logLevel }}"

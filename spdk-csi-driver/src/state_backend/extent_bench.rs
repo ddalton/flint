@@ -87,15 +87,26 @@ async fn mdsbench_block_allocator_cost() {
     crate::state_backend::extent_alloc::BENCH_SKIP_FULL_VERIFY
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let dir = tempfile::tempdir().unwrap(); // honours TMPDIR (lima: /var/tmp, ext4)
-    let backend: Arc<dyn StateBackend> =
-        Arc::new(SqliteBackend::open(dir.path().join("state.db")).unwrap());
+    // FLINT_BENCH_SYNC=full prices the PRODUCTION pNFS-MDS open
+    // (open_durable, synchronous=FULL — per-commit WAL fsync); default
+    // stays NORMAL so historical rows remain comparable. Run BOTH: the
+    // delta IS the re-price of the durability fix.
+    let full_sync = std::env::var("FLINT_BENCH_SYNC")
+        .map(|v| v.eq_ignore_ascii_case("full"))
+        .unwrap_or(false);
+    let backend: Arc<dyn StateBackend> = if full_sync {
+        Arc::new(SqliteBackend::open_durable(dir.path().join("state.db")).unwrap())
+    } else {
+        Arc::new(SqliteBackend::open(dir.path().join("state.db")).unwrap())
+    };
     let host = "nqn.2024-11.com.flint:node:bench";
 
     println!();
     println!("mdsbench-block [{}]", std::env::consts::OS);
     println!(
-        "state.db on {:?} — production path: writer thread + barrier, WAL+NORMAL",
-        dir.path()
+        "state.db on {:?} — production path: writer thread + barrier, WAL+{}",
+        dir.path(),
+        if full_sync { "FULL (open_durable)" } else { "NORMAL" }
     );
     println!();
 

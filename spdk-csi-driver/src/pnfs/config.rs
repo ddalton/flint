@@ -734,8 +734,25 @@ impl PnfsConfig {
                 // per commit batch; the writer thread's group commit
                 // amortizes it (same trade the standalone server has
                 // shipped since v1.7).
-                let backend = crate::state_backend::SqliteBackend::open_durable(&path)
-                    .map_err(|e| format!("open sqlite at {}: {}", path, e))?;
+                //
+                // FLINT_PNFS_STATE_SYNC=normal is the bench/A-B escape
+                // hatch (and a deliberate operator choice for
+                // files-ONLY fleets that accept checkpoint-granularity
+                // durability). It is a foot-gun on block-class fleets
+                // — say so loudly, once, at open.
+                let sync = std::env::var("FLINT_PNFS_STATE_SYNC").unwrap_or_default();
+                let backend = if sync.eq_ignore_ascii_case("normal") {
+                    tracing::warn!(
+                        "FLINT_PNFS_STATE_SYNC=normal: state commits are durable at \
+                         CHECKPOINT, not commit — on a block-class fleet a power loss \
+                         can drop committed extent rows (F67 silent zeros) and fence \
+                         records (fence silently lifted). Bench/files-only use ONLY."
+                    );
+                    crate::state_backend::SqliteBackend::open(&path)
+                } else {
+                    crate::state_backend::SqliteBackend::open_durable(&path)
+                }
+                .map_err(|e| format!("open sqlite at {}: {}", path, e))?;
                 Ok(std::sync::Arc::new(backend))
             }
         }

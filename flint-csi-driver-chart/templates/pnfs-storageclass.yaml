@@ -50,3 +50,33 @@ mountOptions:
 {{ toYaml . | indent 2 }}
 {{- end }}
 {{- end }}
+{{- /*
+pnfs-block (scsi layout) class. Distinct from the files class above:
+no stripe geometry (extents, not stripes — the parameters are refused
+at provision), and the tier is SINGLE-REPLICA (design doc §12): a lost
+storage node is lost data. Expansion of block volumes grows the
+recorded size; the lvol is thin, so it does not reserve capacity.
+Requires pnfs.blockLayout.enabled (the controller gate) and an MDS
+with blockExport configured — a class without them fails provision
+loudly, never silently downgrades to the files layout.
+*/}}
+{{- if and .Values.pnfs.enabled (.Values.pnfs.blockLayout).enabled .Values.pnfs.blockLayout.storageClass.create }}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.pnfs.blockLayout.storageClass.name }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-block
+provisioner: {{ .Values.driver.name }}
+reclaimPolicy: {{ .Values.pnfs.blockLayout.storageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.pnfs.blockLayout.storageClass.volumeBindingMode }}
+allowVolumeExpansion: true
+parameters:
+  layout: pnfs-block
+{{- with .Values.pnfs.blockLayout.storageClass.mountOptions }}
+mountOptions:
+{{ toYaml . | indent 2 }}
+{{- end }}
+{{- end }}
