@@ -30,6 +30,11 @@
 //! * In-flight RPC futures — they time out client-side and retry.
 
 pub mod extent_alloc;
+
+/// §8's cost-budget bench for the block-layout allocator (ignored by
+/// default; run explicitly on Linux — see the module doc).
+#[cfg(test)]
+mod extent_bench;
 pub mod memory;
 pub mod sqlite;
 

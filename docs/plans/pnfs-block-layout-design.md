@@ -428,6 +428,38 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   allocator also ships a merge policy and a stated per-volume extent-count bound before
   phase 3; nothing else bounds table growth.
 
+  > **GATE RUN 2026-08-09 — VERDICT: GO, with the merge-policy debt now a
+  > measured slope.** Instrument: `state_backend/extent_bench.rs`
+  > (`mdsbench_block_allocator_cost`, release build, lima aarch64 ext4,
+  > production `StateBackend` path: writer thread + barrier + WAL/NORMAL).
+  > The kernel client cannot speak type 5 yet, so the bench prices what is
+  > NEW in the scsi path — the allocator transactions — against Tier-1's
+  > per-op anchors; dispatch/XDR above it is shared with the files path.
+  > Measured (µs/op unless noted):
+  >
+  > | shape | cost | note |
+  > |---|---|---|
+  > | admission SELECT | 42 | the per-LAYOUTGET fast path (≈ writer-path floor) |
+  > | grant, fresh volume | ~250–310 | one 4Mi extent + hosts SELECT |
+  > | grant at 1,000 rows | ~930–1,040 | the O(rows) verify tail |
+  > | commit, 4KiB | 109 | no verify in commit; the steady-state shape |
+  > | commit, 1×1024 rows | 5.8 ms | the worst-case single LAYOUTCOMMIT |
+  > | return+free, 1024 rows | 5.5 ms | the REMOVE shape |
+  >
+  > Reading against Tier-1 (w2-opencl = 140 µs MDS-CPU per whole files-layout
+  > open cycle): a scsi grant costs ~2× a whole files open at LOW row count
+  > and serializes through the single writer thread (~1,700 grants/s/shard
+  > ceiling at mid-shatter) — **but the scsi client's shape is grants-per-file
+  > (1 GiB windows), not grants-per-open**, and commits (the true hot path)
+  > are 109 µs unserialized-by-verify. GO for the rig. The debt, made
+  > precise: `verify_volume_invariants` costs **~0.9 µs per volume row per
+  > writing transaction** (measured slope, 1→1024 rows) — a 1 TiB volume
+  > shattered at 4Mi granularity (262k rows) would pay ~230 ms per grant,
+  > which is a NO at production scale. The phase-3 merge policy +
+  > extent-count bound must therefore ALSO window the verify (check the
+  > touched ranges against their neighbours, not the whole volume) — the
+  > bound alone does not close a slope this steep.
+
 ## 9. FlintExtents — the TLA+ module
 
 First-class deliverable, not documentation garnish. **Sequencing rule: the module and
