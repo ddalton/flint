@@ -2726,6 +2726,36 @@ impl CompoundDispatcher {
             return OperationResult::LayoutGet(Nfs4Status::Inval, None);
         }
 
+        // Host admission BEFORE the grant transaction (design doc §5:
+        // the grant lifecycle drives the export allow-list). Ordered
+        // this way so a failed admission leaves no grant behind — the
+        // client simply retries. A client whose NVMe identity we cannot
+        // derive can never reach the device, so granting it extents
+        // would be theater: LAYOUTUNAVAIL is the honest refusal.
+        let Some(host_nqn) = self
+            .state_mgr
+            .clients
+            .get_client(client_id)
+            .and_then(|c| Self::hostnqn_from_co_ownerid(&c.owner))
+        else {
+            refused(&self.f68a);
+            warn!(
+                "❌ LAYOUTGET (scsi) '{}': cannot derive an NVMe host identity for \
+                 client {} — expected the Linux uniform co_ownerid shape",
+                file_key, client_id
+            );
+            return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+        };
+        if let Err(e) = pnfs.admit_block_host(&volume, client_id, &host_nqn).await {
+            refused(&self.f68a);
+            warn!(
+                "❌ LAYOUTGET (scsi) '{}': host admission of {} did not converge: {} — \
+                 TRYLATER",
+                file_key, host_nqn, e
+            );
+            return OperationResult::LayoutGet(Nfs4Status::LayoutTrylater, None);
+        }
+
         match backend.extent_grant(&volume, file_id, client_id, offset, want, true).await {
             Ok(Ok(extents)) => {
                 if extents.iter().any(|x| x.needs_scrub) {
@@ -2800,6 +2830,30 @@ impl CompoundDispatcher {
                 OperationResult::LayoutGet(Nfs4Status::ServerFault, None)
             }
         }
+    }
+
+    /// Derive the client node's flint host NQN from its NFSv4.1+
+    /// co_ownerid. The kernel's uniform client string (verified against
+    /// v6.11 fs/nfs/nfs4proc.c, `nfs4_init_uniform_client_string`) is
+    /// `"Linux NFSv4.<minor> <nodename>"`, or with `nfs.nfs4_unique_id`
+    /// set `"Linux NFSv4.<minor> <uniquifier>/<nodename>"` — the
+    /// nodename is always the LAST '/'-component. flint's fleet
+    /// discipline closes the loop: node name == kernel hostname, and
+    /// every flint initiator connects as `flint_host_nqn(node name)`
+    /// (csi-node and the rig both), so the MDS can derive the NVMe
+    /// identity with zero registration protocol. Anything else — v4.0's
+    /// nonuniform shape, pynfs's custom owners, non-Linux clients —
+    /// refuses (`None`): no admission is safer than a guessed one.
+    fn hostnqn_from_co_ownerid(owner: &[u8]) -> Option<String> {
+        let s = std::str::from_utf8(owner).ok()?;
+        let rest = s
+            .strip_prefix("Linux NFSv4.1 ")
+            .or_else(|| s.strip_prefix("Linux NFSv4.2 "))?;
+        let nodename = rest.rsplit('/').next()?.trim();
+        if nodename.is_empty() {
+            return None;
+        }
+        Some(crate::nvmeof_export::flint_host_nqn(nodename))
     }
 
     /// Frame a GETDEVICEINFO success body, honouring `maxcount`: the
@@ -4691,6 +4745,38 @@ mod tests {
             CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 0),
             OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(_))
         ));
+    }
+
+    /// The co_ownerid → host NQN derivation, against the exact strings
+    /// v6.11's `nfs4_init_uniform_client_string` emits (verified in the
+    /// kernel source, not guessed): `"Linux NFSv4.<minor> <nodename>"`,
+    /// or `"Linux NFSv4.<minor> <uniquifier>/<nodename>"` with
+    /// nfs.nfs4_unique_id set. Everything else refuses — no admission is
+    /// safer than a guessed one.
+    #[test]
+    fn hostnqn_derivation_handles_the_kernel_owner_shapes() {
+        let derive = |s: &str| CompoundDispatcher::hostnqn_from_co_ownerid(s.as_bytes());
+        assert_eq!(
+            derive("Linux NFSv4.1 worker-3"),
+            Some("nqn.2024-11.com.flint:node:worker-3".to_string()),
+            "plain uniform shape"
+        );
+        assert_eq!(
+            derive("Linux NFSv4.2 my-uniq-id/worker-3"),
+            Some("nqn.2024-11.com.flint:node:worker-3".to_string()),
+            "uniquifier shape: nodename is the LAST /-component"
+        );
+        // v4.0's nonuniform shape ends in the peer ADDRESS, not the
+        // nodename — deriving from it would admit a host named after an
+        // IP. v4.0 does no pNFS; refuse.
+        assert_eq!(derive("Linux NFSv4.0 worker-3/10.0.0.7"), None);
+        assert_eq!(derive("pynfs-owner-12345"), None, "non-Linux owners refuse");
+        assert_eq!(derive("Linux NFSv4.1 "), None, "empty nodename refuses");
+        assert_eq!(
+            CompoundDispatcher::hostnqn_from_co_ownerid(&[0xff, 0xfe]),
+            None,
+            "non-UTF8 owners refuse"
+        );
     }
 }
 

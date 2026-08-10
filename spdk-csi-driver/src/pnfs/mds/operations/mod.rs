@@ -227,6 +227,24 @@ impl PnfsOperationHandler {
     ///   MDS incarnation) → Delay while the longest such outage is
     ///   under the ceiling, FailFast after.
     fn fallback_io_disposition_impl(&self, file_key: &str) -> FallbackIoDisposition {
+        // pnfs-block: a scsi-class file's bytes live in extents on the
+        // lvol; the stub is a sparse size-only anchor. Until the §8
+        // fallback lane exists (MDS-side NVMe initiator that consults
+        // extent_grants and reads the device), an MDS READ here would
+        // serve the stub's zeros for committed data — F67's exact shape,
+        // reachable the moment the export goes live and a client's first
+        // sub-blksize I/O routes through the MDS. FailFast (NFS4ERR_IO)
+        // is the only honest answer: loud, recoverable, never zeros.
+        if self.layout_manager.layout_class_for(file_key)
+            == crate::pnfs::mds::layout::LayoutClass::Scsi
+        {
+            tracing::error!(
+                "MDS I/O on scsi-class file '{}' refused (NFS4ERR_IO): the block fallback \
+                 lane is not built yet, and the stub holds no data",
+                file_key
+            );
+            return FallbackIoDisposition::FailFast;
+        }
         self.fallback_io_disposition_bounded(file_key, fallback_delay_ceiling())
     }
 
@@ -1492,7 +1510,46 @@ pub async fn reclaim_scsi_extents(
                         file_key, c, round
                     );
                     match backend.extent_fence_client(&volume, c).await {
-                        Ok(Ok(_)) => {}
+                        Ok(Ok(_)) => {
+                            // Functional-fence backstop (§5): yank the
+                            // client's host from the export allow-list and
+                            // drain its qpairs. BELT ONLY — the fenced
+                            // extents still quarantine (FenceReaches stays
+                            // unproven; the allow-list flip is best-effort
+                            // enforcement, not a freeing condition). An NQN
+                            // shared with another live client of the volume
+                            // survives in the remaining list and is not
+                            // removed.
+                            match backend.block_host_evict(&volume, c).await {
+                                Ok(Ok((evicted, _))) if !evicted.is_empty() => {
+                                    if let Some(rec) = layout_manager.block_export() {
+                                        if let Err(e) = rec.reconcile_hosts(&volume).await {
+                                            tracing::error!(
+                                                "reclaim '{}': host eviction of {:?} did not \
+                                                 converge: {} — the fenced client may still \
+                                                 reach the device until the next reconcile",
+                                                file_key, evicted, e
+                                            );
+                                        } else {
+                                            info!(
+                                                "♻️  reclaim '{}': evicted {:?} from the \
+                                                 export allow-list (functional fence)",
+                                                file_key, evicted
+                                            );
+                                        }
+                                    }
+                                }
+                                Ok(Ok(_)) => {}
+                                Ok(Err(e)) => tracing::error!(
+                                    "reclaim '{}': host-evict rows for {} refused: {}",
+                                    file_key, c, e
+                                ),
+                                Err(e) => tracing::error!(
+                                    "reclaim '{}': host-evict rows for {} failed: {}",
+                                    file_key, c, e
+                                ),
+                            }
+                        }
                         Ok(Err(e)) => {
                             tracing::error!("reclaim '{}': fence of {} refused: {}", file_key, c, e)
                         }
@@ -1598,6 +1655,63 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         self.layout_manager
             .take_scsi_layout(stateid)
             .map(|l| (l.owner.client_id, l.file_ident))
+    }
+
+    async fn admit_block_host(
+        &self,
+        volume: &str,
+        client_id: u64,
+        host_nqn: &str,
+    ) -> Result<(), String> {
+        let backend = self.layout_manager.state_backend();
+        // Fast path: already on the durable desired list → assume the
+        // tgt converged when the row was written and skip the RPC pass.
+        // A tgt restart CAN diverge from this assumption; until the
+        // periodic reconcile loop exists, the startup replay and the
+        // runbook's roll-after-tgt-restart rule are the repair.
+        match backend.block_hosts(volume).await {
+            Ok(Ok(hosts)) if hosts.iter().any(|h| h == host_nqn) => return Ok(()),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(format!("block_hosts read refused: {e}")),
+            Err(e) => return Err(format!("block_hosts read failed: {e}")),
+        }
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        match backend
+            .block_host_admit(volume, client_id, host_nqn, now_unix)
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(format!("host admit refused: {e}")),
+            Err(e) => return Err(format!("host admit failed: {e}")),
+        }
+        match self.layout_manager.block_export() {
+            Some(reconciler) => reconciler.reconcile_hosts(volume).await,
+            // No reconciler attached: unit-test / legacy shape (see the
+            // trait doc — CreateVolume gates real volumes on it). The
+            // durable row is written; a later attach converges it.
+            None => {
+                debug!(
+                    "admit of {} on '{}' recorded durably; no reconciler attached",
+                    host_nqn, volume
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn link_allowed(&self, target_key: &str) -> bool {
+        // scsi-class: extents key on the stub's inode and REMOVE of any
+        // name reclaims them — a hard link would let one name's removal
+        // destroy the surviving name's data. Refused outright.
+        if self.layout_manager.layout_class_for(target_key)
+            == crate::pnfs::mds::layout::LayoutClass::Scsi
+        {
+            return false;
+        }
+        !self.is_pnfs_managed(target_key)
     }
 
     fn note_remove(&self, file_key: &str, file_id: u64) {
@@ -1752,6 +1866,34 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
     }
 
     fn note_rename(&self, old_key: &str, new_key: &str) {
+        if self.layout_manager.layout_class_for(old_key)
+            == crate::pnfs::mds::layout::LayoutClass::Scsi
+        {
+            // Same volume: extents key on the inode and follow the file;
+            // only the recall handles (keyed by path at grant time) need
+            // re-keying, or a later reclaim recalls nothing and fences a
+            // responsive client. Cross-volume: the bytes CANNOT follow —
+            // they live in the old volume's lvol — and this hook runs
+            // after the fs rename, too late to refuse. Scream.
+            let vol = |k: &str| k.split('/').find(|c| !c.is_empty()).map(str::to_string);
+            if vol(old_key) == vol(new_key) {
+                let n = self.layout_manager.rekey_scsi_layouts(old_key, new_key);
+                if n > 0 {
+                    info!(
+                        "scsi rename '{}' → '{}': re-keyed {} recall handle(s)",
+                        old_key, new_key, n
+                    );
+                }
+            } else {
+                tracing::error!(
+                    "cross-volume rename of scsi file '{}' → '{}': the extents stay in \
+                     the old volume's lvol and are now STRANDED — the new name reads \
+                     zeros via the (refused) MDS path; restore by renaming back",
+                    old_key, new_key
+                );
+            }
+            return;
+        }
         match self.layout_manager.rename_placement(old_key, new_key) {
             Ok(Some(overwritten)) => {
                 // Rename-over: the target's old pin is gone; reclaim
@@ -1845,6 +1987,62 @@ mod fallback_tests {
             .expect("clean path converges");
         assert_eq!(out.freed_extents, 1, "returned holder ⇒ clean free");
         assert_eq!(out.quarantined_extents, 0);
+    }
+
+    /// The functional-fence backstop: a fence during reclaim evicts the
+    /// fenced client's host admission (durable rows) and converges the
+    /// allow-list; the surviving client's admission is untouched. The
+    /// quarantine result above is unchanged by any of this — eviction is
+    /// a belt, never a freeing condition.
+    #[tokio::test]
+    async fn scsi_reclaim_fence_evicts_the_fenced_hosts_admission() {
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        lm.set_volume_geometry(
+            "volB",
+            crate::pnfs::mds::layout::VolumeGeometry {
+                stripe_size: 0,
+                stripe_width: 0,
+                layout_class: crate::pnfs::mds::layout::LayoutClass::Scsi,
+            },
+        )
+        .await;
+        lm.register_extent_arena("volB", 1 << 20).await.unwrap();
+        let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
+        let reconciler = Arc::new(crate::pnfs::mds::block_export::BlockExportReconciler::new(
+            Arc::clone(&tgt)
+                as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+        ));
+        reconciler.ensure("volB", Some(1 << 20)).await.unwrap();
+        lm.attach_block_export(reconciler);
+
+        // Two clients admitted; 7 will go unresponsive, 9 stays healthy.
+        let h7 = crate::nvmeof_export::flint_host_nqn("node-7");
+        let h9 = crate::nvmeof_export::flint_host_nqn("node-9");
+        backend.block_host_admit("volB", 7, &h7, 0).await.unwrap().unwrap();
+        backend.block_host_admit("volB", 9, &h9, 0).await.unwrap().unwrap();
+        lm.block_export().unwrap().reconcile_hosts("volB").await.unwrap();
+
+        backend.extent_grant("volB", 42, 7, 0, 8192, true).await.unwrap().unwrap();
+        let out = reclaim_scsi_extents(&lm, None, "volB/f", 42, 0)
+            .await
+            .expect("fence path converges");
+        assert_eq!(out.quarantined_extents, 1, "eviction never turns into a free");
+
+        let remaining = backend.block_hosts("volB").await.unwrap().unwrap();
+        assert_eq!(remaining, vec![h9.clone()], "client 7's admission rows are gone");
+        let nqn = crate::identity::block_volume_export_nqn("volB");
+        assert_eq!(tgt.hosts_of(&nqn), vec![h9], "the tgt allow-list converged");
     }
 
     /// Registry with `ids` registered + a handler whose layout manager

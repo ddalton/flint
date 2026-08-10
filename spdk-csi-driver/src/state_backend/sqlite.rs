@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// One request to the writer thread.
 enum Req {
@@ -1241,6 +1241,48 @@ impl StateBackend for SqliteBackend {
         })
         .await
     }
+
+    async fn block_host_admit(
+        &self,
+        volume: &str,
+        client_id: u64,
+        host_nqn: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<Vec<String>, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        let v = volume.to_string();
+        let h = host_nqn.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::host_admit(conn, &v, client_id, &h, now_unix)
+        })
+        .await
+    }
+
+    async fn block_host_evict(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<
+        Result<(Vec<String>, Vec<String>), crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::host_evict(conn, &v, client_id)
+        })
+        .await
+    }
+
+    async fn block_hosts(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<Vec<String>, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::hosts_for_volume(conn, &v)
+        })
+        .await
+    }
 }
 
 // ── Row decoders ──────────────────────────────────────────────────────
@@ -1634,6 +1676,23 @@ CREATE TABLE IF NOT EXISTS extent_quarantine (
     fenced_clients TEXT NOT NULL,
     quarantined_unix INTEGER NOT NULL,
     PRIMARY KEY (volume, physical_offset)
+);
+
+-- Desired NVMe host admissions for a block-class volume's subsystem
+-- (design doc §5): which host NQNs the export's allow-list should hold.
+-- DESIRED state, not observed — spdk-tgt's live allow-list is converged
+-- onto this set by the block-export reconciler, so a tgt restart can be
+-- repaired by replay instead of being remembered nowhere. Rows are keyed
+-- by the NFS client that earned the admission, which is what lets a
+-- fence name whose host to evict; two clients on one node share a
+-- host_nqn and the DISTINCT list keeps it admitted until the last one
+-- goes.
+CREATE TABLE IF NOT EXISTS block_hosts (
+    volume TEXT NOT NULL,
+    client_id INTEGER NOT NULL,
+    host_nqn TEXT NOT NULL,
+    admitted_unix INTEGER NOT NULL,
+    PRIMARY KEY (volume, client_id)
 );
 "#;
 

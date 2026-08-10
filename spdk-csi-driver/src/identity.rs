@@ -453,6 +453,18 @@ pub fn hotrejoin_export_nqn(volume_id: &StorageId) -> String {
     format!("nqn.2024-11.com.flint:hotrejoin:{}", volume_id)
 }
 
+/// pnfs-block (scsi layout) per-volume export NQN: `…:block:<vol>` —
+/// same reasoning as hotrejoin's namespace choice, doubled: NOT under
+/// `:volume:` so no volume-family sweep (dead-controller reaper, F49
+/// loss-detector, replica reconciles) ever classifies or resurrects it,
+/// and consumed by KERNEL initiators on many nodes at once, which no
+/// `:volume:` lifecycle rule models. The volume id here is the pNFS
+/// volume directory name (the PVC volume), not a StorageId — block
+/// volumes never enter the wrapper/inner domain split.
+pub fn block_volume_export_nqn(volume_id: &str) -> String {
+    format!("nqn.2024-11.com.flint:block:{}", volume_id)
+}
+
 /// Per-node initiator host NQN: `…:node:<node>` (what makes host fencing
 /// possible; fencing only ever removes hosts under this prefix).
 pub fn node_host_nqn(node_name: &str) -> String {

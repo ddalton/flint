@@ -45,6 +45,10 @@ pub mod stub_binding;
 /// F68a: MDS data-path observability (the two silent fallback lanes).
 pub mod f68a_meter;
 
+/// pnfs-block (scsi) NVMe export reconciler — lvol, subsystem-per-volume,
+/// pinned NGUID, grant-driven host admission (design doc §5).
+pub mod block_export;
+
 // Re-exports
 pub use device::{DeviceRegistry, DeviceInfo, DeviceStatus};
 pub use layout::{LayoutManager, IoMode, LayoutType};

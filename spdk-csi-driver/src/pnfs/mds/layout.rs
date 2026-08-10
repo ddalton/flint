@@ -419,6 +419,14 @@ pub struct LayoutManager {
     /// default to [`stub_binding::NoStubs`] (pre-F67 semantics); the
     /// server injects the real xattr binding.
     stub_binding: Arc<dyn super::stub_binding::StubBinding>,
+
+    /// pnfs-block: the NVMe export reconciler, attached once by the
+    /// server when `blockExport` is configured (OnceLock: construction
+    /// order mirrors the callback manager's late attach). `None` means
+    /// this MDS refuses block-class provisions and grant-time host
+    /// admission becomes a logged no-op — unit-test shape only, since
+    /// CreateVolume gates on it.
+    block_export: Arc<std::sync::OnceLock<Arc<super::block_export::BlockExportReconciler>>>,
 }
 
 impl LayoutState {
@@ -730,7 +738,37 @@ impl LayoutManager {
             volume_geometry: Arc::new(DashMap::new()),
             backend,
             stub_binding,
+            block_export: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Attach the block-export reconciler (server wiring, post-
+    /// construction for the same reason as `attach_callback_manager`).
+    /// Second attach is a no-op — OnceLock keeps the first.
+    pub fn attach_block_export(
+        &self,
+        reconciler: Arc<super::block_export::BlockExportReconciler>,
+    ) {
+        let _ = self.block_export.set(reconciler);
+    }
+
+    /// The attached reconciler, if this MDS serves block-class volumes.
+    pub fn block_export(&self) -> Option<Arc<super::block_export::BlockExportReconciler>> {
+        self.block_export.get().cloned()
+    }
+
+    /// Every volume the geometry cache knows to be scsi-class — the
+    /// startup reconcile's work list. The cache is loaded eagerly by
+    /// `load_volume_geometry`, so this is complete once startup seeding
+    /// ran.
+    pub fn scsi_volumes(&self) -> Vec<String> {
+        self.volume_geometry
+            .iter()
+            .filter_map(|e| match e.value() {
+                Some(g) if g.layout_class == LayoutClass::Scsi => Some(e.key().clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Record the geometry chosen for `volume` at provision time and
@@ -1577,6 +1615,31 @@ impl LayoutManager {
             .or_insert_with(Vec::new)
             .push(stateid);
         stateid
+    }
+
+    /// RENAME follow-through for scsi files: recall handles are keyed by
+    /// file_ident (the export-relative path at grant time), and a handle
+    /// left under the old key is a handle `recall_layouts_for_file(new)`
+    /// can never find — the reclaim then skips the recall and goes
+    /// straight to fencing a perfectly responsive client. Re-key them.
+    /// Same-volume renames only make sense here (the extents live in the
+    /// old volume's lvol); the caller polices that.
+    pub fn rekey_scsi_layouts(&self, old_key: &str, new_key: &str) -> usize {
+        let stateids: Vec<[u8; 16]> = self
+            .layouts
+            .iter()
+            .filter(|e| e.value().file_ident == old_key)
+            .map(|e| e.value().stateid)
+            .collect();
+        let mut n = 0;
+        for sid in stateids {
+            if let Some(mut l) = self.layouts.get_mut(&state_key(&sid)) {
+                l.file_ident = new_key.to_string();
+                self.persist(&l);
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Remove a scsi layout by stateid, returning it so the caller can

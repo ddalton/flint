@@ -350,6 +350,41 @@ impl StateBackend for MemoryBackend {
         Ok(Ok(0))
     }
 
+    async fn block_host_admit(
+        &self,
+        _volume: &str,
+        _client_id: u64,
+        _host_nqn: &str,
+        _now_unix: i64,
+    ) -> StateBackendResult<Result<Vec<String>, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        Err(StateBackendError::Storage(
+            "block host admission on the memory backend — block-class volumes require sqlite"
+                .into(),
+        ))
+    }
+
+    async fn block_host_evict(
+        &self,
+        _volume: &str,
+        _client_id: u64,
+    ) -> StateBackendResult<
+        Result<(Vec<String>, Vec<String>), crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        // Same shape as extent_drop_volume: the reclaim driver evicts
+        // unconditionally after a fence, and there is nothing to evict
+        // on a backend that can hold no block volumes.
+        Ok(Ok((Vec::new(), Vec::new())))
+    }
+
+    async fn block_hosts(
+        &self,
+        _volume: &str,
+    ) -> StateBackendResult<Result<Vec<String>, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        Ok(Ok(Vec::new()))
+    }
+
     async fn put_fh_mapping(&self, m: &FhMappingRecord) -> StateBackendResult<()> {
         self.fh_mappings.insert(m.file_id, m.clone());
         Ok(())

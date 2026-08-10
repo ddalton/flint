@@ -196,6 +196,30 @@ impl MetadataServer {
         // but the held-layout window is wide open.
         operation_handler.attach_callback_manager(Arc::clone(&callback_manager));
 
+        // pnfs-block: the NVMe export reconciler, when configured. Same
+        // late-attach shape as the callback manager. Without it this MDS
+        // refuses block-class CreateVolume — a block volume with no
+        // reconciler is a volume no client can ever reach.
+        if let Some(be) = &config.block_export {
+            let rpc = Arc::new(crate::minimal_disk_service::MinimalDiskService::new(
+                "mds".to_string(),
+                be.spdk_socket.clone(),
+            ));
+            let reconciler =
+                Arc::new(crate::pnfs::mds::block_export::BlockExportReconciler::new(
+                    rpc,
+                    state_mgr.backend(),
+                    be.lvstore.clone(),
+                    be.traddr.clone(),
+                    be.trsvcid,
+                ));
+            layout_manager.attach_block_export(reconciler);
+            info!(
+                "🧱 block-export reconciler attached: socket={} lvstore={} listener={}:{}",
+                be.spdk_socket, be.lvstore, be.traddr, be.trsvcid
+            );
+        }
+
         // Register initial data servers from config
         for ds in &config.data_servers {
             // The endpoint field may be a comma-separated multipath
@@ -377,6 +401,23 @@ impl MetadataServer {
         // loaded into `LayoutManager` separately because it lives in
         // the pNFS layer, outside `state::StateManager`.
         self.load_persisted_state().await?;
+
+        // pnfs-block startup replay: converge every known scsi volume's
+        // export chain (the geometry cache was just seeded above). This
+        // repairs the together-restart shape — MDS pod restart takes the
+        // colocated tgt with it, and sqlite is the only durable record of
+        // what the tgt should serve. Spawned + loud-on-failure: a down
+        // tgt must not stop the MDS from serving its file-class volumes.
+        if let Some(reconciler) = self.layout_manager.block_export() {
+            let volumes = self.layout_manager.scsi_volumes();
+            if !volumes.is_empty() {
+                info!(
+                    "🧱 block-export startup replay: {} scsi volume(s)",
+                    volumes.len()
+                );
+                tokio::spawn(async move { reconciler.reconcile_all(&volumes).await });
+            }
+        }
 
         // Start heartbeat monitor in the background
         let heartbeat_timeout = Duration::from_secs(self.config.failover.heartbeat_timeout);

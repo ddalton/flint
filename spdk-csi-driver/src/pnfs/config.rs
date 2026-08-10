@@ -95,6 +95,43 @@ pub struct MdsConfig {
     /// host.lima.internal, so enabling it there would NACK forever.
     #[serde(rename = "verifyDsReachability", default)]
     pub verify_ds_reachability: bool,
+
+    /// pnfs-block (scsi layout): where this MDS reaches the spdk-tgt
+    /// that serves block-class volumes, and the export coordinates it
+    /// converges. Absent = this MDS refuses block-class CreateVolume
+    /// (a granted client would have no target to connect to — the
+    /// refusal names the missing config instead of provisioning a
+    /// volume whose every I/O silently needs an MDS that cannot serve
+    /// it).
+    #[serde(rename = "blockExport", default)]
+    pub block_export: Option<BlockExportConfig>,
+}
+
+/// Block-export reconciler settings (design doc §5, phase 1: one tgt per
+/// MDS shard — allocation is per-volume inside the volume's own lvol,
+/// the volume pins to its shard, so the shard's tgt is the volume's tgt).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockExportConfig {
+    /// spdk-tgt JSON-RPC unix socket path (the MDS is colocated with
+    /// its tgt in this phase — lima rig and kind tier shapes).
+    #[serde(rename = "spdkSocket")]
+    pub spdk_socket: String,
+
+    /// lvolstore name backing per-volume lvols (`<lvstore>/<volume>`).
+    pub lvstore: String,
+
+    /// Listener address kernel initiators dial (node-reachable, NOT
+    /// advertised over NFS — RFC 8154 device addresses carry
+    /// designators; clients connect out of band).
+    pub traddr: String,
+
+    /// Listener port; 4420 is the NVMe-oF IANA default.
+    #[serde(default = "default_nvmf_trsvcid")]
+    pub trsvcid: u16,
+}
+
+fn default_nvmf_trsvcid() -> u16 {
+    4420
 }
 
 /// Data Server configuration

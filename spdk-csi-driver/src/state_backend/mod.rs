@@ -636,6 +636,31 @@ pub trait StateBackend: Send + Sync {
         &self,
         volume: &str,
     ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
+
+    /// Record a client's NVMe host identity on the volume's desired
+    /// allow-list and return the full DISTINCT list after the upsert —
+    /// what the block-export reconciler converges spdk-tgt onto.
+    async fn block_host_admit(
+        &self,
+        volume: &str,
+        client_id: u64,
+        host_nqn: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<Vec<String>, extent_alloc::ExtentAllocError>>;
+
+    /// Drop a client's admission (the durable half of the functional
+    /// fence). Returns `(evicted_nqns, remaining_desired_list)`.
+    async fn block_host_evict(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> StateBackendResult<Result<(Vec<String>, Vec<String>), extent_alloc::ExtentAllocError>>;
+
+    /// The volume's desired allow-list (distinct, sorted).
+    async fn block_hosts(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<Vec<String>, extent_alloc::ExtentAllocError>>;
     async fn delete_volume_geometry(&self, volume: &str) -> StateBackendResult<()>;
 
     // id↔path mappings behind v2 (id-based) metadata filehandles.

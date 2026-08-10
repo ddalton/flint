@@ -186,6 +186,27 @@ impl MdsControlService {
         }
     }
 
+    /// Block-class create's target half: the lvol + subsystem + pinned
+    /// NGUID + listener must exist before the create is acked, or the
+    /// volume is grantable-but-unreachable — every client I/O would need
+    /// the MDS fallback lane, which refuses (the zeros belt). No
+    /// reconciler attached = no `blockExport` in the MDS config = this
+    /// MDS cannot serve the class at all; the refusal names the fix.
+    async fn ensure_block_export(&self, volume: &str, size_bytes: u64) -> Result<(), String> {
+        let Some(reconciler) = self.layout_manager.block_export() else {
+            return Err(
+                "this MDS has no blockExport configured (mds.blockExport: spdkSocket/\
+                 lvstore/traddr) — a block-class volume would have no NVMe target its \
+                 clients could reach"
+                    .to_string(),
+            );
+        };
+        reconciler
+            .ensure(volume, Some(size_bytes))
+            .await
+            .map_err(|e| format!("block-class export provisioning failed: {e}"))
+    }
+
     /// F68b reachability dial: can the endpoint clients will be handed
     /// actually be connected to right now? Plain TCP connect with a
     /// bounded timeout — the point is to verify the routing chain
@@ -595,6 +616,24 @@ impl MdsControl for MdsControlService {
                             effective_layout_class: String::new(),
                         }));
                     }
+                    // And the export chain, same repair reasoning: this
+                    // is the path that finishes a create that crashed
+                    // between the arena and the lvol/subsystem.
+                    if let Err(msg) =
+                        self.ensure_block_export(&req.volume_id, req.size_bytes).await
+                    {
+                        return Ok(Response::new(CreateVolumeResponse {
+                            created: false,
+                            export_path: String::new(),
+                            volume_file: String::new(),
+                            message: msg,
+                            nfs_port: self.nfs_port as u32,
+                            directory: false,
+                            effective_stripe_size: 0,
+                            effective_stripe_width: 0,
+                            effective_layout_class: String::new(),
+                        }));
+                    }
                 }
                 return Ok(Response::new(CreateVolumeResponse {
                     created: true,
@@ -747,6 +786,19 @@ impl MdsControl for MdsControlService {
                     export_path: String::new(),
                     volume_file: String::new(),
                     message: format!("block-class extent arena registration failed: {e}"),
+                    nfs_port: self.nfs_port as u32,
+                    directory: false,
+                    effective_stripe_size: 0,
+                    effective_stripe_width: 0,
+                    effective_layout_class: String::new(),
+                }));
+            }
+            if let Err(msg) = self.ensure_block_export(&req.volume_id, req.size_bytes).await {
+                return Ok(Response::new(CreateVolumeResponse {
+                    created: false,
+                    export_path: String::new(),
+                    volume_file: String::new(),
+                    message: msg,
                     nfs_port: self.nfs_port as u32,
                     directory: false,
                     effective_stripe_size: 0,
@@ -909,6 +961,25 @@ impl MdsControl for MdsControlService {
             mgr.forget_volume_geometry(&req.volume_id);
         };
 
+        // Tear down the NVMe export chain FIRST — deleting the subsystem
+        // severs every client's data path before the extent map beneath
+        // it goes away. Same class-or-no-class convergence as the row
+        // sweep below (both halves tolerate absence), so a class-confused
+        // or half-created state still cleans up. Failure leaks the
+        // subsystem+lvol loudly; rows are swept regardless, because a
+        // re-created same-name volume inheriting stale GRANTS is worse
+        // than one colliding with a stale export (the create's ensure
+        // pass converges the latter).
+        if let Some(reconciler) = self.layout_manager.block_export() {
+            if let Err(e) = reconciler.delete_volume_export(&req.volume_id).await {
+                warn!(
+                    "DeleteVolume {}: export teardown failed: {} — subsystem/lvol leak \
+                     until re-create or operator sweep",
+                    req.volume_id, e
+                );
+            }
+        }
+
         // Sweep every extent-allocator row for the volume, class or no
         // class (dropping zero rows is free, and it also cleans a
         // class-confused state). Without this a re-created same-name
@@ -1047,6 +1118,80 @@ mod create_volume_tests {
         assert!(r.message.contains("extent arena"), "got: {}", r.message);
     }
 
+    /// A durable sqlite MDS with NO blockExport config: the arena would
+    /// register fine, but a block volume with no NVMe target is a volume
+    /// no client can reach — refuse at provision, naming the config key.
+    #[tokio::test]
+    async fn block_class_create_refused_without_block_export_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _tgt) = svc_sqlite(dir.path(), false);
+        let mut req = cvreq("pvc-blk3", 1 << 20);
+        req.layout_class = "scsi".into();
+        let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
+        assert!(!r.created, "no reconciler = no reachable target = refuse");
+        assert!(r.message.contains("blockExport"), "got: {}", r.message);
+        assert!(
+            !dir.path().join("pvc-blk3").exists() || dir.path().join("pvc-blk3").is_dir(),
+            "directory state is fine either way; the ack is what must not happen"
+        );
+    }
+
+    /// The whole block-class provision chain: arena + lvol + subsystem
+    /// (pinned NGUID, default-closed) + listener, and the retry path
+    /// repairs/no-ops instead of failing.
+    #[tokio::test]
+    async fn block_class_create_provisions_the_export_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, tgt) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-blk4", 8 << 20);
+        req.layout_class = "scsi".into();
+        let r = s.create_volume(Request::new(req.clone())).await.unwrap().into_inner();
+        assert!(r.created, "{}", r.message);
+        assert_eq!(r.effective_layout_class, "scsi");
+
+        let nqn = crate::identity::block_volume_export_nqn("pvc-blk4");
+        let subs = tgt.subsystems.lock().unwrap();
+        let sub = subs.get(&nqn).expect("subsystem exists");
+        let (_, nguid) = crate::nvmeof_export::stable_ns_identity("pvc-blk4");
+        assert_eq!(
+            sub["namespaces"][0]["nguid"], nguid,
+            "the namespace carries the SAME identity GETDEVICEINFO advertises"
+        );
+        assert_eq!(sub["allow_any_host"], false, "default-closed");
+        drop(subs);
+        assert!(
+            tgt.bdevs.lock().unwrap().contains("lvs_test/pvc-blk4"),
+            "backing lvol exists"
+        );
+
+        // Idempotent retry (the provisioner does this routinely).
+        let again = s.create_volume(Request::new(req)).await.unwrap().into_inner();
+        assert!(again.created, "retry must succeed: {}", again.message);
+        assert_eq!(again.effective_layout_class, "scsi");
+    }
+
+    /// DeleteVolume of a block volume tears the whole chain down —
+    /// subsystem first (severs the data path), then the lvol, then the
+    /// allocator rows — so a re-created same-name volume starts clean.
+    #[tokio::test]
+    async fn block_class_delete_tears_down_the_export_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, tgt) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-blk5", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+        assert!(!tgt.subsystems.lock().unwrap().is_empty());
+
+        let r = s
+            .delete_volume(Request::new(DeleteVolumeRequest { volume_id: "pvc-blk5".into() }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.deleted, "{}", r.message);
+        assert!(tgt.subsystems.lock().unwrap().is_empty(), "subsystem torn down");
+        assert!(tgt.bdevs.lock().unwrap().is_empty(), "lvol torn down");
+    }
+
     /// Expanding a directory volume must SUCCEED. It stores no
     /// per-volume size — capacity is pool-side at the data servers — so
     /// there is genuinely nothing to do, and refusing left the PVC stuck
@@ -1179,6 +1324,50 @@ mod create_volume_tests {
         let mode = std::fs::metadata(d.path().join("g")).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o770, "mode not applied: {:o}", mode);
         assert_eq!(mode & 0o2000, 0o2000, "setgid not set: {:o}", mode);
+    }
+
+    /// A durable sqlite-backed service, optionally with a FakeTgt-backed
+    /// block-export reconciler attached — the block-class provision
+    /// tests' shape. Returns the FakeTgt so tests can inspect the world
+    /// the reconciler built.
+    fn svc_sqlite(
+        export: &std::path::Path,
+        with_block_export: bool,
+    ) -> (MdsControlService, Arc<crate::pnfs::mds::block_export::tests::FakeTgt>) {
+        let registry = Arc::new(DeviceRegistry::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let layout_manager = crate::pnfs::mds::layout::LayoutManager::new(
+            Arc::clone(&registry),
+            crate::pnfs::config::LayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
+        if with_block_export {
+            layout_manager.attach_block_export(Arc::new(
+                crate::pnfs::mds::block_export::BlockExportReconciler::new(
+                    Arc::clone(&tgt) as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
+                    backend,
+                    "lvs_test".into(),
+                    "10.0.0.9".into(),
+                    4420,
+                ),
+            ));
+        }
+        (
+            MdsControlService::new(
+                registry,
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+                export.to_path_buf(),
+                layout_manager,
+                2049,
+                true,
+                false,
+            ),
+            tgt,
+        )
     }
 
     fn svc_nondurable(export: &std::path::Path) -> MdsControlService {

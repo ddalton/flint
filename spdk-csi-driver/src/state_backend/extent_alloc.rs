@@ -634,12 +634,88 @@ pub fn release_quarantine(conn: &mut Connection, volume: &str) -> Result<u64> {
 pub fn drop_volume(conn: &mut Connection, volume: &str) -> Result<u64> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut n = 0u64;
-    for table in ["extent_grants", "extents", "extent_free", "extent_quarantine", "volume_alloc"] {
+    for table in [
+        "extent_grants",
+        "extents",
+        "extent_free",
+        "extent_quarantine",
+        "volume_alloc",
+        "block_hosts",
+    ] {
         n += tx.execute(&format!("DELETE FROM {table} WHERE volume = ?1"), params![volume])?
             as u64;
     }
     tx.commit()?;
     Ok(n)
+}
+
+/// Record that `client_id` (whose NVMe identity is `host_nqn`) belongs on
+/// `volume`'s export allow-list, and return the full DISTINCT desired list
+/// after the upsert — the level the reconciler converges spdk-tgt onto.
+/// Idempotent; a client re-appearing with a DIFFERENT host_nqn (node
+/// rename between mounts) simply replaces its row.
+pub fn host_admit(
+    conn: &mut Connection,
+    volume: &str,
+    client_id: u64,
+    host_nqn: &str,
+    now_unix: i64,
+) -> Result<Vec<String>> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute(
+        "INSERT INTO block_hosts (volume, client_id, host_nqn, admitted_unix)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (volume, client_id) DO UPDATE SET host_nqn = ?3",
+        params![volume, client_id as i64, host_nqn, now_unix],
+    )?;
+    let hosts = hosts_for_volume_conn(&tx, volume)?;
+    tx.commit()?;
+    Ok(hosts)
+}
+
+/// Drop `client_id`'s admission rows for `volume` and return
+/// `(evicted_nqns, remaining_desired_list)`. The eviction is the durable
+/// half of the functional fence (allow-list yank + qpair drain); the
+/// caller converges the subsystem onto the remaining list. An NQN shared
+/// with another live client stays in `remaining` — host-level fencing
+/// cannot split two NFS clients on one node, same as NVMe reservations
+/// (per Host Identifier).
+pub fn host_evict(
+    conn: &mut Connection,
+    volume: &str,
+    client_id: u64,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut stmt = tx.prepare(
+        "SELECT host_nqn FROM block_hosts WHERE volume = ?1 AND client_id = ?2",
+    )?;
+    let evicted: Vec<String> = stmt
+        .query_map(params![volume, client_id as i64], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    tx.execute(
+        "DELETE FROM block_hosts WHERE volume = ?1 AND client_id = ?2",
+        params![volume, client_id as i64],
+    )?;
+    let remaining = hosts_for_volume_conn(&tx, volume)?;
+    tx.commit()?;
+    Ok((evicted, remaining))
+}
+
+/// The volume's full desired allow-list (distinct, ordered for stable
+/// comparison in tests and logs).
+pub fn hosts_for_volume(conn: &Connection, volume: &str) -> Result<Vec<String>> {
+    hosts_for_volume_conn(conn, volume)
+}
+
+fn hosts_for_volume_conn(conn: &Connection, volume: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT host_nqn FROM block_hosts WHERE volume = ?1 ORDER BY host_nqn",
+    )?;
+    let hosts = stmt
+        .query_map(params![volume], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(hosts)
 }
 
 /// The quarantine meter: (ranges, bytes) currently leaked for the volume.
@@ -1070,5 +1146,48 @@ mod tests {
         let g = grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         assert!(g[0].committed, "committed state survives re-grant");
         verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// block_hosts: admit is an idempotent upsert returning the DISTINCT
+    /// desired list; evict names what fell off and what remains; a
+    /// client re-admitted under a new NQN (node rename) replaces its row.
+    #[test]
+    fn host_rows_admit_evict_and_replace() {
+        let mut conn = setup();
+        let h1 = "nqn.2024-11.com.flint:node:a".to_string();
+        let h2 = "nqn.2024-11.com.flint:node:b".to_string();
+        assert_eq!(host_admit(&mut conn, VOL, C1, &h1, 0).unwrap(), vec![h1.clone()]);
+        assert_eq!(
+            host_admit(&mut conn, VOL, C1, &h1, 5).unwrap(),
+            vec![h1.clone()],
+            "re-admit is idempotent"
+        );
+        assert_eq!(
+            host_admit(&mut conn, VOL, C2, &h1, 0).unwrap(),
+            vec![h1.clone()],
+            "two clients, one node: DISTINCT list has one entry"
+        );
+        // C1 re-appears from a renamed node: its row is replaced.
+        let hosts = host_admit(&mut conn, VOL, C1, &h2, 9).unwrap();
+        assert_eq!(hosts, vec![h1.clone(), h2.clone()]);
+
+        let (evicted, remaining) = host_evict(&mut conn, VOL, C2).unwrap();
+        assert_eq!(evicted, vec![h1.clone()]);
+        assert_eq!(remaining, vec![h2.clone()], "C1's new identity survives");
+        let (evicted, remaining) = host_evict(&mut conn, VOL, C2).unwrap();
+        assert!(evicted.is_empty(), "double-evict is a clean no-op");
+        assert_eq!(remaining, vec![h2]);
+    }
+
+    #[test]
+    fn drop_volume_sweeps_host_rows_too() {
+        let mut conn = setup();
+        host_admit(&mut conn, VOL, C1, "nqn.2024-11.com.flint:node:a", 0).unwrap();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        assert!(drop_volume(&mut conn, VOL).unwrap() > 0);
+        assert!(
+            hosts_for_volume(&conn, VOL).unwrap().is_empty(),
+            "a re-created same-name volume must not inherit admissions"
+        );
     }
 }

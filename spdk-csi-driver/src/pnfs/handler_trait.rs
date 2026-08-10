@@ -282,5 +282,24 @@ pub trait PnfsOperations: Send + Sync {
     fn take_scsi_layout(&self, _stateid: &[u8; 16]) -> Option<(u64, String)> {
         None
     }
+
+    /// Ensure `client_id` (NVMe identity `host_nqn`) is admitted on
+    /// `volume`'s block export — durable desired-state upsert plus a
+    /// converge pass against spdk-tgt. Called by the dispatcher BEFORE
+    /// the scsi grant transaction, so a failed admission leaves no
+    /// grant behind (the client retries; nothing to roll back).
+    ///
+    /// Default `Ok(())`: a handler with no reconciler attached has
+    /// nothing to converge — reachable only in unit tests and for
+    /// legacy volumes, because CreateVolume refuses block-class
+    /// provisions on an MDS without a configured block export.
+    async fn admit_block_host(
+        &self,
+        _volume: &str,
+        _client_id: u64,
+        _host_nqn: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
