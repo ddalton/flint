@@ -401,6 +401,91 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
   # a memory-tight VM. Keeping the two drills separate is the fix.
   vsudo "nvme disconnect -n $SUBNQN 2>/dev/null; true"
   vsudo "[ -f /var/tmp/rig-writer.pid ] && kill -9 \$(cat /var/tmp/rig-writer.pid) 2>/dev/null; true"
+
+  # ── R. RESTART=1: does the fence SURVIVE an MDS restart? ────────────
+  # Reservation holdership is target-side, keyed to the MDS's STABLE
+  # NVMe Host Identifier (identity.rs BLOCK_MDS_HOST_ID / _PR_KEY are
+  # constants, not per-boot). The eviction is in sqlite (block_hosts).
+  # So the claim is: kill+restart the MDS, and the fence is UNCHANGED —
+  # the restarted MDS re-establishes holdership WITHOUT re-registering or
+  # re-acquiring (a no-op re-acquire is the correct answer for an
+  # MDS-only restart: PTPL/tgt-memory persisted the reservation, and the
+  # stable identity means the tgt still sees the MDS as the holder).
+  if [ "${RESTART:-0}" = "1" ]; then
+    echo "▶ RESTART: killing + restarting the MDS with the fence active"
+    vsudo "pkill -9 -x flint-pnfs-mds"
+    for i in $(seq 1 20); do
+      vsh "pgrep -x flint-pnfs-mds" >/dev/null || break
+      sleep 0.5
+    done
+    # Same launch as §3, APPENDING to the log so the pre-restart fence
+    # lines survive for the assertions.
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    for i in $(seq 1 20); do
+      vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
+      [ "$i" = 20 ] && fail "MDS gRPC never came back after restart"
+      sleep 0.5
+    done
+    # R1. startup replay ran — the export chain re-converged from sqlite.
+    vsh "grep -q 'block-export.*reconcile.*converged\|block-export startup replay' $RIG/mds.log" \
+      || fail "restarted MDS did not run the block-export startup replay"
+    echo "✓ MDS restarted; startup replay converged the export from sqlite"
+
+    # R2. the durable eviction SURVIVED: the fenced client is NOT on the
+    # re-converged allow-list — only the MDS fence-lane host remains.
+    HOSTS=$(vsh "$RPC nvmf_get_subsystems" | python3 -c "
+import json,sys
+for s in json.load(sys.stdin):
+    if s.get('nqn') == '$SUBNQN':
+        print(' '.join(h['nqn'] for h in s.get('hosts', []))); break
+")
+    echo "$HOSTS" | grep -q "$HOSTNQN" \
+      && fail "the fenced client's host was RE-ADMITTED after restart: $HOSTS"
+    echo "$HOSTS" | grep -q ':mds:resv-fence' \
+      || fail "the MDS fence-lane host is missing from the allow-list after restart: $HOSTS"
+    echo "✓ durable eviction survived: allow-list = [$HOSTS] (fenced client absent, fence lane kept)"
+
+    # R3. re-run the fence lever. If the reservation SURVIVED, the
+    # restarted MDS (stable identity) finds itself ALREADY the registrant
+    # AND holder — so registered=false, acquired=false, and it is still
+    # the EA-RO holder. That no-op re-acquire IS the re-acquire path.
+    MARK=$(vsh "wc -l < $RIG/mds.log")
+    FR2=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+          -d '{\"volumeId\":\"$VOL\",\"clientId\":\"$CID\"}' \
+          127.0.0.1:50051 pnfs.control.MdsControl/FenceBlockClient") \
+      || fail "post-restart FenceBlockClient RPC failed"
+    echo "$FR2" | grep -c '"fenced": true' >/dev/null || fail "post-restart fence refused: $FR2"
+    # The fence-preempt DETAIL line carries registered=/acquired= AND the
+    # reservation state. Anchor on 'registered=' — it is unique to that
+    # line ('reservation preempt' alone also matches the ...preempted
+    # summary line, which lacks these fields).
+    RESV2=$(vsh "tail -n +$MARK $RIG/mds.log | grep 'registered=' | tail -1" || true)
+    echo "$RESV2" | grep -q 'registered=false' \
+      || fail "post-restart re-fence RE-REGISTERED — identity was NOT stable across restart: ${RESV2:-<none>}"
+    echo "$RESV2" | grep -q 'acquired=false' \
+      || fail "post-restart re-fence RE-ACQUIRED — the reservation did NOT survive the restart: ${RESV2:-<none>}"
+    echo "$RESV2" | grep -q 'rtype=0x4' \
+      || fail "post-restart reservation is not EA-RO: ${RESV2:-<none>}"
+    echo "$RESV2" | grep -q '0x666c696e745f6d64(holder)' \
+      || fail "the MDS key is not the reservation holder after restart: ${RESV2:-<none>}"
+    echo "✓ reservation SURVIVED the restart: ${RESV2}"
+
+    # R4. the client is still fenced at the device: a fresh nvme connect
+    # for its hostnqn is refused by the (durable) allow-list.
+    CONN=$(vsudo "nvme connect -t tcp -a 127.0.0.1 -s 4420 -n $SUBNQN --hostnqn=$HOSTNQN --ctrl-loss-tmo=3 2>&1; true")
+    echo "$CONN" | grep -qiE 'not allowed|Connect command failed|Input/output|Operation not permitted|refused' \
+      || { vsudo "nvme disconnect -n $SUBNQN 2>/dev/null"; fail "the fenced client RE-CONNECTED after restart: $CONN"; }
+    vsudo "nvme disconnect -n $SUBNQN 2>/dev/null; true"
+    echo "✓ fenced client still refused at the device after restart"
+
+    echo
+    echo "✅ fence-restart-rig PASSED — the fence SURVIVED an MDS restart: the"
+    echo "   reservation persisted (no re-register, no re-acquire — the stable MDS"
+    echo "   identity reclaimed holdership), the sqlite eviction survived, and the"
+    echo "   fenced client stayed out. This is the MdsRestart re-acquire path."
+    exit 0
+  fi
+
   echo
   echo "✅ fence-rig PASSED — a reservation held by the MDS (EA-RO, PTPL) stopped a"
   echo "   LIVE raw-path writer's bytes at the device on kernel $KREL (FenceReaches"
