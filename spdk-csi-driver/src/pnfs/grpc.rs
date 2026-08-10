@@ -467,6 +467,7 @@ impl MdsControl for MdsControlService {
                 directory: false,
                 effective_stripe_size: 0,
                 effective_stripe_width: 0,
+                effective_layout_class: String::new(),
             }));
         }
 
@@ -487,6 +488,52 @@ impl MdsControl for MdsControlService {
                 directory: false,
                 effective_stripe_size: 0,
                 effective_stripe_width: 0,
+                effective_layout_class: String::new(),
+            }));
+        }
+
+        // Layout class: a closed set, refused rather than defaulted — a
+        // class misread as File would provision a volume whose layouts
+        // are stripe maps while the caller believes it is extent-backed.
+        // "" is what an OLDER DRIVER sends (proto3 drops the field), and
+        // parses as File, which is exactly what that driver means.
+        let Some(layout_class) =
+            crate::pnfs::mds::layout::LayoutClass::parse(&req.layout_class)
+        else {
+            return Ok(Response::new(CreateVolumeResponse {
+                created: false,
+                export_path: String::new(),
+                volume_file: String::new(),
+                message: format!(
+                    "unknown layout_class {:?}; this MDS supports \"file\" and \"scsi\"",
+                    req.layout_class,
+                ),
+                nfs_port: self.nfs_port as u32,
+                directory: false,
+                effective_stripe_size: 0,
+                effective_stripe_width: 0,
+                effective_layout_class: String::new(),
+            }));
+        };
+        // Block-class volumes are extent-backed: the allocator's state IS
+        // the volume's map, and §8 makes its durability sqlite-only. A
+        // memory-backed MDS cannot hold it — same refusal shape as the
+        // stripe-geometry guard above.
+        if !self.durable_state && layout_class == crate::pnfs::mds::layout::LayoutClass::Scsi {
+            return Ok(Response::new(CreateVolumeResponse {
+                created: false,
+                export_path: String::new(),
+                volume_file: String::new(),
+                message: "block-class (layout: pnfs-block) volumes require the durable sqlite \
+                          state backend: the extent map IS the volume's data map, and losing it \
+                          while the data survives serves silent zeros (F67). Switch the MDS to \
+                          state.backend: sqlite"
+                    .into(),
+                nfs_port: self.nfs_port as u32,
+                directory: false,
+                effective_stripe_size: 0,
+                effective_stripe_width: 0,
+                effective_layout_class: String::new(),
             }));
         }
 
@@ -517,12 +564,38 @@ impl MdsControl for MdsControlService {
                     crate::pnfs::mds::layout::VolumeGeometry {
                         stripe_size: req.stripe_size,
                         stripe_width: req.stripe_width,
+                        layout_class,
                     },
                 ).await;
                 info!(
                     "📦 CreateVolume: directory volume {} already exists (stripe_size={} width={})",
                     req.volume_id, geometry.stripe_size, geometry.stripe_width
                 );
+                // Re-register the arena on the retry path too: it is
+                // idempotent, and this is what repairs a create that
+                // crashed between recording geometry and the arena.
+                if geometry.layout_class == crate::pnfs::mds::layout::LayoutClass::Scsi {
+                    if let Err(e) = self
+                        .layout_manager
+                        .register_extent_arena(&req.volume_id, req.size_bytes)
+                        .await
+                    {
+                        return Ok(Response::new(CreateVolumeResponse {
+                            created: false,
+                            export_path: String::new(),
+                            volume_file: String::new(),
+                            message: format!(
+                                "block-class volume exists but its extent arena could not \
+                                 be ensured: {e}"
+                            ),
+                            nfs_port: self.nfs_port as u32,
+                            directory: false,
+                            effective_stripe_size: 0,
+                            effective_stripe_width: 0,
+                            effective_layout_class: String::new(),
+                        }));
+                    }
+                }
                 return Ok(Response::new(CreateVolumeResponse {
                     created: true,
                     export_path: export_str,
@@ -532,6 +605,7 @@ impl MdsControl for MdsControlService {
                     directory: true,
                     effective_stripe_size: geometry.stripe_size,
                     effective_stripe_width: geometry.stripe_width,
+                    effective_layout_class: geometry.layout_class.as_str().to_string(),
                 }));
             }
             if meta.len() == req.size_bytes {
@@ -544,6 +618,7 @@ impl MdsControl for MdsControlService {
                     crate::pnfs::mds::layout::VolumeGeometry {
                         stripe_size: req.stripe_size,
                         stripe_width: req.stripe_width,
+                        layout_class,
                     },
                 ).await;
                 return Ok(Response::new(CreateVolumeResponse {
@@ -555,6 +630,7 @@ impl MdsControl for MdsControlService {
                     directory: false,
                     effective_stripe_size: geometry.stripe_size,
                     effective_stripe_width: geometry.stripe_width,
+                    effective_layout_class: geometry.layout_class.as_str().to_string(),
                 }));
             }
             return Ok(Response::new(CreateVolumeResponse {
@@ -569,6 +645,7 @@ impl MdsControl for MdsControlService {
                 directory: false,
                 effective_stripe_size: 0,
                 effective_stripe_width: 0,
+                effective_layout_class: String::new(),
             }));
         }
 
@@ -586,6 +663,7 @@ impl MdsControl for MdsControlService {
                 directory: false,
                 effective_stripe_size: 0,
                 effective_stripe_width: 0,
+                effective_layout_class: String::new(),
             }));
         }
 
@@ -600,6 +678,7 @@ impl MdsControl for MdsControlService {
                 directory: false,
                 effective_stripe_size: 0,
                 effective_stripe_width: 0,
+                effective_layout_class: String::new(),
             }));
         }
         // Directory ownership and mode.
@@ -650,8 +729,32 @@ impl MdsControl for MdsControlService {
             crate::pnfs::mds::layout::VolumeGeometry {
                 stripe_size: req.stripe_size,
                 stripe_width: req.stripe_width,
+                layout_class,
             },
         ).await;
+
+        // A block-class volume without its extent arena cannot grant a
+        // single extent — the arena row is as load-bearing as the
+        // directory itself, so its failure fails the create.
+        if geometry.layout_class == crate::pnfs::mds::layout::LayoutClass::Scsi {
+            if let Err(e) = self
+                .layout_manager
+                .register_extent_arena(&req.volume_id, req.size_bytes)
+                .await
+            {
+                return Ok(Response::new(CreateVolumeResponse {
+                    created: false,
+                    export_path: String::new(),
+                    volume_file: String::new(),
+                    message: format!("block-class extent arena registration failed: {e}"),
+                    nfs_port: self.nfs_port as u32,
+                    directory: false,
+                    effective_stripe_size: 0,
+                    effective_stripe_width: 0,
+                    effective_layout_class: String::new(),
+                }));
+            }
+        }
 
         info!(
             "📦 CreateVolume: created directory volume {} at {:?} ({} bytes requested, pool-enforced)",
@@ -666,6 +769,7 @@ impl MdsControl for MdsControlService {
             directory: true,
             effective_stripe_size: geometry.stripe_size,
             effective_stripe_width: geometry.stripe_width,
+            effective_layout_class: geometry.layout_class.as_str().to_string(),
         }))
     }
 
@@ -877,7 +981,46 @@ mod create_volume_tests {
             stripe_width: 0,
             dir_gid: 0,
             dir_mode: 0,
+            layout_class: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn unknown_layout_class_is_refused_not_defaulted() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        let mut req = cvreq("pvc-weird", 1 << 20);
+        req.layout_class = "weird".into();
+        let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
+        assert!(!r.created, "unknown class must refuse, never default to file");
+        assert!(r.message.contains("unknown layout_class"), "got: {}", r.message);
+    }
+
+    #[tokio::test]
+    async fn block_class_requires_durable_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc_nondurable(dir.path());
+        let mut req = cvreq("pvc-blk", 1 << 20);
+        req.layout_class = "scsi".into();
+        let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
+        assert!(!r.created);
+        assert!(r.message.contains("sqlite"), "got: {}", r.message);
+    }
+
+    /// durable_state=true but the backend is MemoryBackend: the arena
+    /// registration itself refuses (extent state is sqlite-only, §8),
+    /// and the create fails LOUDLY instead of acking a block volume
+    /// that could never grant an extent. This is the memory backend's
+    /// refusal doing its job end-to-end.
+    #[tokio::test]
+    async fn block_class_arena_failure_fails_the_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        let mut req = cvreq("pvc-blk2", 1 << 20);
+        req.layout_class = "scsi".into();
+        let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
+        assert!(!r.created, "an unregistrable arena must fail the create");
+        assert!(r.message.contains("extent arena"), "got: {}", r.message);
     }
 
     /// Expanding a directory volume must SUCCEED. It stores no
@@ -1261,7 +1404,7 @@ mod create_volume_tests {
 
         let r = s.create_volume(Request::new(CreateVolumeRequest {
             volume_id: "pvc-abc".into(),
-            size_bytes: 1024 * 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
+            size_bytes: 1024 * 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
         assert!(r.created, "create should succeed: {}", r.message);
         assert_eq!(r.volume_file, "pvc-abc");
         assert!(r.directory, "new volumes are directory subtrees");
@@ -1279,7 +1422,7 @@ mod create_volume_tests {
     async fn create_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let s = svc(dir.path());
-        let req = CreateVolumeRequest { volume_id: "v1".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, };
+        let req = CreateVolumeRequest { volume_id: "v1".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), };
         assert!(s.create_volume(Request::new(req.clone())).await.unwrap().into_inner().created);
         let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
         assert!(r.created, "second call should also succeed");
@@ -1300,12 +1443,12 @@ mod create_volume_tests {
         f.set_len(4096).unwrap();
 
         let r = s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "v-legacy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
+            volume_id: "v-legacy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
         assert!(r.created, "same-size re-create of a legacy file: {}", r.message);
         assert!(!r.directory, "legacy volume must NOT be advertised as a directory");
 
         let r = s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "v-legacy".into(), size_bytes: 8192, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
+            volume_id: "v-legacy".into(), size_bytes: 8192, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
         assert!(!r.created);
         assert!(r.message.contains("refusing to resize"));
 
@@ -1326,7 +1469,7 @@ mod create_volume_tests {
 
         for v in ["vol", "volume2"] {
             let r = s.create_volume(Request::new(CreateVolumeRequest {
-                volume_id: v.into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
+                volume_id: v.into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
             assert!(r.created);
         }
         let rec = |key: &str| crate::state_backend::PlacementRecord {
@@ -1364,7 +1507,7 @@ mod create_volume_tests {
         let dir = tempfile::tempdir().unwrap();
         let s = svc(dir.path());
         s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "busy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap();
+            volume_id: "busy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap();
         std::fs::create_dir_all(dir.path().join("busy/deep/tree")).unwrap();
         std::fs::write(dir.path().join("busy/deep/tree/f.bin"), b"data").unwrap();
 
@@ -1392,7 +1535,7 @@ mod create_volume_tests {
         let s = svc(dir.path());
         for bad in &["", "../escape", "a/b", "with\0nul"] {
             let r = s.create_volume(Request::new(CreateVolumeRequest {
-                volume_id: (*bad).into(), size_bytes: 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, })).await.unwrap().into_inner();
+                volume_id: (*bad).into(), size_bytes: 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
             assert!(!r.created, "should reject {:?}", bad);
         }
     }

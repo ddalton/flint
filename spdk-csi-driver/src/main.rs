@@ -1428,13 +1428,37 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         // (docs/plans/pnfs-block-layout-design.md §7) gets an explicit
         // arm; nothing falls through by default.
         // -------------------------------------------------------------
-        match req.parameters.get("layout").map(String::as_str) {
+        // pnfs-block ships dark until the phase-1 surface is complete:
+        // FLINT_PNFS_BLOCK_LAYOUT=1 opts a rig in, checked once. The
+        // refusal happens HERE, at the PVC, with a message the
+        // StorageClass author can act on — never downstream where it
+        // would look like an MDS fault.
+        fn pnfs_block_enabled() -> bool {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ON.get_or_init(|| {
+                matches!(
+                    std::env::var("FLINT_PNFS_BLOCK_LAYOUT").as_deref(),
+                    Ok("1") | Ok("on") | Ok("true")
+                )
+            })
+        }
+        let layout_param = req.parameters.get("layout").map(String::as_str);
+        match layout_param {
             None | Some("pnfs") => {} // known: fall into the branches below
+            Some("pnfs-block") if pnfs_block_enabled() => {}
+            Some("pnfs-block") => {
+                return Err(tonic::Status::failed_precondition(
+                    "layout: pnfs-block is present in this build but not enabled — \
+                     set FLINT_PNFS_BLOCK_LAYOUT=1 on the controller to opt in \
+                     (phase-1 surface; docs/plans/pnfs-block-layout-design.md §7)",
+                ));
+            }
             Some(other) => {
                 return Err(tonic::Status::invalid_argument(format!(
                     "StorageClass parameter layout: {other:?} is not supported by \
-                     this driver (supported: \"pnfs\", or omit for SPDK volumes). \
-                     Refusing rather than silently provisioning a non-{other} volume",
+                     this driver (supported: \"pnfs\", \"pnfs-block\", or omit for \
+                     SPDK volumes). Refusing rather than silently provisioning a \
+                     non-{other} volume",
                 )));
             }
         }
@@ -1450,7 +1474,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         // per-node attach state (unlike NVMe-oF in the SPDK path) —
         // every node mounts the same MDS export by name.
         // -------------------------------------------------------------
-        if req.parameters.get("layout").map(String::as_str) == Some("pnfs") {
+        if matches!(layout_param, Some("pnfs") | Some("pnfs-block")) {
             // pNFS volumes do not support creation from a snapshot or PVC
             // source. Without this guard the pNFS branch silently ignores
             // volume_content_source and returns an empty volume, masking
@@ -1493,7 +1517,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             // geometry the author asked for, and stripe geometry is
             // fixed at create — there is no later point at which the
             // mistake becomes visible or fixable.
-            let vol_opts = match spdk_csi_driver::pnfs_csi::VolumeOptions::from_parameters(
+            let mut vol_opts = match spdk_csi_driver::pnfs_csi::VolumeOptions::from_parameters(
                 &req.parameters,
             ) {
                 Ok(o) => o,
@@ -1504,6 +1528,19 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     )));
                 }
             };
+            if layout_param == Some("pnfs-block") {
+                // Stripe geometry is files-class machinery; on a volume
+                // whose data lives in extents the parameters would be
+                // recorded and silently meaningless. Refuse the mix.
+                if vol_opts.stripe_size != 0 || vol_opts.stripe_width != 0 {
+                    return Err(tonic::Status::invalid_argument(
+                        "layout: pnfs-block does not take stripeSize/stripeWidth — \
+                         extents are allocated, not striped; drop the \
+                         pnfs.flint.io/stripe* parameters",
+                    ));
+                }
+                vol_opts.layout_class = spdk_csi_driver::pnfs::mds::layout::LayoutClass::Scsi;
+            }
 
             let (shard, shard_client) = pnfs.pick_for_create(&volume_id);
             println!(

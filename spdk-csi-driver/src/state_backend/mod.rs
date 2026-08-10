@@ -301,6 +301,13 @@ pub struct VolumeGeometryRecord {
     /// Max data servers a file in this volume is pinned across.
     /// 0 = every active DS.
     pub stripe_width: u32,
+    /// Layout class serving this volume: "file" (NFSv4.1 files layout,
+    /// the historical class) or "scsi" (RFC 8154/9561 extents — the
+    /// pnfs-block StorageClass). Closed set; parsed by
+    /// `LayoutClass::parse`, and a value it refuses is a load error,
+    /// never a default — a class misread as "file" would silently serve
+    /// stripe layouts over a volume whose data lives in extents.
+    pub layout_class: String,
 }
 
 /// renamed safely.
@@ -536,6 +543,65 @@ pub trait StateBackend: Send + Sync {
     async fn put_volume_geometry(&self, g: &VolumeGeometryRecord) -> StateBackendResult<()>;
     async fn get_volume_geometry(&self, volume: &str) -> StateBackendResult<Option<VolumeGeometryRecord>>;
     async fn list_volume_geometry(&self) -> StateBackendResult<Vec<VolumeGeometryRecord>>;
+
+    // ── Block-layout extent allocator (design doc §8; extent_alloc.rs
+    // owns the transaction semantics, FlintExtents.tla the theorems). ──
+    //
+    // The nested Result separates TRANSPORT failures (outer — the
+    // backend is unreachable/broken) from ALLOCATOR VERDICTS (inner —
+    // refusals the wire layer maps to NFS errors: Conflict/NotQuiescent
+    // → LAYOUTTRYLATER, NoSpace → NOSPC, CommitRejected → BADLAYOUT).
+    // Collapsing them would turn "another client holds this range" into
+    // a storage error, and storage errors get retried forever.
+    //
+    // Only the sqlite backend implements these: §8 is explicit that
+    // extent durability is sqlite-only and must be STRONGER than the
+    // rest of the state (an extent map lost while data survives = F67's
+    // silent zeros, with no stub to hang an xattr on). MemoryBackend
+    // refuses, and a block-class volume on a memory-backed MDS fails
+    // loudly at provision time, never at I/O time.
+
+    async fn extent_register_volume(
+        &self,
+        volume: &str,
+        size_ceiling: u64,
+    ) -> StateBackendResult<Result<(), extent_alloc::ExtentAllocError>>;
+
+    /// LAYOUTGET's allocation transaction. `fresh_only` skips free-list
+    /// reuse — REQUIRED until the MDS grows the NVMe initiator that can
+    /// write_zeroes a reused range before the layout leaves the server
+    /// (GrantedExtent::needs_scrub; FlintExtentsBlindProvision.cfg is
+    /// the world where a reused range ships unscrubbed).
+    async fn extent_grant(
+        &self,
+        volume: &str,
+        file_id: u64,
+        client_id: u64,
+        logical_offset: u64,
+        length: u64,
+        fresh_only: bool,
+    ) -> StateBackendResult<Result<Vec<extent_alloc::GrantedExtent>, extent_alloc::ExtentAllocError>>;
+
+    /// LAYOUTCOMMIT's allocator half: promote INVALID→RW under a live
+    /// (client, gen)-matching grant. Returns extents promoted.
+    async fn extent_commit(
+        &self,
+        volume: &str,
+        file_id: u64,
+        client_id: u64,
+        logical_offset: u64,
+        length: u64,
+    ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
+
+    /// LAYOUTRETURN: drop the client's grant rows over the range.
+    async fn extent_layout_return(
+        &self,
+        volume: &str,
+        file_id: u64,
+        client_id: u64,
+        logical_offset: u64,
+        length: u64,
+    ) -> StateBackendResult<Result<usize, extent_alloc::ExtentAllocError>>;
     async fn delete_volume_geometry(&self, volume: &str) -> StateBackendResult<()>;
 
     // id↔path mappings behind v2 (id-based) metadata filehandles.

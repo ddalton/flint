@@ -83,6 +83,14 @@ message CreateVolumeRequest {
   // its creator's primary group, unreadable to the other consumers.
   uint32 dir_gid = 5;
   uint32 dir_mode = 6;
+
+  // Layout class for the volume: "" or "file" = NFSv4.1 files layout
+  // (the historical class, and what an older driver that predates this
+  // field sends); "scsi" = the pnfs-block StorageClass (RFC 8154/9561
+  // extents — LAYOUTGET hands out raw NVMe ranges from the MDS extent
+  // allocator instead of stripe maps). Closed set: an unknown value
+  // fails the provision. Fixed at creation for the volume's lifetime.
+  string layout_class = 7;
 }
 
 message CreateVolumeResponse {
@@ -127,6 +135,14 @@ message CreateVolumeResponse {
   // 0 in both fields = an MDS that predates them.
   uint64 effective_stripe_size = 7;
   uint32 effective_stripe_width = 8;
+
+  // The layout class the MDS ACTUALLY recorded — same load-bearing echo
+  // contract as the stripe fields above: proto3 silently drops fields
+  // an older peer does not know, so an MDS predating the block layout
+  // echoes "" here and the driver MUST fail a "scsi" provision on the
+  // mismatch instead of shipping a PV whose layouts will be stripe maps
+  // over a volume the caller believes is extent-backed.
+  string effective_layout_class = 9;
 }
 
 message ExpandVolumeRequest {

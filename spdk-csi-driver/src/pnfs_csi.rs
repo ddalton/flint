@@ -53,6 +53,13 @@ pub mod ctx_keys {
     /// actually striped at?", which otherwise requires reading MDS logs.
     pub const STRIPE_SIZE: &str = "pnfs.flint.io/stripe-size";
     pub const STRIPE_WIDTH: &str = "pnfs.flint.io/stripe-width";
+    /// The volume-context DISCRIMINATOR (design doc §7): "block" for a
+    /// pnfs-block (scsi-layout) volume; absent = files layout. Every
+    /// downstream classifier keys on `mds-ip` presence or the `~m`
+    /// shard suffix, and a block volume reuses both — without this key
+    /// NodeUnstage cannot tell the classes apart, and a block volume's
+    /// unstage must deref nvme sessions where a file volume's must not.
+    pub const LAYOUT: &str = "pnfs.flint.io/layout";
 }
 
 /// StorageClass parameter names understood by the pNFS provisioning
@@ -82,6 +89,11 @@ pub struct VolumeOptions {
     pub dir_gid: u32,
     /// Permission bits for the volume root; 0 = the historical 0777.
     pub dir_mode: u32,
+    /// Layout class from the StorageClass `layout` parameter: File for
+    /// `pnfs` (and everything historical), Scsi for `pnfs-block`. Not a
+    /// `pnfs.flint.io/*` parameter — the top-level `layout` key is the
+    /// class selector, dispatched in main.rs before this struct exists.
+    pub layout_class: crate::pnfs::mds::layout::LayoutClass,
 }
 
 impl VolumeOptions {
@@ -373,6 +385,7 @@ impl PnfsCsi {
                 stripe_width: opts.stripe_width,
                 dir_gid: opts.dir_gid,
                 dir_mode: opts.dir_mode,
+                layout_class: opts.layout_class.as_str().to_string(),
             })
             .await
             .map_err(|e| PnfsError::Transport(format!("CreateVolume: {}", e)))?
@@ -398,6 +411,23 @@ impl PnfsCsi {
         // re-striped).
         if let Err(msg) = opts.check_echo(resp.effective_stripe_size, resp.effective_stripe_width) {
             return Err(PnfsError::Mds(msg));
+        }
+
+        // Same version-skew gate for the layout class, and higher
+        // stakes: an MDS predating the block layout echoes "" here
+        // (proto3 drops the unknown field both ways) while happily
+        // creating a FILES-class volume — a PV the workload believes is
+        // extent-backed, served stripe layouts forever. Fail the
+        // provision; never downgrade silently.
+        if opts.layout_class == crate::pnfs::mds::layout::LayoutClass::Scsi
+            && resp.effective_layout_class != "scsi"
+        {
+            return Err(PnfsError::Mds(format!(
+                "this MDS does not support the pnfs-block layout class \
+                 (echoed layout_class {:?}; expected \"scsi\") — upgrade the \
+                 pNFS server image to match the driver",
+                resp.effective_layout_class,
+            )));
         }
 
         // The mount host is the same name we dialed for gRPC (in the
@@ -450,6 +480,13 @@ impl PnfsCsi {
                 ctx_keys::STRIPE_WIDTH.into(),
                 resp.effective_stripe_width.to_string(),
             );
+        }
+        // The class discriminator, present only for block-class volumes
+        // (absent = files layout, which keeps every pre-existing PV
+        // truthful without rewriting). Guarded by the echo check above,
+        // so what lands here is what the MDS actually recorded.
+        if opts.layout_class == crate::pnfs::mds::layout::LayoutClass::Scsi {
+            ctx.insert(ctx_keys::LAYOUT.into(), "block".into());
         }
         Ok(ctx)
     }
@@ -908,7 +945,7 @@ mod tests {
                 volume_file: "pvc-abc".into(),
                 message: String::new(),
                 nfs_port: 20490,
-                directory: true, effective_stripe_size: 0, effective_stripe_width: 0, },
+                directory: true, effective_stripe_size: 0, effective_stripe_width: 0, effective_layout_class: String::new(), },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
         let addr = start_mock_mds(mock.clone()).await;
@@ -945,7 +982,7 @@ mod tests {
                 volume_file: String::new(),
                 message: "size mismatch: existing 4096, requested 8192".into(),
                 nfs_port: 0,
-                directory: false, effective_stripe_size: 0, effective_stripe_width: 0, },
+                directory: false, effective_stripe_size: 0, effective_stripe_width: 0, effective_layout_class: String::new(), },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
         let addr = start_mock_mds(mock).await;
@@ -967,7 +1004,7 @@ mod tests {
                 volume_file: "v".into(),
                 message: String::new(),
                 nfs_port: 2049,
-                directory: true, effective_stripe_size: 0, effective_stripe_width: 0, },
+                directory: true, effective_stripe_size: 0, effective_stripe_width: 0, effective_layout_class: String::new(), },
             DeleteVolumeResponse { deleted: true, message: String::new() },
         ));
         let addr = start_mock_mds(mock.clone()).await;
@@ -1110,7 +1147,7 @@ mod tests {
             export_path: "/data/exports".into(),
             volume_file: "pvc-routed".into(),
             nfs_port: 2049,
-            directory: true, effective_stripe_size: 0, effective_stripe_width: 0, };
+            directory: true, effective_stripe_size: 0, effective_stripe_width: 0, effective_layout_class: String::new(), };
         let canned_delete = DeleteVolumeResponse { deleted: true, message: String::new() };
         let mock0 = std::sync::Arc::new(MockMds::new(canned_create.clone(), canned_delete.clone()));
         let mock1 = std::sync::Arc::new(MockMds::new(canned_create, canned_delete));

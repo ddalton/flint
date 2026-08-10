@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// One request to the writer thread.
 enum Req {
@@ -287,6 +287,27 @@ impl SqliteBackend {
     /// committed. For tests and graceful-shutdown call sites.
     pub async fn flush(&self) -> StateBackendResult<()> {
         self.with_conn(|_| Ok(())).await
+    }
+
+    /// `with_conn`, but the closure gets `&mut Connection` — for the
+    /// extent allocator's explicit multi-statement transactions
+    /// (`rusqlite::Connection::transaction` needs `&mut`). Same barrier
+    /// ordering guarantees; the closure's own error type rides inside
+    /// the oneshot untouched, so allocator verdicts survive the trip.
+    async fn with_conn_mut<T, F>(&self, f: F) -> StateBackendResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> T + Send + 'static,
+    {
+        let (res_tx, res_rx) = oneshot::channel();
+        self.sender()
+            .send(Req::Barrier(Box::new(move |conn: &mut Connection| {
+                let _ = res_tx.send(f(conn));
+            })))
+            .map_err(|_| StateBackendError::Storage("state writer thread gone".into()))?;
+        res_rx
+            .await
+            .map_err(|_| StateBackendError::Storage("state writer thread gone".into()))
     }
 }
 
@@ -572,10 +593,15 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
         WriteOp::PutVolumeGeometry(g) => {
             conn.prepare_cached(
                 "INSERT OR REPLACE INTO volume_geometry
-                   (volume, stripe_size, stripe_width)
-                 VALUES (?1, ?2, ?3)",
+                   (volume, stripe_size, stripe_width, layout_class)
+                 VALUES (?1, ?2, ?3, ?4)",
             )?
-            .execute(params![g.volume, g.stripe_size as i64, g.stripe_width as i64])?;
+            .execute(params![
+                g.volume,
+                g.stripe_size as i64,
+                g.stripe_width as i64,
+                g.layout_class
+            ])?;
         }
         WriteOp::DeleteVolumeGeometry(v) => {
             conn.prepare_cached("DELETE FROM volume_geometry WHERE volume = ?1")?
@@ -970,7 +996,7 @@ impl StateBackend for SqliteBackend {
         let row = self
             .with_conn(move |conn| {
                 conn.query_row(
-                    "SELECT volume, stripe_size, stripe_width
+                    "SELECT volume, stripe_size, stripe_width, layout_class
                      FROM volume_geometry WHERE volume = ?1",
                     params![key],
                     decode_volume_geometry_row,
@@ -985,7 +1011,7 @@ impl StateBackend for SqliteBackend {
         let rows = self
             .with_conn(|conn| {
                 let mut stmt =
-                    conn.prepare("SELECT volume, stripe_size, stripe_width FROM volume_geometry")?;
+                    conn.prepare("SELECT volume, stripe_size, stripe_width, layout_class FROM volume_geometry")?;
                 let rows: rusqlite::Result<Vec<_>> =
                     stmt.query_map([], decode_volume_geometry_row)?.collect();
                 rows
@@ -1054,6 +1080,95 @@ impl StateBackend for SqliteBackend {
             })
             .await?;
         Ok(i64_to_u64(v))
+    }
+
+    // ── Extent allocator (state_backend::extent_alloc owns the
+    // transaction semantics; these are barrier-ordered pass-throughs).
+    // The inner Result is the allocator's verdict, untouched.
+
+    async fn extent_register_volume(
+        &self,
+        volume: &str,
+        size_ceiling: u64,
+    ) -> StateBackendResult<Result<(), crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::register_volume(conn, &v, size_ceiling)
+        })
+        .await
+    }
+
+    async fn extent_grant(
+        &self,
+        volume: &str,
+        file_id: u64,
+        client_id: u64,
+        logical_offset: u64,
+        length: u64,
+        fresh_only: bool,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::GrantedExtent>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::grant(
+                conn,
+                &v,
+                file_id,
+                client_id,
+                logical_offset,
+                length,
+                fresh_only,
+            )
+        })
+        .await
+    }
+
+    async fn extent_commit(
+        &self,
+        volume: &str,
+        file_id: u64,
+        client_id: u64,
+        logical_offset: u64,
+        length: u64,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::commit_extents(
+                conn,
+                &v,
+                file_id,
+                client_id,
+                logical_offset,
+                length,
+            )
+        })
+        .await
+    }
+
+    async fn extent_layout_return(
+        &self,
+        volume: &str,
+        file_id: u64,
+        client_id: u64,
+        logical_offset: u64,
+        length: u64,
+    ) -> StateBackendResult<Result<usize, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::layout_return(
+                conn,
+                &v,
+                file_id,
+                client_id,
+                logical_offset,
+                length,
+            )
+        })
+        .await
     }
 }
 
@@ -1211,6 +1326,7 @@ fn decode_volume_geometry_row(
         volume: row.get(0)?,
         stripe_size: row.get::<_, i64>(1)? as u64,
         stripe_width: row.get::<_, i64>(2)? as u32,
+        layout_class: row.get(3)?,
     }))
 }
 
@@ -1331,7 +1447,10 @@ CREATE TABLE IF NOT EXISTS layouts (
 CREATE TABLE IF NOT EXISTS volume_geometry (
     volume TEXT PRIMARY KEY,
     stripe_size INTEGER NOT NULL,
-    stripe_width INTEGER NOT NULL DEFAULT 0
+    stripe_width INTEGER NOT NULL DEFAULT 0,
+    -- 'file' | 'scsi' (the pnfs-block class); closed set, refused on
+    -- load if unknown. Stripe columns are meaningless for 'scsi'.
+    layout_class TEXT NOT NULL DEFAULT 'file'
 );
 
 CREATE TABLE IF NOT EXISTS file_placement (
@@ -1548,6 +1667,7 @@ mod tests {
             volume: "v".into(),
             stripe_size: 1 << 20,
             stripe_width: 2,
+            layout_class: "file".into(),
         })
         .await
         .unwrap();
@@ -1568,6 +1688,7 @@ mod tests {
                 volume: "vol".into(),
                 stripe_size: 4 << 20,
                 stripe_width: 3,
+                layout_class: "file".into(),
             })
             .await
             .unwrap();

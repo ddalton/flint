@@ -14,7 +14,7 @@
 use super::{
     ClientRecord, FhMappingRecord, LayoutRecord, LockRecord, PlacementRecord, SessionRecord,
     VolumeGeometryRecord,
-    StateBackend, StateBackendResult, StateIdRecord, WriteOp,
+    StateBackend, StateBackendError, StateBackendResult, StateIdRecord, WriteOp,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -230,6 +230,72 @@ impl StateBackend for MemoryBackend {
     async fn delete_volume_geometry(&self, volume: &str) -> StateBackendResult<()> {
         self.volume_geometry.remove(volume);
         Ok(())
+    }
+
+    // ── Extent allocator: REFUSED on the memory backend, deliberately.
+    // §8: extent durability is sqlite-only and must be STRONGER than the
+    // rest of the state — an extent map lost while data survives is
+    // F67's silent zeros, and a memory-backed map IS that loss, one
+    // restart away. Block-class volumes fail loudly at provision time
+    // on this backend, never at I/O time.
+
+    async fn extent_register_volume(
+        &self,
+        _volume: &str,
+        _size_ceiling: u64,
+    ) -> StateBackendResult<Result<(), crate::state_backend::extent_alloc::ExtentAllocError>> {
+        Err(StateBackendError::Storage(
+            "block-class volumes require the durable sqlite backend \
+             (extent maps must survive restart — design doc §8)"
+                .into(),
+        ))
+    }
+
+    async fn extent_grant(
+        &self,
+        _volume: &str,
+        _file_id: u64,
+        _client_id: u64,
+        _logical_offset: u64,
+        _length: u64,
+        _fresh_only: bool,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::GrantedExtent>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        Err(StateBackendError::Storage(
+            "extent grant on the memory backend — block-class volumes require sqlite".into(),
+        ))
+    }
+
+    async fn extent_commit(
+        &self,
+        _volume: &str,
+        _file_id: u64,
+        _client_id: u64,
+        _logical_offset: u64,
+        _length: u64,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        Err(StateBackendError::Storage(
+            "extent commit on the memory backend — block-class volumes require sqlite".into(),
+        ))
+    }
+
+    async fn extent_layout_return(
+        &self,
+        _volume: &str,
+        _file_id: u64,
+        _client_id: u64,
+        _logical_offset: u64,
+        _length: u64,
+    ) -> StateBackendResult<Result<usize, crate::state_backend::extent_alloc::ExtentAllocError>>
+    {
+        Err(StateBackendError::Storage(
+            "extent return on the memory backend — block-class volumes require sqlite".into(),
+        ))
     }
 
     async fn put_fh_mapping(&self, m: &FhMappingRecord) -> StateBackendResult<()> {

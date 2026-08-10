@@ -235,6 +235,13 @@ fn live_unfenced_holders(
 /// belongs to the wire layer, which owns those gates. Nothing here may be
 /// weakened on the argument that step 1 already checked: the model's
 /// two-step honesty is exactly about the daylight between the steps.
+/// `fresh_only` refuses free-list reuse: gaps allocate only from the
+/// bump watermark (virgin space, reads zeros). The wire layer passes
+/// TRUE until the MDS has an NVMe initiator that can write_zeroes a
+/// reused range before the layout leaves the server — shipping a
+/// needs_scrub extent unscrubbed is FlintExtentsBlindProvision.cfg's
+/// deleted-data resurrection, and refusing reuse merely leaks freed
+/// space the way the quarantine already deliberately does.
 pub fn grant(
     conn: &mut Connection,
     volume: &str,
@@ -242,6 +249,7 @@ pub fn grant(
     client_id: u64,
     logical_offset: u64,
     length: u64,
+    fresh_only: bool,
 ) -> Result<Vec<GrantedExtent>> {
     let start = as_i64(logical_offset, "offset exceeds i64")?;
     let end = checked_end(logical_offset, length)?;
@@ -288,15 +296,18 @@ pub fn grant(
     let mut reused_phys: Vec<i64> = Vec::new();
     for (g_start, g_len) in gaps {
         // First fit from the free list; reuse bumps the generation.
-        let hit: Option<(i64, i64, i64)> = tx
-            .query_row(
+        let hit: Option<(i64, i64, i64)> = if fresh_only {
+            None
+        } else {
+            tx.query_row(
                 "SELECT physical_offset, length, last_gen FROM extent_free
                  WHERE volume = ?1 AND length >= ?2
                  ORDER BY physical_offset LIMIT 1",
                 params![volume, g_len],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .optional()?;
+            .optional()?
+        };
         let (phys, generation) = match hit {
             Some((f_phys, f_len, f_gen)) => {
                 tx.execute(
@@ -786,12 +797,12 @@ mod tests {
     #[test]
     fn grant_allocates_and_regrant_is_idempotent() {
         let mut conn = setup();
-        let g1 = grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        let g1 = grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         assert_eq!(g1.len(), 1);
         assert_eq!(g1[0].generation, 1);
         assert!(!g1[0].committed);
         assert!(!g1[0].needs_scrub, "virgin bump-allocated space reads zeros already");
-        let g2 = grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        let g2 = grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         assert_eq!(g1, g2, "re-grant returns the same extents, no new allocation");
         verify_volume_invariants(&conn, VOL).unwrap();
     }
@@ -802,8 +813,8 @@ mod tests {
     #[test]
     fn tlc_grant_overlap_two_clients_refused_in_the_transaction() {
         let mut conn = setup();
-        grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
-        match grant(&mut conn, VOL, F, C2, 4096, 8192) {
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        match grant(&mut conn, VOL, F, C2, 4096, 8192, false) {
             Err(ExtentAllocError::Conflict { holders }) => assert_eq!(holders, vec![C1]),
             other => panic!("expected Conflict, got {other:?}"),
         }
@@ -818,13 +829,13 @@ mod tests {
     fn tlc_stale_snapshot_free_the_free_transaction_revalidates_holders() {
         let mut conn = setup();
         // c2 is granted and returns: the extent is an orphan.
-        grant(&mut conn, VOL, F, C2, 0, 8192).unwrap();
+        grant(&mut conn, VOL, F, C2, 0, 8192, false).unwrap();
         layout_return(&mut conn, VOL, F, C2, 0, 8192).unwrap();
         // The reclaim takes its snapshot: no holders.
         let snap = reclaim_snapshot(&mut conn, VOL, F, 0, 8192).unwrap();
         assert!(snap.is_empty(), "snapshot legitimately sees no holders");
         // c1's grant publishes after the snapshot (the C6-shaped window).
-        grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         // The free MUST refuse — trusting the snapshot here is the
         // machine-refuted design.
         match reclaim_complete(&mut conn, VOL, F, 0, 8192, 1000) {
@@ -848,13 +859,13 @@ mod tests {
     #[test]
     fn tlc_reuse_bumps_gen_and_a_stale_commit_is_refused() {
         let mut conn = setup();
-        let g1 = grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        let g1 = grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         assert_eq!(g1[0].generation, 1);
         let phys1 = g1[0].physical_offset;
         layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
         reclaim_complete(&mut conn, VOL, F, 0, 8192, 1000).unwrap();
         // Reuse: same physical range, next generation.
-        let g2 = grant(&mut conn, VOL, F, C2, 0, 8192).unwrap();
+        let g2 = grant(&mut conn, VOL, F, C2, 0, 8192, false).unwrap();
         assert_eq!(g2[0].physical_offset, phys1, "free list reuses the range");
         assert_eq!(g2[0].generation, 2, "reuse bumps the generation");
         assert!(
@@ -883,11 +894,11 @@ mod tests {
     #[test]
     fn fenced_holder_extents_quarantine_not_free_and_the_lever_releases() {
         let mut conn = setup();
-        let g1 = grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        let g1 = grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         let phys1 = g1[0].physical_offset;
         assert_eq!(fence_client(&mut conn, VOL, C1).unwrap(), 1);
         // A fenced client gets nothing new.
-        match grant(&mut conn, VOL, F, C1, 16384, 4096) {
+        match grant(&mut conn, VOL, F, C1, 16384, 4096, false) {
             Err(ExtentAllocError::FencedClient) => {}
             other => panic!("expected FencedClient, got {other:?}"),
         }
@@ -898,12 +909,12 @@ mod tests {
         assert_eq!(out.freed_extents, 0);
         assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (1, 8192));
         // A new grant must NOT be handed the quarantined range.
-        let g2 = grant(&mut conn, VOL, F, C2, 0, 8192).unwrap();
+        let g2 = grant(&mut conn, VOL, F, C2, 0, 8192, false).unwrap();
         assert_ne!(g2[0].physical_offset, phys1, "quarantined range not reused");
         // Operator lever: release, then the range is reusable at gen+1.
         assert_eq!(release_quarantine(&mut conn, VOL).unwrap(), 8192);
         assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (0, 0));
-        let g3 = grant(&mut conn, VOL, F, C2, 32768, 8192).unwrap();
+        let g3 = grant(&mut conn, VOL, F, C2, 32768, 8192, false).unwrap();
         assert_eq!(g3[0].physical_offset, phys1, "released range is first-fit reused");
         assert_eq!(g3[0].generation, 2, "reuse after release still bumps the generation");
         assert!(g3[0].needs_scrub, "a released quarantine range is still a reuse");
@@ -916,7 +927,7 @@ mod tests {
     #[test]
     fn return_after_fence_upgrades_quarantine_to_clean_free() {
         let mut conn = setup();
-        grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         fence_client(&mut conn, VOL, C1).unwrap();
         assert_eq!(layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap(), 1);
         let out = reclaim_complete(&mut conn, VOL, F, 0, 8192, 1000).unwrap();
@@ -929,9 +940,9 @@ mod tests {
     fn ceiling_is_enforced_after_free_list_first_fit() {
         let mut conn = fresh();
         register_volume(&mut conn, VOL, 16384).unwrap();
-        grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
-        grant(&mut conn, VOL, F, C1, 8192, 8192).unwrap();
-        match grant(&mut conn, VOL, F, C1, 16384, 4096) {
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        grant(&mut conn, VOL, F, C1, 8192, 8192, false).unwrap();
+        match grant(&mut conn, VOL, F, C1, 16384, 4096, false) {
             Err(ExtentAllocError::NoSpace { needed, ceiling, next_free }) => {
                 assert_eq!((needed, ceiling, next_free), (4096, 16384, 16384));
             }
@@ -941,7 +952,7 @@ mod tests {
         // watermark cannot.
         layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
         reclaim_complete(&mut conn, VOL, F, 0, 8192, 1000).unwrap();
-        let g = grant(&mut conn, VOL, F, C1, 16384, 4096).unwrap();
+        let g = grant(&mut conn, VOL, F, C1, 16384, 4096, false).unwrap();
         assert_eq!(g[0].physical_offset, 0, "carved from the freed range");
         assert_eq!(g[0].generation, 2);
         verify_volume_invariants(&conn, VOL).unwrap();
@@ -952,7 +963,7 @@ mod tests {
     #[test]
     fn the_disjointness_assertion_has_teeth_on_a_corrupted_table() {
         let mut conn = setup();
-        grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         // Simulate the aliasing bug class directly: a second extent row
         // over the same physical range, distinct PK.
         conn.execute(
@@ -976,7 +987,7 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(
-            grant(&mut conn, VOL, F, C2, 131072, 4096),
+            grant(&mut conn, VOL, F, C2, 131072, 4096, false),
             Err(ExtentAllocError::Corruption(_))
         ));
         let after: i64 = conn
@@ -1003,7 +1014,7 @@ mod tests {
                 0 | 1 => {
                     // Grants may legitimately Conflict; both outcomes keep
                     // the invariants.
-                    let _ = grant(&mut conn, VOL, f, c, off, 8192);
+                    let _ = grant(&mut conn, VOL, f, c, off, 8192, false);
                 }
                 2 => {
                     let _ = layout_return(&mut conn, VOL, f, c, off, 8192);
@@ -1020,7 +1031,7 @@ mod tests {
     #[test]
     fn commit_promotes_invalid_to_rw_only_under_a_live_matching_grant() {
         let mut conn = setup();
-        grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         // Another client cannot commit someone else's provisional extents.
         assert!(matches!(
             commit_extents(&mut conn, VOL, F, C2, 0, 8192),
@@ -1037,9 +1048,9 @@ mod tests {
         layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
         // (fence marks are per-grant-row; with the row returned, C1 is no
         // longer fenced on this volume and may be re-admitted.)
-        grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         assert_eq!(commit_extents(&mut conn, VOL, F, C1, 0, 8192).unwrap(), 1);
-        let g = grant(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        let g = grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
         assert!(g[0].committed, "committed state survives re-grant");
         verify_volume_invariants(&conn, VOL).unwrap();
     }

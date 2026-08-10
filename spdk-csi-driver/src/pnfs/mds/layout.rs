@@ -587,6 +587,57 @@ pub enum LayoutType {
     /// Flexible File Layout (RFC 8435) - for independent DS storage
     /// Each DS has its own storage, filehandles are DS-specific
     FlexFiles = 4,
+
+    /// SCSI layout (RFC 8154), which RFC 9561 extends to NVMe namespaces
+    /// via NGUID/EUI64 designators. THE pnfs-block class's wire type —
+    /// the kernel's blocklayout driver gained NVMe device matching for
+    /// THIS type (v6.11, commit 3921ae0850a3), not for BlockVolume=3
+    /// (design doc §3: "serve type 5").
+    Scsi = 5,
+}
+
+/// Which layout machinery serves a volume — chosen at provision time
+/// from the StorageClass (`layout: pnfs` vs `layout: pnfs-block`) and
+/// fixed for the volume's lifetime. This is the per-volume dispatch key
+/// the design doc's §5 seam (`layout_type_served`) branches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutClass {
+    /// NFSv4.1 files layout over the DS fleet (the historical class).
+    #[default]
+    File,
+    /// RFC 8154/9561 SCSI-over-NVMe extents straight to spdk-tgt; the
+    /// MDS is an extent allocator (state_backend::extent_alloc).
+    Scsi,
+}
+
+impl LayoutClass {
+    /// The layouttype4 value this class serves on the wire.
+    pub fn wire_type(self) -> LayoutType {
+        match self {
+            LayoutClass::File => LayoutType::NfsV4_1Files,
+            LayoutClass::Scsi => LayoutType::Scsi,
+        }
+    }
+
+    /// The stable string persisted in volume geometry records and
+    /// carried in the CreateVolume proto. A closed set: parse errors
+    /// are refusals, never defaults — a class misread as File would
+    /// silently serve stripe layouts over a volume whose data lives in
+    /// extents.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LayoutClass::File => "file",
+            LayoutClass::Scsi => "scsi",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "file" | "" => Some(LayoutClass::File),
+            "scsi" => Some(LayoutClass::Scsi),
+            _ => None,
+        }
+    }
 }
 
 /// Layout policy implementation
@@ -614,11 +665,15 @@ pub struct VolumeGeometry {
     /// Maximum data servers a file in this volume is pinned across.
     /// 0 = every active DS (the historical behaviour).
     pub stripe_width: u32,
+    /// Which layout machinery serves this volume (design doc §5: the
+    /// per-volume dispatch the `layout_type_served` seam branches on).
+    /// Stripe fields are meaningless for [`LayoutClass::Scsi`] volumes.
+    pub layout_class: LayoutClass,
 }
 
 impl Default for VolumeGeometry {
     fn default() -> Self {
-        Self { stripe_size: 0, stripe_width: 0 }
+        Self { stripe_size: 0, stripe_width: 0, layout_class: LayoutClass::File }
     }
 }
 
@@ -703,6 +758,7 @@ impl LayoutManager {
                 requested.stripe_size
             },
             stripe_width: requested.stripe_width,
+            layout_class: requested.layout_class,
         };
         if let Err(e) = self
             .backend
@@ -710,6 +766,7 @@ impl LayoutManager {
                 volume: volume.to_string(),
                 stripe_size: geom.stripe_size,
                 stripe_width: geom.stripe_width,
+                layout_class: geom.layout_class.as_str().to_string(),
             })
             .await
         {
@@ -718,16 +775,38 @@ impl LayoutManager {
             // default — one volume striped two ways, invisibly. Refuse the
             // cache so the caller's echo check fails the provision.
             warn!("geometry: persisting volume '{}' failed: {} — not caching", volume, e);
-            return VolumeGeometry { stripe_size: self.stripe_size, stripe_width: 0 };
+            return VolumeGeometry {
+                stripe_size: self.stripe_size,
+                stripe_width: 0,
+                layout_class: LayoutClass::File,
+            };
         }
         self.volume_geometry.insert(volume.to_string(), Some(geom));
         info!(
-            "📐 Volume '{}' geometry: stripe_size={} stripe_width={}",
+            "📐 Volume '{}' geometry: stripe_size={} stripe_width={} class={}",
             volume,
             geom.stripe_size,
             if geom.stripe_width == 0 { "all".to_string() } else { geom.stripe_width.to_string() },
+            geom.layout_class.as_str(),
         );
         geom
+    }
+
+    /// Register a block-class volume's extent arena (its volume_alloc
+    /// row: allocation ceiling + bump watermark). Idempotent — an
+    /// existing arena's ceiling is left untouched. Awaited for the same
+    /// reason geometry is: an acked block-class volume whose arena was
+    /// lost cannot grant a single extent.
+    pub async fn register_extent_arena(
+        &self,
+        volume: &str,
+        size_ceiling: u64,
+    ) -> Result<(), String> {
+        match self.backend.extent_register_volume(volume, size_ceiling).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("extent arena for '{volume}': {e}")),
+            Err(e) => Err(format!("extent arena for '{volume}': {e}")),
+        }
     }
 
     /// Forget a volume's geometry (called on DeleteVolume). Queued, not
@@ -761,9 +840,26 @@ impl LayoutManager {
         };
         let n = records.len();
         for r in records {
+            // A class string parse cannot refuse silently into File: a
+            // scsi volume misread as file would serve stripe layouts
+            // over extents. Unknown class = the volume is skipped (and
+            // therefore served at the fleet default, which is loud in
+            // the WARN below) rather than misclassified.
+            let Some(class) = LayoutClass::parse(&r.layout_class) else {
+                warn!(
+                    "📐 volume '{}' has unknown layout_class '{}' — record ignored \
+                     (written by a newer build?)",
+                    r.volume, r.layout_class,
+                );
+                continue;
+            };
             self.volume_geometry.insert(
                 r.volume,
-                Some(VolumeGeometry { stripe_size: r.stripe_size, stripe_width: r.stripe_width }),
+                Some(VolumeGeometry {
+                    stripe_size: r.stripe_size,
+                    stripe_width: r.stripe_width,
+                    layout_class: class,
+                }),
             );
         }
         for v in known_volumes {
@@ -798,11 +894,22 @@ impl LayoutManager {
     /// MDS-wide default for legacy volumes and for anything provisioned
     /// before geometry existed.
     fn geometry_for(&self, file_key: &str) -> VolumeGeometry {
-        let default = VolumeGeometry { stripe_size: self.stripe_size, stripe_width: 0 };
+        let default = VolumeGeometry {
+            stripe_size: self.stripe_size,
+            stripe_width: 0,
+            layout_class: LayoutClass::File,
+        };
         match file_key.split('/').find(|c| !c.is_empty()) {
             Some(volume) => self.recorded_geometry(volume).unwrap_or(default),
             None => default,
         }
+    }
+
+    /// Which layout class serves `file_key`'s volume — the per-volume
+    /// dispatch the design doc's §5 seam branches on. Legacy volumes
+    /// (no geometry record) are File by construction.
+    pub fn layout_class_for(&self, file_key: &str) -> LayoutClass {
+        self.geometry_for(file_key).layout_class
     }
 
     /// Geometry for `volume`, recording `requested` if none is on file.
@@ -3046,7 +3153,7 @@ mod tests {
 
         mgr.set_volume_geometry(
             "narrow",
-            VolumeGeometry { stripe_size: 1024 * 1024, stripe_width: 0 },
+            VolumeGeometry { stripe_size: 1024 * 1024, stripe_width: 0, layout_class: LayoutClass::File },
         )
         .await;
 
@@ -3070,7 +3177,7 @@ mod tests {
             registry.register(ds(id)).unwrap();
         }
         let mgr = stripe_mgr(&registry, 1024 * 1024);
-        mgr.set_volume_geometry("narrow", VolumeGeometry { stripe_size: 0, stripe_width: 2 }).await;
+        mgr.set_volume_geometry("narrow", VolumeGeometry { stripe_size: 0, stripe_width: 2, layout_class: LayoutClass::File }).await;
 
         mgr.generate_layout(test_owner(1), vec![1], "narrow/f", 0, 4 * 1024 * 1024, IoMode::ReadWrite)
             .unwrap();
@@ -3091,7 +3198,7 @@ mod tests {
         registry.register(ds("ds-1")).unwrap();
         registry.register(ds("ds-2")).unwrap();
         let mgr = stripe_mgr(&registry, 1024 * 1024);
-        mgr.set_volume_geometry("v", VolumeGeometry { stripe_size: 0, stripe_width: 16 }).await;
+        mgr.set_volume_geometry("v", VolumeGeometry { stripe_size: 0, stripe_width: 16, layout_class: LayoutClass::File }).await;
         mgr.generate_layout(test_owner(1), vec![1], "v/f", 0, 2 * 1024 * 1024, IoMode::ReadWrite)
             .unwrap();
         assert_eq!(mgr.placement_for("v/f").unwrap().device_ids.len(), 2);
@@ -3113,7 +3220,7 @@ mod tests {
         first
             .set_volume_geometry(
                 "vol",
-                VolumeGeometry { stripe_size: 2 * 1024 * 1024, stripe_width: 1 },
+                VolumeGeometry { stripe_size: 2 * 1024 * 1024, stripe_width: 1, layout_class: LayoutClass::File },
             )
             .await;
 
@@ -3159,7 +3266,7 @@ mod tests {
         registry.register(ds("ds-2")).unwrap();
         let mgr = stripe_mgr_on(&registry, 8 * 1024 * 1024, Arc::clone(&backend));
 
-        mgr.set_volume_geometry("v", VolumeGeometry { stripe_size: 1024 * 1024, stripe_width: 1 })
+        mgr.set_volume_geometry("v", VolumeGeometry { stripe_size: 1024 * 1024, stripe_width: 1, layout_class: LayoutClass::File })
             .await;
         mgr.forget_volume_geometry("v");
 
@@ -3180,7 +3287,7 @@ mod tests {
         let registry = Arc::new(DeviceRegistry::new());
         registry.register(ds("ds-1")).unwrap();
         let mgr = stripe_mgr(&registry, 8 * 1024 * 1024);
-        let got = mgr.set_volume_geometry("v", VolumeGeometry { stripe_size: 0, stripe_width: 0 }).await;
+        let got = mgr.set_volume_geometry("v", VolumeGeometry { stripe_size: 0, stripe_width: 0, layout_class: LayoutClass::File }).await;
         assert_eq!(got.stripe_size, 8 * 1024 * 1024);
     }
 
