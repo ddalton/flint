@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::AsyncReadExt;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// NFS server configuration
 #[derive(Debug, Clone)]
@@ -259,8 +259,26 @@ pub(crate) async fn serve_tcp(addr: &str, dispatcher: Arc<CompoundDispatcher>, g
     let mut connection_count = 0u64;
 
     loop {
-        let (stream, peer) = listener.accept().await?;
-        
+        // NEVER `?` here: accept can fail transiently (EMFILE/ENFILE
+        // under fd pressure, ECONNABORTED, resource starvation), and
+        // propagating the error exits this loop PERMANENTLY while the
+        // rest of the process keeps looking healthy — the NFS lane dies
+        // with no probe able to see it (the node-agent partial-death
+        // lesson, server edition; a wedged-accept MDS was observed live
+        // on the sweep drill under host CPU starvation, 2026-08-10).
+        // Log loudly, breathe, retry — the listener itself is intact.
+        let (stream, peer) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                error!(
+                    "❌ [NFS_SERVER] accept failed: {e} — retrying (transient \
+                     fd/resource pressure; the listener is intact)"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
         connection_count += 1;
         let active = ACTIVE_CONNECTIONS.fetch_add(1, Ordering::SeqCst) + 1;
         info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
