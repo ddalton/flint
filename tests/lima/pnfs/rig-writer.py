@@ -16,6 +16,12 @@ import os
 import sys
 
 path, done = sys.argv[1], sys.argv[2]
+# Optional write cap (argv[3]). The FENCE drill fences within seconds, so
+# the 200k default (~200 GB) never mattered there — the SWEEP drill waits
+# out a 90 s lease against a page-cache-backed lvol at ~3 GB/s, which
+# EXHAUSTED the default mid-drill (the rig's "a zombie, not a corpse"
+# failure) — it passes a bigger cap.
+cap = int(sys.argv[3]) if len(sys.argv) > 3 else 200000
 fd = os.open(path, os.O_WRONLY | os.O_DIRECT)
 buf = mmap.mmap(-1, 1 << 20)  # anonymous mmap is page-aligned for O_DIRECT
 buf.write(b"\0" * (1 << 20))
@@ -23,7 +29,7 @@ buf.seek(0)
 
 n = 0
 try:
-    while n < 200000:
+    while n < cap:
         os.pwrite(fd, buf, 0)
         n += 1
 except OSError as e:

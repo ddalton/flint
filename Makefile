@@ -332,6 +332,10 @@ test-pnfs-unfence-rig: ## The fence is REVERSIBLE: UnfenceBlockClient releases t
 test-pnfs-reconcile-rig: ## A tgt-ONLY restart repairs WITHOUT an MDS roll: the periodic export reconcile loop rebuilds the export chain from sqlite (block-rig RECONCILE=1)
 	RECONCILE=1 tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-sweep-rig
+test-pnfs-sweep-rig: ## Lease-sweep partition drill: NFS port dropped under a live raw writer, the sweep fences/revokes/auto-unfences on the timer, successor recovers leverless (block-rig SWEEP=1)
+	SWEEP=1 tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh

@@ -3,14 +3,14 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and nine runs, ALL required.
+# One hundred and fourteen runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
 # the count; that miscount is how this header once briefly read wrong.
 # 88 before the FlintExtents tranches, + 11 for tranche 1, + 6 for
 # tranche 2, + 1 for the FreeRequiresDelivered graduation probe, + 3 for
-# the merge tranche.)
+# the merge tranche, + 5 for the FlintAdmission tranche.)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -830,5 +830,24 @@ mutation_run FlintExtents FlintExtentsForgedCommit.cfg "forged-commit mutation (
 mutation_run FlintExtents FlintExtentsBlindProvision.cfg "unscrubbed-provision mutation (ProvisionalInvisible=FALSE: a fresh INVALID extent on a reused range still carries the previous incarnation's bytes — deleted-data resurrection; the code belt is extent_alloc's needs_scrub contract)" "Inv_NoPriorOwnerDisclosure"
 mutation_run FlintExtentsProbe FlintExtentsProbeCommit.cfg "extents commit probe (LayoutCommit really executes in the commit-strict world)" "ProbeCommitFires"
 mutation_run FlintExtentsProbe FlintExtentsProbeTruncate.cfg "extents truncate probe (TruncateStart really executes — and with it the committed-block reclaim path it alone unlocks)" "ProbeTruncateFires"
+
+# ---- admission tranche (2026-08-10): the same-node zombie, machine-checked.
+# FlintAdmission.tla models the block-layout ADMISSION layer around the lease
+# sweep: per-Host-NQN allow-list, durable fence records, the volume-wide
+# EA-RO, and the sweep's fence -> delivered-gated revoke -> auto-unfence.
+# The tranche's job is to state EXACTLY which assumption carries safety after
+# the auto-unfence reopens the door: the shipped green (same-host successor,
+# door wide open) rests on ClientHonorsLease — the kernel discarding layout
+# state at lease expiry, which every userspace write must traverse.  The
+# Zombie run is the documented same-node residual AS A COUNTEREXAMPLE (a
+# frozen-past-its-lease client writes a successor's re-granted extent);
+# CrossHost proves the eviction barrier real at per-host granularity even
+# against that client.  Scope limits (sweep path only; no zombie
+# self-re-admission; always-evict coarsening) are argued in the module head.
+strict_run   FlintAdmission FlintAdmission.cfg "admission strict (shipped world: client honours lease, same-host successor — the door is open and the invariant holds anyway)"
+mutation_run FlintAdmission FlintAdmissionZombie.cfg "same-node zombie mutation (ClientHonorsLease=FALSE + same-host readmit: the sweep's auto-unfence + NQN re-admission lets a frozen client's stale mapping write the successor's extent — THE residual, machine-checked)" "Inv_NoStaleDeviceWrite"
+strict_run   FlintAdmission FlintAdmissionCrossHost.cfg "admission cross-host strict (ClientHonorsLease=FALSE but the successor is elsewhere: the per-host eviction barrier alone holds the line)"
+mutation_run FlintAdmission FlintAdmissionProbeSweep.cfg "admission sweep probe (the fence->revoke chain really runs in the shipped state space)" "ProbeSweepFires"
+mutation_run FlintAdmission FlintAdmissionProbeReadmit.cfg "admission readmit probe (the same-host door is really walked through post-sweep — the shipped green exercised the exact door the Zombie run proves dangerous)" "ProbeReadmitFires"
 
 echo "TLA GATE PASSED"

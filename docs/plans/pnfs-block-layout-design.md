@@ -506,12 +506,40 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   > data), and the dead writer's file gets the windowed merge. **Residual, stated:**
   > post-release the standing zombie barrier is the durable host eviction, which is
   > per-Host-Identifier (RFC 8154's own granularity) — a replacement pod on the SAME
-  > node re-admits the NQN a same-node zombie could ride; not closable at this layer,
-  > and the block model cannot state it without an admission tranche (§9 OWED, not a
-  > vacuous green). **Owed:** a live rig mode for the timer path (partition the client
-  > with the stack up — e.g. DROP the NFS port in-VM — and watch expiry → sweep →
-  > successor recovery); the pass itself is unit-proven end to end against real sqlite
-  > + a scripted target.
+  > node re-admits the NQN a same-node zombie could ride; not closable at this layer.
+  >
+  > **THE ADMISSION TRANCHE PAID 2026-08-10** (`formal/FlintAdmission.tla`, gate
+  > 109→114): the residual is now MACHINE-CHECKED instead of a prose apology. The
+  > module models the admission layer around the sweep — per-Host-NQN allow-list,
+  > durable fence records, the volume-wide EA-RO, fence → delivered-gated revoke →
+  > auto-unfence — and pins exactly which assumption carries safety once the
+  > auto-unfence reopens the door: **`ClientHonorsLease`**, the kernel discarding
+  > layout state at lease expiry (every userspace write traverses the kernel's
+  > blocklayout driver, so a discarded layout is an unreachable device). Shipped cfg
+  > (honours-lease, same-host successor, door wide open): `Inv_NoStaleDeviceWrite`
+  > HOLDS. `FlintAdmissionZombie.cfg` (a client frozen past its own lease — a
+  > live-migrated/SIGSTOP'd VM — plus a same-host successor): TLC FINDS the stale
+  > write, the residual as a counterexample. `FlintAdmissionCrossHost.cfg` (same
+  > zombie, successor elsewhere): HOLDS — the eviction barrier is real at per-host
+  > granularity. Two probes keep the greens honest (the sweep chain fires; the
+  > same-host door is really walked). Scope limits argued in the module head: sweep
+  > path only (the manual levers carry an operator contract, not a theorem), no
+  > zombie self-re-admission (re-handshake discards the old incarnation),
+  > always-evict coarsening.
+  >
+  > **THE PARTITION DRILL** (`make test-pnfs-sweep-rig` = block-rig.sh `SWEEP=1`):
+  > the timer path live — DROP the NFS port under a live raw-path writer, lease
+  > expiry, sweep fences/revokes/auto-releases on the timer, node reboots,
+  > successor stages + mounts + writes with zero levers. **Client-behaviour
+  > finding (two drill drafts refuted by the client, in sequence)**: a LIVE
+  > partitioned kernel freezes its raw block-path I/O near-INSTANTLY — the
+  > O_DIRECT write path is coupled to the metadata lane closely enough (a
+  > per-write attribute/commit RPC is suspected: cheap on a healthy loopback
+  > lane at 3 GB/s, blocking the moment the lane dies) that a network partition
+  > CANNOT manufacture a data-plane zombie at all; the drill measures and logs
+  > the window rather than asserting one. Stronger client behaviour than
+  > "honours lease expiry" — and exactly why the model's zombie is the
+  > frozen-VM shape, which skips every client courtesy.
   The MDS-HA machinery (durable-DS plan milestone B: sqlite server_id, 90s grace,
   Recreate+RWO fence) carries the allocator state unchanged — but **reservation
   holdership is not in sqlite**: it lives target-side, keyed to the MDS's NVMe Host

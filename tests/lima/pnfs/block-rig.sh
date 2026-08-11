@@ -76,6 +76,10 @@
 #   sqlite (MDS pid asserted unchanged), the client's surviving kernel
 #   controller reconnects, raw bytes flow again, and the run falls
 #   through to REMOVE reclaim + unstage/detach on the repaired stack.
+# SWEEP=1 — the lease-sweep partition drill (§P): DROP the NFS port
+#   under a live raw-path writer (metadata dead, data alive — the
+#   zombie), the sweep fences/revokes/auto-unfences ON THE TIMER, the
+#   node reboots, and a successor stages + writes with zero levers.
 #
 # Exit 0 = every proof held.
 
@@ -102,6 +106,13 @@ CTRL_LOSS=10
 # (production default 30s). Set on every MDS launch so all modes run
 # the production loop; only RECONCILE=1 depends on it.
 RECON_SECS=5
+# Lease sweep cadence + server grace, also rig-tightened on every MDS
+# launch (production: 30s sweep, 90s grace). The sweep's boot hold is
+# lease_time (90s, fixed) + grace — a short grace keeps the drill's
+# total wait inside one coffee. Uniform across modes: a LIVE client is
+# never swept (aliveness gate), and the fence modes' assertions all
+# complete inside the ~95s boot hold.
+SWEEP_SECS=5
 SUBNQN="nqn.2024-11.com.flint:block:$VOL"
 SOCK=/var/tmp/spdk-rig.sock
 RIG=/var/tmp/flint-rig
@@ -207,7 +218,7 @@ echo "✓ spdk_tgt up: aio(1G) → lvs_rig, TCP transport"
 
 # ── 3. MDS ────────────────────────────────────────────────────────────
 MDS_LOG="${MDS_LOG:-info}"
-vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS RUST_LOG='$MDS_LOG' nohup $MDS_BIN --config $CFG >$RIG/mds.log 2>&1 & sleep 0.5"
+vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS FLINT_NFS_GRACE_SECS=5 FLINT_PNFS_LEASE_SWEEP_SECS=$SWEEP_SECS RUST_LOG='$MDS_LOG' nohup $MDS_BIN --config $CFG >$RIG/mds.log 2>&1 & sleep 0.5"
 for i in $(seq 1 20); do
   vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
   [ "$i" = 20 ] && fail "MDS gRPC never came up"
@@ -538,7 +549,7 @@ if [ "${FENCE:-0}" = "1" ]; then
     # MDS back; its startup replay must RE-ESTABLISH the fence from the
     # durable record before the lever lifts it (the §T-proven property,
     # here as a precondition: what the release releases is real).
-    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS FLINT_NFS_GRACE_SECS=5 FLINT_PNFS_LEASE_SWEEP_SECS=$SWEEP_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
     for i in $(seq 1 20); do
       vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
       [ "$i" = 20 ] && fail "MDS gRPC never came back after the reboot"
@@ -703,7 +714,7 @@ if [ "${FENCE:-0}" = "1" ]; then
     # fenced-set replay re-acquires EA-RO for every fenced volume from
     # the durable record. The STARTUP re-fence line is the proof, and it
     # discriminates the two paths.
-    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS FLINT_NFS_GRACE_SECS=5 FLINT_PNFS_LEASE_SWEEP_SECS=$SWEEP_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
     for i in $(seq 1 20); do
       vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
       [ "$i" = 20 ] && fail "MDS gRPC never came back after tgt restart"
@@ -783,7 +794,7 @@ if [ "${FENCE:-0}" = "1" ]; then
     done
     # Same launch as §3, APPENDING to the log so the pre-restart fence
     # lines survive for the assertions.
-    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS FLINT_NFS_GRACE_SECS=5 FLINT_PNFS_LEASE_SWEEP_SECS=$SWEEP_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
     for i in $(seq 1 20); do
       vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
       [ "$i" = 20 ] && fail "MDS gRPC never came back after restart"
@@ -948,6 +959,148 @@ except Exception: pass
     || fail "device saw only ${W_AFTER}B post-repair (need ≥$NEED_RW) — the write did not go raw"
   echo "✓ client recovered without any node-side action: ${W_AFTER}B written raw post-repair"
   echo "· falling through to REMOVE reclaim + unstage/detach on the repaired stack"
+fi
+
+# ── P. SWEEP=1: the lease-sweep partition drill ──────────────────────
+# The DANGEROUS partition shape: the NFS port dies (leases stop
+# renewing) while the raw NVMe path stays ALIVE — a zombie writer the
+# lease sweep must fence, revoke, and auto-unfence with NO operator
+# lever anywhere. Then the node reboots (the D-state landmine's only
+# reliable clearance) and a successor stages, mounts, and writes —
+# the RWO recovery story, end to end on the timer.
+if [ "${SWEEP:-0}" = "1" ]; then
+  # P0. a held-open raw-path writer (the F0 shape: the held fd keeps
+  # the grant row live; pure pwrites, no fsync — nothing it does needs
+  # the NFS port once the layout is granted). Cap raised to outlive the
+  # 90s lease against the page-cache-fast lvol (~3 GB/s here).
+  vsudo "rm -f /var/tmp/rig-writer.done
+         nohup python3 $REPO_ROOT/tests/lima/pnfs/rig-writer.py \
+           $MNT/data.bin /var/tmp/rig-writer.done 2000000 >/var/tmp/rig-writer.err 2>&1 &
+         echo \$! > /var/tmp/rig-writer.pid"
+  W0=$(lvol_written); sleep 3; W1=$(lvol_written)
+  [ "${W1:-0}" -gt "${W0:-0}" ] || fail "writer never reached the device ($W0 → $W1)"
+  echo "✓ live raw-path writer: bytes_written $W0 → $W1 and climbing"
+
+  # P1. partition the NFS port ONLY. 4420 stays open.
+  vsudo "iptables -A OUTPUT -p tcp --dport 20490 -j DROP"
+  echo "✓ NFS port 20490 partitioned (lease renewals now black-holed; nvme 4420 open)"
+
+  # P2. the zombie WINDOW — measured, not asserted. RIG-FOUND (two
+  # drafts refuted by the client): a LIVE partitioned kernel freezes
+  # its raw block-path I/O near-INSTANTLY — the O_DIRECT write path is
+  # coupled to the metadata lane closely enough (per-write attribute /
+  # commit RPC suspected, cheap on a healthy lane at 3 GB/s, blocking
+  # the moment the lane dies) that a network partition cannot
+  # manufacture a data-plane zombie at all. STRONGER client behaviour
+  # than 'honors lease expiry' — and exactly why the same-node-zombie
+  # model (FlintAdmissionZombie.cfg) uses the frozen-VM shape, which
+  # skips every client courtesy. The sweep's necessity is untouched:
+  # nothing client-side frees the MDS's rows.
+  sleep 2
+  W2=$(lvol_written); sleep 5; W3=$(lvol_written)
+  if [ "${W3:-0}" -gt "${W2:-0}" ]; then
+    echo "· zombie window OPEN at +7s ($W2 → $W3) — this kernel kept writing"
+  else
+    echo "· zombie window ~0s (raw I/O froze with the partition — client-side coupling)"
+  fi
+
+  # P3. expiry + sweep: within lease(90s)+sweep(5s)+margin the sweep
+  # must fence the dead client, bulk-revoke its rows, and auto-unfence.
+  SWEPT=""
+  for i in $(seq 1 40); do
+    SWEPT=$(vsh "grep -c 'lease sweep: ' $RIG/mds.log" || true)
+    [ "${SWEPT:-0}" -ge 1 ] && break
+    sleep 5
+  done
+  [ "${SWEPT:-0}" -ge 1 ] || fail "the lease sweep never swept (waited ~200s past the partition)"
+  GRANTS_LEFT=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM extent_grants WHERE volume='$VOL'\"" || echo "?")
+  [ "${GRANTS_LEFT:-1}" = "0" ] || fail "sweep left $GRANTS_LEFT grant row(s)"
+  FCOUNT=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM fenced_clients WHERE volume='$VOL'\"" || echo "?")
+  [ "${FCOUNT:-1}" = "0" ] || fail "auto-unfence left $FCOUNT fenced_clients row(s)"
+  HOSTROWS=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM block_hosts WHERE volume='$VOL'\"" || echo "?")
+  [ "${HOSTROWS:-1}" = "0" ] || fail "the dead client's admission survived the sweep ($HOSTROWS row(s))"
+  NAROWS=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM block_node_attach WHERE volume='$VOL'\"" || echo "?")
+  [ "${NAROWS:-1}" = "0" ] || fail "the dead node's attach row survived the sweep ($NAROWS row(s))"
+  REL_LINE=$(vsh "grep -o 'released=.*' $RIG/mds.log | tail -1" || true)
+  echo "$REL_LINE" | grep -c 'released=true' >/dev/null \
+    || fail "the auto-unfence did not release the reservation — ${REL_LINE:-<no release line>}"
+  # The freeze belt: by sweep time the counter must be frozen (the
+  # client's own lease expiry and the sweep's fence land near-
+  # simultaneously; F-mode owns the causally-clean FenceReaches proof).
+  W4=$(lvol_written); sleep 5; W5=$(lvol_written)
+  [ "${W4:-0}" = "${W5:-1}" ] || fail "bytes still flowing after the sweep ($W4 → $W5)"
+  echo "✓ sweep on the timer: rows revoked, fence auto-released ($REL_LINE), counter frozen at $W5"
+
+  # P4. reboot the node (clears the potential D-state pwrite AND the
+  # iptables rule), restart the stack, and assert the startup replay
+  # has NOTHING to re-fence — the sweep's auto-unfence left no record.
+  echo "· rebooting the node (D-state clearance; iptables heals with it)"
+  limactl stop -f "$LIMA_VM" >/dev/null 2>&1; sleep 2
+  limactl start "$LIMA_VM" >/dev/null 2>&1 || fail "VM restart failed"
+  vsudo "rm -f /var/tmp/spdk_cpu_lock_* $SOCK ${SOCK}.lock"
+  vsudo "nohup $RIG_TOOLS/spdk_tgt --no-huge -s 512 -r $SOCK -m 0x1 --wait-for-rpc >>$RIG/spdk.log 2>&1 &
+         echo \$! > /var/tmp/spdk-rig.pid; sleep 0.5"
+  for i in $(seq 1 20); do
+    vsh "$RPC rpc_get_methods >/dev/null 2>&1" && break
+    [ "$i" = 20 ] && fail "tgt RPC never came back after the reboot"
+    sleep 0.5
+  done
+  vsudo "chmod 0777 $SOCK"
+  vsh "$RPC iobuf_set_options --small-pool-count 4096 --large-pool-count 1024" || fail "iobuf (reboot)"
+  vsh "$RPC iscsi_set_options -a 1 -c 1 -q 1 -x 1 -k 1 -u 24 -j 1 -z 1" || fail "iscsi (reboot)"
+  vsh "$RPC framework_start_init" || fail "framework_start_init (reboot)"
+  for i in $(seq 1 60); do
+    vsh "$RPC framework_wait_init >/dev/null 2>&1" && break
+    [ "$i" = 60 ] && fail "subsystems never initialized (reboot)"
+    sleep 0.5
+  done
+  vsh "$RPC bdev_aio_create /var/tmp/rig-disk.img rigdisk 4096" >/dev/null || fail "bdev_aio_create (reboot)"
+  for i in $(seq 1 40); do
+    vsh "$RPC bdev_get_bdevs --name lvs_rig/$VOL >/dev/null 2>&1" && break
+    [ "$i" = 40 ] && fail "the lvstore/lvol did NOT auto-load after the reboot"
+    sleep 0.5
+  done
+  vsh "$RPC nvmf_create_transport -t TCP" || fail "nvmf_create_transport (reboot)"
+  vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS FLINT_NFS_GRACE_SECS=5 FLINT_PNFS_LEASE_SWEEP_SECS=$SWEEP_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+  for i in $(seq 1 20); do
+    vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
+    [ "$i" = 20 ] && fail "MDS gRPC never came back after the reboot"
+    sleep 0.5
+  done
+  REFENCE=$(vsh "grep -c 'startup re-fence' $RIG/mds.log" || true)
+  [ "${REFENCE:-0}" = "0" ] \
+    || fail "startup re-fenced something — the sweep's auto-unfence left a record behind"
+  echo "✓ stack restarted; startup replay found NOTHING to re-fence (clean auto-unfence)"
+
+  # P5. the successor: stage + mount + O_DIRECT write, ZERO levers. The
+  # tgt restart zeroed the counters, so everything counted is the
+  # successor's.
+  vsudo "modprobe nvme-tcp && modprobe blocklayoutdriver"
+  STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+          $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)") \
+    || fail "successor stage failed"
+  vsudo "mkdir -p $MNT && mount -t nfs4 -o vers=4.2,proto=tcp,port=20490 127.0.0.1:/$VOL $MNT" \
+    || fail "successor mount failed"
+  SUCC_MIB=8
+  vsudo "dd if=/dev/urandom of=$MNT/data.bin bs=1M count=$SUCC_MIB \
+         oflag=direct conv=notrunc status=none && sync $MNT/data.bin" \
+    || fail "successor O_DIRECT write failed"
+  W6=$(lvol_written)
+  NEED_SW=$((SUCC_MIB * 1024 * 1024))
+  [ "${W6:-0}" -ge "$NEED_SW" ] \
+    || fail "successor wrote only ${W6}B raw (need ≥$NEED_SW)"
+  echo "✓ successor recovered with ZERO operator action: ${W6}B written raw"
+
+  echo
+  echo "✅ sweep-rig PASSED — a partitioned client kept writing raw (the zombie the"
+  echo "   lazy expiry could never see), the lease sweep fenced it ON THE TIMER,"
+  echo "   revoked its rows, auto-released the reservation, and after the reboot a"
+  echo "   successor staged and wrote with no lever touched anywhere. On $KREL."
+  exit 0
 fi
 
 # ── 10. REMOVE → clean reclaim (return, not quarantine) ──────────────
