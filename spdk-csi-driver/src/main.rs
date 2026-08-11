@@ -441,6 +441,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // failure is loud but non-fatal — the stage-time managed link
         // still covers every staged volume.
         if std::env::var("FLINT_PNFS_BLOCK_LAYOUT").as_deref() == Ok("1") {
+            // Kernel floor, announced once at startup. Non-fatal: this
+            // node still serves file-layout volumes; every block-class
+            // NodeStage will refuse individually with the same message.
+            if let Err(e) = spdk_csi_driver::pnfs_block_session::kernel_block_layout_support() {
+                eprintln!(
+                    "🚫 [NODE] pnfs-block DISABLED on this node — {e}. File-layout \
+                     volumes are unaffected; block-class stages will be refused"
+                );
+            }
             match spdk_csi_driver::pnfs_block_session::install_udev_rule() {
                 Ok(true) => println!("🔗 [NODE] pnfs-block udev rule installed (§4a)"),
                 Ok(false) => println!("🔗 [NODE] pnfs-block udev rule already current"),
@@ -3109,6 +3118,16 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             match spdk_csi_driver::pnfs_csi::BlockAttach::from_publish_context(&publish_context)
             {
                 Ok(Some(attach)) => {
+                    // Kernel floor FIRST, as FailedPrecondition: kubelet
+                    // retries cannot change the kernel, and Unavailable
+                    // would have it re-driving a permanent refusal.
+                    if let Err(e) =
+                        spdk_csi_driver::pnfs_block_session::kernel_block_layout_support()
+                    {
+                        return Err(tonic::Status::failed_precondition(format!(
+                            "pnfs-block stage for {volume_id}: {e}"
+                        )));
+                    }
                     println!(
                         "🔌 [NODE_STAGE] pnfs-block volume — establishing nvme session to {} at {}:{}",
                         attach.subnqn, attach.traddr, attach.trsvcid

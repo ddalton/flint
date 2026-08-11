@@ -65,6 +65,73 @@ pub fn install_udev_rule() -> Result<bool, String> {
     Ok(true)
 }
 
+/// The kernel floor for pNFS block over NVMe: `fs/nfs/blocklayout`
+/// gained NVMe device support in 3921ae0850a3 (v6.11 merge window).
+/// Below it the mount SUCCEEDS and every I/O silently proxies through
+/// the MDS — the one outcome worse than failing (Ubuntu 24.04 stock is
+/// 6.8). `FLINT_PNFS_BLOCK_KERNEL_OVERRIDE=1` skips the check for
+/// distro kernels that backport the support under an old version
+/// string — the operator is asserting the backport, loudly.
+pub const BLOCK_LAYOUT_KERNEL_FLOOR: (u32, u32) = (6, 11);
+
+/// "6.8.0-49-generic" → (6, 8). None when the string leads with
+/// anything that is not `major.minor`.
+fn parse_kernel_release(s: &str) -> Option<(u32, u32)> {
+    let mut parts = s.trim().split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// The pure verdict, testable off-Linux. An unparseable release
+/// REFUSES — a kernel we cannot even read a version from is not a
+/// known-good kernel, and the override exists for exactly this shape
+/// of exception.
+fn check_kernel_release(release: &str, override_set: bool) -> Result<(), String> {
+    if override_set {
+        return Ok(());
+    }
+    let (floor_major, floor_minor) = BLOCK_LAYOUT_KERNEL_FLOOR;
+    match parse_kernel_release(release) {
+        Some((major, minor)) if (major, minor) >= (floor_major, floor_minor) => Ok(()),
+        Some((major, minor)) => Err(format!(
+            "kernel {major}.{minor} is below the {floor_major}.{floor_minor} pNFS-block floor \
+             (blocklayout NVMe support landed in v6.11): the mount would SILENTLY \
+             DEGRADE every I/O to MDS proxying. Refusing to stage. \
+             Set FLINT_PNFS_BLOCK_KERNEL_OVERRIDE=1 only if this kernel backports it"
+        )),
+        None => Err(format!(
+            "cannot parse kernel release {release:?} against the \
+             {floor_major}.{floor_minor} pNFS-block floor; refusing to stage. \
+             Set FLINT_PNFS_BLOCK_KERNEL_OVERRIDE=1 to assert support"
+        )),
+    }
+}
+
+/// Refuse block-layout session work on a kernel whose blocklayout
+/// driver cannot speak NVMe. Called at every mouth: NodeStage (maps to
+/// FailedPrecondition — kubelet retries cannot change the kernel), the
+/// CLI `stage` (BEFORE the attach RPC, so an unstageable node never
+/// plants a durable attach row), and `ensure_session` itself as the
+/// belt covering re-establishment.
+pub fn kernel_block_layout_support() -> Result<(), String> {
+    if std::env::var("FLINT_PNFS_BLOCK_KERNEL_OVERRIDE").as_deref() == Ok("1") {
+        let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .unwrap_or_else(|_| "<unreadable>".into());
+        tracing::warn!(
+            "⚠️  [pNFS-BLOCK] FLINT_PNFS_BLOCK_KERNEL_OVERRIDE=1 — accepting kernel {} \
+             despite the {}.{} floor on the operator's word",
+            release.trim(),
+            BLOCK_LAYOUT_KERNEL_FLOOR.0,
+            BLOCK_LAYOUT_KERNEL_FLOOR.1
+        );
+        return Ok(());
+    }
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map_err(|e| format!("reading /proc/sys/kernel/osrelease: {e}"))?;
+    check_kernel_release(&release, false)
+}
+
 /// Where durable per-volume session records live — what makes a
 /// session RE-ESTABLISHABLE after the kernel deletes its controller
 /// (ctrl_loss_tmo exhausted during a long tgt outage; nothing else
@@ -201,6 +268,12 @@ pub async fn reestablish_sessions() -> (usize, usize, usize) {
 /// Establish (or repair) the volume's nvme-tcp session and return the
 /// resolved namespace device path (`/dev/nvmeXnY`).
 pub async fn ensure_session(attach: &BlockAttach) -> Result<String, String> {
+    // The kernel floor, re-checked at the mouth of every session (the
+    // NodeStage/CLI checks are the polite refusals; this one also
+    // covers reestablish_sessions replaying records onto a node whose
+    // kernel changed underneath them — e.g. a downgrade boot).
+    kernel_block_layout_support()?;
+
     let policy = crate::nvme_recovery::ReconnectPolicy::from_env();
 
     // Connect unless a controller for this subsystem already exists.
@@ -599,5 +672,52 @@ mod tests {
         // on the target comparison, not on existence.
         std::fs::remove_file(&dev_b).unwrap();
         assert_eq!(std::fs::read_link(&link).unwrap(), dev_b);
+    }
+
+    #[test]
+    fn kernel_floor_parses_real_release_strings() {
+        assert_eq!(parse_kernel_release("6.8.0-49-generic"), Some((6, 8)));
+        assert_eq!(parse_kernel_release("6.11.0"), Some((6, 11)));
+        assert_eq!(parse_kernel_release("7.0.0-28-generic"), Some((7, 0)));
+        assert_eq!(parse_kernel_release("6.11"), Some((6, 11)));
+        assert_eq!(parse_kernel_release("6.12.0-rc3+"), Some((6, 12)));
+        assert_eq!(parse_kernel_release(""), None);
+        assert_eq!(parse_kernel_release("linux"), None);
+        // A bare major has no minor to compare against the floor.
+        assert_eq!(parse_kernel_release("7"), None);
+    }
+
+    #[test]
+    fn kernel_floor_refuses_the_silent_degradation_kernels() {
+        // Ubuntu 24.04 stock — the kernel that mounts fine and proxies
+        // every byte through the MDS.
+        let err = check_kernel_release("6.8.0-49-generic", false).unwrap_err();
+        assert!(err.contains("6.8"), "names the offending kernel: {err}");
+        assert!(err.contains("6.11"), "names the floor: {err}");
+        assert!(err.contains("SILENTLY"), "says WHY refusal beats staging: {err}");
+        assert!(
+            err.contains("FLINT_PNFS_BLOCK_KERNEL_OVERRIDE"),
+            "names the backport escape hatch: {err}"
+        );
+        // 5.x is below on the major alone.
+        check_kernel_release("5.15.0-100-generic", false).unwrap_err();
+    }
+
+    #[test]
+    fn kernel_floor_accepts_at_and_above() {
+        check_kernel_release("6.11.0", false).unwrap();
+        check_kernel_release("6.12.0-rc3+", false).unwrap();
+        check_kernel_release("7.0.0-28-generic", false).unwrap();
+    }
+
+    #[test]
+    fn kernel_floor_unparseable_refuses_and_override_wins() {
+        // Unknown is refused — the override exists for exactly this.
+        let err = check_kernel_release("weird-vendor-string", false).unwrap_err();
+        assert!(err.contains("FLINT_PNFS_BLOCK_KERNEL_OVERRIDE"), "{err}");
+        // The override accepts anything: the operator asserted the
+        // backport, and the check's job is to be skippable loudly.
+        check_kernel_release("weird-vendor-string", true).unwrap();
+        check_kernel_release("6.8.0-49-generic", true).unwrap();
     }
 }

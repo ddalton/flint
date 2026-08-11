@@ -968,10 +968,18 @@ Each phase ships standalone value; none is gated on the next.
    and again on runar) — what remains from that work is its LOCAL half (A2, rolling a
    node that hosts consumers; design-only,
    `docs/f62-local-half-outage-and-blind-barrier.md`), on top of the remote-initiator
-   blindness above. GA also gains a **kernel admission check**: csi-node verifies
-   kernel ≥ 6.11 + blocklayout module per node and refuses/labels block-class
-   scheduling otherwise, with the MDS block-lane meter (§6, F68 precedent) as the
-   backstop degradation detector.
+   blindness above. GA also gains a **kernel admission check** — **SHIPPED
+   2026-08-10**: `pnfs_block_session::kernel_block_layout_support` (floor 6.11,
+   `FLINT_PNFS_BLOCK_KERNEL_OVERRIDE=1` for distro backports, loud) gates every
+   session mouth — NodeStage (FailedPrecondition: retries can't change a kernel),
+   the CLI `stage` (BEFORE the attach RPC, so an unstageable node never plants a
+   durable attach row), and `ensure_session` itself (covers re-establishment onto
+   a downgrade-booted node) — plus a startup banner ("pnfs-block DISABLED on this
+   node", file layout unaffected). Proven live both directions: a stock Ubuntu
+   24.04 VM (6.8.0-106) refused before touching the endpoint and sailed past the
+   gate with the override; the 7.0 rig stages through the same code green. The
+   MDS block-lane meter (§6, F68 precedent) stays as the backstop degradation
+   detector — the check is per-node prevention, the meter is fleet-wide proof.
 4. **Registry storage driver on the userspace library.** libflint (metadata client +
    SPDK TCP initiator), surfaced as the OCI-registry driver per
    `docs/oci-registry-pnfs-architecture.md`.

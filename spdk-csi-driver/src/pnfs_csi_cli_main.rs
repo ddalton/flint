@@ -148,17 +148,23 @@ async fn main() -> ExitCode {
             .await
             .map(|detail| println!("{}", detail)),
         "stage" => {
-            match pnfs.unwrap().attach_block_node(&volume_id, &node.unwrap()).await {
-                Ok(a) => {
-                    match spdk_csi_driver::pnfs_block_session::ensure_session(&a).await {
-                        Ok(dev) => {
-                            print_attach(&a, Some(&dev));
-                            Ok(())
+            // Kernel floor BEFORE the attach RPC — a node that can
+            // never stage must not plant a durable attach row the MDS
+            // would then hold open for it.
+            match spdk_csi_driver::pnfs_block_session::kernel_block_layout_support() {
+                Err(e) => Err(PnfsError::Mds(format!("kernel admission: {e}"))),
+                Ok(()) => match pnfs.unwrap().attach_block_node(&volume_id, &node.unwrap()).await {
+                    Ok(a) => {
+                        match spdk_csi_driver::pnfs_block_session::ensure_session(&a).await {
+                            Ok(dev) => {
+                                print_attach(&a, Some(&dev));
+                                Ok(())
+                            }
+                            Err(e) => Err(PnfsError::Mds(format!("session: {e}"))),
                         }
-                        Err(e) => Err(PnfsError::Mds(format!("session: {e}"))),
                     }
-                }
-                Err(e) => Err(e),
+                    Err(e) => Err(e),
+                },
             }
         }
         "unstage" => {
