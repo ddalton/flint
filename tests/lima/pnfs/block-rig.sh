@@ -80,6 +80,13 @@
 #   under a live raw-path writer (metadata dead, data alive — the
 #   zombie), the sweep fences/revokes/auto-unfences ON THE TIMER, the
 #   node reboots, and a successor stages + writes with zero levers.
+# PREEMPT=1 — the foreign-holder fence arm (§X), the branch every
+#   earlier fence left cold: the client REGISTERS a key and ACQUIRES
+#   Write Exclusive (no conforming kernel does either), the fence
+#   preempts the holder / takes EA-RO / wipes the key / freezes the
+#   writer — and a second volume on the same tgt, staged by the same
+#   host, keeps writing raw (per-namespace reservation, per-subsystem
+#   eviction).
 #
 # Exit 0 = every proof held.
 
@@ -374,6 +381,142 @@ lvol_written() {
   vsh "$RPC bdev_get_iostat --name lvs_rig/$VOL" | python3 -c "
 import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
 }
+
+# ── X. PREEMPT=1: the foreign-holder fence arm + per-namespace scope ─
+# The one fence branch no drill ever fired: every fence so far found an
+# UNHELD reservation (a conforming kernel registers no key), so
+# fence_preempt's foreign-holder arm — the intruder / stale-MDS shape —
+# has only unit tests. Here the rig client turns adversary: it
+# REGISTERS its own key and ACQUIRES Write Exclusive on volume A. The
+# fence must preempt the holder, take EA-RO, wipe the key, and freeze
+# the writer — while volume B, staged by the SAME host on the SAME tgt,
+# never notices (the reservation is per-namespace, the eviction
+# per-subsystem).
+if [ "${PREEMPT:-0}" = "1" ]; then
+  # X0. the scope-control volume. No NFS mount: the properties under
+  # test are NVMe-level, so raw device I/O through its own staged
+  # session is the honest probe.
+  VOLB=rigvol-b
+  CVB=$(vsh "$RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+        -d '{\"volumeId\":\"$VOLB\",\"sizeBytes\":$((128 * 1024 * 1024)),\"layoutClass\":\"scsi\"}' \
+        127.0.0.1:50051 pnfs.control.MdsControl/CreateVolume") || fail "CreateVolume ($VOLB)"
+  echo "$CVB" | grep -c '"created": true' >/dev/null || fail "CreateVolume ($VOLB) refused: $CVB"
+  STAGEB=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+          $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOLB --node \$(hostname)") \
+    || fail "pnfs-csi-cli stage ($VOLB)"
+  NSDEVB=$(basename "$(echo "$STAGEB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)")
+  [ -n "$NSDEVB" ] || fail "stage ($VOLB) reported no device: $STAGEB"
+  lvol_written_b() {
+    vsh "$RPC bdev_get_iostat --name lvs_rig/$VOLB" | python3 -c "
+import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
+  }
+  B0=$(lvol_written_b)
+  vsudo "dd if=/dev/zero of=/dev/$NSDEVB bs=1M count=4 oflag=direct conv=fsync 2>/dev/null" \
+    || fail "pre-fence raw write to $VOLB failed"
+  B1=$(lvol_written_b)
+  [ "${B1:-0}" -gt "${B0:-0}" ] || fail "control volume $VOLB counter never moved ($B0 → $B1)"
+  echo "✓ control volume $VOLB staged (/dev/$NSDEVB): ${B1}B written raw"
+
+  # X1. the victim writer on A (the held-open F0/F1 shape).
+  vsudo "rm -f /var/tmp/rig-writer.done
+         nohup python3 $REPO_ROOT/tests/lima/pnfs/rig-writer.py \
+           $MNT/data.bin /var/tmp/rig-writer.done >/var/tmp/rig-writer.err 2>&1 &
+         echo \$! > /var/tmp/rig-writer.pid"
+  W1=$(lvol_written); sleep 3; W2=$(lvol_written)
+  [ "${W2:-0}" -gt "${W1:-0}" ] || fail "writer never reached the device ($W1 → $W2)"
+  echo "✓ live raw-path writer on $VOL: bytes_written $W1 → $W2 and climbing"
+
+  # X2. THE ADVERSARY: take the host's registration and acquire Write
+  # Exclusive. REPLACE+IEKEY, not plain REGISTER — drill-found: THIS
+  # kernel REGISTERS its GETDEVICEINFO pr_key (SPDK refused the plain
+  # register with "already register a key with 0x2" = the client id),
+  # refuting the fence-era "kernel registers no key" observation, on
+  # which kernels a plain register conflicts. Replace-with-iekey covers
+  # both worlds: existing registrant (any key) → key swapped, none →
+  # fresh registrant. The writer (same host = the holder) must sail on —
+  # a zombie WITH a reservation, the strongest adversary this layer can
+  # host.
+  IKEY=0xdeadbeef
+  vsudo "nvme resv-register /dev/$NSDEV --rrega=2 --iekey --nrkey=$IKEY" \
+    || fail "intruder resv-register (replace+iekey) refused"
+  vsudo "nvme resv-acquire /dev/$NSDEV --crkey=$IKEY --rtype=1 --racqa=0" \
+    || fail "intruder resv-acquire refused"
+  RESV_I=$(vsudo "nvme resv-report /dev/$NSDEV -c 1 -e 2>/dev/null | grep -iE 'rtype|regctl|rkey' | tr '\n' ' '" || true)
+  echo "· intruder holds the reservation: ${RESV_I:-<report unavailable>}"
+  W2b=$(lvol_written); sleep 2; W2c=$(lvol_written)
+  [ "${W2c:-0}" -gt "${W2b:-0}" ] \
+    || fail "the holder's own writer stopped ($W2b → $W2c) — WE must not block the holder"
+  echo "✓ writer still climbing UNDER the intruder's WE reservation ($W2b → $W2c)"
+
+  # X3. the fence. Same lever as F2; what is NEW is what it must find.
+  CID=$(vsh "grep -oE 'client [0-9]+' $RIG/mds.log | grep -oE '[0-9]+' | tail -1" || true)
+  [ -n "$CID" ] || CID=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT DISTINCT client_id FROM extent_grants WHERE volume='$VOL' LIMIT 1\"")
+  [ -n "$CID" ] || fail "no scsi client id to fence"
+  FR=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+        -d '{\"volumeId\":\"$VOL\",\"clientId\":\"$CID\"}' \
+        127.0.0.1:50051 pnfs.control.MdsControl/FenceBlockClient") \
+    || fail "FenceBlockClient RPC — breadcrumbs: $(vsh "grep -iE 'fence_preempt|resv fence' $RIG/mds.log | tail -3")"
+  echo "$FR" | grep -c '"fenced": true' >/dev/null || fail "fence lever refused: $FR"
+  # THE BRANCH PROOF: the MDS's own pre-preempt report named the foreign
+  # holder — fence_preempt's warn line, verbatim key and all.
+  vsh "grep -q 'foreign reservation holder $IKEY' $RIG/mds.log" \
+    || fail "the foreign-holder preempt arm never fired — fence log: $(vsh "grep -iE 'resv fence' $RIG/mds.log | tail -3")"
+  RESV_LINE=$(vsh "grep -o 'resv: .*' $RIG/mds.log | tail -1" || true)
+  echo "$RESV_LINE" | grep -q 'rtype=0x4' \
+    || fail "MDS does not hold EA-RO after the preempt — resv: ${RESV_LINE:-<none>}"
+  echo "$RESV_LINE" | grep -qi 'deadbeef' \
+    && fail "the intruder key SURVIVED the preempt — resv: $RESV_LINE"
+  echo "✓ foreign holder preempted; MDS holds EA-RO, intruder key wiped: $RESV_LINE"
+
+  # X4. FenceReaches through the preempt path: A's bytes stop.
+  sleep 3
+  W3=$(lvol_written); sleep 3; W4=$(lvol_written)
+  [ "${W3:-0}" = "${W4:-1}" ] \
+    || fail "bytes_written STILL CLIMBING after the preempt ($W3 → $W4)"
+  echo "✓ FenceReaches via preempt: bytes_written frozen at $W4"
+
+  # X5. and B never noticed: the SAME host still writes it raw. A leak
+  # here would mean the fence's reservation or eviction escaped its
+  # namespace/subsystem — the multi-volume deployment killer.
+  vsudo "dd if=/dev/zero of=/dev/$NSDEVB bs=1M count=4 oflag=direct conv=fsync 2>/dev/null" \
+    || fail "post-fence raw write to $VOLB FAILED — the fence leaked across namespaces"
+  B2=$(lvol_written_b)
+  [ "${B2:-0}" -gt "${B1:-0}" ] || fail "control counter frozen ($B1 → $B2) — the fence leaked to $VOLB"
+  RESV_B=$(vsudo "nvme resv-report /dev/$NSDEVB -c 1 -e 2>/dev/null | grep -iE 'rtype|regctl' | tr '\n' ' '" || true)
+  echo "✓ per-namespace scope: $VOLB still writes raw ($B1 → ${B2}B); its resv: ${RESV_B:-<none>}"
+
+  # Teardown, wedge-aware. B FIRST (healthy — bank its production
+  # teardown while nothing can wedge it). Then WAIT for the fenced
+  # writer to surface its error (the F4 shape): disconnecting while its
+  # O_DIRECT pwrite is still in flight is the D-state landmine —
+  # rig-relearned HERE (run 2 wedged nvme-delete-wq + the writer in D;
+  # VM reboot was the only exit). If the writer never exits, SKIP the
+  # disconnect: a leaked controller costs the next run nothing (its
+  # cleanup reboots state), a wedged nvme-delete-wq costs a reboot NOW.
+  vsudo "$CSI_CLI unstage --volume-id $VOLB" >/dev/null || true
+  vsh "$CSI_CLI detach --endpoint 127.0.0.1:50051 --volume-id $VOLB --node \$(hostname)" >/dev/null || true
+  DONE=""
+  for i in $(seq 1 40); do
+    DONE=$(vsh "cat /var/tmp/rig-writer.done 2>/dev/null" || true)
+    [ -n "$DONE" ] && break
+    sleep 0.5
+  done
+  if [ -n "$DONE" ]; then
+    vsudo "[ -f /var/tmp/rig-writer.pid ] && kill -9 \$(cat /var/tmp/rig-writer.pid) 2>/dev/null; true"
+    vsudo "nvme disconnect -n $SUBNQN 2>/dev/null; true"
+    echo "· writer surfaced its error ($DONE); A disconnected"
+  else
+    echo "· writer still blocked in its fenced pwrite — leaving A connected (D-state belt)"
+  fi
+
+  echo
+  echo "✅ preempt-rig PASSED — an adversarial holder (registered key + WE"
+  echo "   reservation: the intruder/stale-MDS shape) was PREEMPTED by the fence."
+  echo "   The MDS took EA-RO over it, wiped its key, froze its writer — and the"
+  echo "   same host's OTHER volume never noticed. On $KREL."
+  exit 0
+fi
 
 # ── F. FENCE=1: the FenceReaches drill ───────────────────────────────
 if [ "${FENCE:-0}" = "1" ]; then

@@ -307,6 +307,17 @@ conforming clients recover cleanly only from RESERVATION CONFLICT.
 >     refuses non-registrant READ *and* WRITE under 4h). `fence_preempt` keeps the
 >     preempt arm for a *foreign/stale* holder, but EA-RO acquisition is the load-bearing
 >     step.
+>     **PREEMPT-DRILL CORRECTION 2026-08-10 (same kernel, later run): "registers NO
+>     key" is only SOMETIMES true.** The preempt drill's plain `resv-register` bounced
+>     with SPDK's *"The same host already register a key with 0x2"* — 0x2 being the
+>     client id, i.e. exactly the `pr_key` GETDEVICEINFO hands out: the kernel's
+>     `pr_register` DOES land its real key on some flows (the zeroed attempts and a
+>     successful register coexist in one run's tgt log). Both worlds are handled and
+>     now both are exercised: a registered victim is wiped by `fence_preempt`'s
+>     preempt-victim arm (`has_key(victim)` — live in production on registering
+>     kernels, since pr_key == client_id == the fence's victim key), an unregistered
+>     one is excluded as a non-registrant by the EA-RO. Do not build on "the client
+>     never has a key."
 >  2. **The conforming client returns its layout on the write error** (`_pnfs_return_layout`
 >     fires on the RESERVATION CONFLICT), which frees the grant **clean** — the
 >     return-after-fence upgrade, observed live, no quarantine needed.

@@ -336,6 +336,10 @@ test-pnfs-reconcile-rig: ## A tgt-ONLY restart repairs WITHOUT an MDS roll: the 
 test-pnfs-sweep-rig: ## Lease-sweep partition drill: NFS port dropped under a live raw writer, the sweep fences/revokes/auto-unfences on the timer, successor recovers leverless (block-rig SWEEP=1)
 	SWEEP=1 tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-preempt-rig
+test-pnfs-preempt-rig: ## Foreign-holder fence arm: an adversarial registered key + WE reservation is preempted away, and a second volume on the same tgt never notices (block-rig PREEMPT=1)
+	PREEMPT=1 tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh
