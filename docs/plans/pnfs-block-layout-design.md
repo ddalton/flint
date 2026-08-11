@@ -551,6 +551,26 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   > the window rather than asserting one. Stronger client behaviour than
   > "honours lease expiry" — and exactly why the model's zombie is the
   > frozen-VM shape, which skips every client courtesy.
+  >
+  > **THE FROZEN-VM ZOMBIE DRILL — RUN AND PASSED 2026-08-10** (`make
+  > test-pnfs-zombie-rig` = block-rig.sh `ZOMBIE=1`; needs a second lima VM,
+  > see the rig header). The model's only dangerous shape, made flesh: a second
+  > VM stages through the production attach verb + a proxied cross-VM session
+  > (lima VMs sit on isolated user-nets — `tcp-proxy.py` on the host bridges
+  > them), writes raw at full proxy throughput, and is **SIGSTOPped at the
+  > hypervisor mid-pwrite**. The sweep fenced the frozen client on the timer,
+  > revoked its rows, swept its attach row (the successor's row asserted
+  > SURVIVING — the sweep's scope is per-client, proven), auto-released; a
+  > successor wrote 8 MiB of sha-stamped pattern over the REUSED extents; the
+  > zombie resumed into a jumped clock. Observed wake path: 4 refused nvme
+  > reconnects (the eviction barrier, client-visible), then its writer errored
+  > out (EXIT 5) — and the successor's bytes re-read sha-intact at the device:
+  > **Inv_NoStaleDeviceWrite held on real hardware through freeze → sweep →
+  > reuse → resume.** FlintAdmissionCrossHost's green and the eviction barrier,
+  > demonstrated end-to-end. Known quirk surfaced: a count-less `dd` probing
+  > past EOF falls to the MDS lane where the zeros-belt answers EIO (loud,
+  > safe) instead of a clean 0-byte EOF — candidate belt refinement, recorded
+  > in the drill's comments.
   The MDS-HA machinery (durable-DS plan milestone B: sqlite server_id, 90s grace,
   Recreate+RWO fence) carries the allocator state unchanged — but **reservation
   holdership is not in sqlite**: it lives target-side, keyed to the MDS's NVMe Host

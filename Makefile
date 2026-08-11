@@ -340,6 +340,10 @@ test-pnfs-sweep-rig: ## Lease-sweep partition drill: NFS port dropped under a li
 test-pnfs-preempt-rig: ## Foreign-holder fence arm: an adversarial registered key + WE reservation is preempted away, and a second volume on the same tgt never notices (block-rig PREEMPT=1)
 	PREEMPT=1 tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-zombie-rig
+test-pnfs-zombie-rig: ## Frozen-VM zombie: a second VM is SIGSTOPped mid-write, swept, its extents reused by a successor — whose bytes must survive the resume (block-rig ZOMBIE=1)
+	ZOMBIE=1 tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh

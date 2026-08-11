@@ -22,7 +22,9 @@ path, done = sys.argv[1], sys.argv[2]
 # EXHAUSTED the default mid-drill (the rig's "a zombie, not a corpse"
 # failure) — it passes a bigger cap.
 cap = int(sys.argv[3]) if len(sys.argv) > 3 else 200000
-fd = os.open(path, os.O_WRONLY | os.O_DIRECT)
+# O_CREAT: the FENCE/SWEEP drills re-write the base flow's existing
+# data.bin, but the ZOMBIE drill's writer is the file's first toucher.
+fd = os.open(path, os.O_WRONLY | os.O_DIRECT | os.O_CREAT, 0o644)
 buf = mmap.mmap(-1, 1 << 20)  # anonymous mmap is page-aligned for O_DIRECT
 buf.write(b"\0" * (1 << 20))
 buf.seek(0)

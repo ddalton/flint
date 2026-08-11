@@ -87,6 +87,14 @@
 #   writer — and a second volume on the same tgt, staged by the same
 #   host, keeps writing raw (per-namespace reservation, per-subsystem
 #   eviction).
+# ZOMBIE=1 — the frozen-VM zombie (§Z), FlintAdmission's only dangerous
+#   shape: a SECOND lima VM (ZOMBIE_VM, default flint-zombie) stages
+#   through the production attach + a proxied cross-VM session, writes
+#   raw, and is SIGSTOPped at the hypervisor mid-write. The sweep
+#   fences/revokes/auto-unfences the frozen client; a successor on THIS
+#   VM reuses its extents; the zombie resumes — and the successor's
+#   sha-checked bytes must survive whatever its kernel does next.
+#   Needs: flint-zombie VM with the HWE kernel (see §Z0's hint).
 #
 # Exit 0 = every proof held.
 
@@ -140,6 +148,14 @@ fail() {
 
 cleanup() {
   set +e
+  # ZOMBIE=1 plumbing first: a failed run must never leave the zombie
+  # VM's hypervisor SIGSTOPped (an invisible frozen VM eating RAM) or
+  # the host proxy squatting on its ports.
+  if [ "${ZOMBIE:-0}" = "1" ]; then
+    kill -CONT $(pgrep -f "\.lima/${ZOMBIE_VM:-flint-zombie}|hostagent.*${ZOMBIE_VM:-flint-zombie}") 2>/dev/null
+    [ -f /tmp/flint-zombie-proxy.pid ] && kill "$(cat /tmp/flint-zombie-proxy.pid)" 2>/dev/null
+    rm -f /tmp/flint-zombie-proxy.pid
+  fi
   # The FENCE=1 continuous writer FIRST: a leftover dd-loop from a
   # failed fence run keeps writing $MNT/data.bin, and the next run's
   # step-8 urandom write races it → a phantom sha mismatch that looks
@@ -1243,6 +1259,225 @@ if [ "${SWEEP:-0}" = "1" ]; then
   echo "   lazy expiry could never see), the lease sweep fenced it ON THE TIMER,"
   echo "   revoked its rows, auto-released the reservation, and after the reboot a"
   echo "   successor staged and wrote with no lever touched anywhere. On $KREL."
+  exit 0
+fi
+
+# ── Z. ZOMBIE=1: the frozen-VM zombie — the model's ONLY dangerous shape
+# The sweep drill proved a LIVE partitioned kernel freezes its own raw
+# I/O instantly, so a partition cannot make a data-plane zombie. What
+# CAN is a FROZEN VM (SIGSTOP the hypervisor = live-migration pause):
+# its lease dies while its stale extent mappings sleep, the sweep
+# fences/revokes/auto-unfences, a successor's fresh grants REUSE the
+# freed extents — and then the zombie WAKES. FlintAdmission says the
+# cross-host barrier (NQN eviction) must hold, and the same-host
+# readmit door is safe only because a live kernel honours its lease.
+# This drill runs that exact movie on a second lima VM and asserts the
+# one thing that must be true at the device: THE SUCCESSOR'S BYTES
+# SURVIVE THE ZOMBIE'S RESUME. Client-side refusal lines are observed
+# and reported, not asserted — the resume-side race (nvme reconnect vs
+# NFS-lane re-admission) is the kernel's business; the invariant is
+# not.
+#
+# Topology: this VM keeps MDS+tgt and plays the successor; ZOMBIE_VM
+# (default flint-zombie: stock 24.04 + HWE kernel + nvme-cli +
+# nfs-common) is the client that freezes. lima VMs cannot dial each
+# other (isolated user-nets), so the zombie reaches the rig through
+# host.lima.internal + tcp-proxy.py on the host + lima's auto-forward
+# of this VM's loopback listeners.
+if [ "${ZOMBIE:-0}" = "1" ]; then
+  ZOMBIE_VM="${ZOMBIE_VM:-flint-zombie}"
+  MNTZ=/mnt/flint-zombie
+  PXY_NVME=24420; PXY_NFS=20491; PXY_GRPC=50052
+  PXY_PID_FILE=/tmp/flint-zombie-proxy.pid
+  vshz()  { limactl shell "$ZOMBIE_VM" -- bash -c "$*"; }
+  vsudoz(){ limactl shell "$ZOMBIE_VM" -- sudo bash -c "$*"; }
+  zombie_procs() { pgrep -f "\.lima/$ZOMBIE_VM|hostagent.*$ZOMBIE_VM" || true; }
+
+  # Z0. preconditions + a CLEAN zombie VM (a prior run may have left a
+  # D-state writer on a dead device — reboot is the only reliable sweep).
+  limactl list 2>/dev/null | grep -q "^$ZOMBIE_VM " \
+    || fail "no lima VM '$ZOMBIE_VM' — create it: limactl create --name=$ZOMBIE_VM --cpus=2 --memory=2 --disk=10 template://ubuntu-24.04, then apt-get install -y linux-generic-hwe-24.04 nvme-cli nfs-common && reboot"
+  limactl stop -f "$ZOMBIE_VM" >/dev/null 2>&1 || true
+  limactl start "$ZOMBIE_VM" --tty=false >/dev/null 2>&1 || fail "could not start $ZOMBIE_VM"
+  ZKREL=$(vshz "uname -r")
+  case "$ZKREL" in
+    [0-5].*|6.[0-9].*|6.10.*) fail "$ZOMBIE_VM kernel $ZKREL < 6.11 — install linux-generic-hwe-24.04" ;;
+  esac
+  echo "✓ zombie VM up on $ZKREL (rebooted clean)"
+
+  # Z1. the host proxy + reachability. The tgt/MDS listen on THIS VM's
+  # loopback; lima forwards them to host 127.0.0.1; the proxy re-exports
+  # them on 0.0.0.0 where the zombie's host.lima.internal can reach.
+  [ -f "$PXY_PID_FILE" ] && { kill "$(cat $PXY_PID_FILE)" 2>/dev/null || true; rm -f "$PXY_PID_FILE"; }
+  python3 "$REPO_ROOT/tests/lima/pnfs/tcp-proxy.py" \
+    "$PXY_NVME:4420" "$PXY_NFS:20490" "$PXY_GRPC:50051" >/tmp/flint-zombie-proxy.log 2>&1 &
+  echo $! > "$PXY_PID_FILE"
+  for i in $(seq 1 10); do
+    grep -q ready /tmp/flint-zombie-proxy.log && break
+    [ "$i" = 10 ] && fail "tcp-proxy never bound ($(cat /tmp/flint-zombie-proxy.log))"
+    sleep 0.5
+  done
+  vshz "timeout 5 bash -c '</dev/tcp/host.lima.internal/$PXY_GRPC'" \
+    || fail "zombie VM cannot reach the rig through the host proxy"
+  # ASCII arrows only next to $vars: macOS bash 3.2 under set -u parses
+  # a glued multibyte char INTO the variable name -> unbound-variable.
+  echo "✓ host proxy up (nvme $PXY_NVME->4420, nfs $PXY_NFS->20490, grpc $PXY_GRPC->50051)"
+
+  # Z2. the zombie stages: attach through the production verb (per-node
+  # admission for ITS OWN hostnqn), then a MANUAL connect — the answered
+  # traddr is rig-loopback truth (127.0.0.1), which is a DIFFERENT HOST
+  # from the zombie's seat, so the drill dials the proxy instead. Long
+  # ctrl-loss: post-resume reconnect attempts are the observable.
+  vsudoz "modprobe nvme-tcp && modprobe blocklayoutdriver" \
+    || fail "zombie VM cannot load nvme-tcp/blocklayoutdriver"
+  ATTZ=$(vshz "$CSI_CLI attach --endpoint host.lima.internal:$PXY_GRPC --volume-id $VOL --node \$(hostname)") \
+    || fail "zombie attach failed"
+  HOSTNQN_Z=$(echo "$ATTZ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hostNqn"])')
+  NGUID_Z=$(echo "$ATTZ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nguid"])')
+  SUBNQN_Z=$(echo "$ATTZ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["subnqn"])')
+  [ "$NGUID_Z" = "$NGUID" ] || fail "zombie attach NGUID '$NGUID_Z' != '$NGUID'"
+  vsudoz "nvme connect -t tcp -a host.lima.internal -s $PXY_NVME -n $SUBNQN_Z -q $HOSTNQN_Z -l 600 -c 2" \
+    || fail "zombie nvme connect refused"
+  NSDEVZ=""
+  for i in $(seq 1 20); do
+    NSDEVZ=$(vshz "for d in /sys/class/block/nvme*n*; do case \$(basename \$d) in *c*n*) continue;; esac;
+      g=\$(cat \$d/nguid 2>/dev/null | tr -d -); [ \"\$g\" = \"$NGUID_Z\" ] && basename \$d && break; done" || true)
+    [ -n "$NSDEVZ" ] && break
+    sleep 0.5
+  done
+  [ -n "$NSDEVZ" ] || fail "zombie namespace for NGUID $NGUID_Z never appeared"
+  vsudoz "ln -sf /dev/$NSDEVZ /dev/disk/by-id/nvme-eui.$NGUID_Z
+          for f in /sys/class/nvme/*/fast_io_fail_tmo; do echo 5 > \$f; done"
+  vsudoz "mkdir -p $MNTZ && mount -t nfs4 -o vers=4.2,proto=tcp,port=$PXY_NFS host.lima.internal:/$VOL $MNTZ" \
+    || fail "zombie mount failed"
+  echo "✓ zombie staged + mounted: /dev/$NSDEVZ as $HOSTNQN_Z, via the proxy"
+
+  # Z3. the zombie writer (held-open O_DIRECT — keeps its layout and
+  # grant rows live so the freeze captures real stale state). Pre-create
+  # the file with a raw O_DIRECT write first: run 3 died on the writer's
+  # own missing-file ENOENT, and this doubles as the zombie's first
+  # raw-path proof through the proxy.
+  ZPRE=$(lvol_written)
+  vsudoz "dd if=/dev/zero of=$MNTZ/zdata.bin bs=1M count=2 oflag=direct conv=fsync status=none" \
+    || fail "zombie raw pre-create failed"
+  ZPOST=$(lvol_written)
+  [ "${ZPOST:-0}" -gt "${ZPRE:-0}" ] \
+    || fail "zombie pre-create never reached the device ($ZPRE -> $ZPOST) — MDS-path degradation?"
+  vsudoz "rm -f /var/tmp/rig-writer.done
+          nohup python3 /Users/ddalton/github/flint/tests/lima/pnfs/rig-writer.py \
+            $MNTZ/zdata.bin /var/tmp/rig-writer.done 2000000 >/var/tmp/rig-writer.err 2>&1 &
+          echo \$! > /var/tmp/rig-writer.pid"
+  W1=$(lvol_written); sleep 4; W2=$(lvol_written)
+  [ "${W2:-0}" -gt "${W1:-0}" ] \
+    || fail "zombie writer never reached the device ($W1 → $W2)"
+  ZCID=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT DISTINCT client_id FROM extent_grants WHERE volume='$VOL' LIMIT 1\"")
+  [ -n "$ZCID" ] || fail "no zombie grant rows to freeze over"
+  ATTACH_PRE=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM block_node_attach WHERE volume='$VOL'\"")
+  echo "✓ zombie writer on the raw path (client $ZCID): $W1 → $W2; $ATTACH_PRE attach row(s) pre-freeze"
+
+  # Z4. FREEZE — SIGSTOP everything that runs the zombie VM (hostagent +
+  # its ssh plumbing). The guest's vCPUs stop mid-pwrite; its lease
+  # clock, unlike the partition drill's, keeps running EVERYWHERE ELSE.
+  kill -STOP $(zombie_procs) 2>/dev/null
+  timeout 4 limactl shell "$ZOMBIE_VM" -- true >/dev/null 2>&1 \
+    && fail "zombie VM still responsive after SIGSTOP"
+  echo "✓ zombie FROZEN mid-write (hypervisor SIGSTOPped)"
+
+  # Z5. the sweep, on the timer, against a frozen client. Its rows
+  # revoke, its attach row sweeps, the fence auto-releases — and THIS
+  # VM's own attach row (the successor's seat) must SURVIVE the sweep.
+  SWEPT=""
+  for i in $(seq 1 240); do
+    LEFT=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+      \"SELECT COUNT(*) FROM extent_grants WHERE volume='$VOL'\"" || echo "?")
+    [ "${LEFT:-1}" = "0" ] && { SWEPT=1; break; }
+    sleep 1
+  done
+  [ -n "$SWEPT" ] || fail "the sweep never revoked the frozen client's rows"
+  vsh "grep -q 'lease sweep' $RIG/mds.log" || fail "no lease-sweep line in the MDS log"
+  vsh "grep -q 'released=true' $RIG/mds.log" || fail "the sweep's fence never auto-released"
+  FENCED_LEFT=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' 'SELECT COUNT(*) FROM fenced_clients'")
+  [ "${FENCED_LEFT:-1}" = "0" ] || fail "$FENCED_LEFT fenced_clients row(s) after auto-unfence"
+  ATTACH_POST=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM block_node_attach WHERE volume='$VOL'\"")
+  [ "$ATTACH_POST" = "$((ATTACH_PRE - 1))" ] \
+    || fail "sweep took attach rows $ATTACH_PRE → $ATTACH_POST (expected exactly the zombie's one)"
+  echo "✓ sweep fenced the frozen client on the timer: rows revoked, auto-released, its attach row swept, the successor's kept"
+
+  # Z6. the successor writes THROUGH this VM's own live session — fresh
+  # grants at gen+1 over the freed (reused) extents. The pattern's sha
+  # is the tripwire the zombie's stale mappings would trip.
+  vsudo "dd if=/dev/urandom of=/var/tmp/succ.src bs=1M count=8 status=none"
+  SHA_SRC=$(vsudo "sha256sum /var/tmp/succ.src | cut -d' ' -f1")
+  vsudo "dd if=/var/tmp/succ.src of=$MNT/successor.bin bs=1M oflag=direct conv=fsync status=none" \
+    || fail "successor write failed"
+  # Baseline read-back, POLLED: a cold O_DIRECT read races the write's
+  # LAYOUTCOMMIT — a range the commit hasn't covered yet falls to the
+  # MDS lane, where the scsi zeros-belt answers EIO (run 5 lost exactly
+  # this race mid-file; the count-less dd's past-EOF probe hits the same
+  # belt every time, harmlessly, after the full 8MiB is out). EIO-not-
+  # zeros is the belt WORKING; the poll waits for the committed view.
+  # Z8's post-resume assert stays single-shot strict — by then this
+  # baseline has proven the data device-readable.
+  SHA_1=""
+  for i in $(seq 1 20); do
+    vsudo "echo 3 > /proc/sys/vm/drop_caches"
+    SHA_1=$(vsudo "dd if=$MNT/successor.bin bs=1M iflag=direct status=none 2>/var/tmp/succ.dd.err | sha256sum | cut -d' ' -f1; true")
+    [ "$SHA_1" = "$SHA_SRC" ] && break
+    sleep 1
+  done
+  [ "$SHA_1" = "$SHA_SRC" ] \
+    || fail "successor data never became device-readable ($SHA_1 != $SHA_SRC) — commit race would have resolved; this is real"
+  echo "✓ successor wrote 8MiB over the reused extents (sha $SHA_SRC, stable on poll $i)"
+  echo "· read-back dd stderr (belt refusals expected): $(vsh "tr '\n' ' ' < /var/tmp/succ.dd.err")"
+
+  # Z7. RESUME. The zombie wakes into a world where its lease died, its
+  # rows were revoked, its NQN was evicted — and then auto-unfence
+  # re-opened the door for a FRESH incarnation. Whatever path its kernel
+  # takes (refused reconnects, STALE_CLIENTID recovery, a clean
+  # re-grant), the successor's bytes must not move. Client-side lines
+  # are OBSERVED; the eviction itself was already asserted server-side.
+  kill -CONT $(zombie_procs) 2>/dev/null
+  sleep 8
+  vshz "true" || fail "zombie VM never came back after SIGCONT"
+  REFUSED=$(vsudoz "dmesg | grep -c 'not allowed, hostnqn'" || true)
+  STALE=$(vsudoz "dmesg | grep -ciE 'stale.*client|EXCHANGE_ID|lease' " || true)
+  echo "· zombie resumed: refused-connect lines=$REFUSED, lease/clientid recovery lines=$STALE (both informational)"
+  sleep 25
+  ZDONE=$(vshz "cat /var/tmp/rig-writer.done 2>/dev/null" || true)
+  W3=$(lvol_written); sleep 3; W4=$(lvol_written)
+  if [ "${W4:-0}" -gt "${W3:-0}" ]; then
+    ZFATE="writing again (fresh incarnation through the re-admit door — grant-site admission re-admitted it)"
+  elif [ -n "$ZDONE" ]; then
+    ZFATE="errored out ($ZDONE)"
+  else
+    ZFATE="blocked (no further device bytes)"
+  fi
+  echo "· zombie fate 30s after resume: $ZFATE"
+
+  # Z8. THE MONEY: the successor's bytes, cold-read at the device,
+  # after the zombie has been awake and flailing (or recovering) for
+  # half a minute. A single stale-extent write lands here as a mismatch.
+  vsudo "echo 3 > /proc/sys/vm/drop_caches"
+  SHA_2=$(vsudo "dd if=$MNT/successor.bin bs=1M iflag=direct status=none 2>/var/tmp/succ.dd.err | sha256sum | cut -d' ' -f1; true")
+  [ "$SHA_2" = "$SHA_SRC" ] \
+    || fail "SUCCESSOR DATA CORRUPTED BY THE RESUMED ZOMBIE ($SHA_2 != $SHA_SRC) — Inv_NoStaleDeviceWrite violated ON REAL HARDWARE"
+  echo "✓ successor's 8MiB sha-intact through the zombie's resume — Inv_NoStaleDeviceWrite held at the device"
+
+  # Reap: freeze plumbing down, zombie VM force-stopped (its writer may
+  # be mid-D on a dead-or-reborn device; Z0 reboots it clean next run).
+  kill "$(cat $PXY_PID_FILE)" 2>/dev/null || true; rm -f "$PXY_PID_FILE"
+  limactl stop -f "$ZOMBIE_VM" >/dev/null 2>&1 || true
+  vsudo "rm -f /var/tmp/succ.src"
+
+  echo
+  echo "✅ zombie-rig PASSED — a client VM FROZEN mid-write (the one zombie shape a"
+  echo "   partition cannot make) slept through fence/revoke/auto-unfence, a successor"
+  echo "   reused its extents, and on resume the successor's bytes survived: the"
+  echo "   eviction barrier + lease-honouring recovery held Inv_NoStaleDeviceWrite"
+  echo "   at the device. Zombie's path on wake: $ZFATE. On $KREL / zombie $ZKREL."
   exit 0
 fi
 
