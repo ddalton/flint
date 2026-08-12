@@ -590,6 +590,15 @@ pub trait StateBackend: Send + Sync {
         volume: &str,
     ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
 
+    /// Highest logical end covered by a file's COMMITTED extents (0 if
+    /// none). The stub's length only advances at LAYOUTCOMMIT, so this
+    /// is what tells an in-flight write apart from a real EOF.
+    async fn extent_committed_end(
+        &self,
+        volume: &str,
+        file_id: u64,
+    ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
+
     /// LAYOUTGET's allocation transaction. `fresh_only` skips free-list
     /// reuse — REQUIRED until the MDS grows the NVMe initiator that can
     /// write_zeroes a reused range before the layout leaves the server

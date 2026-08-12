@@ -87,6 +87,14 @@
 #   writer — and a second volume on the same tgt, staged by the same
 #   host, keeps writing raw (per-namespace reservation, per-subsystem
 #   eviction).
+# MULTI=1 — TWO REAL CLIENT HOSTS on one volume (§M): $VM2 stages and
+#   mounts the SAME volume through the host proxy, both hosts write raw
+#   at once, and the drill asserts what only two hosts can show —
+#   admission is additive, the extent map stays physically disjoint
+#   across hosts (GrantsExclusive on real HW), same-file contention is
+#   refused rather than overlapped, and a fence naming ONE client
+#   evicts only that client. Whether the volume-wide reservation is
+#   collateral for the survivor is asserted BOTH ways.
 # EXPAND=1 — capacity semantics for real (§E): a small volume is FILLED
 #   until the app gets ENOSPC (not EIO — the errno an application can
 #   act on), then ExpandVolume grows the lvol, the client kernel picks
@@ -411,6 +419,321 @@ lvol_written() {
   vsh "$RPC bdev_get_iostat --name lvs_rig/$VOL" | python3 -c "
 import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
 }
+
+# ── the SECOND CLIENT VM, shared by every multi-host mode ────────────
+# lima VMs cannot dial each other (each is 192.168.5.15 on its own
+# user-net), so a second client reaches this rig through
+# host.lima.internal + tcp-proxy.py on the host + lima's auto-forward of
+# THIS VM's loopback listeners. One implementation, because the last
+# same-message-two-places bug in this tree (the recall seqid) cost a
+# month of silently-refused callbacks.
+VM2="${VM2:-${ZOMBIE_VM:-flint-zombie}}"
+MNT2=/mnt/flint-vm2
+PXY_NVME=24420; PXY_NFS=20491; PXY_GRPC=50052
+PXY_PID_FILE=/tmp/flint-zombie-proxy.pid
+vsh2()   { limactl shell "$VM2" -- bash -c "$*"; }
+vsudo2() { limactl shell "$VM2" -- sudo bash -c "$*"; }
+vm2_procs() { pgrep -f "\.lima/$VM2|hostagent.*$VM2" || true; }
+
+# Boot VM2 clean. A prior run may have left a D-state writer on a dead
+# device, and reboot is the only reliable sweep for that.
+vm2_boot() {
+  limactl list 2>/dev/null | grep -q "^$VM2 " \
+    || fail "no lima VM '$VM2' — create it: limactl create --name=$VM2 --cpus=2 --memory=2 --disk=10 template://ubuntu-24.04, then apt-get install -y linux-generic-hwe-24.04 nvme-cli nfs-common && reboot"
+  limactl stop -f "$VM2" >/dev/null 2>&1 || true
+  limactl start "$VM2" --tty=false >/dev/null 2>&1 || fail "could not start $VM2"
+  VM2_KREL=$(vsh2 "uname -r")
+  case "$VM2_KREL" in
+    [0-5].*|6.[0-9].*|6.10.*) fail "$VM2 kernel $VM2_KREL < 6.11 — install linux-generic-hwe-24.04" ;;
+  esac
+  echo "✓ second client VM up on $VM2_KREL (rebooted clean)"
+}
+
+# Host-side proxy: re-export this VM's forwarded loopback ports on
+# 0.0.0.0, where VM2's host.lima.internal can reach them.
+vm2_proxy_up() {
+  [ -f "$PXY_PID_FILE" ] && { kill "$(cat $PXY_PID_FILE)" 2>/dev/null || true; rm -f "$PXY_PID_FILE"; }
+  python3 "$REPO_ROOT/tests/lima/pnfs/tcp-proxy.py" \
+    "$PXY_NVME:4420" "$PXY_NFS:20490" "$PXY_GRPC:50051" >/tmp/flint-zombie-proxy.log 2>&1 &
+  echo $! > "$PXY_PID_FILE"
+  for i in $(seq 1 10); do
+    grep -q ready /tmp/flint-zombie-proxy.log && break
+    [ "$i" = 10 ] && fail "tcp-proxy never bound ($(cat /tmp/flint-zombie-proxy.log))"
+    sleep 0.5
+  done
+  vsh2 "timeout 5 bash -c '</dev/tcp/host.lima.internal/$PXY_GRPC'" \
+    || fail "$VM2 cannot reach the rig through the host proxy"
+  # ASCII arrows only next to $vars: macOS bash 3.2 under set -u parses
+  # a glued multibyte char INTO the variable name -> unbound-variable.
+  echo "✓ host proxy up (nvme $PXY_NVME->4420, nfs $PXY_NFS->20490, grpc $PXY_GRPC->50051)"
+}
+
+# Stage VM2 onto $1 and mount it at $2. Attach through the production verb
+# (per-node admission for VM2's OWN hostnqn), then a MANUAL connect: the
+# attach-answered traddr is rig-loopback truth (127.0.0.1), which is a
+# DIFFERENT HOST from VM2's seat, so the drill dials the proxy instead.
+# Sets HOSTNQN2 / NGUID2 / SUBNQN2 / NSDEV2.
+vm2_stage() {
+  local vol="$1" mnt="$2"
+  vsudo2 "modprobe nvme-tcp && modprobe blocklayoutdriver" \
+    || fail "$VM2 cannot load nvme-tcp/blocklayoutdriver"
+  local att
+  att=$(vsh2 "$CSI_CLI attach --endpoint host.lima.internal:$PXY_GRPC --volume-id $vol --node \$(hostname)") \
+    || fail "$VM2 attach failed"
+  HOSTNQN2=$(echo "$att" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hostNqn"])')
+  NGUID2=$(echo "$att" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nguid"])')
+  SUBNQN2=$(echo "$att" | python3 -c 'import json,sys; print(json.load(sys.stdin)["subnqn"])')
+  vsudo2 "nvme connect -t tcp -a host.lima.internal -s $PXY_NVME -n $SUBNQN2 -q $HOSTNQN2 -l 600 -c 2" \
+    || fail "$VM2 nvme connect refused"
+  NSDEV2=""
+  for i in $(seq 1 20); do
+    NSDEV2=$(vsh2 "for d in /sys/class/block/nvme*n*; do case \$(basename \$d) in *c*n*) continue;; esac;
+      g=\$(cat \$d/nguid 2>/dev/null | tr -d -); [ \"\$g\" = \"$NGUID2\" ] && basename \$d && break; done" || true)
+    [ -n "$NSDEV2" ] && break
+    sleep 0.5
+  done
+  [ -n "$NSDEV2" ] || fail "$VM2 namespace for NGUID $NGUID2 never appeared"
+  vsudo2 "ln -sf /dev/$NSDEV2 /dev/disk/by-id/nvme-eui.$NGUID2
+          for f in /sys/class/nvme/*/fast_io_fail_tmo; do echo 5 > \$f; done"
+  vsudo2 "mkdir -p $mnt && mount -t nfs4 -o vers=4.2,proto=tcp,port=$PXY_NFS host.lima.internal:/$vol $mnt" \
+    || fail "$VM2 mount failed"
+  echo "✓ $VM2 staged + mounted: /dev/$NSDEV2 as $HOSTNQN2, via the proxy"
+}
+
+# The NFS client id the MDS admitted for a host NQN on this volume —
+# what a per-client fence has to name.
+client_id_of_nqn() {
+  vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT client_id FROM block_hosts WHERE volume='$VOL' AND host_nqn='$1' LIMIT 1\"" || true
+}
+
+# ── M. MULTI=1: TWO REAL CLIENT HOSTS on ONE volume ──────────────────
+# Everything before this drill had exactly one client host. The
+# properties that only exist with two — and that the model states but
+# nothing had ever run — are:
+#   M1. admission is ADDITIVE: two nodes, two NQNs, both on the export's
+#       allow-list at once (a per-node admission that replaced instead
+#       of adding would look identical with one node).
+#   M2. two clients writing DIFFERENT files both reach the DEVICE, and
+#       their extents are PHYSICALLY DISJOINT — GrantsExclusive
+#       (FlintExtents' core theorem) on real hardware, across hosts.
+#   M3. two clients over the SAME file: the second is REFUSED, not
+#       given overlapping space, and the first client's bytes survive.
+#   M4. the fence is PER CLIENT, not per volume: fencing host B must
+#       stop B and leave A's admission intact. Whether A's raw I/O
+#       survives is the open question this drill exists to answer — the
+#       reservation is volume-wide at the device — so BOTH outcomes are
+#       asserted, neither is silent, and either way A must be healthy
+#       once the fence lifts.
+# Topology: this VM keeps MDS+tgt and plays host A; $VM2 is host B,
+# reaching the rig through the host proxy (see the VM2 helpers).
+if [ "${MULTI:-0}" = "1" ]; then
+  MNTB="$MNT2"
+  vm2_boot
+  vm2_proxy_up
+  vm2_stage "$VOL" "$MNTB"
+  [ "$NGUID2" = "$NGUID" ] || fail "host B attach NGUID '$NGUID2' != '$NGUID'"
+  HOSTNQN_A="$HOSTNQN"
+
+  # M1. BOTH hosts admitted at once.
+  ATTACH_ROWS=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM block_node_attach WHERE volume='$VOL'\"")
+  [ "${ATTACH_ROWS:-0}" -ge 2 ] \
+    || fail "expected 2 node-attach rows, found ${ATTACH_ROWS:-0} — per-node admission REPLACED instead of adding"
+  HOSTS=$(vsh "$RPC nvmf_get_subsystems" | python3 -c "
+import json,sys
+for s in json.load(sys.stdin):
+    if s.get('nqn') == '$SUBNQN':
+        print(' '.join(h['nqn'] for h in s.get('hosts', []))); break
+")
+  echo "$HOSTS" | grep -q "$HOSTNQN_A" || fail "host A's NQN missing from the allow-list: $HOSTS"
+  echo "$HOSTS" | grep -q "$HOSTNQN2"  || fail "host B's NQN missing from the allow-list: $HOSTS"
+  echo "✓ M1: both hosts admitted — allow-list carries A, B and the fence lane"
+
+  # M2. concurrent raw writes to DIFFERENT files.
+  M_MIB=8
+  vsh  "dd if=/dev/urandom of=/var/tmp/rig-a.bin bs=1M count=$M_MIB status=none"
+  vsh2 "dd if=/dev/urandom of=/var/tmp/rig-b.bin bs=1M count=$M_MIB status=none"
+  SHA_A=$(vsh  "sha256sum /var/tmp/rig-a.bin" | awk '{print $1}')
+  SHA_B=$(vsh2 "sha256sum /var/tmp/rig-b.bin" | awk '{print $1}')
+  MW0=$(lvol_written)
+  BELT0=$(vsh "grep -c 'MDS I/O on scsi-class file' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
+  vsudo  "cp /var/tmp/rig-a.bin $MNT/a.bin && sync $MNT/a.bin"   || fail "host A write failed"
+  vsudo2 "cp /var/tmp/rig-b.bin $MNTB/b.bin && sync $MNTB/b.bin" || fail "host B write failed"
+  MW1=$(lvol_written)
+  [ "$((MW1 - MW0))" -ge "$((2 * M_MIB * 1024 * 1024))" ] \
+    || fail "device saw only $((MW1 - MW0))B for two ${M_MIB}MiB writes — someone went through the MDS"
+  BELT1=$(vsh "grep -c 'MDS I/O on scsi-class file' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
+  [ "${BELT1:-0}" = "${BELT0:-0}" ] \
+    || fail "the zeros belt fired during the concurrent writes ($BELT0 -> $BELT1)"
+
+  # Cold read back on the OTHER host each time: A reads B's file and
+  # vice versa, so the check crosses hosts as well as the device.
+  vsudo  "echo 3 > /proc/sys/vm/drop_caches"
+  vsudo2 "echo 3 > /proc/sys/vm/drop_caches"
+  SHA_B_ON_A=$(vsudo  "sha256sum $MNT/b.bin"  | awk '{print $1}')
+  SHA_A_ON_B=$(vsudo2 "sha256sum $MNTB/a.bin" | awk '{print $1}')
+  [ "$SHA_B_ON_A" = "$SHA_B" ] || fail "host A read host B's file wrong: $SHA_B_ON_A != $SHA_B"
+  [ "$SHA_A_ON_B" = "$SHA_A" ] || fail "host B read host A's file wrong: $SHA_A_ON_B != $SHA_A"
+
+  # GrantsExclusive at the physical layer: no two extents of this volume
+  # may overlap, whoever they were granted to. The allocator's own
+  # verifier says this; here two real kernels on two hosts say it.
+  OVERLAP=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM extents e1 JOIN extents e2
+        ON e1.volume = e2.volume AND e1.rowid <> e2.rowid
+       WHERE e1.volume='$VOL'
+         AND e1.physical_offset < e2.physical_offset + e2.length
+         AND e2.physical_offset < e1.physical_offset + e1.length\"")
+  [ "${OVERLAP:-1}" = "0" ] \
+    || fail "$OVERLAP overlapping physical extent pair(s) across two hosts — GrantsExclusive VIOLATED"
+  FILES=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(DISTINCT file_id) FROM extents WHERE volume='$VOL'\"")
+  echo "✓ M2: both hosts wrote raw ($((MW1 - MW0))B), cross-read intact, $FILES file(s), zero physical overlap"
+
+  # M3. the SAME file from both hosts. Host A holds a live layout on
+  # a.bin (held-open O_DIRECT writer); host B's write to the same file
+  # must NOT be handed overlapping space. A refusal is the correct
+  # answer — the belt's EIO or a TRYLATER loop — and A's data must be
+  # intact afterwards either way.
+  vsudo "rm -f /var/tmp/rig-writer.done
+         nohup python3 $REPO_ROOT/tests/lima/pnfs/rig-writer.py \
+           $MNT/a.bin /var/tmp/rig-writer.done 2000000 >/var/tmp/rig-writer.err 2>&1 &
+         echo \$! > /var/tmp/rig-writer.pid"
+  WA1=$(lvol_written); sleep 3; WA2=$(lvol_written)
+  [ "${WA2:-0}" -gt "${WA1:-0}" ] || fail "host A's writer never reached the device ($WA1 -> $WA2)"
+  CONFLICT0=$(vsh "grep -c 'range held by clients' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
+  set +e
+  B_SAME=$(vsudo2 "dd if=/dev/urandom of=$MNTB/a.bin bs=1M count=2 oflag=direct conv=notrunc status=none 2>&1")
+  B_SAME_RC=$?
+  set -e
+  CONFLICT1=$(vsh "grep -c 'range held by clients' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
+  if [ "$B_SAME_RC" -ne 0 ]; then
+    echo "· host B's write to A's open file was REFUSED (expected): $(echo "$B_SAME" | tr '\n' ' ' | cut -c1-90)"
+  else
+    echo "· host B's write to A's open file SUCCEEDED — the MDS granted it non-overlapping space"
+  fi
+  [ "${CONFLICT1:-0}" -ge "${CONFLICT0:-0}" ] || fail "conflict counter went backwards"
+  OVERLAP2=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM extents e1 JOIN extents e2
+        ON e1.volume = e2.volume AND e1.rowid <> e2.rowid
+       WHERE e1.volume='$VOL'
+         AND e1.physical_offset < e2.physical_offset + e2.length
+         AND e2.physical_offset < e1.physical_offset + e1.length\"")
+  [ "${OVERLAP2:-1}" = "0" ] \
+    || fail "same-file contention produced $OVERLAP2 overlapping extent pair(s) — GrantsExclusive VIOLATED"
+  echo "✓ M3: same-file contention left the extent map disjoint (${CONFLICT1} conflict refusal(s) logged)"
+
+  # M4. THE PER-CLIENT FENCE. Name host B's NFS client and fence it.
+  CID_B=$(client_id_of_nqn "$HOSTNQN2")
+  [ -n "$CID_B" ] || fail "no admitted client id for host B's NQN $HOSTNQN2"
+  CID_A=$(client_id_of_nqn "$HOSTNQN_A")
+  [ -n "$CID_A" ] || fail "no admitted client id for host A's NQN $HOSTNQN_A"
+  [ "$CID_A" != "$CID_B" ] || fail "both hosts resolved to client $CID_A — the admission is not per-host"
+  # Give B something live to lose: a held-open writer on a SCRATCH file
+  # of its own. Not b.bin — the writer rewrites its target with zeros,
+  # and b.bin is the sha-checked evidence that B's COMMITTED bytes
+  # survive the fence (run 1 failed on exactly that self-inflicted
+  # mismatch).
+  vsudo2 "rm -f /var/tmp/rig-writer.done
+          nohup python3 $REPO_ROOT/tests/lima/pnfs/rig-writer.py \
+            $MNTB/bw.bin /var/tmp/rig-writer.done 2000000 >/var/tmp/rig-writer.err 2>&1 &
+          echo \$! > /var/tmp/rig-writer.pid"
+  sleep 3
+  FR=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+        -d '{\"volumeId\":\"$VOL\",\"clientId\":\"$CID_B\"}' \
+        127.0.0.1:50051 pnfs.control.MdsControl/FenceBlockClient") \
+    || fail "FenceBlockClient RPC failed"
+  echo "$FR" | grep -c '"fenced": true' >/dev/null || fail "fence lever refused: $FR"
+
+  # B is out: its NQN leaves the allow-list, A's stays.
+  HOSTS2=$(vsh "$RPC nvmf_get_subsystems" | python3 -c "
+import json,sys
+for s in json.load(sys.stdin):
+    if s.get('nqn') == '$SUBNQN':
+        print(' '.join(h['nqn'] for h in s.get('hosts', []))); break
+")
+  echo "$HOSTS2" | grep -q "$HOSTNQN2" \
+    && fail "fenced host B is STILL on the allow-list: $HOSTS2"
+  echo "$HOSTS2" | grep -q "$HOSTNQN_A" \
+    || fail "fencing B evicted A too — the eviction is not per-host: $HOSTS2"
+  echo "✓ M4a: fencing B evicted ONLY B's NQN; A's admission survived"
+
+  # M4b. THE FENCE ITSELF. Eviction is bookkeeping — it closes the
+  # RECONNECT door. Delivery is the victim's live raw I/O stopping at
+  # the device, and with a second healthy host on the same namespace
+  # that is a per-client claim no single-client drill could make: the
+  # preempt takes B's key so EA-RO excludes B, while A (a registrant)
+  # writes on.
+  BDONE=""
+  for i in $(seq 1 60); do
+    BDONE=$(vsh2 "cat /var/tmp/rig-writer.done 2>/dev/null" || true)
+    [ -n "$BDONE" ] && break
+    sleep 0.5
+  done
+  [ -n "$BDONE" ] \
+    || fail "host B's raw writer NEVER stopped after its fence — FenceReaches failed for the fenced client (err: $(vsh2 'tail -2 /var/tmp/rig-writer.err 2>/dev/null'))"
+  echo "✓ M4b: the fenced host's raw writer stopped at the device ($BDONE)"
+
+  # …and the open question: does the volume-wide reservation stop A's
+  # raw I/O as collateral? Both answers are asserted.
+  sleep 3
+  FA1=$(lvol_written); sleep 3; FA2=$(lvol_written)
+  if [ "${FA2:-0}" -gt "${FA1:-0}" ]; then
+    COLLATERAL=no
+    echo "✓ M4c: host A kept writing raw THROUGH B's fence ($FA1 -> $FA2) — the"
+    echo "  reservation admits A (its kernel registered), so the fence is"
+    echo "  per-client end to end, at the device as well as the allow-list"
+  else
+    COLLATERAL=yes
+    echo "· M4c FINDING: host A's raw I/O ALSO stopped ($FA1 = $FA2). The"
+    echo "  EA-RO reservation is volume-wide and A is not a registrant, so a"
+    echo "  per-client fence is collateral at the device. A must recover when"
+    echo "  the fence lifts — asserted next."
+  fi
+
+  # Unfence and require A healthy either way.
+  UR=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+        -d '{\"volumeId\":\"$VOL\",\"clientId\":\"$CID_B\"}' \
+        127.0.0.1:50051 pnfs.control.MdsControl/UnfenceBlockClient") \
+    || fail "UnfenceBlockClient RPC failed"
+  echo "$UR" | grep -c '"unfenced": true' >/dev/null || fail "unfence refused: $UR"
+  vsudo "[ -f /var/tmp/rig-writer.pid ] && kill -9 \$(cat /var/tmp/rig-writer.pid) 2>/dev/null; true"
+  sleep 2
+  UA1=$(lvol_written)
+  vsudo "dd if=/dev/urandom of=$MNT/a2.bin bs=1M count=2 oflag=direct conv=fsync status=none" \
+    || fail "host A cannot write after B's fence was lifted (collateral=$COLLATERAL)"
+  UA2=$(lvol_written)
+  [ "${UA2:-0}" -gt "${UA1:-0}" ] \
+    || fail "host A's post-unfence write never reached the device ($UA1 -> $UA2)"
+  vsudo "echo 3 > /proc/sys/vm/drop_caches"
+  SHA_B_AFTER=$(vsudo "sha256sum $MNT/b.bin" | awk '{print $1}')
+  [ "$SHA_B_AFTER" = "$SHA_B" ] \
+    || fail "host B's data changed across the fence: $SHA_B_AFTER != $SHA_B"
+  echo "✓ M4d: after unfence host A writes raw again and B's committed bytes are intact"
+
+  # Teardown of host B (production verbs), then prove A is untouched.
+  vsudo2 "[ -f /var/tmp/rig-writer.pid ] && kill -9 \$(cat /var/tmp/rig-writer.pid) 2>/dev/null; true"
+  vsudo2 "umount -lf $MNTB 2>/dev/null; true"
+  vsudo2 "$CSI_CLI unstage --volume-id $VOL" >/dev/null 2>&1 || true
+  vsh2 "$CSI_CLI detach --endpoint host.lima.internal:$PXY_GRPC --volume-id $VOL --node \$(hostname)" \
+    >/dev/null || fail "host B detach failed"
+  ROWS_AFTER=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT COUNT(*) FROM block_node_attach WHERE volume='$VOL' AND host_nqn='$HOSTNQN2'\"")
+  [ "${ROWS_AFTER:-1}" = "0" ] || fail "host B's attach row survived its detach"
+  vsudo "dd if=/dev/urandom of=$MNT/a3.bin bs=1M count=2 oflag=direct conv=fsync status=none" \
+    || fail "host A broke when host B detached"
+  echo "✓ M5: host B detached cleanly; host A unaffected"
+
+  [ -f "$PXY_PID_FILE" ] && { kill "$(cat $PXY_PID_FILE)" 2>/dev/null || true; rm -f "$PXY_PID_FILE"; }
+  echo
+  echo "✅ multi-node rig PASSED — two REAL client hosts on one block volume:"
+  echo "   both admitted at once, both writing raw with a physically DISJOINT"
+  echo "   extent map, same-file contention refused rather than overlapped, and"
+  echo "   a fence that named ONE client evicted only that client (device-side"
+  echo "   collateral: $COLLATERAL) with the survivor healthy across it."
+  exit 0
+fi
 
 # ── E. EXPAND=1: capacity is real — ENOSPC, then a live expand ───────
 # The block class owns real capacity in TWO places (the lvol behind the
@@ -1449,72 +1772,26 @@ fi
 # host.lima.internal + tcp-proxy.py on the host + lima's auto-forward
 # of this VM's loopback listeners.
 if [ "${ZOMBIE:-0}" = "1" ]; then
-  ZOMBIE_VM="${ZOMBIE_VM:-flint-zombie}"
+  ZOMBIE_VM="$VM2"
   MNTZ=/mnt/flint-zombie
-  PXY_NVME=24420; PXY_NFS=20491; PXY_GRPC=50052
-  PXY_PID_FILE=/tmp/flint-zombie-proxy.pid
-  vshz()  { limactl shell "$ZOMBIE_VM" -- bash -c "$*"; }
-  vsudoz(){ limactl shell "$ZOMBIE_VM" -- sudo bash -c "$*"; }
-  zombie_procs() { pgrep -f "\.lima/$ZOMBIE_VM|hostagent.*$ZOMBIE_VM" || true; }
+  # Thin aliases: Z3-Z8 below were written against these names and are
+  # PROVEN, so the shared helpers are wired in rather than renamed
+  # through a drill whose value is that it already caught things.
+  vshz()  { vsh2 "$@"; }
+  vsudoz(){ vsudo2 "$@"; }
+  zombie_procs() { vm2_procs; }
 
-  # Z0. preconditions + a CLEAN zombie VM (a prior run may have left a
-  # D-state writer on a dead device — reboot is the only reliable sweep).
-  limactl list 2>/dev/null | grep -q "^$ZOMBIE_VM " \
-    || fail "no lima VM '$ZOMBIE_VM' — create it: limactl create --name=$ZOMBIE_VM --cpus=2 --memory=2 --disk=10 template://ubuntu-24.04, then apt-get install -y linux-generic-hwe-24.04 nvme-cli nfs-common && reboot"
-  limactl stop -f "$ZOMBIE_VM" >/dev/null 2>&1 || true
-  limactl start "$ZOMBIE_VM" --tty=false >/dev/null 2>&1 || fail "could not start $ZOMBIE_VM"
-  ZKREL=$(vshz "uname -r")
-  case "$ZKREL" in
-    [0-5].*|6.[0-9].*|6.10.*) fail "$ZOMBIE_VM kernel $ZKREL < 6.11 — install linux-generic-hwe-24.04" ;;
-  esac
-  echo "✓ zombie VM up on $ZKREL (rebooted clean)"
+  # Z0/Z1. a CLEAN zombie VM + the host proxy (shared with §M).
+  vm2_boot
+  ZKREL="$VM2_KREL"
+  vm2_proxy_up
 
-  # Z1. the host proxy + reachability. The tgt/MDS listen on THIS VM's
-  # loopback; lima forwards them to host 127.0.0.1; the proxy re-exports
-  # them on 0.0.0.0 where the zombie's host.lima.internal can reach.
-  [ -f "$PXY_PID_FILE" ] && { kill "$(cat $PXY_PID_FILE)" 2>/dev/null || true; rm -f "$PXY_PID_FILE"; }
-  python3 "$REPO_ROOT/tests/lima/pnfs/tcp-proxy.py" \
-    "$PXY_NVME:4420" "$PXY_NFS:20490" "$PXY_GRPC:50051" >/tmp/flint-zombie-proxy.log 2>&1 &
-  echo $! > "$PXY_PID_FILE"
-  for i in $(seq 1 10); do
-    grep -q ready /tmp/flint-zombie-proxy.log && break
-    [ "$i" = 10 ] && fail "tcp-proxy never bound ($(cat /tmp/flint-zombie-proxy.log))"
-    sleep 0.5
-  done
-  vshz "timeout 5 bash -c '</dev/tcp/host.lima.internal/$PXY_GRPC'" \
-    || fail "zombie VM cannot reach the rig through the host proxy"
-  # ASCII arrows only next to $vars: macOS bash 3.2 under set -u parses
-  # a glued multibyte char INTO the variable name -> unbound-variable.
-  echo "✓ host proxy up (nvme $PXY_NVME->4420, nfs $PXY_NFS->20490, grpc $PXY_GRPC->50051)"
-
-  # Z2. the zombie stages: attach through the production verb (per-node
-  # admission for ITS OWN hostnqn), then a MANUAL connect — the answered
-  # traddr is rig-loopback truth (127.0.0.1), which is a DIFFERENT HOST
-  # from the zombie's seat, so the drill dials the proxy instead. Long
-  # ctrl-loss: post-resume reconnect attempts are the observable.
-  vsudoz "modprobe nvme-tcp && modprobe blocklayoutdriver" \
-    || fail "zombie VM cannot load nvme-tcp/blocklayoutdriver"
-  ATTZ=$(vshz "$CSI_CLI attach --endpoint host.lima.internal:$PXY_GRPC --volume-id $VOL --node \$(hostname)") \
-    || fail "zombie attach failed"
-  HOSTNQN_Z=$(echo "$ATTZ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hostNqn"])')
-  NGUID_Z=$(echo "$ATTZ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nguid"])')
-  SUBNQN_Z=$(echo "$ATTZ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["subnqn"])')
+  # Z2. the zombie stages through the production attach verb + a manual
+  # connect to the proxy. Long ctrl-loss: post-resume reconnect attempts
+  # are the observable.
+  vm2_stage "$VOL" "$MNTZ"
+  HOSTNQN_Z="$HOSTNQN2"; NGUID_Z="$NGUID2"; SUBNQN_Z="$SUBNQN2"; NSDEVZ="$NSDEV2"
   [ "$NGUID_Z" = "$NGUID" ] || fail "zombie attach NGUID '$NGUID_Z' != '$NGUID'"
-  vsudoz "nvme connect -t tcp -a host.lima.internal -s $PXY_NVME -n $SUBNQN_Z -q $HOSTNQN_Z -l 600 -c 2" \
-    || fail "zombie nvme connect refused"
-  NSDEVZ=""
-  for i in $(seq 1 20); do
-    NSDEVZ=$(vshz "for d in /sys/class/block/nvme*n*; do case \$(basename \$d) in *c*n*) continue;; esac;
-      g=\$(cat \$d/nguid 2>/dev/null | tr -d -); [ \"\$g\" = \"$NGUID_Z\" ] && basename \$d && break; done" || true)
-    [ -n "$NSDEVZ" ] && break
-    sleep 0.5
-  done
-  [ -n "$NSDEVZ" ] || fail "zombie namespace for NGUID $NGUID_Z never appeared"
-  vsudoz "ln -sf /dev/$NSDEVZ /dev/disk/by-id/nvme-eui.$NGUID_Z
-          for f in /sys/class/nvme/*/fast_io_fail_tmo; do echo 5 > \$f; done"
-  vsudoz "mkdir -p $MNTZ && mount -t nfs4 -o vers=4.2,proto=tcp,port=$PXY_NFS host.lima.internal:/$VOL $MNTZ" \
-    || fail "zombie mount failed"
-  echo "✓ zombie staged + mounted: /dev/$NSDEVZ as $HOSTNQN_Z, via the proxy"
 
   # Z3. the zombie writer (held-open O_DIRECT — keeps its layout and
   # grant rows live so the freeze captures real stale state). Pre-create

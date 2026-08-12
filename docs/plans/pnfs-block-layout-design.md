@@ -1068,6 +1068,17 @@ Each phase ships standalone value; none is gated on the next.
    gate with the override; the 7.0 rig stages through the same code green. The
    MDS block-lane meter (§6, F68 precedent) stays as the backstop degradation
    detector — the check is per-node prevention, the meter is fleet-wide proof.
+   **MULTI-HOST PROVEN 2026-08-11** (`make test-pnfs-multi-rig`, §M): a second lima VM
+   stages the SAME volume through the production attach verb over a host TCP bridge,
+   and the properties that only exist with two hosts are asserted — admission is
+   ADDITIVE (both NQNs on the allow-list at once), both clients write raw with a
+   PHYSICALLY DISJOINT extent map (GrantsExclusive on real hardware, across hosts),
+   same-file contention is REFUSED rather than overlapped (18 conflict refusals, map
+   still disjoint, first client's bytes intact), and a fence naming ONE client evicts
+   only that client — its raw writer stops at the device (EIO) while the OTHER host
+   keeps writing THROUGH the fence. That last result answers the open question the
+   drill was built for: the EA-RO reservation admits the surviving registrant, so a
+   per-client fence is per-client at the DEVICE too, not just on the allow-list.
 4. **Registry storage driver on the userspace library.** libflint (metadata client +
    SPDK TCP initiator), surfaced as the OCI-registry driver per
    `docs/oci-registry-pnfs-architecture.md`.
@@ -1090,6 +1101,24 @@ Each phase ships standalone value; none is gated on the next.
   at write time, where the errno is an lvol-level failure and not this ENOSPC path),
   capacity-aware placement across shards, and the client-side refresh
   (CB_NOTIFY_DEVICEID) that would make expansion online end to end.
+- **LAYOUTCOMMIT after LAYOUTRETURN is REFUSED, and it costs committed data.**
+  Found by the zombie drill 2026-08-11 (pre-existing — the rule dates from the
+  allocator's first commit, 4afb9b2). `extent_alloc::commit` validates against a LIVE
+  grant row for `(file_id, logical_offset, client_id)`; the Linux client, writing 8 MiB
+  through 1 MiB grant windows, repeatedly LAYOUTRETURNs and only then LAYOUTCOMMITs, so
+  the commit lands on rows that were just dropped and is rejected with "no grant for
+  this client". The extents stay `invalid`, the stub's size never advances, and the
+  file is durably SHORT — the drill's successor.bin ends at 4 MiB of 8 MiB written,
+  which no amount of re-reading fixes (an earlier session misread exactly this as a
+  cold-read/commit race and papered it with a polling read-back; the poll cannot help,
+  because the bytes are genuinely uncommitted). Requiring a live grant is stronger than
+  the model needs: the invariant `CommitRejected` protects is that a commit must not
+  promote an extent whose GENERATION has moved on (freed and re-granted to someone
+  else) — a client finishing its own write it just returned is not that. Fix shape:
+  validate the commit against the extent's generation and the returning client's
+  recent ownership rather than a currently-live row, with the model re-run over the
+  weakened precondition. Until then a block-class client that returns before it commits
+  silently loses the uncommitted tail. **This is the block tier's top correctness debt.**
 - **Kernel blocklayout maturity.** Mainline since v6.11, near-zero production soak over
   fabrics, no known production RFC 9561 deployment to learn from. Every client bug
   degrades silently to MDS I/O, which both masks it and moves its load to the MDS.

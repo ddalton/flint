@@ -274,6 +274,18 @@ impl StateBackend for MemoryBackend {
         ))
     }
 
+    async fn extent_committed_end(
+        &self,
+        _volume: &str,
+        _file_id: u64,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        Err(StateBackendError::Storage(
+            "block-class volumes require the durable sqlite backend \
+             (extent maps must survive restart — design doc §8)"
+                .into(),
+        ))
+    }
+
     async fn extent_grant(
         &self,
         _volume: &str,

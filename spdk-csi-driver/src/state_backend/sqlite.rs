@@ -1121,6 +1121,18 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn extent_committed_end(
+        &self,
+        volume: &str,
+        file_id: u64,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::committed_end(conn, &v, file_id)
+        })
+        .await
+    }
+
     async fn extent_grant(
         &self,
         volume: &str,

@@ -284,6 +284,24 @@ pub fn volume_headroom(conn: &Connection, volume: &str) -> Result<u64> {
     }
 }
 
+/// The highest logical end covered by a file's COMMITTED extents, or 0
+/// if it has none.
+///
+/// The MDS stub's length is normally the file's size, but it only
+/// advances at LAYOUTCOMMIT — so between a client's write and its
+/// commit, the extent map knows about bytes the stub does not. Anything
+/// that wants to answer "is this offset past the end of the file?" has
+/// to ask both, or it will call a write-in-flight an EOF.
+pub fn committed_end(conn: &Connection, volume: &str, file_id: u64) -> Result<u64> {
+    let end: Option<i64> = conn.query_row(
+        "SELECT MAX(logical_offset + length) FROM extents
+         WHERE volume = ?1 AND file_id = ?2 AND state = 'rw'",
+        params![volume, file_id as i64],
+        |r| r.get(0),
+    )?;
+    Ok(end.unwrap_or(0).max(0) as u64)
+}
+
 fn overlapping_extents(
     conn: &Connection,
     volume: &str,

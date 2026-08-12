@@ -1421,7 +1421,7 @@ impl CompoundDispatcher {
                     crate::pnfs::FallbackIoDisposition::FailFast => {
                         // Block class, at or past the committed size:
                         // that is EOF, not an error (block_read_eof).
-                        if self.block_read_eof(&stub, offset).is_some() {
+                        if self.block_read_eof(&stub, offset).await {
                             use crate::nfs::v4::compound::ReadResult;
                             return OperationResult::Read(
                                 Nfs4Status::Ok,
@@ -2412,17 +2412,47 @@ impl CompoundDispatcher {
     /// what LAYOUTCOMMIT is for), so at or past that size the correct
     /// answer is a short read with eof set.
     ///
-    /// Deliberately narrow: only at-or-past the stub's size, and only
-    /// for the scsi class. A read INSIDE the file that the belt refuses
-    /// (uncommitted or unreachable extents) keeps its loud EIO — serving
-    /// zeros there is the house failure mode, not a refinement.
-    fn block_read_eof(&self, stub: &Option<StubTarget>, offset: u64) -> Option<()> {
-        let (pnfs, t) = (self.pnfs_handler.as_ref()?, stub.as_ref()?);
+    /// Deliberately narrow, and narrower than the first cut: only
+    /// at-or-past the stub's size, only for the scsi class, and only
+    /// when THE EXTENT MAP AGREES the file ends there.
+    ///
+    /// That last condition is not paranoia — the first version shipped
+    /// without it and the zombie drill caught it the same day. The
+    /// stub's length only advances at LAYOUTCOMMIT, so between a
+    /// client's write and its commit the extent map covers bytes the
+    /// stub does not; answering "EOF" for those turns a loud, retryable
+    /// refusal into a SILENT SHORT READ, which is the same family of
+    /// failure as serving zeros. When committed extents reach past the
+    /// stub, the stub is what is stale — so the belt's EIO stands and
+    /// the reader retries into the truth.
+    async fn block_read_eof(&self, stub: &Option<StubTarget>, offset: u64) -> bool {
+        let (Some(pnfs), Some(t)) = (&self.pnfs_handler, stub.as_ref()) else {
+            return false;
+        };
         if pnfs.layout_class_for(&t.file_key) != crate::pnfs::mds::layout::LayoutClass::Scsi {
-            return None;
+            return false;
         }
-        let size = std::fs::metadata(&t.path).ok()?.len();
-        (offset >= size).then_some(())
+        let Ok(meta) = std::fs::metadata(&t.path) else {
+            return false;
+        };
+        let size = meta.len();
+        if offset < size {
+            return false;
+        }
+        let (Some(backend), Some(volume)) = (
+            pnfs.extent_backend(),
+            t.file_key.split('/').find(|c| !c.is_empty()),
+        ) else {
+            return false;
+        };
+        use std::os::unix::fs::MetadataExt;
+        match backend.extent_committed_end(volume, meta.ino()).await {
+            // Committed bytes past the stub's idea of the end: the SIZE
+            // is stale, not the read. Fall through to the loud answer.
+            Ok(Ok(end)) => end <= size,
+            // Cannot ask ⇒ do not claim EOF.
+            _ => false,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4347,6 +4377,49 @@ mod tests {
             inside.status(),
             Nfs4Status::Io,
             "a refused read INSIDE the file must stay loud"
+        );
+    }
+
+    /// THE EOF REFINEMENT'S OWN BELT — added the day the zombie drill
+    /// caught the first version silently truncating a read.
+    ///
+    /// The stub's length only advances at LAYOUTCOMMIT, so a client
+    /// that has written 8 MiB and not yet committed it leaves the
+    /// server believing the file is shorter. Answering "EOF" for the
+    /// uncovered tail turns a loud, retryable refusal into a SILENT
+    /// SHORT READ — the drill's read-back polled twenty times against a
+    /// stable, WRONG checksum. When committed extents reach past the
+    /// stub, the size is what is stale, and the belt's EIO must stand.
+    #[tokio::test]
+    async fn committed_extents_past_the_stub_size_are_not_eof() {
+        let backend = block_backend_with_arena("pvc-lag", 1 << 20, 0).await;
+        let (d, temp) = create_test_dispatcher_block(&["pvc-lag/data.bin"], backend);
+        let mut ctx = CompoundContext::new(2);
+        // …behind a stub that still says 4 KiB (the pre-LAYOUTCOMMIT
+        // window). file_id is the stub's inode, so the arena rows must
+        // be keyed by it for this test to mean anything.
+        let sid = pin_block_stub(&d, &mut ctx, &temp, "pvc-lag", "data.bin", 4096);
+        let ino = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(temp.path().canonicalize().unwrap().join("pvc-lag/data.bin"))
+                .unwrap()
+                .ino()
+        };
+        // 8 KiB of COMMITTED extents behind a 4 KiB stub.
+        let arena = d.pnfs_handler.as_ref().unwrap().extent_backend().unwrap();
+        arena.extent_grant("pvc-lag", ino, 7, 0, 8192, true).await.unwrap().unwrap();
+        arena.extent_commit("pvc-lag", ino, 7, 0, 8192).await.unwrap().unwrap();
+
+        let read = d
+            .dispatch_operation(
+                Operation::Read { stateid: sid, offset: 4096, count: 4096 },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(
+            read.status(),
+            Nfs4Status::Io,
+            "committed bytes live past the stub's size — this is a stale SIZE, not an EOF"
         );
     }
 
