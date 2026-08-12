@@ -134,6 +134,17 @@ CSI CLI. Modes are standing regression harnesses (`make test-pnfs-*-rig`).
   printed in the failure message, and the drill failed anyway. A rule you have
   written down is not a rule you have applied — grep the diff for `grep -q`
   before running a rig, not after.
+- **"Same predicate, evaluated later" is a new behaviour, and the model has to see
+  it.** The quarantine sweep looked like a free re-application of a belt the model
+  already gates — so much so that the argument for skipping the tranche was written
+  down before it was tested. TLC refuted five successive versions of that design
+  before any code existed: the release needed provenance, the delivery retry had to
+  be modelled or the sweep was unreachable (the *probe* caught that — a green
+  meaning "it never fired"), other free paths had to un-park, only real extents
+  could be parked, and the two-step grant window still bites. Cost: one branch and
+  no shipped bug. When a change re-applies an existing guard at a new TIME, the
+  module has never occupied that state, and "no model change needed" is the claim
+  most worth disbelieving.
 - **`fail` inside `$( )` is not a failure, it is a value.** Its message becomes the
   variable's contents and its `exit` leaves only the subshell, so the caller
   proceeds with the error as its data and reports something unrelated three lines

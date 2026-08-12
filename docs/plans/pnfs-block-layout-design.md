@@ -1389,9 +1389,33 @@ Each phase ships standalone value; none is gated on the next.
   nothing calls it, and nothing re-drives a failed preempt to confirmation.
   `extent_quarantine` does record `fenced_clients`, so the workable shape is a delivery
   RETRY that sets `delivered_unix` on later confirmation, plus a sweep that frees
-  quarantined ranges whose every named client is now delivered — the same
-  `FreeRequiresDelivered` predicate evaluated later, needing no model change and no new
-  trust. The rig remains the standing regression harness that keeps the fence path
+  quarantined ranges whose every named client is now delivered.
+  **ATTEMPTED MODEL-FIRST 2026-08-12 AND NOT LANDED** — branch
+  `wip/quarantine-sweep-model`, deliberately not merged. "The same predicate evaluated
+  later, needing no model change" was WRONG, and TLC said so five times before a line of
+  code was written; the module renders quarantine as *never freed*, so it had never
+  checked a state where a parked block IS freed. The constraints it forced out are the
+  spec for the next attempt:
+  (1) **Provenance is load-bearing.** A release gated on "all current holders are
+  fenced" frees blocks that were never quarantined, skipping the recall — the sweep must
+  act on what was PARKED (the `fenced_clients` CSV), not on circumstance.
+  (2) **The delivery retry must be modelled or the sweep is unreachable**: a client is
+  fenced at most once (the waiting set excludes the already-fenced), so an unlanded
+  exclusion can never become landed. The probe caught that vacuity — the code's reconcile
+  pass IS the retry, and the model had no action for it.
+  (3) **Freeing by any other path must un-park**, or the sweep frees the block again
+  under its next owner's live grant (quarantine and the free list are disjoint in code).
+  (4) **Only a real extent can be parked** — `ReclaimStart` may target never-allocated
+  blocks.
+  (5) **STILL OPEN: the two-step grant window.** `GrantCheck` can select a block that is
+  parked before `GrantInsert` publishes, landing a grant on a quarantined range. In code
+  that is unreachable (a parked range is not in the free list, and the grant is one
+  immediate transaction), so the model needs the matching guard; without it the shipped
+  cfg violates `Inv_RecallCompletesBeforeReuse`.
+  The A/B and probe are already correct on that branch: the blind release
+  (`QuarantineChecksDelivered = FALSE`) violates `Inv_NoStaleExtent*`, and the probe
+  fires once the retry exists. **No code was written**: the capacity leak stays, and the
+  operator lever stays the answer, until the model is green. The rig remains the standing regression harness that keeps the fence path
   honest. Open sub-item: the rig proves reach
   on ONE tgt; multi-namespace / multi-tgt preempt and the MdsRestart re-acquire
   (reservation holdership is target-side, not in sqlite) still need their own drills.
