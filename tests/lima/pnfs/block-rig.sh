@@ -467,11 +467,14 @@ CLIENT_ID=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
 # command failed, and `2>/dev/null || true` turned the error into an
 # answer. A probe that cannot distinguish "nobody registered" from "I
 # could not ask" is not a probe.
-set +e
-RESV_RAW=$(vsudo "nvme resv-report /dev/$NSDEV -d 256 -e 2>&1")
-RESV_RC=$?
-set -e
-[ "$RESV_RC" = "0" ] \
+# The remote exit code travels back INLINE. Never `set -e`/`set +e` here:
+# this script runs `set -uo pipefail` and has NO errexit, so flipping it
+# on mid-run changes the semantics of every later line — which is exactly
+# how the first draft of the fence assertions killed a run with no
+# message at all.
+RESV_RAW=$(vsudo "nvme resv-report /dev/$NSDEV -d 256 -e 2>&1; echo RC=\$?")
+RESV_RC=$(echo "$RESV_RAW" | sed -n 's/^RC=//p' | tail -1)
+[ "${RESV_RC:-1}" = "0" ] \
   || fail "nvme resv-report failed (rc=$RESV_RC) — the registration question was not asked: $(echo "$RESV_RAW" | tr '\n' ' ' | cut -c1-200)"
 RESV_POST=$(echo "$RESV_RAW" | grep -iE 'regctl|rkey' | tr '\n' ' ')
 echo "· resv-report after pNFS I/O:     ${RESV_POST:-<none>}"
@@ -479,7 +482,11 @@ echo "· MDS-issued pr_key (client id):  ${CLIENT_ID:-<none>}"
 [ -n "${CLIENT_ID:-}" ] || fail "no block_hosts row for $VOL — cannot name the key the client should hold"
 # The prediction from the kernel source, asserted so a future kernel
 # that changes this cannot pass quietly.
-REG_N=$(echo "$RESV_POST" | grep -o 'regctl[^0-9]*[0-9]*' | grep -o '[0-9]*$' | head -1)
+# `|| true` because pre-existing blocks in this script turn errexit ON
+# mid-run: an unguarded grep that finds nothing would kill the run with
+# no message, which is precisely the failure this section exists to
+# avoid producing.
+REG_N=$(echo "$RESV_POST" | grep -o 'regctl[^0-9]*[0-9]*' | grep -o '[0-9]*$' | head -1 || true)
 [ "${REG_N:-0}" -ge 1 ] \
   || fail "the client registered NO reservation key after real pNFS block I/O — \
 either this kernel does not register (the old belief, and then EA-RO alone excludes \
@@ -1252,22 +1259,46 @@ if [ "${FENCE:-0}" = "1" ]; then
     || fail "writer never reached the device (bytes_written $W1 → $W2) — nothing to fence"
   echo "✓ live raw-path writer: bytes_written $W1 → $W2 and climbing"
 
-  # The client's own view of the reservation table BEFORE the fence —
-  # independent of anything flint logs. Shows whether the kernel even
-  # registered a preemptable key (the 'zeroed new key' question).
-  RESV_BEFORE=$(vsudo "nvme resv-report /dev/$NSDEV -d 256 -e 2>/dev/null | grep -iE 'rtype|regctl|rkey' | tr '\n' ' '" || true)
-  echo "· resv-report pre-fence: ${RESV_BEFORE:-<none>}"
-
-  # F2. the lever. The victim client id is the NFSv4 client id — the
-  # same u64 GETDEVICEINFO handed out as the reservation key. It is
-  # stable, but a grant ROW only exists mid-write (LAYOUTRETURN drops it
-  # between the O_DIRECT writer's passes), so read it from the MDS log's
-  # scsi LAYOUTGET/RETURN lines, which always name it, and fall back to
-  # a live grant row.
+  # The victim client id is the NFSv4 client id — the same u64
+  # GETDEVICEINFO handed out as the reservation key. It is stable, but a
+  # grant ROW only exists mid-write (LAYOUTRETURN drops it between the
+  # O_DIRECT writer's passes), so read it from the MDS log's scsi
+  # LAYOUTGET/RETURN lines, which always name it, and fall back to a
+  # live grant row. Derived HERE, before the fence, because the
+  # pre-fence reservation assertion needs the key it is looking for.
   CID=$(vsh "grep -oE 'client [0-9]+' $RIG/mds.log | grep -oE '[0-9]+' | tail -1" || true)
   [ -n "$CID" ] || CID=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
     \"SELECT DISTINCT client_id FROM extent_grants WHERE volume='$VOL' LIMIT 1\"")
   [ -n "$CID" ] || fail "no scsi client id in the MDS log or grant table to fence"
+
+  # F1b. THE VICTIM IS A REGISTRANT — the production shape, asserted so
+  # the drill can no longer be read as covering a case it does not.
+  #
+  # This writer goes through the MOUNT, so the client has resolved the
+  # deviceid and `bl_register_scsi` has landed its key
+  # (fs/nfs/blocklayout/dev.c:39, from blocklayout.c:592) — the base
+  # rig's §9b measures that transition directly. It matters because
+  # EA-RO is Exclusive Access *REGISTRANTS ONLY*: against a registrant
+  # the reservation alone excludes nothing, so what fences this client
+  # is the PREEMPT arm removing its key, not the acquisition. A drill
+  # whose victim happened to be unregistered would prove the other
+  # mechanism and read the same in the log.
+  # Prints the report AND a trailing `RC=<n>`; never calls `fail` itself.
+  # A `fail` inside `$( )` writes its message into the VARIABLE instead of
+  # the terminal and exits only the subshell — the caller asserts.
+  resv_report() { vsudo "nvme resv-report /dev/$NSDEV -d 256 -e 2>&1; echo RC=\$?"; }
+  resv_rc() { echo "$1" | sed -n 's/^RC=//p' | tail -1; }
+  RESV_BEFORE_RAW=$(resv_report)
+  [ "$(resv_rc "$RESV_BEFORE_RAW")" = "0" ] \
+    || fail "pre-fence nvme resv-report failed: $(echo "$RESV_BEFORE_RAW" | tr '\n' ' ' | cut -c1-160)"
+  RESV_BEFORE=$(echo "$RESV_BEFORE_RAW" | grep -iE 'rtype|regctl|rkey' | tr '\n' ' ')
+  echo "· resv-report pre-fence: ${RESV_BEFORE:-<none>}"
+  [ "$(echo "$RESV_BEFORE_RAW" | grep -cE "rkey[^0-9]*\b$CID\b" || true)" -ge 1 ] \
+    || fail "the victim (client $CID) holds NO registered key before the fence — this \
+drill would then be proving the non-registrant path (EA-RO excludes it) and NOT the \
+production one (preempt must remove its key). Report: ${RESV_BEFORE:-<none>}"
+  echo "✓ F1b: the victim IS a registrant (rkey = client id $CID) — EA-RO alone will not"
+  echo "  exclude it, so the preempt arm is what has to work"
   FR=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
         -d '{\"volumeId\":\"$VOL\",\"clientId\":\"$CID\"}' \
         127.0.0.1:50051 pnfs.control.MdsControl/FenceBlockClient") \
@@ -1289,6 +1320,32 @@ if [ "${FENCE:-0}" = "1" ]; then
   [ "${W3:-0}" = "${W4:-1}" ] \
     || fail "bytes_written STILL CLIMBING after the fence ($W3 → $W4) — FenceReaches is FALSE"
   echo "✓ FenceReaches: bytes_written frozen at $W4 across 3s (was climbing pre-fence)"
+
+  # F3b. ...and the DEVICE's own account of why: the victim's key is
+  # gone. The counter freeze proves the client stopped; this proves it
+  # stopped for the reason we intended. Without it a freeze caused by
+  # anything else — a wedged writer, a dead session — reads identically.
+  RESV_AFTER_RAW=$(resv_report)
+  RESV_AFTER=$(echo "$RESV_AFTER_RAW" | grep -iE 'rtype|regctl|rkey' | tr '\n' ' ')
+  echo "· resv-report post-fence: ${RESV_AFTER:-<none>} (rc=$(resv_rc "$RESV_AFTER_RAW"))"
+  if [ "$(resv_rc "$RESV_AFTER_RAW")" != "0" ]; then
+    # The report COMMAND itself being refused is a lawful answer here: a
+    # fenced non-registrant can be denied it. That is not evidence the
+    # key survived, so fall back to the MDS's own key list — but say
+    # which arm answered, so the two never blur.
+    echo "· the post-fence report was itself refused — consistent with the client having"
+    echo "  lost its registration; falling back to the MDS's key list"
+    [ "$(echo "$RESV_LINE" | grep -c "0x$(printf '%x' "$CID")" || true)" = "0" ] \
+      || fail "the MDS still lists the victim key 0x$(printf '%x' "$CID") after the fence: $RESV_LINE"
+    echo "✓ F3b: the victim key is absent from the post-fence reservation (MDS view)"
+  else
+    [ "$(echo "$RESV_AFTER_RAW" | grep -cE "rkey[^0-9]*\b$CID\b" || true)" = "0" ] \
+      || fail "the victim's key ($CID) is STILL registered after the fence — the preempt \
+arm did not remove it, so a registrant is being held off by EA-RO alone, which it does \
+not do. Report: ${RESV_AFTER:-<none>}"
+    echo "✓ F3b: the victim's registration is GONE at the device — the preempt arm, not"
+    echo "  the acquisition, is what fenced it"
+  fi
 
   # F4. the writer makes no further progress. Two lawful post-fence
   # states, BOTH acceptable — a reservation conflict is a command-level

@@ -637,10 +637,13 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   > `FENCE=1 RESTART=1`): fence a live client, then kill+restart the MDS with the fence
   > active — the fence is UNCHANGED. Two corrections to the sketch above:
   >  1. **"re-register and re-acquire RTYPE=4h on every block volume on restart" is
-  >     WRONG**, and only because the fence rig taught us the kernel registers no key:
-  >     the MDS therefore holds EA-RO **only during a fence**, never continuously
-  >     (continuous 4h would fence every non-registrant client, i.e. all of them,
-  >     always). So there is no standing per-volume reservation to re-acquire.
+  >     WRONG**: the MDS holds EA-RO **only during a fence**, never continuously, so
+  >     there is no standing per-volume reservation to re-acquire. (The original
+  >     reasoning — "continuous 4h would fence every client, since none registers" —
+  >     was based on the retired no-key claim; the conclusion survives it on the
+  >     stronger ground that a client registers only while it holds a resolved
+  >     device, so a standing EA-RO would fence every client that is between
+  >     devices. See §12.)
   >  2. What must survive is the **per-fence** reservation plus the sqlite eviction, and
   >     both do with **no action on restart**: startup `reconcile_all` re-converges the
   >     allow-list from `block_hosts` (the fenced client's row was deleted by the fence
@@ -680,9 +683,9 @@ volume_alloc(volume TEXT PK, size_ceiling INTEGER, next_free INTEGER, ...)
   > after leaves the fence standing, the safe direction; a lever retry converges), then
   > releases the EA-RO reservation via NVMe Reservation Release (RRELA=0, RTYPE from the
   > report, CRKEY=MDS key; the MDS *registration* stays) — but ONLY when no other client
-  > remains fenced on the volume: the reservation is volume-wide (kernel clients register
-  > no key, so EA-RO blocks every non-registrant), so it must outlive any single unfence
-  > while a sibling's fence stands. Fenced GRANT rows are deliberately untouched — they
+  > remains fenced on the volume: the reservation is volume-wide (EA-RO blocks every
+  > non-registrant, and a client holds a key only while it has a resolved device —
+  > §12), so it must outlive any single unfence while a sibling's fence stands. Fenced GRANT rows are deliberately untouched — they
   > clear via the client's own return-after-fence or quarantine on reclaim. The rig runs
   > the REAL operator flow: fence a mid-write client, **reboot the node**, then unfence —
   > because rig-found, a client fenced with an O_DIRECT pwrite in flight can park that
@@ -1277,27 +1280,34 @@ Each phase ships standalone value; none is gated on the next.
   or MDS-level mirroring across namespaces with the MDS coordinating writes — the
   latter re-inserts the MDS into the data path and is probably disqualified. Undecided;
   phase 1-3 ship single-replica with `reclaimPolicy` and workload guidance saying so.
-- **⚠️ THE CLIENT IS A REGISTRANT — a recorded belief this design cited is WRONG,
-  measured 2026-08-12 (`nvme resv-report`, base rig §9b).** The claim was "kernel
-  blocklayout clients register no key, so EA-RO blocks every one of them". Linux
-  7.0 registers: `bl_register_scsi` issues `pr_register(bdev, 0, dev->pr_key,
-  true)` (`fs/nfs/blocklayout/dev.c:39`) whenever a deviceid is resolved
-  (`blocklayout.c:592`), guarded by a per-device-object `PNFS_BDEV_REGISTERED`
-  bit, and `bl_free_device` unregisters unconditionally. The rig shows both halves:
-  `regctl: 0` with the nvme session up and the volume mounted, then `regctl: 1,
-  rkey: 2` after real pNFS I/O — where 2 is exactly the client id GETDEVICEINFO
-  handed out as `sbv_pr_key`. So registration is tied to DEVICE RESOLUTION, not to
-  `nvme connect`, and the key-distribution channel is now proven at the device
-  rather than inferred.
+- **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
+  device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
+  preempt-drill correction already retired "the kernel registers NO key" and left
+  it at *"only SOMETIMES true"*; this pins down the "sometimes", and it is not
+  flaky — it is deterministic. Two samples in ONE run: with the nvme session up and
+  the volume mounted but no pNFS I/O yet, `regctl: 0`; after real pNFS block I/O,
+  `regctl: 1, rkey: 2` — where 2 is exactly the client id GETDEVICEINFO handed out
+  as `sbv_pr_key`. That matches the source: `bl_register_scsi` issues
+  `pr_register(bdev, 0, dev->pr_key, true)` (`fs/nfs/blocklayout/dev.c:39`) when a
+  deviceid is RESOLVED (`blocklayout.c:592`), guarded by a per-device-object
+  `PNFS_BDEV_REGISTERED` bit, and `bl_free_device` unregisters unconditionally. So
+  a client registers iff it has a live device object — never at `nvme connect` —
+  and the key-distribution channel is now proven at the device rather than
+  inferred. Anywhere below that still reads "kernel clients register no key",
+  read it as "a client with no resolved device holds no key".
   **Two consequences, both about what we have actually proven:**
   (a) EA-RO is Exclusive Access *Registrants Only*, so it does **not** exclude a
-  client that is doing pNFS I/O. The single-host `FENCE=1` drill recorded its
-  mechanism as "EA-RO acquisition against a non-registrant kernel" — true of that
-  drill, whose writer was raw `dd` and therefore never resolved a device, but NOT
-  the production shape. For a registrant the fence rests entirely on the PREEMPT
-  arm removing the victim's key (which multi-rig M4b did exercise, B's writer
-  stopping at the device). The fence drill should assert the registration state
-  around the fence so the two shapes stop being conflated.
+  client that is doing pNFS I/O — for a registrant the fence rests entirely on the
+  PREEMPT arm removing the victim's key. **The `FENCE=1` drill now asserts exactly
+  that, so the two shapes can no longer blur** (F1b/F3b, 2026-08-12): before the
+  lever it requires the victim to BE a registrant whose `rkey` equals the client id
+  about to be fenced — the production shape, and a drill whose victim happened to
+  be unregistered would otherwise prove the other mechanism while reading the same
+  in the log — and after it, requires that key to be gone. Measured en route: the
+  post-fence `nvme resv-report` is itself **refused** (rc=1) where the pre-fence one
+  succeeded, so a fenced client cannot even read the reservation table; the
+  assertion falls back to the MDS's own key list (`keys=[0x666c696e745f6d64(holder)]`
+  — the MDS alone) and says which arm answered.
   (b) **Unfence does not restore the victim's registration.** The preempt removed
   the key; the client's device object keeps its `PNFS_BDEV_REGISTERED` bit set, so
   it will not re-register until that object is freed and re-resolved. An unfenced

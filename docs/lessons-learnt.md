@@ -134,6 +134,14 @@ CSI CLI. Modes are standing regression harnesses (`make test-pnfs-*-rig`).
   printed in the failure message, and the drill failed anyway. A rule you have
   written down is not a rule you have applied — grep the diff for `grep -q`
   before running a rig, not after.
+- **Never flip `set -e` on inside a script that does not use it.** The rig runs
+  `set -uo pipefail`; a `set +e … set -e` pair copied from elsewhere leaves errexit
+  ON for everything after, so the next unguarded `grep` that finds nothing kills
+  the run **with no message at all**. Two of the fence assertions died that way
+  before they ever ran. Carry a remote command's exit code back inline
+  (`cmd; echo RC=$?`) instead of touching shell options — and never call the
+  `fail` helper inside `$( )`, where its message lands in the variable and the
+  exit only leaves the subshell.
 - **A probe wired with a flag the tool does not have prints "nothing found"
   forever.** Five `nvme resv-report` calls in the fence and preempt drills passed
   `-c`, which nvme-cli 2.8 has no such option for; every one failed, `2>/dev/null
