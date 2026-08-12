@@ -1,8 +1,8 @@
-# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, and the block admission layer
+# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, and the block serving-composition machine
 
-Six spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
+Seven spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
-(`scripts/check-tla.sh`, **one hundred and nineteen** TLC runs).
+(`scripts/check-tla.sh`, **one hundred and thirty-two** TLC runs).
 
 Both counts here have drifted before, in both files, because nothing
 regenerated them. They do now:
@@ -209,6 +209,36 @@ committed-and-held blocks — two live grants overlapped in 6 states); it
 now reads "not free ∧ held", because a predicate enumerating states goes
 stale the day the state set grows.  The Rust transaction had it right
 already.
+
+`FlintComposition.tla` (2026-08-12) models the **block-tier
+serving-composition machine** — the arbiter the 17-agent replication
+review found missing between SPDK raid1 and a survivable failover
+(design doc §12): a durable serving-target record `[epoch, composer]`
+advanced by one CAS on a **fallible** dead-vs-partitioned verdict, with
+the victim class `FlintReplication` has no vocabulary for — pNFS block
+clients holding direct nvme-tcp sessions to a composer the MDS cannot
+reach.  Model-before-code like `FlintExtents` was, and it earned that
+order four times before any code existed: eviction must not precede the
+lease horizon (severing a still-acking zombie's fan-in manufactures
+silent loss); the review's three-arm arbiter had no answer to a
+**degraded-window failover**, so promotion needs `ElectInSync` +
+`DegradeBarrier` (GateStrict + RecordBarrier arriving at the
+serving-target record — stock raid1 acks on any-one-leg and records the
+miss async); an epoch-valid fence confirmation is not yet a free license
+(`FreeWaitsActive` — the deposed composer's fan-in reaches the surviving
+leg under its own inter-tgt hostnqn until assembly); and the review's
+"delivered_unix keyed by epoch" is the **wrong enforcement point** — the
+belt is the export mouth (`FenceReplayOnAssemble`: allow-list =
+admissions minus fenced, fail-closed before the listener exists), under
+which the keying is machine-checked redundant
+(`FlintCompositionEpochKeyedToo.cfg` explores the identical
+distinct-state graph).  `DeadmanCertain` is the module's honesty axiom
+(EvidenceStrict's shape): the Skew run prices leasing without consensus
+at a window of stale *reads*, writes already contained.  Owed to later
+tranches: record-driven rebuild/rejoin (clears the sticky stale marks),
+the write-hole divergence belt, fail-back past `MaxEpoch = 2`, and all
+liveness (redirect actor, promotion progress, the forward livelock of a
+never-confirmable fence).
 
 Verification of snapshots is layered deliberately:
 

@@ -239,6 +239,18 @@ Five-plus modules, one gate script (`scripts/check-tla.sh`), every run required.
   committing (which is what Linux does). Only a real client found it. Where a
   precondition is stronger than the theorem it protects, write down WHICH
   theorem it protects — the gap is where over-strictness hides.
+- **A reviewer's named fix is a hypothesis about the enforcement point — model
+  it before schema-ing it.** The replication review (17 agents, every SPDK
+  citation verified) prescribed "key `delivered_unix` by composition epoch";
+  FlintComposition's second strict run produced the counterexample that
+  refutes it as the mechanism: a fence confirmed and its range LEGALLY freed
+  at epoch 1 cannot be un-freed by any keying when the victim later
+  re-attaches to a survivor that has none of the old node's PTPL state. The
+  belt that closes it lives at the export mouth (allow-list =
+  admissions-minus-fenced, fail-closed before the listener exists), and with
+  it the keyed schema is machine-checked redundant — identical
+  distinct-state count with the guard on and off. Review verdicts rank the
+  problems; only the model ranks the fixes.
 - Replay TLC counterexample traces as unit tests — the model's findings become
   regression pins in the code's own suite.
 - TLC mechanics that bite: unbounded `CHOOSE` for sentinels errors (use a

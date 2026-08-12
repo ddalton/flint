@@ -49,7 +49,8 @@ DS-on-replicated-PVC layering. **Honest caveat on that claim**: today's raid1 is
 assembled on the *consumer* node's tgt (`driver.rs:3161-3236`) — a remote pNFS client
 cannot see it. Block-layout volumes are single-replica lvols until replication moves
 server-side (storage-node raid or MDS-level mirroring). That is real work, scoped in
-§12, not a freebie.
+§12, not a freebie — reviewed and modeled 2026-08-12 (§12's replication entry;
+`formal/FlintComposition.tla`), still unimplemented.
 
 ## 2. Motivation — the taxes this deletes
 
@@ -1008,7 +1009,11 @@ serve remote pNFS clients — the licensor's guarantees are vacuous for this tie
 committed extent's bytes survive exactly as well as one lvol does, and no formal
 durability story exists until server-side replication (§12) lands, at which point
 FlintReplication (or a successor) must be re-scoped to cover it; citing a green
-FlintExtents run as a durability claim would be the axiom laundering itself. And
+FlintExtents run as a durability claim would be the axiom laundering itself.
+**The successor now exists (2026-08-12): `FlintComposition.tla` models the
+serving-composition/failover half of §12's replication design ahead of its code —
+control-plane arbitration only; the byte-durability axiom stands unlicensed until
+the data-plane tranche (write-hole belt, rebuild) joins it.** And
 control-plane reachability (recall delivery, reservation delivery) is unmodelled
 anywhere in the corpus, so FlintExtents carries it as explicit constants with failing
 runs, never delegates it.
@@ -1311,10 +1316,117 @@ Each phase ships standalone value; none is gated on the next.
   degrades silently to MDS I/O, which both masks it and moves its load to the MDS.
   Mitigation: F68-style metering on the MDS block lane, and the phase-2 lima rig stays
   a standing regression harness.
-- **Replication for the block tier** (§1 caveat). Server-side raid on the storage node,
-  or MDS-level mirroring across namespaces with the MDS coordinating writes — the
-  latter re-inserts the MDS into the data path and is probably disqualified. Undecided;
-  phase 1-3 ship single-replica with `reclaimPolicy` and workload guidance saying so.
+- **Replication for the block tier** (§1 caveat) — **REVIEWED 2026-08-12 and MODELED
+  the same day; still unimplemented, no longer undecided.** A 17-agent adversarial
+  review (5 mappers / 4 dimension reviewers / 8 independent refutation passes, every
+  SPDK claim re-verified against the v26.05 checkout flint builds) answered the
+  standing question: **SPDK raid1 under the exported namespace is the substrate, and
+  it is the disk arm ONLY.** MDS-level mirroring stays disqualified (re-inserts the
+  MDS into the data path); raid1 keeps the write path client → composing tgt → legs,
+  with a remote leg attached over nvme-tcp via `bdev_nvme`. What raid1 verifiably
+  provides: mirrored writes with FLUSH/UNMAP fan-out, degraded serving, a
+  quiesced-window rebuild engine with a bandwidth cap, superblock auto-assembly
+  guarded by `-EBUSY` for an online array, online grow to min-of-legs, deterministic
+  thin-zero reads, and identity that already survives a node swap (NGUID/UUID/subnqn
+  are pure functions of the volume id — the survivor reproduces them from zero
+  migrated state). What it cannot do, each verified in source:
+  (1) **ack semantics too weak for LAYOUTCOMMIT alone** — a write acks when all legs
+  *respond* but ANY one succeeded, and the record that a leg missed it is written
+  async after the ack behind a quiesce (`bdev_raid.c:705-718`, `2440-2444`); crash in
+  the window ⇒ equal-seq legs reassemble clean, **no scrub or resync exists** (the
+  only process type is REBUILD), reads flap between divergent legs;
+  (2) **a survivor cannot self-promote** — its superblock still lists the dead peer
+  CONFIGURED, so auto-assembly parks in CONFIGURING forever
+  (`bdev_raid.c:3384-3396`, `3730-3737`); any force-degraded lever added naively
+  mints mutual solo-online split-brain that seq numbers cannot arbitrate, because
+  neither process ever sees the other's leg;
+  (3) **rebuild is a full-arena copy** — zero delta tracking, zero zero-detection ⇒
+  densifies the thin target leg, hours at multi-TB, ~$20/TiB cross-AZ (legs are
+  **same-AZ by placement policy**; AZ-loss durability is a priced tier, not a default).
+  Note the asymmetry with the file tier, whose catch-up is blobstore-level and
+  allocation-aware — for a thin volume, stock raid1 rebuild moves 5-10× the bytes the
+  file tier would for the same volume, and leaves the target leg fully densified.
+  **DECIDED 2026-08-12: the first implementation does NOT use raid1's own rebuild
+  process for the copy.** flint drives the rebuild itself, sparse-aware —
+  `SEEK_DATA`/`SEEK_HOLE` against the source lvol (lvol bdevs support it), copying
+  allocated clusters only — so rebuild cost is proportional to allocated bytes, the
+  thin target stays thin, and the cross-AZ worst case scales with data, not logical
+  size. The incremental ladder above that is the "rebuilds at scale" tranche, in
+  cost order: degraded-window dirty tracking (falls out of the DegradeBarrier
+  interposition the model already requires — delta rejoin for the
+  brief-absence case), lvol snapshot-diff at the stale-mark cut (the file tier's
+  esnap shape one layer down), and a persistent md-style crash-window bitmap (the
+  only one that makes the write-hole forced resync incremental). Safety
+  precondition for ANY delta path, RejoinGuard transferred: a leg may rejoin
+  incrementally only if its content is provably the cut state — which the block
+  tier can prove cheaply, because the leg-export admission gate means nothing else
+  could have written the absent leg and the record's generation pins which cut it
+  left at. Modeled in FlintComposition tranche 2 (record-driven rebuild/rejoin)
+  before implementation;
+  (4) **PR state never travels** — reservations live at lib/nvmf per node, PTPL to a
+  local file; an empty PTPL dir on the survivor loads zero state *silently*
+  (`subsystem.c:3154-3158`);
+  (5) **the superblock costs ≥1 MiB of data_offset** — in-place conversion of an
+  existing volume would shift bytes under the pinned NGUID; conversion is a data
+  migration, never a wrap.
+  **The missing piece is one mechanism, and this doc pre-committed to it** (§9's
+  abstraction note: "if two tgt incarnations can ever expose one extent range, the
+  serving-target state is a SET from day one"): a durable serving-target record
+  `[epoch, composer]` in MDS sqlite, advanced by one CAS on an unreachability verdict
+  that deliberately cannot tell dead from partitioned, enforced at the survivor's
+  leg-export (evict the old composer's inter-tgt hostnqn), at the composer itself (a
+  serving lease with a self-suspending dead-man — the only exclusion the LOCAL leg
+  has), and at the export mouth. **`formal/FlintComposition.tla` now carries that
+  machine** (13 gate runs: strict + a redundancy A/B green, 7 single-flag mutations,
+  3 non-vacuity probes), modeled before any code exists, FlintExtents-style — with
+  the pNFS-specific victim class FlintReplication lacks: clients holding direct
+  nvme-tcp sessions to a partitioned composer. **TLC corrected the review's design
+  four times before implementation:**
+  (a) *eviction must not precede the lease horizon* — severing a still-acking
+  zombie's fan-in strands its clients' acked writes on the doomed leg; the failover
+  order is CAS → horizon → evict → assemble → replay → redirect;
+  (b) *the arbiter needs FlintReplication's election machinery, not just fencing* — a
+  degraded-window failover (elect the leg that missed acked solo writes) discards
+  data with every fence belt green; promotion requires `ElectInSync` (the record
+  refuses a stale leg) and `DegradeBarrier` (the raid acks a solo-landing write only
+  after the record carries the peer's stale mark — stock raid1 does the opposite, so
+  flint interposes on leg failure; mark-then-degrade, the RecordBarrier transfer);
+  (c) *an epoch-valid fence confirmation is not yet a free license* — until assembly,
+  the deposed composer's fan-in still reaches the surviving leg **under the
+  composer's own inter-tgt hostnqn**, indistinguishable to any per-client preempt;
+  the free waits for the confirming epoch's composition to be ACTIVE;
+  (d) *the review's "key `delivered_unix` by epoch" is the wrong enforcement point,
+  refuted as redundant* — its scenario (fence confirmed at A, range legally freed at
+  epoch 1, victim re-attaches to the survivor unfenced because PTPL never travels)
+  cannot be closed by keying a free that was legal when it happened; the belt is the
+  **export mouth**: the new composer's export opens only after standing fences are
+  converged into its allow-list (admissions minus fenced, computed MDS-side,
+  fail-closed — converge failure means no listener). With that replay in place, the
+  epoch-keyed schema change is machine-checked redundant
+  (`FlintCompositionEpochKeyedToo.cfg` explores the identical 102,962-state graph),
+  so `fenced_clients` keeps its schema.
+  **Priced residuals, named:** the dead-man rests on a bounded-skew axiom
+  (`DeadmanCertain`; the Skew run prices its absence at a window of stale READS —
+  writes stay contained by eviction + the barrier); electing only in-sync legs means
+  a degraded volume whose good leg's node dies WAITS rather than serves (availability
+  spent on durability; the operator override is FlintReplication's LastResortServe
+  analog, undesigned); and **do not pre-attach a standby via multipath** — PR
+  registration and fence preemption land on one tgt, so a fenced client would fail
+  over to the standby unfenced, breaking the property multi-rig M4c proved.
+  **Still to build or design** (beyond the epoch machine itself): the redirect actor
+  (csi-node re-attach lane + "session up" ack + per-client notify re-fire — the
+  session record today replays the recorded traddr with a deliberate "No MDS call",
+  and the only production CB_NOTIFY_DEVICEID sender is expand), a dead-vs-partitioned
+  detection verdict (the reconcile pass only logs per-volume failures), un-pinning
+  the MDS from the tgt node it must survive (chart `nodeSelector` + static traddr),
+  `grow()` for composed volumes (the read-back belt validates ONE LVOL, not the
+  array — a one-leg ENOSPC mid-sequence could raise the ceiling past the raid), the
+  write-hole divergence belt of limit (1) (forced rebuild of one leg on any unclean
+  assembly), tranche 2 of the model (record-driven rebuild/rejoin, fail-back, the
+  liveness debts), and the long-owed operator surface for
+  `release_quarantine`/`quarantine_stats`, which failover work makes load-bearing.
+  Phases 1-3 continue to ship single-replica with `reclaimPolicy` and workload
+  guidance saying so.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left

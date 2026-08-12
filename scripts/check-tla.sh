@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and nineteen runs, ALL required.
+# One hundred and thirty-two runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -17,9 +17,9 @@
 #   awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
-#   71 FlintReplication   15 FlintExtents   11 FlintExtentsProbe
-#    7 FlintTruncate       5 FlintAdmission  4 FlintSnapshots
-#    3 FlintClaims         3 FlintA2Probe)
+#   71 FlintReplication   15 FlintExtents   13 FlintComposition
+#   11 FlintExtentsProbe   7 FlintTruncate   5 FlintAdmission
+#    4 FlintSnapshots      3 FlintClaims     3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -28,6 +28,11 @@
 # fence/reuse core, modelling code that DOES NOT EXIST YET — the module
 # comes before the allocator, deliberately); documented at the bottom of
 # this file, next to its runs.
+#
+# FlintComposition.tla — the block-tier serving-composition machine
+# (replication failover: serving-target record + epoch, model-before-code
+# like FlintExtents was); documented at the bottom of this file, next to
+# its runs.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -863,5 +868,51 @@ mutation_run FlintAdmission FlintAdmissionZombie.cfg "same-node zombie mutation 
 strict_run   FlintAdmission FlintAdmissionCrossHost.cfg "admission cross-host strict (ClientHonorsLease=FALSE but the successor is elsewhere: the per-host eviction barrier alone holds the line)"
 mutation_run FlintAdmission FlintAdmissionProbeSweep.cfg "admission sweep probe (the fence->revoke chain really runs in the shipped state space)" "ProbeSweepFires"
 mutation_run FlintAdmission FlintAdmissionProbeReadmit.cfg "admission readmit probe (the same-host door is really walked through post-sweep — the shipped green exercised the exact door the Zombie run proves dangerous)" "ProbeReadmitFires"
+
+# ---- the block-tier serving-composition machine (2026-08-12). ----
+# docs/plans/pnfs-block-layout-design.md §12 "Replication for the block
+# tier".  Models code that DOES NOT EXIST YET — the 17-agent replication
+# review's verdict was that SPDK raid1 is the disk arm only, and the missing
+# arbiter is an MDS-CAS'd serving-target record [epoch, composer] enforced at
+# the survivor's leg-export, the composer's serving lease, and the export
+# mouth.  The victim class FlintReplication has no vocabulary for is modelled
+# here: pNFS block clients holding DIRECT nvme-tcp sessions to a composer the
+# MDS cannot reach ("part" is MDS-unreachable, client-reachable — the
+# fallible dead-vs-partitioned verdict is built into PromoteCAS's guard).
+#
+# FOUR FINDINGS BEFORE ANY CODE (module header carries the full argument):
+# (1) eviction must not precede the lease horizon (severing a still-acking
+# zombie's fan-in manufactures silent loss — the order is CAS -> horizon ->
+# evict -> assemble -> replay -> redirect); (2) the review's three-arm
+# arbiter had no answer to a DEGRADED-WINDOW failover — electing the stale
+# leg discards every acked solo write, so promotion needs ElectInSync +
+# DegradeBarrier (FlintReplication's GateStrict + RecordBarrier arriving at
+# the serving-target record; stock raid1 acks on any-one-leg and records the
+# miss async, bdev_raid.c:705-718, 2440-2444, so flint interposes on leg
+# failure); (3) an epoch-valid fence confirmation is not yet a free license —
+# the deposed composer's fan-in still reaches the surviving leg until
+# assembly, under the COMPOSER'S inter-tgt hostnqn no per-client preempt can
+# distinguish (FreeWaitsActive); (4) the review's "delivered_unix keyed by
+# epoch" is the WRONG ENFORCEMENT POINT — a legally-freed range's victim
+# re-attaches to the survivor unfenced because PTPL never travels, and no
+# keying closes a free that was legal when it happened.  The belt is the
+# export MOUTH (FenceReplayOnAssemble: allow-list = admissions minus fenced,
+# converged before the listener exists, fail-closed), and under it the
+# keying is machine-checked redundant (EpochKeyedToo explores the IDENTICAL
+# 102,962-state graph as the shipped strict cfg — the guard is never the
+# deciding guard anywhere).
+strict_run   FlintComposition FlintComposition.cfg "composition strict (all belts on, DeliveredEpochKeyed=FALSE as shipped: one full failover with a fallible verdict, a zombie composer, direct-session clients, and every theorem holding)"
+strict_run   FlintComposition FlintCompositionEpochKeyedToo.cfg "composition epoch-keyed A/B (DeliveredEpochKeyed=TRUE, full theorem stack: GREEN = the machine-checked REDUNDANCY verdict — with the fence replay at the export mouth and the free waiting on ActiveNew, the review's schema refinement changes nothing; identical distinct-state count is the receipt)"
+mutation_run FlintComposition FlintCompositionSkew.cfg "synchrony-axiom price (DeadmanCertain=FALSE: the late self-suspend serves stale READS after the survivor is active — writes already contained by eviction + the degrade barrier; the documented residual of leasing without consensus)" "Inv_NoStaleServe"
+mutation_run FlintComposition FlintCompositionLegGate.cfg "eviction mutation in the skew world (LegAdmissionGate=FALSE where the deadman can be late — the base world is where eviction stops being redundant: the zombie fans an innocent write INTO the serving leg; with eviction ON divergence is unreachable there, which is the attribution)" "Inv_NoDivergentServing"
+mutation_run FlintComposition FlintCompositionDeadman.cfg "dead-man mutation (DeadmanGate=FALSE: the partitioned composer serves an abandoned lineage FOREVER — the local leg and the read path are what no admission gate can reach, and why the arbiter is three parts)" "Inv_NoStaleServe"
+mutation_run FlintComposition FlintCompositionAssembly.cfg "record-is-the-only-door mutation (RecordAssemblyOnly=FALSE: the healed composer's reconciler re-converges the same subnqn+NGUID over the stale leg and serves it — the review's 'nothing tears down A's export' finding as a counterexample)" "Inv_NoStaleServe"
+mutation_run FlintComposition FlintCompositionElectStale.cfg "election-gate mutation (ElectInSync=FALSE: the degraded-window failover — promote the leg the record already knows is stale and the assembly discards every acked solo write; with the gate ON the volume waits for the good leg instead, availability spent on durability)" "Inv_NoDoomedAck"
+mutation_run FlintComposition FlintCompositionDegradeBlind.cfg "mark-then-degrade mutation (DegradeBarrier=FALSE = stock raid1's actual ack path: the un-marked solo ack leaves the election gate reading insync for a leg already missing acked bytes — the barrier is what makes ElectInSync's data honest)" "Inv_NoDoomedAck"
+mutation_run FlintComposition FlintCompositionFreeEarly.cfg "free-waits-active mutation (FreeWaitsActive=FALSE: an epoch-current, honestly-keyed confirmation licenses a free in the CAS-to-assembly interregnum, and the victim's writes arrive at the surviving leg under the composer's inter-tgt hostnqn)" "Inv_NoStaleExtentWrite"
+mutation_run FlintComposition FlintCompositionNoReplay.cfg "fence-replay mutation (FenceReplayOnAssemble=FALSE: a client fenced, confirmed and LEGALLY freed at epoch 1 re-attaches to the survivor unfenced — PTPL never travels, and no delivered-keying closes a free that was legal; the belt is the export mouth, fail-closed)" "Inv_NoStaleExtentWrite"
+mutation_run FlintComposition FlintCompositionProbeFailover.cfg "composition failover probe (a COMPLETE promotion — CAS, horizon, evict, assemble — really occurs in the strict state space; without this every green could mean the guards deadlock it)" "ProbeFailoverCompletes"
+mutation_run FlintComposition FlintCompositionProbeZombie.cfg "composition zombie probe (a deposed composer really accepts a write — the divergence green means 'contained', not 'never fired')" "ProbeZombieWriteReachable"
+mutation_run FlintComposition FlintCompositionProbeFree.cfg "composition post-failover free probe (a fenced holder's range really is freed and re-granted after a failover under every belt — the quarantine tranche's vacuity lesson, not repeated)" "ProbePostFailoverFreeReachable"
 
 echo "TLA GATE PASSED"
