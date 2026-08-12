@@ -200,6 +200,16 @@ impl MetadataServer {
         // driven from the CONTROL plane (ExpandVolume), which reaches
         // the layout manager and not the NFS operation handler.
         layout_manager.attach_callback_manager(Arc::clone(&callback_manager));
+        // ...and the lease verdict, for the roller's initiator report: a
+        // client-earned admission outlives the client that earned it (only
+        // fence and DeleteVolume remove those rows), so without this the
+        // report would name a long-gone client forever and the roller
+        // would refuse that node's roll for good.
+        {
+            let leases = Arc::clone(&state_mgr.leases);
+            layout_manager
+                .attach_lease_oracle(Arc::new(move |c| leases.is_valid(c)));
+        }
 
         // pnfs-block: the NVMe export reconciler, when configured. Same
         // late-attach shape as the callback manager. Without it this MDS

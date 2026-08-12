@@ -463,6 +463,23 @@ impl StateBackend for MemoryBackend {
         Ok(Ok((false, Vec::new())))
     }
 
+    async fn block_initiators(
+        &self,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockInitiatorRow>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        // Empty is the TRUTH here, not a shrug: every path that could
+        // mint an initiator (create, attach, admit) refuses on this
+        // backend, so a memory-backed MDS provably has none. The
+        // roller reads an empty list as permission to roll, so this
+        // must never become a stand-in for "don't know" — an MDS that
+        // cannot be asked is an error, and the roller treats it as one.
+        Ok(Ok(Vec::new()))
+    }
+
     async fn block_fence_record(
         &self,
         _volume: &str,

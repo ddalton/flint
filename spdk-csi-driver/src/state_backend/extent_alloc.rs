@@ -1159,6 +1159,95 @@ pub fn hosts_for_volume(conn: &Connection, volume: &str) -> Result<Vec<String>> 
     hosts_for_volume_conn(conn, volume)
 }
 
+/// Where a live admission came from. The distinction matters to the
+/// roller: an attachment names its node, a client-earned admission
+/// cannot (its row is keyed by NFS client id, which is minted long
+/// after — and because of — the nvme session).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockInitiatorSource {
+    /// `block_node_attach` — CSI ControllerPublish.
+    NodeAttach,
+    /// `block_hosts` — earned at LAYOUTGET.
+    ClientEarned,
+}
+
+impl BlockInitiatorSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NodeAttach => "attach",
+            Self::ClientEarned => "client",
+        }
+    }
+}
+
+/// One live block-layout initiator, as the allow-list tables record it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockInitiatorRow {
+    pub volume: String,
+    pub host_nqn: String,
+    /// Empty for `ClientEarned` rows — never read this as "no node".
+    pub node_name: String,
+    /// 0 for `NodeAttach` rows.
+    pub client_id: u64,
+    pub source: BlockInitiatorSource,
+    pub since_unix: i64,
+}
+
+/// Every live initiator this MDS knows about, across every volume — the
+/// fact the maintenance roller has no other way to learn (design §11).
+///
+/// The two tables are reported SEPARATELY rather than unioned by NQN,
+/// which `hosts_for_volume` does: the roller wants to name what it is
+/// refusing for, and "3 initiators on 2 volumes, one of them
+/// client-earned with no node name" is a materially different operator
+/// story from a deduped list of strings. Callers that want the allow-list
+/// still want `hosts_for_volume`.
+///
+/// Fenced clients never appear: the fence deletes the `block_hosts` row
+/// and the node's `block_node_attach` row in the same transaction. That
+/// is the correct reading for the roller too — a fenced client is
+/// already cut off at the device, so the tgt restart takes nothing from
+/// it that the fence has not already taken.
+pub fn list_initiators(conn: &Connection) -> Result<Vec<BlockInitiatorRow>> {
+    let mut out = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT volume, host_nqn, node_name, attached_unix FROM block_node_attach
+         ORDER BY volume, host_nqn",
+    )?;
+    let attaches = stmt.query_map([], |r| {
+        Ok(BlockInitiatorRow {
+            volume: r.get(0)?,
+            host_nqn: r.get(1)?,
+            node_name: r.get(2)?,
+            client_id: 0,
+            source: BlockInitiatorSource::NodeAttach,
+            since_unix: r.get(3)?,
+        })
+    })?;
+    for row in attaches {
+        out.push(row?);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT volume, host_nqn, client_id, admitted_unix FROM block_hosts
+         ORDER BY volume, host_nqn",
+    )?;
+    let earned = stmt.query_map([], |r| {
+        let client: i64 = r.get(2)?;
+        Ok(BlockInitiatorRow {
+            volume: r.get(0)?,
+            host_nqn: r.get(1)?,
+            node_name: String::new(),
+            client_id: client as u64,
+            source: BlockInitiatorSource::ClientEarned,
+            since_unix: r.get(3)?,
+        })
+    })?;
+    for row in earned {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Write the durable fence record for `client_id` on `volume` (the
 /// positive record — see the `fenced_clients` schema comment). Captures
 /// the client's `host_nqn` from `block_hosts` IN THE SAME TRANSACTION,
@@ -2842,6 +2931,70 @@ mod tests {
         node_attach(&mut conn, VOL, &h2, "node-b", 0).unwrap();
         host_evict(&mut conn, VOL, C1).unwrap();
         assert_eq!(hosts_for_volume(&conn, VOL).unwrap(), vec![h2]);
+    }
+
+    /// The roller's read: both admission tables, across volumes, each
+    /// row keeping the provenance the roller needs — an attach names
+    /// its node, a client-earned admission cannot, and the same NQN
+    /// holding both appears TWICE (unlike `hosts_for_volume`, which
+    /// dedups for the allow-list). Two rows for one NQN is the honest
+    /// answer to "who is connected": two independent admissions, either
+    /// of which alone keeps the client on the export.
+    #[test]
+    fn list_initiators_reports_both_tables_with_their_provenance() {
+        let mut conn = setup();
+        let h1 = "nqn.2024-11.com.flint:node:a".to_string();
+        let h2 = "nqn.2024-11.com.flint:node:b".to_string();
+        assert!(list_initiators(&conn).unwrap().is_empty(), "nothing admitted yet");
+
+        node_attach(&mut conn, VOL, &h1, "node-a", 11).unwrap();
+        node_attach(&mut conn, "vol-other", &h2, "node-b", 12).unwrap();
+        host_admit(&mut conn, VOL, C1, &h1, 13).unwrap();
+
+        let rows = list_initiators(&conn).unwrap();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let attach: Vec<_> = rows
+            .iter()
+            .filter(|r| r.source == BlockInitiatorSource::NodeAttach)
+            .collect();
+        assert_eq!(attach.len(), 2);
+        assert!(attach.iter().all(|r| !r.node_name.is_empty() && r.client_id == 0));
+        assert_eq!(
+            attach.iter().map(|r| r.volume.as_str()).collect::<Vec<_>>(),
+            vec![VOL, "vol-other"],
+            "cross-volume by design — one node's tgt serves them all"
+        );
+        let earned: Vec<_> = rows
+            .iter()
+            .filter(|r| r.source == BlockInitiatorSource::ClientEarned)
+            .collect();
+        assert_eq!(earned.len(), 1);
+        assert_eq!(earned[0].client_id, C1);
+        assert_eq!(earned[0].since_unix, 13);
+        assert!(
+            earned[0].node_name.is_empty(),
+            "the client-earned row has no node to name, and must not invent one"
+        );
+    }
+
+    /// A fenced client is not an initiator. It is already cut off at the
+    /// device, so a tgt restart takes nothing from it that the fence has
+    /// not — and counting it would refuse the roll of a node whose only
+    /// "client" is one we deliberately evicted.
+    #[test]
+    fn a_fenced_client_is_absent_from_the_initiator_list() {
+        let mut conn = setup();
+        let nqn = "nqn.2024-11.com.flint:node:a".to_string();
+        node_attach(&mut conn, VOL, &nqn, "node-a", 1).unwrap();
+        host_admit(&mut conn, VOL, C1, &nqn, 2).unwrap();
+        assert_eq!(list_initiators(&conn).unwrap().len(), 2);
+
+        fence_record(&mut conn, VOL, C1, 100).unwrap();
+        host_evict(&mut conn, VOL, C1).unwrap();
+        assert!(
+            list_initiators(&conn).unwrap().is_empty(),
+            "the fence deletes the client row AND the node's attach row"
+        );
     }
 
     /// The attach-side fence guard: a fence record naming the NQN

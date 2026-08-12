@@ -233,6 +233,43 @@ back up — or enable `maintenance.drainRoll`, which puts the DaemonSet on
 `OnDelete` and lets the controller's roller sequence it behind a redundancy
 barrier.
 
+### The roll and pnfs-block: refusals you should expect
+
+A `pnfs-block` volume's NVMe target is the spdk-tgt in the csi-node pod
+**colocated with its MDS shard**, and its clients are kernel initiators on
+*other* nodes. Deleting that pod takes the namespace out from under every
+one of them at once — and the MDS's own fallback lane with it, since the
+MDS drives the same tgt. So the roller **refuses** such a node while any
+initiator is connected, rather than draining it:
+
+```
+[MAINT] roll refuses ip-10-0-3-14: it serves a live pnfs-block export
+        (2 initiator(s) on pvc-a1b2, pvc-c3d4) — restarting its spdk-tgt
+        would pull the namespace out from under every one of them
+```
+
+To clear it, stop the workloads holding those volumes (each detach drops
+one initiator), then re-run the campaign; an export with **no** initiators
+rolls normally. Two related messages:
+
+- `roll PAUSED — cannot read the block-export status` — the controller
+  could not reach an MDS shard. Deliberately not treated as "nobody is
+  connected"; the campaign resumes on its own once the MDS answers.
+- A node stays refused for a while after the last pod goes: an admission
+  a client earned at LAYOUTGET stops counting only when its NFS lease
+  expires. It clears itself; nothing to do.
+
+Inspect what the roller sees with the same RPC it uses:
+
+```
+pnfs-csi-cli block-status --endpoint <mds-shard>:50051
+```
+
+**Not covered**: this governs the roller's own campaign only. A manual
+`kubectl delete pod`, an eviction or a node drain still cuts block clients
+with no warning — the csi-node preStop deletes NVMe-oF subsystems on the
+way out.
+
 ## Replica failure underneath a DS (the durability payoff)
 
 Drill: `tests/k8s/pnfs-drills/replica-under-ds.sh`. With the DS PVC on

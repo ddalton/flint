@@ -55,6 +55,7 @@ fn usage() -> ! {
          pnfs-csi-cli detach --endpoint <host:port> --volume-id <id> --node <name>\n  \
          pnfs-csi-cli stage --endpoint <host:port> --volume-id <id> --node <name>\n  \
          pnfs-csi-cli unstage --volume-id <id>\n  \
+         pnfs-csi-cli block-status --endpoint <host:port>\n  \
          pnfs-csi-cli reestablish"
     );
     std::process::exit(2);
@@ -102,6 +103,37 @@ async fn main() -> ExitCode {
             spdk_csi_driver::pnfs_block_session::reestablish_sessions().await;
         println!("records={records} repaired={repaired} failed={failed}");
         return if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) };
+    }
+    // Volume-free, like `reestablish`: this asks about the SHARD, not
+    // about one volume — a target serves every block volume it hosts,
+    // which is exactly why the roller has to ask this way.
+    if args[1] == "block-status" {
+        let pnfs = PnfsCsi::new(endpoint.unwrap_or_else(|| usage()));
+        return match pnfs.block_export_status().await {
+            Ok(st) => {
+                println!(
+                    "export enabled={} node={} traddr={} initiators={}",
+                    st.enabled,
+                    if st.export_node.is_empty() { "-" } else { &st.export_node },
+                    if st.export_traddr.is_empty() { "-" } else { &st.export_traddr },
+                    st.initiators.len()
+                );
+                for i in &st.initiators {
+                    println!(
+                        "initiator volume={} node={} source={} nqn={}",
+                        i.volume_id,
+                        if i.node_name.is_empty() { "-" } else { &i.node_name },
+                        i.source,
+                        i.host_nqn
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("pnfs-csi-cli: {}", e);
+                ExitCode::from(1)
+            }
+        };
     }
     let volume_id = volume_id.unwrap_or_else(|| usage());
     // Everything except unstage talks to the MDS.

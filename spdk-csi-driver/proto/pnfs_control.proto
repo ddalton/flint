@@ -86,6 +86,63 @@ service MdsControl {
   // Client-earned admissions (LAYOUTGET-time block_hosts rows) are NOT
   // touched; only their own lifecycle ends them.
   rpc DetachBlockNode(DetachBlockNodeRequest) returns (DetachBlockNodeResponse);
+
+  // Where this shard's block export lives, and who is connected to it.
+  //
+  // The maintenance roller's missing fact (design doc §11, "today's roll
+  // orchestration is blind to remote initiators"). A block export lives
+  // in the spdk-tgt COLOCATED with this MDS — same node, socket over a
+  // shared hostPath — so deleting that node's csi-node pod takes the
+  // target down under every remote kernel initiator at once, with no
+  // VolumeAttachment, no raid leg and no record anywhere in the
+  // roller's world to say so. This RPC is that record.
+  //
+  // Read-only and cheap (two indexed table scans); the roller polls it
+  // once per tick. An initiator here is a LIVE admission: a node
+  // attachment from ControllerPublish, or a client-earned admission
+  // from LAYOUTGET. Fenced clients are absent by construction — the
+  // fence deletes both rows.
+  rpc BlockExportStatus(BlockExportStatusRequest) returns (BlockExportStatusResponse);
+}
+
+message BlockExportStatusRequest {}
+
+message BlockExportStatusResponse {
+  // False when this MDS has no blockExport configured: it can serve no
+  // block-class volume, so no roll of any node can hurt one HERE. The
+  // roller must still consult its other shards.
+  bool enabled = 1;
+
+  // The node whose spdk-tgt hosts this export, from the MDS pod's own
+  // downward-API nodeName — the roller's join key. Empty on charts that
+  // predate the env var, which is why traddr is also returned: the
+  // roller then resolves the address against the Node objects instead.
+  string export_node = 2;
+
+  // The listener address clients are handed (the pinned node's IP).
+  string export_traddr = 3;
+  uint32 export_trsvcid = 4;
+
+  // Every live initiator, across every block volume on this shard.
+  repeated BlockInitiator initiators = 5;
+}
+
+message BlockInitiator {
+  string volume_id = 1;
+  // The NVMe host NQN on the export's allow-list.
+  string host_nqn = 2;
+  // The Kubernetes node it was admitted for. Set for node attachments;
+  // EMPTY for client-earned admissions, whose row is keyed by NFS
+  // client id and never carried a node name. The roller must not read
+  // an empty node as "no node" — see `source`.
+  string node_name = 3;
+  // "attach" (block_node_attach, ControllerPublish) or "client"
+  // (block_hosts, LAYOUTGET-earned).
+  string source = 4;
+  // The NFSv4 client id for client-earned rows; 0 for attachments.
+  uint64 client_id = 5;
+  // When the admission was recorded (unix seconds).
+  int64 since_unix = 6;
 }
 
 message FenceBlockClientRequest {

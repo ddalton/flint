@@ -205,11 +205,82 @@ pub struct RollView {
     /// consuming a volume whose legs are all remote still hosts the raid —
     /// over NVMe-oF — and rolling it destroys that composition just the same.
     pub local_consumer_nodes: Vec<String>,
+    /// Nodes whose spdk-tgt hosts a pnfs-block export with LIVE remote
+    /// initiators — the roller's blind spot until now (design §11).
+    ///
+    /// A block export lives in the csi-node tgt COLOCATED with its MDS
+    /// shard, and its clients are kernel NVMe-oF initiators on OTHER
+    /// nodes. None of that is visible anywhere else in this module's
+    /// world: a block volume has no raid replicas, so it never enters
+    /// `gather_volume_maint` at all, and its consumers hold no
+    /// VolumeAttachment on the node being rolled. Deleting this pod
+    /// therefore takes the target down under every one of them at once
+    /// — with the MDS's own fallback lane dying alongside it, since the
+    /// MDS drives the SAME tgt over the shared socket. There is no
+    /// drain that survives that, which is why these nodes are refused
+    /// rather than queued behind a barrier.
+    ///
+    /// Emptiness is load-bearing in the other direction too (the F61
+    /// lesson): an export node with NO initiators is perfectly rollable
+    /// — the MDS's startup reconcile rebuilds its subsystems — and
+    /// refusing it would rebuild the livelock. So the predicate is
+    /// "hosts an export AND someone is connected", never "hosts an
+    /// export".
+    pub block_busy_nodes: Vec<BlockBusyNode>,
     /// The barrier input: every multi-replica volume fully redundant —
     /// all replicas in_sync, no hot-rejoin markers, no live marks.
     pub fully_redundant: bool,
     /// Operator-facing note when the barrier fails (which volume, why).
     pub barrier_note: String,
+}
+
+/// One node hosting a block export that clients are actively connected
+/// to, with enough detail for the refusal to be actionable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockBusyNode {
+    pub node: String,
+    /// Live admissions (node attachments + client-earned), all volumes.
+    pub initiators: usize,
+    /// The volumes they are connected for, distinct and sorted.
+    pub volumes: Vec<String>,
+}
+
+/// Why the roller will not touch a node. Both causes are terminal and
+/// both need an operator, but they need DIFFERENT operators: a local
+/// consumer is moved by rescheduling a pod on this node, while block
+/// initiators are somewhere else entirely and are cleared by draining
+/// the workloads that hold them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefusalCause {
+    /// F62: the node consumes one of its own volumes, so its tgt holds
+    /// that volume's raid composition.
+    LocalConsumer,
+    /// The node's tgt serves a live pnfs-block export.
+    BlockInitiators { initiators: usize, volumes: Vec<String> },
+}
+
+impl RefusalCause {
+    /// The operator-facing why, in one clause.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::LocalConsumer => "consumes its own volume — its tgt hosts the raid \
+                                    composition, which the pod delete would destroy"
+                .to_string(),
+            Self::BlockInitiators { initiators, volumes } => format!(
+                "serves a live pnfs-block export ({} initiator(s) on {}) — restarting its \
+                 spdk-tgt would pull the namespace out from under every one of them",
+                initiators,
+                volumes.join(", ")
+            ),
+        }
+    }
+}
+
+/// A node the campaign will not roll, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollRefusal {
+    pub node: String,
+    pub cause: RefusalCause,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -231,13 +302,14 @@ pub enum RollStep {
     /// strategy not OnDelete). The campaign resumes when the world moves.
     Blocked { reason: String },
     /// F62: every node this roller CAN roll has been rolled, and these are
-    /// the ones it will not touch — each hosts a raid composition in its own
-    /// tgt, which the pod delete would destroy with nothing left to rebuild
-    /// it. A terminal outcome, deliberately distinct from `Idle`: reporting
+    /// the ones it will not touch — each hosts something in its own tgt
+    /// that the pod delete would destroy with nothing left to rebuild it:
+    /// a raid composition it consumes itself, or a live block export.
+    /// A terminal outcome, deliberately distinct from `Idle`: reporting
     /// "done" with nodes still on the old revision is the silent give-up
-    /// that F61 was, wearing better manners. The operator drains these by
-    /// moving the consumer, then re-runs the campaign.
-    Refused { nodes: Vec<String> },
+    /// that F61 was, wearing better manners. The operator clears the
+    /// named cause, then re-runs the campaign.
+    Refused { nodes: Vec<RollRefusal> },
 }
 
 /// Decide this tick's single step. Pure — the tick owns observation and
@@ -290,6 +362,26 @@ pub fn plan_roll(view: &RollView) -> RollStep {
             {
                 RollStep::ClearMarks { node: node.clone() }
             }
+            // The same completion-path hole, block edition, and reachable
+            // the same way: this node was drained and marked while its
+            // export was idle, and a client connected in the window
+            // before the delete (a pod scheduling onto a pnfs-block PVC
+            // is all it takes). F63's fix filtered the SELECTION path;
+            // arriving initiators need the same treatment here or the
+            // delete lands on a target with live clients on it.
+            //
+            // ClearMarks for F63's reason, not merely by analogy: holding
+            // the marks would park an already-drained raid leg at reduced
+            // redundancy for as long as the block clients stay, and
+            // `renew_marks` runs on the refused path, so a live roller
+            // would renew that suppression forever. Lift it, let
+            // hot-rejoin readmit the leg, and let the standing Refused
+            // report name the node.
+            Some(p) if !p.current_rev
+                    && view.block_busy_nodes.iter().any(|b| &b.node == node) =>
+            {
+                RollStep::ClearMarks { node: node.clone() }
+            }
             Some(p) if !p.current_rev => RollStep::DeletePod {
                 pod: p.pod_name.clone(),
                 node: node.clone(),
@@ -314,20 +406,13 @@ pub fn plan_roll(view: &RollView) -> RollStep {
         .iter()
         .filter(|p| !p.current_rev)
         .filter(|p| !view.local_consumer_nodes.iter().any(|n| n == &p.node_name))
+        .filter(|p| !view.block_busy_nodes.iter().any(|b| b.node == p.node_name))
         .collect();
     pending.sort_by(|a, b| a.node_name.cmp(&b.node_name));
     let Some(next) = pending.first() else {
         // Nothing left that we may roll. If refusals are what remain, SAY SO
         // — an Idle here would read as a converged campaign.
-        let mut refused: Vec<String> = view
-            .pods
-            .iter()
-            .filter(|p| !p.current_rev)
-            .filter(|p| view.local_consumer_nodes.iter().any(|n| n == &p.node_name))
-            .map(|p| p.node_name.clone())
-            .collect();
-        refused.sort();
-        refused.dedup();
+        let refused = refusals(view);
         if !refused.is_empty() {
             return RollStep::Refused { nodes: refused };
         }
@@ -365,6 +450,123 @@ pub fn plan_roll(view: &RollView) -> RollStep {
     RollStep::Drain {
         node: next.node_name.clone(),
     }
+}
+
+/// The two-step block read: shard statuses, then Node addresses ONLY if
+/// some shard failed to name its own node. Split out of the tick so the
+/// "don't list Nodes unless you must" rule lives next to the reason for
+/// it, and so the error type stays one string the caller can log.
+async fn read_block_busy(block: &dyn BlockRollOps) -> Result<Vec<BlockBusyNode>, String> {
+    let exports = block.block_exports().await.map_err(|e| e.to_string())?;
+    let needs_addrs = exports
+        .iter()
+        .any(|e| e.enabled && !e.initiators.is_empty() && e.export_node.is_empty());
+    let addrs = if needs_addrs {
+        block.node_addresses().await.map_err(|e| e.to_string())?
+    } else {
+        Vec::new()
+    };
+    resolve_block_busy(&exports, &addrs)
+}
+
+/// The standing refusal report: every PENDING node the campaign will not
+/// roll, with its cause. Block initiators are reported first when a node
+/// has both, because they are the surprising half — a local consumer is
+/// visible in `kubectl get pods -o wide`, while the clients of a block
+/// export are on other nodes entirely and hold no object here at all.
+fn refusals(view: &RollView) -> Vec<RollRefusal> {
+    let mut out: Vec<RollRefusal> = Vec::new();
+    for pod in view.pods.iter().filter(|p| !p.current_rev) {
+        let cause = if let Some(b) = view
+            .block_busy_nodes
+            .iter()
+            .find(|b| b.node == pod.node_name)
+        {
+            Some(RefusalCause::BlockInitiators {
+                initiators: b.initiators,
+                volumes: b.volumes.clone(),
+            })
+        } else if view.local_consumer_nodes.iter().any(|n| n == &pod.node_name) {
+            Some(RefusalCause::LocalConsumer)
+        } else {
+            None
+        };
+        if let Some(cause) = cause {
+            if !out.iter().any(|r| r.node == pod.node_name) {
+                out.push(RollRefusal { node: pod.node_name.clone(), cause });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.node.cmp(&b.node));
+    out
+}
+
+// ---------------------------------------------------------------------------
+// The block-export read: which nodes are serving live initiators.
+// ---------------------------------------------------------------------------
+
+/// Fold every shard's `BlockExportStatus` into the per-node answer the
+/// planner needs.
+///
+/// `node_addrs` is `(node, addresses)` from the Node objects, used only
+/// as the fallback for a shard whose MDS predates `FLINT_NODE_NAME` and
+/// so reports its listener address instead of its node name.
+///
+/// Returns `Err` when a shard has initiators but its export node cannot
+/// be named. That is not a corner to paper over: we would know that
+/// SOMEBODY loses their device to a roll without knowing whose roll it
+/// is, and every node would have to be presumed safe for the campaign to
+/// proceed. The caller blocks instead — the tick's error path — which
+/// costs a paused upgrade and never costs a client its namespace.
+pub fn resolve_block_busy(
+    exports: &[crate::pnfs_csi::BlockExportView],
+    node_addrs: &[(String, Vec<String>)],
+) -> Result<Vec<BlockBusyNode>, String> {
+    let mut by_node: std::collections::HashMap<String, (usize, Vec<String>)> =
+        std::collections::HashMap::new();
+    for e in exports {
+        // An export nobody is connected to is rollable, and saying so is
+        // what keeps the campaign converging (F61).
+        if !e.enabled || e.initiators.is_empty() {
+            continue;
+        }
+        let node = if !e.export_node.is_empty() {
+            e.export_node.clone()
+        } else {
+            match node_addrs
+                .iter()
+                .find(|(_, addrs)| addrs.iter().any(|a| a == &e.export_traddr))
+            {
+                Some((n, _)) => n.clone(),
+                None => {
+                    return Err(format!(
+                        "a block export with {} live initiator(s) listens on {}, which \
+                         matches no node address — the roller cannot tell which node's \
+                         tgt serves it (upgrade the MDS chart so it reports \
+                         FLINT_NODE_NAME)",
+                        e.initiators.len(),
+                        if e.export_traddr.is_empty() { "<no address>" } else { &e.export_traddr },
+                    ))
+                }
+            }
+        };
+        let entry = by_node.entry(node).or_insert((0, Vec::new()));
+        entry.0 += e.initiators.len();
+        for i in &e.initiators {
+            if !entry.1.contains(&i.volume_id) {
+                entry.1.push(i.volume_id.clone());
+            }
+        }
+    }
+    let mut out: Vec<BlockBusyNode> = by_node
+        .into_iter()
+        .map(|(node, (initiators, mut volumes))| {
+            volumes.sort();
+            BlockBusyNode { node, initiators, volumes }
+        })
+        .collect();
+    out.sort_by(|a, b| a.node.cmp(&b.node));
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +689,61 @@ impl RollOps for KubeRollOps {
         let api: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         api.delete(name, &Default::default()).await?;
         Ok(())
+    }
+}
+
+/// The block-export half of observation, separate from [`RollOps`]
+/// because it leaves the cluster: the answer lives in each MDS shard's
+/// state DB and arrives over gRPC.
+#[async_trait]
+pub trait BlockRollOps: Send + Sync {
+    /// Every configured shard's export posture. An `Err` means UNKNOWN
+    /// and must pause the campaign — never "no initiators".
+    async fn block_exports(&self) -> Result<Vec<crate::pnfs_csi::BlockExportView>, RpcError>;
+    /// `(node, addresses)` for the traddr fallback. Called only when a
+    /// shard fails to name its own node, so the steady state costs no
+    /// Node list at all.
+    async fn node_addresses(&self) -> Result<Vec<(String, Vec<String>)>, RpcError>;
+}
+
+pub struct KubeBlockRollOps {
+    pub client: kube::Client,
+    /// `None` = pNFS is dormant in this deployment (no MDS endpoint
+    /// configured), so no block export can exist anywhere.
+    pub shards: Option<crate::pnfs_csi::PnfsShards>,
+}
+
+#[async_trait]
+impl BlockRollOps for KubeBlockRollOps {
+    async fn block_exports(&self) -> Result<Vec<crate::pnfs_csi::BlockExportView>, RpcError> {
+        let Some(shards) = self.shards.as_ref() else {
+            return Ok(Vec::new());
+        };
+        shards
+            .block_export_status_all()
+            .await
+            .map_err(|e| RpcError::from(format!("BlockExportStatus: {e}")))
+    }
+
+    async fn node_addresses(&self) -> Result<Vec<(String, Vec<String>)>, RpcError> {
+        use k8s_openapi::api::core::v1::Node;
+        let api: Api<Node> = Api::all(self.client.clone());
+        Ok(api
+            .list(&ListParams::default())
+            .await?
+            .items
+            .into_iter()
+            .filter_map(|n| {
+                let name = n.metadata.name.clone()?;
+                let addrs = n
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.addresses.as_ref())
+                    .map(|a| a.iter().map(|a| a.address.clone()).collect())
+                    .unwrap_or_default();
+                Some((name, addrs))
+            })
+            .collect())
     }
 }
 
@@ -660,6 +917,12 @@ pub async fn run_maint_roll_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: MaintR
         namespace: cfg.namespace.clone(),
         ds_name: cfg.ds_name.clone(),
     };
+    // Env read here, at the edge, so the tick and the planner stay
+    // env-free (the F43 lesson).
+    let block = KubeBlockRollOps {
+        client: driver.kube_client.clone(),
+        shards: crate::pnfs_csi::PnfsShards::from_env(),
+    };
     let store = crate::catchup::KubeStore {
         client: driver.kube_client.clone(),
     };
@@ -670,7 +933,7 @@ pub async fn run_maint_roll_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: MaintR
         if !crate::orchestrator_lease::is_leader() {
             continue;
         }
-        if let Err(e) = maint_roll_tick(driver.as_ref(), &ops, &store, &cfg).await {
+        if let Err(e) = maint_roll_tick(driver.as_ref(), &ops, &block, &store, &cfg).await {
             warn!(error = %e, "[MAINT] tick failed — retrying next cycle");
         }
     }
@@ -679,6 +942,7 @@ pub async fn run_maint_roll_orchestrator(driver: Arc<SpdkCsiDriver>, cfg: MaintR
 pub async fn maint_roll_tick(
     driver: &SpdkCsiDriver,
     ops: &dyn RollOps,
+    block: &dyn BlockRollOps,
     store: &dyn CatchupStore,
     cfg: &MaintRollConfig,
 ) -> Result<(), RpcError> {
@@ -769,6 +1033,27 @@ pub async fn maint_roll_tick(
         })
         .map(|p| p.node_name.clone())
         .collect();
+    // Who is connected to a block export, and on which node's tgt.
+    //
+    // Read AFTER the volume gather on purpose: when the MDS cannot
+    // answer we pause the campaign, and a node already mid-roll must
+    // still get its marks renewed on the way out — otherwise an MDS
+    // outage would quietly let a drained leg's suppression lapse. That
+    // it lapses eventually is the LEASE working as designed; that it
+    // lapses because we bailed early would be an accident.
+    let block_busy = match read_block_busy(block).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "[MAINT] roll PAUSED — cannot read the block-export status, and an \
+                 unreadable MDS is not an empty one: rolling now could restart a tgt \
+                 under live pnfs-block clients. The campaign resumes when the MDS answers."
+            );
+            renew_marks(store, &volumes, cfg, &now).await;
+            return Ok(());
+        }
+    };
     let obstruction = volumes.iter().find_map(|v| {
         v.obstruction
             .as_ref()
@@ -782,6 +1067,7 @@ pub async fn maint_roll_tick(
         nothing_to_drain,
         local_last_serving,
         local_consumer_nodes,
+        block_busy_nodes: block_busy,
         fully_redundant: obstruction.is_none(),
         barrier_note: obstruction.unwrap_or_default(),
     };
@@ -824,16 +1110,17 @@ pub async fn maint_roll_tick(
         // just a wedge with better manners, which is the whole reason this
         // is a distinct step and not a silent `continue` in the planner.
         RollStep::Refused { nodes } => {
-            warn!(
-                nodes = %nodes.join(","),
-                "[MAINT] roll campaign complete except for nodes that consume their own volumes — \
-                 their csi-node pod hosts the raid composition, so deleting it would take the \
-                 volume down permanently (nothing re-creates a raid under a still-staged volume). \
-                 Move the consumer off each node, then re-run the campaign."
-            );
+            for r in nodes {
+                warn!(
+                    node = %r.node,
+                    "[MAINT] roll refuses {}: it {}. Clear the cause, then re-run the campaign.",
+                    r.node,
+                    r.cause.describe()
+                );
+            }
             for v in &volumes {
                 let Some(consumer) = v.consumer.as_deref() else { continue };
-                if !nodes.iter().any(|n| n == consumer) {
+                if !nodes.iter().any(|r| r.node == consumer) {
                     continue;
                 }
                 store
@@ -851,6 +1138,11 @@ pub async fn maint_roll_tick(
                     )
                     .await;
             }
+            // Block refusals have no raid record to hang an event on —
+            // the volume is block-class, so it never entered `volumes`.
+            // The warn above is the whole signal, which is exactly why
+            // it names the volumes and the initiator count rather than
+            // just the node.
             renew_marks(store, &volumes, cfg, &now).await;
         }
         RollStep::Drain { node } => {
@@ -1149,9 +1441,23 @@ mod tests {
             nothing_to_drain: Vec::new(),
             local_last_serving: Vec::new(),
             local_consumer_nodes: Vec::new(),
+            block_busy_nodes: Vec::new(),
             fully_redundant: redundant,
             barrier_note: if redundant { String::new() } else { "vol1: replica x is stale".into() },
         }
+    }
+
+    /// A node serving `n` live block initiators on one volume.
+    fn busy(node: &str, n: usize) -> BlockBusyNode {
+        BlockBusyNode {
+            node: node.to_string(),
+            initiators: n,
+            volumes: vec!["pvc-block-1".to_string()],
+        }
+    }
+
+    fn refused_local(node: &str) -> RollRefusal {
+        RollRefusal { node: node.to_string(), cause: RefusalCause::LocalConsumer }
     }
 
     #[test]
@@ -1291,9 +1597,7 @@ mod tests {
         v.local_consumer_nodes = vec!["a".to_string()];
         assert_eq!(
             plan_roll(&v),
-            RollStep::Refused {
-                nodes: vec!["a".to_string()]
-            },
+            RollStep::Refused { nodes: vec![refused_local("a")] },
             "a node hosting the composition must be refused and NAMED, never rolled"
         );
     }
@@ -1323,9 +1627,7 @@ mod tests {
         assert_ne!(step, RollStep::Idle, "a stale refused node is not convergence");
         assert_eq!(
             step,
-            RollStep::Refused {
-                nodes: vec!["a".to_string()]
-            }
+            RollStep::Refused { nodes: vec![refused_local("a")] }
         );
     }
 
@@ -1336,6 +1638,326 @@ mod tests {
         let mut v = view(vec![pod("a", true, true), pod("b", true, true)], &[], true);
         v.local_consumer_nodes = vec!["a".to_string()];
         assert_eq!(plan_roll(&v), RollStep::Idle);
+    }
+
+    // -----------------------------------------------------------------
+    // Block-export blindness (design §11).
+    // -----------------------------------------------------------------
+
+    /// The defect itself: a node whose tgt serves live block initiators
+    /// must never be rolled. Nothing else in the planner's world knows
+    /// about them — a block volume has no raid legs, so it contributes
+    /// no marks, no in-sync map and no consumer.
+    #[test]
+    fn plan_roll_refuses_a_node_serving_live_block_initiators() {
+        let mut v = view(vec![pod("a", false, true)], &[], true);
+        // Deliberately the F61-shaped setup: the drain pass would mark
+        // nothing here, so WITHOUT the block check this node is a
+        // straight DeletePod.
+        v.nothing_to_drain = vec!["a".to_string()];
+        v.block_busy_nodes = vec![busy("a", 3)];
+        let step = plan_roll(&v);
+        assert_eq!(
+            step,
+            RollStep::Refused {
+                nodes: vec![RollRefusal {
+                    node: "a".into(),
+                    cause: RefusalCause::BlockInitiators {
+                        initiators: 3,
+                        volumes: vec!["pvc-block-1".to_string()],
+                    },
+                }]
+            },
+            "a live block export must refuse the roll, not merely delay it"
+        );
+        let RollStep::Refused { nodes } = step else { unreachable!() };
+        let why = nodes[0].cause.describe();
+        assert!(
+            why.contains("3 initiator(s)") && why.contains("pvc-block-1"),
+            "the refusal must name what is connected and to what: {why}"
+        );
+    }
+
+    /// The F61 guard, block edition: an export with NOBODY connected is
+    /// rollable and must roll. The MDS's startup reconcile rebuilds its
+    /// subsystems, so an idle target costs nothing to restart — and a
+    /// blanket "never roll an export node" would wedge every cluster
+    /// that has a block StorageClass but no block workload.
+    #[test]
+    fn plan_roll_still_rolls_an_export_node_with_no_initiators() {
+        let mut v = view(vec![pod("a", false, true)], &[], true);
+        v.nothing_to_drain = vec!["a".to_string()];
+        // An idle export contributes NO entry — that is `resolve_block_busy`'s
+        // job, pinned by its own test; here the planner must not invent one.
+        v.block_busy_nodes = Vec::new();
+        assert_eq!(
+            plan_roll(&v),
+            RollStep::DeletePod { pod: "flint-csi-node-a".into(), node: "a".into() },
+            "an export nobody is connected to must not block the campaign"
+        );
+    }
+
+    /// F63's hole, block edition: the initiators can arrive DURING the
+    /// roll — between the drain that marked this node and the delete
+    /// that would follow. Any pod landing on a pnfs-block PVC is enough.
+    /// The completion path must refuse too, and refuse by CLEARING the
+    /// marks: holding them would park the already-drained raid leg at
+    /// reduced redundancy for as long as the block clients stay, because
+    /// `renew_marks` runs on the refused path.
+    #[test]
+    fn plan_roll_clears_marks_when_block_initiators_arrive_mid_roll() {
+        let mut v = view(vec![pod("a", false, true)], &["a"], true);
+        v.block_busy_nodes = vec![busy("a", 1)];
+        assert_eq!(
+            plan_roll(&v),
+            RollStep::ClearMarks { node: "a".into() },
+            "a marked node that became block-busy must not be deleted"
+        );
+    }
+
+    /// A block refusal must not stall the rest, exactly as F62's does
+    /// not: "b" keeps converging while "a" is refused.
+    #[test]
+    fn plan_roll_block_refusal_does_not_stall_the_other_nodes() {
+        let mut v = view(vec![pod("a", false, true), pod("b", false, true)], &[], true);
+        v.block_busy_nodes = vec![busy("a", 2)];
+        assert_eq!(plan_roll(&v), RollStep::Drain { node: "b".into() });
+    }
+
+    /// Both causes at once: report the block one. A local consumer is
+    /// visible in `kubectl get pods -o wide`; the clients of a block
+    /// export are on other nodes and hold no object here at all, so
+    /// naming the invisible cause is what makes the message useful.
+    #[test]
+    fn a_node_refused_for_both_reasons_names_the_block_one() {
+        let mut v = view(vec![pod("a", false, true)], &[], true);
+        v.local_consumer_nodes = vec!["a".to_string()];
+        v.block_busy_nodes = vec![busy("a", 1)];
+        let RollStep::Refused { nodes } = plan_roll(&v) else {
+            panic!("expected a refusal")
+        };
+        assert_eq!(nodes.len(), 1, "one node, one entry");
+        assert!(matches!(nodes[0].cause, RefusalCause::BlockInitiators { .. }));
+    }
+
+    /// Fold shards onto nodes: two shards on the same node add up, a
+    /// third on another node stays separate, and the volume list is
+    /// distinct — the refusal message is only useful if it is exact.
+    #[test]
+    fn resolve_block_busy_folds_shards_onto_their_export_nodes() {
+        use crate::pnfs_csi::{BlockExportView, BlockInitiatorView};
+        let init = |vol: &str, node: &str| BlockInitiatorView {
+            volume_id: vol.into(),
+            host_nqn: format!("nqn.2024-11.com.flint:node:{node}"),
+            node_name: node.into(),
+            source: "attach".into(),
+        };
+        let exports = vec![
+            BlockExportView {
+                enabled: true,
+                export_node: "tgt-1".into(),
+                export_traddr: "10.0.0.1".into(),
+                initiators: vec![init("vol-a", "w1"), init("vol-a", "w2")],
+            },
+            BlockExportView {
+                enabled: true,
+                export_node: "tgt-1".into(),
+                export_traddr: "10.0.0.1".into(),
+                initiators: vec![init("vol-b", "w1")],
+            },
+            BlockExportView {
+                enabled: true,
+                export_node: "tgt-2".into(),
+                export_traddr: "10.0.0.2".into(),
+                initiators: vec![init("vol-c", "w3")],
+            },
+            // Enabled but idle, and not enabled at all: neither appears.
+            BlockExportView {
+                enabled: true,
+                export_node: "tgt-3".into(),
+                export_traddr: "10.0.0.3".into(),
+                initiators: Vec::new(),
+            },
+            BlockExportView::default(),
+        ];
+        let busy = resolve_block_busy(&exports, &[]).unwrap();
+        assert_eq!(
+            busy,
+            vec![
+                BlockBusyNode {
+                    node: "tgt-1".into(),
+                    initiators: 3,
+                    volumes: vec!["vol-a".into(), "vol-b".into()],
+                },
+                BlockBusyNode {
+                    node: "tgt-2".into(),
+                    initiators: 1,
+                    volumes: vec!["vol-c".into()],
+                },
+            ],
+            "shards on one node add up; idle and files-only shards contribute nothing"
+        );
+    }
+
+    /// An MDS too old to report its own node name still has to be
+    /// usable, so the listener address resolves against the Node
+    /// objects instead.
+    #[test]
+    fn resolve_block_busy_falls_back_to_the_listener_address() {
+        use crate::pnfs_csi::{BlockExportView, BlockInitiatorView};
+        let exports = vec![BlockExportView {
+            enabled: true,
+            export_node: String::new(),
+            export_traddr: "10.0.0.7".into(),
+            initiators: vec![BlockInitiatorView {
+                volume_id: "vol-a".into(),
+                host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
+                node_name: "w1".into(),
+                source: "attach".into(),
+            }],
+        }];
+        let addrs = vec![
+            ("other".to_string(), vec!["10.0.0.6".to_string()]),
+            ("tgt-1".to_string(), vec!["10.0.0.7".to_string(), "ip-10-0-0-7".to_string()]),
+        ];
+        assert_eq!(
+            resolve_block_busy(&exports, &addrs).unwrap(),
+            vec![BlockBusyNode {
+                node: "tgt-1".into(),
+                initiators: 1,
+                volumes: vec!["vol-a".into()],
+            }]
+        );
+    }
+
+    /// The one case that must NOT degrade to "nobody is connected": we
+    /// know somebody would lose their device, but not on whose roll. If
+    /// this returned an empty list the campaign would presume every node
+    /// safe — the exact inversion of the bug being fixed.
+    #[test]
+    fn an_unnameable_export_node_is_an_error_not_an_empty_answer() {
+        use crate::pnfs_csi::{BlockExportView, BlockInitiatorView};
+        let exports = vec![BlockExportView {
+            enabled: true,
+            export_node: String::new(),
+            export_traddr: "10.9.9.9".into(),
+            initiators: vec![BlockInitiatorView {
+                volume_id: "vol-a".into(),
+                host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
+                node_name: "w1".into(),
+                source: "attach".into(),
+            }],
+        }];
+        let err = resolve_block_busy(&exports, &[("n".into(), vec!["10.0.0.1".into()])])
+            .expect_err("an unresolvable busy export must be an error");
+        assert!(err.contains("10.9.9.9") && err.contains("FLINT_NODE_NAME"), "{err}");
+    }
+
+    /// An idle export that cannot be resolved is NOT an error: nobody
+    /// is connected to it, so no roll can hurt anyone through it, and
+    /// erroring would wedge every campaign on a chart-version skew that
+    /// costs nothing.
+    #[test]
+    fn an_unnameable_but_idle_export_is_not_an_error() {
+        use crate::pnfs_csi::BlockExportView;
+        let exports = vec![BlockExportView {
+            enabled: true,
+            export_node: String::new(),
+            export_traddr: "10.9.9.9".into(),
+            initiators: Vec::new(),
+        }];
+        assert!(resolve_block_busy(&exports, &[]).unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // The read seam: unreachable ≠ empty.
+    // -----------------------------------------------------------------
+
+    struct FakeBlockOps {
+        exports: std::sync::Mutex<Result<Vec<crate::pnfs_csi::BlockExportView>, String>>,
+        addrs: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+        addr_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeBlockOps {
+        fn ok(exports: Vec<crate::pnfs_csi::BlockExportView>) -> Self {
+            Self {
+                exports: std::sync::Mutex::new(Ok(exports)),
+                addrs: std::sync::Mutex::new(Vec::new()),
+                addr_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn broken() -> Self {
+            Self {
+                exports: std::sync::Mutex::new(Err("connect refused".into())),
+                addrs: std::sync::Mutex::new(Vec::new()),
+                addr_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BlockRollOps for FakeBlockOps {
+        async fn block_exports(&self) -> Result<Vec<crate::pnfs_csi::BlockExportView>, RpcError> {
+            self.exports
+                .lock()
+                .unwrap()
+                .clone()
+                .map_err(RpcError::from)
+        }
+        async fn node_addresses(&self) -> Result<Vec<(String, Vec<String>)>, RpcError> {
+            self.addr_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.addrs.lock().unwrap().clone())
+        }
+    }
+
+    /// An MDS that cannot be reached must propagate as an error, which
+    /// the tick turns into a paused campaign. Silently reading it as
+    /// "no initiators" would roll a live target on the one day the
+    /// control plane is unhealthy — precisely when it hurts most.
+    #[tokio::test]
+    async fn an_unreachable_shard_is_an_error_not_an_absence() {
+        let err = read_block_busy(&FakeBlockOps::broken())
+            .await
+            .expect_err("an unreachable MDS must not read as an idle one");
+        assert!(err.contains("connect refused"), "{err}");
+    }
+
+    /// The Node list is a cluster-wide read; the steady state must not
+    /// pay for it. It is only needed when a shard failed to name its own
+    /// node, which no current chart does.
+    #[tokio::test]
+    async fn the_node_list_is_only_read_when_a_shard_cannot_name_itself() {
+        use crate::pnfs_csi::{BlockExportView, BlockInitiatorView};
+        let one = |node: &str, traddr: &str| BlockExportView {
+            enabled: true,
+            export_node: node.into(),
+            export_traddr: traddr.into(),
+            initiators: vec![BlockInitiatorView {
+                volume_id: "vol-a".into(),
+                host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
+                node_name: "w1".into(),
+                source: "attach".into(),
+            }],
+        };
+
+        let modern = FakeBlockOps::ok(vec![one("tgt-1", "10.0.0.1")]);
+        assert_eq!(read_block_busy(&modern).await.unwrap().len(), 1);
+        assert_eq!(
+            modern.addr_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a shard that names its node needs no Node list"
+        );
+
+        let legacy = FakeBlockOps::ok(vec![one("", "10.0.0.1")]);
+        *legacy.addrs.lock().unwrap() = vec![("tgt-1".into(), vec!["10.0.0.1".into()])];
+        assert_eq!(read_block_busy(&legacy).await.unwrap()[0].node, "tgt-1");
+        assert_eq!(
+            legacy.addr_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the fallback path reads it exactly once"
+        );
     }
 
     #[test]

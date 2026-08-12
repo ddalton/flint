@@ -449,7 +449,18 @@ pub struct LayoutManager {
     /// the operation handler's copy — the back-channel registry has to
     /// exist first. `None` in unit tests: notifications become no-ops.
     callbacks: Arc<std::sync::OnceLock<Arc<super::callback::CallbackManager>>>,
+
+    /// Is an NFS client still leased? Attached late by the server (the
+    /// state manager owns the lease table). Only the block-initiator
+    /// report reads it — see `client_is_live` for why its unattached
+    /// default is "alive".
+    lease_oracle: Arc<std::sync::OnceLock<LeaseOracle>>,
 }
+
+/// The client-lease verdict, injected rather than imported so the layout
+/// manager keeps no dependency on the NFS state machine (and so tests
+/// need no lease machinery — the same shape `lease_sweep_pass` uses).
+pub type LeaseOracle = Arc<dyn Fn(u64) -> bool + Send + Sync>;
 
 impl LayoutState {
     /// Snapshot the persisted bits of this layout for the
@@ -763,6 +774,7 @@ impl LayoutManager {
             block_export: Arc::new(std::sync::OnceLock::new()),
             device_notify: Arc::new(DashMap::new()),
             callbacks: Arc::new(std::sync::OnceLock::new()),
+            lease_oracle: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -771,6 +783,26 @@ impl LayoutManager {
     /// no-op; `None` means device notifications are skipped.
     pub fn attach_callback_manager(&self, callbacks: Arc<super::callback::CallbackManager>) {
         let _ = self.callbacks.set(callbacks);
+    }
+
+    /// Attach the client-lease verdict (the same one the lease sweep
+    /// injects). Same late-attach shape as the callback manager: the
+    /// state manager is built alongside this one.
+    pub fn attach_lease_oracle(&self, alive: LeaseOracle) {
+        let _ = self.lease_oracle.set(alive);
+    }
+
+    /// Is this NFS client still leased?
+    ///
+    /// Defaults to TRUE with no oracle attached, and the direction is
+    /// deliberate: the only consumer is the roller's initiator report,
+    /// where a false "dead" would let a live client's target be
+    /// restarted. Over-reporting merely pauses an upgrade.
+    pub fn client_is_live(&self, client_id: u64) -> bool {
+        match self.lease_oracle.get() {
+            Some(alive) => alive(client_id),
+            None => true,
+        }
     }
 
     /// Record that `session` fetched `volume`'s device and which

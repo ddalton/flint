@@ -1346,6 +1346,67 @@ impl MdsControl for MdsControlService {
         }
     }
 
+    /// Where this shard's block export lives and who is on it — the
+    /// roller's read (design §11). Read-only, and it must FAIL rather
+    /// than answer partially: an empty initiator list is permission to
+    /// restart the target, so "I could not read the table" and "nobody
+    /// is connected" must never arrive as the same answer.
+    async fn block_export_status(
+        &self,
+        _request: Request<BlockExportStatusRequest>,
+    ) -> Result<Response<BlockExportStatusResponse>, Status> {
+        let Some(reconciler) = self.layout_manager.block_export() else {
+            // No export here: no block volume can live on this shard, so
+            // no roll can hurt one through it. Not an error — a
+            // files-only shard is the common case.
+            return Ok(Response::new(BlockExportStatusResponse {
+                enabled: false,
+                export_node: String::new(),
+                export_traddr: String::new(),
+                export_trsvcid: 0,
+                initiators: Vec::new(),
+            }));
+        };
+        let (traddr, trsvcid) = reconciler.listener();
+        let rows = self
+            .layout_manager
+            .state_backend()
+            .block_initiators()
+            .await
+            .map_err(|e| Status::unavailable(format!("block initiators unreadable: {e}")))?
+            .map_err(|e| Status::unavailable(format!("block initiators unreadable: {e}")))?;
+        Ok(Response::new(BlockExportStatusResponse {
+            enabled: true,
+            export_node: crate::pnfs::mds::block_export::export_node_name(),
+            export_traddr: traddr.to_string(),
+            export_trsvcid: trsvcid as u32,
+            initiators: rows
+                .into_iter()
+                // A client-earned admission OUTLIVES the client that
+                // earned it: only a fence or DeleteVolume removes those
+                // rows, and the lease sweep never visits a client that
+                // returned its layouts cleanly. Reported raw, one
+                // ordinary unmount would make this node permanently
+                // un-rollable — F61's livelock rebuilt on the block
+                // tier. Node attachments need no such filter: they are
+                // ControllerPublish/Unpublish's own, and detach removes
+                // them.
+                .filter(|r| {
+                    r.source != crate::state_backend::extent_alloc::BlockInitiatorSource::ClientEarned
+                        || self.layout_manager.client_is_live(r.client_id)
+                })
+                .map(|r| BlockInitiator {
+                    volume_id: r.volume,
+                    host_nqn: r.host_nqn,
+                    node_name: r.node_name,
+                    source: r.source.as_str().to_string(),
+                    client_id: r.client_id,
+                    since_unix: r.since_unix,
+                })
+                .collect(),
+        }))
+    }
+
     /// Handle DS unregistration
     async fn unregister_data_server(
         &self,
@@ -1937,6 +1998,212 @@ mod create_volume_tests {
             .into_inner();
         assert!(!r.attached);
         assert!(r.message.contains("not block-class"), "{}", r.message);
+    }
+
+    /// BlockExportStatus is the roller's whole view of the block tier,
+    /// so it must report the initiator the moment the attach lands and
+    /// stop reporting it the moment the detach does — anything laggier
+    /// and the roller either refuses forever or rolls a live target.
+    #[tokio::test]
+    async fn block_export_status_tracks_initiators_across_attach_and_detach() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _tgt) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-roll", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        // A created-but-unused block volume must NOT look busy: refusing
+        // an idle export node is how F61's livelock comes back.
+        let idle = s
+            .block_export_status(Request::new(BlockExportStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(idle.enabled, "the shard serves the block class");
+        assert_eq!(idle.export_traddr, "10.0.0.9");
+        assert_eq!(idle.export_trsvcid, 4420);
+        assert!(
+            idle.initiators.is_empty(),
+            "a volume nobody connected to has no initiators: {:?}",
+            idle.initiators
+        );
+
+        for node in ["node-w1", "node-w2"] {
+            let r = s
+                .attach_block_node(Request::new(AttachBlockNodeRequest {
+                    volume_id: "pvc-roll".into(),
+                    node_name: node.into(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(r.attached, "{}", r.message);
+        }
+
+        let busy = s
+            .block_export_status(Request::new(BlockExportStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(busy.initiators.len(), 2, "{:?}", busy.initiators);
+        let mut nodes: Vec<&str> =
+            busy.initiators.iter().map(|i| i.node_name.as_str()).collect();
+        nodes.sort();
+        assert_eq!(nodes, vec!["node-w1", "node-w2"], "attach rows name their node");
+        assert!(
+            busy.initiators.iter().all(|i| i.source == "attach"
+                && i.volume_id == "pvc-roll"
+                && i.host_nqn == crate::nvmeof_export::flint_host_nqn(&i.node_name)),
+            "{:?}",
+            busy.initiators
+        );
+
+        assert!(
+            s.detach_block_node(Request::new(DetachBlockNodeRequest {
+                volume_id: "pvc-roll".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .detached
+        );
+        let after = s
+            .block_export_status(Request::new(BlockExportStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(after.initiators.len(), 1, "{:?}", after.initiators);
+        assert_eq!(after.initiators[0].node_name, "node-w2");
+    }
+
+    /// A client-earned admission (LAYOUTGET, no ControllerPublish) is
+    /// just as fatal to roll through, and it carries NO node name — its
+    /// row is keyed by NFS client id, which is minted after the very
+    /// session the admission exists to permit. The roller must see it
+    /// as an initiator on the EXPORT's node, not skip it for lack of a
+    /// node name.
+    #[tokio::test]
+    async fn a_client_earned_admission_is_an_initiator_with_no_node_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _tgt) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-earned", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        let host = crate::nvmeof_export::flint_host_nqn("node-late");
+        s.layout_manager
+            .state_backend()
+            .block_host_admit("pvc-earned", 4242, &host, 1_700_000_000)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let st = s
+            .block_export_status(Request::new(BlockExportStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(st.initiators.len(), 1, "{:?}", st.initiators);
+        let i = &st.initiators[0];
+        assert_eq!(i.source, "client");
+        assert_eq!(i.client_id, 4242);
+        assert_eq!(i.host_nqn, host);
+        assert!(i.node_name.is_empty(), "client-earned rows carry no node name");
+    }
+
+    /// The livelock this report would otherwise ship with. A
+    /// client-earned admission is removed by NOTHING in the normal
+    /// lifecycle — not unmount, not unstage, not detach; only a fence or
+    /// DeleteVolume — and the lease sweep never visits a client that
+    /// returned its layouts cleanly. So one ordinary unmount would leave
+    /// a row that reports an initiator forever, and the roller would
+    /// refuse that node's roll for the life of the volume. The lease is
+    /// the liveness test; the node attachment beside it is NOT filtered,
+    /// because ControllerUnpublish already owns that row's lifetime.
+    #[tokio::test]
+    async fn a_dead_clients_earned_admission_stops_counting_as_an_initiator() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _tgt) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-stale", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        let host = crate::nvmeof_export::flint_host_nqn("node-w1");
+        s.attach_block_node(Request::new(AttachBlockNodeRequest {
+            volume_id: "pvc-stale".into(),
+            node_name: "node-w1".into(),
+        }))
+        .await
+        .unwrap();
+        s.layout_manager
+            .state_backend()
+            .block_host_admit("pvc-stale", 77, &host, 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // While the lease holds, both rows report.
+        s.layout_manager.attach_lease_oracle(Arc::new(|_| true));
+        let live = s
+            .block_export_status(Request::new(BlockExportStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(live.initiators.len(), 2, "{:?}", live.initiators);
+
+        // The oracle is set once (OnceLock), so the dead-client half
+        // needs its own service — which is also the honest shape: a
+        // real MDS attaches exactly one lease table for its lifetime.
+        let (s2, _t2) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-stale2", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s2.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+        s2.attach_block_node(Request::new(AttachBlockNodeRequest {
+            volume_id: "pvc-stale2".into(),
+            node_name: "node-w1".into(),
+        }))
+        .await
+        .unwrap();
+        s2.layout_manager
+            .state_backend()
+            .block_host_admit("pvc-stale2", 77, &host, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        s2.layout_manager.attach_lease_oracle(Arc::new(|_| false));
+        let after = s2
+            .block_export_status(Request::new(BlockExportStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            after.initiators.len(),
+            1,
+            "the expired client's earned row must stop counting: {:?}",
+            after.initiators
+        );
+        assert_eq!(
+            after.initiators[0].source, "attach",
+            "the node attachment is NOT lease-filtered — ControllerUnpublish owns it"
+        );
+    }
+
+    /// A files-only shard answers enabled=false rather than erroring:
+    /// the roller consults every shard, and most clusters have none of
+    /// them serving block.
+    #[tokio::test]
+    async fn block_export_status_on_a_files_only_shard_is_disabled_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _tgt) = svc_sqlite(dir.path(), false);
+        let st = s
+            .block_export_status(Request::new(BlockExportStatusRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!st.enabled);
+        assert!(st.initiators.is_empty());
+        assert!(st.export_traddr.is_empty());
     }
 
     /// The fence closes the attach door and reopens it only at unfence:

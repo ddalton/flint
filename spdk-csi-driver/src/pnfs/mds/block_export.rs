@@ -28,6 +28,21 @@ use std::sync::Arc;
 use crate::nvmeof_export::{ensure_export, get_subsystem, ExportSpec, SpdkRpcTransport};
 use serde_json::json;
 
+/// The node whose spdk-tgt this MDS drives, from the pod's own
+/// downward-API `spec.nodeName` (chart: `FLINT_NODE_NAME` on the MDS
+/// container). The export socket is a shared hostPath, so the MDS pod
+/// and the tgt it converges are on the same node BY CONSTRUCTION — the
+/// MDS's own node name IS the export node, with no lookup and nothing
+/// to drift.
+///
+/// Empty when the env var is absent (a chart older than this, or a
+/// non-Kubernetes rig). Callers must have a fallback — the roller
+/// resolves the listener address against the Node objects instead —
+/// and must never read "" as "no node".
+pub fn export_node_name() -> String {
+    std::env::var("FLINT_NODE_NAME").unwrap_or_default()
+}
+
 /// How the reconciler reaches its spdk-tgt plus the export coordinates it
 /// converges toward. One target per MDS shard for phase 1 — allocation is
 /// per-volume inside the volume's own lvol (§8), and the volume pins to

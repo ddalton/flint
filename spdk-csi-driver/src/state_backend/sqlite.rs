@@ -1378,6 +1378,18 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn block_initiators(
+        &self,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockInitiatorRow>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        self.with_conn_mut(move |conn| crate::state_backend::extent_alloc::list_initiators(conn))
+            .await
+    }
+
     async fn block_fence_record(
         &self,
         volume: &str,

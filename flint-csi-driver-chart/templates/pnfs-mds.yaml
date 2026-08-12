@@ -229,6 +229,18 @@ spec:
               value: {{ $i | quote }}
             - name: RUST_LOG
               value: {{ $.Values.pnfs.server.logLevel | default "info" | quote }}
+            # The node this MDS runs on — and therefore, when blockExport
+            # is enabled, the node whose csi-node spdk-tgt serves the
+            # export (the socket is a shared hostPath, so the two are
+            # colocated by construction). BlockExportStatus reports it so
+            # the maintenance roller can refuse to roll a target with
+            # live NVMe-oF initiators on it. Harmless when blockExport is
+            # off; the roller falls back to matching the listener address
+            # against Node addresses if this is ever absent.
+            - name: FLINT_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             {{- if $.Values.pnfs.controlToken.enabled }}
             # Required Bearer token on every MdsControl gRPC — see
             # templates/pnfs-security.yaml.

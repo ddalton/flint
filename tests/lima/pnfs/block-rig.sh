@@ -415,6 +415,30 @@ BELT=$(vsh "grep -c 'MDS I/O on scsi-class file' $RIG/mds.log" || true)
 [ "${BELT:-0}" = "0" ] || fail "zeros-belt fired $BELT time(s) — the client fell back to MDS I/O"
 echo "✓ device counters: ${WR}B written / ${RD}B read; $GRANTS LAYOUTGET grant(s); zero MDS-path I/O"
 
+# ── R. the roller's read: BlockExportStatus sees the LIVE initiator ───
+# The maintenance roller refuses to roll a node whose spdk-tgt has block
+# clients on it, and this RPC is the only thing that tells it so. The
+# planner is pure and unit-tested; what needs REAL hardware is the claim
+# underneath it — that an actual kernel nvme session, doing actual raw
+# I/O right now, shows up here. A green unit suite over a source that
+# reports nobody is the bug wearing a passing test.
+# `grep -c`, never `grep -q`: under `set -o pipefail` a -q that exits on
+# the first match can SIGPIPE the writer and turn a MATCH into a failed
+# pipeline (the runak lesson — and it bit this very section on its first
+# run, which is exactly how cheap that mistake is to repeat).
+BS=$(vsh "$CSI_CLI block-status --endpoint 127.0.0.1:50051") || fail "block-status RPC"
+[ "$(echo "$BS" | grep -c 'enabled=true' || true)" -ge 1 ] \
+  || fail "block-status says the shard serves no block class: $BS"
+BS_N=$(echo "$BS" | head -1 | sed -n 's/.*initiators=\([0-9]*\).*/\1/p')
+[ "${BS_N:-0}" -ge 1 ] \
+  || fail "block-status reports $BS_N initiators while this host is mounted and writing — the roller would roll this tgt: $BS"
+# Match on the NQN, not on a second `vsh hostname` round-trip: HOSTNQN is
+# the identity the allow-list and the roller both key on, and it is
+# already derived from this host above.
+[ "$(echo "$BS" | grep -c "source=attach nqn=$HOSTNQN" || true)" -ge 1 ] \
+  || fail "block-status does not name THIS host's attachment ($HOSTNQN): $BS"
+echo "✓ BlockExportStatus sees the live session: $BS_N initiator(s), this host named"
+
 lvol_written() {
   vsh "$RPC bdev_get_iostat --name lvs_rig/$VOL" | python3 -c "
 import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
@@ -550,6 +574,21 @@ for s in json.load(sys.stdin):
   echo "$HOSTS" | grep -q "$HOSTNQN2"  || fail "host B's NQN missing from the allow-list: $HOSTS"
   echo "✓ M1: both hosts admitted — allow-list carries A, B and the fence lane"
 
+  # M1b. The roller's read is additive too. This is the number the
+  # refusal message quotes ("N initiator(s)"), and with two real hosts
+  # it is the first time it can be wrong in the direction that matters:
+  # an under-count would let a campaign roll a tgt believing one client
+  # would be hurt when two would.
+  BSM=$(vsh "$CSI_CLI block-status --endpoint 127.0.0.1:50051") || fail "M1b block-status"
+  BSM_N=$(echo "$BSM" | head -1 | sed -n 's/.*initiators=\([0-9]*\).*/\1/p')
+  [ "${BSM_N:-0}" -ge 2 ] \
+    || fail "block-status counts ${BSM_N:-0} initiator(s) with TWO hosts attached: $BSM"
+  [ "$(echo "$BSM" | grep -c "nqn=$HOSTNQN_A" || true)" -ge 1 ] \
+    || fail "host A missing from block-status: $BSM"
+  [ "$(echo "$BSM" | grep -c "nqn=$HOSTNQN2" || true)" -ge 1 ] \
+    || fail "host B missing from block-status: $BSM"
+  echo "✓ M1b: the roller's read counts BOTH hosts ($BSM_N initiators, A and B named)"
+
   # M2. concurrent raw writes to DIFFERENT files.
   M_MIB=8
   vsh  "dd if=/dev/urandom of=/var/tmp/rig-a.bin bs=1M count=$M_MIB status=none"
@@ -658,6 +697,18 @@ for s in json.load(sys.stdin):
   echo "$HOSTS2" | grep -q "$HOSTNQN_A" \
     || fail "fencing B evicted A too — the eviction is not per-host: $HOSTS2"
   echo "✓ M4a: fencing B evicted ONLY B's NQN; A's admission survived"
+
+  # M4a'. The roller must see the fence too, and see it the RIGHT way
+  # round: a fenced client is already cut off at the device, so counting
+  # it would refuse this node's roll on behalf of a client we
+  # deliberately evicted — while A, still live, must keep the refusal
+  # standing on its own.
+  BSF=$(vsh "$CSI_CLI block-status --endpoint 127.0.0.1:50051") || fail "M4a' block-status"
+  [ "$(echo "$BSF" | grep -c "nqn=$HOSTNQN2" || true)" = "0" ] \
+    || fail "block-status still counts the FENCED host B as an initiator: $BSF"
+  [ "$(echo "$BSF" | grep -c "nqn=$HOSTNQN_A" || true)" -ge 1 ] \
+    || fail "block-status lost the still-live host A after B's fence: $BSF"
+  echo "✓ M4a': the roller's read drops the fenced host and keeps the live one"
 
   # M4b. THE FENCE ITSELF. Eviction is bookkeeping — it closes the
   # RECONNECT door. Delivery is the victim's live raw I/O stopping at
@@ -1976,6 +2027,38 @@ DETACH2=$(vsh "$CSI_CLI detach --endpoint 127.0.0.1:50051 --volume-id $VOL --nod
   || fail "detach replay errored"
 echo "$DETACH2" | grep -c 'replay' >/dev/null || fail "detach replay did not self-identify: $DETACH2"
 echo "✓ unstage+detach: session down, link gone, attach row swept, replay clean"
+
+# The other half of §R, and the one that keeps the roller CONVERGING: an
+# export nobody is connected to must report zero, or the campaign would
+# refuse this node forever (F61's livelock, block edition).
+#
+# Two rows have to clear, and they clear by different clocks. The node
+# ATTACH row goes synchronously with the detach above. The CLIENT-EARNED
+# row (minted at LAYOUTGET) is removed by nothing in the normal
+# lifecycle, so it stops counting only when the NFS client's lease does —
+# promptly if the kernel sent DESTROY_CLIENTID on the last umount,
+# otherwise at lease expiry. Hence the poll: what is asserted is that it
+# converges, not that it is instant.
+BS_N=""
+for i in $(seq 1 60); do
+  BS=$(vsh "$CSI_CLI block-status --endpoint 127.0.0.1:50051") || fail "block-status after detach"
+  BS_N=$(echo "$BS" | head -1 | sed -n 's/.*initiators=\([0-9]*\).*/\1/p')
+  [ "${BS_N:-1}" = "0" ] && break
+  sleep 1
+done
+[ "${BS_N:-1}" = "0" ] \
+  || fail "block-status still reports $BS_N initiator(s) 60s after unstage+detach — the roller would refuse this node until the volume is deleted: $BS"
+# ...and prove WHICH mechanism got it to zero. The client-earned row is
+# still in the table — nothing in the normal lifecycle deletes it — so a
+# zero here is the LEASE FILTER working, not a row that quietly vanished.
+# Without this assertion the check above would pass just as happily on a
+# build that had never heard of leases.
+HROWS=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+  \"SELECT COUNT(*) FROM block_hosts WHERE volume='$VOL'\"" || echo "?")
+[ "${HROWS:-0}" -ge 1 ] \
+  || fail "expected the client-earned block_hosts row to OUTLIVE the detach (that is the point of the lease filter); found ${HROWS:-0}"
+echo "✓ BlockExportStatus drops to 0 initiators once the session is gone (the roll unblocks, poll $i)"
+echo "  …with $HROWS client-earned row(s) still in block_hosts — the LEASE, not a deletion, is what cleared the report"
 
 echo
 if [ "${RECONCILE:-0}" = "1" ]; then

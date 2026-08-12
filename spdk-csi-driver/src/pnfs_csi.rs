@@ -602,6 +602,56 @@ impl PnfsCsi {
         })
     }
 
+    /// Ask this shard where its block export lives and who is on it —
+    /// the maintenance roller's read (design §11).
+    ///
+    /// Every failure mode is an `Err`, deliberately: the caller turns an
+    /// empty initiator list into permission to restart a target, so a
+    /// shard that cannot answer must be unmistakable from a shard that
+    /// answers "nobody".
+    pub async fn block_export_status(&self) -> Result<BlockExportView, PnfsError> {
+        let mut client = self.dial().await?;
+        let resp = client
+            .block_export_status(crate::pnfs::grpc::BlockExportStatusRequest {})
+            .await
+            .map_err(|e| {
+                // Image skew during a helm upgrade: the controller rolls
+                // before the MDS does, and an MDS predating this verb
+                // answers UNIMPLEMENTED. Still an error — an old MDS can
+                // be serving block volumes right now and we cannot see
+                // them — but it must say WHY, or the operator reads a
+                // paused campaign as a broken one. The chart already
+                // requires the MDS and driver images to move together,
+                // so this window is minutes, and the roller retries
+                // every tick.
+                if e.code() == tonic::Code::Unimplemented {
+                    PnfsError::Mds(
+                        "this MDS predates BlockExportStatus — the roll pauses until the \
+                         MDS image matches the driver's (the chart pins them together)"
+                            .into(),
+                    )
+                } else {
+                    PnfsError::Transport(format!("BlockExportStatus: {}", e))
+                }
+            })?
+            .into_inner();
+        Ok(BlockExportView {
+            enabled: resp.enabled,
+            export_node: resp.export_node,
+            export_traddr: resp.export_traddr,
+            initiators: resp
+                .initiators
+                .into_iter()
+                .map(|i| BlockInitiatorView {
+                    volume_id: i.volume_id,
+                    host_nqn: i.host_nqn,
+                    node_name: i.node_name,
+                    source: i.source,
+                })
+                .collect(),
+        })
+    }
+
     /// The inverse (ControllerUnpublish). Idempotent on the MDS.
     pub async fn detach_block_node(
         &self,
@@ -639,6 +689,30 @@ pub struct BlockAttach {
     pub subnqn: String,
     pub nguid: String,
     pub host_nqn: String,
+}
+
+/// One shard's block-export posture, as `BlockExportStatus` answered it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BlockExportView {
+    /// False = this shard serves no block class at all.
+    pub enabled: bool,
+    /// The node hosting the export's spdk-tgt (MDS downward API).
+    /// Empty on charts predating `FLINT_NODE_NAME` — resolve
+    /// `export_traddr` against the Node objects instead.
+    pub export_node: String,
+    pub export_traddr: String,
+    pub initiators: Vec<BlockInitiatorView>,
+}
+
+/// One live initiator on a shard's export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockInitiatorView {
+    pub volume_id: String,
+    pub host_nqn: String,
+    /// The node the admission names; empty for client-earned rows.
+    pub node_name: String,
+    /// "attach" | "client".
+    pub source: String,
 }
 
 /// Publish-context keys ControllerPublish stamps for block volumes and
@@ -791,6 +865,34 @@ impl PnfsShards {
     /// Endpoint string of shard `i` (logging).
     pub fn endpoint_of(&self, shard: usize) -> &str {
         self.shards[shard].endpoint()
+    }
+
+    /// Ask EVERY shard for its block-export posture (design §11). Each
+    /// shard runs its own tgt on its own node, so the roller's question
+    /// — "may I restart node X's target?" — is only answerable from the
+    /// union.
+    ///
+    /// All-or-nothing on purpose: one unreachable shard fails the whole
+    /// call. A partial union would be indistinguishable from a complete
+    /// one that happens to have fewer initiators, and the difference is
+    /// exactly whether a node with live clients gets rolled. The
+    /// campaign pausing on an unreachable MDS is the cheap failure.
+    pub async fn block_export_status_all(&self) -> Result<Vec<BlockExportView>, PnfsError> {
+        let mut out = Vec::with_capacity(self.shards.len());
+        for (i, shard) in self.shards.iter().enumerate() {
+            match shard.block_export_status().await {
+                Ok(v) => out.push(v),
+                Err(e) => {
+                    return Err(PnfsError::Transport(format!(
+                        "shard {} ({}): {}",
+                        i,
+                        shard.endpoint(),
+                        e
+                    )))
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -973,6 +1075,9 @@ mod tests {
         canned_delete: Mutex<Option<DeleteVolumeResponse>>,
         canned_expand: Mutex<Option<ExpandVolumeResponse>>,
         canned_attach: Mutex<Option<crate::pnfs::grpc::AttachBlockNodeResponse>>,
+        canned_block_status: Mutex<Option<crate::pnfs::grpc::BlockExportStatusResponse>>,
+        /// Pretend to be an MDS that predates the verb (helm skew).
+        block_status_unimplemented: Mutex<bool>,
         last_create_volume_id: Mutex<Option<String>>,
         last_delete_volume_id: Mutex<Option<String>>,
         last_create_request: Mutex<Option<CreateVolumeRequest>>,
@@ -987,6 +1092,8 @@ mod tests {
                 canned_delete: Mutex::new(Some(delete)),
                 canned_expand: Mutex::new(None),
                 canned_attach: Mutex::new(None),
+                canned_block_status: Mutex::new(None),
+                block_status_unimplemented: Mutex::new(false),
                 last_create_request: Mutex::new(None),
                 last_create_volume_id: Mutex::new(None),
                 last_delete_volume_id: Mutex::new(None),
@@ -1075,6 +1182,19 @@ mod tests {
                 detached: true,
                 message: String::new(),
             }))
+        }
+        async fn block_export_status(
+            &self, _: Request<crate::pnfs::grpc::BlockExportStatusRequest>,
+        ) -> Result<Response<crate::pnfs::grpc::BlockExportStatusResponse>, Status> {
+            if *self.block_status_unimplemented.lock().unwrap() {
+                return Err(Status::unimplemented("unknown method BlockExportStatus"));
+            }
+            match self.canned_block_status.lock().unwrap().clone() {
+                Some(r) => Ok(Response::new(r)),
+                // No canned answer = this shard is unreachable, the case
+                // the roller must never confuse with "nobody connected".
+                None => Err(Status::unavailable("mock: no canned block status")),
+            }
         }
     }
 
@@ -1194,6 +1314,56 @@ mod tests {
             mock.last_delete_volume_id.lock().unwrap().as_deref(),
             Some("pvc-todelete"),
         );
+    }
+
+    /// The roller turns an empty initiator list into permission to
+    /// restart a target, so every way of NOT getting an answer has to
+    /// stay an error. The one worth naming is helm skew: the controller
+    /// rolls before the MDS, the old MDS answers UNIMPLEMENTED, and a
+    /// campaign that read that as "no block clients here" would roll
+    /// straight through a live export — during an upgrade, which is
+    /// exactly when the roller is busiest.
+    #[tokio::test]
+    async fn an_mds_too_old_for_the_verb_is_an_error_that_names_the_skew() {
+        let mock = std::sync::Arc::new(MockMds::new(
+            CreateVolumeResponse {
+                created: true, export_path: "/srv".into(), volume_file: "v".into(),
+                message: String::new(), nfs_port: 2049, directory: true,
+                effective_stripe_size: 0, effective_stripe_width: 0,
+                effective_layout_class: String::new(),
+            },
+            DeleteVolumeResponse { deleted: true, message: String::new() },
+        ));
+        *mock.block_status_unimplemented.lock().unwrap() = true;
+        let addr = start_mock_mds(mock.clone()).await;
+        let err = PnfsCsi::new(&addr)
+            .block_export_status()
+            .await
+            .expect_err("an MDS that cannot answer must not read as an idle one");
+        assert!(
+            err.to_string().contains("predates BlockExportStatus"),
+            "the pause must name the skew or it reads as a broken controller: {err}"
+        );
+
+        // And the shard fan-out is all-or-nothing: one silent shard
+        // fails the union rather than contributing zero initiators.
+        *mock.block_status_unimplemented.lock().unwrap() = false;
+        *mock.canned_block_status.lock().unwrap() =
+            Some(crate::pnfs::grpc::BlockExportStatusResponse {
+                enabled: true,
+                export_node: "tgt-1".into(),
+                export_traddr: "10.0.0.9".into(),
+                export_trsvcid: 4420,
+                initiators: Vec::new(),
+            });
+        let good = PnfsCsi::new(&addr).block_export_status().await.expect("status");
+        assert_eq!(good.export_node, "tgt-1");
+        let shards = PnfsShards::new(vec![addr.clone(), "127.0.0.1:1".to_string()]);
+        let err = shards
+            .block_export_status_all()
+            .await
+            .expect_err("one unreachable shard must fail the whole union");
+        assert!(err.to_string().contains("shard 1"), "{err}");
     }
 
     #[tokio::test]

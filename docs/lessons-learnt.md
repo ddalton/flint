@@ -129,7 +129,16 @@ CSI CLI. Modes are standing regression harnesses (`make test-pnfs-*-rig`).
   wire value has an obvious reading and a deployed implementation, pin the
   deployed one in a byte-level test with the source citation.
 - **`grep -q` + `pipefail` = SIGPIPE false negatives** in drill asserts — use
-  `grep -c`. Never pipe a drill through `tail` (runag/runai).
+  `grep -c`. Never pipe a drill through `tail` (runag/runai). *Recurred
+  2026-08-11* in a freshly written assert: the pattern matched, the line was
+  printed in the failure message, and the drill failed anyway. A rule you have
+  written down is not a rule you have applied — grep the diff for `grep -q`
+  before running a rig, not after.
+- **Assert the mechanism, not only the outcome.** A check that "the report
+  reached zero" passes identically whether a lease filter cleared it or a row
+  quietly vanished — and those two worlds behave differently the next time. The
+  block-status drill asserts zero AND that the underlying row is still there,
+  so it can only pass for the intended reason.
 - **Never `nvme disconnect` under a fenced writer's in-flight O_DIRECT pwrite**
   — it wedges the writer *and* `nvme-delete-wq` in D-state; only a VM reboot
   recovers. Wait for the writer's errno first; skip the disconnect if it stays
@@ -217,8 +226,21 @@ performance findings. Rules:
   pins the volume and only a node reboot clears it (runab). The unstick
   ladder: `ss -K` first, reboot last (runz).
 - DS rolls restart spdk-tgt → EIO under mounted PVCs; **drainRoll is ON by
-  default since 1.22.0** — block-layout remote initiators raise the stakes
-  because the roller is blind to them.
+  default since 1.22.0**. The roller was blind to block-layout initiators
+  until 2026-08-11 — it now refuses a node whose tgt serves a live
+  `pnfs-block` export, and the way it was blind is the lesson:
+  **a consumer model built from one kind of record cannot see a client of
+  another kind.** Block volumes are single-replica, so they failed the
+  `replicas_from_pv` guard and never entered the roller's world at all — not
+  "no consumer found", but never asked. When you add a class of workload,
+  re-derive every safety predicate that enumerates workloads.
+- **Ask what deletes each row before you report it as liveness.** The same
+  fix nearly shipped a permanent refusal: node attachments are removed by
+  ControllerUnpublish, but a client-earned admission is removed by *nothing*
+  in the normal lifecycle (only a fence or DeleteVolume), so one ordinary
+  unmount would have wedged that node's rolls for the life of the volume.
+  Durable-row-as-liveness needs an expiry story, and "who deletes this?" is
+  the question that finds its absence.
 - Kubelet evictions explain "mystery" pod deaths — the audit log is where the
   answer lives (attach/detach campaign).
 - Silent-zero reads are the house failure mode: F67 (MDS state loss ⇒ zeros)

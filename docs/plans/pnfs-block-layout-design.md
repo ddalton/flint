@@ -1079,6 +1079,67 @@ Each phase ships standalone value; none is gated on the next.
    keeps writing THROUGH the fence. That last result answers the open question the
    drill was built for: the EA-RO reservation admits the surviving registrant, so a
    per-client fence is per-client at the DEVICE too, not just on the allow-list.
+
+   > **ROLL-SAFETY SHIPPED 2026-08-11 — the roller can see block initiators.**
+   > The blindness above was worse than "no signal": a block volume is
+   > single-replica, so `gather_volume_maint` skipped it at the
+   > `replicas_from_pv` guard and it never entered the roller's world at all
+   > — no marks, no in-sync map, no consumer. A "safe" roll deleted the
+   > csi-node pod whose spdk-tgt hosts the export and every remote kernel
+   > initiator lost its namespace mid-write, with the MDS's own fallback
+   > lane dying alongside it (same tgt, shared socket). There is no drain
+   > that survives that, so the answer is REFUSAL in F62's vocabulary, not
+   > a barrier.
+   >
+   > **The fact**: new `BlockExportStatus` MdsControl RPC — `enabled`, the
+   > export's node (from the MDS pod's own downward-API `spec.nodeName`,
+   > since the hostPath socket makes MDS and tgt colocated by
+   > construction), its listener, and every live initiator across every
+   > volume on the shard (`block_node_attach` ∪ `block_hosts`, with
+   > provenance). The controller unions it across ALL shards
+   > (`block_export_status_all`) — each shard runs its own tgt on its own
+   > node, so only the union answers "may I restart node X".
+   > `RollStep::Refused` now carries a per-node `RefusalCause`, because the
+   > two causes need different operators: a local consumer is visible in
+   > `kubectl get pods -o wide`, block clients are on other nodes and hold
+   > no object here at all.
+   >
+   > **Three things that had to be got right, each with a test:**
+   > (a) *Idle exports must still roll.* The predicate is "hosts an export
+   > AND someone is connected", never "hosts an export" — the F61 livelock
+   > is one careless `!initiators.is_empty()` away.
+   > (b) *Unreachable ≠ empty.* A shard that cannot answer fails the whole
+   > union and PAUSES the campaign; an empty list is permission to restart
+   > a target, and the two must never arrive as the same value. The tick
+   > still renews marks on the way out, so an MDS outage cannot quietly
+   > lapse a mid-roll node's suppression.
+   > (c) *Client-earned admissions expire, or the fix ships its own
+   > livelock.* `block_hosts` rows are removed by NOTHING in the normal
+   > lifecycle — not unmount, not unstage, not detach; only a fence or
+   > DeleteVolume — and the lease sweep only visits clients holding GRANT
+   > rows, so a clean unmount leaves a row that reports an initiator
+   > forever. The report now lease-filters client-earned rows (the layout
+   > manager takes the same `alive` oracle the sweep does); node
+   > attachments are NOT filtered, because ControllerUnpublish already owns
+   > their lifetime.
+   >
+   > Also handled: initiators arriving DURING a roll (F63's completion-path
+   > hole, block edition — ClearMarks, never DeletePod, or a live roller
+   > would renew the drained leg's suppression forever), and an MDS too old
+   > to name its own node (the listener address resolves against the Node
+   > objects; a busy export that still cannot be named is an ERROR, since
+   > "somebody loses their device but we can't say whose roll does it" must
+   > not degrade to "nobody"). Rig-proven in §R of `block-rig.sh`: a real
+   > kernel session shows up in the report while it writes, both hosts are
+   > counted under MULTI=1, a FENCED host drops out while its live sibling
+   > stays, and the count converges to 0 after unstage+detach.
+   >
+   > **Still open here**: the preStop hook (`node.yaml`) deletes NVMe-oF
+   > subsystems on shutdown, so a MANUAL pod delete, eviction or node drain
+   > still cuts block clients with no warning — the roller only governs its
+   > own campaign. And a refusal is terminal: nothing yet recalls layouts
+   > and drains block clients so the roll can proceed (the
+   > ANA-INACCESSIBLE + CB_LAYOUTRECALL half of this item).
 4. **Registry storage driver on the userspace library.** libflint (metadata client +
    SPDK TCP initiator), surfaced as the OCI-registry driver per
    `docs/oci-registry-pnfs-architecture.md`.

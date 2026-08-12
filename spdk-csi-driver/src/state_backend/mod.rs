@@ -726,6 +726,16 @@ pub trait StateBackend: Send + Sync {
         host_nqn: &str,
     ) -> StateBackendResult<Result<(bool, Vec<String>), extent_alloc::ExtentAllocError>>;
 
+    /// Every live block-layout initiator on this MDS, across all
+    /// volumes — the maintenance roller's view of who would lose their
+    /// device if this node's spdk-tgt restarted (design §11).
+    ///
+    /// Cross-volume by design: the roller asks about a NODE, and a node
+    /// hosts one target serving every block volume on the shard.
+    async fn block_initiators(
+        &self,
+    ) -> StateBackendResult<Result<Vec<extent_alloc::BlockInitiatorRow>, extent_alloc::ExtentAllocError>>;
+
     /// Write the durable fence record (the positive `fenced_clients`
     /// row). Captures the client's host_nqn from `block_hosts` — so it
     /// must run BEFORE the eviction — and returns it for the log.
