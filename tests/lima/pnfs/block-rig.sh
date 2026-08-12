@@ -1429,59 +1429,86 @@ not do. Report: ${RESV_AFTER:-<none>}"
   # of the release under test. The money proof inverts F3: the device
   # counter moves again under a fresh O_DIRECT write.
   if [ "${UNFENCE:-0}" = "1" ]; then
-    echo "▶ UNFENCE: node reboot, fence re-established, then record → reservation → bytes"
-    # U0. reboot the client node (the whole VM — force: the D-state
-    # writer blocks a graceful shutdown indefinitely).
-    limactl stop -f "$LIMA_VM" || fail "limactl stop"
-    limactl start "$LIMA_VM" || fail "limactl start"
-    vsudo "modprobe nvme-tcp && modprobe blocklayoutdriver" || fail "modprobe after reboot"
-    vsudo "rm -f /var/tmp/spdk_cpu_lock_*; rm -f /dev/disk/by-id/nvme-eui.*"
+    # NOREBOOT=1 — the variant that answers a question the rebooting
+    # path CANNOT, because the reboot destroys the evidence.
+    #
+    # A preempted client loses its key at the target, but its own
+    # `pnfs_block_dev` keeps `PNFS_BDEV_REGISTERED` set
+    # (fs/nfs/blocklayout/dev.c), and `bl_register_scsi` only ever
+    # registers ONCE per device object. So a client that survives a
+    # fence with its device object intact would never re-register — it
+    # would run as a non-registrant believing otherwise, and the next
+    # sibling fence (volume-wide EA-RO) would lock it out though it was
+    # never fenced. Rebooting mints a fresh device object and hides that
+    # entirely.
+    #
+    # Precondition, not politeness: only run this when the fenced writer
+    # ERRORED rather than parking its pwrite in D-state. The D-state
+    # case is exactly why the rebooting path exists (`umount -lf` cannot
+    # clear it), and unfencing into it would wedge the VM instead of
+    # measuring anything.
+    if [ "${NOREBOOT:-0}" = "1" ]; then
+      echo "▶ UNFENCE (NOREBOOT): does a fenced client re-register once it recovers?"
+      echo "$DONE" | grep -qE 'EXIT [1-9]' \
+        || fail "the fenced writer did not error (marker='${DONE:-none}') — its pwrite may be \
+parked in D-state, which only a reboot clears. Re-run without NOREBOOT=1."
+      echo "✓ U0': writer errored ($DONE) — no D-state, so the reboot is skippable here"
+    else
 
-    # Same tgt resurrection as §T: SAME disk image, SAME ptpl_dir —
-    # lvstore+lvol auto-load; NO create_lvstore (that would wipe).
-    vsudo "nohup $RIG_TOOLS/spdk_tgt --no-huge -s 512 -r $SOCK -m 0x1 --wait-for-rpc >>$RIG/spdk.log 2>&1 &
-           echo \$! > /var/tmp/spdk-rig.pid; sleep 0.5"
-    for i in $(seq 1 20); do
-      vsh "$RPC rpc_get_methods >/dev/null 2>&1" && break
-      [ "$i" = 20 ] && fail "tgt RPC never came back after the reboot ($RIG/spdk.log)"
-      sleep 0.5
-    done
-    vsudo "chmod 0777 $SOCK"
-    vsh "$RPC iobuf_set_options --small-pool-count 4096 --large-pool-count 1024" || fail "iobuf (reboot)"
-    vsh "$RPC iscsi_set_options -a 1 -c 1 -q 1 -x 1 -k 1 -u 24 -j 1 -z 1" || fail "iscsi (reboot)"
-    vsh "$RPC framework_start_init" || fail "framework_start_init (reboot)"
-    for i in $(seq 1 60); do
-      vsh "$RPC framework_wait_init >/dev/null 2>&1" && break
-      [ "$i" = 60 ] && fail "subsystems never initialized (reboot)"
-      sleep 0.5
-    done
-    vsh "$RPC bdev_aio_create /var/tmp/rig-disk.img rigdisk 4096" >/dev/null || fail "bdev_aio_create (reboot)"
-    for i in $(seq 1 40); do
-      vsh "$RPC bdev_get_bdevs --name lvs_rig/$VOL >/dev/null 2>&1" && break
-      [ "$i" = 40 ] && fail "the lvstore/lvol did NOT auto-load after the reboot"
-      sleep 0.5
-    done
-    vsh "$RPC nvmf_create_transport -t TCP" || fail "nvmf_create_transport (reboot)"
+      # U0. reboot the client node (the whole VM — force: the D-state
+      # writer blocks a graceful shutdown indefinitely).
+      limactl stop -f "$LIMA_VM" || fail "limactl stop"
+      limactl start "$LIMA_VM" || fail "limactl start"
+      vsudo "modprobe nvme-tcp && modprobe blocklayoutdriver" || fail "modprobe after reboot"
+      vsudo "rm -f /var/tmp/spdk_cpu_lock_*; rm -f /dev/disk/by-id/nvme-eui.*"
 
-    # MDS back; its startup replay must RE-ESTABLISH the fence from the
-    # durable record before the lever lifts it (the §T-proven property,
-    # here as a precondition: what the release releases is real).
-    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS FLINT_NFS_GRACE_SECS=5 FLINT_PNFS_LEASE_SWEEP_SECS=$SWEEP_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
-    for i in $(seq 1 20); do
-      vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
-      [ "$i" = 20 ] && fail "MDS gRPC never came back after the reboot"
-      sleep 0.5
-    done
-    STARTUP=""
-    for i in $(seq 1 60); do
-      STARTUP=$(vsh "grep 'startup re-fence' $RIG/mds.log | tail -1" || true)
-      [ -n "$STARTUP" ] && break
-      sleep 0.5
-    done
-    [ -n "$STARTUP" ] || fail "no startup re-fence after the reboot — the durable record was not consulted"
-    echo "$STARTUP" | grep -q '0x666c696e745f6d64(holder)' \
-      || fail "the fence did not re-establish across the reboot: ${STARTUP}"
-    echo "✓ node rebooted; stack restarted; fence re-established: ${STARTUP}"
+      # Same tgt resurrection as §T: SAME disk image, SAME ptpl_dir —
+      # lvstore+lvol auto-load; NO create_lvstore (that would wipe).
+      vsudo "nohup $RIG_TOOLS/spdk_tgt --no-huge -s 512 -r $SOCK -m 0x1 --wait-for-rpc >>$RIG/spdk.log 2>&1 &
+             echo \$! > /var/tmp/spdk-rig.pid; sleep 0.5"
+      for i in $(seq 1 20); do
+        vsh "$RPC rpc_get_methods >/dev/null 2>&1" && break
+        [ "$i" = 20 ] && fail "tgt RPC never came back after the reboot ($RIG/spdk.log)"
+        sleep 0.5
+      done
+      vsudo "chmod 0777 $SOCK"
+      vsh "$RPC iobuf_set_options --small-pool-count 4096 --large-pool-count 1024" || fail "iobuf (reboot)"
+      vsh "$RPC iscsi_set_options -a 1 -c 1 -q 1 -x 1 -k 1 -u 24 -j 1 -z 1" || fail "iscsi (reboot)"
+      vsh "$RPC framework_start_init" || fail "framework_start_init (reboot)"
+      for i in $(seq 1 60); do
+        vsh "$RPC framework_wait_init >/dev/null 2>&1" && break
+        [ "$i" = 60 ] && fail "subsystems never initialized (reboot)"
+        sleep 0.5
+      done
+      vsh "$RPC bdev_aio_create /var/tmp/rig-disk.img rigdisk 4096" >/dev/null || fail "bdev_aio_create (reboot)"
+      for i in $(seq 1 40); do
+        vsh "$RPC bdev_get_bdevs --name lvs_rig/$VOL >/dev/null 2>&1" && break
+        [ "$i" = 40 ] && fail "the lvstore/lvol did NOT auto-load after the reboot"
+        sleep 0.5
+      done
+      vsh "$RPC nvmf_create_transport -t TCP" || fail "nvmf_create_transport (reboot)"
+
+      # MDS back; its startup replay must RE-ESTABLISH the fence from the
+      # durable record before the lever lifts it (the §T-proven property,
+      # here as a precondition: what the release releases is real).
+      vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS FLINT_NFS_GRACE_SECS=5 FLINT_PNFS_LEASE_SWEEP_SECS=$SWEEP_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+      for i in $(seq 1 20); do
+        vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
+        [ "$i" = 20 ] && fail "MDS gRPC never came back after the reboot"
+        sleep 0.5
+      done
+      STARTUP=""
+      for i in $(seq 1 60); do
+        STARTUP=$(vsh "grep 'startup re-fence' $RIG/mds.log | tail -1" || true)
+        [ -n "$STARTUP" ] && break
+        sleep 0.5
+      done
+      [ -n "$STARTUP" ] || fail "no startup re-fence after the reboot — the durable record was not consulted"
+      echo "$STARTUP" | grep -q '0x666c696e745f6d64(holder)' \
+        || fail "the fence did not re-establish across the reboot: ${STARTUP}"
+      echo "✓ node rebooted; stack restarted; fence re-established: ${STARTUP}"
+
+    fi
 
     # U1. the lever: record cleared AND the reservation released.
     UR=$(vsh "timeout 45 $RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
@@ -1525,9 +1552,42 @@ not do. Report: ${RESV_AFTER:-<none>}"
     # MDS I/O, so dd would EIO instead of moving the lvol counter
     # (which the tgt restart zeroed: everything it counts now is
     # post-release traffic).
-    vsudo "mkdir -p $MNT && mount -t nfs4 -o vers=4.2,proto=tcp,port=20490 127.0.0.1:/$VOL $MNT" \
+    # NOREBOOT keeps the ORIGINAL mount — which is the point: what is
+    # under test is whether the client recovers on the mount it already
+    # has, not on a fresh one. (The rebooting path has no mount left, so
+    # it must make one.)
+    vsudo "mkdir -p $MNT; mountpoint -q $MNT || mount -t nfs4 -o vers=4.2,proto=tcp,port=20490 127.0.0.1:/$VOL $MNT" \
       || fail "post-unfence mount failed"
     REWRITE_MIB=8
+    if [ "${NOREBOOT:-0}" = "1" ]; then
+      # THE FINDING, asserted rather than narrated: a live mount does NOT
+      # survive its client being fenced. The eviction tore down the nvme
+      # controller, recovery re-staged onto a NEW one (nvme0n1 →
+      # nvme0n2), and the mount keeps issuing I/O to the OLD path — the
+      # dmesg is `dev nvme0c0n1` even though the by-id link now points at
+      # the new namespace. CB_NOTIFY_DEVICEID from the unfence was tried
+      # and cannot fix it: the unfence necessarily precedes the re-stage
+      # (attach is refused while the fence stands), so the notification
+      # lands before the replacement device exists — accepted 1/1, write
+      # still failed.
+      #
+      # If this write ever STARTS succeeding, something real improved
+      # (a kernel that re-resolves on path loss, or a post-stage signal
+      # we added) — so it fails loudly rather than being skipped.
+      set +o pipefail
+      NOREBOOT_W=$(vsudo "dd if=/dev/urandom of=$MNT/data.bin bs=1M count=1 \
+             oflag=direct conv=notrunc status=none 2>&1; echo RC=\$?")
+      set -o pipefail
+      [ "$(echo "$NOREBOOT_W" | sed -n 's/^RC=//p' | tail -1)" != "0" ] \
+        || fail "the pre-remount write SUCCEEDED — a live mount now survives its client \
+being fenced. That is an improvement, not a regression: re-verify what changed and retire \
+this expectation."
+      echo "✓ U4': the surviving mount is DEAD after the fence (writes still go to the old"
+      echo "  controller path) — recovery needs a remount, which is why the standard arm reboots"
+      vsudo "umount -f $MNT 2>/dev/null || umount -l $MNT 2>/dev/null; true"
+      vsudo "mount -t nfs4 -o vers=4.2,proto=tcp,port=20490 127.0.0.1:/$VOL $MNT" \
+        || fail "remount after the unfence failed"
+    fi
     vsudo "dd if=/dev/urandom of=$MNT/data.bin bs=1M count=$REWRITE_MIB \
            oflag=direct conv=notrunc status=none && sync $MNT/data.bin" \
       || fail "post-unfence O_DIRECT write FAILED — the client is still fenced somewhere"
@@ -1540,6 +1600,49 @@ not do. Report: ${RESV_AFTER:-<none>}"
     [ "${HOSTROWS:-0}" -ge 1 ] \
       || fail "no block_hosts row after the recovery write — the LAYOUTGET admission never ran"
     echo "✓ bytes flow again: ${W_AFTER}B written raw post-release; durable re-admission recorded"
+
+    # U5. IS THE RECOVERED CLIENT A REGISTRANT AGAIN?
+    #
+    # The fence preempted its key. `bl_register_scsi` registers ONCE per
+    # `pnfs_block_dev` (a `test_and_set_bit` on PNFS_BDEV_REGISTERED), and
+    # only `bl_free_device` clears it — so a client that came back on the
+    # SAME device object would be a non-registrant that believes it is
+    # registered, and the next sibling fence (volume-wide EA-RO) would
+    # lock it out though it was never fenced. Both recovery paths mint a
+    # fresh device object (the reboot obviously; NOREBOOT via a fresh
+    # `stage` = new nvme controller = new bdev = new deviceid
+    # resolution), so the prediction is that the key is BACK — and that
+    # the hazard is unreachable through this path rather than merely
+    # unobserved. Asserted so a future recovery shortcut that reuses the
+    # device object cannot land quietly.
+    RESV_UNF_RAW=$(vsudo "nvme resv-report /dev/$NSDEV -d 256 -e 2>&1; echo RC=\$?")
+    RESV_UNF_RC=$(echo "$RESV_UNF_RAW" | sed -n 's/^RC=//p' | tail -1)
+    RESV_UNF=$(echo "$RESV_UNF_RAW" | grep -iE 'rtype|regctl|rkey' | tr '\n' ' ')
+    echo "· resv-report post-unfence: ${RESV_UNF:-<none>} (rc=${RESV_UNF_RC:-?})"
+    [ "${RESV_UNF_RC:-1}" = "0" ] \
+      || fail "the recovered client still cannot READ the reservation table (rc=${RESV_UNF_RC:-?}) — \
+it is being treated as a non-registrant after the unfence: $(echo "$RESV_UNF_RAW" | tr '\n' ' ' | cut -c1-160)"
+    # The recovered client registers under its CURRENT identity, which is
+    # NOT the one that was fenced: the fence destroys the client's state,
+    # so it comes back with a new NFSv4 client id and GETDEVICEINFO hands
+    # out that new id as `sbv_pr_key`. Measured: the fenced client was 2,
+    # the recovered one registered as 4, alongside the MDS's own
+    # 0x666c696e745f6d64. So the drill asserts BOTH halves — the new
+    # identity is a registrant, and the fenced key never came back.
+    NEWCID=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+      \"SELECT client_id FROM block_hosts WHERE volume='$VOL' ORDER BY admitted_unix DESC LIMIT 1\"" || true)
+    [ -n "${NEWCID:-}" ] || fail "no block_hosts row after the recovery write — cannot name the recovered client"
+    [ "$(echo "$RESV_UNF_RAW" | grep -ciE "rkey[^0-9a-f]*\b$(printf '%x' "$NEWCID")\b" || true)" -ge 1 ] \
+      || fail "the recovered client (id $NEWCID) is NOT registered — it is writing as a \
+non-registrant, and the next fence of any sibling would exclude it though it was never fenced. \
+Report: ${RESV_UNF:-<none>}"
+    if [ "$NEWCID" != "$CID" ]; then
+      [ "$(echo "$RESV_UNF_RAW" | grep -ciE "rkey[^0-9a-f]*\b$(printf '%x' "$CID")\b" || true)" = "0" ] \
+        || fail "the FENCED key ($CID) is registered again — the preempt was undone by the recovery"
+    fi
+    echo "✓ U5: recovery RE-REGISTERS (client $CID → $NEWCID, rkey $(printf '%x' "$NEWCID") present,"
+    echo "  fenced key absent) — a fresh device object is minted, so the never-re-registers"
+    echo "  hazard is unreachable through this path"
 
     echo
     echo "✅ unfence-rig PASSED — the fence is REVERSIBLE, through the REAL operator"

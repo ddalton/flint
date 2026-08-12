@@ -528,6 +528,23 @@ If the MDS cannot read the lvolstore it **proceeds and warns**
 (`capacity UNREADABLE`) rather than refusing — one blipped RPC must not
 block every provision in the fleet.
 
+### Unfencing a block client: the consumer must be recycled
+
+`UnfenceBlockClient` clears the durable record and releases the
+reservation, and the node can re-stage immediately — but **the workload's
+existing mount does not recover on its own**. The fence tears down that
+node's NVMe controller, so the re-stage comes back on a *new* controller
+and namespace while the mount keeps issuing I/O to the old path; writes
+fail until the mount is recycled. Restart the consuming pod (or unmount
+and remount) after unfencing. A node reboot achieves the same thing and
+is what the drill's standard arm does.
+
+Two things not to expect: a CB_NOTIFY_DEVICEID does not rescue it (the
+unfence necessarily happens before the replacement device exists — it was
+tried), and the recovered client comes back with a **new NFSv4 client
+id**, so its reservation key changes. That is normal: the fenced key is
+gone for good, which is the fence working.
+
 ## Known residuals (fix work tracked in the durable-DS plan)
 
 - **FIXED 2026-08-12: expanding a block volume after an MDS restart used

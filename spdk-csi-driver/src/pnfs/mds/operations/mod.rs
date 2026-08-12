@@ -1645,6 +1645,26 @@ pub async fn unfence_block_client(
             summary.push_str("; release FAILED (volume still blocked — retry; see log)");
         }
     }
+
+    // NOT notified here, and the negative result is worth keeping.
+    //
+    // Rig-found (`FENCE=1 UNFENCE=1 NOREBOOT=1`): a fenced client's nvme
+    // controller is torn down by the eviction, so recovery re-stages
+    // onto a BRAND NEW controller and namespace (/dev/nvme0n1 →
+    // /dev/nvme0n2) while the mount still holds a cached blocklayout
+    // device for the old one. The obvious remedy — send
+    // CB_NOTIFY_DEVICEID from here so the client drops it — was tried
+    // and does NOT work: the unfence necessarily precedes the re-stage
+    // (attach is refused while the fence stands), so the notification
+    // lands before the replacement device exists. It was accepted
+    // (1/1) and the write still failed on the old path. Timing it
+    // correctly needs a signal the MDS does not have today — "this
+    // node's session is up" — which is a csi-node-side event after
+    // ensure_session, not anything visible here.
+    //
+    // So a live mount does not survive its client being fenced: recovery
+    // needs a remount (or a node reboot, which is what the operator
+    // runbook and the rebooting arm of the drill do).
     Ok(summary)
 }
 

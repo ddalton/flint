@@ -1308,12 +1308,31 @@ Each phase ships standalone value; none is gated on the next.
   succeeded, so a fenced client cannot even read the reservation table; the
   assertion falls back to the MDS's own key list (`keys=[0x666c696e745f6d64(holder)]`
   — the MDS alone) and says which arm answered.
-  (b) **Unfence does not restore the victim's registration.** The preempt removed
-  the key; the client's device object keeps its `PNFS_BDEV_REGISTERED` bit set, so
-  it will not re-register until that object is freed and re-resolved. An unfenced
-  client can therefore be a non-registrant that believes otherwise, and a LATER
-  fence of any sibling — which takes volume-wide EA-RO — would exclude it. Derived
-  from the source, not yet drilled.
+  (b) **"Unfence does not restore the victim's registration" — DRILLED AND
+  REFUTED** (`make test-pnfs-unfence-noreboot-rig`, 2026-08-12). The worry was that
+  a preempted client keeps its `PNFS_BDEV_REGISTERED` bit and so never
+  re-registers. It cannot arise through this path: the fence's host eviction tears
+  the client's nvme controller down, so recovery necessarily re-stages onto a NEW
+  controller and namespace, which means a fresh `pnfs_block_dev` and a fresh
+  registration. Measured: `regctl: 2` afterwards — the MDS's own
+  `0x666c696e745f6d64` plus the client — and the client's key is **not the one that
+  was fenced**. The fence destroys the client's NFS state too, so it returns under a
+  NEW client id (2 → 4) and GETDEVICEINFO hands out that new id as `sbv_pr_key`.
+  The drill asserts both halves: the new identity is a registrant, and the fenced
+  key never comes back.
+  **What that drill found instead, and it is worse: a live mount does NOT survive
+  its client being fenced.** After unfence + re-stage the mount keeps issuing I/O
+  to the OLD controller path (`dev nvme0c0n1` in dmesg) even though the by-id link
+  now points at the new namespace, and every write fails. Recovery needs a remount
+  — which is why the standard arm of the drill reboots the node, and why the
+  operator runbook's recipe is a reboot. **Sending CB_NOTIFY_DEVICEID from the
+  unfence was tried and does not fix it**: the unfence necessarily precedes the
+  re-stage (attach is refused while the fence stands), so the notification lands
+  before the replacement device exists — accepted 1/1, write still failed. Timing
+  it correctly needs a signal the MDS does not have today, "this node's session is
+  up", which is a csi-node event after `ensure_session` rather than anything
+  visible MDS-side. Left unbuilt deliberately; the negative result is recorded in
+  `unfence_block_client` so nobody re-derives it.
 - **Fencing end-to-end**: ~~confirmed on each side, untested in combination~~ **PROVEN
   in combination 2026-08-10** (§5 RIG-PROVEN box; `make test-pnfs-fence-rig`): a real
   Linux client mid-write was stopped at the device by the MDS's NVMe reservation, with

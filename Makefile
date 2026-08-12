@@ -328,6 +328,10 @@ test-pnfs-fenced-record-rig: ## Durable fenced record: fence survives a tgt rest
 test-pnfs-unfence-rig: ## The fence is REVERSIBLE: UnfenceBlockClient releases the reservation and the frozen device counter moves again (block-rig FENCE=1 UNFENCE=1)
 	FENCE=1 UNFENCE=1 tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-unfence-noreboot-rig
+test-pnfs-unfence-noreboot-rig: ## Unfence WITHOUT the reboot (only valid when the fenced writer errored): proves recovery re-registers the client's reservation key, so the never-re-registers hazard is unreachable (block-rig FENCE=1 UNFENCE=1 NOREBOOT=1)
+	FENCE=1 UNFENCE=1 NOREBOOT=1 tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-reconcile-rig
 test-pnfs-reconcile-rig: ## A tgt-ONLY restart repairs WITHOUT an MDS roll: the periodic export reconcile loop rebuilds the export chain from sqlite (block-rig RECONCILE=1)
 	RECONCILE=1 tests/lima/pnfs/block-rig.sh
