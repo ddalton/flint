@@ -379,7 +379,17 @@ impl SpdkNative {
                     uuid: obj.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                     base_bdev: obj.get("base_bdev").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                     cluster_size: obj.get("cluster_size").and_then(|v| v.as_u64()).unwrap_or(0),
-                    total_clusters: obj.get("total_clusters").and_then(|v| v.as_u64()).unwrap_or(0),
+                    // SPDK names this `total_data_clusters`
+                    // (`module/bdev/lvol/vbdev_lvol_rpc.c`, the
+                    // `spdk_bs_total_data_cluster_count` writer); reading
+                    // `total_clusters` alone made this field silently 0
+                    // on every lvstore. The old name is kept as a
+                    // fallback for any shim that reshapes the reply.
+                    total_clusters: obj
+                        .get("total_data_clusters")
+                        .or_else(|| obj.get("total_clusters"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
                     free_clusters: obj.get("free_clusters").and_then(|v| v.as_u64()).unwrap_or(0),
                     block_size: obj.get("block_size").and_then(|v| v.as_u64()).unwrap_or(512),
                 });

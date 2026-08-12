@@ -1745,6 +1745,9 @@ impl MinimalDiskService {
                         "base_bdev": lvs.base_bdev,
                         "cluster_size": lvs.cluster_size,
                         "total_clusters": lvs.total_clusters,
+                        // SPDK's own name for it — emitted alongside so a
+                        // consumer reading either spelling gets a number.
+                        "total_data_clusters": lvs.total_clusters,
                         "free_clusters": lvs.free_clusters,
                         "block_size": lvs.block_size
                     })

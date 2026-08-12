@@ -1162,6 +1162,29 @@ Each phase ships standalone value; none is gated on the next.
   at write time, where the errno is an lvol-level failure and not this ENOSPC path),
   capacity-aware placement across shards, and the client-side refresh
   (CB_NOTIFY_DEVICEID) that would make expansion online end to end.
+  **THIN-PROVISIONING OVERSUBSCRIPTION CLOSED 2026-08-12** — create and expand now
+  gate on the lvolstore, and the gate had to be a LOGICAL one. SPDK will not make
+  this check itself: `blob_resize` skips its free-cluster test entirely for thin
+  blobs (`lib/blob/blobstore.c:2292`, `spdk_blob_is_thin_provisioned(blob) ==
+  false`), so an oversubscribed create or grow succeeds at the device, the arena
+  ceiling follows it, the PVC reports its full size, and the application meets the
+  truth at write time. Nor could `free_clusters` answer it — a thin lvol consumes
+  no clusters until written, and the rig shows a volume admitted with **544 MiB
+  promised and 956 MiB still physically free**. The gate therefore compares
+  PROMISED logical bytes (summed from `bdev_get_bdevs`, filtered to this store by
+  alias) plus the new request against `total_data_clusters × cluster_size`, and
+  refuses with those numbers in the message. `FLINT_PNFS_BLOCK_OVERCOMMIT=1` opts
+  back in, loudly — thin provisioning legitimately means overcommitting, but the
+  cost lands on an application as a failed write rather than on the operator as a
+  refused PVC, so it is never the default. An unreadable store PROCEEDS (a blipped
+  RPC must not block every provision in the fleet); that is the opposite of the
+  roller's fail-closed rule and deliberately so, because there the failure mode is
+  data loss and here it is a refused provision. Rig-proven: 4 GiB refused on a
+  1 GiB store with no lvol created. **It also found a latent bug in the driver's
+  own lvstore parsing** — `spdk_native.rs` read `total_clusters`, which SPDK does
+  not emit (it writes `total_data_clusters`), so that field had been silently 0 on
+  every lvstore; the gate read 0 and disabled itself on its first rig run, which
+  is exactly the kind of self-disabling a unit test against a fake cannot catch.
 - **An MDS restart made the next expand fail with EIO — MEASURED
   2026-08-12, and FIXED the same day.** The device-notify address book
   (`LayoutManager.device_notify`) is an in-memory map of which sessions

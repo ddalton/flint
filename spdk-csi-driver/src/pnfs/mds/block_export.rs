@@ -146,6 +146,151 @@ impl BlockExportReconciler {
         self.ensure(volume, None).await
     }
 
+    /// The backing lvolstore's totals, straight from SPDK
+    /// (`bdev_lvol_get_lvstores`): `(total_bytes, free_bytes)`.
+    ///
+    /// `None` when the store cannot be read. Callers treat that as
+    /// "unknown", never "empty" — refusing every provision because one
+    /// RPC blipped is worse than the oversubscription it guards.
+    async fn lvstore_totals(&self) -> Option<(u64, u64)> {
+        let resp = self
+            .rpc
+            .rpc(&json!({
+                "method": "bdev_lvol_get_lvstores",
+                "params": { "lvs_name": self.lvstore }
+            }))
+            .await
+            .ok()?;
+        // Find OUR store by name rather than taking the first entry:
+        // the driver's RPC shim ignores the `lvs_name` filter and hands
+        // back every lvstore, so trusting position would size the gate
+        // against somebody else's store.
+        let s = resp
+            .get("result")
+            .and_then(|r| r.as_array())?
+            .iter()
+            .find(|s| s.get("name").and_then(|v| v.as_str()) == Some(self.lvstore.as_str()))?;
+        let cluster = s.get("cluster_size").and_then(|v| v.as_u64())?;
+        // SPDK spells it `total_data_clusters`; the shim also emits
+        // `total_clusters`. Accept either — reading only one of them is
+        // how this number came back 0 and silently disabled the gate on
+        // its first rig run.
+        let total = s
+            .get("total_data_clusters")
+            .or_else(|| s.get("total_clusters"))
+            .and_then(|v| v.as_u64())
+            .filter(|t| *t > 0)?;
+        let free = s.get("free_clusters").and_then(|v| v.as_u64())?;
+        Some((total.checked_mul(cluster)?, free.checked_mul(cluster)?))
+    }
+
+    /// Bytes this store has already PROMISED: the sum of every lvol's
+    /// logical size, read from one `bdev_get_bdevs` and filtered to this
+    /// lvolstore by alias.
+    ///
+    /// Logical, not allocated, and that distinction is the whole gate.
+    /// `free_clusters` cannot answer this question: a thin lvol consumes
+    /// no clusters until it is written, so ten 1 GiB volumes on a 1 GiB
+    /// store leave the store reporting itself nearly empty right up
+    /// until the writes land. The oversubscription is invisible in the
+    /// physical numbers and visible in the logical ones.
+    async fn committed_logical_bytes(&self) -> Option<u64> {
+        let resp = self
+            .rpc
+            .rpc(&json!({ "method": "bdev_get_bdevs" }))
+            .await
+            .ok()?;
+        let prefix = format!("{}/", self.lvstore);
+        let mut sum = 0u64;
+        for b in resp.get("result")?.as_array()? {
+            let mine = b
+                .get("aliases")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|v| v.starts_with(&prefix))
+                })
+                .unwrap_or(false);
+            if !mine {
+                continue;
+            }
+            let bs = b.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
+            let nb = b.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+            sum = sum.saturating_add(bs.saturating_mul(nb));
+        }
+        Some(sum)
+    }
+
+    /// Is the operator deliberately overcommitting the lvolstore?
+    ///
+    /// Thin provisioning makes logical-beyond-physical *possible*, and
+    /// some fleets want it. Default OFF because the failure it permits
+    /// is silent and lands on the application, not the operator: the PVC
+    /// reports its full size and the write fails at the device. Loud
+    /// when set, for the same reason the kernel-floor override is.
+    fn overcommit_allowed() -> bool {
+        std::env::var("FLINT_PNFS_BLOCK_OVERCOMMIT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    /// Refuse to promise capacity the lvolstore does not have.
+    ///
+    /// `need` is the NEW promise — a create's full size, a grow's DELTA
+    /// — added to what the store has already promised. SPDK will not
+    /// make this check for us: `blob_resize` skips its free-cluster
+    /// check entirely for thin blobs (`lib/blob/blobstore.c:2292`,
+    /// `spdk_blob_is_thin_provisioned(blob) == false`), and every flint
+    /// block volume is thin. So without this, a create or grow beyond
+    /// the store's capacity SUCCEEDS at the device, the arena ceiling
+    /// follows it, the PVC reports the full size, and the application
+    /// discovers the truth at write time as an lvol-level failure
+    /// instead of the honest NFS4ERR_NOSPC the arena would have given.
+    async fn check_store_has_room(&self, volume: &str, need: u64) -> Result<(), String> {
+        if need == 0 {
+            return Ok(());
+        }
+        let (Some((total, free)), Some(committed)) =
+            (self.lvstore_totals().await, self.committed_logical_bytes().await)
+        else {
+            tracing::warn!(
+                "📏 block volume '{}': lvolstore '{}' capacity UNREADABLE — proceeding \
+                 without the capacity gate (a write may still hit the store's real limit)",
+                volume, self.lvstore
+            );
+            return Ok(());
+        };
+        let after = committed.saturating_add(need);
+        if after <= total {
+            tracing::info!(
+                "📏 block volume '{}': lvolstore '{}' promises {} of {} bytes after this \
+                 {} request ({} physically free)",
+                volume, self.lvstore, after, total, need, free
+            );
+            return Ok(());
+        }
+        if Self::overcommit_allowed() {
+            tracing::warn!(
+                "📏 block volume '{}': OVERCOMMITTING lvolstore '{}' — {} promised of {} \
+                 after a {} request (FLINT_PNFS_BLOCK_OVERCOMMIT=1). The PVC will report \
+                 its full size and a write past the store's real capacity fails at the \
+                 device, NOT as ENOSPC",
+                volume, self.lvstore, after, total, need
+            );
+            return Ok(());
+        }
+        Err(format!(
+            "lvolstore '{}' has already promised {} of {} bytes and this needs {} more — \
+             refusing rather than handing out capacity the store does not have. SPDK will \
+             NOT stop this on its own (a thin blob's resize skips the free-cluster check), \
+             so the volume would report its full size and fail at WRITE time instead. Grow \
+             the lvolstore, delete a volume, or set FLINT_PNFS_BLOCK_OVERCOMMIT=1 to accept \
+             the risk deliberately",
+            self.lvstore, committed, total, need
+        ))
+    }
+
     /// A live bdev's capacity in bytes, from its own `bdev_get_bdevs`
     /// record. Read back rather than computed from what we asked for:
     /// lvol sizes round up to the lvolstore's cluster size, so the
@@ -190,6 +335,13 @@ impl BlockExportReconciler {
         if current >= new_size_bytes {
             return Ok(current);
         }
+
+        // The store must be able to fund the GROWTH. Checked before the
+        // resize because after it the promise is already made: SPDK
+        // accepts a thin resize regardless of free clusters, so there is
+        // no later point at which the truth surfaces except a failing
+        // write in the application.
+        self.check_store_has_room(volume, new_size_bytes - current).await?;
 
         let size_mib = new_size_bytes.div_ceil(1024 * 1024).max(1);
         let resize = json!({
@@ -272,6 +424,7 @@ impl BlockExportReconciler {
                     bdev
                 ));
             };
+            self.check_store_has_room(volume, bytes).await?;
             let size_mib = bytes.div_ceil(1024 * 1024).max(1);
             let create = json!({
                 "method": "bdev_lvol_create",
@@ -507,7 +660,15 @@ pub(crate) mod tests {
         /// this map is what lets a test prove it does.
         pub(crate) bdev_bytes: Mutex<std::collections::HashMap<String, u64>>,
         pub(crate) subsystems: Mutex<std::collections::HashMap<String, Value>>,
+        /// Free clusters the fake lvolstore reports. `None` = the
+        /// `bdev_lvol_get_lvstores` RPC FAILS, which is the "unknown"
+        /// case the capacity gate must not read as "empty".
+        pub(crate) free_clusters: Mutex<Option<u64>>,
+        pub(crate) total_clusters: Mutex<u64>,
     }
+
+    /// The fake lvolstore's cluster size (SPDK's default is 4 MiB).
+    pub(crate) const FAKE_CLUSTER: u64 = 4 * 1024 * 1024;
 
     /// The block size the fake reports; 4 KiB, as an lvolstore on a
     /// modern NVMe namespace does.
@@ -520,8 +681,18 @@ pub(crate) mod tests {
                 bdevs: Mutex::new(Default::default()),
                 bdev_bytes: Mutex::new(Default::default()),
                 subsystems: Mutex::new(Default::default()),
+                // Roomy by default so every pre-existing test keeps its
+                // exact behaviour; the gate's own tests set it.
+                free_clusters: Mutex::new(Some(1 << 20)),
+                total_clusters: Mutex::new(1 << 20),
             }
         }
+        /// Size the fake store: `(total_clusters, free_clusters)`.
+        pub(crate) fn set_store(&self, total: u64, free: u64) {
+            *self.total_clusters.lock().unwrap() = total;
+            *self.free_clusters.lock().unwrap() = Some(free);
+        }
+
         pub(crate) fn methods(&self) -> Vec<String> {
             self.calls
                 .lock()
@@ -557,8 +728,26 @@ pub(crate) mod tests {
             let p = &payload["params"];
             match method {
                 "bdev_get_bdevs" => {
-                    let name = p["name"].as_str().unwrap_or("");
                     let bdevs = self.bdevs.lock().unwrap();
+                    // No `name` = list everything (what the capacity
+                    // gate uses to sum promised logical bytes).
+                    let Some(name) = p["name"].as_str() else {
+                        let sizes = self.bdev_bytes.lock().unwrap();
+                        let all: Vec<Value> = bdevs
+                            .iter()
+                            .map(|(alias, canonical)| {
+                                let bytes = sizes.get(alias).copied().unwrap_or(0);
+                                json!({
+                                    "name": canonical,
+                                    "uuid": canonical,
+                                    "aliases": [alias],
+                                    "block_size": FAKE_BLOCK_SIZE,
+                                    "num_blocks": bytes / FAKE_BLOCK_SIZE,
+                                })
+                            })
+                            .collect();
+                        return Ok(json!({ "result": all }));
+                    };
                     let bytes =
                         self.bdev_bytes.lock().unwrap().get(name).copied().unwrap_or(0);
                     match bdevs.get(name) {
@@ -583,6 +772,29 @@ pub(crate) mod tests {
                     let mib = p["size_in_mib"].as_u64().unwrap_or(0);
                     self.bdev_bytes.lock().unwrap().insert(alias, mib * 1024 * 1024);
                     Ok(json!({ "result": canonical }))
+                }
+                "bdev_lvol_get_lvstores" => {
+                    match *self.free_clusters.lock().unwrap() {
+                        // Two entries, and the caller's filter is
+                        // IGNORED — exactly what the driver's RPC shim
+                        // does, so the lookup-by-name is exercised
+                        // rather than assumed.
+                        Some(free) => Ok(json!({ "result": [
+                            {
+                                "name": "someone-elses-store",
+                                "cluster_size": FAKE_CLUSTER,
+                                "free_clusters": 0u64,
+                                "total_data_clusters": 1u64,
+                            },
+                            {
+                                "name": "lvs_test",
+                                "cluster_size": FAKE_CLUSTER,
+                                "free_clusters": free,
+                                "total_data_clusters": *self.total_clusters.lock().unwrap(),
+                            }
+                        ]})),
+                        None => Err("lvolstore unreadable".into()),
+                    }
                 }
                 "bdev_lvol_resize" => {
                     let name = p["name"].as_str().unwrap_or("").to_string();
@@ -779,6 +991,109 @@ pub(crate) mod tests {
         let r = reconciler(Arc::clone(&tgt));
         let e = r.grow("pvc-ghost", 1 << 20).await.expect_err("must refuse");
         assert!(e.contains("bdev_get_bdevs"), "got: {e}");
+    }
+
+    /// THE CAPACITY GATE. SPDK will not stop an oversubscribed thin
+    /// provision on its own — `blob_resize` skips its free-cluster check
+    /// entirely for thin blobs — so a create or grow the store cannot
+    /// fund succeeds at the device and fails later, in the application,
+    /// as an lvol-level error instead of ENOSPC. The gate asks SPDK the
+    /// question SPDK declines to ask itself.
+    #[tokio::test]
+    async fn create_refuses_what_the_lvolstore_cannot_fund() {
+        let tgt = Arc::new(FakeTgt::new());
+        tgt.set_store(16, 16); // 64 MiB total, all of it free
+        let r = reconciler(Arc::clone(&tgt));
+
+        // 48 MiB fits.
+        r.ensure("pvc-a", Some(48 * 1024 * 1024)).await.expect("first fits");
+        tgt.calls.lock().unwrap().clear();
+
+        // ...and the store is STILL physically empty (thin lvols consume
+        // no clusters until written), which is exactly why the gate
+        // cannot be a free-space check: 48 MiB is already promised.
+        assert_eq!(
+            *tgt.free_clusters.lock().unwrap(),
+            Some(16),
+            "a thin create must not have consumed a single cluster"
+        );
+        let e = r
+            .ensure("pvc-b", Some(32 * 1024 * 1024))
+            .await
+            .expect_err("48 + 32 > 64 must be refused even though the store reads empty");
+        assert!(e.contains("promised") && e.contains("OVERCOMMIT"), "got: {e}");
+        assert!(
+            !tgt.methods().iter().any(|m| m == "bdev_lvol_create"),
+            "the refusal must come BEFORE the create, not after"
+        );
+
+        // What still fits within the promise budget provisions fine.
+        r.ensure("pvc-c", Some(8 * 1024 * 1024))
+            .await
+            .expect("a request inside the remaining budget must succeed");
+    }
+
+    /// The opt-out exists because thin provisioning legitimately means
+    /// overcommitting — but it must be deliberate and loud, never the
+    /// default, because the cost lands on an application as a failed
+    /// write rather than on the operator as a refused PVC.
+    #[tokio::test]
+    async fn overcommit_is_allowed_only_when_asked_for() {
+        let tgt = Arc::new(FakeTgt::new());
+        tgt.set_store(4, 4); // 16 MiB
+        let r = reconciler(Arc::clone(&tgt));
+        assert!(
+            r.ensure("pvc-over", Some(64 * 1024 * 1024)).await.is_err(),
+            "default must refuse"
+        );
+        // The env-free core is what the test drives; the wrapper is one
+        // std::env read (the F43 shape).
+        assert!(!BlockExportReconciler::overcommit_allowed());
+    }
+
+    /// The grow half gates on the DELTA, not the new size: a volume
+    /// already 32 MiB growing to 40 MiB needs 8 MiB of new space, and
+    /// charging it 40 would refuse expansions the store can easily fund.
+    #[tokio::test]
+    async fn grow_gates_on_the_delta_and_refuses_before_the_resize() {
+        let tgt = Arc::new(FakeTgt::new());
+        tgt.set_store(12, 12); // 48 MiB
+        let r = reconciler(Arc::clone(&tgt));
+        r.ensure("pvc-g", Some(32 * 1024 * 1024)).await.expect("create");
+
+        tgt.calls.lock().unwrap().clear();
+        // 32 MiB promised of 48 total: +8 MiB fits, even though the NEW
+        // SIZE (40 MiB) plus the old promise would not.
+        r.grow("pvc-g", 40 * 1024 * 1024).await.expect("the delta fits");
+        assert!(tgt.methods().iter().any(|m| m == "bdev_lvol_resize"));
+
+        // ...and a delta that does NOT fit is refused before the resize.
+        tgt.calls.lock().unwrap().clear();
+        let e = r
+            .grow("pvc-g", 512 * 1024 * 1024)
+            .await
+            .expect_err("a delta beyond free space must be refused");
+        assert!(e.contains("refusing"), "got: {e}");
+        assert!(
+            !tgt.methods().iter().any(|m| m == "bdev_lvol_resize"),
+            "the promise must not be made at the device first"
+        );
+    }
+
+    /// UNREADABLE IS NOT EMPTY — the same rule the roller's block read
+    /// follows, pointing the other way. There the safe default was to
+    /// refuse; here it is to proceed, because a blipped RPC must not
+    /// block every provision in the fleet, and the pre-existing
+    /// behaviour (no gate at all) is exactly what proceeding restores.
+    #[tokio::test]
+    async fn an_unreadable_lvolstore_does_not_block_provisioning() {
+        let tgt = Arc::new(FakeTgt::new());
+        *tgt.free_clusters.lock().unwrap() = None; // the lvstore RPC fails
+        let r = reconciler(Arc::clone(&tgt));
+        r.ensure("pvc-blind", Some(64 * 1024 * 1024))
+            .await
+            .expect("an unreadable store must not refuse the provision");
+        assert!(tgt.methods().iter().any(|m| m == "bdev_lvol_create"));
     }
 
     #[tokio::test]

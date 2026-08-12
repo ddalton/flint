@@ -498,6 +498,36 @@ identity (no cross-shard trunking), disjoint `file_id`s, scoped
 cleanup, shard-0 kill leaves shard 1 in full service, restart
 recovery over sqlite.
 
+### Block capacity: what a refused provision means
+
+A `pnfs-block` PVC can be refused at create or expand with:
+
+```
+lvolstore 'lvs_flint' has already promised 900GB of 1TB bytes and this
+needs 200GB more — refusing rather than handing out capacity the store
+does not have
+```
+
+That is the capacity gate, and it is counting **promised** bytes, not
+used ones: block volumes are thin, so a store can look nearly empty
+(`free_clusters`) while every byte of it is already spoken for. SPDK
+does not make this check itself — a thin blob's resize skips its
+free-cluster test — so without the gate the PVC would be created at its
+full size and the application would meet the limit as an I/O error
+mid-write.
+
+To resolve: grow the lvolstore, delete a volume, or — if you genuinely
+intend to overcommit — set `FLINT_PNFS_BLOCK_OVERCOMMIT=1` on the MDS.
+That is a real choice, not a formality: overcommitting means some
+application will eventually get a failed write instead of ENOSPC. The
+MDS logs every admitted provision with the running total
+(`📏 block volume '<v>': lvolstore '<s>' promises X of Y bytes …`), so
+the ratio is greppable before you hit it.
+
+If the MDS cannot read the lvolstore it **proceeds and warns**
+(`capacity UNREADABLE`) rather than refusing — one blipped RPC must not
+block every provision in the fleet.
+
 ## Known residuals (fix work tracked in the durable-DS plan)
 
 - **FIXED 2026-08-12: expanding a block volume after an MDS restart used

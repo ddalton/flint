@@ -288,6 +288,27 @@ for s in json.load(sys.stdin):
 [ -n "$NGUID" ] || fail "no namespace/NGUID on $SUBNQN"
 echo "✓ volume created: class=scsi, subsystem live, NGUID=$NGUID"
 
+# ── 4b. the capacity gate, against a REAL lvolstore ──────────────────
+# SPDK will not refuse an oversubscribed thin provision on its own —
+# `blob_resize` skips its free-cluster check entirely for thin blobs
+# (lib/blob/blobstore.c:2292) — so without our gate the create succeeds,
+# the PVC reports its full size, and the application discovers the truth
+# at WRITE time as an lvol-level error. Unit tests prove the arithmetic
+# against a fake; only the rig proves that a real `bdev_lvol_get_lvstores`
+# reports what we read it as. The store is 1 GiB with 512 MiB already
+# promised above, so 4 GiB cannot be funded.
+OVER=$(vsh "$RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+      -d '{\"volumeId\":\"rigvol-toobig\",\"sizeBytes\":$((4 * 1024 * 1024 * 1024)),\"layoutClass\":\"scsi\"}' \
+      127.0.0.1:50051 pnfs.control.MdsControl/CreateVolume") || fail "CreateVolume (oversize) RPC"
+[ "$(echo "$OVER" | grep -c '"created": true' || true)" = "0" ] \
+  || fail "a 4GiB volume was ACCEPTED on a 1GiB lvolstore — the capacity gate did not fire: $OVER"
+[ "$(echo "$OVER" | grep -c 'promised' || true)" -ge 1 ] \
+  || fail "the refusal does not name the promise budget: $OVER"
+# ...and it refused BEFORE touching the device.
+vsh "$RPC bdev_get_bdevs --name lvs_rig/rigvol-toobig" >/dev/null 2>&1 \
+  && fail "the refused volume left an lvol behind — the gate fired after the create"
+echo "✓ capacity gate: 4GiB refused on a 1GiB store, no lvol created"
+
 # ── 5. stage the node session — THE PRODUCTION PATH ──────────────────
 # AttachBlockNode (per-node hostnqn admission, the ControllerPublish
 # verb — the allow-list is default-closed, so this must precede the

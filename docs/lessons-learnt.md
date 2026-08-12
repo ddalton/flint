@@ -134,6 +134,14 @@ CSI CLI. Modes are standing regression harnesses (`make test-pnfs-*-rig`).
   printed in the failure message, and the drill failed anyway. A rule you have
   written down is not a rule you have applied — grep the diff for `grep -q`
   before running a rig, not after.
+- **A gate that reads a field nobody writes disables itself silently.** The
+  block capacity gate passed its unit tests against a fake and then did nothing on
+  its first rig run: it read `total_clusters`, SPDK emits `total_data_clusters`,
+  and the driver's own lvstore parser had been returning 0 for that field all
+  along. A fake answers with the shape you imagined; only the rig answers with the
+  shape that exists. When a check's "safe" branch is *proceed*, a parse failure is
+  indistinguishable from a pass — so make the rig assert the REFUSAL, not just the
+  happy path.
 - **Assert the mechanism, not only the outcome.** A check that "the report
   reached zero" passes identically whether a lease filter cleared it or a row
   quietly vanished — and those two worlds behave differently the next time. The
