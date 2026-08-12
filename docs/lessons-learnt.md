@@ -134,6 +134,13 @@ CSI CLI. Modes are standing regression harnesses (`make test-pnfs-*-rig`).
   printed in the failure message, and the drill failed anyway. A rule you have
   written down is not a rule you have applied — grep the diff for `grep -q`
   before running a rig, not after.
+- **`fail` inside `$( )` is not a failure, it is a value.** Its message becomes the
+  variable's contents and its `exit` leaves only the subshell, so the caller
+  proceeds with the error as its data and reports something unrelated three lines
+  later. Written down after it cost two fence-drill runs — and then it cost two
+  more in a brand-new kind script the same day, because the rule was recorded but
+  the *shape* was not. The shape: helpers set a global and return a status; they
+  never run inside command substitution and never call `fail`.
 - **Never flip `set -e` on inside a script that does not use it.** The rig runs
   `set -uo pipefail`; a `set +e … set -e` pair copied from elsewhere leaves errexit
   ON for everything after, so the next unguarded `grep` that finds nothing kills

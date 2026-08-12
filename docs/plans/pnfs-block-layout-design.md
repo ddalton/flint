@@ -1061,7 +1061,27 @@ Each phase ships standalone value; none is gated on the next.
    copy/sparse precedent); kind runs real spdk-tgt. Prove: device resolution (udev
    rule), reads/writes/LAYOUTCOMMIT, fencing via reservations with PTPL across a tgt
    restart, blksize ≤ 4 KiB advertisement.
-3. **Chart class + NetworkPolicy + roll-safety hardening.** `pnfs-block` SC, 4420
+3. **Chart class + NetworkPolicy + roll-safety hardening.**
+   > **KIND CHART PASS DONE 2026-08-12** (`make test-kind-chart-pass`). The docker
+   > VM kernel is 5.10-linuxkit, far below the 6.11 client floor, so no kind node
+   > can ever stage a block volume — and the kernel-floor REFUSAL is already proven
+   > on real hardware (a stock 24.04 VM at 6.8 refused before touching the
+   > endpoint). What kind adds instead, and nothing else covers: the chart's
+   > pnfs-block surface is accepted by a REAL API server. `helm template` only
+   > proves the templates produce text; `kubectl apply --dry-run=server` proves
+   > Kubernetes agrees the objects are legal — no images, no flint pods, ~1 GB of
+   > Docker. The pass covers four value shapes (pnfs off; pnfs on/block off; block
+   > on; SC opt-in), asserts the guards REFUSE (blockExport without `lvstore` or
+   > `traddr` must fail to render, naming each), and pins the surface that has
+   > drifted before: the `pnfs-block` SC, `FLINT_PNFS_BLOCK_LAYOUT` on the
+   > controller, `FLINT_NODE_NAME` wired to the downward API (the roller's
+   > export-node join key), the PTPL hostPath being outside `/var/tmp` (where
+   > systemd-tmpfiles would age the fence out), the §4a udev surface, and the
+   > `nodes` RBAC the roller's fallback resolution needs. A/B'd by deleting
+   > `FLINT_NODE_NAME` from the template — the pass goes red on exactly that check.
+   > Prerequisite it does NOT paper over: the chart's VolumeSnapshotClass needs the
+   > external-snapshotter CRDs, a genuine cluster dependency (values.yaml says so),
+   > so the pass disables that one object rather than pretending it validates. `pnfs-block` SC, 4420
    policy (with the hostNetwork caveat resolved or documented), discriminator ctx key,
    unstage ordering fix. **Prerequisite, not optional**: today's roll orchestration is
    blind to remote initiators — the consumer model is `volumes[].consumer`, so a "safe"
