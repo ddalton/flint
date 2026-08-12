@@ -1371,13 +1371,28 @@ Each phase ships standalone value; none is gated on the next.
   Linux client mid-write was stopped at the device by the MDS's NVMe reservation, with
   the mechanism turning out to be EA-RO acquisition against a non-registrant kernel, not
   key-preempt. **This proves FenceReaches *for this tgt/kernel pairing on the rig*; it
-  does NOT flip the shipped cfg.** The `FenceReaches` constant stays FALSE until the
-  formal-model gate is re-run with it TRUE (the FlintExtentsLostFence residual re-modeled
-  and the 99-run gate green) — a separate, deliberate step, not taken here. Until that
-  flip GC still **quarantines** fenced-holder extents rather than reusing them (§8):
-  reuse-after-unproven-fence stays designed out. What the rig changes is the *confidence*
-  that the flip is safe to pursue, and it becomes the standing regression harness that
-  keeps the fence path honest between now and then. Open sub-item: the rig proves reach
+  does NOT flip the shipped cfg** — and **the flip is RETIRED, not pending
+  (2026-08-12)**. It was superseded four days after it was written, by a better route:
+  the `FreeRequiresDelivered` graduation. What the flip was FOR — GC reusing
+  fenced-holder extents instead of quarantining them — **already ships**, gated
+  per-fence on `fenced_clients.delivered_unix` (`extent_alloc.rs`: all fenced holders
+  delivered ⇒ clean free; any unconfirmed ⇒ quarantine). The shipped cfg already LISTS
+  `Inv_NoStaleExtentRead/Write` with `FenceReaches = FALSE`, and
+  `FlintExtentsLostFence.cfg` is a single-flag A/B on `FreeRequiresDelivered`, not on
+  `FenceReaches` (both arms hold it FALSE). Setting it TRUE would buy nothing and cost
+  something: it asserts *every* fence lands, which is false of the code — the preempt
+  arm is best-effort and fails when the tgt is unreachable — so it would trade a claim
+  proven in the harsher fences-CAN-fail world for a weaker one proven in an ideal
+  world. That is the F65-audit mistake in new clothes. **Do not flip it.**
+  **The honest successor**: extents quarantined by an UNCONFIRMED fence are never
+  recovered automatically. `release_quarantine` is a whole-volume operator lever,
+  nothing calls it, and nothing re-drives a failed preempt to confirmation.
+  `extent_quarantine` does record `fenced_clients`, so the workable shape is a delivery
+  RETRY that sets `delivered_unix` on later confirmation, plus a sweep that frees
+  quarantined ranges whose every named client is now delivered — the same
+  `FreeRequiresDelivered` predicate evaluated later, needing no model change and no new
+  trust. The rig remains the standing regression harness that keeps the fence path
+  honest. Open sub-item: the rig proves reach
   on ONE tgt; multi-namespace / multi-tgt preempt and the MdsRestart re-acquire
   (reservation holdership is target-side, not in sqlite) still need their own drills.
 - **CoW / CLONE**: RFC 8154 §2.4.5 gives the extent vocabulary (READ_DATA source +

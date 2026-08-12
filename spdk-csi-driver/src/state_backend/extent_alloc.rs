@@ -974,8 +974,19 @@ pub fn commit_extents(
 
 /// The operator lever: move every quarantined range of the volume into
 /// the free list, generations remembered so reuse still bumps. Explicit
-/// and whole-volume by design — nothing calls this automatically, and it
-/// must stay that way until FenceReaches is proven on hardware.
+/// and whole-volume by design — nothing calls this automatically.
+///
+/// The old reason ("until FenceReaches is proven on hardware") is
+/// retired: `FenceReaches` was superseded by the per-fence delivered
+/// belt and is never going TRUE — it would assert that every fence
+/// lands, which is false of a best-effort preempt arm. The reason it
+/// stays manual is narrower and still stands: these ranges were
+/// quarantined because a fence was NOT confirmed at the target, so
+/// freeing them wholesale is exactly `FlintExtentsLostFence.cfg`'s
+/// machine-checked corruption. The automatable successor is a
+/// delivery RETRY plus a sweep gated on `extent_quarantine.
+/// fenced_clients` all being delivered — the same predicate the reclaim
+/// already uses, evaluated later.
 pub fn release_quarantine(conn: &mut Connection, volume: &str) -> Result<u64> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut bytes = 0u64;
