@@ -155,17 +155,49 @@
 (*               composition was ACTIVE (stale reads served, acks minted   *)
 (*               on a lineage the record has abandoned).                   *)
 (*                                                                         *)
+(* TRANCHE 2 (2026-08-12, same day): RECORD-DRIVEN REBUILD/REJOIN, behind  *)
+(* RejoinEnabled (every tranche-1 cfg keeps its state space BIT-IDENTICAL  *)
+(* — flagship distinct-count 102,962 verified unchanged).  members         *)
+(* becomes real state; the composition's round trip becomes reachable      *)
+(* (MaxEpoch = 3: promote away -> rebuild -> lose the survivor -> promote  *)
+(* BACK, ProbeFailBackCompletes is its witness); and three belts get       *)
+(* teeth:                                                                  *)
+(*   RecordRejoinOnly   a stale mark clears ONLY through a record-driven   *)
+(*                      rebuild.  The mutation is auto-examine self-       *)
+(*                      rejoin: seq arbitration (which only ever sees its  *)
+(*                      own leg) declares the leg clean, and the honest    *)
+(*                      election gate then trusts corrupt bookkeeping —    *)
+(*                      DegradeBlind's shape one layer up.                 *)
+(*   UncleanResync      the write-hole belt: an unclean composer death     *)
+(*                      comes back SOLO, peer leg stale, rebuild-only.     *)
+(*                      Stock raid1 reassembles equal-seq divergent legs   *)
+(*                      as clean equals with no resync; the code cannot    *)
+(*                      see divergence, only "died serving", so the belt   *)
+(*                      is conservative by construction.                   *)
+(*   AncestryGuard      the RejoinGuard transfer: the DELTA rejoin door    *)
+(*                      opens only for a leg provably AT its cut (no solo  *)
+(*                      bytes of its own, no divergence) — the delta       *)
+(*                      copies the SOURCE'S dirty regions and cannot       *)
+(*                      erase what the target wrote alone.  Everything     *)
+(*                      else takes the full rebuild, the one divergence    *)
+(*                      eraser (flint-driven and sparse-aware per §12's    *)
+(*                      decided rebuild engine — raid1's allocation-blind  *)
+(*                      process is never the copy).                        *)
+(* New theorem: Inv_NoSplitRead — no read is served through a composition  *)
+(* whose member legs diverge (raid1's balancer coin-flips those,           *)
+(* raid1.c:227-233).  RebuildStart doubles as the epoch-checked            *)
+(* leg-admission grant: only record.composer is ever admitted at the       *)
+(* rebuilding leg's export, because the admitting reconciler consults      *)
+(* the record — the same one-door discipline Recover enforces.             *)
+(*                                                                         *)
 (* ABSTRACTIONS, STATED:                                                   *)
-(*   1. Content is not tracked; harm is landing-set membership.  The       *)
-(*      write-hole / divergent-legs-assemble-clean hazard (raid1 acks on   *)
-(*      any-one-leg success and records the miss ASYNC after the ack —     *)
-(*      bdev_raid.c:705-718, 2440-2444) is a DATA-level belt (forced       *)
-(*      rebuild on unclean assembly) owned by tranche 2, not here.         *)
-(*   2. Leg failure and rebuild-rejoin WITHIN one epoch are SPDK's own     *)
-(*      machinery (a failed leg rejoins only as a rebuild target while     *)
-(*      the survivor is ONLINE, bdev_raid.c:3949-3957) and are not         *)
-(*      modelled; after a failover the composition is the survivor's leg   *)
-(*      alone until tranche 2 models record-driven re-add.                 *)
+(*   1. Content is not tracked; harm is landing-set membership plus the    *)
+(*      diverged boolean (a torn death or an unguarded delta rejoin left   *)
+(*      the two legs holding different bytes).  WHICH blocks diverge is    *)
+(*      below this model; the sim/rig tier owns byte-level truth.          *)
+(*   2. The rebuild copy is atomic here (admit -> fan-in live writes ->    *)
+(*      complete); crash INSIDE the copy is the crash-sweep sim harness's  *)
+(*      job, per the FlintSnapshots esnap-window precedent.                *)
 (*   3. One volume, one extent range, whole-volume fences.  The dangerous  *)
 (*      client never RETURNS its layout (a conforming reachable client     *)
 (*      frees cleanly — the quarantine tranche proved that world; the      *)
@@ -174,9 +206,9 @@
 (*      review's finding that no redirect ACTOR exists is a liveness       *)
 (*      debt, deferred with the rest of liveness (promotion progress,      *)
 (*      the forward livelock of a never-confirmable fence, lease           *)
-(*      renewal); this tranche is safety only, CHECK_DEADLOCK FALSE.       *)
-(*   5. MaxEpoch bounds failovers (one, in the shipped cfgs): epoch 3      *)
-(*      would need the fail-back/rebuild story tranche 2 owns.             *)
+(*      renewal, rebuild progress); safety only, CHECK_DEADLOCK FALSE.     *)
+(*   5. MaxEpoch = 3 in the rejoin cfgs bounds the round trip at one       *)
+(*      fail-back; deeper epoch chains add no new mechanism.               *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -198,12 +230,31 @@ CONSTANTS
                            \*        allow-list (fail-closed: converge failure =
                            \*        no listener), so a fenced client is excluded
                            \*        at the new namespace BEFORE it can re-attach
-  DeliveredEpochKeyed      \* TRUE = the review's delivered-keyed-by-epoch
+  DeliveredEpochKeyed,     \* TRUE = the review's delivered-keyed-by-epoch
                            \*        refinement (scoped to the current epoch,
                            \*        key captured at preempt execution).  FALSE
                            \*        in the shipped cfg: under the replay belt
                            \*        it is machine-checked REDUNDANT — see the
                            \*        header's finding 4
+  \* ---- TRANCHE 2 (record-driven rebuild/rejoin; FALSE in every tranche-1
+  \* cfg, which keeps those state spaces bit-identical — the MaintEnabled
+  \* pattern, verified by flagship distinct-count match). ----
+  RejoinEnabled,           \* TRUE = tranche-2 actions exist (rebuild, delta
+                           \*        rejoin, torn composer death, fail-back)
+  RecordRejoinOnly,        \* TRUE = a stale mark clears only through a
+                           \*        record-driven rebuild — never by the
+                           \*        recovered node's auto-examine winning seq
+                           \*        arbitration and declaring itself clean
+  UncleanResync,           \* TRUE = an unclean composer death (crash while
+                           \*        serving) forces resync on recovery: come
+                           \*        back solo, peer leg stale, rebuild-only —
+                           \*        the write-hole belt (raid1 has NO dirty
+                           \*        flag: equal-seq divergent legs assemble
+                           \*        clean, bdev_raid.c:3390-3396)
+  AncestryGuard            \* TRUE = the RejoinGuard transfer: a leg may take
+                           \*        the DELTA rejoin path only if provably at
+                           \*        its cut state (no solo-acked bytes of its
+                           \*        own, no divergence) — else full rebuild
 
 ASSUME Cardinality(Tgts) = 2
 
@@ -242,16 +293,29 @@ VARIABLES
   legSync,    \* [Tgts -> {"insync","stale"}] — the RECORD's view of each
               \* node's leg; "stale" is sticky in this tranche (clearing it
               \* is tranche 2's record-driven rebuild)
-  soloAcked   \* [Tgts -> BOOLEAN] — some un-fenced client's acked write
+  soloAcked,  \* [Tgts -> BOOLEAN] — some un-fenced client's acked write
               \* landed ONLY on this node's leg (the degraded-window bytes
               \* a promotion of the OTHER leg would discard)
+  members,    \* SUBSET Tgts — the current composition's member legs.  In
+              \* tranche 1 this was derivable (Tgts at epoch 1, {composer}
+              \* after any assembly); rebuild-rejoin makes it real state.
+  diverged,   \* ghost: the two legs hold divergent bytes (a torn composer
+              \* death split them, or an unguarded delta rejoin kept a
+              \* divergent leg's own bytes).  Cleared only by a FULL rebuild
+              \* — raid1 itself has no scrub to clear it with.
+  splitRead,  \* theorem ghost: a read was served through a composition with
+              \* two divergent member legs — raid1's least-loaded balancer
+              \* (raid1.c:227-233) makes every such read a coin flip
+  rejoined    \* probe ghost: a stale leg actually re-entered the composition
 
 vars == <<tgt, record, serving, lastServed, legAdmit, lease, session, excl,
           fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
           divergent, doomed, staleWrite, staleServe, zombieWrote,
-          legSync, soloAcked>>
+          legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
-CurrentLegs == IF record.epoch = 1 THEN Tgts ELSE {record.composer}
+\* The composition's member set.  Tranche 2 made it a variable; the alias
+\* keeps tranche 1's ghost predicates textually unchanged.
+CurrentLegs == members
 ActiveNew   == serving[record.composer] = record.epoch
 Deposed     == Peer(record.composer)
 
@@ -278,6 +342,11 @@ TypeOK ==
        \subseteq BOOLEAN
   /\ legSync \in [Tgts -> {"insync", "stale"}]
   /\ soloAcked \in [Tgts -> BOOLEAN]
+  /\ members \in SUBSET Tgts /\ members # {}
+  \* structural tripwire: an active composer is always a member of its own
+  \* composition
+  /\ ActiveNew => record.composer \in members
+  /\ {diverged, splitRead, rejoined} \subseteq BOOLEAN
 
 Init ==
   /\ tgt = [t \in Tgts |-> "ok"]
@@ -299,6 +368,8 @@ Init ==
   /\ staleServe = FALSE /\ zombieWrote = FALSE
   /\ legSync = [t \in Tgts |-> "insync"]
   /\ soloAcked = [t \in Tgts |-> FALSE]
+  /\ members = Tgts
+  /\ diverged = FALSE /\ splitRead = FALSE /\ rejoined = FALSE
 
 (***************************************************************************)
 (* Failure events.  "part" is the load-bearing state: the MDS's only       *)
@@ -313,7 +384,7 @@ Partition(t) ==
   /\ UNCHANGED <<record, serving, lastServed, legAdmit, lease, session, excl,
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 Die(t) ==
   /\ tgt[t] \in {"ok", "part"} /\ crashes < MaxCrashes
@@ -322,7 +393,7 @@ Die(t) ==
   /\ UNCHANGED <<record, serving, lastServed, legAdmit, lease, session, excl,
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 (***************************************************************************)
 (* Recovery is where RecordAssemblyOnly bites: the recovered node's        *)
@@ -335,6 +406,9 @@ Die(t) ==
 (* composer must come up through Assemble's guards, not through reboot.    *)
 (***************************************************************************)
 Recover(t) ==
+  LET unclean == tgt[t] = "dead" /\ record.composer = t
+                   /\ lastServed[t] = record.epoch
+  IN
   /\ tgt[t] \in {"part", "dead"}
   /\ tgt' = [tgt EXCEPT ![t] = "ok"]
   /\ lease' = [lease EXCEPT ![t] = "live"]
@@ -342,10 +416,22 @@ Recover(t) ==
        IF record.composer = t
          THEN IF lastServed[t] = record.epoch THEN record.epoch ELSE 0
          ELSE IF RecordAssemblyOnly THEN 0 ELSE lastServed[t]]
+  \* THE WRITE-HOLE BELT (UncleanResync): raid1 has no dirty flag — after a
+  \* crash between leg writes both legs' superblocks claim CONFIGURED at
+  \* equal seq and reassembly serves them as equals with no resync
+  \* (bdev_raid.c:3390-3396), read-flapping on the divergence.  The code
+  \* cannot see `diverged`; what it CAN see is "this composer stopped
+  \* uncleanly while serving", so the belt is conservative: come back solo,
+  \* peer leg stale, rebuild-only rejoin.  A clean partition heal is not
+  \* unclean — the process never died mid-write.
+  /\ members' = IF RejoinEnabled /\ UncleanResync /\ unclean
+                  THEN {t} ELSE members
+  /\ legSync' = IF RejoinEnabled /\ UncleanResync /\ unclean
+                  THEN [legSync EXCEPT ![Peer(t)] = "stale"] ELSE legSync
   /\ UNCHANGED <<record, lastServed, legAdmit, session, excl, fenced, pendingEpoch,
                  delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 soloAcked, diverged, splitRead, rejoined>>
 
 (***************************************************************************)
 (* The lease horizon.  The lapse is one FACT both sides key off — the      *)
@@ -364,7 +450,7 @@ LeaseLapse(t) ==
   /\ UNCHANGED <<tgt, record, lastServed, legAdmit, session, excl, fenced,
                  pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 DeadmanFire(t) ==
   /\ DeadmanGate /\ ~DeadmanCertain
@@ -373,7 +459,7 @@ DeadmanFire(t) ==
   /\ UNCHANGED <<tgt, record, lastServed, legAdmit, lease, session, excl,
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 (***************************************************************************)
 (* Promotion, as the pipeline the implementation must be: CAS the record,  *)
@@ -393,7 +479,7 @@ PromoteCAS ==
   /\ UNCHANGED <<tgt, serving, lastServed, legAdmit, lease, session, excl,
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 \* THE ORDERING GUARD: never sever the zombie's fan-in while it can still
 \* ack (lease[d] = "lapsed" is the horizon).  Dropping this guard makes the
@@ -409,7 +495,7 @@ EvictAtLeg ==
   /\ UNCHANGED <<tgt, record, serving, lastServed, lease, session, excl,
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 \* Assembly is the force-degraded decision: the survivor's raid comes up on
 \* its own leg and the deposed leg is marked FAILED in the superblock —
@@ -428,6 +514,7 @@ Assemble ==
   /\ serving' = [serving EXCEPT ![record.composer] = record.epoch]
   /\ lastServed' = [lastServed EXCEPT ![record.composer] = record.epoch]
   /\ legSync' = [legSync EXCEPT ![Deposed] = "stale"]
+  /\ members' = {record.composer}
   /\ doomed' = (doomed \/ soloAcked[Deposed])
   \* THE FENCE REPLAY (finding 4): the exclusion a fence earned lives in
   \* the OLD node's PTPL and does not travel.  The new export therefore
@@ -442,7 +529,8 @@ Assemble ==
                ELSE excl
   /\ UNCHANGED <<tgt, record, legAdmit, lease, session, fenced, pendingEpoch,
                  delivered, gen, clientHeld, owner, crashes,
-                 divergent, staleWrite, staleServe, zombieWrote, soloAcked>>
+                 divergent, staleWrite, staleServe, zombieWrote, soloAcked,
+                 diverged, splitRead, rejoined>>
 
 (***************************************************************************)
 (* The fence, in the code's real granularity.  FenceClient is the MDS      *)
@@ -462,7 +550,7 @@ FenceClient(c) ==
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  excl, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 PreemptExecute(c) ==
   /\ c \in fenced
@@ -472,7 +560,7 @@ PreemptExecute(c) ==
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  fenced, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 DeliveredMark(c) ==
   /\ pendingEpoch[c] # 0
@@ -481,7 +569,7 @@ DeliveredMark(c) ==
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  excl, fenced, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 (***************************************************************************)
 (* The free/regrant, gated exactly as the code's FreeRequiresDelivered     *)
@@ -512,7 +600,7 @@ RegrantRange ==
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  excl, fenced, pendingEpoch, delivered, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 (***************************************************************************)
 (* The client write — the entire data path in one action, because that is  *)
@@ -557,7 +645,7 @@ ClientWrite(c) ==
                     ELSE soloAcked
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
-                 crashes, doomed, legSync>>
+                 crashes, doomed, legSync, members, diverged, splitRead, rejoined>>
 
 \* Reads take the same door minus the mirror fan-out: a deposed-but-alive
 \* composer serving READS of an abandoned lineage is the harm the dead-man
@@ -569,10 +657,18 @@ ClientRead(c) ==
   /\ serving[t] > 0
   /\ c \notin excl[t]
   /\ staleServe' = (staleServe \/ (ActiveNew /\ serving[t] < record.epoch))
+  \* The read-flap ghost: a composition serving two divergent member legs
+  \* answers this read from whichever leg is least loaded (raid1.c:227-233)
+  \* — old or new bytes, nondeterministically.  Fires only when BOTH legs
+  \* are members: a divergent NON-member leg is exactly what the belts
+  \* force (solo + stale + rebuild-only), and it flaps nothing.
+  /\ splitRead' = (splitRead \/ (/\ diverged
+                                 /\ Cardinality(members) >= 2
+                                 /\ serving[t] = record.epoch))
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  crashes, divergent, doomed, staleWrite, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, rejoined>>
 
 \* The composer reports a lost peer leg to the MDS — the stale mark the
 \* barrier waits on and the election gate reads.  It requires the composer
@@ -587,7 +683,130 @@ MarkStale ==
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  crashes, divergent, doomed, staleWrite, staleServe,
-                 zombieWrote, soloAcked>>
+                 zombieWrote, soloAcked, members, diverged, splitRead, rejoined>>
+
+(***************************************************************************)
+(* TRANCHE 2 — record-driven rebuild/rejoin.  A torn composer death, the   *)
+(* rebuild pipeline (admit -> copy -> member), the delta-rejoin ancestry   *)
+(* rule, and the auto-examine self-rejoin door.  All gated on              *)
+(* RejoinEnabled so every tranche-1 cfg keeps its exact state space.       *)
+(***************************************************************************)
+
+\* The write hole made reachable: the composer dies BETWEEN leg writes of
+\* a fanned write (raid1 acks on any-one-leg and records nothing durable
+\* before the crash — bdev_raid.c:705-718, 2440-2444), so the two member
+\* legs now hold divergent bytes and both superblocks still claim
+\* CONFIGURED at equal seq.  Costs a crash from the same budget as Die.
+DieMidWrite ==
+  LET t == record.composer IN
+  /\ RejoinEnabled
+  /\ crashes < MaxCrashes
+  /\ tgt[t] = "ok" /\ serving[t] > 0
+  /\ Cardinality(members) = 2
+  /\ tgt' = [tgt EXCEPT ![t] = "dead"]
+  /\ crashes' = crashes + 1
+  /\ diverged' = TRUE
+  /\ UNCHANGED <<record, serving, lastServed, legAdmit, lease, session, excl,
+                 fenced, pendingEpoch, delivered, gen, clientHeld, owner,
+                 divergent, doomed, staleWrite, staleServe, zombieWrote,
+                 legSync, soloAcked, members, splitRead, rejoined>>
+
+\* The rebuild pipeline, step 1: the STALE leg's node re-admits the current
+\* composer at its leg-export.  Epoch-checked by construction — the only
+\* initiator this action ever admits is record.composer, because the
+\* admitting reconciler consults the record (the same record-is-the-only-
+\* door discipline Recover enforces).  From here the composer's writes fan
+\* to the rebuilding leg (landed picks it up via legAdmit), which is
+\* exactly SPDK's live-write-plus-copied-windows rebuild shape.
+RebuildStart ==
+  LET s == record.composer
+      d == Peer(s)
+  IN
+  /\ RejoinEnabled
+  /\ ActiveNew
+  /\ legSync[d] = "stale"
+  /\ tgt[s] = "ok" /\ tgt[d] = "ok"
+  /\ s \notin legAdmit[d]
+  /\ legAdmit' = [legAdmit EXCEPT ![d] = @ \cup {s}]
+  /\ UNCHANGED <<tgt, record, serving, lastServed, lease, session, excl,
+                 fenced, pendingEpoch, delivered, gen, clientHeld, owner,
+                 crashes, divergent, doomed, staleWrite, staleServe,
+                 zombieWrote, legSync, soloAcked, members, diverged,
+                 splitRead, rejoined>>
+
+\* Step 2, the FULL copy (flint-driven, sparse-aware — §12's decided
+\* rebuild engine; raid1's own allocation-blind process is never used).
+\* The target leg's content becomes the source's: divergence and solo
+\* bytes on EITHER side are resolved (the target's own divergent bytes are
+\* overwritten; the source's solo bytes now exist on both legs).  Only
+\* here does the stale mark clear and the leg re-enter the composition.
+RebuildComplete ==
+  LET s == record.composer
+      d == Peer(s)
+  IN
+  /\ RejoinEnabled
+  /\ ActiveNew
+  /\ legSync[d] = "stale"
+  /\ s \in legAdmit[d]
+  /\ tgt[s] = "ok" /\ tgt[d] = "ok"
+  /\ legSync' = [legSync EXCEPT ![d] = "insync"]
+  /\ members' = members \cup {d}
+  /\ soloAcked' = [t \in Tgts |-> FALSE]
+  /\ diverged' = FALSE
+  /\ rejoined' = TRUE
+  /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
+                 excl, fenced, pendingEpoch, delivered, gen, clientHeld,
+                 owner, crashes, divergent, doomed, staleWrite, staleServe,
+                 zombieWrote, splitRead>>
+
+\* Step 2, the DELTA path: copy only the regions the record's dirty
+\* tracking knows changed since the leg's cut (the degraded-window dirty
+\* set the DegradeBarrier interposition maintains — §12's incremental
+\* ladder).  The delta brings the SOURCE'S bytes over, so the source's
+\* solo-acked marks clear — but it knows nothing of bytes the TARGET wrote
+\* on its own (a torn write that landed target-only, a degraded stint as
+\* composer), and those survive the rejoin as live divergence.  That is
+\* why AncestryGuard exists: the delta door opens only for a leg that is
+\* provably AT its cut — no solo bytes of its own, no divergence — which
+\* the block tier can prove cheaply (the leg-export admission gate means
+\* nothing else could have written the absent leg; the record pins the
+\* cut).  The RejoinGuard transfer, verbatim in spirit.
+DeltaRejoin ==
+  LET s == record.composer
+      d == Peer(s)
+  IN
+  /\ RejoinEnabled
+  /\ ActiveNew
+  /\ legSync[d] = "stale"
+  /\ s \in legAdmit[d]
+  /\ tgt[s] = "ok" /\ tgt[d] = "ok"
+  /\ AncestryGuard => (~soloAcked[d] /\ ~diverged)
+  /\ legSync' = [legSync EXCEPT ![d] = "insync"]
+  /\ members' = members \cup {d}
+  /\ soloAcked' = [soloAcked EXCEPT ![s] = FALSE]
+  /\ diverged' = (diverged \/ soloAcked[d])
+  /\ rejoined' = TRUE
+  /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
+                 excl, fenced, pendingEpoch, delivered, gen, clientHeld,
+                 owner, crashes, divergent, doomed, staleWrite, staleServe,
+                 zombieWrote, splitRead>>
+
+\* The door RecordRejoinOnly closes: the recovered node's auto-examine
+\* wins seq_number arbitration (bdev_raid.c:3883-3904 — it only ever sees
+\* its own leg) and declares its leg clean, corrupting the RECORD'S VIEW
+\* with no copy having happened.  The election gate then trusts the lie in
+\* good faith — the same shape as DegradeBlind, one layer up: a belt is
+\* only as honest as the bookkeeping it reads.
+SelfRejoin ==
+  /\ RejoinEnabled /\ ~RecordRejoinOnly
+  /\ \E t \in Tgts :
+       /\ tgt[t] = "ok" /\ legSync[t] = "stale"
+       /\ legSync' = [legSync EXCEPT ![t] = "insync"]
+  /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
+                 excl, fenced, pendingEpoch, delivered, gen, clientHeld,
+                 owner, crashes, divergent, doomed, staleWrite, staleServe,
+                 zombieWrote, soloAcked, members, diverged, splitRead,
+                 rejoined>>
 
 (***************************************************************************)
 (* The redirect lane, timing-free.  The review found no ACTOR exists to    *)
@@ -604,7 +823,7 @@ ReAttach(c) ==
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, excl,
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
-                 legSync, soloAcked>>
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 Next ==
   \/ \E t \in Tgts : Partition(t) \/ Die(t) \/ Recover(t)
@@ -614,6 +833,7 @@ Next ==
                           \/ DeliveredMark(c) \/ ClientWrite(c)
                           \/ ClientRead(c) \/ ReAttach(c)
   \/ RegrantRange
+  \/ DieMidWrite \/ RebuildStart \/ RebuildComplete \/ DeltaRejoin \/ SelfRejoin
 
 Spec == Init /\ [][Next]_vars
 
@@ -643,6 +863,15 @@ Inv_NoStaleExtentWrite == ~staleWrite
 \* the record is the only door to serving (heal-reconverge is the mutation).
 Inv_NoStaleServe == ~staleServe
 
+\* Tranche 2's theorem: no read is ever served through a composition whose
+\* member legs diverge.  raid1 cannot state this about itself — it has no
+\* scrub, no dirty flag, and its balancer makes every such read a coin
+\* flip — so the belts that carry it are all flint's: UncleanResync (come
+\* back solo after a torn death), AncestryGuard (no delta door for a leg
+\* with bytes of its own), and the full rebuild as the only divergence
+\* eraser.
+Inv_NoSplitRead == ~splitRead
+
 (***************************************************************************)
 (* NON-VACUITY PROBES (the standing rule: a green safety run proves        *)
 (* nothing without a witness that the guarded machinery actually fires).   *)
@@ -660,5 +889,16 @@ ProbeZombieWriteReachable == ~zombieWrote
 \* Witnesses the dangerous free: a fenced holder's range re-granted AFTER
 \* a failover (the path the free belts and the fence replay police).
 ProbePostFailoverFreeReachable == ~(gen >= 2 /\ record.epoch >= 2)
+
+\* Tranche-2 witnesses:
+\* a stale leg really re-enters the composition (either rejoin door) —
+\* without this, every NoSplitRead green is compatible with "nothing ever
+\* rejoins", the quarantine vacuity lesson again;
+ProbeRejoinCompletes == ~rejoined
+\* a torn composer death really occurs (UncleanResync's subject exists);
+ProbeTornReachable == ~diverged
+\* and a full FAIL-BACK really completes: promote away, rebuild the old
+\* leg, lose the survivor, promote back — the record machine's round trip.
+ProbeFailBackCompletes == ~(record.epoch = 3 /\ ActiveNew)
 
 ================================================================================

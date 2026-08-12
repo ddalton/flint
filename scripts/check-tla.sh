@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and thirty-two runs, ALL required.
+# One hundred and thirty-nine runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -17,9 +17,9 @@
 #   awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
-#   71 FlintReplication   15 FlintExtents   13 FlintComposition
-#   11 FlintExtentsProbe   7 FlintTruncate   5 FlintAdmission
-#    4 FlintSnapshots      3 FlintClaims     3 FlintA2Probe)
+#   71 FlintReplication   20 FlintComposition   15 FlintExtents
+#   11 FlintExtentsProbe   7 FlintTruncate       5 FlintAdmission
+#    4 FlintSnapshots      3 FlintClaims         3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -914,5 +914,34 @@ mutation_run FlintComposition FlintCompositionNoReplay.cfg "fence-replay mutatio
 mutation_run FlintComposition FlintCompositionProbeFailover.cfg "composition failover probe (a COMPLETE promotion — CAS, horizon, evict, assemble — really occurs in the strict state space; without this every green could mean the guards deadlock it)" "ProbeFailoverCompletes"
 mutation_run FlintComposition FlintCompositionProbeZombie.cfg "composition zombie probe (a deposed composer really accepts a write — the divergence green means 'contained', not 'never fired')" "ProbeZombieWriteReachable"
 mutation_run FlintComposition FlintCompositionProbeFree.cfg "composition post-failover free probe (a fenced holder's range really is freed and re-granted after a failover under every belt — the quarantine tranche's vacuity lesson, not repeated)" "ProbePostFailoverFreeReachable"
+
+# ---- composition tranche 2 (2026-08-12, same day): record-driven
+# rebuild/rejoin, behind RejoinEnabled — every tranche-1 cfg's state space
+# verified BIT-IDENTICAL (flagship distinct-count 102,962 unchanged, twice).
+# members becomes real state, MaxEpoch=3 makes the record machine's round
+# trip reachable, and the sticky stale marks from tranche 1 earn their one
+# clearing door.  Three belts, each a FlintReplication shape arriving at the
+# serving record: RecordRejoinOnly (stale clears only via record-driven
+# rebuild — the mutation is auto-examine seq arbitration declaring a leg
+# clean with no copy, corrupting the bookkeeping the honest election gate
+# reads); UncleanResync (the write-hole belt: stock raid1 reassembles
+# equal-seq DIVERGENT legs as clean equals with no resync, bdev_raid.c:
+# 3390-3396, and the code cannot see divergence — only "died serving" — so
+# an unclean composer death comes back solo, peer stale, rebuild-only);
+# AncestryGuard (the RejoinGuard transfer: the delta-rejoin door opens only
+# for a leg provably AT its cut, because the delta copies the SOURCE'S
+# dirty regions and cannot erase bytes the target wrote alone).  New
+# theorem Inv_NoSplitRead: no read served through divergent member legs
+# (raid1's least-loaded balancer coin-flips those, raid1.c:227-233).
+# RebuildStart doubles as the epoch-checked leg-admission grant.  The full
+# rebuild is flint-driven and sparse-aware per §12's decided engine —
+# raid1's allocation-blind full-arena process is never the copy.
+strict_run   FlintComposition FlintCompositionRejoin.cfg "composition tranche-2 strict (RejoinEnabled, MaxEpoch=3: torn deaths, rebuilds, both rejoin doors and the full fail-back round trip, every theorem incl. NoSplitRead holding over the complete 468k-state graph)"
+mutation_run FlintComposition FlintCompositionSelfRejoin.cfg "self-rejoin mutation (RecordRejoinOnly=FALSE: auto-examine wins seq arbitration and declares the stale leg clean — no copy — so the honest election gate elects it in good faith and its assembly discards the survivor's acked bytes; never let auto-examine arbitrate, now with teeth)" "Inv_NoDoomedAck"
+mutation_run FlintComposition FlintCompositionUncleanBlind.cfg "write-hole mutation (UncleanResync=FALSE = stock raid1 crash recovery: equal-seq divergent legs reassemble as clean equals and the balancer read-flaps LAYOUTCOMMIT-confirmed bytes — the belt is flint's conservative died-serving => solo+rebuild, because no code can see the divergence itself)" "Inv_NoSplitRead"
+mutation_run FlintComposition FlintCompositionAncestryBlind.cfg "delta-ancestry mutation (AncestryGuard=FALSE: the incremental rejoin door opened to a leg with bytes of its own — the delta brings the source's dirty regions and leaves the target's divergence live in the composition; the RejoinGuard transfer, and why delta-rejoin needs the admission-gate provenance proof)" "Inv_NoSplitRead"
+mutation_run FlintComposition FlintCompositionProbeRejoin.cfg "composition rejoin probe (a stale leg really re-enters the composition — without this every NoSplitRead green is compatible with nothing ever rejoining)" "ProbeRejoinCompletes"
+mutation_run FlintComposition FlintCompositionProbeTorn.cfg "composition torn-death probe (the write hole really occurs in the checked space — separates 'contained' from 'never happened')" "ProbeTornReachable"
+mutation_run FlintComposition FlintCompositionProbeFailBack.cfg "composition fail-back probe (the record machine's full round trip: promote away, rebuild record-driven, lose the survivor, promote BACK to an in-sync mark EARNED by a completed rebuild)" "ProbeFailBackCompletes"
 
 echo "TLA GATE PASSED"

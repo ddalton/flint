@@ -1361,8 +1361,14 @@ Each phase ships standalone value; none is gated on the next.
   incrementally only if its content is provably the cut state — which the block
   tier can prove cheaply, because the leg-export admission gate means nothing else
   could have written the absent leg and the record's generation pins which cut it
-  left at. Modeled in FlintComposition tranche 2 (record-driven rebuild/rejoin)
-  before implementation;
+  left at. **Tranche 2 SHIPPED same day**: record-driven rebuild/rejoin modeled with
+  the ancestry rule as a belt (`AncestryGuard` — its A/B shows the delta door opened
+  to a leg with bytes of its own leaves live divergence in the composition), the
+  write-hole belt (`UncleanResync`: an unclean composer death comes back solo,
+  peer-stale, rebuild-only — stock raid1 reassembles equal-seq divergent legs as
+  clean equals), the auto-examine self-rejoin refuted with teeth
+  (`RecordRejoinOnly`), and the full fail-back round trip probed at MaxEpoch=3;
+  `Inv_NoSplitRead` is the new theorem;
   (4) **PR state never travels** — reservations live at lib/nvmf per node, PTPL to a
   local file; an empty PTPL dir on the survivor loads zero state *silently*
   (`subsystem.c:3154-3158`);
@@ -1421,9 +1427,11 @@ Each phase ships standalone value; none is gated on the next.
   the MDS from the tgt node it must survive (chart `nodeSelector` + static traddr),
   `grow()` for composed volumes (the read-back belt validates ONE LVOL, not the
   array — a one-leg ENOSPC mid-sequence could raise the ceiling past the raid), the
-  write-hole divergence belt of limit (1) (forced rebuild of one leg on any unclean
-  assembly), tranche 2 of the model (record-driven rebuild/rejoin, fail-back, the
-  liveness debts), and the long-owed operator surface for
+  write-hole divergence belt of limit (1) in code (the model's `UncleanResync` names
+  its shape: forced rebuild of one leg on any unclean assembly), the model's
+  liveness tranche (redirect-actor progress, promotion progress, the forward
+  livelock of a never-confirmable fence, rebuild progress — tranche 2's safety half
+  shipped 2026-08-12), and the long-owed operator surface for
   `release_quarantine`/`quarantine_stats`, which failover work makes load-bearing.
   Phases 1-3 continue to ship single-replica with `reclaimPolicy` and workload
   guidance saying so.

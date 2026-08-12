@@ -2,7 +2,7 @@
 
 Seven spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
-(`scripts/check-tla.sh`, **one hundred and thirty-two** TLC runs).
+(`scripts/check-tla.sh`, **one hundred and thirty-nine** TLC runs).
 
 Both counts here have drifted before, in both files, because nothing
 regenerated them. They do now:
@@ -234,11 +234,25 @@ which the keying is machine-checked redundant
 (`FlintCompositionEpochKeyedToo.cfg` explores the identical
 distinct-state graph).  `DeadmanCertain` is the module's honesty axiom
 (EvidenceStrict's shape): the Skew run prices leasing without consensus
-at a window of stale *reads*, writes already contained.  Owed to later
-tranches: record-driven rebuild/rejoin (clears the sticky stale marks),
-the write-hole divergence belt, fail-back past `MaxEpoch = 2`, and all
+at a window of stale *reads*, writes already contained.  **Tranche 2**
+(same day, behind `RejoinEnabled` — tranche-1 state spaces bit-identical,
+flagship 102,962 verified twice): record-driven rebuild/rejoin.
+`members` becomes real state, `MaxEpoch = 3` makes the record machine's
+full round trip reachable (fail-back to an in-sync mark *earned* by a
+completed rebuild — probed, not assumed), and the sticky stale marks get
+their one clearing door, guarded three ways: `RecordRejoinOnly` (the
+auto-examine self-rejoin mutation — seq arbitration declares a leg clean
+with no copy and the honest election gate trusts corrupt bookkeeping),
+`UncleanResync` (the write-hole belt: stock raid1 reassembles equal-seq
+divergent legs as clean equals, so an unclean composer death comes back
+solo + peer-stale + rebuild-only), and `AncestryGuard` (the RejoinGuard
+transfer: the delta-rejoin door opens only for a leg provably at its
+cut — the delta copies the source's dirty regions and cannot erase what
+the target wrote alone).  New theorem `Inv_NoSplitRead`: no read served
+through divergent member legs.  Still owed: crash *inside* the rebuild
+copy (sim-harness territory, the esnap-window precedent), and all
 liveness (redirect actor, promotion progress, the forward livelock of a
-never-confirmable fence).
+never-confirmable fence, rebuild progress).
 
 Verification of snapshots is layered deliberately:
 
