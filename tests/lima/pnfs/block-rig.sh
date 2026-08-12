@@ -87,6 +87,11 @@
 #   writer — and a second volume on the same tgt, staged by the same
 #   host, keeps writing raw (per-namespace reservation, per-subsystem
 #   eviction).
+# EXPAND=1 — capacity semantics for real (§E): a small volume is FILLED
+#   until the app gets ENOSPC (not EIO — the errno an application can
+#   act on), then ExpandVolume grows the lvol, the client kernel picks
+#   the bigger namespace up through SPDK's resize AEN, the arena ceiling
+#   rises, and the same mount writes past the old ceiling sha-intact.
 # ZOMBIE=1 — the frozen-VM zombie (§Z), FlintAdmission's only dangerous
 #   shape: a SECOND lima VM (ZOMBIE_VM, default flint-zombie) stages
 #   through the production attach + a proxied cross-VM session, writes
@@ -164,7 +169,14 @@ cleanup() {
          pkill -9 -f 'of=$MNT/data.bin'; pkill -9 -f rig-writer.py;
          rm -f /var/tmp/rig-writer.pid /var/tmp/rig-writer.done /var/tmp/rig-writer.err" \
     >/dev/null 2>&1
-  vsudo "umount -lf $MNT 2>/dev/null; nvme disconnect -n $SUBNQN 2>/dev/null;
+  # Both mounts: EXPAND=1's own volume is mounted at $MNT-e, and a run
+  # that died before its teardown leaves a STALE handle there — the next
+  # run's `mkdir -p` then fails with ESTALE before it can even mount
+  # (rig-found, expand run 2). Unconditional: a leftover from an EXPAND
+  # run must not wedge an unrelated one.
+  vsudo "umount -lf $MNT 2>/dev/null; umount -lf ${MNT}-e 2>/dev/null;
+         nvme disconnect -n $SUBNQN 2>/dev/null;
+         nvme disconnect -n ${SUBNQN}-e 2>/dev/null;
          rm -rf /var/lib/kubelet/plugins/flint.csi.storage.io/block-sessions" >/dev/null 2>&1
   # Kill AND wait: a half-dead spdk_tgt still holds the core-claim lock
   # AND the 4420 listener, and a successor dies on either. Two traps
@@ -397,6 +409,167 @@ lvol_written() {
   vsh "$RPC bdev_get_iostat --name lvs_rig/$VOL" | python3 -c "
 import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
 }
+
+# ── E. EXPAND=1: capacity is real — ENOSPC, then a live expand ───────
+# The block class owns real capacity in TWO places (the lvol behind the
+# export and the allocator's arena ceiling), and before this drill CSI
+# expand moved NEITHER: the PVC reported the new size while every
+# LAYOUTGET past the old ceiling answered NoSpace forever. Two
+# properties, one flow, on its own small volume:
+#   E1. a FULL arena reports ENOSPC to the application — not EIO. The
+#       app must be able to tell "disk full" from "I/O error"; the
+#       fallback lane's blanket EIO said the wrong one.
+#   E2. ExpandVolume grows the lvol, the KERNEL picks the bigger
+#       namespace up (SPDK's resize AEN → nvme rescan — the one link in
+#       the chain no unit test can stand in for), the ceiling rises, and
+#       the same mount writes past the old ceiling with the bytes intact.
+if [ "${EXPAND:-0}" = "1" ]; then
+  # Derived, not spelled out: cleanup() tears these down by the same
+  # "-e" suffix rule, and two independent spellings would drift.
+  VOLE="$VOL-e"
+  MNTE="$MNT-e"
+  SUBNQNE="$SUBNQN-e"
+  E_START=$((32 * 1024 * 1024))
+  E_GROWN=$((128 * 1024 * 1024))
+
+  # E0. a deliberately SMALL volume — filling 512 MiB to prove ENOSPC
+  # would be a throughput test wearing a capacity test's clothes.
+  CVE=$(vsh "$RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+        -d '{\"volumeId\":\"$VOLE\",\"sizeBytes\":$E_START,\"layoutClass\":\"scsi\"}' \
+        127.0.0.1:50051 pnfs.control.MdsControl/CreateVolume") || fail "CreateVolume ($VOLE)"
+  echo "$CVE" | grep -c '"created": true' >/dev/null || fail "CreateVolume ($VOLE) refused: $CVE"
+  STAGEE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+          $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOLE --node \$(hostname)") \
+    || fail "pnfs-csi-cli stage ($VOLE)"
+  NSDEVE=$(basename "$(echo "$STAGEE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)")
+  [ -n "$NSDEVE" ] || fail "stage ($VOLE) reported no device: $STAGEE"
+  vsudo "mkdir -p $MNTE && mount -t nfs4 -o vers=4.2,proto=tcp,port=20490 127.0.0.1:/$VOLE $MNTE" \
+    || fail "mount ($VOLE)"
+  # The kernel's view of the namespace, in 512-byte sectors — this is
+  # the number the resize AEN has to move, and the one that gates
+  # whether a bio past the old end is even submittable.
+  SECT0=$(vsh "cat /sys/block/$NSDEVE/size")
+  CEIL0=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT size_ceiling FROM volume_alloc WHERE volume='$VOLE'\"")
+  [ "${CEIL0:-0}" = "$E_START" ] || fail "arena ceiling is '${CEIL0:-none}', expected $E_START"
+  echo "✓ $VOLE staged+mounted: /dev/$NSDEVE, $SECT0 sectors, ceiling ${CEIL0}B"
+
+  # E1. FILL IT. O_DIRECT so the error surfaces to dd rather than being
+  # deferred into writeback where nobody is listening.
+  # `|| true` INSIDE the remote command: grep -c exits 1 on zero matches,
+  # and a host-side `|| echo 0` appends a SECOND line to grep's own "0" —
+  # the multi-line value then breaks the -gt comparison below (run 1).
+  BELT_PRE=$(vsh "grep -c 'EXHAUSTED extent arena' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
+  set +e
+  FILL_ERR=$(vsudo "dd if=/dev/zero of=$MNTE/fill.bin bs=1M count=64 oflag=direct conv=fsync 2>&1 >/dev/null")
+  set -e
+  echo "· fill result: $(echo "$FILL_ERR" | tr '\n' ' ' | cut -c1-200)"
+  echo "$FILL_ERR" | grep -qi 'No space left on device' \
+    || fail "filling a $((E_START / 1024 / 1024))MiB volume did NOT report ENOSPC — got: $FILL_ERR"
+  BELT_POST=$(vsh "grep -c 'EXHAUSTED extent arena' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
+  [ "${BELT_POST:-0}" -gt "${BELT_PRE:-0}" ] \
+    || fail "the app saw ENOSPC but the MDS never logged an exhausted arena — \
+wrong lane? ($BELT_PRE → $BELT_POST)"
+  USED=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT next_free FROM volume_alloc WHERE volume='$VOLE'\"")
+  echo "✓ E1: the app got ENOSPC (not EIO) with the arena at ${USED}B of ${CEIL0}B"
+
+  # E2. THE EXPAND. Device first, then ceiling — the ordering the MDS
+  # enforces; here we only check both landed.
+  EXR=$(vsh "$RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+        -d '{\"volumeId\":\"$VOLE\",\"sizeBytes\":$E_GROWN}' \
+        127.0.0.1:50051 pnfs.control.MdsControl/ExpandVolume") || fail "ExpandVolume RPC"
+  echo "$EXR" | grep -c '"expanded": true' >/dev/null || fail "ExpandVolume refused: $EXR"
+  CEIL1=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT size_ceiling FROM volume_alloc WHERE volume='$VOLE'\"")
+  [ "${CEIL1:-0}" = "$E_GROWN" ] || fail "ceiling did not rise: '${CEIL1:-none}' != $E_GROWN"
+  DEVB=$(vsh "$RPC bdev_get_bdevs --name lvs_rig/$VOLE" | python3 -c "
+import json,sys
+b = json.load(sys.stdin)[0]
+print(b['block_size'] * b['num_blocks'])")
+  [ "${DEVB:-0}" -ge "$E_GROWN" ] || fail "lvol is ${DEVB}B, below the new ceiling $E_GROWN"
+
+  # THE LINK NO UNIT TEST COVERS: does the client's kernel actually pick
+  # the resize up? SPDK turns the bdev resize into nvmf_ns_resize and
+  # sends the ns-changed AEN; the kernel is supposed to rescan. If it
+  # does not, every write past the old end fails at the block layer and
+  # the expand is cosmetic.
+  SECT1=$SECT0
+  for i in $(seq 1 30); do
+    SECT1=$(vsh "cat /sys/block/$NSDEVE/size")
+    [ "${SECT1:-0}" -gt "${SECT0:-0}" ] && break
+    sleep 1
+  done
+  [ "${SECT1:-0}" -gt "${SECT0:-0}" ] \
+    || fail "the client kernel still sees $SECT1 sectors after the resize — the AEN/rescan never landed"
+  [ $((SECT1 * 512)) -ge "$E_GROWN" ] \
+    || fail "kernel sees $((SECT1 * 512))B, below the new ceiling $E_GROWN"
+  echo "✓ E2a: lvol ${DEVB}B, ceiling ${CEIL1}B, kernel $SECT0 → $SECT1 sectors (resize AEN landed)"
+
+  # E2b. and the volume WORKS past the old ceiling: fresh bytes, raw
+  # path, sha-checked cold.
+  #
+  # RIG FINDING (runs 3-4, kernel 7.0.0-28): the SAME MOUNT cannot use
+  # the new room. The server grants layouts past the old ceiling
+  # correctly — the log shows the grant, then an immediate LAYOUTRETURN
+  # and a fall back to the MDS lane for every write, for EVERY new file
+  # on that mount. The client caches the blocklayout device (its LENGTH
+  # among it) from GETDEVICEINFO, and extents past that length are
+  # unmappable; nothing re-reads it, because we answer GETDEVICEINFO
+  # with an EMPTY notification bitmap (no CB_NOTIFY_DEVICEID, RFC 5661
+  # §12.2.10). Recycling the mount drops the device cache and the space
+  # becomes usable — proven by A/B on the live rig, with the nvme
+  # session untouched in both arms (so it is the NFS device cache, not
+  # the block device: sysfs already showed the bigger namespace).
+  #
+  # So: attempt the same mount FIRST and report what happens either way
+  # — if a future kernel (or a CB_NOTIFY_DEVICEID implementation) makes
+  # it work, this drill says so instead of silently passing on the
+  # remount path.
+  vsh "dd if=/dev/urandom of=/var/tmp/rig-e.bin bs=1M count=16 status=none"
+  E_SHA=$(vsh "sha256sum /var/tmp/rig-e.bin" | awk '{print $1}')
+  set +e
+  SAME_ERR=$(vsudo "cp /var/tmp/rig-e.bin $MNTE/after-expand.bin 2>&1 >/dev/null")
+  SAME_RC=$?
+  set -e
+  if [ "$SAME_RC" -eq 0 ]; then
+    echo "· NOTE: the SAME mount wrote past the old ceiling — the client picked"
+    echo "  the grown device up without a remount. If that reproduces, the"
+    echo "  online-expand caveat in the design doc (§7) is STALE: update it."
+  else
+    echo "· EXPECTED TODAY: the same mount cannot use the new room"
+    echo "  ($(echo "$SAME_ERR" | tr '\n' ' ' | cut -c1-110))"
+    echo "  — cached blocklayout device length; no CB_NOTIFY_DEVICEID offered."
+    vsudo "umount $MNTE && mount -t nfs4 -o vers=4.2,proto=tcp,port=20490 127.0.0.1:/$VOLE $MNTE" \
+      || fail "remount after expand"
+    vsudo "cp /var/tmp/rig-e.bin $MNTE/after-expand.bin" \
+      || fail "write after expand+remount — the new room is not usable AT ALL"
+  fi
+  vsudo "sync $MNTE/after-expand.bin" || fail "sync after expand"
+  NEXT=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+    \"SELECT next_free FROM volume_alloc WHERE volume='$VOLE'\"")
+  [ "${NEXT:-0}" -gt "${CEIL0:-0}" ] \
+    || fail "the post-expand write allocated nothing past the OLD ceiling ($NEXT ≤ $CEIL0)"
+  vsudo "echo 3 > /proc/sys/vm/drop_caches"
+  E_SHA2=$(vsudo "sha256sum $MNTE/after-expand.bin" | awk '{print $1}')
+  [ "$E_SHA" = "$E_SHA2" ] || fail "post-expand sha mismatch: $E_SHA != $E_SHA2"
+  echo "✓ E2b: 16MiB written past the old ceiling (watermark $NEXT > $CEIL0), cold-read intact"
+
+  # Teardown of the drill's own volume; the base flow owns $VOL.
+  vsudo "umount $MNTE" >/dev/null 2>&1 || true
+  vsudo "$CSI_CLI unstage --volume-id $VOLE" >/dev/null || true
+  vsh "$CSI_CLI detach --endpoint 127.0.0.1:50051 --volume-id $VOLE --node \$(hostname)" >/dev/null || true
+  vsudo "nvme disconnect -n $SUBNQNE 2>/dev/null; true"
+
+  echo
+  echo "✅ expand-rig PASSED — a full block volume reported ENOSPC to the app"
+  echo "   (not EIO), and a live ExpandVolume grew the lvol, moved the KERNEL's"
+  echo "   namespace size ($SECT0 → $SECT1 sectors), raised the arena ceiling, and"
+  echo "   the volume then wrote past the old ceiling sha-intact. On $KREL."
+  [ "$SAME_RC" -eq 0 ] \
+    || echo "   Caveat proven, not assumed: that last write needed the mount recycled."
+  exit 0
+fi
 
 # ── X. PREEMPT=1: the foreign-holder fence arm + per-namespace scope ─
 # The one fence branch no drill ever fired: every fence so far found an

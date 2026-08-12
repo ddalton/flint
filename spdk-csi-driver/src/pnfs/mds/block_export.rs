@@ -131,6 +131,86 @@ impl BlockExportReconciler {
         self.ensure(volume, None).await
     }
 
+    /// A live bdev's capacity in bytes, from its own `bdev_get_bdevs`
+    /// record. Read back rather than computed from what we asked for:
+    /// lvol sizes round up to the lvolstore's cluster size, so the
+    /// device is usually BIGGER than the request, and the number the
+    /// allocator's ceiling is checked against has to be the real one.
+    fn bdev_capacity(resp: &serde_json::Value) -> Option<u64> {
+        let b = resp.get("result").and_then(|r| r.as_array())?.first()?;
+        let block_size = b.get("block_size").and_then(|v| v.as_u64())?;
+        let num_blocks = b.get("num_blocks").and_then(|v| v.as_u64())?;
+        block_size.checked_mul(num_blocks)
+    }
+
+    /// Grow the volume's lvol to at least `new_size_bytes` — the DEVICE
+    /// half of a CSI expand, and the half that must land first (the
+    /// allocator's ceiling may never outrun the namespace; see
+    /// `extent_alloc::expand_volume`). Returns the capacity in force
+    /// afterwards.
+    ///
+    /// Idempotent: a device already big enough is left alone, so a
+    /// re-driven ExpandVolume costs one RPC and changes nothing.
+    ///
+    /// The namespace follows for free — SPDK turns the bdev resize into
+    /// `nvmf_ns_resize`, which bumps the namespace and sends the
+    /// ns-changed AEN, and connected kernels rescan (v26.05
+    /// `lib/nvmf/subsystem.c`; growth needs no I/O quiesce, which is why
+    /// this is safe under live initiators). Shrinking has no path here
+    /// at all — CSI forbids it and the extents would be unaddressable.
+    pub async fn grow(&self, volume: &str, new_size_bytes: u64) -> Result<u64, String> {
+        let lock = self.lock_for(volume);
+        let _g = lock.lock().await;
+        let bdev = self.bdev_name(volume);
+        let probe = json!({ "method": "bdev_get_bdevs", "params": { "name": bdev } });
+
+        let before = self
+            .rpc
+            .rpc(&probe)
+            .await
+            .map_err(|e| format!("bdev_get_bdevs {bdev}: {e}"))?;
+        let current = Self::bdev_capacity(&before).ok_or_else(|| {
+            format!("bdev_get_bdevs {bdev}: reply carries no block_size/num_blocks")
+        })?;
+        if current >= new_size_bytes {
+            return Ok(current);
+        }
+
+        let size_mib = new_size_bytes.div_ceil(1024 * 1024).max(1);
+        let resize = json!({
+            "method": "bdev_lvol_resize",
+            "params": { "name": bdev, "size_in_mib": size_mib }
+        });
+        self.rpc
+            .rpc(&resize)
+            .await
+            .map_err(|e| format!("bdev_lvol_resize {bdev} to {size_mib} MiB: {e}"))?;
+
+        let after = self
+            .rpc
+            .rpc(&probe)
+            .await
+            .map_err(|e| format!("bdev_get_bdevs {bdev} (post-resize): {e}"))?;
+        let grown = Self::bdev_capacity(&after).ok_or_else(|| {
+            format!("bdev_get_bdevs {bdev} (post-resize): reply carries no block_size/num_blocks")
+        })?;
+        // Belt: an acked resize that did not actually grow the device
+        // must not become a raised ceiling. Refusing here leaves the
+        // volume at its old (working) size for the resizer to retry.
+        if grown < new_size_bytes {
+            return Err(format!(
+                "lvol {bdev} is {grown} bytes after a resize to {new_size_bytes} — \
+                 refusing to raise the allocation ceiling past the device"
+            ));
+        }
+        tracing::info!(
+            "📏 block volume '{}': lvol grown {} → {} bytes (namespace follows via \
+             the SPDK resize AEN)",
+            volume, current, grown
+        );
+        Ok(grown)
+    }
+
     /// Every name the lvol answers to, from a live `bdev_get_bdevs`
     /// record: its bdev name (UUID-form for lvols), its uuid, and its
     /// aliases. The namespace record in `nvmf_get_subsystems` carries
@@ -406,14 +486,24 @@ pub(crate) mod tests {
         pub(crate) calls: Mutex<Vec<Value>>,
         /// alias → canonical (UUID-form) bdev name.
         pub(crate) bdevs: Mutex<std::collections::HashMap<String, String>>,
+        /// alias → capacity in bytes. Real lvols round UP to the
+        /// lvolstore's cluster size, so the expand path must read the
+        /// device's own number back rather than trust its arithmetic —
+        /// this map is what lets a test prove it does.
+        pub(crate) bdev_bytes: Mutex<std::collections::HashMap<String, u64>>,
         pub(crate) subsystems: Mutex<std::collections::HashMap<String, Value>>,
     }
+
+    /// The block size the fake reports; 4 KiB, as an lvolstore on a
+    /// modern NVMe namespace does.
+    const FAKE_BLOCK_SIZE: u64 = 4096;
 
     impl FakeTgt {
         pub(crate) fn new() -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
                 bdevs: Mutex::new(Default::default()),
+                bdev_bytes: Mutex::new(Default::default()),
                 subsystems: Mutex::new(Default::default()),
             }
         }
@@ -454,11 +544,15 @@ pub(crate) mod tests {
                 "bdev_get_bdevs" => {
                     let name = p["name"].as_str().unwrap_or("");
                     let bdevs = self.bdevs.lock().unwrap();
+                    let bytes =
+                        self.bdev_bytes.lock().unwrap().get(name).copied().unwrap_or(0);
                     match bdevs.get(name) {
                         Some(canonical) => Ok(json!({ "result": [{
                             "name": canonical,
                             "uuid": canonical,
                             "aliases": [name],
+                            "block_size": FAKE_BLOCK_SIZE,
+                            "num_blocks": bytes / FAKE_BLOCK_SIZE,
                         }] })),
                         None => Err("No such device".into()),
                     }
@@ -470,11 +564,24 @@ pub(crate) mod tests {
                         p["lvol_name"].as_str().unwrap()
                     );
                     let canonical = format!("uuid-of-{}", p["lvol_name"].as_str().unwrap());
-                    self.bdevs.lock().unwrap().insert(alias, canonical.clone());
+                    self.bdevs.lock().unwrap().insert(alias.clone(), canonical.clone());
+                    let mib = p["size_in_mib"].as_u64().unwrap_or(0);
+                    self.bdev_bytes.lock().unwrap().insert(alias, mib * 1024 * 1024);
                     Ok(json!({ "result": canonical }))
                 }
+                "bdev_lvol_resize" => {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    if !self.bdevs.lock().unwrap().contains_key(&name) {
+                        return Err("No such device".into());
+                    }
+                    let mib = p["size_in_mib"].as_u64().unwrap_or(0);
+                    self.bdev_bytes.lock().unwrap().insert(name, mib * 1024 * 1024);
+                    Ok(json!({ "result": true }))
+                }
                 "bdev_lvol_delete" => {
-                    self.bdevs.lock().unwrap().remove(p["name"].as_str().unwrap_or(""));
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    self.bdevs.lock().unwrap().remove(&name);
+                    self.bdev_bytes.lock().unwrap().remove(&name);
                     Ok(json!({ "result": true }))
                 }
                 "nvmf_get_subsystems" => {
@@ -612,6 +719,51 @@ pub(crate) mod tests {
             tgt.call_with_method(&calls, "nvmf_subsystem_add_listener").expect("listener");
         assert_eq!(listener["params"]["listen_address"]["traddr"], "10.0.0.9");
         assert_eq!(listener["params"]["listen_address"]["trsvcid"], "4420");
+    }
+
+    /// The device half of a CSI expand: the lvol grows, rounded UP to
+    /// MiB, and the capacity reported back is the DEVICE's own.
+    #[tokio::test]
+    async fn grow_resizes_the_lvol_and_reports_the_device_capacity() {
+        let tgt = Arc::new(FakeTgt::new());
+        let r = reconciler(Arc::clone(&tgt));
+        r.ensure("pvc-1", Some(4 * 1024 * 1024)).await.expect("provision");
+        tgt.calls.lock().unwrap().clear();
+
+        let got = r.grow("pvc-1", 10 * 1024 * 1024 + 1).await.expect("grow");
+        let calls = tgt.calls.lock().unwrap().clone();
+        let resize = tgt.call_with_method(&calls, "bdev_lvol_resize").expect("resized");
+        assert_eq!(resize["params"]["name"], "lvs_test/pvc-1");
+        assert_eq!(resize["params"]["size_in_mib"], 11, "rounded UP to MiB");
+        assert_eq!(got, 11 * 1024 * 1024, "the DEVICE's capacity, not the request");
+    }
+
+    /// Idempotent: a re-driven ExpandVolume (external-resizer does this
+    /// freely) must not re-resize a device that is already big enough.
+    #[tokio::test]
+    async fn grow_is_a_no_op_when_the_device_already_fits() {
+        let tgt = Arc::new(FakeTgt::new());
+        let r = reconciler(Arc::clone(&tgt));
+        r.ensure("pvc-1", Some(16 * 1024 * 1024)).await.expect("provision");
+        tgt.calls.lock().unwrap().clear();
+
+        let got = r.grow("pvc-1", 8 * 1024 * 1024).await.expect("grow");
+        assert_eq!(got, 16 * 1024 * 1024);
+        assert!(
+            !tgt.methods().contains(&"bdev_lvol_resize".to_string()),
+            "a device that already fits must not be resized: {:?}",
+            tgt.methods()
+        );
+    }
+
+    /// A missing lvol is a hard error, never a silent success — the
+    /// ceiling must not move for a device that isn't there.
+    #[tokio::test]
+    async fn grow_refuses_when_the_lvol_is_absent() {
+        let tgt = Arc::new(FakeTgt::new());
+        let r = reconciler(Arc::clone(&tgt));
+        let e = r.grow("pvc-ghost", 1 << 20).await.expect_err("must refuse");
+        assert!(e.contains("bdev_get_bdevs"), "got: {e}");
     }
 
     #[tokio::test]

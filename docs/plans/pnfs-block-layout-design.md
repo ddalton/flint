@@ -394,6 +394,38 @@ allowVolumeExpansion: true            # now a REAL allocation op — see below
 - **Expand**: the current pNFS expand path is a metadata-only ack keyed on the shard
   suffix alone (`main.rs:2668-2708`). Block expand must raise the allocation ceiling
   for real — the discriminator check goes before that early return.
+
+> **EXPAND — SHIPPED 2026-08-11, and the client-side caveat it exposed.**
+> `ExpandVolume`'s scsi arm now moves BOTH halves of a block volume's capacity:
+> `BlockExportReconciler::grow` resizes the lvol (rounded up to MiB, idempotent,
+> capacity read BACK from the device) and `extent_alloc::expand_volume` raises
+> `volume_alloc.size_ceiling` — **device first, always**; a ceiling that outran its
+> namespace would hand out extents past the end of the device, and the write would
+> fail at the device with the server believing all was well (unit-pinned:
+> `a_failed_device_grow_never_raises_the_ceiling`). Both failure paths answer a gRPC
+> error so the driver maps them to UNAVAILABLE and external-resizer re-drives —
+> FAILED_PRECONDITION is terminal for the resizer, and a half-applied expand that can
+> never be re-driven is the wedge this RPC was fixed to stop causing.
+>
+> Rig-proven end to end (`make test-pnfs-expand-rig`, §E): a 32 MiB volume filled to
+> exactly its ceiling reported **ENOSPC to the application** (not EIO — see §12's
+> capacity residual, now closed at the wire), the expand grew the lvol to 128 MiB, and
+> the client kernel picked the bigger namespace up on its own (65536 → 262144 sectors:
+> SPDK turns the bdev resize into `nvmf_ns_resize` + the ns-changed AEN, and the kernel
+> rescans — `lib/nvmf/subsystem.c`, growth needs no I/O quiesce).
+>
+> **THE CAVEAT, rig-found: expansion is online at the server and OFFLINE at the
+> client.** After the expand the same mount could not use the new room — the server
+> granted layouts past the old ceiling, the client returned each one immediately and
+> wrote through the MDS lane instead, for every new file on that mount. The NFS client
+> caches the blocklayout **device** — its length included — from GETDEVICEINFO, and
+> extents past that length are unmappable. Recycling the mount drops the device cache
+> and the space is usable at once (A/B'd on the live rig with the nvme session
+> untouched, so it is the NFS device cache and not the block device). The clean fix is
+> **CB_NOTIFY_DEVICEID** (RFC 5661 §12.2.10): the Linux client ASKS for it —
+> `notify_types=[6]` = CHANGE|DELETE, now logged on every scsi GETDEVICEINFO — and we
+> decline with an empty notification bitmap. Until that ships, block expansion is
+> offline expansion (pod restart), documented in the operator runbook.
 - Reuse the `check_echo` version-skew gate (`pnfs_csi.rs:196-225`) for the layout-class
   field: an MDS predating block layout must not ack a block-class CreateVolume (proto3
   drops unknown fields silently).
@@ -1023,8 +1055,16 @@ Each phase ships standalone value; none is gated on the next.
 - **Capacity semantics become real.** The file layout inherited allocation, sparse
   semantics, and ENOSPC from ext4. The allocator now owns: real allocation at LAYOUTGET
   time, real expansion (§7), thin provisioning policy, and an ENOSPC story that isn't
-  "fallback FailFasts and the app sees EIO" (the current runbook residual). Undesigned
-  beyond the sketch in §8; needs its own bounds before phase 3.
+  "fallback FailFasts and the app sees EIO" (the current runbook residual).
+  **PARTLY CLOSED 2026-08-11**: real expansion is shipped and rig-proven (§7 box), and
+  the ENOSPC story is honest at the wire — the MDS lane now answers NFS4ERR_NOSPC when
+  the arena is exhausted instead of the blanket EIO, so an application on a full block
+  volume sees ENOSPC (rig: a 32 MiB volume filled to exactly its ceiling, `dd` reported
+  "No space left on device"). What REMAINS: thin-provisioning policy (the lvol is thin
+  and the ceiling is logical, so a fleet can oversubscribe its lvolstore and discover it
+  at write time, where the errno is an lvol-level failure and not this ENOSPC path),
+  capacity-aware placement across shards, and the client-side refresh
+  (CB_NOTIFY_DEVICEID) that would make expansion online end to end.
 - **Kernel blocklayout maturity.** Mainline since v6.11, near-zero production soak over
   fabrics, no known production RFC 9561 deployment to learn from. Every client bug
   degrades silently to MDS I/O, which both masks it and moves its load to the MDS.

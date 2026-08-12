@@ -210,6 +210,80 @@ pub fn register_volume(conn: &mut Connection, volume: &str, size_ceiling: u64) -
     Ok(())
 }
 
+/// Raise a volume's allocation ceiling (the CSI expand path).
+///
+/// RAISE-ONLY and idempotent: a request at or below the current ceiling
+/// is answered with the ceiling in force, never an error — CSI re-drives
+/// ExpandVolume until the reported capacity matches, and a "no" to a
+/// duplicate would wedge the PVC in `Resizing` over an operation that had
+/// already happened. Shrinking is not expressible here at all: extents
+/// already handed out past a lower ceiling would be un-representable, and
+/// CSI forbids shrink anyway.
+///
+/// ORDERING RULE for the caller: the backing device must be grown BEFORE
+/// this ceiling moves. The ceiling is the allocator's promise that a
+/// bump-allocated physical offset is addressable on the lvol; raising it
+/// first opens a window where a LAYOUTGET hands a client extents past the
+/// end of the namespace, and the client's write fails at the device with
+/// no server-side record of why.
+pub fn expand_volume(conn: &mut Connection, volume: &str, new_ceiling: u64) -> Result<u64> {
+    let want = as_i64(new_ceiling, "ceiling exceeds i64")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: Option<i64> = tx
+        .query_row(
+            "SELECT size_ceiling FROM volume_alloc WHERE volume = ?1",
+            params![volume],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(current) = current else {
+        // No arena = this is not a block-class volume (or its create
+        // never completed). Silently "expanding" it would report success
+        // for a ceiling that does not exist.
+        return Err(ExtentAllocError::InvalidRange(
+            "volume has no extent arena to expand",
+        ));
+    };
+    if want <= current {
+        return Ok(current as u64);
+    }
+    tx.execute(
+        "UPDATE volume_alloc SET size_ceiling = ?2 WHERE volume = ?1",
+        params![volume, want],
+    )?;
+    // The watermark/containment invariant is the one this touches; run
+    // the same verifier every other write transaction ends with rather
+    // than reasoning that a raise is obviously safe.
+    verify_volume_invariants(&tx, volume)?;
+    tx.commit()?;
+    Ok(want as u64)
+}
+
+/// Bytes the arena can still hand out to an allocating LAYOUTGET.
+///
+/// The bump region ONLY (`ceiling - next_free`). Free-list bytes are
+/// deliberately excluded: the production grant path runs `fresh_only`
+/// (reused ranges would ship a previous incarnation's bytes until the MDS
+/// can scrub them — `GrantedExtent::needs_scrub`), so free-list space is
+/// not reachable and counting it would make an exhausted volume look
+/// healthy to the ENOSPC belt. Zero here means the next write grant
+/// returns `NoSpace`.
+pub fn volume_headroom(conn: &Connection, volume: &str) -> Result<u64> {
+    let row: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT size_ceiling, next_free FROM volume_alloc WHERE volume = ?1",
+            params![volume],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((ceiling, next_free)) => Ok((ceiling - next_free).max(0) as u64),
+        // No arena row: not a block volume. "Not exhausted" is the safe
+        // answer — the belt's other arms own that file.
+        None => Ok(u64::MAX),
+    }
+}
+
 fn overlapping_extents(
     conn: &Connection,
     volume: &str,
@@ -2261,6 +2335,88 @@ mod tests {
         assert_eq!(g[0].physical_offset, 0, "carved from the freed range");
         assert_eq!(g[0].generation, 2);
         verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// THE EXPAND PATH, end to end at this layer: a volume that has hit
+    /// its ceiling grants again after the ceiling rises. Before this
+    /// existed, CSI expand acked a resize that raised nothing — the PVC
+    /// reported the new size and every LAYOUTGET past the old ceiling
+    /// still answered NoSpace (design doc §7).
+    #[test]
+    fn expand_raises_the_ceiling_and_unblocks_the_next_grant() {
+        let mut conn = fresh();
+        register_volume(&mut conn, VOL, 16384).unwrap();
+        grant(&mut conn, VOL, F, C1, 0, 16384, false).unwrap();
+        assert!(matches!(
+            grant(&mut conn, VOL, F, C1, 16384, 4096, false),
+            Err(ExtentAllocError::NoSpace { .. })
+        ));
+        assert_eq!(volume_headroom(&conn, VOL).unwrap(), 0, "arena exhausted");
+
+        assert_eq!(expand_volume(&mut conn, VOL, 65536).unwrap(), 65536);
+        assert_eq!(volume_headroom(&conn, VOL).unwrap(), 65536 - 16384);
+        let g = grant(&mut conn, VOL, F, C1, 16384, 4096, false).unwrap();
+        assert_eq!(g[0].physical_offset, 16384, "bump-allocated into the new room");
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// external-resizer re-drives ExpandVolume freely, and a PVC edited
+    /// back down must not be answered with an error that wedges it in
+    /// `Resizing`: at-or-below the ceiling in force is a no-op that
+    /// reports the truth.
+    #[test]
+    fn expand_is_idempotent_and_never_shrinks() {
+        let mut conn = fresh();
+        register_volume(&mut conn, VOL, 65536).unwrap();
+        assert_eq!(expand_volume(&mut conn, VOL, 65536).unwrap(), 65536, "no-op");
+        assert_eq!(expand_volume(&mut conn, VOL, 4096).unwrap(), 65536, "never shrinks");
+        assert_eq!(expand_volume(&mut conn, VOL, 1 << 20).unwrap(), 1 << 20);
+        assert_eq!(expand_volume(&mut conn, VOL, 1 << 20).unwrap(), 1 << 20, "replay");
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// A volume with no arena is not a block volume. Reporting success
+    /// for a ceiling that does not exist is exactly the lie the whole
+    /// change is removing.
+    #[test]
+    fn expand_refuses_a_volume_with_no_arena() {
+        let mut conn = fresh();
+        match expand_volume(&mut conn, "never-registered", 1 << 20) {
+            Err(ExtentAllocError::InvalidRange(m)) => assert!(m.contains("no extent arena")),
+            other => panic!("expected InvalidRange, got {other:?}"),
+        }
+    }
+
+    /// Headroom is the BUMP REGION only. The production grant path runs
+    /// `fresh_only`, so free-list bytes cannot be handed out — counting
+    /// them would tell the ENOSPC belt a full volume is healthy, and the
+    /// app would get EIO where ENOSPC is the truth.
+    #[test]
+    fn headroom_ignores_the_free_list_because_grants_are_fresh_only() {
+        let mut conn = fresh();
+        register_volume(&mut conn, VOL, 16384).unwrap();
+        grant(&mut conn, VOL, F, C1, 0, 16384, false).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        reclaim_complete(&mut conn, VOL, F, 0, 8192, 1000).unwrap();
+        assert_eq!(
+            volume_headroom(&conn, VOL).unwrap(),
+            0,
+            "8 KiB sits on the free list, but fresh_only cannot reach it"
+        );
+        // And the allocator agrees: a fresh_only grant still refuses.
+        assert!(matches!(
+            grant(&mut conn, VOL, F, C1, 16384, 4096, true),
+            Err(ExtentAllocError::NoSpace { .. })
+        ));
+    }
+
+    /// An unregistered volume must not read as "full" — the belt's other
+    /// arms own non-block files, and a bogus zero here would turn every
+    /// file-layout fallback write into ENOSPC.
+    #[test]
+    fn headroom_of_an_unknown_volume_is_not_zero() {
+        let conn = fresh();
+        assert_eq!(volume_headroom(&conn, "not-a-block-volume").unwrap(), u64::MAX);
     }
 
     /// The §8 mandate with teeth: the PK admits overlapping rows, so the

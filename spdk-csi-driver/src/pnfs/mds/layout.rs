@@ -857,6 +857,28 @@ impl LayoutManager {
         }
     }
 
+    /// Raise a block volume's allocation ceiling (the CSI expand path).
+    /// Returns the ceiling in force — idempotent, so a re-driven expand
+    /// answers the same number instead of failing.
+    ///
+    /// THE BACKING DEVICE MUST ALREADY BE BIG ENOUGH. The ceiling is the
+    /// allocator's promise that a bump-allocated offset is addressable on
+    /// the lvol; raising it ahead of the device would grant a client
+    /// extents past the end of its namespace, and the failure would
+    /// surface as an unexplained I/O error at the client with the server
+    /// believing everything is fine. Callers grow the export first.
+    pub async fn expand_extent_arena(
+        &self,
+        volume: &str,
+        new_ceiling: u64,
+    ) -> Result<u64, String> {
+        match self.backend.extent_expand_volume(volume, new_ceiling).await {
+            Ok(Ok(ceiling)) => Ok(ceiling),
+            Ok(Err(e)) => Err(format!("extent arena for '{volume}': {e}")),
+            Err(e) => Err(format!("extent arena for '{volume}': {e}")),
+        }
+    }
+
     /// Forget a volume's geometry (called on DeleteVolume). Queued, not
     /// awaited: a lost delete leaks one tiny row that the next
     /// CreateVolume of the same name overwrites anyway.

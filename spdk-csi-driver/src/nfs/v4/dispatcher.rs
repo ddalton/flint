@@ -1419,6 +1419,15 @@ impl CompoundDispatcher {
                         return OperationResult::Read(Nfs4Status::Delay, None);
                     }
                     crate::pnfs::FallbackIoDisposition::FailFast => {
+                        // Block class, at or past the committed size:
+                        // that is EOF, not an error (block_read_eof).
+                        if self.block_read_eof(&stub, offset).is_some() {
+                            use crate::nfs::v4::compound::ReadResult;
+                            return OperationResult::Read(
+                                Nfs4Status::Ok,
+                                Some(ReadResult { eof: true, data: Bytes::new() }),
+                            );
+                        }
                         return OperationResult::Read(Nfs4Status::Io, None);
                     }
                     // F66: healthy fleet — serve the fallback read FROM
@@ -1493,7 +1502,10 @@ impl CompoundDispatcher {
                         return OperationResult::Write(Nfs4Status::Delay, None);
                     }
                     crate::pnfs::FallbackIoDisposition::FailFast => {
-                        return OperationResult::Write(Nfs4Status::Io, None);
+                        // EIO unless the block arena is out of space, in
+                        // which case ENOSPC is the truthful errno.
+                        let status = self.block_write_failfast_status(&stub).await;
+                        return OperationResult::Write(status, None);
                     }
                     // F66: apply the fallback write TO THE STRIPES. The
                     // DS fdatasyncs before answering, so FILE_SYNC is
@@ -2342,6 +2354,77 @@ impl CompoundDispatcher {
         (disp, Some(StubTarget { file_key, path }))
     }
 
+    /// Refine the block lane's blanket NFS4ERR_IO for a WRITE that fell
+    /// back to the MDS (design doc §12, "capacity semantics become
+    /// real").
+    ///
+    /// The belt says FailFast for every scsi-class file because the MDS
+    /// holds no bytes for one — true, but it collapses two very
+    /// different situations into one errno. When the arena still has
+    /// headroom, the client is here because of a layout problem and EIO
+    /// is the honest, recoverable answer. When the arena is EXHAUSTED,
+    /// the client is here because LAYOUTGET answered LAYOUTUNAVAIL over
+    /// `NoSpace` — the volume is full, and the app deserves the errno
+    /// that says so. ENOSPC is also the one an application can act on:
+    /// EIO on a full filesystem reads as data loss.
+    ///
+    /// Read-side callers do NOT use this: a read is never out of space.
+    async fn block_write_failfast_status(
+        &self,
+        stub: &Option<StubTarget>,
+    ) -> Nfs4Status {
+        let (Some(pnfs), Some(t)) = (&self.pnfs_handler, stub.as_ref()) else {
+            return Nfs4Status::Io;
+        };
+        if pnfs.layout_class_for(&t.file_key) != crate::pnfs::mds::layout::LayoutClass::Scsi {
+            return Nfs4Status::Io;
+        }
+        let Some(backend) = pnfs.extent_backend() else {
+            return Nfs4Status::Io;
+        };
+        let Some(volume) = t.file_key.split('/').find(|c| !c.is_empty()) else {
+            return Nfs4Status::Io;
+        };
+        // Any failure to ASK stays EIO — an unknown capacity state must
+        // not be reported as a definite "disk full".
+        match backend.extent_volume_headroom(volume).await {
+            Ok(Ok(0)) => {
+                tracing::error!(
+                    "🈵 WRITE through MDS for block volume '{}' with an EXHAUSTED extent \
+                     arena — NFS4ERR_NOSPC (the app sees ENOSPC). Expand the PVC to raise \
+                     the allocation ceiling.",
+                    volume
+                );
+                Nfs4Status::NoSpc
+            }
+            _ => Nfs4Status::Io,
+        }
+    }
+
+    /// Past-EOF READ on a block-class file: 0 bytes with `eof`, not EIO.
+    ///
+    /// Rig-found (the frozen-VM zombie drill, 2026-08-11): a probing
+    /// O_DIRECT read past the end of the file gets no layout for a range
+    /// that has no extents, falls to the MDS lane, and collects the
+    /// block belt's blanket EIO — which is wrong, and noisy enough to
+    /// look like a failure on a passing drill. RFC 5661 §12.5.4 makes
+    /// the server's committed size authoritative for readers (that is
+    /// what LAYOUTCOMMIT is for), so at or past that size the correct
+    /// answer is a short read with eof set.
+    ///
+    /// Deliberately narrow: only at-or-past the stub's size, and only
+    /// for the scsi class. A read INSIDE the file that the belt refuses
+    /// (uncommitted or unreachable extents) keeps its loud EIO — serving
+    /// zeros there is the house failure mode, not a refinement.
+    fn block_read_eof(&self, stub: &Option<StubTarget>, offset: u64) -> Option<()> {
+        let (pnfs, t) = (self.pnfs_handler.as_ref()?, stub.as_ref()?);
+        if pnfs.layout_class_for(&t.file_key) != crate::pnfs::mds::layout::LayoutClass::Scsi {
+            return None;
+        }
+        let size = std::fs::metadata(&t.path).ok()?.len();
+        (offset >= size).then_some(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Map a wire `layout_type` onto the one layout type this server
     /// actually serves, for the operations that *emit* a layout-typed
@@ -3060,7 +3143,20 @@ impl CompoundDispatcher {
                 return OperationResult::GetDeviceInfo(Nfs4Status::OpNotInSession, None);
             }
             let body = Self::encode_scsi_device_addr(&dev_id, pr_key);
-            info!("📡 GETDEVICEINFO (scsi): volume '{}' → BASE/NGUID device", volume);
+            // notify_types is logged because it decides whether the
+            // server has ANY way to tell a client its device changed
+            // (CB_NOTIFY_DEVICEID, RFC 5661 §12.2.10) — the question an
+            // online expand runs into: the client caches the device's
+            // LENGTH from this reply, and a grown volume is invisible to
+            // it until the device cache is dropped. We reply with an
+            // empty notification bitmap today, so the answer is "no
+            // push"; this line is the evidence for what the client asked
+            // for, per kernel version.
+            info!(
+                "📡 GETDEVICEINFO (scsi): volume '{}' → BASE/NGUID device \
+                 (client notify_types={:?}, server offers none)",
+                volume, _notify_types
+            );
             return Self::frame_getdeviceinfo_reply(layout_type, &body, _maxcount);
         }
 
@@ -3914,6 +4010,12 @@ mod tests {
     struct FakePnfs {
         pinned: std::collections::HashSet<String>,
         disposition: crate::pnfs::FallbackIoDisposition,
+        /// Pinned files belong to a block-class (scsi) volume, and the
+        /// extent backend answers headroom queries. Both are what the
+        /// block lane's ENOSPC and EOF refinements branch on, so a
+        /// file-layout-only fake would leave them unreachable.
+        scsi: bool,
+        backend: Option<Arc<dyn crate::state_backend::StateBackend>>,
     }
 
     impl FakePnfs {
@@ -3924,6 +4026,22 @@ mod tests {
             Arc::new(Self {
                 pinned: pinned.iter().map(|s| s.to_string()).collect(),
                 disposition,
+                scsi: false,
+                backend: None,
+            })
+        }
+
+        fn new_block(
+            pinned: &[&str],
+            backend: Arc<dyn crate::state_backend::StateBackend>,
+        ) -> Arc<dyn crate::pnfs::PnfsOperations> {
+            Arc::new(Self {
+                pinned: pinned.iter().map(|s| s.to_string()).collect(),
+                // The real block belt has exactly one answer for a
+                // scsi-class file (the MDS holds no bytes for one).
+                disposition: crate::pnfs::FallbackIoDisposition::FailFast,
+                scsi: true,
+                backend: Some(backend),
             })
         }
     }
@@ -3970,6 +4088,18 @@ mod tests {
             } else {
                 crate::pnfs::FallbackIoDisposition::Serve
             }
+        }
+
+        fn layout_class_for(&self, file_key: &str) -> crate::pnfs::mds::layout::LayoutClass {
+            if self.scsi && self.pinned.contains(file_key) {
+                crate::pnfs::mds::layout::LayoutClass::Scsi
+            } else {
+                crate::pnfs::mds::layout::LayoutClass::File
+            }
+        }
+
+        fn extent_backend(&self) -> Option<Arc<dyn crate::state_backend::StateBackend>> {
+            self.backend.clone()
         }
     }
 
@@ -4040,6 +4170,158 @@ mod tests {
             1,
             Some(fh.data.clone()),
         )
+    }
+
+    /// A dispatcher whose pinned files are block-class, with a real
+    /// sqlite extent backend behind them.
+    fn create_test_dispatcher_block(
+        pinned: &[&str],
+        backend: Arc<dyn crate::state_backend::StateBackend>,
+    ) -> (CompoundDispatcher, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let export_path = temp_dir.path().canonicalize().unwrap();
+        let fh_mgr = Arc::new(FileHandleManager::new(export_path));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let lock_mgr = Arc::new(LockManager::new());
+        let dispatcher = CompoundDispatcher::new_with_pnfs(
+            fh_mgr,
+            state_mgr,
+            lock_mgr,
+            Some(FakePnfs::new_block(pinned, backend)),
+        );
+        (dispatcher, temp_dir)
+    }
+
+    /// A block-class stub at `<volume>/<file>` — the real file-key shape,
+    /// whose FIRST COMPONENT is the volume the arena is keyed by. A flat
+    /// name would leave that split unexercised.
+    fn pin_block_stub(
+        d: &CompoundDispatcher,
+        ctx: &mut CompoundContext,
+        temp: &TempDir,
+        volume: &str,
+        file: &str,
+        size: usize,
+    ) -> StateId {
+        let dir = temp.path().canonicalize().unwrap().join(volume);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file);
+        std::fs::write(&path, vec![0u8; size]).unwrap();
+        let fh = d.file_handler.fh_manager().path_to_filehandle(&path).unwrap();
+        ctx.current_fh = Some(fh.clone());
+        d.state_mgr.stateids.allocate(
+            crate::nfs::v4::state::StateType::Open,
+            1,
+            Some(fh.data.clone()),
+        )
+    }
+
+    async fn block_backend_with_arena(
+        volume: &str,
+        ceiling: u64,
+        granted: u64,
+    ) -> Arc<dyn crate::state_backend::StateBackend> {
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        backend.extent_register_volume(volume, ceiling).await.unwrap().unwrap();
+        if granted > 0 {
+            backend
+                .extent_grant(volume, 42, 7, 0, granted, true)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        backend
+    }
+
+    /// §12's capacity residual, closed at the wire: a WRITE that fell
+    /// back to the MDS because the arena is FULL must report ENOSPC, not
+    /// EIO. The client is here only because LAYOUTGET answered
+    /// LAYOUTUNAVAIL over `NoSpace`; EIO on a full volume reads as data
+    /// loss, and no application retries it usefully.
+    #[tokio::test]
+    async fn a_full_block_arena_answers_write_with_nospc_not_io() {
+        let backend = block_backend_with_arena("pvc-full", 16384, 16384).await;
+        let (d, temp) = create_test_dispatcher_block(&["pvc-full/data.bin"], backend);
+        let mut ctx = CompoundContext::new(2);
+        let sid = pin_block_stub(&d, &mut ctx, &temp, "pvc-full", "data.bin", 4096);
+
+        let write = d
+            .dispatch_operation(
+                Operation::Write {
+                    stateid: sid,
+                    offset: 0,
+                    stable: 2,
+                    data: bytes::Bytes::from_static(b"zzzz"),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(write.status(), Nfs4Status::NoSpc);
+    }
+
+    /// The A-arm's control, and the one that keeps the refinement
+    /// narrow: with headroom left, a fallback WRITE is a layout problem,
+    /// not a capacity one, and EIO remains the honest answer.
+    #[tokio::test]
+    async fn a_block_arena_with_headroom_still_answers_write_with_io() {
+        let backend = block_backend_with_arena("pvc-room", 1 << 20, 8192).await;
+        let (d, temp) = create_test_dispatcher_block(&["pvc-room/data.bin"], backend);
+        let mut ctx = CompoundContext::new(2);
+        let sid = pin_block_stub(&d, &mut ctx, &temp, "pvc-room", "data.bin", 4096);
+
+        let write = d
+            .dispatch_operation(
+                Operation::Write {
+                    stateid: sid,
+                    offset: 0,
+                    stable: 2,
+                    data: bytes::Bytes::from_static(b"zzzz"),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(write.status(), Nfs4Status::Io);
+    }
+
+    /// Rig-found (frozen-VM zombie drill): a probing O_DIRECT read past
+    /// EOF collected the block belt's blanket EIO. At or past the
+    /// server's committed size the correct answer is a short read with
+    /// `eof` — and a read INSIDE the file keeps its loud EIO, because
+    /// serving zeros there is the house failure mode.
+    #[tokio::test]
+    async fn a_past_eof_block_read_is_eof_while_an_in_file_read_stays_loud() {
+        let backend = block_backend_with_arena("pvc-eof", 1 << 20, 8192).await;
+        let (d, temp) = create_test_dispatcher_block(&["pvc-eof/data.bin"], backend);
+        let mut ctx = CompoundContext::new(2);
+        let sid = pin_block_stub(&d, &mut ctx, &temp, "pvc-eof", "data.bin", 4096);
+
+        let past = d
+            .dispatch_operation(
+                Operation::Read { stateid: sid.clone(), offset: 4096, count: 4096 },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(past.status(), Nfs4Status::Ok, "past EOF is not an error");
+        match past {
+            OperationResult::Read(_, Some(r)) => {
+                assert!(r.eof, "eof must be set");
+                assert!(r.data.is_empty(), "no bytes past EOF, and never zeros");
+            }
+            other => panic!("expected a Read result, got {other:?}"),
+        }
+
+        let inside = d
+            .dispatch_operation(
+                Operation::Read { stateid: sid, offset: 0, count: 4096 },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(
+            inside.status(),
+            Nfs4Status::Io,
+            "a refused read INSIDE the file must stay loud"
+        );
     }
 
     /// T1 — retro-coverage for the READ/WRITE stub guard.

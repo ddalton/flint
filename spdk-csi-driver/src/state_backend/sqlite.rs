@@ -1098,6 +1098,29 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn extent_expand_volume(
+        &self,
+        volume: &str,
+        new_ceiling: u64,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::expand_volume(conn, &v, new_ceiling)
+        })
+        .await
+    }
+
+    async fn extent_volume_headroom(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::volume_headroom(conn, &v)
+        })
+        .await
+    }
+
     async fn extent_grant(
         &self,
         volume: &str,

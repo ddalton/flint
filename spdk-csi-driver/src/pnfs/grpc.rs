@@ -207,6 +207,68 @@ impl MdsControlService {
             .map_err(|e| format!("block-class export provisioning failed: {e}"))
     }
 
+    /// Block-class expand: grow the device, THEN raise the arena
+    /// ceiling. See `expand_volume`'s doc for why the order is not
+    /// negotiable and why the failure paths are retryable.
+    async fn expand_block_volume(
+        &self,
+        volume: &str,
+        size_bytes: u64,
+    ) -> Result<Response<ExpandVolumeResponse>, Status> {
+        let Some(reconciler) = self.layout_manager.block_export() else {
+            // Terminal, not retryable: no amount of re-driving grows an
+            // lvol on an MDS that has no target configured. The volume
+            // could not have been created here either, so this is a
+            // misrouted request or a config that changed under a live
+            // volume — either way the operator, not the resizer, is the
+            // one who can act.
+            return Ok(Response::new(ExpandVolumeResponse {
+                expanded: false,
+                size_bytes: 0,
+                message: format!(
+                    "block-class volume {volume} cannot be expanded on this MDS: no \
+                     blockExport configured (mds.blockExport: spdkSocket/lvstore/traddr)"
+                ),
+            }));
+        };
+
+        let device_bytes = reconciler.grow(volume, size_bytes).await.map_err(|e| {
+            tracing::error!("📏 ExpandVolume: {} device grow failed: {}", volume, e);
+            Status::unavailable(format!("block volume {volume}: device grow failed: {e}"))
+        })?;
+
+        // Ceiling second, and never above what the device just proved it
+        // has. `grow` already refuses to return less than requested, so
+        // the min() is a belt against a future caller loosening that.
+        let ceiling = self
+            .layout_manager
+            .expand_extent_arena(volume, size_bytes.min(device_bytes))
+            .await
+            .map_err(|e| {
+                // The device is already bigger; only the ceiling lags.
+                // Retryable on purpose — the two halves must converge,
+                // and a terminal answer here would leave a volume whose
+                // PVC says one size and whose allocator says another,
+                // with no path back.
+                tracing::error!(
+                    "📏 ExpandVolume: {} device grew to {} but the arena ceiling did NOT \
+                     move: {} — the volume is under-provisioned until this converges",
+                    volume, device_bytes, e
+                );
+                Status::unavailable(format!("block volume {volume}: ceiling raise failed: {e}"))
+            })?;
+
+        info!(
+            "📏 ExpandVolume: block volume {} → ceiling {} bytes (device {} bytes)",
+            volume, ceiling, device_bytes
+        );
+        Ok(Response::new(ExpandVolumeResponse {
+            expanded: true,
+            size_bytes: ceiling,
+            message: String::new(),
+        }))
+    }
+
     /// F68b reachability dial: can the endpoint clients will be handed
     /// actually be connected to right now? Plain TCP connect with a
     /// bounded timeout — the point is to verify the routing chain
@@ -827,16 +889,33 @@ impl MdsControl for MdsControlService {
 
     /// Grow a volume's recorded capacity.
     ///
-    /// Directory volumes — the current model — hold no per-volume size on
-    /// the MDS at all: `CreateVolume` logs the requested bytes as
-    /// "pool-enforced" and stores nothing. So expansion is genuinely a
-    /// metadata-only acknowledgement, and refusing it (as the driver did
-    /// before) left a PVC permanently wedged in `Resizing` for an
-    /// operation that had nothing to do. Legacy sparse-file volumes DO
-    /// carry a real length and are grown in place.
+    /// Three shapes, and only one of them is a no-op:
     ///
-    /// Shrinking is refused in both shapes: CSI forbids it, and for a
-    /// legacy file it would discard data.
+    /// - **File-layout directory volumes** hold no per-volume size on the
+    ///   MDS at all: `CreateVolume` logs the requested bytes as
+    ///   "pool-enforced" and stores nothing. Expansion is genuinely a
+    ///   metadata-only acknowledgement, and refusing it (as the driver
+    ///   did before) left a PVC permanently wedged in `Resizing` for an
+    ///   operation that had nothing to do.
+    /// - **Block-class (scsi) volumes** own real capacity in two places —
+    ///   the lvol behind the NVMe export and the allocator's arena
+    ///   ceiling — and BOTH have to move or the expand is a lie: the PVC
+    ///   would report the new size while every LAYOUTGET past the old
+    ///   ceiling answered NoSpace. Device first, then ceiling (design
+    ///   doc §7; the ordering rule lives on `extent_alloc::expand_volume`).
+    /// - **Legacy sparse-file volumes** carry a real length and are grown
+    ///   in place.
+    ///
+    /// Shrinking is refused in every shape: CSI forbids it, for a legacy
+    /// file it would discard data, and for a block volume the extents
+    /// past a lowered ceiling would be unaddressable.
+    ///
+    /// Retryability is deliberate. A block expand that fails on the SPDK
+    /// or sqlite half returns a gRPC error (the driver maps it to
+    /// UNAVAILABLE, which external-resizer re-drives) rather than
+    /// `expanded: false` — a FAILED_PRECONDITION is terminal for the
+    /// resizer, and a half-applied expand that can never be re-driven is
+    /// exactly the wedge this RPC was fixed to stop causing.
     async fn expand_volume(
         &self,
         request: Request<ExpandVolumeRequest>,
@@ -866,6 +945,11 @@ impl MdsControl for MdsControlService {
         };
 
         if meta.is_dir() {
+            if self.layout_manager.layout_class_for(&req.volume_id)
+                == crate::pnfs::mds::layout::LayoutClass::Scsi
+            {
+                return self.expand_block_volume(&req.volume_id, req.size_bytes).await;
+            }
             info!(
                 "📏 ExpandVolume: directory volume {} → {} bytes (metadata-only; \
                  capacity is pool-side at the data servers)",
@@ -1368,6 +1452,118 @@ mod create_volume_tests {
         let again = s.create_volume(Request::new(req)).await.unwrap().into_inner();
         assert!(again.created, "retry must succeed: {}", again.message);
         assert_eq!(again.effective_layout_class, "scsi");
+    }
+
+    /// EXPAND, the honest version (design doc §7). Before this, the
+    /// block class inherited the directory volume's metadata-only ack:
+    /// the PVC reported the new size while the lvol and the arena
+    /// ceiling both stayed put, so the filesystem grew into space the
+    /// allocator would refuse forever. Both halves must move.
+    #[tokio::test]
+    async fn block_class_expand_grows_the_device_and_the_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, tgt) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-blk6", 8 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        // Exhaust the arena: the whole 8 MiB is granted, and the next
+        // byte has nowhere to go.
+        let backend = s.layout_manager.state_backend();
+        backend.extent_grant("pvc-blk6", 42, 7, 0, 8 << 20, true).await.unwrap().unwrap();
+        assert!(
+            backend.extent_grant("pvc-blk6", 42, 7, 8 << 20, 4096, true).await.unwrap().is_err(),
+            "arena is full before the expand"
+        );
+
+        let r = s
+            .expand_volume(Request::new(ExpandVolumeRequest {
+                volume_id: "pvc-blk6".into(),
+                size_bytes: 32 << 20,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.expanded, "{}", r.message);
+        assert_eq!(r.size_bytes, 32 << 20);
+
+        // The DEVICE grew...
+        assert_eq!(
+            tgt.bdev_bytes.lock().unwrap().get("lvs_test/pvc-blk6").copied(),
+            Some(32 << 20),
+            "the lvol behind the export must actually be bigger"
+        );
+        // ...and the arena can hand out the new room.
+        let g = backend
+            .extent_grant("pvc-blk6", 42, 7, 8 << 20, 4096, true)
+            .await
+            .unwrap()
+            .expect("grant past the old ceiling");
+        assert_eq!(g[0].physical_offset, 8 << 20);
+    }
+
+    /// THE ORDERING RULE, as a test: a failed device grow must leave the
+    /// ceiling alone. A ceiling that outran its namespace would hand a
+    /// client extents past the end of the device, and the write would
+    /// fail at the device with the server believing all was well.
+    /// Retryable (UNAVAILABLE), because the two halves must converge.
+    #[tokio::test]
+    async fn a_failed_device_grow_never_raises_the_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, tgt) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-blk7", 8 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        // The lvol vanishes under us (lvolstore gone, tgt rebuilt, …).
+        tgt.bdevs.lock().unwrap().remove("lvs_test/pvc-blk7");
+
+        let e = s
+            .expand_volume(Request::new(ExpandVolumeRequest {
+                volume_id: "pvc-blk7".into(),
+                size_bytes: 32 << 20,
+            }))
+            .await
+            .expect_err("must not ack");
+        assert_eq!(
+            e.code(),
+            tonic::Code::Unavailable,
+            "retryable: FAILED_PRECONDITION is terminal for external-resizer"
+        );
+
+        // The ceiling did not move: a grant past the original 8 MiB
+        // still refuses.
+        let backend = s.layout_manager.state_backend();
+        backend.extent_grant("pvc-blk7", 42, 7, 0, 8 << 20, true).await.unwrap().unwrap();
+        assert!(
+            backend.extent_grant("pvc-blk7", 42, 7, 8 << 20, 4096, true).await.unwrap().is_err(),
+            "the ceiling must not have outrun the device"
+        );
+    }
+
+    /// The file-layout class keeps its metadata-only acknowledgement —
+    /// it holds no per-volume size on the MDS, and refusing wedges the
+    /// PVC in `Resizing` over an operation with nothing to do.
+    #[tokio::test]
+    async fn file_class_expand_stays_a_metadata_only_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = svc(dir.path());
+        assert!(s
+            .create_volume(Request::new(cvreq("pvc-files", 1 << 20)))
+            .await
+            .unwrap()
+            .into_inner()
+            .created);
+        let r = s
+            .expand_volume(Request::new(ExpandVolumeRequest {
+                volume_id: "pvc-files".into(),
+                size_bytes: 4 << 20,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.expanded, "{}", r.message);
+        assert_eq!(r.size_bytes, 4 << 20);
     }
 
     /// DeleteVolume of a block volume tears the whole chain down —

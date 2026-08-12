@@ -277,6 +277,37 @@ fleet looks healthy, so the fallback is treated as a trapped client).
 End-to-end ENOSPC preservation arrives with MDS proxy I/O. Drill:
 `tests/lima/pnfs/enospc-drill.sh` (make test-pnfs-enospc).
 
+### Block class (pnfs-block): capacity is per-volume, and expansion is
+### online at the server, OFFLINE at the client
+
+A block volume's capacity lives in two places that must stay in step —
+the lvol behind its NVMe export and the allocator's arena ceiling
+(`volume_alloc.size_ceiling`). ExpandVolume moves both, device first;
+a failure on either half answers UNAVAILABLE so external-resizer
+re-drives rather than leaving the PVC half-expanded.
+
+- **A full block volume reports ENOSPC to the application** — not EIO
+  (the file-class caveat above). The chain: LAYOUTGET answers
+  LAYOUTUNAVAIL over `NoSpace`, the client falls back to the MDS lane,
+  and the MDS answers NFS4ERR_NOSPC once the arena is exhausted. The
+  MDS logs `🈵 WRITE through MDS for block volume '<v>' with an
+  EXHAUSTED extent arena`; that line is the signal to expand the PVC.
+- **THE CONSUMER MUST BE RESTARTED TO USE THE NEW SPACE.** The lvol
+  grows online, the client kernel even picks the bigger NVMe namespace
+  up (SPDK's resize AEN → rescan; `/sys/block/<dev>/size` grows), but
+  the NFS client caches the pNFS **block device**, its length included,
+  from GETDEVICEINFO — and it re-reads that only when its device cache
+  is dropped. Until then every layout past the old ceiling is granted
+  by the server and immediately returned by the client, which then
+  writes through the MDS lane and gets EIO. Recycling the mount (pod
+  restart / re-stage) fixes it instantly. Rig-proven both directions
+  (`make test-pnfs-expand-rig`, kernel 7.0.0-28). The clean fix is
+  CB_NOTIFY_DEVICEID — the client asks for it (`notify_types=[6]` =
+  CHANGE|DELETE, visible in the MDS's GETDEVICEINFO log line) and we
+  currently decline with an empty notification bitmap; until we send
+  it, treat block expansion as **offline expansion** and schedule the
+  pod restart with the resize.
+
 Deleting striped data frees DS space immediately: the heartbeat-borne
 stripe cleanup both unlinks the stripe file and evicts the DS's cached
 fd for it (`evicted N cached fd(s)` in the DS log). On builds ≤ 1.11

@@ -344,6 +344,10 @@ test-pnfs-preempt-rig: ## Foreign-holder fence arm: an adversarial registered ke
 test-pnfs-zombie-rig: ## Frozen-VM zombie: a second VM is SIGSTOPped mid-write, swept, its extents reused by a successor — whose bytes must survive the resume (block-rig ZOMBIE=1)
 	ZOMBIE=1 tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-expand-rig
+test-pnfs-expand-rig: ## Block capacity is real: a full volume reports ENOSPC to the app, then a live expand grows the lvol, the kernel's namespace and the arena ceiling (block-rig EXPAND=1)
+	EXPAND=1 tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh

@@ -572,6 +572,24 @@ pub trait StateBackend: Send + Sync {
         size_ceiling: u64,
     ) -> StateBackendResult<Result<(), extent_alloc::ExtentAllocError>>;
 
+    /// Raise the arena ceiling (the CSI expand path). Raise-only and
+    /// idempotent; returns the ceiling in force. The CALLER must have
+    /// grown the backing device first — see `extent_alloc::expand_volume`.
+    async fn extent_expand_volume(
+        &self,
+        volume: &str,
+        new_ceiling: u64,
+    ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
+
+    /// Bytes an allocating LAYOUTGET could still be granted. Zero = the
+    /// next write grant returns `NoSpace`; the MDS-lane belt reads this
+    /// to tell "arena full" (ENOSPC) apart from "no block fallback lane"
+    /// (EIO).
+    async fn extent_volume_headroom(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
+
     /// LAYOUTGET's allocation transaction. `fresh_only` skips free-list
     /// reuse — REQUIRED until the MDS grows the NVMe initiator that can
     /// write_zeroes a reused range before the layout leaves the server
