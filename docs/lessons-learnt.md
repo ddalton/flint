@@ -134,6 +134,15 @@ CSI CLI. Modes are standing regression harnesses (`make test-pnfs-*-rig`).
   printed in the failure message, and the drill failed anyway. A rule you have
   written down is not a rule you have applied — grep the diff for `grep -q`
   before running a rig, not after.
+- **A probe wired with a flag the tool does not have prints "nothing found"
+  forever.** Five `nvme resv-report` calls in the fence and preempt drills passed
+  `-c`, which nvme-cli 2.8 has no such option for; every one failed, `2>/dev/null
+  || true` turned the error into an answer, and each drill dutifully logged
+  `resv-report pre-fence: <none>` across every campaign. Nobody noticed, because
+  `<none>` is exactly what an unregistered namespace would print. Same shape as
+  the field-nobody-writes bug below: when a probe's failure mode and its
+  negative result are the same string, capture the exit code and the raw stderr,
+  or you have built a decoration.
 - **A gate that reads a field nobody writes disables itself silently.** The
   block capacity gate passed its unit tests against a fake and then did nothing on
   its first rig run: it read `total_clusters`, SPDK emits `total_data_clusters`,

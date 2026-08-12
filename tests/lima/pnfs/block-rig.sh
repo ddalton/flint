@@ -403,6 +403,14 @@ echo "✓ session re-established from the durable record: /dev/$NSDEV (second pa
 vsudo "mount -t nfs4 -o vers=4.2,proto=tcp,port=20490 127.0.0.1:/$VOL $MNT" || fail "mount"
 echo "✓ mounted 127.0.0.1:/$VOL (vers=4.2)"
 
+# Reservation sample #1: the nvme session is UP and the mount is live,
+# but no pNFS block I/O has happened yet, so the client has resolved no
+# deviceid. Per fs/nfs/blocklayout/dev.c the key is registered by
+# `bl_register_scsi` at deviceid RESOLUTION (blocklayout.c:592), not at
+# `nvme connect` — so this must show nobody.
+RESV_PRE=$(vsudo "nvme resv-report /dev/$NSDEV -d 256 -e 2>&1 | grep -iE 'regctl|rkey' | tr '\n' ' '" || true)
+echo "· resv-report before any pNFS I/O: ${RESV_PRE:-<none>}"
+
 # ── 8. write → sync → cold read → verify ─────────────────────────────
 vsh "dd if=/dev/urandom of=/var/tmp/rig-src.bin bs=1M count=$IO_MIB status=none"
 SRC_SHA=$(vsh "sha256sum /var/tmp/rig-src.bin" | awk '{print $1}')
@@ -435,6 +443,54 @@ BELT=$(vsh "grep -c 'MDS I/O on scsi-class file' $RIG/mds.log" || true)
 [ "${GRANTS:-0}" -ge 1 ] || fail "MDS log shows no scsi LAYOUTGET grants"
 [ "${BELT:-0}" = "0" ] || fail "zeros-belt fired $BELT time(s) — the client fell back to MDS I/O"
 echo "✓ device counters: ${WR}B written / ${RD}B read; $GRANTS LAYOUTGET grant(s); zero MDS-path I/O"
+
+# ── 9b. DOES THE KERNEL REGISTER A RESERVATION KEY? ──────────────────
+# Settles a recorded belief that the fence design cites: "kernel
+# blocklayout clients register no key, so EA-RO blocks every one of
+# them". Linux 7.0 says otherwise — `bl_register_scsi` issues
+# `pr_register(bdev, 0, dev->pr_key, true)` whenever a deviceid is
+# resolved (fs/nfs/blocklayout/dev.c:39, driven from blocklayout.c:592),
+# guarded by a per-device-object PNFS_BDEV_REGISTERED bit, and
+# `bl_free_device` unregisters unconditionally. If that is right, the
+# key appears only AFTER pNFS I/O, and it is the one GETDEVICEINFO
+# handed out: `sbv_pr_key` = the NFSv4 client id.
+#
+# It matters because EA-RO is Exclusive Access - REGISTRANTS ONLY: if
+# clients are registrants, the reservation alone does not exclude them
+# and a fence MUST remove the victim's key. The whole per-client fence
+# story rests on which of these is true.
+CLIENT_ID=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+  \"SELECT client_id FROM block_hosts WHERE volume='$VOL' LIMIT 1\"" || true)
+# Raw, with stderr and the exit code, because the FIRST run of this
+# check reported "<none>" for a reason that had nothing to do with
+# reservations: `-c` is not a resv-report flag in nvme-cli 2.8, the
+# command failed, and `2>/dev/null || true` turned the error into an
+# answer. A probe that cannot distinguish "nobody registered" from "I
+# could not ask" is not a probe.
+set +e
+RESV_RAW=$(vsudo "nvme resv-report /dev/$NSDEV -d 256 -e 2>&1")
+RESV_RC=$?
+set -e
+[ "$RESV_RC" = "0" ] \
+  || fail "nvme resv-report failed (rc=$RESV_RC) — the registration question was not asked: $(echo "$RESV_RAW" | tr '\n' ' ' | cut -c1-200)"
+RESV_POST=$(echo "$RESV_RAW" | grep -iE 'regctl|rkey' | tr '\n' ' ')
+echo "· resv-report after pNFS I/O:     ${RESV_POST:-<none>}"
+echo "· MDS-issued pr_key (client id):  ${CLIENT_ID:-<none>}"
+[ -n "${CLIENT_ID:-}" ] || fail "no block_hosts row for $VOL — cannot name the key the client should hold"
+# The prediction from the kernel source, asserted so a future kernel
+# that changes this cannot pass quietly.
+REG_N=$(echo "$RESV_POST" | grep -o 'regctl[^0-9]*[0-9]*' | grep -o '[0-9]*$' | head -1)
+[ "${REG_N:-0}" -ge 1 ] \
+  || fail "the client registered NO reservation key after real pNFS block I/O — \
+either this kernel does not register (the old belief, and then EA-RO alone excludes \
+clients) or the device was never resolved. Report: ${RESV_POST:-<none>}"
+KEY_HEX=$(printf '%x' "$CLIENT_ID")
+[ "$(echo "$RESV_POST" | grep -ciE "0x0*$KEY_HEX\b|\b$CLIENT_ID\b" || true)" -ge 1 ] \
+  || fail "a key is registered but it is not the one GETDEVICEINFO handed out \
+(client id $CLIENT_ID / 0x$KEY_HEX) — the key distribution channel and the device \
+have drifted. Report: ${RESV_POST:-<none>}"
+echo "✓ 9b: the kernel DOES register its pr_key ($REG_N registrant(s), key = client id"
+echo "  $CLIENT_ID) — and only after pNFS I/O resolved the device, not at nvme connect"
 
 # ── R. the roller's read: BlockExportStatus sees the LIVE initiator ───
 # The maintenance roller refuses to roll a node whose spdk-tgt has block
@@ -1102,7 +1158,7 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
     || fail "intruder resv-register (replace+iekey) refused"
   vsudo "nvme resv-acquire /dev/$NSDEV --crkey=$IKEY --rtype=1 --racqa=0" \
     || fail "intruder resv-acquire refused"
-  RESV_I=$(vsudo "nvme resv-report /dev/$NSDEV -c 1 -e 2>/dev/null | grep -iE 'rtype|regctl|rkey' | tr '\n' ' '" || true)
+  RESV_I=$(vsudo "nvme resv-report /dev/$NSDEV -d 256 -e 2>/dev/null | grep -iE 'rtype|regctl|rkey' | tr '\n' ' '" || true)
   echo "· intruder holds the reservation: ${RESV_I:-<report unavailable>}"
   W2b=$(lvol_written); sleep 2; W2c=$(lvol_written)
   [ "${W2c:-0}" -gt "${W2b:-0}" ] \
@@ -1144,7 +1200,7 @@ import json,sys; print(json.load(sys.stdin)['bdevs'][0]['bytes_written'])"
     || fail "post-fence raw write to $VOLB FAILED — the fence leaked across namespaces"
   B2=$(lvol_written_b)
   [ "${B2:-0}" -gt "${B1:-0}" ] || fail "control counter frozen ($B1 → $B2) — the fence leaked to $VOLB"
-  RESV_B=$(vsudo "nvme resv-report /dev/$NSDEVB -c 1 -e 2>/dev/null | grep -iE 'rtype|regctl' | tr '\n' ' '" || true)
+  RESV_B=$(vsudo "nvme resv-report /dev/$NSDEVB -d 256 -e 2>/dev/null | grep -iE 'rtype|regctl' | tr '\n' ' '" || true)
   echo "✓ per-namespace scope: $VOLB still writes raw ($B1 → ${B2}B); its resv: ${RESV_B:-<none>}"
 
   # Teardown, wedge-aware. B FIRST (healthy — bank its production
@@ -1199,7 +1255,7 @@ if [ "${FENCE:-0}" = "1" ]; then
   # The client's own view of the reservation table BEFORE the fence —
   # independent of anything flint logs. Shows whether the kernel even
   # registered a preemptable key (the 'zeroed new key' question).
-  RESV_BEFORE=$(vsudo "nvme resv-report /dev/$NSDEV -c 1 -e 2>/dev/null | grep -iE 'rtype|regctl|rkey' | tr '\n' ' '" || true)
+  RESV_BEFORE=$(vsudo "nvme resv-report /dev/$NSDEV -d 256 -e 2>/dev/null | grep -iE 'rtype|regctl|rkey' | tr '\n' ' '" || true)
   echo "· resv-report pre-fence: ${RESV_BEFORE:-<none>}"
 
   # F2. the lever. The victim client id is the NFSv4 client id — the

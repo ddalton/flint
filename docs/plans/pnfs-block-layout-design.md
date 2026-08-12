@@ -1277,6 +1277,33 @@ Each phase ships standalone value; none is gated on the next.
   or MDS-level mirroring across namespaces with the MDS coordinating writes — the
   latter re-inserts the MDS into the data path and is probably disqualified. Undecided;
   phase 1-3 ship single-replica with `reclaimPolicy` and workload guidance saying so.
+- **⚠️ THE CLIENT IS A REGISTRANT — a recorded belief this design cited is WRONG,
+  measured 2026-08-12 (`nvme resv-report`, base rig §9b).** The claim was "kernel
+  blocklayout clients register no key, so EA-RO blocks every one of them". Linux
+  7.0 registers: `bl_register_scsi` issues `pr_register(bdev, 0, dev->pr_key,
+  true)` (`fs/nfs/blocklayout/dev.c:39`) whenever a deviceid is resolved
+  (`blocklayout.c:592`), guarded by a per-device-object `PNFS_BDEV_REGISTERED`
+  bit, and `bl_free_device` unregisters unconditionally. The rig shows both halves:
+  `regctl: 0` with the nvme session up and the volume mounted, then `regctl: 1,
+  rkey: 2` after real pNFS I/O — where 2 is exactly the client id GETDEVICEINFO
+  handed out as `sbv_pr_key`. So registration is tied to DEVICE RESOLUTION, not to
+  `nvme connect`, and the key-distribution channel is now proven at the device
+  rather than inferred.
+  **Two consequences, both about what we have actually proven:**
+  (a) EA-RO is Exclusive Access *Registrants Only*, so it does **not** exclude a
+  client that is doing pNFS I/O. The single-host `FENCE=1` drill recorded its
+  mechanism as "EA-RO acquisition against a non-registrant kernel" — true of that
+  drill, whose writer was raw `dd` and therefore never resolved a device, but NOT
+  the production shape. For a registrant the fence rests entirely on the PREEMPT
+  arm removing the victim's key (which multi-rig M4b did exercise, B's writer
+  stopping at the device). The fence drill should assert the registration state
+  around the fence so the two shapes stop being conflated.
+  (b) **Unfence does not restore the victim's registration.** The preempt removed
+  the key; the client's device object keeps its `PNFS_BDEV_REGISTERED` bit set, so
+  it will not re-register until that object is freed and re-resolved. An unfenced
+  client can therefore be a non-registrant that believes otherwise, and a LATER
+  fence of any sibling — which takes volume-wide EA-RO — would exclude it. Derived
+  from the source, not yet drilled.
 - **Fencing end-to-end**: ~~confirmed on each side, untested in combination~~ **PROVEN
   in combination 2026-08-10** (§5 RIG-PROVEN box; `make test-pnfs-fence-rig`): a real
   Linux client mid-write was stopped at the device by the MDS's NVMe reservation, with
