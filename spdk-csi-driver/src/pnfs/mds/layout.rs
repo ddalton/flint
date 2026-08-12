@@ -439,10 +439,28 @@ pub struct LayoutManager {
     /// Layout tables cannot answer "who believes something about this
     /// device", so device fetches are recorded separately.
     ///
-    /// In-memory and best-effort: an MDS restart forgets the address
-    /// book, which costs a missed notification (the documented
-    /// recycle-the-mount state), never correctness. Entries are dropped
-    /// when the volume goes away or a send finds no back-channel.
+    /// In-memory and best-effort. Entries are dropped when the volume
+    /// goes away or a send finds no back-channel.
+    ///
+    /// ⚠️ **A restart costs more than the comment here used to claim**,
+    /// measured 2026-08-12 (`EXPAND=1 MDS_BOUNCE=1`, against the same
+    /// drill passing without the bounce). It is not "a missed
+    /// notification, recycle the mount": the client keeps writing into a
+    /// volume it believes is the old size and the app gets **EIO** —
+    /// the MDS grants a layout past the old ceiling, the client cannot
+    /// use it, returns it, falls back to the MDS lane, and the zeros
+    /// belt refuses (52 refusals in the measured run).
+    ///
+    /// And the restart loses this book TWICE OVER, which is what decides
+    /// the shape of any fix: startup deliberately discards persisted
+    /// sessions so the kernel re-CREATE_SESSIONs on BADSESSION, and the
+    /// client comes back with a NEW session id under its EXISTING
+    /// clientid (no EXCHANGE_ID) and issues no fresh GETDEVICEINFO — its
+    /// device cache outlives the session that fetched it. So persisting
+    /// these rows as they stand, keyed on `SessionId`, would restore
+    /// addresses that provably no longer exist. The stable identity is
+    /// the CLIENT; the session belongs at send time, resolved from live
+    /// state.
     device_notify: Arc<DashMap<String, DashMap<crate::nfs::v4::protocol::SessionId, u32>>>,
 
     /// The callback channel, attached late by the server exactly like

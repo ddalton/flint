@@ -799,6 +799,25 @@ fi
 #       namespace up (SPDK's resize AEN → nvme rescan — the one link in
 #       the chain no unit test can stand in for), the ceiling rises, and
 #       the same mount writes past the old ceiling with the bytes intact.
+#
+# MDS_BOUNCE=1 — restart the MDS between the device fetch and the expand.
+# **THIS MODE CURRENTLY FAILS, AND THAT IS THE POINT**: it is the drill
+# for a known residual, kept red until the fix lands (measured
+# 2026-08-12, both arms in one session).
+#   control (EXPAND=1):             1 client took CB_NOTIFY_DEVICEID,
+#                                   same mount wrote past the old ceiling.
+#   bounce  (EXPAND=1 MDS_BOUNCE=1): 0 notifications, and the write failed
+#                                   with EIO — 52 zeros-belt refusals as
+#                                   the client fell back to the MDS lane.
+# The MDS log says exactly why, and it decides how the fix must be keyed:
+# startup logs "observed 1 persisted sessions ... dropped them so kernel
+# re-CREATE_SESSIONs naturally on BADSESSION", the client then does
+# CREATE_SESSION with a NEW session id and its EXISTING clientid (no
+# EXCHANGE_ID at all), and issues NO fresh GETDEVICEINFO — so its cached
+# blocklayout device outlives the session that fetched it, while the
+# `device_notify` book (keyed on SessionId, in memory) is gone twice
+# over. A durable book keyed on SessionId would be dead on arrival; the
+# client id is the stable identity.
 if [ "${EXPAND:-0}" = "1" ]; then
   # Derived, not spelled out: cleanup() tears these down by the same
   # "-e" suffix rule, and two independent spellings would drift.
@@ -850,6 +869,57 @@ wrong lane? ($BELT_PRE → $BELT_POST)"
     \"SELECT next_free FROM volume_alloc WHERE volume='$VOLE'\"")
   echo "✓ E1: the app got ENOSPC (not EIO) with the arena at ${USED}B of ${CEIL0}B"
 
+  # E1b. MDS_BOUNCE=1 — THE EXPERIMENT (residual: the device-notify
+  # address book is in-memory).
+  #
+  # `LayoutManager.device_notify` is a DashMap: which sessions fetched
+  # which volume's device, and what notify mask they asked for. It does
+  # not survive a restart. The open question is whether that MATTERS,
+  # and it is not answerable by reading either side alone:
+  #
+  #   * flint PERSISTS sessions, so an MDS restart can be transparent to
+  #     the client — no EXCHANGE_ID, no state purge, and (the part that
+  #     bites) no reason for it to drop its cached blocklayout device.
+  #   * but if the client re-establishes and re-fetches anyway, the book
+  #     repopulates itself and there is nothing to fix.
+  #
+  # So: bounce the MDS here, with the client mounted and its device
+  # already cached, let it fully reconnect, and then let E2/E2c judge.
+  # The verdict is E2c's SAME-MOUNT write, not the notification count —
+  # a client that self-heals without a callback is a pass.
+  if [ "${MDS_BOUNCE:-0}" = "1" ]; then
+    MDS_PID0=$(vsh "pgrep -x flint-pnfs-mds | head -1" || true)
+    [ -n "$MDS_PID0" ] || fail "no MDS process to bounce"
+    vsudo "pkill -9 -x flint-pnfs-mds"
+    for i in $(seq 1 20); do
+      vsh "pgrep -x flint-pnfs-mds" >/dev/null || break
+      [ "$i" = 20 ] && fail "MDS never exited"
+      sleep 0.5
+    done
+    vsh "env FLINT_PNFS_BLOCK_LAYOUT=1 FLINT_PNFS_EXPORT_RECONCILE_SECS=$RECON_SECS FLINT_NFS_GRACE_SECS=5 FLINT_PNFS_LEASE_SWEEP_SECS=$SWEEP_SECS RUST_LOG='${MDS_LOG:-info}' nohup $MDS_BIN --config $CFG >>$RIG/mds.log 2>&1 & sleep 0.5"
+    for i in $(seq 1 20); do
+      vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" && break
+      [ "$i" = 20 ] && fail "MDS gRPC never came back after the bounce"
+      sleep 0.5
+    done
+    MDS_PID1=$(vsh "pgrep -x flint-pnfs-mds | head -1" || true)
+    [ -n "$MDS_PID1" ] && [ "$MDS_PID1" != "$MDS_PID0" ] \
+      || fail "MDS pid did not change ($MDS_PID0 → $MDS_PID1) — nothing was bounced"
+    # Out of the grace window, then drive REAL client traffic so the
+    # session is re-established and any device re-fetch it would do on
+    # its own has already happened BEFORE the expand. Without this the
+    # post-expand write would confound "the notification reached it"
+    # with "reconnecting refreshed it".
+    sleep 8
+    vsudo "stat $MNTE >/dev/null" || fail "the mount did not survive the MDS bounce"
+    vsudo "dd if=$MNTE/fill.bin of=/dev/null bs=1M count=1 iflag=direct status=none" \
+      || fail "post-bounce read failed — the client never recovered its session"
+    FETCH_AFTER=$(vsh "grep -c 'GETDEVICEINFO (scsi)' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
+    echo "· E1b: MDS bounced ($MDS_PID0 → $MDS_PID1), client reconnected and read;"
+    echo "       cumulative GETDEVICEINFO count now ${FETCH_AFTER:-?} (the address book"
+    echo "       is repopulated ONLY by a fetch after the restart)"
+  fi
+
   # E2. THE EXPAND. Device first, then ceiling — the ordering the MDS
   # enforces; here we only check both landed.
   EXR=$(vsh "$RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
@@ -900,8 +970,17 @@ print(b['block_size'] * b['num_blocks'])")
   vsh "dd if=/dev/urandom of=/var/tmp/rig-e.bin bs=1M count=16 status=none"
   E_SHA=$(vsh "sha256sum /var/tmp/rig-e.bin" | awk '{print $1}')
   NOTIFIED=$(vsh "grep -c 'CB_NOTIFY_DEVICEID ← .*accepted' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
-  [ "${NOTIFIED:-0}" -ge 1 ] \
-    || fail "no client ACCEPTED a CB_NOTIFY_DEVICEID — $(vsh "grep -i 'notify_deviceid' $RIG/mds.log | tail -3")"
+  if [ "${MDS_BOUNCE:-0}" = "1" ]; then
+    # An OBSERVATION here, not an assertion: whether the notification
+    # went out is the mechanism, and the experiment is about the
+    # OUTCOME. A zero with a passing E2c would mean the client refreshes
+    # itself and the address book's loss costs nothing.
+    echo "· E2c(bounce): CB_NOTIFY_DEVICEID accepted count = ${NOTIFIED:-0}"
+    echo "  $(vsh "grep -i 'notify_deviceid\|NOTIFY_DEVICEID' $RIG/mds.log | tail -2" || true)"
+  else
+    [ "${NOTIFIED:-0}" -ge 1 ] \
+      || fail "no client ACCEPTED a CB_NOTIFY_DEVICEID — $(vsh "grep -i 'notify_deviceid' $RIG/mds.log | tail -3")"
+  fi
   set +e
   SAME_ERR=$(vsudo "cp /var/tmp/rig-e.bin $MNTE/after-expand.bin 2>&1 >/dev/null")
   SAME_RC=$?

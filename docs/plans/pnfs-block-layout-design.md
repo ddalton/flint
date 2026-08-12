@@ -1162,6 +1162,35 @@ Each phase ships standalone value; none is gated on the next.
   at write time, where the errno is an lvol-level failure and not this ENOSPC path),
   capacity-aware placement across shards, and the client-side refresh
   (CB_NOTIFY_DEVICEID) that would make expansion online end to end.
+- **An MDS restart makes the next expand fail with EIO — MEASURED
+  2026-08-12, not inferred.** The device-notify address book
+  (`LayoutManager.device_notify`) is an in-memory map of which sessions
+  fetched which volume's device. `EXPAND=1 MDS_BOUNCE=1` bounces the MDS
+  between the fetch and the expand, against the identical drill without
+  the bounce: control = 1 client took CB_NOTIFY_DEVICEID and the same
+  mount wrote past the old ceiling; bounce = **0 notifications and the
+  write failed EIO**, with 52 zeros-belt refusals as the client fell back
+  to the MDS lane. So the old "costs a missed notification, recycle the
+  mount" reading was wrong — the application gets an I/O error on a
+  volume that has the space.
+  **The same run decided how to fix it.** The MDS log shows startup
+  *deliberately* discarding persisted sessions ("dropped them so kernel
+  re-CREATE_SESSIONs naturally on BADSESSION"); the client then does
+  CREATE_SESSION with a NEW session id under its EXISTING clientid (no
+  EXCHANGE_ID) and issues **no fresh GETDEVICEINFO** — its cached
+  blocklayout device outlives the session that fetched it. Therefore:
+  persisting the book as it stands, keyed on `SessionId`, would restore
+  addresses that provably no longer exist; and deriving targets from
+  layout holders cannot work either, since the dangerous client holds no
+  layout. The workable shape is a durable record keyed on the CLIENT
+  (stable across the restart) with the session resolved at send time from
+  live state. A larger alternative worth weighing first: make the
+  deviceid generation-stamped (`hash(volume, gen)`, bumped on expand) so
+  new space is only reachable through a LAYOUTGET that returns an
+  unseen deviceid, forcing a fetch — which removes the address book, the
+  durability and the back-channel dependency from the correctness path
+  altogether, at the cost of verifying that the Linux client tolerates
+  two `pnfs_block_dev` objects over one namespace.
 - **LAYOUTCOMMIT after LAYOUTRETURN — FIXED 2026-08-11 (commit-grace tranche).**
   Found by the zombie drill 2026-08-11 (pre-existing — the rule dates from the
   allocator's first commit, 4afb9b2). `extent_alloc::commit` validates against a LIVE
