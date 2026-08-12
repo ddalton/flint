@@ -2190,20 +2190,59 @@ impl LayoutManager {
     /// (set on LAYOUTGET); a single layout has exactly one session.
     /// One client with multiple layouts on the dead device produces
     /// multiple pairs with the same session id.
+    /// Advance one layout's stateid for a CB_LAYOUTRECALL and return
+    /// what to put on the wire: `(owner session, BUMPED stateid,
+    /// filehandle)`.
+    ///
+    /// RFC 8881 §12.5.3: the server increments the seqid on each
+    /// CB_LAYOUTRECALL, and §12.5.5.2.1 makes the client CHECK it. Linux
+    /// implements that check exactly (`pnfs_check_callback_stateid`):
+    /// `newseq <= oldseq` → **NFS4ERR_OLD_STATEID**, `newseq > oldseq+1`
+    /// → NFS4ERR_DELAY. So the recall must carry precisely one more than
+    /// the client holds, or the client refuses it before draining
+    /// anything. Bump first, then hand out the bumped value; the map key
+    /// is `other`, so this does not move the entry.
+    ///
+    /// EVERY recall path goes through here. The seqid bump was fixed
+    /// once (audit C1) on the truncate path only, and the DS-death path
+    /// kept sending the stale seqid for months — invisible because the
+    /// client's refusal is answered by forced server-side revocation,
+    /// which looks like a working recall from the outside.
+    fn bump_recall_stateid(
+        &self,
+        key: &LayoutStateId,
+    ) -> Option<(SessionIdBytes, LayoutStateId, Vec<u8>)> {
+        let mut entry = self.layouts.get_mut(key)?;
+        let next = seqid_of(&entry.stateid).wrapping_add(1);
+        let next = if next == 0 { LAYOUT_SEQID_BASE } else { next };
+        entry.stateid[0..4].copy_from_slice(&next.to_be_bytes());
+        let to_send = entry.stateid;
+        let owner_session = entry.owner.session_id;
+        let fh = entry.filehandle.clone();
+        let snapshot = entry.clone();
+        drop(entry);
+        self.persist(&snapshot);
+        Some((owner_session, to_send, fh))
+    }
+
     pub fn recall_layouts_for_device(
         &self,
         device_id: &str,
     ) -> Vec<(SessionIdBytes, LayoutStateId)> {
-        let mut recalled = Vec::new();
-
+        // Two phases, and not for style: a DashMap write taken while one
+        // of its own iterators is live deadlocks on the shard lock, and
+        // the bump below is a write.
+        let mut hits: Vec<LayoutStateId> = Vec::new();
         for entry in self.layouts.iter() {
-            let has_device = entry
-                .segments
-                .iter()
-                .any(|seg| seg.device_id == device_id);
+            if entry.segments.iter().any(|seg| seg.device_id == device_id) {
+                hits.push(state_key(&entry.stateid));
+            }
+        }
 
-            if has_device {
-                recalled.push((entry.owner.session_id, entry.stateid));
+        let mut recalled = Vec::new();
+        for key in hits {
+            if let Some((session, stateid, _fh)) = self.bump_recall_stateid(&key) {
+                recalled.push((session, stateid));
             }
         }
 
@@ -2255,23 +2294,8 @@ impl LayoutManager {
         // write taken while one of its own iterators is live deadlocks on the
         // shard lock.
         for key in hits {
-            if let Some(mut entry) = self.layouts.get_mut(&key) {
-                // RFC 8881 §12.5.3: the server increments the seqid on each
-                // CB_LAYOUTRECALL, and §12.5.5.2.1 makes the client CHECK it —
-                // a recall carrying the seqid the client already has is
-                // rejected with NFS4ERR_OLD_STATEID before the client drains
-                // anything. Bump first, then hand out the bumped value; the
-                // map key is `other` so this does not move the entry.
-                let next = seqid_of(&entry.stateid).wrapping_add(1);
-                let next = if next == 0 { LAYOUT_SEQID_BASE } else { next };
-                entry.stateid[0..4].copy_from_slice(&next.to_be_bytes());
-                let to_send = entry.stateid;
-                let owner_session = entry.owner.session_id;
-                let fh = entry.filehandle.clone();
-                let snapshot = entry.clone();
-                drop(entry);
-                self.persist(&snapshot);
-                recalled.push((owner_session, to_send, fh));
+            if let Some(triple) = self.bump_recall_stateid(&key) {
+                recalled.push(triple);
             }
         }
         if unidentified > 0 {
@@ -2677,7 +2701,13 @@ mod tests {
         let recalled = manager.recall_layouts_for_device(device_used);
 
         assert_eq!(recalled.len(), 1, "expected exactly one (sid, stateid) pair");
-        assert_eq!(recalled[0].1, layout.stateid);
+        // The recall carries the layout's `other` with a BUMPED seqid.
+        // This assertion used to demand the stateid unchanged, which is
+        // how the missing bump survived: the test pinned the bug (the
+        // client answers NFS4ERR_OLD_STATEID to an un-advanced seqid —
+        // see `the_ds_death_recall_bumps_the_seqid_too_and_shares_the_counter`).
+        assert_eq!(&recalled[0].1[4..], &layout.stateid[4..], "same layout");
+        assert_eq!(seqid_of(&recalled[0].1), seqid_of(&layout.stateid) + 1);
         assert_eq!(recalled[0].0, layout.owner.session_id);
     }
 
@@ -3185,6 +3215,52 @@ mod tests {
         assert!(mgr.return_layout(&second[0].1).is_ok(), "LAYOUTRETURN with the bumped seqid");
         assert!(mgr.get_layout(&l.stateid).is_none());
         assert!(mgr.layouts_for_client(1).is_empty(), "by_owner cleaned up too");
+    }
+
+    /// AUDIT C1, THE OTHER HALF — rig-found on 2026-08-11, months after
+    /// the truncate path was fixed.
+    ///
+    /// `recall_layouts_for_device` (the DS-death path) handed out the
+    /// STORED stateid, unbumped, so the client's
+    /// `pnfs_check_callback_stateid` saw `newseq <= oldseq` and answered
+    /// NFS4ERR_OLD_STATEID without draining anything. It stayed
+    /// invisible because a refused recall is answered by forced
+    /// server-side revocation, which from the outside looks exactly like
+    /// a recall that worked. Both paths now share one bump, and this
+    /// test covers the device path specifically — plus the property that
+    /// makes twin paths safe: they advance the SAME counter, so
+    /// alternating them still yields strictly increasing seqids.
+    #[test]
+    fn the_ds_death_recall_bumps_the_seqid_too_and_shares_the_counter() {
+        let mgr = recall_fixture();
+        let l = mgr
+            .generate_layout(test_owner(1), vec![0xA], "file-a", 0, 1 << 20, IoMode::ReadWrite)
+            .unwrap();
+        let minted = seqid_of(&l.stateid);
+        let device = l.segments[0].device_id.clone();
+
+        let first = mgr.recall_layouts_for_device(&device);
+        assert_eq!(first.len(), 1, "the layout uses that device");
+        assert_eq!(
+            seqid_of(&first[0].1),
+            minted + 1,
+            "a DS-death recall must send seqid+1, or the client answers OLD_STATEID"
+        );
+        assert_eq!(
+            &first[0].1[4..],
+            &l.stateid[4..],
+            "only the seqid moves — `other` identifies the layout"
+        );
+
+        // Alternate the paths: one shared counter, strictly increasing.
+        let second = mgr.recall_layouts_for_file(&l.file_ident);
+        assert_eq!(seqid_of(&second[0].1), minted + 2);
+        let third = mgr.recall_layouts_for_device(&device);
+        assert_eq!(seqid_of(&third[0].1), minted + 3);
+
+        // And the layout is still addressable by both spellings.
+        assert!(mgr.get_layout(&third[0].1).is_some(), "bumped stateid resolves");
+        assert!(mgr.get_layout(&l.stateid).is_some(), "original stateid resolves");
     }
 
     /// AUDIT C6. A grant that passes layoutget's gate check and then has

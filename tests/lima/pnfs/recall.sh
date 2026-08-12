@@ -21,6 +21,18 @@
 #      the recall." Whether the kernel client honors a recall on this
 #      specific layout shape is a separate story (A.5 covers forced
 #      revocation on timeout).
+#   5. …with ONE client-side answer that IS asserted, because it is a
+#      verdict on our own bytes rather than on client policy:
+#      NFS4ERR_OLD_STATEID must never appear. It means the recall
+#      carried a seqid the client already held, so the callback was
+#      refused before anything drained (RFC 8881 §12.5.3). Rig-found
+#      2026-08-11: the DS-death path had never bumped the seqid.
+#
+# NOTE ON THE MOUNT: this drill mounts minorversion=1, so it does NOT
+# cover the 4.2 callback path that production uses — the CB_COMPOUND
+# header must echo the session's minor version, and a hardcoded 1 (the
+# shipped behaviour until 18b4d53) answers BADSESSION on a 4.2 mount
+# while passing here. The block rig's EXPAND drill covers 4.2.
 #
 # This script's PASS bar is "the MDS recall chain executes through
 # CB_LAYOUTRECALL emission." Client-side outcomes beyond that are
@@ -267,8 +279,24 @@ PASS=true
 "$SAW_CALL_EMITTED" || { echo "  ✗ never saw 'CB_LAYOUTRECALL → session' in MDS log"; PASS=false; }
 "$SAW_REVOKED"      || { echo "  ✗ never saw forced layout revocation in MDS log"; PASS=false; }
 
+# SIXTH marker, and unlike the others it is about OUR BYTES, not the
+# client's policy: NFS4ERR_OLD_STATEID means the recall carried a seqid
+# the client already had, so it refused the callback before draining
+# anything (RFC 8881 §12.5.3; Linux's pnfs_check_callback_stateid:
+# newseq <= oldseq → OLD_STATEID). The DS-death path shipped that way
+# for months — the seqid bump had been fixed on the truncate path only —
+# and it was invisible because a refused recall is answered by forced
+# revocation, which looks exactly like a working one from out here.
+# Whether the client then acks, drains, or says NOMATCHING_LAYOUT is its
+# business; sending it a stale seqid is ours.
+OLDSTATEID=$(grep -c 'status=OldStateId' "$MDS_LOG" || true)
+if [ "${OLDSTATEID:-0}" -ne 0 ]; then
+  echo "  ✗ client answered NFS4ERR_OLD_STATEID — the recall's seqid was not advanced"
+  PASS=false
+fi
+
 if "$PASS"; then
-  echo "  ✓ all five MDS-side recall+revoke markers fired"
+  echo "  ✓ all five MDS-side recall+revoke markers fired, and no OLD_STATEID refusal"
 fi
 
 # ──────────────────────────────────────────────────────────────────────

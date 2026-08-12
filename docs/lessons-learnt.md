@@ -113,6 +113,15 @@ CSI CLI. Modes are standing regression harnesses (`make test-pnfs-*-rig`).
   (`decode_devicenotify_args: status 22 ndevs 0` → and after the fix, `type 2
   layout 0x5` plus `bl_free_deviceid_node`, the cache drop we were paying for).
   `rpcdebug` itself buffer-overflows on modern userland; write the sysctl.
+- **Fix a bug on one twin path and you have fixed half a bug.** The
+  CB_LAYOUTRECALL seqid bump (RFC 8881 §12.5.3 — the client refuses a recall
+  whose seqid it already holds) was fixed once on the truncate recall path and
+  left undone on the DS-death path for months. What hid it: a refused recall is
+  answered by forced server-side revocation, so from outside the drill it looks
+  exactly like a recall that worked — and the drill's own assertion demanded the
+  stateid come back *unchanged*, pinning the bug in place. When two call sites
+  produce the same wire message, give them one shared function, and be
+  suspicious of any test asserting "unchanged".
 - **Read the client's constants, not just the RFC.** RFC 8881 declares
   `NOTIFY_DEVICEID4_CHANGE = 1`; Linux defines it as `1 << 1` because every
   transmission of it is a bitmap, and its decoder compares the received word

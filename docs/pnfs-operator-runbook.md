@@ -463,6 +463,23 @@ recovery over sqlite.
 
 ## Known residuals (fix work tracked in the durable-DS plan)
 
+- **FIXED 2026-08-11, recorded because the symptom is worth
+  recognising: layout recalls used to be refused, and it looked like
+  they worked.** Two independent defects made every CB_LAYOUTRECALL a
+  no-op at the client. (1) The CB_COMPOUND header carried a hardcoded
+  `minorversion: 1`, but Linux resolves a callback's client by
+  (address, sessionid, minorversion) — production mounts are vers=4.2,
+  so the whole callback answered NFS4ERR_BADSESSION before the recall
+  op was read. (2) The DS-death recall path handed out the layout's
+  stored stateid without advancing its seqid, so a client that DID
+  process it answered NFS4ERR_OLD_STATEID (RFC 8881 §12.5.3). Both
+  refusals are answered by forced server-side revocation, which is why
+  fleet behaviour looked correct: the layout did go away, just never
+  with the client's cooperation. If you see `status=BadSession` or
+  `status=OldStateId` on a `CB_LAYOUTRECALL ←` line, the client is not
+  draining — it is being overruled. Both are now pinned by tests and
+  by `make test-pnfs-recall`.
+
 - **In-flight I/O wedge on abrupt DS loss — the DELAY livelock.**
   Root cause established by kernel-source analysis (6.1) + live
   tracepoints on runn (2026-07-06). On a DS connection error the
