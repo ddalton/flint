@@ -194,6 +194,18 @@ CONSTANTS
   GrantsExclusive,     \* TRUE = the grant transaction polices disjointness
   RecallBeforeReuse,   \* TRUE = frees only through the reclaim machinery
   FreeRevalidates,     \* TRUE = the free transaction re-validates holders
+  QuarantineEnabled,   \* TRUE = the reclaim COMPLETES over an
+                       \*   unconfirmed fence, parking those blocks
+                       \*   (the code's extent_quarantine) instead of
+                       \*   refusing to finish — and a later
+                       \*   ReleaseQuarantine may free them once the
+                       \*   exclusion IS confirmed.  FALSE reproduces
+                       \*   the pre-2026-08-12 abstraction, in which a
+                       \*   quarantined block was simply never freed.
+  QuarantineChecksDelivered, \* the release re-applies the delivered
+                       \*   belt.  Its A/B is the whole point: a release
+                       \*   that skips it frees a range whose holder the
+                       \*   target never excluded.
   FenceReaches,        \* TRUE = every fence lands as a target exclusion
   FreeRequiresDelivered, \* TRUE = the free additionally requires every
                        \*   FENCED holder's exclusion CONFIRMED at the
@@ -297,6 +309,20 @@ VARIABLES
                   \*   under?" — and the gen check is what keeps it safe:
                   \*   after a free+reuse the block's gen has moved and the
                   \*   stale grace record refuses on its own.
+  qHold,              \* [Blocks -> SUBSET Clients] the fenced holders a
+                      \*   PARKED block was quarantined WITH — the code's
+                      \*   extent_quarantine.fenced_clients CSV.  {} = not
+                      \*   parked.  Provenance is load-bearing: without it
+                      \*   a release could free any block whose holders
+                      \*   happen to be fenced, which skips the recall
+                      \*   entirely — TLC found exactly that on the first
+                      \*   draft of this tranche.
+  quarantineReleased, \* a PARKED block (reclaim completed while its
+                      \*   fence was unconfirmed) was later freed once
+                      \*   the exclusion was confirmed — writer:
+                      \*   ReleaseQuarantine.  Without this witness the
+                      \*   shipped green could be "the release never
+                      \*   fired" wearing the sweep's label.
   commitAfterReturn \* a commit was validated through graceG rather than a
                   \*   live grant (writer: LayoutCommit; probe witness)
 
@@ -311,7 +337,7 @@ vars == <<alloc, gen, grants, granting, reclaim, fenced, resv,
           staleRead, staleWrite, reuseFired, fenceFired, tgtRestarted,
           resnapshotGrew, commitFired, truncateFired, zeroSized,
           forgedCommit, disclosedRead, deliveredFreeFired, mergeFired,
-          graceG, commitAfterReturn>>
+          graceG, commitAfterReturn, quarantineReleased, qHold>>
 
 Blocks == 1..NBlocks
 GenBound == MaxReclaims + 1        \* one initial bump + one per free
@@ -354,6 +380,8 @@ TypeOK ==
   /\ mergeFired \in BOOLEAN
   /\ graceG \in [Clients -> [Blocks -> 0..GenBound]]
   /\ commitAfterReturn \in BOOLEAN
+  /\ quarantineReleased \in BOOLEAN
+  /\ qHold \in [Blocks -> SUBSET Clients]
   \* Structure: g is normalised to 0 outside held (state-space hygiene and
   \* a modelling-bug tripwire, not a claim about the code).
   /\ \A c \in Clients : \A b \in Blocks :
@@ -377,6 +405,8 @@ Init ==
   /\ zeroSized = FALSE /\ forgedCommit = FALSE
   /\ graceG = [c \in Clients |-> ZeroG]
   /\ commitAfterReturn = FALSE
+  /\ quarantineReleased = FALSE
+  /\ qHold = [b \in Blocks |-> {}]
   /\ disclosedRead = FALSE /\ deliveredFreeFired = FALSE
   /\ mergeFired = FALSE
 
@@ -400,7 +430,7 @@ GrantCheck(c, R) ==
   /\ UNCHANGED <<alloc, gen, grants, reclaim, fenced, resv,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 everWritten, priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 everWritten, priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 \* LAYOUTGET step 2: the sqlite transaction.  With GrantsExclusive it
 \* re-validates disjointness INSIDE the transaction and refuses a range
@@ -434,7 +464,7 @@ GrantInsert(c) ==
                          nGrants, nReclaims, nRestarts, staleRead,
                          staleWrite, reuseFired, fenceFired, tgtRestarted,
                          resnapshotGrew, sizeVars, everWritten, priorBytes,
-                         disclosedRead, deliveredFreeFired, mergeFired>>
+                         disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
         ELSE
           LET fresh == {b \in R : alloc[b] = "free"}
               gen2 == [b \in Blocks |->
@@ -459,7 +489,7 @@ GrantInsert(c) ==
           /\ UNCHANGED <<reclaim, fenced, resv, nGrants, nReclaims,
                          nRestarts, staleRead, staleWrite, fenceFired,
                          tgtRestarted, resnapshotGrew, sizeVars,
-                         everWritten, disclosedRead, deliveredFreeFired, mergeFired>>
+                         everWritten, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 (***************************************************************************)
 (* The MDS: reclaim (recall-then-free)                                     *)
@@ -488,7 +518,7 @@ ReclaimStart(R) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 \* The retry loop's separate re-read step (the F62 idiom): recompute the
 \* holder set from the live tables.  This is what eventually surfaces a
@@ -504,7 +534,7 @@ ReclaimResnapshot ==
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 \* An unresponsive holder is fenced: revoked server-side (bookkeeping in
 \* `fenced` — its grant row is dead to the MDS) and preempted at the
@@ -524,7 +554,7 @@ Fence(c) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 \* The free.  Every snapshotted holder has returned or been fenced; with
 \* FreeRevalidates the transaction ALSO re-validates the live tables and
@@ -546,21 +576,59 @@ ReclaimComplete ==
   \* theorems WITHOUT FenceReaches — the fence may fail to land, and the
   \* free machinery still never reuses a block out from under a client
   \* the target has not actually excluded.
-  /\ FreeRequiresDelivered =>
+  \* WITHOUT QuarantineEnabled this is the pre-2026-08-12 rendering: the
+  \* free simply cannot happen while any fenced holder is unconfirmed, so
+  \* the reclaim never completes and the block is never freed.  That was
+  \* always an ABSTRACTION of the code, not a description of it — the code
+  \* completes the reclaim and PARKS the offending ranges in
+  \* extent_quarantine.  Kept as the default so every legacy cfg's state
+  \* graph stays bit-identical.
+  /\ (FreeRequiresDelivered /\ ~QuarantineEnabled) =>
        \A b \in reclaim.blks : (HeldBy(b) \cap fenced) \subseteq resv
-  /\ alloc' = [b \in Blocks |->
-                IF b \in reclaim.blks THEN "free" ELSE alloc[b]]
+  \* WITH it, the reclaim completes either way and frees only the blocks
+  \* whose fenced holders are ALL confirmed-excluded; the rest stay
+  \* allocated, holders remembered (the code drops their grant ROWS and
+  \* remembers the client ids in extent_quarantine.fenced_clients —
+  \* `HeldBy` is that memory here).  Nothing may reuse a parked block:
+  \* it is not "free", so GrantInsert cannot pick it.
+  /\ LET deliverable ==
+           IF QuarantineEnabled /\ FreeRequiresDelivered
+             THEN {b \in reclaim.blks : (HeldBy(b) \cap fenced) \subseteq resv}
+             ELSE reclaim.blks
+     IN alloc' = [b \in Blocks |->
+                   IF b \in deliverable THEN "free" ELSE alloc[b]]
   /\ reclaim' = NoReclaim
   \* Canonicalise: a freed block's dirt flag is recomputed at its next
   \* reuse from everWritten; holding it at FALSE meanwhile keeps free
   \* blocks from splitting states on a value nothing reads.
   /\ priorBytes' = [b \in Blocks |->
-                     IF b \in reclaim.blks THEN FALSE ELSE priorBytes[b]]
+                     IF b \in (IF QuarantineEnabled /\ FreeRequiresDelivered
+                                 THEN {bb \in reclaim.blks :
+                                        (HeldBy(bb) \cap fenced) \subseteq resv}
+                                 ELSE reclaim.blks)
+                       THEN FALSE ELSE priorBytes[b]]
   \* Probe witness: the delivered-conditional free actually FREED blocks
   \* a fenced+delivered holder still held — the exact event the code
   \* flip (quarantine -> clean free) exists to produce.  Gated on the
   \* arm so unbelted state spaces never pay for it.  (Parenthesized per
   \* the tranche-1 precedence trap.)
+  \* Provenance for the parked blocks: WHO was holding them, fenced but
+  \* not confirmed-excluded, at the moment the reclaim gave up on them.
+  \* This is extent_quarantine.fenced_clients, and it is what the sweep
+  \* re-checks later — not "whoever happens to hold the block now".
+  \* ...and a block that FREES here is un-parked in the same stroke.
+  \* extent_quarantine and the free list are disjoint by construction in
+  \* the code (verify_volume_invariants enforces it); letting a stale
+  \* qHold survive a free lets the sweep free the block AGAIN, under its
+  \* next owner's live grant — TLC found that too.
+  /\ qHold' = [b \in Blocks |->
+                IF QuarantineEnabled /\ FreeRequiresDelivered
+                   /\ b \in reclaim.blks
+                   /\ alloc[b] # "free"   \* only a real extent can be parked
+                  THEN (IF (HeldBy(b) \cap fenced) \subseteq resv
+                          THEN {}                      \* freed => un-parked
+                          ELSE HeldBy(b) \cap fenced)  \* parked, holders remembered
+                  ELSE qHold[b]]
   /\ deliveredFreeFired' =
        (deliveredFreeFired \/
          (FreeRequiresDelivered /\
@@ -568,7 +636,65 @@ ReclaimComplete ==
   /\ UNCHANGED <<gen, grants, granting, fenced, resv, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 disclosedRead, mergeFired>>
+                 disclosedRead, mergeFired, quarantineReleased>>
+
+\* THE DELIVERY RETRY (2026-08-12).  The reconcile pass re-runs
+\* `fence_preempt` for every (volume, client) in fenced_clients and marks
+\* the fence DELIVERED when it confirms — so a fence that failed to land
+\* at fence time (tgt unreachable) can become confirmed later.  Modelled
+\* because WITHOUT IT THE SWEEP IS UNREACHABLE: `Fence` only ever fires
+\* once per client (the waiting set excludes the already-fenced), so an
+\* unlanded exclusion could never become landed and every parked block
+\* would stay parked forever.  The probe caught exactly that — the first
+\* draft's shipped green was vacuous with respect to the sweep.
+FenceRetry(c) ==
+  /\ QuarantineEnabled
+  /\ c \in fenced
+  /\ c \notin resv
+  /\ \E landed \in BOOLEAN :
+       /\ FenceReaches => landed
+       /\ resv' = IF landed THEN resv \cup {c} ELSE resv
+  /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, nGrants,
+                 nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
+                 fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
+                 everWritten, priorBytes, disclosedRead, deliveredFreeFired,
+                 mergeFired, quarantineReleased, qHold>>
+
+\* THE QUARANTINE SWEEP (2026-08-12).  A block the reclaim PARKED —
+\* completed the job, but this range's fence was not confirmed at the
+\* target, so freeing it would have been FlintExtentsLostFence's
+\* corruption — becomes free once every remembered holder IS confirmed
+\* excluded.  The delivery retry that makes that reachable already ships
+\* (the reconcile pass re-runs the preempt for every fenced pair and
+\* marks it delivered on success); what did not exist is anything that
+\* revisits the parked range afterwards, so the capacity leaked forever.
+\*
+\* The predicate is the SAME one ReclaimComplete applies — re-applied
+\* later, which is exactly what the module could not express before and
+\* therefore had never checked.  Its A/B (QuarantineChecksDelivered =
+\* FALSE) must find the corruption: releasing a range whose holder the
+\* target never excluded is the un-fenced client writing into the next
+\* owner's bytes.
+\*
+\* An UNFENCED client is not confirmed-excluded — in code its
+\* fenced_clients row is gone, so the delivered join yields nothing and
+\* the range stays parked.  Here that is `fenced`: unfencing removes the
+\* client, HeldBy(b) \subseteq fenced fails, and the release is disabled.
+ReleaseQuarantine(b) ==
+  /\ QuarantineEnabled
+  /\ ~reclaim.active                  \* not mid-job; the sweep is its own pass
+  /\ qHold[b] # {}                    \* PARKED — provenance, not circumstance
+  /\ alloc[b] # "free"                \* ...and still parked, not already freed
+  /\ QuarantineChecksDelivered => qHold[b] \subseteq resv
+  /\ alloc' = [alloc EXCEPT ![b] = "free"]
+  /\ qHold' = [qHold EXCEPT ![b] = {}]
+  /\ priorBytes' = [priorBytes EXCEPT ![b] = FALSE]
+  /\ quarantineReleased' = TRUE
+  /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
+                 nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
+                 fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
+                 everWritten, disclosedRead, deliveredFreeFired,
+                 mergeFired, graceG, commitAfterReturn>>
 
 \* The merge policy's one block-level residue (see MergeEnabled's
 \* header): two same-state allocated blocks coarsen to ONE generation —
@@ -596,7 +722,7 @@ Merge(b1, b2) ==
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
                  everWritten, priorBytes, disclosedRead,
-                 deliveredFreeFired>>
+                 deliveredFreeFired, quarantineReleased, qHold>>
 
 \* The unbelted world: RecallBeforeReuse = FALSE frees allocated blocks
 \* outright, holders or no holders — the F65-of-extents.
@@ -606,11 +732,13 @@ FreeDirect(R) ==
   /\ R \subseteq {b \in Blocks : alloc[b] = "provisional"}
   /\ R # {}
   /\ alloc' = [b \in Blocks |-> IF b \in R THEN "free" ELSE alloc[b]]
+  \* Same disjointness as ReclaimComplete: a freed block is not parked.
+  /\ qHold' = [b \in Blocks |-> IF b \in R THEN {} ELSE qHold[b]]
   /\ nReclaims' = nReclaims + 1
   /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased>>
 
 (***************************************************************************)
 (* The MDS: commit and size (tranche 2, CommitEnabled)                     *)
@@ -664,7 +792,7 @@ LayoutCommit(c, R, n) ==
              /\ fsize' = n
              /\ commitFired' = TRUE
              /\ commitAfterReturn' = (commitAfterReturn \/ viaGrace)
-             /\ UNCHANGED <<zeroSized, forgedCommit>>
+             /\ UNCHANGED <<zeroSized, forgedCommit, quarantineReleased, qHold>>
         ELSE IF CommitChecksGen /\ CommitGatesSize
         THEN FALSE          \* refused whole: a disabled action
         ELSE IF CommitChecksGen
@@ -673,7 +801,7 @@ LayoutCommit(c, R, n) ==
              /\ zeroSized' = (zeroSized \/ n > fsize)
              /\ commitFired' = TRUE
              /\ commitAfterReturn' = (commitAfterReturn \/ viaGrace)
-             /\ UNCHANGED <<alloc, forgedCommit>>
+             /\ UNCHANGED <<alloc, forgedCommit, quarantineReleased, qHold>>
         ELSE \* ~CommitChecksGen: the forged commit applies whole
              /\ alloc' = [b \in Blocks |->
                            IF b \in R THEN "committed" ELSE alloc[b]]
@@ -686,7 +814,7 @@ LayoutCommit(c, R, n) ==
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, truncateFired,
                  everWritten, priorBytes, disclosedRead, deliveredFreeFired,
-                 mergeFired, graceG>>
+                 mergeFired, graceG, quarantineReleased, qHold>>
 
 \* SETATTR-shrink: the size cut is metadata-only and immediate; the blocks
 \* beyond the new size stay allocated until the reclaim machinery frees
@@ -704,7 +832,7 @@ TruncateStart(n) ==
                  reuseFired, fenceFired, tgtRestarted, resnapshotGrew,
                  commitFired, zeroSized, forgedCommit, everWritten,
                  priorBytes, disclosedRead, deliveredFreeFired, mergeFired,
-                 graceG, commitAfterReturn>>
+                 graceG, commitAfterReturn, quarantineReleased, qHold>>
 
 (***************************************************************************)
 (* The target                                                              *)
@@ -721,7 +849,7 @@ TgtRestart ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, nGrants,
                  nReclaims, staleRead, staleWrite, reuseFired, fenceFired,
                  resnapshotGrew, sizeVars, everWritten, priorBytes,
-                 disclosedRead, deliveredFreeFired, mergeFired>>
+                 disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 (***************************************************************************)
 (* The clients — raw NVMe I/O under a held layout; the MDS is not on this  *)
@@ -744,7 +872,7 @@ ClientRead(c, b) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 everWritten, priorBytes, deliveredFreeFired, mergeFired>>
+                 everWritten, priorBytes, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 ClientWrite(c, b) ==
   /\ grants[c].live
@@ -763,7 +891,7 @@ ClientWrite(c, b) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleRead, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 disclosedRead, deliveredFreeFired, mergeFired>>
+                 disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 LayoutReturn(c) ==
   /\ grants[c].live
@@ -792,7 +920,7 @@ LayoutReturn(c) ==
                  tgtRestarted, resnapshotGrew, everWritten,
                  priorBytes, disclosedRead, deliveredFreeFired, mergeFired,
                  fsize, commitFired, truncateFired, zeroSized, forgedCommit,
-                 commitAfterReturn>>
+                 commitAfterReturn, quarantineReleased, qHold>>
 
 Next ==
   \/ \E c \in Clients, R \in Ranges : GrantCheck(c, R)
@@ -801,6 +929,8 @@ Next ==
   \/ ReclaimResnapshot
   \/ \E c \in Clients : Fence(c)
   \/ ReclaimComplete
+  \/ \E c \in Clients : FenceRetry(c)
+  \/ \E b \in Blocks : ReleaseQuarantine(b)
   \/ \E b1, b2 \in Blocks : Merge(b1, b2)
   \/ \E R \in Ranges : FreeDirect(R)
   \/ TgtRestart

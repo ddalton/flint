@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and fourteen runs, ALL required.
+# One hundred and eighteen runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -831,6 +831,8 @@ mutation_run FlintExtents FlintExtentsBlindProvision.cfg "unscrubbed-provision m
 mutation_run FlintExtentsProbe FlintExtentsProbeCommit.cfg "extents commit probe (LayoutCommit really executes in the commit-strict world)" "ProbeCommitFires"
 mutation_run FlintExtentsProbe FlintExtentsProbeCommitAfterReturn.cfg "commit-grace probe (a LAYOUTCOMMIT validated through graceG — the client returned its layout first, which is what Linux does)" "ProbeCommitAfterReturn"
 strict_run   FlintExtentsProbe FlintExtentsNoCommitGrace.cfg "commit-grace A/B (CommitGraceEnabled=FALSE reproduces the shipped-until-2026-08-11 world: no behaviour can reach a commit-after-return, so the probe HOLDS — this is what makes the probe run above mean something)"
+mutation_run FlintExtents FlintExtentsQuarantineBlindRelease.cfg "quarantine-sweep A/B (QuarantineChecksDelivered=FALSE: the sweep hands a PARKED range back to the allocator without re-checking that its remembered holders are confirmed-excluded — LostFence's corruption arriving by the other door, the free correctly refused at reclaim time taken later without the check)" "Inv_NoStaleExtentWrite"
+mutation_run FlintExtentsProbe FlintExtentsProbeQuarantineRelease.cfg "quarantine-sweep probe (a PARKED range really is released once its exclusion is confirmed — without this the shipped green is compatible with nothing ever being quarantined, or nothing ever swept: the leak wearing the sweep's label)" "ProbeQuarantineReleaseFires"
 mutation_run FlintExtentsProbe FlintExtentsProbeTruncate.cfg "extents truncate probe (TruncateStart really executes — and with it the committed-block reclaim path it alone unlocks)" "ProbeTruncateFires"
 
 # ---- admission tranche (2026-08-10): the same-node zombie, machine-checked.

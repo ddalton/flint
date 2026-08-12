@@ -58,6 +58,14 @@ ProbeTruncateFires == ~truncateFired
 \* exact event the code flip (quarantine -> clean free) ships to produce.
 ProbeDeliveredFreeFires == ~deliveredFreeFired
 
+\* For the sweep-armed shipped cfg: a PARKED range must actually be
+\* released.  Without this, the shipped green could be "no block was ever
+\* quarantined, or none was ever swept" — the leak wearing the sweep's
+\* label, which is precisely the mistake ProbeDeliveredFreeFires exists
+\* to prevent one layer up.  quarantineReleased's only writer is
+\* ReleaseQuarantine.
+ProbeQuarantineReleaseFires == ~quarantineReleased
+
 \* For the merge-armed shipped cfg: a REAL coarsening merge (unequal
 \* gens, quiescent blocks) must be reachable, or the strict green says
 \* nothing about the gen-coarsening the code's merge performs.
