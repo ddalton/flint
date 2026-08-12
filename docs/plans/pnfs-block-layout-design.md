@@ -1101,7 +1101,7 @@ Each phase ships standalone value; none is gated on the next.
   at write time, where the errno is an lvol-level failure and not this ENOSPC path),
   capacity-aware placement across shards, and the client-side refresh
   (CB_NOTIFY_DEVICEID) that would make expansion online end to end.
-- **LAYOUTCOMMIT after LAYOUTRETURN is REFUSED, and it costs committed data.**
+- **LAYOUTCOMMIT after LAYOUTRETURN — FIXED 2026-08-11 (commit-grace tranche).**
   Found by the zombie drill 2026-08-11 (pre-existing — the rule dates from the
   allocator's first commit, 4afb9b2). `extent_alloc::commit` validates against a LIVE
   grant row for `(file_id, logical_offset, client_id)`; the Linux client, writing 8 MiB
@@ -1116,9 +1116,21 @@ Each phase ships standalone value; none is gated on the next.
   promote an extent whose GENERATION has moved on (freed and re-granted to someone
   else) — a client finishing its own write it just returned is not that. Fix shape:
   validate the commit against the extent's generation and the returning client's
-  recent ownership rather than a currently-live row, with the model re-run over the
-  weakened precondition. Until then a block-class client that returns before it commits
-  silently loses the uncommitted tail. **This is the block tier's top correctness debt.**
+  recent ownership rather than a currently-live row.
+  **Shipped exactly that.** `layout_return` now leaves a generation record behind
+  (`extent_commit_grace`: volume, file_id, offset, client, gen) before dropping the
+  grant rows, and `commit_extents` accepts a live grant OR that record — with the SAME
+  generation check on both doors. The record is deliberately not holdership: nothing in
+  the conflict, reclaim or free paths reads the table, so a returned client still
+  cannot block a reclaim (pinned by a test). Safety rests on the generation, not on the
+  row's liveness — after a free+reuse the block's gen has moved and a stale record
+  refuses on its own, which is what lets the table be pruned lazily (hygiene on
+  reclaim) instead of exactly. A fenced client gets no door: `fence_client` drops its
+  grace rows in the same transaction, and a return of already-fenced rows mints none.
+  Model tranche: `CommitGraceEnabled` + `graceG` in FlintExtents, with the A/B that
+  makes it mean something — with grace OFF the model reproduces the shipped-until-now
+  refusal and the `commitAfterReturn` probe HOLDS; with it ON the probe must be
+  VIOLATED (the door is reachable), while InvCommit and Inv_NoForgedCommit stay green.
 - **Kernel blocklayout maturity.** Mainline since v6.11, near-zero production soak over
   fabrics, no known production RFC 9561 deployment to learn from. Every client bug
   degrades silently to MDS I/O, which both masks it and moves its load to the MDS.

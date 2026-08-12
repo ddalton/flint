@@ -665,6 +665,28 @@ pub fn layout_return(
     let end = checked_end(logical_offset, length)?;
     let client = as_i64(client_id, "client id exceeds i64")?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // THE GENERATION MEMORY, written before the rows go. A returning
+    // client is not a holder — that is the whole point of the return, and
+    // every free/conflict belt keeps reading extent_grants alone — but it
+    // may still have written bytes it has not committed yet, and the
+    // Linux client routinely returns first and commits second. Without
+    // this row its LAYOUTCOMMIT has nothing to validate against and its
+    // data stays provisional forever (rig-found, 2026-08-11).
+    //
+    // FENCED rows are deliberately excluded: a fenced client's exclusion
+    // must not be undone by the very revocation that swept its rows.
+    tx.execute(
+        "INSERT OR REPLACE INTO extent_commit_grace
+             (volume, file_id, logical_offset, client_id, gen)
+         SELECT volume, file_id, logical_offset, client_id, gen
+           FROM extent_grants
+          WHERE volume = ?1 AND file_id = ?2 AND client_id = ?3 AND fenced = 0
+            AND logical_offset IN
+              (SELECT logical_offset FROM extents
+               WHERE volume = ?1 AND file_id = ?2
+                 AND logical_offset < ?5 AND logical_offset + length > ?4)",
+        params![volume, file_id as i64, client, start, end],
+    )?;
     let n = tx.execute(
         "DELETE FROM extent_grants
          WHERE volume = ?1 AND file_id = ?2 AND client_id = ?3
@@ -687,11 +709,21 @@ pub fn layout_return(
 /// will quarantine rather than free.
 pub fn fence_client(conn: &mut Connection, volume: &str, client_id: u64) -> Result<usize> {
     let client = as_i64(client_id, "client id exceeds i64")?;
-    let n = conn.execute(
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let n = tx.execute(
         "UPDATE extent_grants SET fenced = 1
          WHERE volume = ?1 AND client_id = ?2 AND fenced = 0",
         params![volume, client],
     )?;
+    // …and shut the commit-grace door in the same transaction. A client
+    // being fenced must not be able to promote extents through a
+    // generation record left by an earlier, unfenced return — the fence
+    // is an exclusion, and a half-excluded client is not one.
+    tx.execute(
+        "DELETE FROM extent_commit_grace WHERE volume = ?1 AND client_id = ?2",
+        params![volume, client],
+    )?;
+    tx.commit()?;
     Ok(n)
 }
 
@@ -812,6 +844,16 @@ pub fn reclaim_complete(
              WHERE volume = ?1 AND file_id = ?2 AND logical_offset = ?3",
             params![volume, file_id as i64, t.logical_offset],
         )?;
+        // Hygiene, not safety: the extent is gone, so any commit-grace
+        // record over it is dead weight. Safety is the generation check
+        // in `commit_extents` — a record that outlived its extent
+        // refuses there anyway, which is why this can be a plain
+        // cleanup and never a correctness dependency.
+        tx.execute(
+            "DELETE FROM extent_commit_grace
+             WHERE volume = ?1 AND file_id = ?2 AND logical_offset = ?3",
+            params![volume, file_id as i64, t.logical_offset],
+        )?;
     }
     drop(fenced_stmt);
 
@@ -868,12 +910,51 @@ pub fn commit_extents(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        match row {
-            None => return Err(ExtentAllocError::CommitRejected("no grant for this client")),
+        // The grant the client wrote under, live or just returned. The
+        // second door is not a relaxation of the belt — the generation
+        // check below is identical on both — it only stops us from
+        // demanding that a client still HOLD a layout it has already
+        // given back. Linux returns before it commits; without this the
+        // written bytes never leave 'invalid' (rig-found, 2026-08-11).
+        let gen_held: Option<i64> = match row {
             Some((_, fenced)) if fenced != 0 => {
                 return Err(ExtentAllocError::CommitRejected("grant is fenced"))
             }
-            Some((g, _)) if g != t.generation => {
+            Some((g, _)) => Some(g),
+            // Windowed, not exact-offset: LAYOUTRETURN merges adjacent
+            // quiescent extents in the same transaction that writes the
+            // grace rows, so by commit time one extent row can cover
+            // several of them. Every grace row inside the extent must
+            // agree on the generation — MIN = MAX = the extent's — or the
+            // client did not write the whole of it under one incarnation
+            // and the conservative refusal is right.
+            None => {
+                let (lo, hi, n): (Option<i64>, Option<i64>, i64) = tx.query_row(
+                    "SELECT MIN(gen), MAX(gen), COUNT(*) FROM extent_commit_grace
+                     WHERE volume = ?1 AND file_id = ?2 AND client_id = ?3
+                       AND logical_offset >= ?4
+                       AND logical_offset < ?5",
+                    params![
+                        volume,
+                        file_id as i64,
+                        client,
+                        t.logical_offset,
+                        t.logical_offset + t.length
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?;
+                match (lo, hi, n) {
+                    (Some(a), Some(b), c) if c > 0 && a == b => Some(a),
+                    _ => None,
+                }
+            }
+        };
+        match gen_held {
+            None => return Err(ExtentAllocError::CommitRejected("no grant for this client")),
+            // THE BELT. After a free+reuse the extent's generation has
+            // moved, so a stale record — live or grace — refuses here.
+            // This is what makes the grace row safe to forget lazily.
+            Some(g) if g != t.generation => {
                 return Err(ExtentAllocError::CommitRejected("generation mismatch"))
             }
             Some(_) => {}
@@ -2352,6 +2433,169 @@ mod tests {
         let g = grant(&mut conn, VOL, F, C1, 16384, 4096, false).unwrap();
         assert_eq!(g[0].physical_offset, 0, "carved from the freed range");
         assert_eq!(g[0].generation, 2);
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// THE COMMIT-GRACE TRANCHE — rig-found 2026-08-11, and it was live
+    /// data loss.
+    ///
+    /// The Linux client writing through 1 MiB grant windows does
+    /// LAYOUTRETURN and only then LAYOUTCOMMIT, on every window. With the
+    /// commit validated against a LIVE grant row, half the commits were
+    /// refused with "no grant for this client", the extents stayed
+    /// `invalid`, the stub's size never advanced — the drill's 8 MiB file
+    /// was durably 4 MiB. Returning is not disowning what you already
+    /// wrote.
+    #[test]
+    fn a_client_may_commit_the_range_it_just_returned() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        assert_eq!(layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap(), 1);
+        // The shape that used to fail: commit AFTER the return.
+        assert_eq!(commit_extents(&mut conn, VOL, F, C1, 0, 8192).unwrap(), 1);
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM extents WHERE volume = ?1 AND file_id = ?2",
+                params![VOL, F as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "rw", "the returned client's bytes must commit");
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// …and the belt that makes the grace door safe is the GENERATION,
+    /// not the row's liveness. Once the range is freed and re-granted,
+    /// the old holder's grace record names a generation the extent no
+    /// longer carries, and its commit refuses — the same answer a stale
+    /// LIVE grant would get. This is the property that lets grace rows be
+    /// pruned lazily instead of exactly.
+    #[test]
+    fn commit_grace_refuses_once_the_range_has_been_reused() {
+        let mut conn = fresh();
+        register_volume(&mut conn, VOL, 65536).unwrap();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        // The range is reclaimed and handed to somebody else at gen+1…
+        reclaim_complete(&mut conn, VOL, F, 0, 8192, 1000).unwrap();
+        let g = grant(&mut conn, VOL, F, C2, 0, 8192, false).unwrap();
+        assert_eq!(g[0].generation, 2, "reuse bumps the generation");
+        // …and C1's commit refuses. (The reclaim also PRUNED its grace
+        // row, so the refusal names the missing record; the test below
+        // proves the generation belt independently, which is what makes
+        // that pruning hygiene rather than load-bearing.)
+        assert!(
+            commit_extents(&mut conn, VOL, F, C1, 0, 8192).is_err(),
+            "the previous owner must not commit a reused range"
+        );
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM extents WHERE volume = ?1 AND file_id = ?2",
+                params![VOL, F as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "invalid", "the new owner's extent was not promoted by the old one");
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// The rig's actual shape, which is why the grace lookup is
+    /// WINDOWED: the client takes a grant per 1 MiB window, returns, and
+    /// LAYOUTRETURN merges the adjacent quiescent extents in the same
+    /// transaction — so by commit time ONE extent row covers several
+    /// grace rows. An exact-offset lookup would find nothing for the
+    /// merged row and refuse the very commit this fix exists to allow.
+    #[test]
+    fn commit_grace_survives_the_merge_that_layout_return_performs() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 4096, false).unwrap();
+        grant(&mut conn, VOL, F, C1, 4096, 4096, false).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extents WHERE volume = ?1 AND file_id = ?2",
+                params![VOL, F as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "the return merged the two extents (else this proves nothing)");
+        assert_eq!(
+            commit_extents(&mut conn, VOL, F, C1, 0, 8192).unwrap(),
+            1,
+            "the merged extent must still be committable by the client that wrote it"
+        );
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// The generation belt, tested WITHOUT relying on pruning: a grace
+    /// record that outlives a generation bump (any path that reshapes an
+    /// extent without deleting it — merge, split, a future reclaim
+    /// variant) must refuse on the generation alone. This is the
+    /// assertion that lets the cleanup elsewhere be best-effort.
+    #[test]
+    fn a_stale_grace_record_refuses_on_the_generation_alone() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        // Simulate the record outliving its generation: the extent moves
+        // to gen 2 while C1's grace row still says gen 1.
+        conn.execute(
+            "UPDATE extents SET gen = 2 WHERE volume = ?1 AND file_id = ?2",
+            params![VOL, F as i64],
+        )
+        .unwrap();
+        match commit_extents(&mut conn, VOL, F, C1, 0, 8192) {
+            Err(ExtentAllocError::CommitRejected(r)) => assert_eq!(r, "generation mismatch"),
+            other => panic!("expected a generation mismatch, got {other:?}"),
+        }
+    }
+
+    /// A FENCED client must not walk through the grace door. Two arms,
+    /// because there are two ways in: a fence lands while its rows are
+    /// live (the row is marked, and the fence drops any earlier grace
+    /// record), and a fenced row that is later swept must leave no grace
+    /// behind. A half-excluded client is not excluded.
+    #[test]
+    fn a_fenced_client_cannot_commit_through_the_grace_door() {
+        // Arm A: returned first (grace exists), fenced afterwards.
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        fence_client(&mut conn, VOL, C1).unwrap();
+        match commit_extents(&mut conn, VOL, F, C1, 0, 8192) {
+            Err(ExtentAllocError::CommitRejected(r)) => assert_eq!(r, "no grant for this client"),
+            other => panic!("fenced client committed through grace: {other:?}"),
+        }
+
+        // Arm B: fenced while holding, then its rows are returned. The
+        // return must not mint a grace row for a fenced grant.
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C2, 0, 8192, false).unwrap();
+        fence_client(&mut conn, VOL, C2).unwrap();
+        layout_return(&mut conn, VOL, F, C2, 0, 8192).unwrap();
+        match commit_extents(&mut conn, VOL, F, C2, 0, 8192) {
+            Err(ExtentAllocError::CommitRejected(r)) => assert_eq!(r, "no grant for this client"),
+            other => panic!("fenced-then-returned client committed through grace: {other:?}"),
+        }
+    }
+
+    /// Grace is NOT holdership — the property the whole design rests on.
+    /// A returned client leaves a grace record behind, and the reclaim
+    /// must still see an unheld range and free it (FreeRevalidates reads
+    /// `extent_grants` alone). If grace ever leaked into a holder query,
+    /// this frees nothing and the volume leaks forever.
+    #[test]
+    fn a_grace_record_does_not_block_the_reclaim() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, 8192).unwrap();
+        assert!(
+            reclaim_snapshot(&mut conn, VOL, F, 0, 8192).unwrap().is_empty(),
+            "a returned client is not a holder, grace record or not"
+        );
+        let out = reclaim_complete(&mut conn, VOL, F, 0, 8192, 1000).unwrap();
+        assert_eq!(out.freed_extents, 1);
+        assert_eq!(out.quarantined_extents, 0);
         verify_volume_invariants(&conn, VOL).unwrap();
     }
 

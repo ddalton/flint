@@ -38,6 +38,15 @@ ProbeResnapshotGrows == ~resnapshotGrew
 \* ever committed to or shrank.  commitFired's only writer is
 \* LayoutCommit; truncateFired's only writer is TruncateStart.
 ProbeCommitFires == ~commitFired
+
+\* For the commit-grace tranche: the whole point of graceG is the door a
+\* client walks through AFTER it has returned its layout, and a green on
+\* InvCommit says nothing about that door unless something opens it.
+\* commitAfterReturn's only writer is LayoutCommit, and only on the arm
+\* where at least one committed block was validated through graceG rather
+\* than a live grant — the exact shape the Linux client produces and the
+\* exact shape that used to lose data.
+ProbeCommitAfterReturn == ~commitAfterReturn
 ProbeTruncateFires == ~truncateFired
 
 \* For the graduated shipped cfg (FreeRequiresDelivered = TRUE): its green

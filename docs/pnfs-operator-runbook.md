@@ -463,6 +463,19 @@ recovery over sqlite.
 
 ## Known residuals (fix work tracked in the durable-DS plan)
 
+- **FIXED 2026-08-11: a block client that returned its layout before
+  committing lost the uncommitted tail.** The Linux client writes
+  through 1 MiB grant windows and does LAYOUTRETURN then LAYOUTCOMMIT on
+  each one; the commit was validated against a LIVE grant row, so half
+  the commits were refused (`commit rejected: no grant for this client`
+  in the MDS log), those extents stayed provisional and the file was
+  durably SHORT — 4 MiB of an 8 MiB write, unfixable by re-reading. If
+  you see that log line on a build older than this fix, the file it
+  names is missing data. Now `layout_return` leaves a generation record
+  behind and the commit accepts it, with the same generation check that
+  guards a live grant; a fenced client gets no such door. Schema bumped
+  to 9 — flint has no migrations, so an MDS state DB written by an older
+  build is refused at startup and must be deleted (the message says so).
 - **FIXED 2026-08-11, recorded because the symptom is worth
   recognising: layout recalls used to be refused, and it looked like
   they worked.** Two independent defects made every CB_LAYOUTRECALL a

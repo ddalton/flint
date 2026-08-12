@@ -162,6 +162,14 @@ Five-plus modules, one gate script (`scripts/check-tla.sh`), every run required.
   execute in the checked space.
 - **A/B every mutation**: flip exactly one thing; if the gate can't tell the
   mutant from the shipped config, the gate isn't checking what you think.
+- **A model cannot tell you your code is too STRICT.** Invariant checking finds
+  behaviours that break safety; it says nothing about legal behaviours you
+  refuse. flint's LAYOUTCOMMIT demanded a live grant row where the model only
+  needed the generation to still match — every invariant stayed green while the
+  code silently lost data for any client that returned its layout before
+  committing (which is what Linux does). Only a real client found it. Where a
+  precondition is stronger than the theorem it protects, write down WHICH
+  theorem it protects — the gap is where over-strictness hides.
 - Replay TLC counterexample traces as unit tests — the model's findings become
   regression pins in the code's own suite.
 - TLC mechanics that bite: unbounded `CHOOSE` for sentinels errors (use a

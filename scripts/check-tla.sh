@@ -829,6 +829,8 @@ mutation_run FlintExtents FlintExtentsUngatedSize.cfg "half-stub mutation (Commi
 mutation_run FlintExtents FlintExtentsForgedCommit.cfg "forged-commit mutation (CommitChecksGen=FALSE: reservations fence only the NVMe data path, the NFS control path stays open, and an unvalidated LAYOUTCOMMIT promotes extents the committer no longer owns)" "Inv_NoForgedCommit"
 mutation_run FlintExtents FlintExtentsBlindProvision.cfg "unscrubbed-provision mutation (ProvisionalInvisible=FALSE: a fresh INVALID extent on a reused range still carries the previous incarnation's bytes — deleted-data resurrection; the code belt is extent_alloc's needs_scrub contract)" "Inv_NoPriorOwnerDisclosure"
 mutation_run FlintExtentsProbe FlintExtentsProbeCommit.cfg "extents commit probe (LayoutCommit really executes in the commit-strict world)" "ProbeCommitFires"
+mutation_run FlintExtentsProbe FlintExtentsProbeCommitAfterReturn.cfg "commit-grace probe (a LAYOUTCOMMIT validated through graceG — the client returned its layout first, which is what Linux does)" "ProbeCommitAfterReturn"
+strict_run   FlintExtentsProbe FlintExtentsNoCommitGrace.cfg "commit-grace A/B (CommitGraceEnabled=FALSE reproduces the shipped-until-2026-08-11 world: no behaviour can reach a commit-after-return, so the probe HOLDS — this is what makes the probe run above mean something)"
 mutation_run FlintExtentsProbe FlintExtentsProbeTruncate.cfg "extents truncate probe (TruncateStart really executes — and with it the committed-block reclaim path it alone unlocks)" "ProbeTruncateFires"
 
 # ---- admission tranche (2026-08-10): the same-node zombie, machine-checked.

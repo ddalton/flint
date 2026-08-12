@@ -871,10 +871,27 @@ its cached device"
   echo "✓ E2b: 16MiB written past the old ceiling (watermark $NEXT > $CEIL0), cold-read intact"
 
   # Teardown of the drill's own volume; the base flow owns $VOL.
-  vsudo "umount $MNTE" >/dev/null 2>&1 || true
-  vsudo "$CSI_CLI unstage --volume-id $VOLE" >/dev/null || true
-  vsh "$CSI_CLI detach --endpoint 127.0.0.1:50051 --volume-id $VOLE --node \$(hostname)" >/dev/null || true
-  vsudo "nvme disconnect -n $SUBNQNE 2>/dev/null; true"
+  #
+  # QUIESCE FIRST, and this is not politeness: pulling the nvme session
+  # while the client still has writeback and a LAYOUTRETURN/LAYOUTCOMMIT
+  # in flight parks nvme-wq kworkers in D — a VM reboot is the only exit
+  # (rig-relearned here the day LAYOUTCOMMIT started SUCCEEDING, which
+  # gave the umount real work to do where before it gave up). Same
+  # lesson as the PREEMPT reap, different door.
+  vsudo "sync $MNTE 2>/dev/null; umount $MNTE" >/dev/null 2>&1 || true
+  for i in $(seq 1 40); do
+    LEFT_E=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
+      \"SELECT COUNT(*) FROM extent_grants WHERE volume='$VOLE'\"" 2>/dev/null || echo "?")
+    [ "${LEFT_E:-1}" = "0" ] && break
+    sleep 0.5
+  done
+  [ "${LEFT_E:-1}" = "0" ] \
+    || echo "· note: $VOLE still shows ${LEFT_E} grant row(s) at teardown — leaving the session up"
+  if [ "${LEFT_E:-1}" = "0" ]; then
+    vsudo "$CSI_CLI unstage --volume-id $VOLE" >/dev/null || true
+    vsh "$CSI_CLI detach --endpoint 127.0.0.1:50051 --volume-id $VOLE --node \$(hostname)" >/dev/null || true
+    vsudo "nvme disconnect -n $SUBNQNE 2>/dev/null; true"
+  fi
 
   echo
   echo "✅ expand-rig PASSED — a full block volume reported ENOSPC to the app"

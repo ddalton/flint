@@ -208,7 +208,17 @@ CONSTANTS
   CommitGatesSize,     \* TRUE = a commit's size-advance applies only WITH
                        \*   its range promotion (one transaction)
   CommitChecksGen,     \* TRUE = LAYOUTCOMMIT validates (client,
-                       \*   gen-at-grant) against the live grant table (§8)
+                       \*   gen-at-grant) against the grant it was made
+                       \*   under (§8)
+  CommitGraceEnabled,  \* TRUE = a client that has RETURNED its layout may
+                       \*   still commit the range it wrote under that
+                       \*   layout, provided the generation still matches
+                       \*   (graceG).  FALSE reproduces the shipped-until-
+                       \*   2026-08-11 world, where LAYOUTRETURN destroyed
+                       \*   the row LAYOUTCOMMIT validates against and the
+                       \*   client's already-written bytes stayed forever
+                       \*   provisional — the Linux client returns before
+                       \*   it commits, so this was live data loss.
   MergeEnabled,        \* merge-tranche master switch (MaintEnabled
                        \*   pattern — FALSE keeps every prior state space
                        \*   bit-identical). The code's merge policy: adjacent
@@ -275,19 +285,33 @@ VARIABLES
   deliveredFreeFired, \* the delivered-conditional free freed blocks a
                   \*   fenced+delivered holder still held (writer:
                   \*   ReclaimComplete, gated on FreeRequiresDelivered)
-  mergeFired      \* Merge executed (writer: Merge, gated on
+  mergeFired,     \* Merge executed (writer: Merge, gated on
                   \*   MergeEnabled — legacy spaces never pay)
+  graceG,         \* [Clients -> [Blocks -> Nat]] the generation a client
+                  \*   held for a block WHEN IT RETURNED the layout; 0 =
+                  \*   none.  Deliberately NOT holdership: HeldBy and every
+                  \*   free/reclaim belt keep reading `grants` alone, so a
+                  \*   grace record can never block a reclaim or count as a
+                  \*   conflicting holder.  It exists to answer one
+                  \*   question — "which generation did this client write
+                  \*   under?" — and the gen check is what keeps it safe:
+                  \*   after a free+reuse the block's gen has moved and the
+                  \*   stale grace record refuses on its own.
+  commitAfterReturn \* a commit was validated through graceG rather than a
+                  \*   live grant (writer: LayoutCommit; probe witness)
 
 \* The tranche-2 additions, grouped so tranche-1 actions can leave them
 \* unchanged in one stroke.
-sizeVars == <<fsize, commitFired, truncateFired, zeroSized, forgedCommit>>
+sizeVars == <<fsize, commitFired, truncateFired, zeroSized, forgedCommit,
+              graceG, commitAfterReturn>>
 
 vars == <<alloc, gen, grants, granting, reclaim, fenced, resv,
           nGrants, nReclaims, nRestarts,
           fsize, everWritten, priorBytes,
           staleRead, staleWrite, reuseFired, fenceFired, tgtRestarted,
           resnapshotGrew, commitFired, truncateFired, zeroSized,
-          forgedCommit, disclosedRead, deliveredFreeFired, mergeFired>>
+          forgedCommit, disclosedRead, deliveredFreeFired, mergeFired,
+          graceG, commitAfterReturn>>
 
 Blocks == 1..NBlocks
 GenBound == MaxReclaims + 1        \* one initial bump + one per free
@@ -328,6 +352,8 @@ TypeOK ==
   /\ zeroSized \in BOOLEAN /\ forgedCommit \in BOOLEAN
   /\ disclosedRead \in BOOLEAN /\ deliveredFreeFired \in BOOLEAN
   /\ mergeFired \in BOOLEAN
+  /\ graceG \in [Clients -> [Blocks -> 0..GenBound]]
+  /\ commitAfterReturn \in BOOLEAN
   \* Structure: g is normalised to 0 outside held (state-space hygiene and
   \* a modelling-bug tripwire, not a claim about the code).
   /\ \A c \in Clients : \A b \in Blocks :
@@ -349,6 +375,8 @@ Init ==
   /\ tgtRestarted = FALSE /\ resnapshotGrew = FALSE
   /\ commitFired = FALSE /\ truncateFired = FALSE
   /\ zeroSized = FALSE /\ forgedCommit = FALSE
+  /\ graceG = [c \in Clients |-> ZeroG]
+  /\ commitAfterReturn = FALSE
   /\ disclosedRead = FALSE /\ deliveredFreeFired = FALSE
   /\ mergeFired = FALSE
 
@@ -607,16 +635,35 @@ FreeDirect(R) ==
 \*                               (ghost: forgedCommit)
 LayoutCommit(c, R, n) ==
   /\ CommitEnabled
-  /\ grants[c].live
-  /\ R # {} /\ R \subseteq grants[c].held
-  /\ n >= fsize /\ n <= NBlocks
-  /\ LET valid == c \notin fenced
-                  /\ \A b \in R : grants[c].g[b] = gen[b]
+  /\ R # {} /\ n >= fsize /\ n <= NBlocks
+  \* Reachable two ways: under a LIVE grant, or — when CommitGraceEnabled
+  \* — through graceG, the generation memory a LayoutReturn left behind.
+  \* The second door is what a real Linux client walks through: it
+  \* LAYOUTRETURNs and then LAYOUTCOMMITs, and with the door shut its
+  \* written bytes stay provisional forever.
+  /\ \A b \in R : \/ (grants[c].live /\ b \in grants[c].held)
+                  \/ (CommitGraceEnabled /\ graceG[c][b] # 0)
+  /\ LET liveHold(b) == grants[c].live /\ b \in grants[c].held
+         genOf(b)    == IF liveHold(b) THEN grants[c].g[b] ELSE graceG[c][b]
+         viaGrace    == \E b \in R : ~liveHold(b)
+         \* THE BELT, unchanged in substance and now shared by both doors:
+         \* the generation the client wrote under must still be the
+         \* block's.  After a free+reuse the gen has moved, so a stale
+         \* grace record refuses exactly like a stale live grant would —
+         \* which is why grace can be forgotten lazily without becoming
+         \* a correctness dependency.
+         \* NOTE the shape: `valid` does NOT consult CommitChecksGen —
+         \* the flag branches BELOW, which is what makes the
+         \* forged-commit mutation reachable (folding it in here would
+         \* route CommitChecksGen=FALSE into the honest arm and quietly
+         \* disarm that mutation).
+         valid == c \notin fenced /\ \A b \in R : genOf(b) = gen[b]
      IN IF valid
         THEN /\ alloc' = [b \in Blocks |->
                            IF b \in R THEN "committed" ELSE alloc[b]]
              /\ fsize' = n
              /\ commitFired' = TRUE
+             /\ commitAfterReturn' = (commitAfterReturn \/ viaGrace)
              /\ UNCHANGED <<zeroSized, forgedCommit>>
         ELSE IF CommitChecksGen /\ CommitGatesSize
         THEN FALSE          \* refused whole: a disabled action
@@ -625,6 +672,7 @@ LayoutCommit(c, R, n) ==
              /\ fsize' = n
              /\ zeroSized' = (zeroSized \/ n > fsize)
              /\ commitFired' = TRUE
+             /\ commitAfterReturn' = (commitAfterReturn \/ viaGrace)
              /\ UNCHANGED <<alloc, forgedCommit>>
         ELSE \* ~CommitChecksGen: the forged commit applies whole
              /\ alloc' = [b \in Blocks |->
@@ -632,11 +680,13 @@ LayoutCommit(c, R, n) ==
              /\ fsize' = n
              /\ forgedCommit' = TRUE
              /\ commitFired' = TRUE
+             /\ commitAfterReturn' = (commitAfterReturn \/ viaGrace)
              /\ UNCHANGED zeroSized
   /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, truncateFired,
-                 everWritten, priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 everWritten, priorBytes, disclosedRead, deliveredFreeFired,
+                 mergeFired, graceG>>
 
 \* SETATTR-shrink: the size cut is metadata-only and immediate; the blocks
 \* beyond the new size stay allocated until the reclaim machinery frees
@@ -653,7 +703,8 @@ TruncateStart(n) ==
                  nGrants, nReclaims, nRestarts, staleRead, staleWrite,
                  reuseFired, fenceFired, tgtRestarted, resnapshotGrew,
                  commitFired, zeroSized, forgedCommit, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired,
+                 graceG, commitAfterReturn>>
 
 (***************************************************************************)
 (* The target                                                              *)
@@ -718,10 +769,30 @@ LayoutReturn(c) ==
   /\ grants[c].live
   /\ grants' = [grants EXCEPT ![c] = NoGrant]
   /\ reclaim' = [reclaim EXCEPT !.waiting = @ \ {c}]
+  \* The return destroys the grant, which is right — a returned client is
+  \* not a holder and must not block a reclaim.  What it must NOT destroy
+  \* is the memory of WHICH GENERATION the client wrote under: the Linux
+  \* client returns before it commits, and without this the bytes it
+  \* already wrote stay provisional forever (live data loss, rig-found).
+  \* graceG is never consulted by any holder/free/conflict predicate.
+  \* Gated on the tranche switch (the MaintEnabled pattern): with
+  \* CommitEnabled = FALSE there is no LayoutCommit to serve, so the
+  \* memory is dead weight and pinning it keeps every tranche-1 state
+  \* space BIT-IDENTICAL — the property this module's tranches are
+  \* required to preserve, and the reason the flagship's distinct count
+  \* is quotable across them.
+  /\ graceG' = IF CommitEnabled /\ CommitGraceEnabled
+               THEN [graceG EXCEPT ![c] =
+                       [b \in Blocks |-> IF b \in grants[c].held
+                                         THEN grants[c].g[b]
+                                         ELSE graceG[c][b]]]
+               ELSE graceG
   /\ UNCHANGED <<alloc, gen, granting, fenced, resv, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
-                 tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 tgtRestarted, resnapshotGrew, everWritten,
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired,
+                 fsize, commitFired, truncateFired, zeroSized, forgedCommit,
+                 commitAfterReturn>>
 
 Next ==
   \/ \E c \in Clients, R \in Ranges : GrantCheck(c, R)

@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// One request to the writer thread.
 enum Req {
@@ -1822,6 +1822,29 @@ CREATE TABLE IF NOT EXISTS extent_grants (
     mode TEXT NOT NULL,
     gen INTEGER NOT NULL,
     fenced INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (volume, file_id, logical_offset, client_id)
+);
+
+-- LAYOUTCOMMIT GRACE: which generation a client held for a range at the
+-- moment it RETURNED the layout. Not holdership — nothing that decides
+-- conflicts, reclaims or frees reads this table, so a grace row can
+-- never block anything.
+--
+-- It exists because the Linux client LAYOUTRETURNs and only then
+-- LAYOUTCOMMITs (rig-observed: 8 MiB written through 1 MiB grant windows,
+-- return-then-commit on every window). Validating a commit against a
+-- LIVE grant row therefore refused half the commits and left the client's
+-- already-written bytes provisional FOREVER — the file was durably short.
+-- The belt that keeps this safe is the generation, not the row's
+-- liveness: after a free+reuse the block's gen has moved on, so a stale
+-- grace row refuses exactly as a stale live grant would. That is also why
+-- pruning here is hygiene rather than correctness.
+CREATE TABLE IF NOT EXISTS extent_commit_grace (
+    volume TEXT NOT NULL,
+    file_id INTEGER NOT NULL,
+    logical_offset INTEGER NOT NULL,
+    client_id INTEGER NOT NULL,
+    gen INTEGER NOT NULL,
     PRIMARY KEY (volume, file_id, logical_offset, client_id)
 );
 
