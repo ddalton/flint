@@ -546,6 +546,18 @@ impl StateBackend for MemoryBackend {
         Ok(Ok(false))
     }
 
+    async fn block_sweep_quarantine(
+        &self,
+        _volume: &str,
+    ) -> StateBackendResult<
+        Result<(u64, u64), crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        // Nothing is ever parked here: block volumes cannot exist on
+        // this backend, so (0, 0) is TRUTHFUL — "no ranges, no bytes",
+        // not a stand-in for "don't know".
+        Ok(Ok((0, 0)))
+    }
+
     async fn block_grant_clients(
         &self,
     ) -> StateBackendResult<

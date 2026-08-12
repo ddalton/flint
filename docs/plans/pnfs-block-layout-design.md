@@ -987,6 +987,8 @@ crash budget, "transiently unavailable forever" needs an unbudgeted limbo consta
 | FlintExtentsTgtAmnesia.cfg | PersistReservations=FALSE | **must VIOLATE** NoStaleExtentWrite — §5's "PTPL is mandatory", with teeth |
 | FlintExtentsAliasedSplit.cfg | SplitKeepsDisjoint=FALSE | **must VIOLATE** NoPhysicalAliasing |
 | FlintExtentsCrashAmnesia.cfg / RecoverOptimist.cfg | PersistGrants / RecoverConservative =FALSE | **must VIOLATE** CrashRecoverySound |
+| FlintExtentsQuarantineBlindRelease.cfg | QuarantineChecksDelivered=FALSE | **must VIOLATE** NoStaleExtentWrite (SHIPPED 2026-08-12) — the sweep hands a PARKED range back without re-checking that the clients IT was parked with are confirmed excluded. LostFence's corruption through the other door: the free correctly refused at reclaim time, taken later without the check |
+| FlintExtentsQuarantineVisible.cfg | QuarantineIsolated=FALSE | **must VIOLATE** RecallCompletesBeforeReuse (SHIPPED 2026-08-12) — the parked range keeps its `extents` row instead of moving to the third table, so it reads as an ORPHAN (allocated, no live holder) and the grant path re-hands it out at its old generation. Nine states. This is the run that closed the "two-step grant window" constraint by showing it was never about the window: `grant` is one immediate transaction, and the model's rendering of quarantine was the bug |
 | FlintExtentsTarget.cfg | all arms TRUE | HOLDS — conditional green, **cite as goal only** |
 | FlintExtentsProbe*.cfg (one per ghost, ×5) | — | **must VIOLATE** `Probe*Fires` — non-vacuity, no ghost exempt |
 
@@ -1384,38 +1386,68 @@ Each phase ships standalone value; none is gated on the next.
   arm is best-effort and fails when the tgt is unreachable — so it would trade a claim
   proven in the harsher fences-CAN-fail world for a weaker one proven in an ideal
   world. That is the F65-audit mistake in new clothes. **Do not flip it.**
-  **The honest successor**: extents quarantined by an UNCONFIRMED fence are never
-  recovered automatically. `release_quarantine` is a whole-volume operator lever,
-  nothing calls it, and nothing re-drives a failed preempt to confirmation.
-  `extent_quarantine` does record `fenced_clients`, so the workable shape is a delivery
-  RETRY that sets `delivered_unix` on later confirmation, plus a sweep that frees
-  quarantined ranges whose every named client is now delivered.
-  **ATTEMPTED MODEL-FIRST 2026-08-12 AND NOT LANDED** — branch
-  `wip/quarantine-sweep-model`, deliberately not merged. "The same predicate evaluated
-  later, needing no model change" was WRONG, and TLC said so five times before a line of
-  code was written; the module renders quarantine as *never freed*, so it had never
-  checked a state where a parked block IS freed. The constraints it forced out are the
-  spec for the next attempt:
+  **The honest successor SHIPPED (2026-08-12)**: the delivery retry already existed
+  (`export_reconcile_pass` re-runs `fence_preempt` and marks `delivered_unix` on
+  confirmation); what was missing was anything that revisited a PARKED range
+  afterwards, so a range parked by a fence that landed *late* leaked forever.
+  `sweep_quarantine_delivered` closes it — it runs at the end of the same reconcile
+  pass (after the retry, deliberately: sweeping first re-checks the delivered bits the
+  previous pass already found missing and frees nothing) and releases a parked range
+  once every client in **that range's own** `fenced_clients` CSV is confirmed excluded.
+
+  **It took five TLC refutations to write, and the argument for skipping the model
+  entirely — "the same predicate evaluated later, needing no model change" — was the
+  first thing refuted.** The module rendered quarantine as *never freed*, so it had
+  never occupied a state where a parked range IS freed. What the counterexamples
+  forced, each now a permanent run or a test:
   (1) **Provenance is load-bearing.** A release gated on "all current holders are
-  fenced" frees blocks that were never quarantined, skipping the recall — the sweep must
-  act on what was PARKED (the `fenced_clients` CSV), not on circumstance.
-  (2) **The delivery retry must be modelled or the sweep is unreachable**: a client is
-  fenced at most once (the waiting set excludes the already-fenced), so an unlanded
-  exclusion can never become landed. The probe caught that vacuity — the code's reconcile
-  pass IS the retry, and the model had no action for it.
-  (3) **Freeing by any other path must un-park**, or the sweep frees the block again
-  under its next owner's live grant (quarantine and the free list are disjoint in code).
-  (4) **Only a real extent can be parked** — `ReclaimStart` may target never-allocated
-  blocks.
-  (5) **STILL OPEN: the two-step grant window.** `GrantCheck` can select a block that is
-  parked before `GrantInsert` publishes, landing a grant on a quarantined range. In code
-  that is unreachable (a parked range is not in the free list, and the grant is one
-  immediate transaction), so the model needs the matching guard; without it the shipped
-  cfg violates `Inv_RecallCompletesBeforeReuse`.
-  The A/B and probe are already correct on that branch: the blind release
-  (`QuarantineChecksDelivered = FALSE`) violates `Inv_NoStaleExtent*`, and the probe
-  fires once the retry exists. **No code was written**: the capacity leak stays, and the
-  operator lever stays the answer, until the model is green. The rig remains the standing regression harness that keeps the fence path
+  fenced" frees ranges that were never quarantined, skipping the recall — the sweep
+  acts on what was PARKED, never on circumstance
+  (`the_sweep_checks_the_range_provenance_not_whoever_is_fenced_now`).
+  (2) **The delivery retry had to be modelled or the sweep is unreachable**: a client
+  is fenced at most once (the waiting set excludes the already-fenced), so an unlanded
+  exclusion could never become landed. The *probe* caught that vacuity — a green that
+  meant "the sweep never fired". `FenceRetry` is the code's reconcile pass, and
+  `FlintExtentsProbeQuarantineRelease.cfg` is the standing non-vacuity licence.
+  (3) **Freeing by any other path must un-park**, or the sweep frees the range again
+  under its next owner's live grant.
+  (4) **Only a real extent can be parked.**
+  (5) **The one filed as an open hole in the two-step grant window was the model's
+  own abstraction.** Rendering a parked range as still-provisional makes it an ORPHAN —
+  allocated, no live holder, which is the module's definition of re-grantable — so TLC
+  duly re-granted it and then swept it out from under the new owner. The code never
+  had that shape: `reclaim_complete` DELETEs the `extents` row and INSERTs into
+  `extent_quarantine`, a third home whose disjointness from the other two
+  `verify_volume_invariants` enforces, and `grant` is one immediate transaction that
+  allocates from `extent_free`/the watermark and re-grants from `extents`. `alloc` now
+  carries a `"quarantined"` state, and `QuarantineIsolated` is the A/B that keeps the
+  structure honest — remove the third home and the corruption returns in nine states
+  (`FlintExtentsQuarantineVisible.cfg`).
+  Three new gate runs (shipped-strict is unchanged and green; blind-release and
+  isolation A/Bs; the release probe), five new allocator tests, and one wiring test
+  (`the_reconcile_pass_sweeps_quarantine_after_confirming_the_fence`) that pins the
+  ORDERING — swap the two loops in `export_reconcile_pass` and it fails with the range
+  still parked, verified by running it that way.
+
+  **A rig drill was attempted and withdrawn, and what it taught is worth more than the
+  drill would have been.** Staged single-host — writer, tgt killed, fence, `rm` — it
+  found `extents=0, grants=0 rows, free_ranges=1`: the reclaim FREED the range. That is
+  correct behaviour, and the reason is the return-after-fence upgrade. **A conforming,
+  REACHABLE client always returns its layout, and a return is quiescence, so it always
+  frees cleanly. Quarantine is only ever reachable for a holder that cannot be reached
+  to return** — which is precisely why §10's `REMOVE quarantined 0 range(s)` assertion
+  has always passed. Staging a real parked range therefore needs an *unreachable* holder
+  plus a reclaim triggered from somewhere else: the second VM issuing the unlink while
+  host A is partitioned (the MULTI/SWEEP machinery already exists). **OWED**, and named
+  rather than approximated — a single-host drill can only ever prove the clean-free path
+  while claiming to prove the other one.
+  **Still manual, by design**: `release_quarantine` — the whole-volume lever that frees
+  parked ranges *without* the delivered check — remains the only way out for a range
+  whose client was UNFENCED (no fence record ⇒ `COALESCE 0` ⇒ undelivered ⇒ the sweep
+  correctly refuses it forever). **Gap**: that lever and `quarantine_stats` have no
+  gRPC or `StateBackend` surface at all — they are reachable only from unit tests, so
+  the "operator lever" this doc describes is not today operable. The rig remains the
+  standing regression harness that keeps the fence path
   honest. Open sub-item: the rig proves reach
   on ONE tgt; multi-namespace / multi-tgt preempt and the MdsRestart re-acquire
   (reservation holdership is target-side, not in sqlite) still need their own drills.

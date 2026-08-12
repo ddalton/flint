@@ -194,6 +194,39 @@ CONSTANTS
   GrantsExclusive,     \* TRUE = the grant transaction polices disjointness
   RecallBeforeReuse,   \* TRUE = frees only through the reclaim machinery
   FreeRevalidates,     \* TRUE = the free transaction re-validates holders
+  QuarantineEnabled,   \* TRUE = the reclaim COMPLETES over an
+                       \*   unconfirmed fence, parking those blocks
+                       \*   (the code's extent_quarantine) instead of
+                       \*   refusing to finish — and a later
+                       \*   ReleaseQuarantine may free them once the
+                       \*   exclusion IS confirmed.  FALSE reproduces
+                       \*   the pre-2026-08-12 abstraction, in which a
+                       \*   quarantined block was simply never freed.
+  QuarantineChecksDelivered, \* the release re-applies the delivered
+                       \*   belt.  Its A/B is the whole point: a release
+                       \*   that skips it frees a range whose holder the
+                       \*   target never excluded.
+  QuarantineIsolated,  \* TRUE = a PARKED range lives in its own home and
+                       \*   the extent-table operations cannot see it at
+                       \*   all.  This is ONE code fact, not a policy:
+                       \*   `reclaim_complete`'s quarantine branch DELETEs
+                       \*   the `extents` row and INSERTs the range into
+                       \*   `extent_quarantine` — a third table, whose
+                       \*   physical disjointness from the other two
+                       \*   `verify_volume_invariants` enforces on every
+                       \*   write.  So the grant transaction cannot mint
+                       \*   it (it allocates from `extent_free` or the
+                       \*   arena watermark, never from quarantine) and
+                       \*   cannot re-grant it either (re-grant walks
+                       \*   `extents`, where the row no longer is);
+                       \*   `merge_extents_window` and `commit_extents`
+                       \*   walk `extents` too and miss it for the same
+                       \*   reason.  FALSE is the plausible refactor —
+                       \*   keep the extent row and flag it — under which
+                       \*   a parked range looks exactly like an ORPHAN
+                       \*   (allocated, no live holder) and is re-grantable
+                       \*   at its old generation.  Its A/B must find the
+                       \*   corruption; see FlintExtentsQuarantineVisible.
   FenceReaches,        \* TRUE = every fence lands as a target exclusion
   FreeRequiresDelivered, \* TRUE = the free additionally requires every
                        \*   FENCED holder's exclusion CONFIRMED at the
@@ -244,7 +277,17 @@ CONSTANTS
                        \*   its verdict.
 
 VARIABLES
-  alloc,          \* [Blocks -> {"free","provisional"}] physical allocation
+  alloc,          \* [Blocks -> {"free","provisional","committed",
+                  \*   "quarantined"}] — WHICH HOME the physical range is
+                  \*   in, and (for the two extent states) its lifecycle.
+                  \*   The code has exactly three homes and enforces their
+                  \*   physical disjointness in `verify_volume_invariants`:
+                  \*   `extents` (provisional/committed), `extent_free`
+                  \*   (free), `extent_quarantine` (quarantined).  Rendering
+                  \*   a parked range as still-provisional — which this
+                  \*   module did until 2026-08-12 — makes it look like an
+                  \*   ORPHAN to the grant path, and TLC duly found the
+                  \*   grant.  The bug was the abstraction, again.
   gen,            \* [Blocks -> Nat] bumped on every free->provisional edge
   grants,         \* [Clients -> [live, held, g]] published layout grants;
                   \*   live is the CLIENT's view (it holds the layout until
@@ -297,6 +340,20 @@ VARIABLES
                   \*   under?" — and the gen check is what keeps it safe:
                   \*   after a free+reuse the block's gen has moved and the
                   \*   stale grace record refuses on its own.
+  qHold,              \* [Blocks -> SUBSET Clients] the fenced holders a
+                      \*   PARKED block was quarantined WITH — the code's
+                      \*   extent_quarantine.fenced_clients CSV.  {} = not
+                      \*   parked.  Provenance is load-bearing: without it
+                      \*   a release could free any block whose holders
+                      \*   happen to be fenced, which skips the recall
+                      \*   entirely — TLC found exactly that on the first
+                      \*   draft of this tranche.
+  quarantineReleased, \* a PARKED block (reclaim completed while its
+                      \*   fence was unconfirmed) was later freed once
+                      \*   the exclusion was confirmed — writer:
+                      \*   ReleaseQuarantine.  Without this witness the
+                      \*   shipped green could be "the release never
+                      \*   fired" wearing the sweep's label.
   commitAfterReturn \* a commit was validated through graceG rather than a
                   \*   live grant (writer: LayoutCommit; probe witness)
 
@@ -311,7 +368,7 @@ vars == <<alloc, gen, grants, granting, reclaim, fenced, resv,
           staleRead, staleWrite, reuseFired, fenceFired, tgtRestarted,
           resnapshotGrew, commitFired, truncateFired, zeroSized,
           forgedCommit, disclosedRead, deliveredFreeFired, mergeFired,
-          graceG, commitAfterReturn>>
+          graceG, commitAfterReturn, quarantineReleased, qHold>>
 
 Blocks == 1..NBlocks
 GenBound == MaxReclaims + 1        \* one initial bump + one per free
@@ -329,8 +386,19 @@ NoReclaim == [active |-> FALSE, blks |-> {}, waiting |-> {}]
 HeldBy(b) == {c \in Clients : grants[c].live /\ b \in grants[c].held}
 LiveHolders(R) == {c \in Clients : grants[c].live /\ grants[c].held \cap R # {}}
 
+\* "This range has NO `extents` row, so no extent-table operation can see
+\* it."  True exactly of a PARKED range in the shipped world: the
+\* quarantine branch deleted the row and moved the range to a third
+\* table.  Every use below is an operation the code implements as a walk
+\* over `extents` — grant (re-grant and allocate), merge, commit — and
+\* the one flag is what makes them all miss it together, because in the
+\* code they miss it for one reason.  Deliberately NOT written as a
+\* lifecycle enumeration: "which home" is the stable concept, and
+\* enumerating states is what went stale the day "committed" arrived.
+NotAnExtent(b) == QuarantineIsolated /\ alloc[b] = "quarantined"
+
 TypeOK ==
-  /\ alloc \in [Blocks -> {"free", "provisional", "committed"}]
+  /\ alloc \in [Blocks -> {"free", "provisional", "committed", "quarantined"}]
   /\ gen \in [Blocks -> 0..GenBound]
   /\ grants \in [Clients ->
        [live : BOOLEAN, held : SUBSET Blocks, g : [Blocks -> 0..GenBound]]]
@@ -354,10 +422,18 @@ TypeOK ==
   /\ mergeFired \in BOOLEAN
   /\ graceG \in [Clients -> [Blocks -> 0..GenBound]]
   /\ commitAfterReturn \in BOOLEAN
+  /\ quarantineReleased \in BOOLEAN
+  /\ qHold \in [Blocks -> SUBSET Clients]
   \* Structure: g is normalised to 0 outside held (state-space hygiene and
   \* a modelling-bug tripwire, not a claim about the code).
   /\ \A c \in Clients : \A b \in Blocks :
        b \notin grants[c].held => grants[c].g[b] = 0
+  \* Structure: the parked STATE and its provenance are one fact written
+  \* in two places — a row in `extent_quarantine` carries the range AND
+  \* its `fenced_clients` CSV, and neither exists without the other.  A
+  \* tripwire, not a claim: if these ever drift, the sweep is reading
+  \* provenance for a range nothing parked, or missing it for one that is.
+  /\ \A b \in Blocks : (alloc[b] = "quarantined") <=> (qHold[b] # {})
 
 Init ==
   /\ alloc = [b \in Blocks |-> "free"]
@@ -377,6 +453,8 @@ Init ==
   /\ zeroSized = FALSE /\ forgedCommit = FALSE
   /\ graceG = [c \in Clients |-> ZeroG]
   /\ commitAfterReturn = FALSE
+  /\ quarantineReleased = FALSE
+  /\ qHold = [b \in Blocks |-> {}]
   /\ disclosedRead = FALSE /\ deliveredFreeFired = FALSE
   /\ mergeFired = FALSE
 
@@ -394,13 +472,21 @@ GrantCheck(c, R) ==
   /\ ~grants[c].live
   /\ ~granting[c].open
   /\ c \notin fenced        \* no re-admission before lease recovery (owed)
+  \* A PARKED range is not an orphan, however much it looks like one: it
+  \* is allocated-but-unheld only because the quarantine branch swept its
+  \* grant rows, and it has no `extents` row for the re-grant to find.
+  \* This clause is not a new belt over the code — it is the model finally
+  \* rendering the third table.  (2026-08-12: without it TLC re-grants a
+  \* parked block through the orphan door and the sweep then frees it
+  \* under the new owner's live grant.)
+  /\ \A b \in R : ~NotAnExtent(b)
   /\ \A b \in R : alloc[b] = "free" \/ HeldBy(b) = {}
   /\ granting' = [granting EXCEPT ![c] = [open |-> TRUE, blks |-> R]]
   /\ nGrants' = nGrants + 1
   /\ UNCHANGED <<alloc, gen, grants, reclaim, fenced, resv,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 everWritten, priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 everWritten, priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 \* LAYOUTGET step 2: the sqlite transaction.  With GrantsExclusive it
 \* re-validates disjointness INSIDE the transaction and refuses a range
@@ -427,14 +513,22 @@ GrantInsert(c) ==
          \* committed block in 6 states: a predicate enumerating states
          \* goes stale the day the state set grows; "not free" does not.
          occupied == \E b \in R : alloc[b] # "free" /\ HeldBy(b) # {}
-     IN IF GrantsExclusive /\ occupied
+         \* ...and a PARKED range refuses whatever the disjointness policy
+         \* is, because this is not a policy: the transaction allocates
+         \* from `extent_free` or the arena watermark and re-grants from
+         \* `extents`, and a parked range is in NEITHER.  Deliberately
+         \* OUTSIDE the GrantsExclusive conjunct — flipping the
+         \* disjointness policy must not hand the allocator a third
+         \* table it cannot read in any world.
+         parked == \E b \in R : NotAnExtent(b)
+     IN IF (GrantsExclusive /\ occupied) \/ parked
         THEN \* transaction refuses; the window closes, nothing published
           /\ granting' = [granting EXCEPT ![c] = NoWindow]
           /\ UNCHANGED <<alloc, gen, grants, reclaim, fenced, resv,
                          nGrants, nReclaims, nRestarts, staleRead,
                          staleWrite, reuseFired, fenceFired, tgtRestarted,
                          resnapshotGrew, sizeVars, everWritten, priorBytes,
-                         disclosedRead, deliveredFreeFired, mergeFired>>
+                         disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
         ELSE
           LET fresh == {b \in R : alloc[b] = "free"}
               gen2 == [b \in Blocks |->
@@ -459,7 +553,7 @@ GrantInsert(c) ==
           /\ UNCHANGED <<reclaim, fenced, resv, nGrants, nReclaims,
                          nRestarts, staleRead, staleWrite, fenceFired,
                          tgtRestarted, resnapshotGrew, sizeVars,
-                         everWritten, disclosedRead, deliveredFreeFired, mergeFired>>
+                         everWritten, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 (***************************************************************************)
 (* The MDS: reclaim (recall-then-free)                                     *)
@@ -488,7 +582,7 @@ ReclaimStart(R) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 \* The retry loop's separate re-read step (the F62 idiom): recompute the
 \* holder set from the live tables.  This is what eventually surfaces a
@@ -504,7 +598,7 @@ ReclaimResnapshot ==
   /\ UNCHANGED <<alloc, gen, grants, granting, fenced, resv, nGrants,
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 \* An unresponsive holder is fenced: revoked server-side (bookkeeping in
 \* `fenced` — its grant row is dead to the MDS) and preempted at the
@@ -524,7 +618,15 @@ Fence(c) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
+
+\* The reclaim's per-block verdict, ONE definition so the three
+\* assignments in ReclaimComplete cannot drift apart (they did while this
+\* was inlined thrice).  Outside the quarantine world it is constantly
+\* TRUE, which is what keeps every legacy cfg's state graph bit-identical.
+ReclaimFrees(b) ==
+  \/ ~(QuarantineEnabled /\ FreeRequiresDelivered)
+  \/ (HeldBy(b) \cap fenced) \subseteq resv
 
 \* The free.  Every snapshotted holder has returned or been fenced; with
 \* FreeRevalidates the transaction ALSO re-validates the live tables and
@@ -546,16 +648,48 @@ ReclaimComplete ==
   \* theorems WITHOUT FenceReaches — the fence may fail to land, and the
   \* free machinery still never reuses a block out from under a client
   \* the target has not actually excluded.
-  /\ FreeRequiresDelivered =>
+  \* WITHOUT QuarantineEnabled this is the pre-2026-08-12 rendering: the
+  \* free simply cannot happen while any fenced holder is unconfirmed, so
+  \* the reclaim never completes and the block is never freed.  That was
+  \* always an ABSTRACTION of the code, not a description of it — the code
+  \* completes the reclaim and PARKS the offending ranges in
+  \* extent_quarantine.  Kept as the default so every legacy cfg's state
+  \* graph stays bit-identical.
+  /\ (FreeRequiresDelivered /\ ~QuarantineEnabled) =>
        \A b \in reclaim.blks : (HeldBy(b) \cap fenced) \subseteq resv
+  \* WITH it, the reclaim completes either way: the blocks whose fenced
+  \* holders are ALL confirmed-excluded go to the free list, and the rest
+  \* LEAVE THE EXTENT TABLE for the quarantine — which is the code, step
+  \* for step (DELETE FROM extents, INSERT INTO extent_quarantine, DELETE
+  \* the grant rows).  Parking as a distinct home rather than "stays
+  \* allocated" is the 2026-08-12 correction: an allocated-but-unheld
+  \* block is an ORPHAN, and orphans are re-grantable.
   /\ alloc' = [b \in Blocks |->
-                IF b \in reclaim.blks THEN "free" ELSE alloc[b]]
+                IF b \in reclaim.blks
+                  THEN (IF ReclaimFrees(b) THEN "free" ELSE "quarantined")
+                  ELSE alloc[b]]
   /\ reclaim' = NoReclaim
   \* Canonicalise: a freed block's dirt flag is recomputed at its next
   \* reuse from everWritten; holding it at FALSE meanwhile keeps free
-  \* blocks from splitting states on a value nothing reads.
+  \* blocks from splitting states on a value nothing reads.  A PARKED
+  \* block keeps its dirt — it is not reusable yet, and the sweep clears
+  \* the flag at the moment it becomes so.
   /\ priorBytes' = [b \in Blocks |->
-                     IF b \in reclaim.blks THEN FALSE ELSE priorBytes[b]]
+                     IF b \in reclaim.blks /\ ReclaimFrees(b)
+                       THEN FALSE ELSE priorBytes[b]]
+  \* Provenance for the parked blocks: WHO was holding them, fenced but
+  \* not confirmed-excluded, at the moment the reclaim gave up on them.
+  \* This is extent_quarantine.fenced_clients, and it is what the sweep
+  \* re-checks later — not "whoever happens to hold the block now".  A
+  \* block that FREES here is un-parked in the same stroke: the two homes
+  \* are disjoint by construction in the code (verify_volume_invariants
+  \* enforces it), and letting a stale qHold survive a free lets the sweep
+  \* free the block AGAIN, under its next owner's live grant — TLC found
+  \* that too.
+  /\ qHold' = [b \in Blocks |->
+                IF b \in reclaim.blks
+                  THEN (IF ReclaimFrees(b) THEN {} ELSE HeldBy(b) \cap fenced)
+                  ELSE qHold[b]]
   \* Probe witness: the delivered-conditional free actually FREED blocks
   \* a fenced+delivered holder still held — the exact event the code
   \* flip (quarantine -> clean free) exists to produce.  Gated on the
@@ -568,7 +702,76 @@ ReclaimComplete ==
   /\ UNCHANGED <<gen, grants, granting, fenced, resv, nGrants, nReclaims,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 disclosedRead, mergeFired>>
+                 disclosedRead, mergeFired, quarantineReleased>>
+
+\* THE DELIVERY RETRY (2026-08-12).  The reconcile pass re-runs
+\* `fence_preempt` for every (volume, client) in fenced_clients and marks
+\* the fence DELIVERED when it confirms — so a fence that failed to land
+\* at fence time (tgt unreachable) can become confirmed later.  Modelled
+\* because WITHOUT IT THE SWEEP IS UNREACHABLE: `Fence` only ever fires
+\* once per client (the waiting set excludes the already-fenced), so an
+\* unlanded exclusion could never become landed and every parked block
+\* would stay parked forever.  The probe caught exactly that — the first
+\* draft's shipped green was vacuous with respect to the sweep.
+FenceRetry(c) ==
+  /\ QuarantineEnabled
+  /\ c \in fenced
+  /\ c \notin resv
+  /\ \E landed \in BOOLEAN :
+       /\ FenceReaches => landed
+       /\ resv' = IF landed THEN resv \cup {c} ELSE resv
+  /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, nGrants,
+                 nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
+                 fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
+                 everWritten, priorBytes, disclosedRead, deliveredFreeFired,
+                 mergeFired, quarantineReleased, qHold>>
+
+\* THE QUARANTINE SWEEP (2026-08-12).  A block the reclaim PARKED —
+\* completed the job, but this range's fence was not confirmed at the
+\* target, so freeing it would have been FlintExtentsLostFence's
+\* corruption — becomes free once every remembered holder IS confirmed
+\* excluded.  The delivery retry that makes that reachable already ships
+\* (the reconcile pass re-runs the preempt for every fenced pair and
+\* marks it delivered on success); what did not exist is anything that
+\* revisits the parked range afterwards, so the capacity leaked forever.
+\*
+\* The predicate is the SAME one ReclaimComplete applies — re-applied
+\* later, which is exactly what the module could not express before and
+\* therefore had never checked.  Its A/B (QuarantineChecksDelivered =
+\* FALSE) must find the corruption: releasing a range whose holder the
+\* target never excluded is the un-fenced client writing into the next
+\* owner's bytes.
+\*
+\* IT CHECKS qHold, NOT HeldBy — provenance, not circumstance.  Gating on
+\* "every CURRENT holder is fenced-and-confirmed" frees blocks that were
+\* never quarantined at all, skipping the recall entirely; TLC found that
+\* on the first draft of this tranche.  The sweep must act on what was
+\* PARKED (the code's extent_quarantine.fenced_clients CSV), which is
+\* also why an UNFENCED client cannot rescue a range: in code its
+\* fenced_clients row is gone, so the delivered join yields nothing and
+\* the range stays parked — conservatively, forever, until the operator
+\* lever.
+\* DELIBERATELY NOT gated on ~reclaim.active.  The sweep runs in the
+\* reconcile task and a reclaim is driven from the dispatcher / lease
+\* sweep; nothing serialises them but sqlite's per-transaction write
+\* lock, so a model that disabled the sweep mid-reclaim would be
+\* checking a tidier server than the one that ships.  It is safe for a
+\* reason the model can state: a parked range has no extent row, so
+\* ReclaimStart can never have selected it, and the two act on disjoint
+\* blocks.  Stated, not assumed — the interleaving is in the graph.
+ReleaseQuarantine(b) ==
+  /\ QuarantineEnabled
+  /\ alloc[b] = "quarantined"         \* PARKED — a row in the third table
+  /\ QuarantineChecksDelivered => qHold[b] \subseteq resv
+  /\ alloc' = [alloc EXCEPT ![b] = "free"]
+  /\ qHold' = [qHold EXCEPT ![b] = {}]
+  /\ priorBytes' = [priorBytes EXCEPT ![b] = FALSE]
+  /\ quarantineReleased' = TRUE
+  /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
+                 nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
+                 fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
+                 everWritten, disclosedRead, deliveredFreeFired,
+                 mergeFired, graceG, commitAfterReturn>>
 
 \* The merge policy's one block-level residue (see MergeEnabled's
 \* header): two same-state allocated blocks coarsen to ONE generation —
@@ -584,6 +787,10 @@ Merge(b1, b2) ==
   /\ MergeEnabled
   /\ b1 # b2
   /\ alloc[b1] # "free"
+  \* ...and never over a PARKED range: `merge_extents_window` walks
+  \* `extents`, which a quarantined range has left.  Same one code fact
+  \* as the grant path's refusal, hence the same flag.
+  /\ ~NotAnExtent(b1)
   /\ alloc[b1] = alloc[b2]
   /\ gen[b1] # gen[b2]
   /\ MergeChecksHolders => (HeldBy(b1) = {} /\ HeldBy(b2) = {})
@@ -596,7 +803,7 @@ Merge(b1, b2) ==
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
                  everWritten, priorBytes, disclosedRead,
-                 deliveredFreeFired>>
+                 deliveredFreeFired, quarantineReleased, qHold>>
 
 \* The unbelted world: RecallBeforeReuse = FALSE frees allocated blocks
 \* outright, holders or no holders — the F65-of-extents.
@@ -606,11 +813,13 @@ FreeDirect(R) ==
   /\ R \subseteq {b \in Blocks : alloc[b] = "provisional"}
   /\ R # {}
   /\ alloc' = [b \in Blocks |-> IF b \in R THEN "free" ELSE alloc[b]]
+  \* Same disjointness as ReclaimComplete: a freed block is not parked.
+  /\ qHold' = [b \in Blocks |-> IF b \in R THEN {} ELSE qHold[b]]
   /\ nReclaims' = nReclaims + 1
   /\ UNCHANGED <<gen, grants, granting, reclaim, fenced, resv, nGrants,
                  nRestarts, staleRead, staleWrite, reuseFired, fenceFired,
                  tgtRestarted, resnapshotGrew, sizeVars, everWritten,
-                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired>>
+                 priorBytes, disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased>>
 
 (***************************************************************************)
 (* The MDS: commit and size (tranche 2, CommitEnabled)                     *)
@@ -643,6 +852,14 @@ LayoutCommit(c, R, n) ==
   \* written bytes stay provisional forever.
   /\ \A b \in R : \/ (grants[c].live /\ b \in grants[c].held)
                   \/ (CommitGraceEnabled /\ graceG[c][b] # 0)
+  \* A PARKED range has no extent row to promote, so `commit_extents`
+  \* refuses it (CommitRejected) before any of the belts below get a
+  \* say — including the forged-commit arm, which is why this sits above
+  \* them rather than inside `valid`.  Reachable without it: a client
+  \* that returned its layout keeps a grace record, a LATER holder is
+  \* fenced and the range parks, and the returner's commit then promotes
+  \* a quarantined range back into the file.
+  /\ \A b \in R : ~NotAnExtent(b)
   /\ LET liveHold(b) == grants[c].live /\ b \in grants[c].held
          genOf(b)    == IF liveHold(b) THEN grants[c].g[b] ELSE graceG[c][b]
          viaGrace    == \E b \in R : ~liveHold(b)
@@ -664,7 +881,7 @@ LayoutCommit(c, R, n) ==
              /\ fsize' = n
              /\ commitFired' = TRUE
              /\ commitAfterReturn' = (commitAfterReturn \/ viaGrace)
-             /\ UNCHANGED <<zeroSized, forgedCommit>>
+             /\ UNCHANGED <<zeroSized, forgedCommit, quarantineReleased, qHold>>
         ELSE IF CommitChecksGen /\ CommitGatesSize
         THEN FALSE          \* refused whole: a disabled action
         ELSE IF CommitChecksGen
@@ -673,7 +890,7 @@ LayoutCommit(c, R, n) ==
              /\ zeroSized' = (zeroSized \/ n > fsize)
              /\ commitFired' = TRUE
              /\ commitAfterReturn' = (commitAfterReturn \/ viaGrace)
-             /\ UNCHANGED <<alloc, forgedCommit>>
+             /\ UNCHANGED <<alloc, forgedCommit, quarantineReleased, qHold>>
         ELSE \* ~CommitChecksGen: the forged commit applies whole
              /\ alloc' = [b \in Blocks |->
                            IF b \in R THEN "committed" ELSE alloc[b]]
@@ -686,7 +903,7 @@ LayoutCommit(c, R, n) ==
                  nReclaims, nRestarts, staleRead, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, truncateFired,
                  everWritten, priorBytes, disclosedRead, deliveredFreeFired,
-                 mergeFired, graceG>>
+                 mergeFired, graceG, quarantineReleased, qHold>>
 
 \* SETATTR-shrink: the size cut is metadata-only and immediate; the blocks
 \* beyond the new size stay allocated until the reclaim machinery frees
@@ -704,7 +921,7 @@ TruncateStart(n) ==
                  reuseFired, fenceFired, tgtRestarted, resnapshotGrew,
                  commitFired, zeroSized, forgedCommit, everWritten,
                  priorBytes, disclosedRead, deliveredFreeFired, mergeFired,
-                 graceG, commitAfterReturn>>
+                 graceG, commitAfterReturn, quarantineReleased, qHold>>
 
 (***************************************************************************)
 (* The target                                                              *)
@@ -721,7 +938,7 @@ TgtRestart ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, nGrants,
                  nReclaims, staleRead, staleWrite, reuseFired, fenceFired,
                  resnapshotGrew, sizeVars, everWritten, priorBytes,
-                 disclosedRead, deliveredFreeFired, mergeFired>>
+                 disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 (***************************************************************************)
 (* The clients — raw NVMe I/O under a held layout; the MDS is not on this  *)
@@ -744,7 +961,7 @@ ClientRead(c, b) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleWrite, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 everWritten, priorBytes, deliveredFreeFired, mergeFired>>
+                 everWritten, priorBytes, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 ClientWrite(c, b) ==
   /\ grants[c].live
@@ -763,7 +980,7 @@ ClientWrite(c, b) ==
   /\ UNCHANGED <<alloc, gen, grants, granting, reclaim, fenced, resv,
                  nGrants, nReclaims, nRestarts, staleRead, reuseFired,
                  fenceFired, tgtRestarted, resnapshotGrew, sizeVars,
-                 disclosedRead, deliveredFreeFired, mergeFired>>
+                 disclosedRead, deliveredFreeFired, mergeFired, quarantineReleased, qHold>>
 
 LayoutReturn(c) ==
   /\ grants[c].live
@@ -792,7 +1009,7 @@ LayoutReturn(c) ==
                  tgtRestarted, resnapshotGrew, everWritten,
                  priorBytes, disclosedRead, deliveredFreeFired, mergeFired,
                  fsize, commitFired, truncateFired, zeroSized, forgedCommit,
-                 commitAfterReturn>>
+                 commitAfterReturn, quarantineReleased, qHold>>
 
 Next ==
   \/ \E c \in Clients, R \in Ranges : GrantCheck(c, R)
@@ -801,6 +1018,8 @@ Next ==
   \/ ReclaimResnapshot
   \/ \E c \in Clients : Fence(c)
   \/ ReclaimComplete
+  \/ \E c \in Clients : FenceRetry(c)
+  \/ \E b \in Blocks : ReleaseQuarantine(b)
   \/ \E b1, b2 \in Blocks : Merge(b1, b2)
   \/ \E R \in Ranges : FreeDirect(R)
   \/ TgtRestart
@@ -827,15 +1046,20 @@ Inv_NoConflictingGrants ==
       => grants[c1].held \cap grants[c2].held = {}
 
 \* No block moves through the allocator's lifecycle while a live unfenced
-\* grant covers it: its generation never moves under the grant, and it is
-\* never in the free state under the grant (freed-under-grant is already
-\* the bug even before a new owner appears).
+\* grant covers it: its generation never moves under the grant, and it
+\* never LEAVES THE EXTENT TABLE under the grant — for the free list
+\* (freed-under-grant is already the bug even before a new owner appears)
+\* or, since 2026-08-12, for the quarantine.  Parking is a lifecycle move
+\* like any other: a range whose extent row is gone is one the sweep may
+\* hand to the allocator at any moment, so a live grant over it is the
+\* same bug one step earlier.  Vacuous wherever QuarantineEnabled is
+\* FALSE (nothing is ever parked), which is every cfg but three.
 Inv_RecallCompletesBeforeReuse ==
   \A c \in Clients :
     (grants[c].live /\ c \notin fenced) =>
       \A b \in grants[c].held :
         /\ gen[b] = grants[c].g[b]
-        /\ alloc[b] # "free"
+        /\ alloc[b] \notin {"free", "quarantined"}
 
 (***************************************************************************)
 (* THE THEOREMS — descendants of Inv_NoStaleServe, and the WRITE is        *)

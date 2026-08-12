@@ -1884,6 +1884,34 @@ pub async fn export_reconcile_pass(
         Ok(Err(e)) => tracing::error!("{} fenced-set read refused: {}", context, e),
         Err(e) => tracing::error!("{} fenced-set read failed: {}", context, e),
     }
+
+    // THE QUARANTINE SWEEP, and it runs HERE for one reason: the loop
+    // above is the only thing in the server that turns an unconfirmed
+    // fence into a confirmed one. A range parked by a fence that landed
+    // late is releasable the instant that mark is written, and nothing
+    // else ever revisits it — before this, such a range leaked until an
+    // operator ran the whole-volume lever.
+    //
+    // AFTER the retry, never before: sweeping first would re-check the
+    // same delivered bits the previous pass already found missing and
+    // free nothing, making every release wait a full extra pass. That
+    // ordering is asserted by
+    // `the_reconcile_pass_sweeps_quarantine_after_confirming_the_fence`,
+    // which fails with (1, 8192) left parked if these two are swapped.
+    for v in &volumes {
+        match backend.block_sweep_quarantine(v).await {
+            Ok(Ok((0, _))) => {}
+            Ok(Ok((ranges, bytes))) => info!(
+                "🧹 {} quarantine sweep '{}': released {} range(s), {} bytes — \
+                 every remembered holder is now confirmed excluded",
+                context, v, ranges, bytes
+            ),
+            // Parked capacity staying parked is the SAFE side, so this
+            // is a warning about a leak, not about a corruption.
+            Ok(Err(e)) => tracing::warn!("{} quarantine sweep '{}' refused: {}", context, v, e),
+            Err(e) => tracing::warn!("{} quarantine sweep '{}' failed: {}", context, v, e),
+        }
+    }
     (volumes.len(), refenced)
 }
 
@@ -2932,6 +2960,93 @@ mod fallback_tests {
             Arc::clone(&backend),
         );
         assert_eq!(export_reconcile_pass(&bare, "reconcile").await, (0, 0));
+    }
+
+    /// THE QUARANTINE SWEEP IS WIRED, AND IT RUNS AFTER THE RETRY.
+    ///
+    /// The allocator tests prove `sweep_quarantine_delivered` frees the
+    /// right ranges and refuses the wrong ones; the model proves the
+    /// predicate. Neither proves the sweep is CALLED, nor that it is
+    /// called after the preempt retry in the same pass — and the
+    /// ordering is the whole value. A range parked by a fence that had
+    /// not landed becomes releasable the instant that retry confirms it;
+    /// sweep-then-retry would re-check the same missing delivered bits
+    /// the previous pass already found missing, free nothing, and make
+    /// every release wait a full extra interval.
+    ///
+    /// So the fence here is UNDELIVERED when the pass begins (the target
+    /// was unreachable at fence time), and the range is parked. Swap the
+    /// two loops in `export_reconcile_pass` and this test fails with
+    /// (1, 8192) still parked — verified, not assumed.
+    #[tokio::test]
+    async fn the_reconcile_pass_sweeps_quarantine_after_confirming_the_fence() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        lm.set_volume_geometry(
+            "volQ",
+            crate::pnfs::mds::layout::VolumeGeometry {
+                stripe_size: 0,
+                stripe_width: 0,
+                layout_class: crate::pnfs::mds::layout::LayoutClass::Scsi,
+            },
+        )
+        .await;
+        lm.register_extent_arena("volQ", 1 << 20).await.unwrap();
+
+        // A client holds extents, and is fenced with NO block export
+        // attached — rows-only, so nothing can confirm it. That is the
+        // "tgt unreachable at fence time" world, and it is exactly what
+        // makes the reclaim park instead of free.
+        backend.extent_grant("volQ", 44, 7, 0, 8192, true).await.unwrap().unwrap();
+        backend.block_fence_record("volQ", 7, 100).await.unwrap().unwrap();
+        backend.extent_fence_client("volQ", 7).await.unwrap().unwrap();
+        let out = backend
+            .extent_reclaim_complete("volQ", 44, 0, 8192, 200)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.quarantined_extents, 1, "an unconfirmed fence must PARK the range");
+        assert_eq!(out.freed_extents, 0);
+
+        // Now the target is reachable again. Attach the export so the
+        // pass's preempt retry has something to confirm against.
+        let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
+        let reconciler = Arc::new(crate::pnfs::mds::block_export::BlockExportReconciler::new(
+            Arc::clone(&tgt)
+                as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        ));
+        reconciler.ensure("volQ", Some(1 << 20)).await.unwrap();
+        lm.attach_block_export(reconciler);
+
+        let (vols, refenced) = export_reconcile_pass(&lm, "reconcile").await;
+        assert_eq!((vols, refenced), (1, 1), "the pass re-fenced the standing record");
+
+        // ONE pass: the retry confirmed the fence AND the sweep released
+        // the range it had parked.
+        assert!(
+            !backend.block_fence_delivered("volQ", 7, 300).await.unwrap().unwrap(),
+            "the pass already marked it delivered, so a re-mark finds nothing to do"
+        );
+        let (ranges, bytes) = backend.block_sweep_quarantine("volQ").await.unwrap().unwrap();
+        assert_eq!(
+            (ranges, bytes),
+            (0, 0),
+            "NOTHING left for a second sweep — the pass already released it. A non-zero \
+             here means the sweep ran BEFORE the retry and left the range parked for \
+             another whole interval"
+        );
     }
 
     /// An unreachable target leaves the fence UNCONFIRMED: the sweep

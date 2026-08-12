@@ -1,6 +1,17 @@
-# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, and the block-layout extent allocator
+# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, and the block admission layer
 
-Five modules, one gate (`scripts/check-tla.sh`, one hundred and five TLC runs).
+Six spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
+ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
+(`scripts/check-tla.sh`, **one hundred and nineteen** TLC runs).
+
+Both counts here have drifted before, in both files, because nothing
+regenerated them. They do now:
+
+```
+ls formal/*.tla | wc -l
+awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
+  scripts/check-tla.sh | sort | uniq -c | sort -rn
+```
 
 `FlintReplication.tla` models the durability core every flint orchestrator
 mutates: leg lifecycle states, the writer set, epoch cuts, raid superblock
@@ -211,7 +222,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs one hundred and five configs, ALL required:
+on first use).  It runs one hundred and nineteen configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus

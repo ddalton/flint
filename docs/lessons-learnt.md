@@ -136,15 +136,32 @@ CSI CLI. Modes are standing regression harnesses (`make test-pnfs-*-rig`).
   before running a rig, not after.
 - **"Same predicate, evaluated later" is a new behaviour, and the model has to see
   it.** The quarantine sweep looked like a free re-application of a belt the model
-  already gates — so much so that the argument for skipping the tranche was written
-  down before it was tested. TLC refuted five successive versions of that design
-  before any code existed: the release needed provenance, the delivery retry had to
-  be modelled or the sweep was unreachable (the *probe* caught that — a green
-  meaning "it never fired"), other free paths had to un-park, only real extents
-  could be parked, and the two-step grant window still bites. Cost: one branch and
-  no shipped bug. When a change re-applies an existing guard at a new TIME, the
-  module has never occupied that state, and "no model change needed" is the claim
-  most worth disbelieving.
+  already gates — the argument for skipping the tranche was written down before it was
+  tested. TLC refuted five successive designs before any code existed: the release
+  needed provenance, the delivery retry had to be modelled or the sweep was unreachable
+  (the *probe* caught that — a green meaning "it never fired"), other free paths had to
+  un-park, only real extents could be parked, and the grant path re-handed out a parked
+  range. When a change re-applies an existing guard at a new TIME, the module has never
+  occupied that state, and "no model change needed" is the claim most worth
+  disbelieving.
+- **A drill that cannot reach the state it names proves the opposite thing, quietly.**
+  The quarantine-sweep drill staged a fence with the tgt down and expected the reclaim to
+  park the range; it freed it, correctly — a REACHABLE client returns its layout, and a
+  return is quiescence. Quarantine is only reachable for a holder that *cannot* be
+  reached, so a single-host drill can only ever exercise the clean-free path while
+  wearing the other path's name. Withdrawn rather than weakened. Before writing a drill,
+  ask what has to be UNREACHABLE for the state under test to exist — if the answer is
+  "the host running the drill", the harness needs a second host.
+- **A counterexample indicts the abstraction before it indicts the design — go read the
+  code.** The fifth refutation above was filed as an open hole in the two-step grant
+  window and cost the tranche a session. It was not a hole: the model rendered a
+  quarantined range as still-allocated, which made it an ORPHAN (allocated, no live
+  holder) and therefore re-grantable by the module's own rule, while the code moves the
+  range to a THIRD table that neither the allocator nor the re-grant path reads. The
+  fix was one new state value, not a new belt — and the A/B that pins it now finds the
+  corruption in nine states. Before writing "the model needs a guard the code already
+  has", check that the code has it *for the reason you think*; the answer took one grep
+  of `reclaim_complete` and settled a constraint that had been carried as unresolved.
 - **`fail` inside `$( )` is not a failure, it is a value.** Its message becomes the
   variable's contents and its `exit` leaves only the subshell, so the caller
   proceeds with the error as its data and reports something unrelated three lines

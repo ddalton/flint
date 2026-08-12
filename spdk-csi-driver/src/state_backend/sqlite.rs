@@ -1502,6 +1502,19 @@ impl StateBackend for SqliteBackend {
         .await
     }
 
+    async fn block_sweep_quarantine(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<(u64, u64), crate::state_backend::extent_alloc::ExtentAllocError>,
+    > {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::sweep_quarantine_delivered(conn, &v)
+        })
+        .await
+    }
+
     async fn block_grant_clients(
         &self,
     ) -> StateBackendResult<

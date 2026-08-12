@@ -1011,6 +1011,112 @@ pub fn release_quarantine(conn: &mut Connection, volume: &str) -> Result<u64> {
     Ok(bytes)
 }
 
+/// THE QUARANTINE SWEEP — `release_quarantine`'s gated, automatic
+/// successor, and the thing that stops an unconfirmed fence from leaking
+/// the range FOREVER. A parked range frees when every client named in
+/// its own `fenced_clients` CSV is CONFIRMED excluded at the target
+/// (`fenced_clients.delivered_unix > 0`) — the same predicate
+/// `reclaim_complete` applied and refused on, re-applied later, once the
+/// reconcile pass's preempt retry has had a chance to land the fence
+/// that had not landed then.
+///
+/// Returns `(ranges, bytes)` released.
+///
+/// THREE THINGS THE MODEL FORCED, each a counterexample before it was a
+/// line of code (`formal/FlintExtents.tla`, the QuarantineEnabled
+/// tranche; `FlintExtentsQuarantineBlindRelease.cfg` and
+/// `FlintExtentsQuarantineVisible.cfg` are its two A/Bs):
+///
+/// 1. **It reads the range's OWN provenance, not the live tables.** A
+///    sweep gated on "every current holder is fenced" frees ranges that
+///    were never quarantined, skipping the recall entirely. The CSV this
+///    range was parked with is the whole point of storing it.
+/// 2. **An absent fence record is UNDELIVERED** (the `COALESCE 0`
+///    discipline `reclaim_complete` already uses). A client that was
+///    UNFENCED has no row, so its ranges stay parked — conservatively,
+///    until the operator lever. Reading "no row" as "nothing to wait
+///    for" would free exactly the ranges whose exclusion was released.
+/// 3. **A parked range is invisible to the allocator** — not because
+///    of a check here, but because the quarantine branch moved it OUT of
+///    `extents` into this third table, and `grant` allocates from
+///    `extent_free`/the watermark and re-grants from `extents`. Keep
+///    that structure: the moment a parked range is reachable as an
+///    orphan extent, this sweep frees it under its new owner's live
+///    grant (the QuarantineVisible A/B, in nine states).
+pub fn sweep_quarantine_delivered(
+    conn: &mut Connection,
+    volume: &str,
+) -> Result<(u64, u64)> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let parked: Vec<(i64, i64, i64, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT physical_offset, length, gen, fenced_clients
+               FROM extent_quarantine WHERE volume = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![volume], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    if parked.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let mut delivered_stmt = tx.prepare(
+        "SELECT COALESCE(delivered_unix, 0) FROM fenced_clients
+          WHERE volume = ?1 AND client_id = ?2",
+    )?;
+    let mut ranges = 0u64;
+    let mut bytes = 0u64;
+    let mut released: Vec<(i64, i64, i64)> = Vec::new();
+    for (phys, len, generation, csv) in &parked {
+        // A malformed id is NOT a free pass: an entry we cannot parse is
+        // an exclusion we cannot verify, so the range stays parked.
+        let mut all_delivered = true;
+        for field in csv.split(',').filter(|s| !s.is_empty()) {
+            let Ok(client) = field.trim().parse::<i64>() else {
+                all_delivered = false;
+                break;
+            };
+            let d: i64 = delivered_stmt
+                .query_row(params![volume, client], |r| r.get(0))
+                .optional()?
+                .unwrap_or(0);
+            if d <= 0 {
+                all_delivered = false;
+                break;
+            }
+        }
+        // An EMPTY CSV never reaches quarantine (the branch fires only
+        // with a fenced holder), so treat it as unverifiable rather than
+        // as "nobody to wait for" — the same conservative side as above.
+        if all_delivered && !csv.trim().is_empty() {
+            released.push((*phys, *len, *generation));
+            ranges += 1;
+            bytes += *len as u64;
+        }
+    }
+    drop(delivered_stmt);
+
+    for (phys, len, generation) in &released {
+        free_insert_coalescing(&tx, volume, *phys, *len, *generation)?;
+        tx.execute(
+            "DELETE FROM extent_quarantine WHERE volume = ?1 AND physical_offset = ?2",
+            params![volume, phys],
+        )?;
+    }
+    if ranges > 0 {
+        // The free list just grew over ranges that left the quarantine —
+        // exactly the two homes whose disjointness this checks. Cheap
+        // relative to a sweep that only runs when something was parked.
+        verify_volume_invariants_conn(&tx, volume)?;
+    }
+    tx.commit()?;
+    Ok((ranges, bytes))
+}
+
 /// DeleteVolume's sweep: drop every extent-allocator row for the
 /// volume — extents, grants, free list, quarantine, and the arena
 /// itself. Without this, a re-created volume of the same name would
@@ -2086,6 +2192,178 @@ mod tests {
         }
         // The rightful owner's commit promotes.
         assert_eq!(commit_extents(&mut conn, VOL, F, C2, 0, 8192).unwrap(), 1);
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// THE SWEEP, end to end: a range parked by an UNCONFIRMED fence is
+    /// released the moment that same fence is confirmed — and not one
+    /// step sooner. This is the whole point of the tranche: before it,
+    /// the range leaked until an operator ran the whole-volume lever.
+    ///
+    /// TLC trace: FlintExtentsProbeQuarantineRelease.cfg is the
+    /// non-vacuity witness that this sequence is reachable at all;
+    /// FlintExtentsQuarantineBlindRelease.cfg is the world where the
+    /// sweep skips the delivered re-check and hands the range back while
+    /// the client is still writing to it.
+    #[test]
+    fn the_sweep_releases_a_parked_range_only_once_its_fence_confirms() {
+        let mut conn = setup();
+        let g1 = grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        let phys1 = g1[0].physical_offset;
+        fence_record(&mut conn, VOL, C1, 500).unwrap();
+        fence_client(&mut conn, VOL, C1).unwrap();
+        // The preempt did NOT confirm, so the reclaim parks the range.
+        let out = reclaim_complete(&mut conn, VOL, F, 0, 8192, 1234).unwrap();
+        assert_eq!(out.quarantined_extents, 1);
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (1, 8192));
+
+        // Sweeping now must free NOTHING: the exclusion is still unproven,
+        // and freeing here is LostFence's corruption exactly.
+        assert_eq!(sweep_quarantine_delivered(&mut conn, VOL).unwrap(), (0, 0));
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (1, 8192));
+
+        // The reconcile pass's preempt retry lands and marks it delivered.
+        assert!(mark_fence_delivered(&mut conn, VOL, C1, 900).unwrap());
+        assert_eq!(sweep_quarantine_delivered(&mut conn, VOL).unwrap(), (1, 8192));
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (0, 0));
+
+        // ...and the released range is a REUSE, with everything a reuse owes.
+        let g2 = grant(&mut conn, VOL, F, C2, 32768, 8192, false).unwrap();
+        assert_eq!(g2[0].physical_offset, phys1, "swept range is first-fit reused");
+        assert_eq!(g2[0].generation, 2, "reuse after a sweep still bumps the generation");
+        assert!(g2[0].needs_scrub, "a swept range still carries the prior incarnation's bytes");
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// The sweep reads the range's OWN provenance — the client ids it was
+    /// parked with — never the live tables. A second client's confirmed
+    /// fence says nothing about the range C1 was parked for, and a sweep
+    /// that looked at "whoever is fenced now" would free it.
+    ///
+    /// TLC found this on the tranche's first draft: a release gated on
+    /// the current holders frees blocks that were never quarantined,
+    /// skipping the recall entirely.
+    #[test]
+    fn the_sweep_checks_the_range_provenance_not_whoever_is_fenced_now() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        fence_record(&mut conn, VOL, C1, 500).unwrap();
+        fence_client(&mut conn, VOL, C1).unwrap();
+        reclaim_complete(&mut conn, VOL, F, 0, 8192, 1234).unwrap();
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (1, 8192));
+
+        // A DIFFERENT client is fenced and confirmed. C1's range is not
+        // its business, and the parked range must not move.
+        fence_record(&mut conn, VOL, C2, 600).unwrap();
+        assert!(mark_fence_delivered(&mut conn, VOL, C2, 700).unwrap());
+        assert_eq!(sweep_quarantine_delivered(&mut conn, VOL).unwrap(), (0, 0));
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (1, 8192));
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// An UNFENCED client leaves no fence record, and the sweep reads
+    /// that absence as UNDELIVERED — the COALESCE-0 discipline
+    /// `reclaim_complete` already applies. Reading "no row" as "nobody
+    /// left to wait for" would free precisely the ranges whose exclusion
+    /// was deliberately released, which is the corruption with an extra
+    /// step.
+    #[test]
+    fn unfencing_a_client_does_not_make_its_parked_ranges_sweepable() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        fence_record(&mut conn, VOL, C1, 500).unwrap();
+        fence_client(&mut conn, VOL, C1).unwrap();
+        reclaim_complete(&mut conn, VOL, F, 0, 8192, 1234).unwrap();
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (1, 8192));
+
+        assert!(unfence_record(&mut conn, VOL, C1).unwrap(), "the record is gone");
+        assert_eq!(
+            sweep_quarantine_delivered(&mut conn, VOL).unwrap(),
+            (0, 0),
+            "an absent fence record is UNDELIVERED, not 'nothing to wait for'"
+        );
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (1, 8192));
+        // The operator lever is still the way out — deliberately manual.
+        assert_eq!(release_quarantine(&mut conn, VOL).unwrap(), 8192);
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// A range parked for TWO clients frees only when BOTH are
+    /// confirmed. One delivered fence out of two is a range one client
+    /// may still be writing to. (Second holder row manufactured directly,
+    /// as in `a_shared_extent_frees_only_when_every_fence_is_delivered` —
+    /// the live multi-holder path is the READ-grant tiling, whose
+    /// ceremony would obscure what this pins.)
+    #[test]
+    fn a_range_parked_for_two_clients_needs_both_confirmed() {
+        let mut conn = setup();
+        grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        conn.execute(
+            "INSERT INTO extent_grants
+               (volume, file_id, logical_offset, client_id, mode, gen, fenced)
+             SELECT volume, file_id, logical_offset, ?1, mode, gen, 0
+             FROM extent_grants WHERE volume = ?2 AND client_id = ?3",
+            params![C2 as i64, VOL, C1 as i64],
+        )
+        .unwrap();
+        for c in [C1, C2] {
+            fence_record(&mut conn, VOL, c, 500).unwrap();
+            fence_client(&mut conn, VOL, c).unwrap();
+        }
+        let out = reclaim_complete(&mut conn, VOL, F, 0, 8192, 1234).unwrap();
+        assert_eq!(out.quarantined_extents, 1);
+
+        assert!(mark_fence_delivered(&mut conn, VOL, C1, 900).unwrap());
+        assert_eq!(
+            sweep_quarantine_delivered(&mut conn, VOL).unwrap(),
+            (0, 0),
+            "one of two confirmed is not quiescence"
+        );
+        assert!(mark_fence_delivered(&mut conn, VOL, C2, 950).unwrap());
+        assert_eq!(sweep_quarantine_delivered(&mut conn, VOL).unwrap(), (1, 8192));
+        assert_eq!(quarantine_stats(&conn, VOL).unwrap(), (0, 0));
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// A parked range is invisible to the allocator — and it is invisible
+    /// because it LEFT the extents table for a third one, not because of
+    /// a check. That structure is what
+    /// FlintExtentsQuarantineVisible.cfg pins: keep the extent row and
+    /// flag it, and the parked range looks exactly like an ORPHAN
+    /// (allocated, no live holder — the quarantine branch swept the
+    /// grant rows itself), the grant path re-hands it out at its old
+    /// generation, and the sweep then frees it under the new owner's
+    /// live grant. TLC finds that in nine states.
+    #[test]
+    fn a_parked_range_is_in_no_table_the_allocator_reads() {
+        let mut conn = setup();
+        let g1 = grant(&mut conn, VOL, F, C1, 0, 8192, false).unwrap();
+        let phys1 = g1[0].physical_offset;
+        fence_record(&mut conn, VOL, C1, 500).unwrap();
+        fence_client(&mut conn, VOL, C1).unwrap();
+        reclaim_complete(&mut conn, VOL, F, 0, 8192, 1234).unwrap();
+
+        // Not an extent: the row is gone, so nothing can re-grant it.
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extents WHERE volume = ?1 AND physical_offset = ?2",
+                params![VOL, phys1],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "a parked range must not keep its extents row");
+        // Not free either: nothing can allocate it.
+        let free_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extent_free WHERE volume = ?1 AND physical_offset = ?2",
+                params![VOL, phys1],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(free_rows, 0, "a parked range must not be in the free list");
+        // ...which is what makes this hold, through both doors at once.
+        let g2 = grant(&mut conn, VOL, F, C2, 0, 8192, false).unwrap();
+        assert_ne!(g2[0].physical_offset, phys1, "the parked range was re-granted");
         verify_volume_invariants(&conn, VOL).unwrap();
     }
 

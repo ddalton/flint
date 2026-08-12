@@ -815,6 +815,17 @@ pub trait StateBackend: Send + Sync {
         now_unix: i64,
     ) -> StateBackendResult<Result<bool, extent_alloc::ExtentAllocError>>;
 
+    /// THE QUARANTINE SWEEP: free every parked range of the volume whose
+    /// own remembered holders are ALL confirmed-excluded. Runs after the
+    /// reconcile pass's preempt retry, which is what turns an
+    /// unconfirmed fence into a confirmed one; without it a range parked
+    /// by a fence that landed late leaks until an operator intervenes.
+    /// Returns `(ranges, bytes)` released.
+    async fn block_sweep_quarantine(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<(u64, u64), extent_alloc::ExtentAllocError>>;
+
     /// Every distinct (volume, client_id) pair holding grant rows —
     /// the lease sweep's durable candidate source.
     async fn block_grant_clients(

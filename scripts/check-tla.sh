@@ -3,14 +3,23 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and fourteen runs, ALL required.
+# One hundred and nineteen runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
 # the count; that miscount is how this header once briefly read wrong.
-# 88 before the FlintExtents tranches, + 11 for tranche 1, + 6 for
-# tranche 2, + 1 for the FreeRequiresDelivered graduation probe, + 3 for
-# the merge tranche, + 5 for the FlintAdmission tranche.)
+#
+# The tally is PER MODULE, not per tranche, because the per-tranche
+# version drifted silently: it summed to 114 while the file held 116, and
+# nothing could notice — a tranche breakdown has no command that
+# regenerates it.  This one does:
+#
+#   awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
+#     scripts/check-tla.sh | sort | uniq -c | sort -rn
+#
+#   71 FlintReplication   15 FlintExtents   11 FlintExtentsProbe
+#    7 FlintTruncate       5 FlintAdmission  4 FlintSnapshots
+#    3 FlintClaims         3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -831,6 +840,9 @@ mutation_run FlintExtents FlintExtentsBlindProvision.cfg "unscrubbed-provision m
 mutation_run FlintExtentsProbe FlintExtentsProbeCommit.cfg "extents commit probe (LayoutCommit really executes in the commit-strict world)" "ProbeCommitFires"
 mutation_run FlintExtentsProbe FlintExtentsProbeCommitAfterReturn.cfg "commit-grace probe (a LAYOUTCOMMIT validated through graceG — the client returned its layout first, which is what Linux does)" "ProbeCommitAfterReturn"
 strict_run   FlintExtentsProbe FlintExtentsNoCommitGrace.cfg "commit-grace A/B (CommitGraceEnabled=FALSE reproduces the shipped-until-2026-08-11 world: no behaviour can reach a commit-after-return, so the probe HOLDS — this is what makes the probe run above mean something)"
+mutation_run FlintExtents FlintExtentsQuarantineBlindRelease.cfg "quarantine-sweep A/B (QuarantineChecksDelivered=FALSE: the sweep hands a PARKED range back to the allocator without re-checking that its remembered holders are confirmed-excluded — LostFence's corruption arriving by the other door, the free correctly refused at reclaim time taken later without the check)" "Inv_NoStaleExtentWrite"
+mutation_run FlintExtents FlintExtentsQuarantineVisible.cfg "quarantine-isolation A/B (QuarantineIsolated=FALSE: the parked range keeps its extents row instead of moving to the third table, so it looks like an ORPHAN — allocated, no live holder — and the grant path re-hands it to a new owner at its old generation. THE ANSWER TO CONSTRAINT 5: the trace that was filed as an open hole in the two-step grant window was the model's abstraction, not the design's)" "Inv_RecallCompletesBeforeReuse"
+mutation_run FlintExtentsProbe FlintExtentsProbeQuarantineRelease.cfg "quarantine-sweep probe (a PARKED range really is released once its exclusion is confirmed — without this the shipped green is compatible with nothing ever being quarantined, or nothing ever swept: the leak wearing the sweep's label)" "ProbeQuarantineReleaseFires"
 mutation_run FlintExtentsProbe FlintExtentsProbeTruncate.cfg "extents truncate probe (TruncateStart really executes — and with it the committed-block reclaim path it alone unlocks)" "ProbeTruncateFires"
 
 # ---- admission tranche (2026-08-10): the same-node zombie, machine-checked.
