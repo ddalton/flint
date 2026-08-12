@@ -352,6 +352,10 @@ test-pnfs-multi-rig: ## TWO real client hosts on one block volume: additive admi
 test-pnfs-expand-rig: ## Block capacity is real: a full volume reports ENOSPC to the app, then a live expand grows the lvol, the kernel's namespace and the arena ceiling (block-rig EXPAND=1)
 	EXPAND=1 tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-expand-bounce-rig
+test-pnfs-expand-bounce-rig: ## The expand drill with an MDS RESTART between the device fetch and the expand: the durable notify book must still reach the client through its NEW session (block-rig EXPAND=1 MDS_BOUNCE=1)
+	EXPAND=1 MDS_BOUNCE=1 tests/lima/pnfs/block-rig.sh
+
 .PHONY: test-pnfs-enospc
 test-pnfs-enospc: build-pnfs ## Capacity truth + clean bounded ENOSPC on a 64MB DS (P0-4)
 	tests/lima/pnfs/enospc-drill.sh

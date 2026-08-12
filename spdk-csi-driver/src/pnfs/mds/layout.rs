@@ -428,44 +428,6 @@ pub struct LayoutManager {
     /// CreateVolume gates on it.
     block_export: Arc<std::sync::OnceLock<Arc<super::block_export::BlockExportReconciler>>>,
 
-    /// pnfs-block: which sessions fetched a volume's device, and which
-    /// device notifications each one asked for (the GETDEVICEINFO
-    /// `gdia_notify_types` bitmap). Volume → session → mask.
-    ///
-    /// This is the CB_NOTIFY_DEVICEID address book, and it exists
-    /// because the interesting client is often NOT a layout holder: the
-    /// caching client in the expand case had returned every layout and
-    /// still served stale device geometry from its cache (rig-found).
-    /// Layout tables cannot answer "who believes something about this
-    /// device", so device fetches are recorded separately.
-    ///
-    /// In-memory and best-effort. Entries are dropped when the volume
-    /// goes away or a send finds no back-channel.
-    ///
-    /// ⚠️ **A restart costs more than the comment here used to claim**,
-    /// measured 2026-08-12 (`EXPAND=1 MDS_BOUNCE=1`, against the same
-    /// drill passing without the bounce). It is not "a missed
-    /// notification, recycle the mount": the client keeps writing into a
-    /// volume it believes is the old size and the app gets **EIO** —
-    /// the MDS grants a layout past the old ceiling, the client cannot
-    /// use it, returns it, falls back to the MDS lane, and the zeros
-    /// belt refuses (52 refusals in the measured run).
-    ///
-    /// And the restart loses this book TWICE OVER, which is what decides
-    /// the shape of any fix: startup deliberately discards persisted
-    /// sessions so the kernel re-CREATE_SESSIONs on BADSESSION, and the
-    /// client comes back with a NEW session id under its EXISTING
-    /// clientid (no EXCHANGE_ID) and issues no fresh GETDEVICEINFO — its
-    /// device cache outlives the session that fetched it. So persisting
-    /// these rows as they stand, keyed on `SessionId`, would restore
-    /// addresses that provably no longer exist. The stable identity is
-    /// the CLIENT; the session belongs at send time, resolved from live
-    /// state.
-    device_notify: Arc<DashMap<String, DashMap<crate::nfs::v4::protocol::SessionId, u32>>>,
-
-    /// The callback channel, attached late by the server exactly like
-    /// the operation handler's copy — the back-channel registry has to
-    /// exist first. `None` in unit tests: notifications become no-ops.
     callbacks: Arc<std::sync::OnceLock<Arc<super::callback::CallbackManager>>>,
 
     /// Is an NFS client still leased? Attached late by the server (the
@@ -790,7 +752,6 @@ impl LayoutManager {
             backend,
             stub_binding,
             block_export: Arc::new(std::sync::OnceLock::new()),
-            device_notify: Arc::new(DashMap::new()),
             callbacks: Arc::new(std::sync::OnceLock::new()),
             lease_oracle: Arc::new(std::sync::OnceLock::new()),
         }
@@ -826,27 +787,70 @@ impl LayoutManager {
     /// Record that `session` fetched `volume`'s device and which
     /// notifications it accepts (GETDEVICEINFO `gdia_notify_types`
     /// word 0). Idempotent; the newest mask wins.
-    pub fn note_device_fetch(
-        &self,
-        volume: &str,
-        session: crate::nfs::v4::protocol::SessionId,
-        notify_mask: u32,
-    ) {
-        if notify_mask == 0 {
+    /// Record that `client_id` cached `volume`'s device and which
+    /// notifications it accepted (GETDEVICEINFO `gdia_notify_types`).
+    ///
+    /// This is the CB_NOTIFY_DEVICEID address book. It exists separately
+    /// from layout state because the client that needs telling is often
+    /// NOT a layout holder — in the expand case it had returned every
+    /// layout and still served stale device geometry from its cache — so
+    /// "who holds a layout" cannot answer "who believes something about
+    /// this device".
+    ///
+    /// **Durable and CLIENT-keyed, both halves measured before they were
+    /// built** (`EXPAND=1 MDS_BOUNCE=1`). While this book was in memory,
+    /// an expand after an MDS restart notified nobody and the
+    /// application got EIO on a volume that had the space: the MDS
+    /// granted a layout past the old ceiling, the client could not use
+    /// it against its cached device, and the fallback lane refused.
+    ///
+    /// Keyed on the CLIENT because the session does not survive a
+    /// restart — startup deliberately drops persisted sessions so the
+    /// kernel re-CREATE_SESSIONs on BADSESSION, and the client returns
+    /// with a NEW session id under its EXISTING clientid, issuing no
+    /// fresh GETDEVICEINFO. Its cached blocklayout device (whose LENGTH
+    /// is snapshotted from the bdev at parse time,
+    /// `fs/nfs/blocklayout/dev.c`) outlives the session that fetched it,
+    /// so a session-keyed record would have restored dead addresses. The
+    /// session is resolved at SEND time from live state, because a
+    /// back-channel cannot be persisted at all.
+    pub fn note_device_fetch(&self, volume: &str, client_id: u64, notify_mask: u32) {
+        if notify_mask == 0 || client_id == 0 {
             // A client that asks for nothing cannot be told anything —
             // recording it would only make the address book lie about
             // reachable clients.
             return;
         }
-        self.device_notify
-            .entry(volume.to_string())
-            .or_default()
-            .insert(session, notify_mask);
+        // Queued, not awaited: GETDEVICEINFO is a synchronous handler
+        // and this write is once per (client, device). The window a
+        // queued write opens is an MDS crash between the fetch and the
+        // flush; the row would be lost and that client would miss a
+        // later expand — the same outcome as before this table existed,
+        // for a far smaller window.
+        self.backend
+            .enqueue_write(WriteOp::PutDeviceNotify(crate::state_backend::DeviceNotifyRecord {
+                volume: volume.to_string(),
+                client_id,
+                notify_mask,
+                fetched_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+            }));
     }
 
     /// Forget a volume's notify address book (DeleteVolume).
     pub fn forget_device_notify(&self, volume: &str) {
-        self.device_notify.remove(volume);
+        self.backend
+            .enqueue_write(WriteOp::DeleteDeviceNotify(volume.to_string(), None));
+    }
+
+    /// Forget one client's row (its lease expired).
+    pub fn forget_device_notify_client(&self, volume: &str, client_id: u64) {
+        self.backend.enqueue_write(WriteOp::DeleteDeviceNotify(
+            volume.to_string(),
+            Some(client_id),
+        ));
     }
 
     /// Tell every client that cached `volume`'s device to drop it — the
@@ -862,18 +866,28 @@ impl LayoutManager {
         let Some(callbacks) = self.callbacks.get().cloned() else {
             return (0, 0);
         };
-        let Some(targets) = self.device_notify.get(volume).map(|m| {
-            m.iter().map(|e| (*e.key(), *e.value())).collect::<Vec<_>>()
-        }) else {
-            return (0, 0);
+        let targets = match self.backend.device_notify_list(volume).await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("device notify list for '{}' failed: {} — no client told", volume, e);
+                return (0, 0);
+            }
         };
         if targets.is_empty() {
             return (0, 0);
         }
         let deviceid = crate::nvmeof_export::scsi_device_id(volume);
         let mut accepted = 0usize;
-        let mut dead: Vec<crate::nfs::v4::protocol::SessionId> = Vec::new();
-        for (session, mask) in &targets {
+        let mut attempted = 0usize;
+        for (client_id, mask) in &targets {
+            // An expired client is not a target: it holds no session to
+            // reach and its next mount fetches the device fresh. Pruned
+            // here rather than swept, so the table tracks reality
+            // without a second timer to get wrong.
+            if !self.client_is_live(*client_id) {
+                self.forget_device_notify_client(volume, *client_id);
+                continue;
+            }
             // Prefer CHANGE — it says what actually happened, and the
             // Linux client treats CHANGE and DELETE identically (both
             // drop the cached deviceid). DELETE is the fallback for a
@@ -886,25 +900,30 @@ impl LayoutManager {
             } else {
                 continue;
             };
+            attempted += 1;
             match callbacks
-                .send_notify_deviceid(session, LayoutType::Scsi as u32, deviceid, notify_type)
+                .send_notify_deviceid_to_client(
+                    *client_id,
+                    LayoutType::Scsi as u32,
+                    deviceid,
+                    notify_type,
+                )
                 .await
             {
                 Ok(reply) if reply.status == crate::nfs::v4::protocol::Nfs4Status::Ok => {
                     accepted += 1
                 }
                 Ok(_) => {}
-                Err(_) => dead.push(*session),
+                // NOT pruned on a failed send, and this is the whole
+                // lesson of the in-memory version: right after a restart
+                // a live client has no back-channel yet, and dropping it
+                // here would re-create the bug the durable book exists
+                // to fix. Only a dead lease or a deleted volume removes
+                // a row.
+                Err(_) => {}
             }
         }
-        if !dead.is_empty() {
-            if let Some(map) = self.device_notify.get(volume) {
-                for s in dead {
-                    map.remove(&s);
-                }
-            }
-        }
-        (accepted, targets.len())
+        (accepted, attempted)
     }
 
     /// Attach the block-export reconciler (server wiring, post-
@@ -3470,29 +3489,89 @@ mod tests {
     ///  - DeleteVolume forgets the book, because the deviceid is
     ///    derived from the volume NAME and a re-created volume would
     ///    otherwise inherit the dead one's subscribers.
-    #[test]
-    fn device_notify_address_book_records_filters_and_forgets() {
+    #[tokio::test]
+    async fn device_notify_address_book_records_filters_and_forgets() {
+        // Against SQLITE, not the memory backend: the book is durable
+        // now, and the memory backend deliberately no-ops it (a
+        // block-class volume cannot exist there). A memory-backed
+        // assertion would pass on an implementation that stored nothing.
         let registry = Arc::new(DeviceRegistry::new());
-        let mgr = stripe_mgr(&registry, 1 << 20);
-        let s1 = crate::nfs::v4::protocol::SessionId([1u8; 16]);
-        let s2 = crate::nfs::v4::protocol::SessionId([2u8; 16]);
-
-        mgr.note_device_fetch("vol", s1, 0x6);
-        mgr.note_device_fetch("vol", s2, 0); // asked for nothing
-        assert_eq!(
-            mgr.device_notify.get("vol").map(|m| m.len()),
-            Some(1),
-            "a client that requested no notifications must not be recorded"
+        let sq = Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let backend: Arc<dyn crate::state_backend::StateBackend> = Arc::clone(&sq) as _;
+        let mgr = LayoutManager::new(
+            registry,
+            ConfigLayoutPolicy::RoundRobin,
+            1 << 20,
+            Arc::clone(&backend),
         );
-        mgr.note_device_fetch("vol", s1, 0x2);
+
+        mgr.note_device_fetch("vol", 11, 0x6);
+        mgr.note_device_fetch("vol", 12, 0); // asked for nothing
+        mgr.note_device_fetch("vol", 0, 0x6); // no client id resolved
+        sq.flush().await.unwrap();
         assert_eq!(
-            mgr.device_notify.get("vol").and_then(|m| m.get(&s1).map(|v| *v)),
-            Some(0x2),
+            backend.device_notify_list("vol").await.unwrap(),
+            vec![(11, 0x6)],
+            "only a client that asked for notifications is recorded"
+        );
+
+        mgr.note_device_fetch("vol", 11, 0x2);
+        sq.flush().await.unwrap();
+        assert_eq!(
+            backend.device_notify_list("vol").await.unwrap(),
+            vec![(11, 0x2)],
             "the newest mask wins"
         );
 
+        // Another volume is a separate book (the deviceid derives from
+        // the volume name).
+        mgr.note_device_fetch("vol2", 11, 0x6);
         mgr.forget_device_notify("vol");
-        assert!(mgr.device_notify.get("vol").is_none());
+        sq.flush().await.unwrap();
+        assert!(backend.device_notify_list("vol").await.unwrap().is_empty());
+        assert_eq!(backend.device_notify_list("vol2").await.unwrap(), vec![(11, 0x6)]);
+
+        // ...and one client can be dropped alone (its lease expired).
+        mgr.note_device_fetch("vol2", 12, 0x6);
+        mgr.forget_device_notify_client("vol2", 11);
+        sq.flush().await.unwrap();
+        assert_eq!(backend.device_notify_list("vol2").await.unwrap(), vec![(12, 0x6)]);
+    }
+
+    /// THE REGRESSION FOR THE MEASURED BUG (`EXPAND=1 MDS_BOUNCE=1`):
+    /// the book must survive the MDS process. A second LayoutManager
+    /// over the same backend is what a restart looks like from here —
+    /// and before this was durable it came up empty, so the expand that
+    /// followed notified nobody and the application got EIO on a volume
+    /// that had the space.
+    #[tokio::test]
+    async fn the_notify_book_survives_a_new_layout_manager_over_the_same_state() {
+        let sq = Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let backend: Arc<dyn crate::state_backend::StateBackend> = Arc::clone(&sq) as _;
+        {
+            let mgr = LayoutManager::new(
+                Arc::new(DeviceRegistry::new()),
+                ConfigLayoutPolicy::RoundRobin,
+                1 << 20,
+                Arc::clone(&backend),
+            );
+            mgr.note_device_fetch("vol", 42, 0x6);
+            sq.flush().await.unwrap();
+        }
+        let restarted = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            ConfigLayoutPolicy::RoundRobin,
+            1 << 20,
+            Arc::clone(&backend),
+        );
+        assert_eq!(
+            backend.device_notify_list("vol").await.unwrap(),
+            vec![(42, 0x6)],
+            "the restarted MDS must still know who cached this device"
+        );
+        // No callback channel attached, so nothing is sent — but the
+        // target was FOUND, which is the half that used to be lost.
+        assert_eq!(restarted.notify_device_changed("vol").await, (0, 0));
     }
 
     /// With no callback channel attached — every unit-test shape, and a
@@ -3502,7 +3581,7 @@ mod tests {
     async fn device_notify_without_a_callback_channel_is_a_noop() {
         let registry = Arc::new(DeviceRegistry::new());
         let mgr = stripe_mgr(&registry, 1 << 20);
-        mgr.note_device_fetch("vol", crate::nfs::v4::protocol::SessionId([3u8; 16]), 0x6);
+        mgr.note_device_fetch("vol", 3, 0x6);
         assert_eq!(mgr.notify_device_changed("vol").await, (0, 0));
     }
 

@@ -500,18 +500,22 @@ recovery over sqlite.
 
 ## Known residuals (fix work tracked in the durable-DS plan)
 
-- **OPEN: expanding a block volume after an MDS restart gives the
-  application EIO.** Measured 2026-08-12 (`EXPAND=1 MDS_BOUNCE=1` vs the
-  same drill without the bounce). The MDS remembers which clients cached
-  a volume's pNFS device only in memory, so after a restart the expand
-  notifies nobody; the client keeps writing against the old size, the
-  MDS grants a layout it cannot use, and the fallback lane refuses —
+- **FIXED 2026-08-12: expanding a block volume after an MDS restart used
+  to give the application EIO.** Measured (`EXPAND=1 MDS_BOUNCE=1`
+  against the same drill without the bounce), then fixed and
+  re-measured. The MDS remembered which clients had cached a volume's
+  pNFS device only in memory, so after a restart the expand notified
+  nobody; the client kept writing against the old size, the MDS granted
+  a layout it could not use, and the fallback lane refused —
   `MDS I/O on scsi-class file '<vol>/<file>' refused (NFS4ERR_IO)`
-  repeating in the MDS log is the signature. The capacity is real and
-  nothing is corrupted. **Workaround: remount the volume** (unmount and
-  mount, or restart the consuming pod) — the fresh GETDEVICEINFO picks up
-  the new size. Expanding *without* an intervening MDS restart is
-  unaffected and stays online.
+  repeating in the MDS log is the signature on older builds. The
+  capacity was real and nothing was corrupted; **remounting the volume**
+  recovered it. That record is now durable and keyed on the CLIENT
+  (`device_notify`), and the MDS reaches each client through whatever
+  session it holds after the restart, so expansion stays online across
+  an MDS bounce. **Schema bumped to 10** — flint has no migrations, so
+  an MDS state DB written by an older build is refused at startup with
+  instructions.
 
 - **FIXED 2026-08-11: a block client that returned its layout before
   committing lost the uncommitted tail.** The Linux client writes

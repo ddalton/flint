@@ -800,24 +800,23 @@ fi
 #       the chain no unit test can stand in for), the ceiling rises, and
 #       the same mount writes past the old ceiling with the bytes intact.
 #
-# MDS_BOUNCE=1 — restart the MDS between the device fetch and the expand.
-# **THIS MODE CURRENTLY FAILS, AND THAT IS THE POINT**: it is the drill
-# for a known residual, kept red until the fix lands (measured
-# 2026-08-12, both arms in one session).
-#   control (EXPAND=1):             1 client took CB_NOTIFY_DEVICEID,
-#                                   same mount wrote past the old ceiling.
-#   bounce  (EXPAND=1 MDS_BOUNCE=1): 0 notifications, and the write failed
-#                                   with EIO — 52 zeros-belt refusals as
-#                                   the client fell back to the MDS lane.
-# The MDS log says exactly why, and it decides how the fix must be keyed:
-# startup logs "observed 1 persisted sessions ... dropped them so kernel
+# MDS_BOUNCE=1 — restart the MDS between the device fetch and the expand,
+# then expand. The drill that found the bug and now guards the fix
+# (measured 2026-08-12, both arms in one session):
+#   before: 0 notifications, and the write failed with EIO — 52
+#           zeros-belt refusals as the client fell back to the MDS lane
+#           on a volume that had the space.
+#   after:  1 notification accepted, same mount wrote past the old
+#           ceiling sha-intact, exactly like the un-bounced control.
+# The MDS log says why the fix had to be keyed on the CLIENT: startup
+# logs "observed N persisted sessions ... dropped them so kernel
 # re-CREATE_SESSIONs naturally on BADSESSION", the client then does
-# CREATE_SESSION with a NEW session id and its EXISTING clientid (no
+# CREATE_SESSION with a NEW session id under its EXISTING clientid (no
 # EXCHANGE_ID at all), and issues NO fresh GETDEVICEINFO — so its cached
-# blocklayout device outlives the session that fetched it, while the
-# `device_notify` book (keyed on SessionId, in memory) is gone twice
-# over. A durable book keyed on SessionId would be dead on arrival; the
-# client id is the stable identity.
+# blocklayout device outlives the session that fetched it. A durable
+# book keyed on SessionId would have restored dead addresses; the client
+# id is what both sides still agree on, and the session is resolved at
+# send time from live state.
 if [ "${EXPAND:-0}" = "1" ]; then
   # Derived, not spelled out: cleanup() tears these down by the same
   # "-e" suffix rule, and two independent spellings would drift.
@@ -970,17 +969,8 @@ print(b['block_size'] * b['num_blocks'])")
   vsh "dd if=/dev/urandom of=/var/tmp/rig-e.bin bs=1M count=16 status=none"
   E_SHA=$(vsh "sha256sum /var/tmp/rig-e.bin" | awk '{print $1}')
   NOTIFIED=$(vsh "grep -c 'CB_NOTIFY_DEVICEID ← .*accepted' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
-  if [ "${MDS_BOUNCE:-0}" = "1" ]; then
-    # An OBSERVATION here, not an assertion: whether the notification
-    # went out is the mechanism, and the experiment is about the
-    # OUTCOME. A zero with a passing E2c would mean the client refreshes
-    # itself and the address book's loss costs nothing.
-    echo "· E2c(bounce): CB_NOTIFY_DEVICEID accepted count = ${NOTIFIED:-0}"
-    echo "  $(vsh "grep -i 'notify_deviceid\|NOTIFY_DEVICEID' $RIG/mds.log | tail -2" || true)"
-  else
-    [ "${NOTIFIED:-0}" -ge 1 ] \
-      || fail "no client ACCEPTED a CB_NOTIFY_DEVICEID — $(vsh "grep -i 'notify_deviceid' $RIG/mds.log | tail -3")"
-  fi
+  [ "${NOTIFIED:-0}" -ge 1 ] \
+    || fail "no client ACCEPTED a CB_NOTIFY_DEVICEID${MDS_BOUNCE:+ (after the MDS bounce — the durable notify book did not survive, or the client could not be reached through its NEW session)} — $(vsh "grep -i 'notify_deviceid' $RIG/mds.log | tail -3")"
   set +e
   SAME_ERR=$(vsudo "cp /var/tmp/rig-e.bin $MNTE/after-expand.bin 2>&1 >/dev/null")
   SAME_RC=$?

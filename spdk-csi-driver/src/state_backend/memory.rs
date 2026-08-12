@@ -94,6 +94,10 @@ impl StateBackend for MemoryBackend {
             WriteOp::DeleteVolumeGeometry(v) => {
                 self.volume_geometry.remove(&v);
             }
+            // Device notifications exist only for the scsi class, which
+            // this backend refuses outright — so there is nothing to
+            // remember and nothing to forget.
+            WriteOp::PutDeviceNotify(_) | WriteOp::DeleteDeviceNotify(..) => {}
             WriteOp::PutFhMapping(m) => {
                 self.fh_mappings.insert(m.file_id, m);
             }
@@ -461,6 +465,27 @@ impl StateBackend for MemoryBackend {
         // Detach replays are tolerated everywhere; a backend that can
         // hold no block volumes has nothing to detach.
         Ok(Ok((false, Vec::new())))
+    }
+
+    async fn device_notify_put(
+        &self,
+        _rec: &crate::state_backend::DeviceNotifyRecord,
+    ) -> StateBackendResult<()> {
+        Ok(())
+    }
+
+    async fn device_notify_list(&self, _volume: &str) -> StateBackendResult<Vec<(u64, u32)>> {
+        // Empty is truthful: a block-class volume cannot exist here, so
+        // no client can have cached one of its devices.
+        Ok(Vec::new())
+    }
+
+    async fn device_notify_forget(
+        &self,
+        _volume: &str,
+        _client_id: Option<u64>,
+    ) -> StateBackendResult<()> {
+        Ok(())
     }
 
     async fn block_initiators(

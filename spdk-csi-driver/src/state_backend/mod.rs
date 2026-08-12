@@ -296,6 +296,25 @@ pub struct LayoutRecord {
 /// keep their pinned placements. It changes only how files not yet
 /// created are striped, which is why the loss is worth a loud WARN
 /// rather than a refusal to serve.
+/// A client that fetched a block volume's pNFS device and asked to be
+/// told when it changes — the durable half of CB_NOTIFY_DEVICEID.
+///
+/// Keyed on the client, not the session: the session a client fetched
+/// under does not survive an MDS restart (startup drops persisted
+/// sessions on purpose so the kernel re-CREATE_SESSIONs), while its
+/// cached device does. See the `device_notify` schema comment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceNotifyRecord {
+    pub volume: String,
+    /// NFSv4 client id — the same u64 the volume's reservation key is.
+    pub client_id: u64,
+    /// The notification types GRANTED at GETDEVICEINFO (a subset of what
+    /// the client requested). Sending a type the client did not ask for
+    /// is a protocol violation, so this travels with the address.
+    pub notify_mask: u32,
+    pub fetched_unix: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeGeometryRecord {
     /// Volume directory name under the MDS export — the first component
@@ -401,6 +420,9 @@ pub enum WriteOp {
     DeletePlacement(String),
     PutVolumeGeometry(VolumeGeometryRecord),
     DeleteVolumeGeometry(String),
+    PutDeviceNotify(DeviceNotifyRecord),
+    /// Forget a volume's notify book (DeleteVolume), or one client's row.
+    DeleteDeviceNotify(String, Option<u64>),
     PutFhMapping(FhMappingRecord),
     DeleteFhMapping(u64),
 }
@@ -418,6 +440,8 @@ pub enum WriteOpKey {
     Placement(String),
     VolumeGeometry(String),
     FhMapping(u64),
+    /// `None` = the whole volume's book (DeleteVolume).
+    DeviceNotify(String, Option<u64>),
 }
 
 impl WriteOp {
@@ -437,6 +461,8 @@ impl WriteOp {
             WriteOp::DeletePlacement(k) => WriteOpKey::Placement(k.clone()),
             WriteOp::PutVolumeGeometry(g) => WriteOpKey::VolumeGeometry(g.volume.clone()),
             WriteOp::DeleteVolumeGeometry(v) => WriteOpKey::VolumeGeometry(v.clone()),
+            WriteOp::PutDeviceNotify(r) => WriteOpKey::DeviceNotify(r.volume.clone(), Some(r.client_id)),
+            WriteOp::DeleteDeviceNotify(v, c) => WriteOpKey::DeviceNotify(v.clone(), *c),
             WriteOp::PutFhMapping(m) => WriteOpKey::FhMapping(m.file_id),
             WriteOp::DeleteFhMapping(id) => WriteOpKey::FhMapping(*id),
         }
@@ -459,6 +485,8 @@ impl WriteOp {
             WriteOp::DeletePlacement(_) => "placement.delete",
             WriteOp::PutVolumeGeometry(_) => "volume_geometry.put",
             WriteOp::DeleteVolumeGeometry(_) => "volume_geometry.delete",
+            WriteOp::PutDeviceNotify(_) => "device_notify.put",
+            WriteOp::DeleteDeviceNotify(..) => "device_notify.delete",
             WriteOp::PutFhMapping(_) => "fh_mapping.put",
             WriteOp::DeleteFhMapping(_) => "fh_mapping.delete",
         }
@@ -732,6 +760,22 @@ pub trait StateBackend: Send + Sync {
     ///
     /// Cross-volume by design: the roller asks about a NODE, and a node
     /// hosts one target serving every block volume on the shard.
+    /// Record that `client_id` cached `volume`'s pNFS device and which
+    /// notifications it accepted. Idempotent; the newest mask wins.
+    async fn device_notify_put(&self, rec: &DeviceNotifyRecord) -> StateBackendResult<()>;
+
+    /// Everyone to tell when `volume`'s device changes: `(client_id,
+    /// notify_mask)`. The session is NOT here — it is resolved at send
+    /// time, because a back-channel cannot be persisted.
+    async fn device_notify_list(&self, volume: &str) -> StateBackendResult<Vec<(u64, u32)>>;
+
+    /// Forget one client's row, or the whole volume's book (`None`).
+    async fn device_notify_forget(
+        &self,
+        volume: &str,
+        client_id: Option<u64>,
+    ) -> StateBackendResult<()>;
+
     async fn block_initiators(
         &self,
     ) -> StateBackendResult<Result<Vec<extent_alloc::BlockInitiatorRow>, extent_alloc::ExtentAllocError>>;

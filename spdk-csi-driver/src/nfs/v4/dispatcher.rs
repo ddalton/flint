@@ -3201,9 +3201,12 @@ impl CompoundDispatcher {
             let requested = _notify_types.first().copied().unwrap_or(0);
             let granted = requested & (dnt::CHANGE | dnt::DELETE);
             if granted != 0 {
-                if let Some(sid) = context.session_id {
-                    pnfs.note_scsi_device_fetch(&volume, sid, granted);
-                }
+                // `pr_key` IS the client id (resolved from the session
+                // just above) — and the client id is deliberately what
+                // the address book keys on: the session that fetched is
+                // gone after an MDS restart, the client and its cached
+                // device are not.
+                pnfs.note_scsi_device_fetch(&volume, pr_key, granted);
             }
             info!(
                 "📡 GETDEVICEINFO (scsi): volume '{}' → BASE/NGUID device \

@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// One request to the writer thread.
 enum Req {
@@ -607,6 +607,32 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
             conn.prepare_cached("DELETE FROM volume_geometry WHERE volume = ?1")?
                 .execute(params![v])?;
         }
+        WriteOp::PutDeviceNotify(r) => {
+            conn.prepare_cached(
+                "INSERT INTO device_notify (volume, client_id, notify_mask, fetched_unix)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (volume, client_id)
+                 DO UPDATE SET notify_mask = ?3, fetched_unix = ?4",
+            )?
+            .execute(params![
+                r.volume,
+                u64_to_i64(r.client_id),
+                r.notify_mask as i64,
+                r.fetched_unix
+            ])?;
+        }
+        WriteOp::DeleteDeviceNotify(v, client) => match client {
+            Some(c) => {
+                conn.prepare_cached(
+                    "DELETE FROM device_notify WHERE volume = ?1 AND client_id = ?2",
+                )?
+                .execute(params![v, u64_to_i64(*c)])?;
+            }
+            None => {
+                conn.prepare_cached("DELETE FROM device_notify WHERE volume = ?1")?
+                    .execute(params![v])?;
+            }
+        },
         WriteOp::PutFhMapping(m) => {
             conn.prepare_cached("INSERT OR REPLACE INTO fh_mappings (file_id, path) VALUES (?1, ?2)")?
                 .execute(params![u64_to_i64(m.file_id), m.path])?;
@@ -1022,6 +1048,42 @@ impl StateBackend for SqliteBackend {
 
     async fn delete_volume_geometry(&self, volume: &str) -> StateBackendResult<()> {
         self.write(WriteOp::DeleteVolumeGeometry(volume.to_string())).await
+    }
+
+    async fn device_notify_put(
+        &self,
+        rec: &crate::state_backend::DeviceNotifyRecord,
+    ) -> StateBackendResult<()> {
+        self.write(WriteOp::PutDeviceNotify(rec.clone())).await
+    }
+
+    async fn device_notify_list(&self, volume: &str) -> StateBackendResult<Vec<(u64, u32)>> {
+        let v = volume.to_string();
+        let rows: Vec<(i64, i64)> = self
+            .with_conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT client_id, notify_mask FROM device_notify WHERE volume = ?1
+                     ORDER BY client_id",
+                )?;
+                let out = stmt
+                    .query_map(params![v], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(out)
+            })
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(c, m)| (i64_to_u64(c), m as u32))
+            .collect())
+    }
+
+    async fn device_notify_forget(
+        &self,
+        volume: &str,
+        client_id: Option<u64>,
+    ) -> StateBackendResult<()> {
+        self.write(WriteOp::DeleteDeviceNotify(volume.to_string(), client_id))
+            .await
     }
 
     async fn delete_placement(&self, file_key: &str) -> StateBackendResult<()> {
@@ -1767,6 +1829,31 @@ CREATE TABLE IF NOT EXISTS file_placement (
     -- the pre-truncate bytes. -1 = no cut pending.
     truncate_pending INTEGER NOT NULL DEFAULT -1,
     truncate_since_unix INTEGER NOT NULL DEFAULT -1
+);
+
+-- Who has cached a block volume's pNFS device, so an expand can tell
+-- them it changed (CB_NOTIFY_DEVICEID). Keyed on the CLIENT, never the
+-- session, and the difference is the whole reason this table exists:
+-- startup deliberately drops persisted sessions so the kernel
+-- re-CREATE_SESSIONs on BADSESSION, and the client comes back with a
+-- NEW session id under its EXISTING clientid — while its cached
+-- blocklayout device (whose LENGTH is snapshotted from the bdev at
+-- parse time, fs/nfs/blocklayout/dev.c) survives untouched. A
+-- session-keyed record would restore addresses that provably no longer
+-- exist; the client id is what both sides still agree on. Measured
+-- before it was built: without this, an expand after an MDS restart
+-- notified nobody and the application got EIO on a volume that had the
+-- space (`EXPAND=1 MDS_BOUNCE=1`).
+--
+-- notify_mask is the intersection the server GRANTED at GETDEVICEINFO
+-- (never more than the client asked for). The session is resolved at
+-- SEND time from live state — a back-channel cannot be persisted.
+CREATE TABLE IF NOT EXISTS device_notify (
+    volume TEXT NOT NULL,
+    client_id INTEGER NOT NULL,
+    notify_mask INTEGER NOT NULL,
+    fetched_unix INTEGER NOT NULL,
+    PRIMARY KEY (volume, client_id)
 );
 
 CREATE TABLE IF NOT EXISTS instance_counter (

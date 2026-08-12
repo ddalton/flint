@@ -269,13 +269,13 @@ pub trait PnfsOperations: Send + Sync {
     /// it had returned every layout and still served stale device
     /// geometry from its cache), so "who holds a layout" cannot answer
     /// "who believes something about this device".
-    fn note_scsi_device_fetch(
-        &self,
-        _volume: &str,
-        _session_id: crate::nfs::v4::protocol::SessionId,
-        _notify_mask: u32,
-    ) {
-    }
+    /// Keyed on the CLIENT id, not the session that fetched: the
+    /// session does not survive an MDS restart (startup drops persisted
+    /// sessions so the kernel re-CREATE_SESSIONs), the client id does,
+    /// and the client's cached device survives both. Measured — before
+    /// this was client-keyed and durable, an expand after a restart
+    /// notified nobody and the application got EIO.
+    fn note_scsi_device_fetch(&self, _volume: &str, _client_id: u64, _notify_mask: u32) {}
 
     /// Mint and register the recall handle for a scsi grant (the
     /// stateid CB_LAYOUTRECALL and LAYOUTRETURN address; the allocator's

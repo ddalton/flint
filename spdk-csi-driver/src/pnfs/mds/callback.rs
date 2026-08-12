@@ -327,6 +327,45 @@ impl CallbackManager {
     /// dead session, or a refusal leaves the volume in the documented
     /// "recycle the mount" state. It never affects the expand's own
     /// success — the capacity IS there either way.
+    /// Reach a CLIENT rather than a session: try each session the client
+    /// currently holds until one has a back-channel and answers.
+    ///
+    /// This is the resolution step that lets the notify address book be
+    /// durable. A back-channel is a live TCP writer and can never be
+    /// persisted; a session id does not survive an MDS restart either
+    /// (startup drops persisted sessions so the kernel re-CREATE_SESSIONs
+    /// on BADSESSION). The client id survives both, so the book records
+    /// the client and the session is looked up HERE, from live state, at
+    /// the moment of sending.
+    ///
+    /// Trying every session matters for the same reason: after a restart
+    /// or a trunked mount, the session that fetched the device is not
+    /// the session that can be reached now.
+    pub async fn send_notify_deviceid_to_client(
+        &self,
+        client_id: u64,
+        layout_type: u32,
+        deviceid: [u8; 16],
+        notify_type: u32,
+    ) -> Result<CbCompoundReply, CallbackError> {
+        let sessions = self.state_mgr.sessions.get_client_sessions(client_id);
+        if sessions.is_empty() {
+            debug!("CB_NOTIFY_DEVICEID: client {} holds no session", client_id);
+            return Err(CallbackError::ConnectionClosed);
+        }
+        let mut last = CallbackError::ConnectionClosed;
+        for sid in &sessions {
+            match self
+                .send_notify_deviceid(sid, layout_type, deviceid, notify_type)
+                .await
+            {
+                Ok(reply) => return Ok(reply),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
     pub async fn send_notify_deviceid(
         &self,
         session_id: &SessionId,
@@ -1057,6 +1096,92 @@ mod tests {
             "the CALL must actually carry op 14"
         );
         mock_client.await.unwrap();
+    }
+
+    /// THE RESOLUTION STEP THE DURABLE NOTIFY BOOK RESTS ON: address a
+    /// CLIENT and reach it through whatever session it holds NOW.
+    ///
+    /// This is exactly the post-restart shape. The book remembers client
+    /// 42; the session it originally fetched under is gone (startup
+    /// drops persisted sessions so the kernel re-CREATE_SESSIONs), and
+    /// the client is now on a different session id with the only live
+    /// back-channel. Sending to the remembered session would fail; the
+    /// client-addressed send must find the new one.
+    #[tokio::test]
+    async fn a_client_is_reached_through_whatever_session_it_holds_now() {
+        let (writer, server_read, client_read, mut client_write) = pair().await;
+        let (state_mgr, dead_session) = fixture_state(0x40000000);
+
+        // The client re-established: a SECOND session for client 42,
+        // and only THAT one has a back-channel.
+        let live = state_mgr.sessions.create_session(
+            42, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None, 1,
+        );
+        assert_ne!(live.session_id, dead_session);
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(live.session_id, vec![Arc::clone(&writer)]);
+        let cb_mgr = CallbackManager::new(Arc::clone(&back_channels), Arc::clone(&state_mgr))
+            .with_timeout(Duration::from_secs(5));
+
+        // The remembered session cannot be reached at all.
+        assert!(cb_mgr
+            .send_notify_deviceid(
+                &dead_session,
+                5,
+                [0x5au8; 16],
+                crate::nfs::v4::cb_compound::deviceid_notify_type::CHANGE,
+            )
+            .await
+            .is_err());
+
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+        let mock_client = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let call = read_record(&mut r).await;
+            let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+            let mut enc = XdrEncoder::new();
+            enc.encode_u32(xid);
+            enc.encode_u32(MessageType::Reply as u32);
+            enc.encode_u32(ReplyStatus::Accepted as u32);
+            enc.encode_u32(AuthFlavor::Null as u32);
+            enc.encode_opaque(&[]);
+            enc.encode_u32(AcceptStatus::Success as u32);
+            enc.encode_u32(Nfs4Status::Ok.to_u32());
+            enc.encode_opaque(&[]);
+            enc.encode_u32(2);
+            enc.encode_u32(cb_opcode::CB_SEQUENCE);
+            enc.encode_u32(Nfs4Status::Ok.to_u32());
+            for _ in 0..8 {
+                enc.encode_u32(0);
+            }
+            enc.encode_u32(cb_opcode::CB_NOTIFY_DEVICEID);
+            enc.encode_u32(Nfs4Status::Ok.to_u32());
+            write_record(&mut client_write, enc.finish()).await;
+        });
+
+        let reply = cb_mgr
+            .send_notify_deviceid_to_client(
+                42,
+                5,
+                [0x5au8; 16],
+                crate::nfs::v4::cb_compound::deviceid_notify_type::CHANGE,
+            )
+            .await
+            .expect("the client is reachable through its CURRENT session");
+        assert_eq!(reply.status, Nfs4Status::Ok);
+        mock_client.await.unwrap();
+
+        // A client that holds no session at all is an error, not a
+        // silent success — the caller counts accepted vs attempted.
+        assert!(cb_mgr
+            .send_notify_deviceid_to_client(
+                999,
+                5,
+                [0x5au8; 16],
+                crate::nfs::v4::cb_compound::deviceid_notify_type::CHANGE,
+            )
+            .await
+            .is_err());
     }
 
     /// AUDIT C2. RFC 8881 §2.10.6.1: each reuse of a back-channel slot

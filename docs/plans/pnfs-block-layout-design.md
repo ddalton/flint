@@ -1162,8 +1162,8 @@ Each phase ships standalone value; none is gated on the next.
   at write time, where the errno is an lvol-level failure and not this ENOSPC path),
   capacity-aware placement across shards, and the client-side refresh
   (CB_NOTIFY_DEVICEID) that would make expansion online end to end.
-- **An MDS restart makes the next expand fail with EIO — MEASURED
-  2026-08-12, not inferred.** The device-notify address book
+- **An MDS restart made the next expand fail with EIO — MEASURED
+  2026-08-12, and FIXED the same day.** The device-notify address book
   (`LayoutManager.device_notify`) is an in-memory map of which sessions
   fetched which volume's device. `EXPAND=1 MDS_BOUNCE=1` bounces the MDS
   between the fetch and the expand, against the identical drill without
@@ -1182,15 +1182,39 @@ Each phase ships standalone value; none is gated on the next.
   persisting the book as it stands, keyed on `SessionId`, would restore
   addresses that provably no longer exist; and deriving targets from
   layout holders cannot work either, since the dangerous client holds no
-  layout. The workable shape is a durable record keyed on the CLIENT
-  (stable across the restart) with the session resolved at send time from
-  live state. A larger alternative worth weighing first: make the
-  deviceid generation-stamped (`hash(volume, gen)`, bumped on expand) so
-  new space is only reachable through a LAYOUTGET that returns an
-  unseen deviceid, forcing a fetch — which removes the address book, the
-  durability and the back-channel dependency from the correctness path
-  altogether, at the cost of verifying that the Linux client tolerates
-  two `pnfs_block_dev` objects over one namespace.
+  layout.
+  **Shipped exactly that**: `device_notify(volume, client_id, notify_mask,
+  fetched_unix)` (schema 10), written at GETDEVICEINFO, read at expand,
+  with the session resolved at send time by
+  `CallbackManager::send_notify_deviceid_to_client` — which tries every
+  session the client holds NOW, because after a restart that is never
+  the session that fetched. Rows are dropped when the volume goes away or
+  the client's lease expires, and **never because a send failed**: right
+  after a restart a live client has no back-channel yet, and pruning
+  there would re-create the bug. Same drill, after: 1 notification
+  accepted, same mount wrote past the old ceiling sha-intact
+  (`make test-pnfs-expand-bounce-rig`).
+  **The alternative was investigated and REJECTED on kernel evidence.**
+  Generation-stamping the deviceid (`hash(volume, gen)`, bumped on
+  expand) would have removed the book, its durability and the
+  back-channel from the correctness path — but the SCSI device object
+  owns the PR key registration: `bl_register_scsi` registers
+  (`pr_register(bdev, 0, dev->pr_key, true)`) on every deviceid
+  resolution, and `bl_free_device` **unregisters unconditionally**
+  (`fs/nfs/blocklayout/dev.c:23,39`; `blocklayout.c:592`). Two device
+  objects for one namespace carrying the same per-client `pr_key` means
+  freeing the stale one unregisters the key the live one still needs,
+  and the live object keeps its `PNFS_BDEV_REGISTERED` bit so it never
+  re-registers — silently turning a registrant into a non-registrant.
+  That is precisely the property multi-rig M4c proved (host A wrote
+  THROUGH B's fence *because* it was a registrant under EA-RO). Distinct
+  keys per generation would fix it only by making a fence preempt every
+  key a client holds, which `fenced_clients` and the preempt path are
+  not built for. The open half of the *open* was fine — `bl_open_path`
+  passes a NULL holder (`dev.c:373`), so two objects over one bdev
+  coexist — and `d->len = bdev_nr_bytes(bdev)` (`dev.c:416`) confirms the
+  cached length is snapshotted from the kernel's bdev view at parse time,
+  which is why only a re-parse fixes it.
 - **LAYOUTCOMMIT after LAYOUTRETURN — FIXED 2026-08-11 (commit-grace tranche).**
   Found by the zombie drill 2026-08-11 (pre-existing — the rule dates from the
   allocator's first commit, 4afb9b2). `extent_alloc::commit` validates against a LIVE
