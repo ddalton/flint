@@ -99,6 +99,26 @@ CSI CLI. Modes are standing regression harnesses (`make test-pnfs-*-rig`).
   not looking* — a dead API server made never-observed oracles pass silently
   (runaq/runar). Assert the observation happened, not just that no error was
   seen.
+- **A drill's own config can hide the bug.** The callback channel was broken
+  for every production mount — flint mounts `vers=4.2`, and the CB_COMPOUND
+  header hardcoded `minorversion: 1`, which Linux resolves clients by, so every
+  callback answered NFS4ERR_BADSESSION before the op was read. The one drill
+  that exercises recalls mounts `minorversion=1`, so it passed for years. Match
+  the drill's configuration to production, or state explicitly which production
+  shape it is NOT covering.
+- **The client's own debug log is a first-class oracle.** Two wire-format
+  refusals (NFS4ERR_INVAL, NFS4ERR_BADSESSION) were opaque from the server side
+  and instantly legible from the kernel's: `echo 0x1100 >
+  /proc/sys/sunrpc/nfs_debug` then `dmesg` gave the decoder's own verdict
+  (`decode_devicenotify_args: status 22 ndevs 0` → and after the fix, `type 2
+  layout 0x5` plus `bl_free_deviceid_node`, the cache drop we were paying for).
+  `rpcdebug` itself buffer-overflows on modern userland; write the sysctl.
+- **Read the client's constants, not just the RFC.** RFC 8881 declares
+  `NOTIFY_DEVICEID4_CHANGE = 1`; Linux defines it as `1 << 1` because every
+  transmission of it is a bitmap, and its decoder compares the received word
+  against *its* constant. The RFC's ordinal on the wire is refused. When a
+  wire value has an obvious reading and a deployed implementation, pin the
+  deployed one in a byte-level test with the source citation.
 - **`grep -q` + `pipefail` = SIGPIPE false negatives** in drill asserts — use
   `grep -c`. Never pipe a drill through `tail` (runag/runai).
 - **Never `nvme disconnect` under a fenced writer's in-flight O_DIRECT pwrite**

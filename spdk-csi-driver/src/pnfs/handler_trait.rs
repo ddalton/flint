@@ -261,6 +261,22 @@ pub trait PnfsOperations: Send + Sync {
         None
     }
 
+    /// Record that a session fetched a scsi volume's device and which
+    /// notifications it accepts — the CB_NOTIFY_DEVICEID address book.
+    ///
+    /// Kept separately from layout state on purpose: the client that
+    /// needs telling is often NOT a layout holder (in the expand case
+    /// it had returned every layout and still served stale device
+    /// geometry from its cache), so "who holds a layout" cannot answer
+    /// "who believes something about this device".
+    fn note_scsi_device_fetch(
+        &self,
+        _volume: &str,
+        _session_id: crate::nfs::v4::protocol::SessionId,
+        _notify_mask: u32,
+    ) {
+    }
+
     /// Mint and register the recall handle for a scsi grant (the
     /// stateid CB_LAYOUTRECALL and LAYOUTRETURN address; the allocator's
     /// grant rows remain the authority on what the client holds).

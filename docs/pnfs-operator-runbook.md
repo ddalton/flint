@@ -292,21 +292,21 @@ re-drives rather than leaving the PVC half-expanded.
   and the MDS answers NFS4ERR_NOSPC once the arena is exhausted. The
   MDS logs `🈵 WRITE through MDS for block volume '<v>' with an
   EXHAUSTED extent arena`; that line is the signal to expand the PVC.
-- **THE CONSUMER MUST BE RESTARTED TO USE THE NEW SPACE.** The lvol
-  grows online, the client kernel even picks the bigger NVMe namespace
-  up (SPDK's resize AEN → rescan; `/sys/block/<dev>/size` grows), but
-  the NFS client caches the pNFS **block device**, its length included,
-  from GETDEVICEINFO — and it re-reads that only when its device cache
-  is dropped. Until then every layout past the old ceiling is granted
-  by the server and immediately returned by the client, which then
-  writes through the MDS lane and gets EIO. Recycling the mount (pod
-  restart / re-stage) fixes it instantly. Rig-proven both directions
-  (`make test-pnfs-expand-rig`, kernel 7.0.0-28). The clean fix is
-  CB_NOTIFY_DEVICEID — the client asks for it (`notify_types=[6]` =
-  CHANGE|DELETE, visible in the MDS's GETDEVICEINFO log line) and we
-  currently decline with an empty notification bitmap; until we send
-  it, treat block expansion as **offline expansion** and schedule the
-  pod restart with the resize.
+- **Expansion is online — no pod restart.** The lvol grows, the client
+  kernel picks the bigger NVMe namespace up by itself (SPDK's resize
+  AEN → rescan; `/sys/block/<dev>/size` grows), and the MDS sends
+  **CB_NOTIFY_DEVICEID** to every client that fetched the volume's
+  device so it drops its cached copy — otherwise the client keeps the
+  device's OLD length, returns every layout past the old ceiling, and
+  writes through the MDS lane for EIO. Rig-proven end to end
+  (`make test-pnfs-expand-rig`, kernel 7.0.0-28).
+  - Watch for `📢 ExpandVolume: N/M client(s) accepted CB_NOTIFY_DEVICEID`.
+    `N < M` is a WARN and names the residual: those mounts keep the old
+    capacity until they are recycled (pod restart), everything else is
+    unaffected. A client with no back-channel — or one that never
+    fetched the device — is not a subscriber and needs nothing.
+  - The notification is best-effort by design: it never fails the
+    expand. The capacity is real either way.
 
 Deleting striped data frees DS space immediately: the heartbeat-borne
 stripe cleanup both unlinks the stripe file and evicts the DS's cached

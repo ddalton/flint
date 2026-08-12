@@ -70,6 +70,45 @@ pub enum CbOp {
         changed: bool,
         recall: LayoutRecall,
     },
+    /// `CB_NOTIFY_DEVICEID` (RFC 8881 §20.12) — tell the client that a
+    /// device it fetched with GETDEVICEINFO has changed or gone, so it
+    /// drops the cached copy and re-fetches. The block class needs this
+    /// for online expansion: the client caches the device's LENGTH, and
+    /// without a notification a grown volume stays invisible to it
+    /// until its device cache is dropped some other way (design doc §7).
+    NotifyDeviceId { changes: Vec<DeviceIdNotify> },
+}
+
+/// One entry of `CB_NOTIFY_DEVICEID4args.cnda_changes<>` — a `notify4`
+/// carrying a `notify_deviceid_change4` or `notify_deviceid_delete4`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceIdNotify {
+    /// `notify_deviceid_type4` AS TRANSMITTED — the bitmap bit, so
+    /// `deviceid_notify_type::CHANGE` (2) or `DELETE` (4), never the
+    /// RFC's enum ordinal. See that module for what the difference cost.
+    pub notify_type: u32,
+    pub layout_type: u32,
+    pub deviceid: [u8; 16],
+    /// `ndc_immediate` — CHANGE only; ignored for DELETE.
+    pub immediate: bool,
+}
+
+/// `notify_deviceid_type4` (RFC 8881 §3.3.7 / §20.12) — **as it appears
+/// on the wire**, which is not the enum's ordinal.
+///
+/// The RFC declares the enum as CHANGE = 1, DELETE = 2, but every place
+/// these values are transmitted is a `bitmap4` — the GETDEVICEINFO
+/// request/reply `notify_types`, and CB_NOTIFY_DEVICEID's
+/// `notify_mask` — so what travels is the BIT for the ordinal: 2 and 4.
+/// Linux encodes that into its own constants (`include/linux/nfs4.h`:
+/// `NOTIFY_DEVICEID4_CHANGE = 1 << 1`) and its callback decoder compares
+/// the received bitmap word against them directly, so an ordinal on the
+/// wire is rejected with NFS4ERR_INVAL. Rig-found: the first cut sent 1
+/// and the client refused it while cheerfully asking us for `[6]` — the
+/// same two bits — in its GETDEVICEINFO.
+pub mod deviceid_notify_type {
+    pub const CHANGE: u32 = 1 << 1;
+    pub const DELETE: u32 = 1 << 2;
 }
 
 /// Body of a `CB_LAYOUTRECALL` (the `clora_recall` discriminated
@@ -127,6 +166,11 @@ pub enum CbResult {
         /// not as a real error).
         status: Nfs4Status,
     },
+    /// `CB_NOTIFY_DEVICEID4res` — a bare status (`cnd_status`). INVAL
+    /// here means the client refused our encoding, which is the failure
+    /// mode worth naming: it is silent otherwise (the device stays
+    /// cached and the client just keeps using stale geometry).
+    NotifyDeviceId { status: Nfs4Status },
     /// Catch-all for any operation we sent but didn't model a typed
     /// result for. The caller can still see the status; a rich client
     /// might want to re-decode this lazily.
@@ -140,6 +184,7 @@ impl CbResult {
         match self {
             CbResult::Sequence { status, .. } => *status,
             CbResult::LayoutRecall { status } => *status,
+            CbResult::NotifyDeviceId { status } => *status,
             CbResult::OtherStatus { status, .. } => *status,
         }
     }
@@ -233,6 +278,33 @@ fn encode_cb_op(enc: &mut XdrEncoder, op: &CbOp) {
                     enc.encode_u32(layoutrecall_type::ALL);
                     // void payload
                 }
+            }
+        }
+        CbOp::NotifyDeviceId { changes } => {
+            enc.encode_u32(cb_opcode::CB_NOTIFY_DEVICEID);
+            enc.encode_u32(changes.len() as u32);
+            for c in changes {
+                // notify4.notify_mask is a bitmap4 that Linux's
+                // `decode_devicenotify_args` requires to be EXACTLY ONE
+                // word, carrying exactly one type's BIT (see
+                // `deviceid_notify_type` for why that is 2/4 and not
+                // 1/2). One notification per entry, so one bit per
+                // word; anything else is NFS4ERR_INVAL.
+                enc.encode_u32(1);
+                enc.encode_u32(c.notify_type);
+                // notify4.notify_vals: an opaque<> whose body is the
+                // notify_deviceid_{change,delete}4 struct. Linux checks
+                // this length EXACTLY: deviceid(16) + layouttype(4),
+                // plus 4 for CHANGE's ndc_immediate.
+                let is_change = c.notify_type == deviceid_notify_type::CHANGE;
+                enc.encode_u32(if is_change { 16 + 8 } else { 16 + 4 });
+                enc.encode_u32(c.layout_type);
+                // deviceid4 is a FIXED 16-byte array: no length prefix.
+                enc.encode_fixed_opaque(&c.deviceid);
+                if is_change {
+                    enc.encode_bool(c.immediate);
+                }
+                // Both bodies are 4-aligned, so the opaque needs no pad.
             }
         }
     }
@@ -485,6 +557,8 @@ fn decode_cb_result(dec: &mut XdrDecoder) -> Result<CbResult, CbReplyError> {
             // to parse.
             Ok(CbResult::LayoutRecall { status })
         }
+        // Same shape: CB_NOTIFY_DEVICEID4res is the status alone.
+        cb_opcode::CB_NOTIFY_DEVICEID => Ok(CbResult::NotifyDeviceId { status }),
         other => Ok(CbResult::OtherStatus {
             opcode: other,
             status,
@@ -585,6 +659,70 @@ mod tests {
         assert_eq!(dec.decode_u64().unwrap(), u64::MAX);
         assert_eq!(dec.decode_stateid().unwrap(), sample_layout_stateid());
         assert_eq!(dec.remaining(), 0, "no trailing bytes after CB_COMPOUND args");
+    }
+
+    /// CB_NOTIFY_DEVICEID, byte-for-byte against LINUX'S DECODER —
+    /// `fs/nfs/callback_xdr.c:decode_devicenotify_args`, which is
+    /// stricter than the RFC's prose and rejects everything it does not
+    /// expect with NFS4ERR_INVAL:
+    ///
+    ///   - bitmap length MUST be exactly 1 word;
+    ///   - that word is read as the notify_deviceid_type4 VALUE (1 or
+    ///     2), *not* as a mask of bit positions — even though the same
+    ///     client's GETDEVICEINFO request bitmap ([6]) is a mask;
+    ///   - the notify_vals opaque length MUST be exactly 24 for CHANGE
+    ///     (deviceid 16 + layouttype 4 + immediate 4) and 20 for DELETE.
+    ///
+    /// Get any of those wrong and the notification is refused silently
+    /// from the operator's point of view — the client simply keeps its
+    /// stale device. Hence a byte-level test rather than a round-trip
+    /// against our own encoder.
+    #[test]
+    fn notify_deviceid_matches_the_linux_decoders_exact_expectations() {
+        let deviceid = [0xa5u8; 16];
+        for (notify_type, want_len, has_immediate) in [
+            // CHANGE = 1<<1 = 2, body 16+4+4; DELETE = 1<<2 = 4, body
+            // 16+4. Both numbers are what the kernel decoder checks.
+            (2u32, 24u32, true),
+            (4u32, 20u32, false),
+        ] {
+            let call = CbCompoundCall {
+                tag: String::new(),
+                minorversion: 1,
+                callback_ident: 0,
+                ops: vec![CbOp::NotifyDeviceId {
+                    changes: vec![DeviceIdNotify {
+                        notify_type,
+                        layout_type: 5, // scsi
+                        deviceid,
+                        immediate: true,
+                    }],
+                }],
+            };
+            let mut dec = XdrDecoder::new(call.encode());
+            assert_eq!(dec.decode_string().unwrap(), "");
+            assert_eq!(dec.decode_u32().unwrap(), 1); // minorversion
+            assert_eq!(dec.decode_u32().unwrap(), 0); // callback_ident
+            assert_eq!(dec.decode_u32().unwrap(), 1); // one op
+
+            assert_eq!(dec.decode_u32().unwrap(), cb_opcode::CB_NOTIFY_DEVICEID);
+            assert_eq!(dec.decode_u32().unwrap(), 1, "one change entry");
+            assert_eq!(dec.decode_u32().unwrap(), 1, "bitmap MUST be one word");
+            assert_eq!(
+                dec.decode_u32().unwrap(),
+                notify_type,
+                "one bitmap word carrying the type's BIT (2=CHANGE, 4=DELETE)"
+            );
+            assert_eq!(dec.decode_u32().unwrap(), want_len, "notify_vals opaque length");
+            assert_eq!(dec.decode_u32().unwrap(), 5, "layout type");
+            let mut got = [0u8; 16];
+            got.copy_from_slice(&dec.decode_fixed_opaque(16).unwrap());
+            assert_eq!(got, deviceid, "deviceid4 is fixed-length: no length prefix");
+            if has_immediate {
+                assert!(dec.decode_bool().unwrap(), "ndc_immediate");
+            }
+            assert_eq!(dec.remaining(), 0, "no trailing bytes ({notify_type})");
+        }
     }
 
     /// Full RPC CALL frame: header is well-formed and addressable
@@ -796,6 +934,10 @@ mod tests {
                     enc.encode_u32(cb_opcode::CB_LAYOUTRECALL);
                     enc.encode_u32(status.to_u32());
                     // void union body
+                }
+                CbResult::NotifyDeviceId { status } => {
+                    enc.encode_u32(cb_opcode::CB_NOTIFY_DEVICEID);
+                    enc.encode_u32(status.to_u32());
                 }
                 CbResult::OtherStatus { opcode, status } => {
                     enc.encode_u32(*opcode);

@@ -258,6 +258,26 @@ impl MdsControlService {
                 Status::unavailable(format!("block volume {volume}: ceiling raise failed: {e}"))
             })?;
 
+        // Tell every client that cached this volume's device to drop it,
+        // so the new room is usable WITHOUT recycling the mount. Best
+        // effort and never fatal: the capacity is real either way, and a
+        // client that misses this falls back to the documented
+        // recycle-the-mount behaviour instead of a broken one.
+        let (notified, targets) = self.layout_manager.notify_device_changed(volume).await;
+        if targets > 0 {
+            info!(
+                "📢 ExpandVolume: {}/{} client(s) accepted CB_NOTIFY_DEVICEID for '{}'",
+                notified, targets, volume
+            );
+            if notified < targets {
+                warn!(
+                    "⚠️ ExpandVolume: {} client(s) did NOT take the device notification for \
+                     '{}' — those mounts keep the OLD capacity until they are recycled",
+                    targets - notified, volume
+                );
+            }
+        }
+
         info!(
             "📏 ExpandVolume: block volume {} → ceiling {} bytes (device {} bytes)",
             volume, ceiling, device_bytes
@@ -1043,6 +1063,11 @@ impl MdsControl for MdsControlService {
             // name must get the new StorageClass's geometry, not inherit
             // the old one the way a stale placement pin would.
             mgr.forget_volume_geometry(&req.volume_id);
+            // …and neither does the device-notification address book:
+            // the deviceid is derived from the volume NAME, so a
+            // re-created volume would otherwise inherit the dead one's
+            // subscribers and notify sessions that never fetched it.
+            mgr.forget_device_notify(&req.volume_id);
         };
 
         // Tear down the NVMe export chain FIRST — deleting the subsystem

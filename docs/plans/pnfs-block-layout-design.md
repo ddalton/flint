@@ -414,18 +414,43 @@ allowVolumeExpansion: true            # now a REAL allocation op — see below
 > SPDK turns the bdev resize into `nvmf_ns_resize` + the ns-changed AEN, and the kernel
 > rescans — `lib/nvmf/subsystem.c`, growth needs no I/O quiesce).
 >
-> **THE CAVEAT, rig-found: expansion is online at the server and OFFLINE at the
-> client.** After the expand the same mount could not use the new room — the server
-> granted layouts past the old ceiling, the client returned each one immediately and
-> wrote through the MDS lane instead, for every new file on that mount. The NFS client
-> caches the blocklayout **device** — its length included — from GETDEVICEINFO, and
-> extents past that length are unmappable. Recycling the mount drops the device cache
-> and the space is usable at once (A/B'd on the live rig with the nvme session
-> untouched, so it is the NFS device cache and not the block device). The clean fix is
-> **CB_NOTIFY_DEVICEID** (RFC 5661 §12.2.10): the Linux client ASKS for it —
-> `notify_types=[6]` = CHANGE|DELETE, now logged on every scsi GETDEVICEINFO — and we
-> decline with an empty notification bitmap. Until that ships, block expansion is
-> offline expansion (pod restart), documented in the operator runbook.
+> **THE CAVEAT THE DRILL FOUND — and then closed.** In the first runs the same mount
+> could NOT use the new room: the server granted layouts past the old ceiling, the
+> client returned each one immediately and wrote through the MDS lane instead, for
+> every new file on that mount. The NFS client caches the blocklayout **device** — its
+> length included — from GETDEVICEINFO, and extents past that length are unmappable.
+> Recycling the mount fixed it at once (A/B'd on the live rig with the nvme session
+> untouched, so it was the NFS device cache and not the block device).
+>
+> **CB_NOTIFY_DEVICEID (RFC 8881 §20.12) now ships, and expansion is online end to
+> end.** Every scsi GETDEVICEINFO records which session fetched the device and which
+> notifications it accepts (`gdia_notify_types`), the reply advertises the
+> intersection of that with what we send (never more — an advertised-but-unsent
+> notification would have the client trust a stale cache forever), and ExpandVolume
+> fans out one CB_NOTIFY_DEVICEID per subscriber after the ceiling rises. Linux's
+> `nfs4_callback_devicenotify` drops the cached deviceid for both CHANGE and DELETE,
+> so the next LAYOUTGET re-fetches it. Best-effort by construction: a client with no
+> back-channel or a refusal falls back to the old recycle-the-mount behaviour, and the
+> expand itself never fails on it.
+>
+> **Two wire landmines, both rig-found, both now pinned by byte-level tests:**
+>
+> 1. **The notify bitmap carries the type's BIT, not the RFC enum's ordinal.** RFC 8881
+>    §3.3.7 declares `NOTIFY_DEVICEID4_CHANGE = 1`, but every transmission of it is a
+>    `bitmap4`, so the wire value is `1 << 1` = 2 (and DELETE is 4) — which is exactly
+>    how Linux defines its own constants (`include/linux/nfs4.h`) and how its callback
+>    decoder compares them. Sending the ordinal got NFS4ERR_INVAL from a client that
+>    was simultaneously asking us for `[6]` — those same two bits.
+> 2. **The CB_COMPOUND header must carry the SESSION's minor version.** Linux takes
+>    `cps->minorversion` from our header and resolves the client with
+>    `nfs4_find_client_sessionid(net, addr, sessionid, cps->minorversion)`, which
+>    requires `clp->cl_minorversion == minorversion`. flint mounts are **vers=4.2**
+>    (`mount_opts.rs` default), so the hardcoded `minorversion: 1` matched no client
+>    and every callback came back NFS4ERR_BADSESSION *before the callback op was even
+>    looked at*. This had been true for CB_LAYOUTRECALL too. It went unnoticed because
+>    the one drill that exercises recalls mounts `minorversion=1` — A/B'd both ways:
+>    with the probe restored, the 4.1 drill is unaffected; on the 4.2 block rig the
+>    same probe reproduces BADSESSION.
 - Reuse the `check_echo` version-skew gate (`pnfs_csi.rs:196-225`) for the layout-class
   field: an MDS predating block layout must not ack a block-class CreateVolume (proto3
   drops unknown fields silently).

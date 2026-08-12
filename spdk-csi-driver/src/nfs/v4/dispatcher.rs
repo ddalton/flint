@@ -3047,14 +3047,24 @@ impl CompoundDispatcher {
     /// address was tiny; scsi volume-topology bodies made TOOSMALL
     /// handling real (design doc §5). TOOSMALL replies carry
     /// gdir_mincount so the client can retry sized right.
+    /// `notify_mask` is the `gdir_notification` bitmap4 we COMMIT to
+    /// sending for this device: 0 encodes an empty bitmap ("expect no
+    /// notifications"), non-zero encodes one word. Promising a
+    /// notification we never send is worse than promising none — the
+    /// client would trust its cache indefinitely — so callers pass only
+    /// what they will actually deliver.
     fn frame_getdeviceinfo_reply(
         layout_type: u32,
         dev_addr_encoded: &[u8],
         maxcount: u32,
+        notify_mask: u32,
     ) -> OperationResult {
         use crate::nfs::xdr::XdrEncoder;
         let padded = (dev_addr_encoded.len() + 3) & !3;
-        let total = 4 + 4 + padded + 4; // type + opaque<len,body> + empty notify bitmap
+        // type + opaque<len,body> + bitmap4 (count, plus one word when
+        // we advertise anything).
+        let bitmap_len = if notify_mask == 0 { 4 } else { 8 };
+        let total = 4 + 4 + padded + bitmap_len;
         if maxcount > 0 && total as u64 > maxcount as u64 {
             let mut e = XdrEncoder::new();
             e.encode_u32(total as u32); // gdir_mincount
@@ -3063,7 +3073,12 @@ impl CompoundDispatcher {
         let mut e = XdrEncoder::new();
         e.encode_u32(layout_type);
         e.encode_opaque(dev_addr_encoded);
-        e.encode_u32(0); // empty notification bitmap
+        if notify_mask == 0 {
+            e.encode_u32(0); // empty notification bitmap
+        } else {
+            e.encode_u32(1); // one bitmap word
+            e.encode_u32(notify_mask);
+        }
         OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(e.finish()))
     }
 
@@ -3143,21 +3158,29 @@ impl CompoundDispatcher {
                 return OperationResult::GetDeviceInfo(Nfs4Status::OpNotInSession, None);
             }
             let body = Self::encode_scsi_device_addr(&dev_id, pr_key);
-            // notify_types is logged because it decides whether the
-            // server has ANY way to tell a client its device changed
-            // (CB_NOTIFY_DEVICEID, RFC 5661 §12.2.10) — the question an
-            // online expand runs into: the client caches the device's
-            // LENGTH from this reply, and a grown volume is invisible to
-            // it until the device cache is dropped. We reply with an
-            // empty notification bitmap today, so the answer is "no
-            // push"; this line is the evidence for what the client asked
-            // for, per kernel version.
+            // Device notifications (CB_NOTIFY_DEVICEID, RFC 5661
+            // §12.2.10) are what makes an online expand actually online:
+            // the client caches this device's LENGTH, so a grown volume
+            // stays invisible to it until it re-fetches, and the only
+            // way for us to prompt that is a notification it asked for.
+            // Grant the intersection of what the client requested with
+            // what we send — never more, since an advertised-but-unsent
+            // notification would have the client trust a stale cache
+            // forever.
+            use crate::nfs::v4::cb_compound::deviceid_notify_type as dnt;
+            let requested = _notify_types.first().copied().unwrap_or(0);
+            let granted = requested & (dnt::CHANGE | dnt::DELETE);
+            if granted != 0 {
+                if let Some(sid) = context.session_id {
+                    pnfs.note_scsi_device_fetch(&volume, sid, granted);
+                }
+            }
             info!(
                 "📡 GETDEVICEINFO (scsi): volume '{}' → BASE/NGUID device \
-                 (client notify_types={:?}, server offers none)",
-                volume, _notify_types
+                 (notify_types requested={:#x}, granted={:#x})",
+                volume, requested, granted
             );
-            return Self::frame_getdeviceinfo_reply(layout_type, &body, _maxcount);
+            return Self::frame_getdeviceinfo_reply(layout_type, &body, _maxcount, granted);
         }
 
         let args = GetDeviceInfoArgs {
@@ -3178,7 +3201,10 @@ impl CompoundDispatcher {
             Ok(result) => {
                 let dev_addr_encoded = Self::encode_device_addr(&result.device_addr);
                 debug!("✅ GETDEVICEINFO successful");
-                Self::frame_getdeviceinfo_reply(layout_type, &dev_addr_encoded, _maxcount)
+                // Files layout: no notifications offered. A files DS
+                // device's contents change by RECALL, not by cache
+                // invalidation, so there is nothing to promise here.
+                Self::frame_getdeviceinfo_reply(layout_type, &dev_addr_encoded, _maxcount, 0)
             }
             Err(_e) => {
                 warn!("❌ GETDEVICEINFO failed");
@@ -5112,14 +5138,14 @@ mod tests {
     #[test]
     fn getdeviceinfo_maxcount_toosmall_carries_mincount() {
         let body = [0u8; 40];
-        // Total = 4 (type) + 4 (opaque len) + 40 + 4 (notify) = 52.
-        match CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 51) {
+        // Total = 4 (type) + 4 (opaque len) + 40 + 4 (empty notify) = 52.
+        match CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 51, 0) {
             OperationResult::GetDeviceInfo(Nfs4Status::TooSmall, Some(b)) => {
                 assert_eq!(&b[..], &52u32.to_be_bytes());
             }
             other => panic!("expected TooSmall with mincount, got {:?}", other),
         }
-        match CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 52) {
+        match CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 52, 0) {
             OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(b)) => {
                 assert_eq!(b.len(), 52);
                 assert_eq!(&b[0..4], &5u32.to_be_bytes(), "echoes the layout type");
@@ -5128,9 +5154,26 @@ mod tests {
         }
         // maxcount 0 = the client declared no ceiling.
         assert!(matches!(
-            CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 0),
+            CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 0, 0),
             OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(_))
         ));
+        // An advertised notification costs one extra bitmap word, and
+        // the size accounting has to know: a reply that fits at 52 with
+        // an empty bitmap must NOT claim to fit with a word appended.
+        match CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 52, 0x2) {
+            OperationResult::GetDeviceInfo(Nfs4Status::TooSmall, Some(b)) => {
+                assert_eq!(&b[..], &56u32.to_be_bytes());
+            }
+            other => panic!("expected TooSmall at 56 bytes, got {:?}", other),
+        }
+        match CompoundDispatcher::frame_getdeviceinfo_reply(5, &body, 56, 0x2) {
+            OperationResult::GetDeviceInfo(Nfs4Status::Ok, Some(b)) => {
+                assert_eq!(b.len(), 56);
+                assert_eq!(&b[48..52], &1u32.to_be_bytes(), "one bitmap word");
+                assert_eq!(&b[52..56], &2u32.to_be_bytes(), "the granted mask");
+            }
+            other => panic!("expected Ok with a notification bitmap, got {:?}", other),
+        }
     }
 
     /// The co_ownerid → host NQN derivation, against the exact strings

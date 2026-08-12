@@ -91,7 +91,9 @@
 #   until the app gets ENOSPC (not EIO — the errno an application can
 #   act on), then ExpandVolume grows the lvol, the client kernel picks
 #   the bigger namespace up through SPDK's resize AEN, the arena ceiling
-#   rises, and the same mount writes past the old ceiling sha-intact.
+#   rises, CB_NOTIFY_DEVICEID drops the client's cached pNFS device, and
+#   the SAME MOUNT writes past the old ceiling sha-intact — no remount,
+#   which is the property the notification exists for.
 # ZOMBIE=1 — the frozen-VM zombie (§Z), FlintAdmission's only dangerous
 #   shape: a SECOND lima VM (ZOMBIE_VM, default flint-zombie) stages
 #   through the production attach + a proxied cross-VM session, writes
@@ -509,43 +511,33 @@ print(b['block_size'] * b['num_blocks'])")
   # E2b. and the volume WORKS past the old ceiling: fresh bytes, raw
   # path, sha-checked cold.
   #
-  # RIG FINDING (runs 3-4, kernel 7.0.0-28): the SAME MOUNT cannot use
-  # the new room. The server grants layouts past the old ceiling
-  # correctly — the log shows the grant, then an immediate LAYOUTRETURN
-  # and a fall back to the MDS lane for every write, for EVERY new file
-  # on that mount. The client caches the blocklayout device (its LENGTH
-  # among it) from GETDEVICEINFO, and extents past that length are
-  # unmappable; nothing re-reads it, because we answer GETDEVICEINFO
-  # with an EMPTY notification bitmap (no CB_NOTIFY_DEVICEID, RFC 5661
-  # §12.2.10). Recycling the mount drops the device cache and the space
-  # becomes usable — proven by A/B on the live rig, with the nvme
-  # session untouched in both arms (so it is the NFS device cache, not
-  # the block device: sysfs already showed the bigger namespace).
+  # ON THE SAME MOUNT — the property CB_NOTIFY_DEVICEID exists for.
   #
-  # So: attempt the same mount FIRST and report what happens either way
-  # — if a future kernel (or a CB_NOTIFY_DEVICEID implementation) makes
-  # it work, this drill says so instead of silently passing on the
-  # remount path.
+  # Rig runs 3-4 (before the notification shipped) found this failing:
+  # the server granted layouts past the old ceiling, the client returned
+  # each one instantly and wrote through the MDS lane, for EVERY new
+  # file on that mount, because it caches the blocklayout device — its
+  # LENGTH included — from GETDEVICEINFO and nothing told it to re-read.
+  # Only recycling the mount recovered. Now the expand sends
+  # CB_NOTIFY_DEVICEID to every client that fetched the device, Linux's
+  # nfs4_callback_devicenotify drops the cached deviceid, and the next
+  # LAYOUTGET re-fetches it. NO REMOUNT: that is the whole point, so the
+  # drill fails rather than falling back to one.
   vsh "dd if=/dev/urandom of=/var/tmp/rig-e.bin bs=1M count=16 status=none"
   E_SHA=$(vsh "sha256sum /var/tmp/rig-e.bin" | awk '{print $1}')
+  NOTIFIED=$(vsh "grep -c 'CB_NOTIFY_DEVICEID ← .*accepted' $RIG/mds.log || true" | head -1 | tr -dc '0-9')
+  [ "${NOTIFIED:-0}" -ge 1 ] \
+    || fail "no client ACCEPTED a CB_NOTIFY_DEVICEID — $(vsh "grep -i 'notify_deviceid' $RIG/mds.log | tail -3")"
   set +e
   SAME_ERR=$(vsudo "cp /var/tmp/rig-e.bin $MNTE/after-expand.bin 2>&1 >/dev/null")
   SAME_RC=$?
   set -e
-  if [ "$SAME_RC" -eq 0 ]; then
-    echo "· NOTE: the SAME mount wrote past the old ceiling — the client picked"
-    echo "  the grown device up without a remount. If that reproduces, the"
-    echo "  online-expand caveat in the design doc (§7) is STALE: update it."
-  else
-    echo "· EXPECTED TODAY: the same mount cannot use the new room"
-    echo "  ($(echo "$SAME_ERR" | tr '\n' ' ' | cut -c1-110))"
-    echo "  — cached blocklayout device length; no CB_NOTIFY_DEVICEID offered."
-    vsudo "umount $MNTE && mount -t nfs4 -o vers=4.2,proto=tcp,port=20490 127.0.0.1:/$VOLE $MNTE" \
-      || fail "remount after expand"
-    vsudo "cp /var/tmp/rig-e.bin $MNTE/after-expand.bin" \
-      || fail "write after expand+remount — the new room is not usable AT ALL"
-  fi
+  [ "$SAME_RC" -eq 0 ] || fail "the SAME mount still cannot use the new room after \
+CB_NOTIFY_DEVICEID ($(echo "$SAME_ERR" | tr '\n' ' ' | cut -c1-110)) — the client kept \
+its cached device"
   vsudo "sync $MNTE/after-expand.bin" || fail "sync after expand"
+  echo "✓ E2c: $NOTIFIED client(s) took CB_NOTIFY_DEVICEID; the SAME mount wrote past"
+  echo "  the old ceiling with no remount"
   NEXT=$(vsh "sqlite3 'file:$RIG/state.db?mode=ro' \
     \"SELECT next_free FROM volume_alloc WHERE volume='$VOLE'\"")
   [ "${NEXT:-0}" -gt "${CEIL0:-0}" ] \
@@ -565,9 +557,8 @@ print(b['block_size'] * b['num_blocks'])")
   echo "✅ expand-rig PASSED — a full block volume reported ENOSPC to the app"
   echo "   (not EIO), and a live ExpandVolume grew the lvol, moved the KERNEL's"
   echo "   namespace size ($SECT0 → $SECT1 sectors), raised the arena ceiling, and"
-  echo "   the volume then wrote past the old ceiling sha-intact. On $KREL."
-  [ "$SAME_RC" -eq 0 ] \
-    || echo "   Caveat proven, not assumed: that last write needed the mount recycled."
+  echo "   CB_NOTIFY_DEVICEID dropped the client's cached device so the SAME MOUNT"
+  echo "   wrote past the old ceiling sha-intact — no remount. On $KREL."
   exit 0
 fi
 

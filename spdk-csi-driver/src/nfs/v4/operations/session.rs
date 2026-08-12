@@ -557,6 +557,12 @@ impl SessionOperationHandler {
                         .find(|p| matches!(p, crate::nfs::v4::compound::CallbackSecParms::None))
                 })
                 .cloned(),
+            // The COMPOUND's own minor version. Every callback on this
+            // session must carry it: Linux looks its client up by
+            // (address, sessionid, MINOR VERSION), so a 4.2 mount sent
+            // a minorversion=1 callback answers BADSESSION and never
+            // reaches the callback op at all.
+            ctx.minor_version,
         );
 
         // C8 evidence, logged rather than assumed: what the client will

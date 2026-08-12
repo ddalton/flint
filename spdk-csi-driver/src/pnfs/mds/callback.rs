@@ -187,8 +187,14 @@ impl CallbackManager {
         // CREATE_SESSION'd with cb_program=0 ("I won't host
         // callbacks"), bail out — sending a CALL with program=0
         // would just bounce.
-        let cb_program = match self.state_mgr.sessions.get_session(session_id) {
-            Some(s) if s.cb_program != 0 => s.cb_program,
+        // …and with it the session's MINOR VERSION, which the callback
+        // header must carry: Linux resolves the callback's client by
+        // (address, sessionid, minorversion), so a 4.2 mount sent a
+        // minorversion=1 CB_COMPOUND answers BADSESSION before any
+        // callback op is looked at (rig-found — it had been costing
+        // every recall to a 4.2 client, which is every flint mount).
+        let (cb_program, cb_minorversion) = match self.state_mgr.sessions.get_session(session_id) {
+            Some(s) if s.cb_program != 0 => (s.cb_program, s.minorversion),
             Some(_) => {
                 warn!(
                     "CB_LAYOUTRECALL: session {:?} advertised cb_program=0",
@@ -229,7 +235,7 @@ impl CallbackManager {
 
         let call = CbCompoundCall {
             tag: String::new(),
-            minorversion: 1,
+            minorversion: cb_minorversion,
             callback_ident: 0,
             ops: vec![
                 CbOp::Sequence {
@@ -303,6 +309,114 @@ impl CallbackManager {
             reply.status,
             reply.results.len(),
         );
+        Ok(reply)
+    }
+
+    /// Tell one client that a device it cached has changed — the
+    /// online half of block-volume expansion (design doc §7).
+    ///
+    /// The client caches a pNFS device, its LENGTH included, from
+    /// GETDEVICEINFO; a grown volume is invisible until that cache is
+    /// dropped, and layouts past the old end are granted by the server
+    /// and immediately returned by the client (rig-proven). Linux's
+    /// `nfs4_callback_devicenotify` responds to BOTH change and delete
+    /// by deleting the cached deviceid, which makes the next LAYOUTGET
+    /// re-fetch it — exactly the effect we want.
+    ///
+    /// Best-effort by construction: a client with no back-channel, a
+    /// dead session, or a refusal leaves the volume in the documented
+    /// "recycle the mount" state. It never affects the expand's own
+    /// success — the capacity IS there either way.
+    pub async fn send_notify_deviceid(
+        &self,
+        session_id: &SessionId,
+        layout_type: u32,
+        deviceid: [u8; 16],
+        notify_type: u32,
+    ) -> Result<CbCompoundReply, CallbackError> {
+        let writer = match self.back_channels.get(session_id).and_then(|w| w.first().cloned()) {
+            Some(w) => w,
+            None => {
+                debug!("CB_NOTIFY_DEVICEID: no back-channel for session {:?}", session_id);
+                return Err(CallbackError::ConnectionClosed);
+            }
+        };
+        let (cb_program, cb_minorversion) = match self.state_mgr.sessions.get_session(session_id) {
+            Some(s) if s.cb_program != 0 => (s.cb_program, s.minorversion),
+            _ => return Err(CallbackError::ConnectionClosed),
+        };
+
+        let slot = self.slot(session_id);
+        let mut seq_guard = slot.lock().await;
+        let seq = seq_guard.wrapping_add(1);
+        let seq = if seq == 0 { 1 } else { seq };
+
+        let call = CbCompoundCall {
+            tag: String::new(),
+            minorversion: cb_minorversion,
+            callback_ident: 0,
+            ops: vec![
+                CbOp::Sequence {
+                    sessionid: *session_id,
+                    sequenceid: seq,
+                    slotid: 0,
+                    highest_slotid: 0,
+                    cachethis: false,
+                },
+                CbOp::NotifyDeviceId {
+                    changes: vec![crate::nfs::v4::cb_compound::DeviceIdNotify {
+                        notify_type,
+                        layout_type,
+                        deviceid,
+                        // "Act now" rather than "at your convenience":
+                        // the client is holding geometry we know is
+                        // stale, and every write past the old end goes
+                        // down the MDS lane until it re-fetches.
+                        immediate: true,
+                    }],
+                },
+            ],
+        };
+
+        let cb_cred = self
+            .state_mgr
+            .sessions
+            .get_session(session_id)
+            .and_then(|s| s.cb_cred.clone());
+        info!(
+            "📢 CB_NOTIFY_DEVICEID → session {:?} (type={}, layout_type={}, dev={:02x?})",
+            session_id,
+            notify_type,
+            layout_type,
+            &deviceid[..4],
+        );
+        let reply = match writer
+            .send_cb_compound(cb_program, cb_cred.as_ref(), &call, self.timeout)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                *seq_guard = seq;
+                return Err(e);
+            }
+        };
+        *seq_guard = seq;
+        drop(seq_guard);
+        // A refusal is worth a WARN of its own: the failure is otherwise
+        // SILENT (the client keeps serving the stale device and nothing
+        // else complains), and NFS4ERR_INVAL specifically means our
+        // encoding was rejected — the one thing a wire change can get
+        // wrong and never notice.
+        if reply.status != crate::nfs::v4::protocol::Nfs4Status::Ok {
+            warn!(
+                "⚠️ CB_NOTIFY_DEVICEID ← session {:?}: status={:?} — the client kept its \
+                 cached device (a grown volume stays invisible to it until the mount is \
+                 recycled)",
+                session_id, reply.status,
+            );
+        } else {
+            info!("✅ CB_NOTIFY_DEVICEID ← session {:?}: accepted", session_id);
+        }
         Ok(reply)
     }
 
@@ -756,6 +870,10 @@ mod tests {
     /// CallbackManager can resolve it. SessionId is fixed so the
     /// test can register the same id in `back_channels`.
     fn fixture_state(cb_program: u32) -> (Arc<StateManager>, SessionId) {
+        fixture_state_minor(cb_program, 1)
+    }
+
+    fn fixture_state_minor(cb_program: u32, minorversion: u32) -> (Arc<StateManager>, SessionId) {
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let session = state_mgr.sessions.create_session(
             42,                 // client_id
@@ -768,8 +886,62 @@ mod tests {
             16,                 // max_requests
             cb_program,
             None,
+            minorversion,
         );
         (state_mgr, session.session_id)
+    }
+
+    /// THE MINOR VERSION IS NOT COSMETIC — rig-found, and it had been
+    /// silently breaking every callback to every flint mount.
+    ///
+    /// Linux's callback service takes `cps->minorversion` from OUR
+    /// CB_COMPOUND header and resolves the client with
+    /// `nfs4_find_client_sessionid(net, addr, sessionid, cps->minorversion)`,
+    /// which requires `clp->cl_minorversion == minorversion`. flint
+    /// mounts are vers=4.2, so a hardcoded minorversion=1 matched NO
+    /// client: the reply was NFS4ERR_BADSESSION and the callback op
+    /// never ran. Both send paths must echo the session's own minor
+    /// version.
+    #[tokio::test]
+    async fn callbacks_echo_the_sessions_minor_version_not_a_hardcoded_one() {
+        for minor in [1u32, 2u32] {
+            let (writer, server_read, client_read, mut client_write) = pair().await;
+            let (state_mgr, session_id) = fixture_state_minor(0x40000000, minor);
+            let back_channels = Arc::new(DashMap::new());
+            back_channels.insert(session_id, vec![Arc::clone(&writer)]);
+            let cb_mgr = CallbackManager::new(back_channels, Arc::clone(&state_mgr))
+                .with_timeout(Duration::from_secs(5));
+            let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+            let seen = Arc::new(std::sync::Mutex::new(u32::MAX));
+            let seen_c = Arc::clone(&seen);
+            let mock_client = tokio::spawn(async move {
+                let mut r = BufReader::new(client_read);
+                let call = read_record(&mut r).await;
+                // RPC header is 10 u32s (xid, msg_type, rpcvers, prog,
+                // vers, proc, cred{flavor,len}, verf{flavor,len}); the
+                // CB_COMPOUND body then opens with the tag's length
+                // (0) and the minorversion.
+                let at = |i: usize| {
+                    u32::from_be_bytes([call[i], call[i + 1], call[i + 2], call[i + 3]])
+                };
+                let mut off = 40;
+                let taglen = at(off) as usize;
+                off += 4 + taglen.div_ceil(4) * 4;
+                *seen_c.lock().unwrap() = at(off);
+                let xid = at(0);
+                write_record(&mut client_write, build_reply(xid, Nfs4Status::Ok)).await;
+            });
+
+            let stateid = [0u8; 16];
+            let _ = cb_mgr.send_layoutrecall(&session_id, &stateid, 1, 3, true).await;
+            mock_client.await.unwrap();
+            assert_eq!(
+                *seen.lock().unwrap(),
+                minor,
+                "CB_COMPOUND must carry the session's minor version"
+            );
+        }
     }
 
     /// Happy path: send a CB_LAYOUTRECALL, mock client replies OK,
@@ -815,6 +987,75 @@ mod tests {
         assert_eq!(reply.results[1].status(), Nfs4Status::Ok);
         assert!(matches!(reply.results[1], CbResult::LayoutRecall { .. }));
 
+        mock_client.await.unwrap();
+    }
+
+    /// CB_NOTIFY_DEVICEID end to end over the back channel: the call
+    /// goes out with the right op, the client's status comes back
+    /// parsed, and the WIRE BYTES are the ones a Linux client accepts
+    /// (the byte-level shape is pinned in `cb_compound`'s tests; this
+    /// one covers routing, sequencing and the reply parse).
+    #[tokio::test]
+    async fn send_notify_deviceid_round_trip() {
+        let (writer, server_read, client_read, mut client_write) = pair().await;
+        let (state_mgr, session_id) = fixture_state(0x40000000);
+
+        let back_channels = Arc::new(DashMap::new());
+        back_channels.insert(session_id, vec![Arc::clone(&writer)]);
+        let cb_mgr = CallbackManager::new(Arc::clone(&back_channels), Arc::clone(&state_mgr))
+            .with_timeout(Duration::from_secs(5));
+        let _loop_handle = spawn_read_loop(Arc::clone(&writer), server_read);
+
+        let seen_op = Arc::new(std::sync::Mutex::new(0u32));
+        let seen = Arc::clone(&seen_op);
+        let mock_client = tokio::spawn(async move {
+            let mut r = BufReader::new(client_read);
+            let call = read_record(&mut r).await;
+            let xid = u32::from_be_bytes([call[0], call[1], call[2], call[3]]);
+            // The second op's opcode: find it by scanning for the value
+            // rather than hand-counting the RPC header offsets.
+            let want = cb_opcode::CB_NOTIFY_DEVICEID.to_be_bytes();
+            if call.windows(4).any(|w| w == want) {
+                *seen.lock().unwrap() = cb_opcode::CB_NOTIFY_DEVICEID;
+            }
+            let mut enc = XdrEncoder::new();
+            enc.encode_u32(xid);
+            enc.encode_u32(MessageType::Reply as u32);
+            enc.encode_u32(ReplyStatus::Accepted as u32);
+            enc.encode_u32(AuthFlavor::Null as u32);
+            enc.encode_opaque(&[]);
+            enc.encode_u32(AcceptStatus::Success as u32);
+            enc.encode_u32(Nfs4Status::Ok.to_u32());
+            enc.encode_opaque(&[]); // tag
+            enc.encode_u32(2);
+            enc.encode_u32(cb_opcode::CB_SEQUENCE);
+            enc.encode_u32(Nfs4Status::Ok.to_u32());
+            for _ in 0..8 {
+                enc.encode_u32(0);
+            }
+            enc.encode_u32(cb_opcode::CB_NOTIFY_DEVICEID);
+            enc.encode_u32(Nfs4Status::Ok.to_u32());
+            write_record(&mut client_write, enc.finish()).await;
+        });
+
+        let reply = cb_mgr
+            .send_notify_deviceid(
+                &session_id,
+                5,
+                [0x5au8; 16],
+                crate::nfs::v4::cb_compound::deviceid_notify_type::CHANGE,
+            )
+            .await
+            .expect("CB_NOTIFY_DEVICEID succeeds");
+
+        assert_eq!(reply.status, Nfs4Status::Ok);
+        assert_eq!(reply.results.len(), 2);
+        assert!(matches!(reply.results[1], CbResult::NotifyDeviceId { .. }));
+        assert_eq!(
+            *seen_op.lock().unwrap(),
+            cb_opcode::CB_NOTIFY_DEVICEID,
+            "the CALL must actually carry op 14"
+        );
         mock_client.await.unwrap();
     }
 
@@ -1154,11 +1395,11 @@ mod tests {
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let session_a = state_mgr
             .sessions
-            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None)
+            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None, 1)
             .session_id;
         let session_b = state_mgr
             .sessions
-            .create_session(2, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None)
+            .create_session(2, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None, 1)
             .session_id;
 
         let back_channels = Arc::new(DashMap::new());
@@ -1231,7 +1472,7 @@ mod tests {
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let session_id = state_mgr
             .sessions
-            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None)
+            .create_session(1, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16, 0x40000000, None, 1)
             .session_id;
         let back_channels = Arc::new(DashMap::new());
         back_channels.insert(session_id, vec![Arc::clone(&writer)]);
@@ -1301,7 +1542,7 @@ mod tests {
         for i in 0..3u64 {
             let session = state_mgr.sessions.create_session(
                 100 + i, 0, 0, 64 * 1024, 64 * 1024, 16 * 1024, 16, 16,
-                0x4000_0000, None,
+                0x4000_0000, None, 1,
             );
             let (writer, server_read, client_read, client_write) = pair().await;
             back_channels.insert(session.session_id, vec![Arc::clone(&writer)]);

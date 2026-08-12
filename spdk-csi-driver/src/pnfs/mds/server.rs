@@ -195,6 +195,11 @@ impl MetadataServer {
         // DSes (F65). Without this line the truncate gate still holds
         // but the held-layout window is wide open.
         operation_handler.attach_callback_manager(Arc::clone(&callback_manager));
+        // The layout manager needs it too, for a callback the operation
+        // handler never sees: CB_NOTIFY_DEVICEID on block expand is
+        // driven from the CONTROL plane (ExpandVolume), which reaches
+        // the layout manager and not the NFS operation handler.
+        layout_manager.attach_callback_manager(Arc::clone(&callback_manager));
 
         // pnfs-block: the NVMe export reconciler, when configured. Same
         // late-attach shape as the callback manager. Without it this MDS

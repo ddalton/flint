@@ -427,6 +427,28 @@ pub struct LayoutManager {
     /// admission becomes a logged no-op — unit-test shape only, since
     /// CreateVolume gates on it.
     block_export: Arc<std::sync::OnceLock<Arc<super::block_export::BlockExportReconciler>>>,
+
+    /// pnfs-block: which sessions fetched a volume's device, and which
+    /// device notifications each one asked for (the GETDEVICEINFO
+    /// `gdia_notify_types` bitmap). Volume → session → mask.
+    ///
+    /// This is the CB_NOTIFY_DEVICEID address book, and it exists
+    /// because the interesting client is often NOT a layout holder: the
+    /// caching client in the expand case had returned every layout and
+    /// still served stale device geometry from its cache (rig-found).
+    /// Layout tables cannot answer "who believes something about this
+    /// device", so device fetches are recorded separately.
+    ///
+    /// In-memory and best-effort: an MDS restart forgets the address
+    /// book, which costs a missed notification (the documented
+    /// recycle-the-mount state), never correctness. Entries are dropped
+    /// when the volume goes away or a send finds no back-channel.
+    device_notify: Arc<DashMap<String, DashMap<crate::nfs::v4::protocol::SessionId, u32>>>,
+
+    /// The callback channel, attached late by the server exactly like
+    /// the operation handler's copy — the back-channel registry has to
+    /// exist first. `None` in unit tests: notifications become no-ops.
+    callbacks: Arc<std::sync::OnceLock<Arc<super::callback::CallbackManager>>>,
 }
 
 impl LayoutState {
@@ -739,7 +761,100 @@ impl LayoutManager {
             backend,
             stub_binding,
             block_export: Arc::new(std::sync::OnceLock::new()),
+            device_notify: Arc::new(DashMap::new()),
+            callbacks: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Attach the callback channel (server wiring, post-construction —
+    /// the back-channel registry must exist first). Second attach is a
+    /// no-op; `None` means device notifications are skipped.
+    pub fn attach_callback_manager(&self, callbacks: Arc<super::callback::CallbackManager>) {
+        let _ = self.callbacks.set(callbacks);
+    }
+
+    /// Record that `session` fetched `volume`'s device and which
+    /// notifications it accepts (GETDEVICEINFO `gdia_notify_types`
+    /// word 0). Idempotent; the newest mask wins.
+    pub fn note_device_fetch(
+        &self,
+        volume: &str,
+        session: crate::nfs::v4::protocol::SessionId,
+        notify_mask: u32,
+    ) {
+        if notify_mask == 0 {
+            // A client that asks for nothing cannot be told anything —
+            // recording it would only make the address book lie about
+            // reachable clients.
+            return;
+        }
+        self.device_notify
+            .entry(volume.to_string())
+            .or_default()
+            .insert(session, notify_mask);
+    }
+
+    /// Forget a volume's notify address book (DeleteVolume).
+    pub fn forget_device_notify(&self, volume: &str) {
+        self.device_notify.remove(volume);
+    }
+
+    /// Tell every client that cached `volume`'s device to drop it — the
+    /// online half of expansion (design doc §7). Returns
+    /// (accepted, attempted).
+    ///
+    /// Best-effort on purpose, and the caller must NOT fail an expand
+    /// on it: the capacity is real either way, and a client that misses
+    /// the notification is in the documented "recycle the mount" state
+    /// rather than a broken one. Unreachable sessions are pruned so a
+    /// long-lived volume's address book does not accumulate ghosts.
+    pub async fn notify_device_changed(&self, volume: &str) -> (usize, usize) {
+        let Some(callbacks) = self.callbacks.get().cloned() else {
+            return (0, 0);
+        };
+        let Some(targets) = self.device_notify.get(volume).map(|m| {
+            m.iter().map(|e| (*e.key(), *e.value())).collect::<Vec<_>>()
+        }) else {
+            return (0, 0);
+        };
+        if targets.is_empty() {
+            return (0, 0);
+        }
+        let deviceid = crate::nvmeof_export::scsi_device_id(volume);
+        let mut accepted = 0usize;
+        let mut dead: Vec<crate::nfs::v4::protocol::SessionId> = Vec::new();
+        for (session, mask) in &targets {
+            // Prefer CHANGE — it says what actually happened, and the
+            // Linux client treats CHANGE and DELETE identically (both
+            // drop the cached deviceid). DELETE is the fallback for a
+            // client that only accepts that.
+            use crate::nfs::v4::cb_compound::deviceid_notify_type as t;
+            let notify_type = if mask & t::CHANGE != 0 {
+                t::CHANGE
+            } else if mask & t::DELETE != 0 {
+                t::DELETE
+            } else {
+                continue;
+            };
+            match callbacks
+                .send_notify_deviceid(session, LayoutType::Scsi as u32, deviceid, notify_type)
+                .await
+            {
+                Ok(reply) if reply.status == crate::nfs::v4::protocol::Nfs4Status::Ok => {
+                    accepted += 1
+                }
+                Ok(_) => {}
+                Err(_) => dead.push(*session),
+            }
+        }
+        if !dead.is_empty() {
+            if let Some(map) = self.device_notify.get(volume) {
+                for s in dead {
+                    map.remove(&s);
+                }
+            }
+        }
+        (accepted, targets.len())
     }
 
     /// Attach the block-export reconciler (server wiring, post-
@@ -3216,6 +3331,53 @@ mod tests {
         assert!(mgr.get_layout(&l_b.stateid).is_some());
         assert!(mgr.layouts_for_client(1).is_empty());
         assert_eq!(mgr.layouts_for_client(2), vec![l_b.stateid]);
+    }
+
+    /// The CB_NOTIFY_DEVICEID address book: who gets told when a block
+    /// volume's device changes. Three properties that decide whether a
+    /// notification lands at all —
+    ///  - a client that asked for NOTHING is not recorded (telling it
+    ///    is impossible, and a phantom entry would make the send path
+    ///    report reachable clients that are not);
+    ///  - the newest mask wins (a client may re-fetch with different
+    ///    notify types);
+    ///  - DeleteVolume forgets the book, because the deviceid is
+    ///    derived from the volume NAME and a re-created volume would
+    ///    otherwise inherit the dead one's subscribers.
+    #[test]
+    fn device_notify_address_book_records_filters_and_forgets() {
+        let registry = Arc::new(DeviceRegistry::new());
+        let mgr = stripe_mgr(&registry, 1 << 20);
+        let s1 = crate::nfs::v4::protocol::SessionId([1u8; 16]);
+        let s2 = crate::nfs::v4::protocol::SessionId([2u8; 16]);
+
+        mgr.note_device_fetch("vol", s1, 0x6);
+        mgr.note_device_fetch("vol", s2, 0); // asked for nothing
+        assert_eq!(
+            mgr.device_notify.get("vol").map(|m| m.len()),
+            Some(1),
+            "a client that requested no notifications must not be recorded"
+        );
+        mgr.note_device_fetch("vol", s1, 0x2);
+        assert_eq!(
+            mgr.device_notify.get("vol").and_then(|m| m.get(&s1).map(|v| *v)),
+            Some(0x2),
+            "the newest mask wins"
+        );
+
+        mgr.forget_device_notify("vol");
+        assert!(mgr.device_notify.get("vol").is_none());
+    }
+
+    /// With no callback channel attached — every unit-test shape, and a
+    /// live MDS between construction and wiring — notification is a
+    /// silent no-op, never a panic and never a failed expand.
+    #[tokio::test]
+    async fn device_notify_without_a_callback_channel_is_a_noop() {
+        let registry = Arc::new(DeviceRegistry::new());
+        let mgr = stripe_mgr(&registry, 1 << 20);
+        mgr.note_device_fetch("vol", crate::nfs::v4::protocol::SessionId([3u8; 16]), 0x6);
+        assert_eq!(mgr.notify_device_changed("vol").await, (0, 0));
     }
 
     // ── Phase 0: per-file placement pinning ──────────────────────────

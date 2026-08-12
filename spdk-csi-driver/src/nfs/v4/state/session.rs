@@ -115,6 +115,25 @@ pub struct Session {
     /// client DENIED the RPC for it.
     pub cb_cred: Option<crate::nfs::v4::compound::CallbackSecParms>,
 
+    /// The NFSv4 MINOR VERSION this session was created at, echoed in
+    /// the header of every callback CB_COMPOUND we send on it.
+    ///
+    /// Not cosmetic, and not "always 1": Linux's callback service sets
+    /// `cps->minorversion` from OUR header and looks the client up with
+    /// `nfs4_find_client_sessionid(net, addr, sessionid, cps->minorversion)`,
+    /// which requires `clp->cl_minorversion == minorversion`. A 4.2
+    /// mount (flint's own mount options, and the kernel's default) has
+    /// `cl_minorversion == 2`, so a callback sent with minorversion=1
+    /// matches NO client and the whole CB_COMPOUND comes back
+    /// NFS4ERR_BADSESSION — before any callback op is even looked at.
+    /// Rig-found while landing CB_NOTIFY_DEVICEID; it had been silently
+    /// costing CB_LAYOUTRECALL the same way.
+    ///
+    /// In-memory only: restored sessions are dropped at startup (the
+    /// client re-CREATE_SESSIONs on BADSESSION), so there is nothing on
+    /// the persisted path that could use it.
+    pub minorversion: u32,
+
     /// Slots for exactly-once semantics
     pub slots: Vec<Slot>,
 
@@ -155,6 +174,7 @@ impl Session {
         max_requests: u32,
         cb_program: u32,
         cb_cred: Option<crate::nfs::v4::compound::CallbackSecParms>,
+        minorversion: u32,
     ) -> Self {
         // Slot table is sized to the negotiated ca_maxrequests, capped at
         // MAX_SLOTS for sanity. Smaller tables let SEQUENCE return
@@ -177,6 +197,7 @@ impl Session {
             fore_chan_maxrequests: slot_count,
             cb_program,
             cb_cred,
+            minorversion,
             slots,
             highest_slotid: 0,
         }
@@ -346,6 +367,7 @@ impl SessionManager {
         max_requests: u32,
         cb_program: u32,
         cb_cred: Option<crate::nfs::v4::compound::CallbackSecParms>,
+        minorversion: u32,
     ) -> Session {
         // Generate session ID (lock-free atomic increment)
         let session_id_num = self.next_session_id.fetch_add(1, Ordering::SeqCst);
@@ -366,6 +388,7 @@ impl SessionManager {
             max_requests,
             cb_program,
             cb_cred,
+            minorversion,
         );
 
         // LOCK-FREE: Direct DashMap inserts without global locks
@@ -458,7 +481,7 @@ mod tests {
     #[test]
     fn test_session_creation() {
         let mgr = SessionManager::new(crate::state_backend::memory_backend());
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0, None);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0, None, 1);
 
         assert_eq!(session.client_id, 1);
         assert_eq!(mgr.active_count(), 1);
@@ -467,7 +490,7 @@ mod tests {
     #[test]
     fn test_sequence_processing() {
         let mgr = SessionManager::new(crate::state_backend::memory_backend());
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0, None);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0, None, 1);
 
         // First request on slot 0
         let result = mgr.get_session_mut(&session.session_id, |s| {
@@ -498,7 +521,7 @@ mod tests {
     #[test]
     fn test_session_destruction() {
         let mgr = SessionManager::new(crate::state_backend::memory_backend());
-        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0, None);
+        let session = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0, None, 1);
         let session_id = session.session_id;
 
         assert_eq!(mgr.active_count(), 1);
@@ -512,9 +535,9 @@ mod tests {
     #[test]
     fn test_client_sessions() {
         let mgr = SessionManager::new(crate::state_backend::memory_backend());
-        let _session1 = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0, None);
-        let _session2 = mgr.create_session(1, 1, 0, 1024, 1024, 1024, 16, 8, 0, None);
-        let _session3 = mgr.create_session(2, 0, 0, 1024, 1024, 1024, 16, 8, 0, None);
+        let _session1 = mgr.create_session(1, 0, 0, 1024, 1024, 1024, 16, 8, 0, None, 1);
+        let _session2 = mgr.create_session(1, 1, 0, 1024, 1024, 1024, 16, 8, 0, None, 1);
+        let _session3 = mgr.create_session(2, 0, 0, 1024, 1024, 1024, 16, 8, 0, None, 1);
 
         let client1_sessions = mgr.get_client_sessions(1);
         assert_eq!(client1_sessions.len(), 2);

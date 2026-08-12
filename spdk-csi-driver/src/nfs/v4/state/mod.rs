@@ -179,6 +179,7 @@ mod tests {
             10,
             0,
             None,
+            1,
         );
 
         // Verify client and session exist
@@ -216,6 +217,7 @@ mod tests {
             10,
             0,
             None,
+            1,
         );
 
         // Run cleanup (no leases have expired)
@@ -288,6 +290,7 @@ mod tests {
         let session = mgr1.sessions.create_session(
             client_id, 0, 0, 4096, 4096, 1024, 16, 8, 0xcb_aabb,
             None,
+            1,
         );
 
         // Persist is fire-and-forget; let the spawned tasks land
@@ -346,6 +349,7 @@ mod tests {
         let new_session = mgr2.sessions.create_session(
             client_id, 0, 0, 4096, 4096, 1024, 16, 8, 0xcb_aabb,
             None,
+            1,
         );
         assert_ne!(
             new_session.session_id, session.session_id,

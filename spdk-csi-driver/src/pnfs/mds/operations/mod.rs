@@ -2172,6 +2172,15 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         self.layout_manager.scsi_volume_for_deviceid(device_id)
     }
 
+    fn note_scsi_device_fetch(
+        &self,
+        volume: &str,
+        session_id: crate::nfs::v4::protocol::SessionId,
+        notify_mask: u32,
+    ) {
+        self.layout_manager.note_device_fetch(volume, session_id, notify_mask);
+    }
+
     fn register_scsi_layout(
         &self,
         owner: crate::pnfs::mds::layout::LayoutOwner,
