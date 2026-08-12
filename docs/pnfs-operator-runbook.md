@@ -40,6 +40,71 @@ and the chart ships two layers to make that boundary real:
    NetworkPolicy (Cilium does). An empty `nodeCIDRs` with the policy
    enabled blocks ALL NFS traffic — deliberate, set your node CIDR.
 
+### Port 4420 (NVMe-oF) — the gap, stated plainly
+
+**4420 is not covered by either layer above, and it is the port that
+reaches the raw blocks.** It carries two kinds of traffic: raid-leg
+connections between nodes (pre-dates the block class) and, when
+`pnfs-block` is enabled, kernel initiators from every node holding such a
+volume.
+
+**What actually guards it today**, in the order it applies:
+
+1. **A default-closed per-subsystem allow-list.** Each volume's NVMe
+   subsystem admits only host NQNs the MDS put there — a connect from
+   anything else is refused at the target, which the rig sees as
+   `Connect for subsystem nqn.2024-11.com.flint:block:<vol> is not
+   allowed, hostnqn: ...`. This is real enforcement and it is on by
+   default. It is also what the fence yanks.
+2. **NVMe reservations** (EA-RO, PTPL-persisted) during a fence, which
+   stop a specific client at the device.
+3. **Network reachability** — which at the Kubernetes layer is
+   **unrestricted**.
+
+**The honest weakness: the allow-list authorizes a name the client
+asserts about itself.** Host NQNs are derived deterministically —
+`nqn.2024-11.com.flint:node:<node-name>` (`FLINT_HOST_NQN_PREFIX`) — so
+they are *predictable, not secret*. Anyone who can reach 4420 and can
+guess an admitted node's name can connect as that host and read or write
+the namespace directly, bypassing NFS entirely: no file permissions, no
+`fsGroup`, no export options. Treat 4420 as equivalent to physical access
+to the disk.
+
+**Why the chart cannot close it.** spdk-tgt runs in the **hostNetwork**
+csi-node DaemonSet, and NetworkPolicy cannot select host-network pods —
+so a `4420` ingress rule in the shape of the 2049 one has nothing to
+attach to. This is not an oversight in the values; it is a property of
+where the target runs.
+
+**So protect it outside the chart, and treat that as mandatory:**
+
+- Restrict 4420 ingress to the node CIDR at the security-group / host
+  firewall / private-subnet layer. On AWS that is one SG rule; on bare
+  metal, an nftables rule on each node.
+- Never expose node IPs carrying flint block volumes to untrusted
+  networks. There is no authentication in front of the namespace.
+- Audit with `ss -tnp state established '( sport = :4420 )'` on a storage
+  node: every peer should be a node IP you recognise.
+
+**The two upgrade paths, both present in the SPDK we ship (v26.05) and
+neither wired up yet:**
+
+- **In-band authentication (NVMe DH-HMAC-CHAP).**
+  `nvmf_subsystem_add_host` already accepts `dhchap_key` and
+  `dhchap_ctrlr_key` (`lib/nvmf/nvmf_rpc.c:1880`), with secrets held in
+  SPDK's keyring (`keyring_file_add_key`). This is the one that fixes the
+  weakness above: it turns the NQN from a claim into a proof. Needs key
+  distribution to nodes and a place in the attach flow.
+- **TLS on the listener.** `nvmf_subsystem_add_listener` takes
+  `secure_channel` (`nvmf_rpc.c:637`), refused when `allow_any_host` is
+  set (`:908`) — i.e. SPDK will not let you pair encryption with an open
+  door. Gives confidentiality; on its own it does not authenticate the
+  host.
+
+- **Making the in-chart policy possible at all** requires the block
+  targets to become pod-networked (the `pnfs-ds` StatefulSet pattern), at
+  which point the 4420 rule is the same shape as the 2049 one.
+
 What this does NOT give you: per-user authentication or wire
 encryption. The server has a dormant pure-Rust RPCSEC_GSS/Kerberos
 implementation (krb5/krb5i/krb5p, keytab via `KRB5_KTNAME`) — wiring

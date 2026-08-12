@@ -462,7 +462,20 @@ allowVolumeExpansion: true            # now a REAL allocation op — see below
   4420 policy is only enforceable if block-layout targets get a pod-networked fleet
   (the pnfs-ds StatefulSet pattern); today 4420 is unpoliced entirely, including
   existing raid-leg traffic. Until then, 4420 protection is security-groups/host-
-  firewall, outside the chart — say so in the runbook trust-model section.
+  firewall, outside the chart.
+  **WRITTEN UP 2026-08-12** — `docs/pnfs-operator-runbook.md`, "Port 4420 (NVMe-oF) —
+  the gap, stated plainly": what actually enforces today (default-closed per-subsystem
+  allow-list, reservations during a fence), the honest weakness (host NQNs are
+  DETERMINISTIC — `nqn.2024-11.com.flint:node:<node>` — so the allow-list authorizes a
+  name the client asserts about itself; reaching 4420 and naming an admitted node gets
+  raw namespace access, bypassing every NFS-level control), the mandatory out-of-chart
+  mitigation, and the two upgrade paths verified present in the SPDK we ship:
+  **DH-HMAC-CHAP** via `nvmf_subsystem_add_host`'s `dhchap_key`/`dhchap_ctrlr_key`
+  (`lib/nvmf/nvmf_rpc.c:1880`, keys in SPDK's keyring) — the one that turns the NQN
+  from a claim into a proof — and listener **TLS** via `secure_channel`
+  (`nvmf_rpc.c:637`, refused alongside `allow_any_host` at `:908`), which gives
+  confidentiality but not host authentication. Neither is wired; both need key
+  distribution in the attach flow.
 - The **images-lockstep warning** (values.yaml:476) extends verbatim: the allocator is
   MDS-half, the dispatch and csi session code is driver-half; pins move together.
 - The control token covers the allocator's MdsControl surface for free; it does **not**
