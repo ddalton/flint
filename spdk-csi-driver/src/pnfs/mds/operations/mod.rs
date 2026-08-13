@@ -1975,6 +1975,44 @@ pub async fn export_reconcile_pass(
     if volumes.is_empty() {
         return (0, 0);
     }
+
+    // ASSEMBLY, before converging: a volume the record seats here but
+    // whose epoch this target holds no lease for has been ELECTED and
+    // not yet made to serve. Assembly waits out the deposed composer's
+    // horizon, evicts it at this target's leg-export, marks its leg
+    // stale, grants this epoch's lease and opens the export with
+    // standing fences replayed into the allow-list. Ordinary passes
+    // report nothing here — every volume already holds its own lease.
+    for (v, outcome) in reconciler.assembly_pass(&volumes).await {
+        match outcome {
+            crate::pnfs::mds::block_export::AssemblyOutcome::Assembled { epoch, deposed } => {
+                tracing::warn!(
+                    "🔧 {} '{}': ASSEMBLED at epoch {}{} — the export is up with standing \
+                     fences replayed; clients still need the redirect actor, which does not \
+                     exist yet",
+                    context,
+                    v,
+                    epoch,
+                    deposed.map(|d| format!(", deposing '{d}'")).unwrap_or_default()
+                );
+            }
+            crate::pnfs::mds::block_export::AssemblyOutcome::AwaitingHorizon {
+                deposed,
+                until_unix,
+            } => {
+                tracing::info!(
+                    "⏳ {} '{}': assembly waits for '{}''s lease to lapse at {} — tearing its \
+                     fan-in out now would strand its clients' acked writes",
+                    context, v, deposed, until_unix
+                );
+            }
+            crate::pnfs::mds::block_export::AssemblyOutcome::AlreadyAssembled { .. } => {}
+            crate::pnfs::mds::block_export::AssemblyOutcome::Refused(r) => {
+                tracing::error!("{} '{}': assembly refused — {}", context, v, r);
+            }
+        }
+    }
+
     reconciler.reconcile_all(&volumes).await;
     // Seats whose composer has no registry row cannot be dialed — the
     // deliberate refusal at every dial site. Say so once per pass,

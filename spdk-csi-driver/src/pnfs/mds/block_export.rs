@@ -185,6 +185,24 @@ enum ConvergeMode {
     Suspend,
 }
 
+/// What one assembly attempt did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssemblyOutcome {
+    /// The composition is live: the deposed peer is evicted at this
+    /// target's leg-export, its leg is marked stale, the epoch's lease
+    /// is granted, and the export is up with standing fences replayed
+    /// into its allow-list.
+    Assembled { epoch: i64, deposed: Option<String> },
+    /// Nothing to do — this target already holds the lease for the
+    /// seated epoch.
+    AlreadyAssembled { epoch: i64 },
+    /// THE HORIZON has not passed. The deposed composer's lease still
+    /// runs, so it may still be acking its clients' writes, and tearing
+    /// its fan-in out now is what strands those writes on a doomed leg.
+    AwaitingHorizon { deposed: String, until_unix: i64 },
+    Refused(String),
+}
+
 /// The result of one promotion attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromotionOutcome {
@@ -595,6 +613,205 @@ impl BlockExportReconciler {
             Ok(Err(e)) => Err(e.to_string()),
             Err(e) => Err(format!("lease renewal failed: {e}")),
         }
+    }
+
+    /// EVICTION AT THE LEG-EXPORT (`EvictAtLeg`): the deposed composer
+    /// must not be able to reach this target's copy of the volume.
+    ///
+    /// What this is in code today is a VERIFICATION with teeth, and the
+    /// reason is worth stating plainly. A target's allow-list is derived
+    /// level-triggered from the admission tables, and no inter-target
+    /// host NQN is ever in them — so a deposed peer is already excluded
+    /// by construction, and this call normally finds nothing to do. The
+    /// day replication adds the peer's NQN to a leg's allow-list so it
+    /// can mirror, that changes, and this is the step that removes it.
+    /// Failing loudly if it is still present after the removal is what
+    /// keeps that future change from silently skipping the eviction.
+    ///
+    /// The ORDER is the part that is load-bearing now: this runs after
+    /// the horizon and before assembly, because severing a still-acking
+    /// zombie's fan-in strands its clients' acked writes on the doomed
+    /// leg — CAS → horizon → evict → assemble, never CAS → evict.
+    async fn evict_deposed_at_leg(&self, volume: &str, deposed: &str) -> Result<(), String> {
+        let nqn = crate::identity::block_volume_export_nqn(volume);
+        let deposed_nqn = crate::nvmeof_export::flint_host_nqn(deposed);
+        let present = get_subsystem(self.rpc.as_ref(), &nqn)
+            .await
+            .map_err(|e| format!("nvmf_get_subsystems {}: {}", nqn, e))?
+            .and_then(|s| {
+                Some(
+                    s.get("hosts")?
+                        .as_array()?
+                        .iter()
+                        .any(|h| h.get("nqn").and_then(|n| n.as_str()) == Some(&deposed_nqn)),
+                )
+            })
+            .unwrap_or(false);
+        if !present {
+            tracing::debug!(
+                "evict '{}': '{}' already excluded at this leg-export",
+                volume,
+                deposed
+            );
+            return Ok(());
+        }
+        let remove = json!({
+            "method": "nvmf_subsystem_remove_host",
+            "params": { "nqn": nqn, "host": deposed_nqn }
+        });
+        self.rpc
+            .rpc(&remove)
+            .await
+            .map_err(|e| format!("evicting '{deposed}' from {nqn}: {e}"))?;
+        tracing::warn!("⛔ evict '{}': deposed composer '{}' removed at the leg-export", volume, deposed);
+        Ok(())
+    }
+
+    /// ASSEMBLY (`Assemble`) — the act that makes an elected composer a
+    /// serving one, and the act that GRANTS THE EPOCH'S LEASE. Those are
+    /// one thing, which is tranche 3's finding (b): a composer that
+    /// serves on some earlier lease's lapse gets deposed later, and the
+    /// promoter reads that ancient lapse as an already-passed horizon
+    /// and assembles over a still-serving zombie.
+    ///
+    /// In order, and the order is the model's:
+    ///   1. the seat must name this target — the record is the only door;
+    ///   2. THE HORIZON — the standing lease (whoever holds it) must have
+    ///      expired, or belong to us already;
+    ///   3. evict the deposed at this target's leg-export;
+    ///   4. mark the deposed leg STALE, so the election gate will not
+    ///      hand the composition back to it before a rebuild;
+    ///   5. grant this epoch's lease;
+    ///   6. converge the export, whose allow-list is admissions minus
+    ///      fenced — the FENCE REPLAY, fail-closed by construction:
+    ///      `ensure_export` creates the subsystem with
+    ///      `allow_any_host: false`, converges the host list, and only
+    ///      then adds the namespace and the listener, so there is no
+    ///      instant at which the volume is reachable by a client the
+    ///      MDS-side computation excluded. PTPL never travels, so that
+    ///      allow-list is the ONLY exclusion a fenced client meets here.
+    ///
+    /// 5 before 6 deliberately, and this is the one place the code
+    /// cannot be as atomic as the model. A crash between them leaves a
+    /// lease with no export — harmless, and the next converge builds it.
+    /// The other order would leave an export SERVING with no lease: the
+    /// dead-man's work list is what a target holds, so it would never
+    /// look at it again, and converge would refuse it forever. Exercise
+    /// must never outlive entitlement.
+    ///
+    /// The standing lease is also what names the DEPOSED target. There
+    /// is no separate "who was serving" record because the lease is
+    /// exactly that record — holder plus epoch.
+    pub async fn assemble(&self, volume: &str) -> AssemblyOutcome {
+        let me = target_id();
+        let lock = self.lock_for(volume);
+        let _g = lock.lock().await;
+
+        let seat = match self.backend.block_volume_seat(volume).await {
+            Ok(Ok(Some(s))) => s,
+            Ok(Ok(None)) => return AssemblyOutcome::Refused("no seat".into()),
+            Ok(Err(e)) => return AssemblyOutcome::Refused(format!("seat unreadable: {e}")),
+            Err(e) => return AssemblyOutcome::Refused(format!("seat unreadable: {e}")),
+        };
+        if seat.composer != me {
+            return AssemblyOutcome::Refused(format!(
+                "the record seats '{}' at '{}' (epoch {}), not at this target ('{}')",
+                volume, seat.composer, seat.epoch, me
+            ));
+        }
+
+        let standing = match self.backend.block_lease(volume).await {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => return AssemblyOutcome::Refused(format!("lease unreadable: {e}")),
+            Err(e) => return AssemblyOutcome::Refused(format!("lease unreadable: {e}")),
+        };
+        let now = now_unix();
+        let deposed = match &standing {
+            Some(l) if l.holder == me && l.epoch == seat.epoch => {
+                return AssemblyOutcome::AlreadyAssembled { epoch: l.epoch }
+            }
+            // Our own lease at an older epoch: we were the one serving,
+            // so there is no foreign horizon to wait out and no other
+            // leg to depose.
+            Some(l) if l.holder == me => None,
+            Some(l) if l.is_live_at(now) => {
+                return AssemblyOutcome::AwaitingHorizon {
+                    deposed: l.holder.clone(),
+                    until_unix: l.expires_unix,
+                }
+            }
+            Some(l) => Some(l.holder.clone()),
+            None => None,
+        };
+
+        if let Some(ref d) = deposed {
+            if let Err(e) = self.evict_deposed_at_leg(volume, d).await {
+                return AssemblyOutcome::Refused(format!("eviction failed: {e}"));
+            }
+            // The deposed leg missed everything this composition is
+            // about to accept. Marking it stale is what stops the
+            // election gate handing the volume straight back to it —
+            // only a completed rebuild clears the mark
+            // (`RecordRejoinOnly`).
+            match self
+                .backend
+                .block_leg_mark(volume, d, crate::state_backend::extent_alloc::LEG_STALE, now)
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return AssemblyOutcome::Refused(format!("stale mark refused: {e}"))
+                }
+                Err(e) => return AssemblyOutcome::Refused(format!("stale mark failed: {e}")),
+            }
+        }
+
+        match self
+            .backend
+            .block_lease_grant(volume, seat.epoch, &me, now + lease_ttl())
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return AssemblyOutcome::Refused(format!("lease grant refused: {e}")),
+            Err(e) => return AssemblyOutcome::Refused(format!("lease grant failed: {e}")),
+        }
+
+        // Now the export, through the ordinary converge path so the
+        // fence replay is the same code every client gets and cannot
+        // drift into a second implementation.
+        if let Err(e) = self.ensure_locked(volume, ConvergeMode::Reconcile).await {
+            return AssemblyOutcome::Refused(format!(
+                "lease granted but the export did not converge: {e} — the next pass retries"
+            ));
+        }
+        AssemblyOutcome::Assembled { epoch: seat.epoch, deposed }
+    }
+
+    /// Assemble every volume seated here that this target does not yet
+    /// hold the seated epoch's lease for. Returns only the volumes it
+    /// acted on or is waiting on, so a steady-state pass reports
+    /// nothing.
+    pub async fn assembly_pass(&self, volumes: &[String]) -> Vec<(String, AssemblyOutcome)> {
+        let me = target_id();
+        let mut out = Vec::new();
+        for v in volumes {
+            let seat = match self.backend.block_volume_seat(v).await {
+                Ok(Ok(Some(s))) => s,
+                _ => continue,
+            };
+            if seat.composer != me {
+                continue;
+            }
+            let held = matches!(
+                self.backend.block_lease(v).await,
+                Ok(Ok(Some(ref l))) if l.holder == me && l.epoch == seat.epoch
+            );
+            if held {
+                continue;
+            }
+            out.push((v.clone(), self.assemble(v).await));
+        }
+        out
     }
 
     /// THE DEAD-MAN (design §12; `DeadmanGate`). For every volume this
@@ -2361,6 +2578,144 @@ pub(crate) mod tests {
             }
             other => panic!("the new composer is healthy; got {other:?}"),
         }
+    }
+
+    /// THE WHOLE FAILOVER ORDER, on one volume: CAS → horizon → evict →
+    /// assemble → replay. Driven from the survivor's side, which is the
+    /// side that has to be right.
+    ///
+    /// The horizon is the part with teeth. Assembly must REFUSE while
+    /// the deposed composer's lease still runs — it may still be acking
+    /// its clients' writes, and taking its fan-in away is what strands
+    /// them on a doomed leg. Only once that lease lapses may the
+    /// survivor become the serving composition.
+    #[tokio::test]
+    async fn assembly_waits_out_the_horizon_then_takes_the_composition() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        let me = target_id();
+        let now = now_unix();
+
+        // The world just before a failover TO us: the volume is seated
+        // at a peer, that peer holds a live epoch-1 lease, and our leg
+        // is in sync. (The lvol is ours to converge; provisioning it
+        // here stands in for the rebuild that would have filled it.)
+        backend.block_target_register("node-peer", "10.0.0.2", 4420, now).await.unwrap().unwrap();
+        r.self_register().await.unwrap();
+        backend
+            .block_seat_volume("pvc-fo", "node-peer", now, now + 60)
+            .await
+            .unwrap()
+            .unwrap();
+        backend
+            .block_leg_mark(
+                "pvc-fo",
+                &me,
+                crate::state_backend::extent_alloc::LEG_INSYNC,
+                now,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        // A client admitted, and one FENCED — the fence replay's whole
+        // reason for existing, since PTPL never travels to a survivor.
+        let live = crate::nvmeof_export::flint_host_nqn("node-live");
+        let doomed = crate::nvmeof_export::flint_host_nqn("node-doomed");
+        backend.block_node_attach("pvc-fo", &live, "node-live", now).await.unwrap().unwrap();
+        backend.block_host_admit("pvc-fo", 9, &doomed, now).await.unwrap().unwrap();
+        backend.block_fence_record("pvc-fo", 9, now).await.unwrap().unwrap();
+        backend.block_host_evict("pvc-fo", 9).await.unwrap().unwrap();
+
+        // THE CAS: the peer is condemned, we are the in-sync survivor.
+        let long_ago = now - 10 * verdict_min_secs();
+        for _ in 0..verdict_strikes() + 1 {
+            r.observe("node-peer", false, long_ago);
+        }
+        r.observe(&me, true, now);
+        match r.attempt_promotion("pvc-fo").await {
+            PromotionOutcome::Promoted { to, epoch, evict_after_unix, .. } => {
+                assert_eq!((to.as_str(), epoch), (me.as_str(), 2));
+                assert_eq!(evict_after_unix, now + 60, "the horizon is the deposed lease");
+            }
+            other => panic!("expected a promotion, got {other:?}"),
+        }
+
+        // The lvol is already here — the rebuild's output, standing in.
+        // It goes in BEFORE the first attempt on purpose: with it
+        // present, the ONLY thing between this call and a completed
+        // assembly is the horizon, so the refusal below is attributable
+        // to the horizon and to nothing else.
+        tgt.bdevs.lock().unwrap().insert("lvs_test/pvc-fo".into(), "uuid-fo".into());
+
+        // THE HORIZON: assembly refuses while that lease still runs.
+        match r.assemble("pvc-fo").await {
+            AssemblyOutcome::AwaitingHorizon { deposed, until_unix } => {
+                assert_eq!((deposed.as_str(), until_unix), ("node-peer", now + 60))
+            }
+            other => panic!("assembly must wait out the deposed lease, got {other:?}"),
+        }
+        let nqn = crate::identity::block_volume_export_nqn("pvc-fo");
+        assert!(
+            tgt.subsystems.lock().unwrap().get(&nqn).is_none(),
+            "nothing may be built for a composition that has not been assembled"
+        );
+
+        // The lease lapses (expressed by re-granting the DEPOSED one in
+        // the past — what a lapse looks like from the record's side).
+        backend
+            .block_lease_grant("pvc-fo", 1, "node-peer", now - 1)
+            .await
+            .unwrap()
+            .unwrap();
+        match r.assemble("pvc-fo").await {
+            AssemblyOutcome::Assembled { epoch, deposed } => {
+                assert_eq!(epoch, 2);
+                assert_eq!(deposed.as_deref(), Some("node-peer"));
+            }
+            other => panic!("expected assembly, got {other:?}"),
+        }
+
+        // ASSEMBLY IS THE LEASE GRANT.
+        let l = backend.block_lease("pvc-fo").await.unwrap().unwrap().unwrap();
+        assert_eq!((l.epoch, l.holder.as_str()), (2, me.as_str()));
+
+        // The deposed leg is STALE, so the election gate cannot hand the
+        // composition straight back to it.
+        let legs = backend.block_legs("pvc-fo").await.unwrap().unwrap();
+        let peer = legs.iter().find(|l| l.target_id == "node-peer").expect("peer leg");
+        assert_eq!(peer.sync_state, crate::state_backend::extent_alloc::LEG_STALE);
+
+        // THE FENCE REPLAY: the export is up, the live client is
+        // admitted, and the fenced one is NOT — nothing about the fence
+        // travelled here except this MDS-side computation.
+        let hosts = tgt.hosts_of(&nqn);
+        assert!(hosts.contains(&live), "live client admitted: {hosts:?}");
+        assert!(!hosts.contains(&doomed), "fenced client must not return: {hosts:?}");
+        assert!(hosts.contains(&crate::identity::block_mds_host_nqn()), "fence lane present");
+        // And the door STAYS shut, which is the part the allow-list
+        // check alone would not prove: the fenced client's node tries to
+        // re-attach at the survivor, where no PTPL and no reservation
+        // ever arrived, and is refused against the durable record.
+        match backend.block_node_attach("pvc-fo", &doomed, "node-doomed", now).await {
+            Ok(Err(crate::state_backend::extent_alloc::ExtentAllocError::FencedClient)) => {}
+            other => panic!("a fenced node must not re-attach at the survivor: {other:?}"),
+        }
+
+        // Idempotent: a second pass is a no-op, not a second assembly.
+        assert_eq!(
+            r.assemble("pvc-fo").await,
+            AssemblyOutcome::AlreadyAssembled { epoch: 2 }
+        );
+        assert!(r.assembly_pass(&["pvc-fo".to_string()]).await.is_empty());
     }
 
     /// THE DEAD-MAN, end to end: a target that has lost the record's

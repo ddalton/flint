@@ -1573,10 +1573,43 @@ Each phase ships standalone value; none is gated on the next.
   condemned — not ours to converge — and the fence path's converge-local/dial-remote
   asymmetry is noted at the site: a deposed target's converge is refused there
   (its lease will not renew) rather than fencing the wrong target.
-  What remains of the epoch machine after this: eviction at the survivor's
-  leg-export, assembly (the lease grant for the new epoch, where the deposed leg is
-  marked stale and standing fences are replayed into the allow-list), and the
-  redirect actor.
+  **EVICTION AND ASSEMBLY FOLLOWED (same day), and the failover order is now whole
+  in code**: CAS → horizon → evict → assemble → replay. Assembly refuses while the
+  deposed composer's lease still runs (`AwaitingHorizon`), because that composer may
+  still be acking its clients' writes and taking its fan-in away is what strands
+  them on a doomed leg; then it evicts the deposed at this target's leg-export,
+  marks the deposed leg STALE so the election gate cannot hand the composition
+  straight back to it (`RecordRejoinOnly` — only a completed rebuild clears it),
+  grants the epoch's lease, and converges the export. **Assembly IS the lease
+  grant**, which is finding (b) in its enforcement position rather than its
+  statement position.
+  Two details are worth keeping. **The standing lease is what names the DEPOSED
+  target** — there is no separate "who was serving" record, because holder-plus-epoch
+  already is one. And the one place code cannot be as atomic as the model is the
+  lease grant versus the export build: they are ordered grant-then-build, so a crash
+  between them leaves a lease with no export (harmless; the next converge builds it)
+  rather than an export SERVING with no lease, which the dead-man's work list would
+  never look at again and converge would refuse forever. Exercise must not outlive
+  entitlement.
+  The **fence replay** rides the ordinary converge path rather than a second
+  implementation of it, and its fail-closed property is structural rather than
+  hoped-for: `ensure_export` creates the subsystem `allow_any_host: false`,
+  converges the host list, and only then adds the namespace and listener — verified
+  by reading it, so there is no instant at which the volume is reachable by a client
+  the MDS-side computation excluded. The round-trip test asserts the survivor
+  REFUSES a fenced node's re-attach, not merely that its NQN is absent from the
+  allow-list: the weaker check passes vacuously (the fence deleted the row), while
+  the refusal is the belt that actually holds when PTPL never travelled.
+  **Eviction is, today, a verification with teeth.** A target's allow-list is
+  derived level-triggered from the admission tables and no inter-target host NQN is
+  ever in them, so a deposed peer is already excluded by construction and the call
+  normally finds nothing to remove. The day replication puts a peer's NQN on a leg's
+  allow-list so it can mirror, that changes — and this is the step that removes it,
+  in the right place in the order.
+  What remains: the redirect actor (csi-node re-attach lane + "session up" ack +
+  per-client notify re-fire), and replication itself — the second leg, the degrade
+  barrier that writes stale marks on a solo ack, and the sparse-aware rebuild that
+  clears them.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left
