@@ -186,6 +186,54 @@ impl LegTransportPolicy {
         Self { fast_io_fail_timeout_sec, ..d }
     }
 
+    /// THE DEGRADE BARRIER's transport half, for pnfs-block COMPOSED
+    /// legs only (`FlintComposition`'s `DegradeBarrier`).
+    ///
+    /// `fast_io_fail_timeout_sec: 0` — a peer leg's I/O QUEUES rather
+    /// than failing, which is what makes it impossible for raid1 to ack
+    /// a write that only one leg took. Stock raid1 acks when all legs
+    /// have responded and ANY one succeeded, and writes the leg-failed
+    /// record ASYNCHRONOUSLY afterwards; between those two the MDS
+    /// record still says the missing leg is in sync, so an election in
+    /// that window hands the volume to a leg already missing acked
+    /// bytes. `FlintCompositionDegradeBlind.cfg` is that window as a
+    /// counterexample. If the leg cannot fail an I/O, the raid cannot
+    /// ack solo, and the window does not exist.
+    ///
+    /// THIS IS NOT F42 COMING BACK, and the distinction is the whole
+    /// design. F42's stall was UNBOUNDED because nothing ever removed
+    /// the leg — the raid reported online 2/2 while consumers sat in
+    /// D-state forever. Here the stall is bounded by flint's own
+    /// mark-then-degrade loop: the unreachability verdict fires, the
+    /// peer's stale mark lands durably, the leg is removed from the
+    /// raid, and the queued I/O drains degraded. The bound is a
+    /// detection latency instead of a transport timeout, and it is the
+    /// price of the barrier — availability spent on durability, the same
+    /// trade `ElectInSync` makes one layer up.
+    ///
+    /// An operator can put the transport bound back with
+    /// `FLINT_PNFS_BLOCK_LEG_FAST_IO_FAIL_SECS`, and doing so re-opens
+    /// the write hole this exists to close: solo acks would resume
+    /// before the record knows, which is exactly the mutation.
+    pub fn composed_leg() -> Self {
+        let d = Self::default();
+        let fast_io_fail_timeout_sec = std::env::var("FLINT_PNFS_BLOCK_LEG_FAST_IO_FAIL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&v| v == 0 || v >= d.reconnect_delay_sec)
+            .unwrap_or(0);
+        if fast_io_fail_timeout_sec > 0 {
+            tracing::warn!(
+                "⚠️  FLINT_PNFS_BLOCK_LEG_FAST_IO_FAIL_SECS={} — a composed leg will FAIL \
+                 queued I/O, so raid1 can ack a write only one leg took before the record \
+                 carries the peer's stale mark. That is the degrade barrier switched off, \
+                 and the election gate's data stops being honest",
+                fast_io_fail_timeout_sec
+            );
+        }
+        Self { fast_io_fail_timeout_sec, ..d }
+    }
+
     /// Stamp the transport bounds onto a `bdev_nvme_attach_controller`
     /// `params` object (leaves every other field alone; omits
     /// fast_io_fail when disabled).

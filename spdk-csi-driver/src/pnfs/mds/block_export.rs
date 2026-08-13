@@ -891,11 +891,13 @@ impl BlockExportReconciler {
                 "hostnqn": crate::nvmeof_export::flint_host_nqn(&target_id()),
             }
         });
-        // F42's belt, inherited: ctrlr-loss keeps the bdev identity
-        // alive across a peer outage, and fast_io_fail bounds the queue
-        // so a leg on a DEAD node faults out of the raid instead of
-        // stalling every consumer write forever.
-        crate::nvme_recovery::LegTransportPolicy::from_env().apply(&mut params["params"]);
+        // THE DEGRADE BARRIER's transport half: a composed leg QUEUES
+        // I/O rather than failing it, so raid1 cannot ack a write only
+        // one leg took. The stall that creates is bounded by the
+        // mark-then-degrade loop below, not by a transport timeout —
+        // see `LegTransportPolicy::composed_leg` for why that is not
+        // F42 coming back.
+        crate::nvme_recovery::LegTransportPolicy::composed_leg().apply(&mut params["params"]);
         let resp = self
             .rpc
             .rpc(&params)
@@ -1006,6 +1008,129 @@ impl BlockExportReconciler {
             .map_err(|e| format!("bdev_raid_delete {raid}: {e}"))?;
         tracing::info!("'{}' is solo — composition object dropped", volume);
         Ok(())
+    }
+
+    /// THE DEGRADE BARRIER (`DegradeBarrier`), record half: MARK, then
+    /// degrade. Never the other way round.
+    ///
+    /// Stock raid1 does the opposite — it acks a solo-landing write and
+    /// records the leg failure asynchronously afterwards — and the gap
+    /// between those two is a window in which the MDS record still says
+    /// a leg is in sync while it is already missing acked bytes. An
+    /// election in that window discards them with every belt green
+    /// (`FlintCompositionDegradeBlind.cfg`).
+    ///
+    /// flint is not on the data path, so it cannot gate an ack. It gates
+    /// the ABILITY TO ACK instead: a composed leg's transport queues I/O
+    /// rather than failing it (`LegTransportPolicy::composed_leg`), so
+    /// while a peer is unreachable the raid cannot complete a write at
+    /// all. Writes stall. Then, and only then:
+    ///
+    ///   1. the peer's stale mark lands DURABLY in the record;
+    ///   2. the leg is removed from the raid, which lets the queued I/O
+    ///      drain and the volume serve degraded.
+    ///
+    /// After step 1 no ack can be a lie: any write the raid completes
+    /// from here is one the record already knows the peer missed. The
+    /// stall between the peer's death and step 2 is the barrier's price,
+    /// bounded by the unreachability verdict's own thresholds — and it
+    /// is the same trade `ElectInSync` makes, availability spent on
+    /// durability.
+    ///
+    /// If flint dies between the peer's death and step 2, writes stay
+    /// stalled until it returns. That is an availability event and not a
+    /// correctness one — nothing acked, so nothing was lost — and it is
+    /// the honest cost of not being on the data path.
+    ///
+    /// Returns the legs degraded this pass.
+    pub async fn degrade_pass(&self, volume: &str) -> Vec<String> {
+        let me = target_id();
+        let seat = match self.backend.block_volume_seat(volume).await {
+            Ok(Ok(Some(s))) if s.composer == me => s,
+            _ => return Vec::new(), // not ours to compose
+        };
+        let legs = match self.backend.block_legs(volume).await {
+            Ok(Ok(l)) => l,
+            _ => return Vec::new(),
+        };
+        let mut degraded = Vec::new();
+        for leg in legs.iter().filter(|l| {
+            l.target_id != me && l.sync_state == crate::state_backend::extent_alloc::LEG_INSYNC
+        }) {
+            // Only an affirmative verdict degrades a leg. A peer that is
+            // merely SUSPECT keeps its place: the transport is queueing,
+            // so nothing can be acked behind its back, and degrading on
+            // a blip would spend a rebuild on a target that never left.
+            match self.reachability(&leg.target_id) {
+                Some(v) if v.is_unreachable() => {}
+                _ => continue,
+            }
+            tracing::error!(
+                "🔻 '{}' epoch {}: leg '{}' is unreachable — marking it STALE before degrading, \
+                 so no ack can outrun the record",
+                volume,
+                seat.epoch,
+                leg.target_id
+            );
+            // (1) THE MARK, first and durable.
+            match self
+                .backend
+                .block_leg_mark(
+                    volume,
+                    &leg.target_id,
+                    crate::state_backend::extent_alloc::LEG_STALE,
+                    now_unix(),
+                )
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    // The mark did not land, so the barrier is not up.
+                    // Leave the leg in the raid: I/O stays stalled,
+                    // which is the safe side of this trade.
+                    tracing::error!(
+                        "'{}' leg '{}': stale mark FAILED ({}) — leaving the leg in the \
+                         composition, so writes stall rather than acking behind the record",
+                        volume, leg.target_id, e
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "'{}' leg '{}': stale mark FAILED ({}) — writes stall rather than \
+                         acking behind the record",
+                        volume, leg.target_id, e
+                    );
+                    continue;
+                }
+            }
+            // (2) Only now may the composition degrade.
+            let base = format!("flintleg-{volume}-{}n1", leg.target_id);
+            let remove = json!({
+                "method": "bdev_raid_remove_base_bdev",
+                "params": { "name": base }
+            });
+            match self.rpc.rpc(&remove).await {
+                Ok(_) => {
+                    tracing::warn!(
+                        "'{}' now serving DEGRADED without leg '{}' — a rebuild is owed before \
+                         that leg can be elected again",
+                        volume,
+                        leg.target_id
+                    );
+                    degraded.push(leg.target_id.clone());
+                }
+                // The mark stands, which is the important half: the leg
+                // is already unelectable. The removal retries next pass;
+                // until it succeeds, writes stall.
+                Err(e) => tracing::error!(
+                    "'{}' leg '{}': marked stale but NOT removed from the raid ({}) — writes \
+                     stay stalled until the next pass",
+                    volume, leg.target_id, e
+                ),
+            }
+        }
+        degraded
     }
 
     /// ASSEMBLY (`Assemble`) — the act that makes an elected composer a
@@ -2122,6 +2247,21 @@ pub(crate) mod tests {
                     self.bdevs.lock().unwrap().insert(name.clone(), name.clone());
                     Ok(json!({ "result": true }))
                 }
+                // Degrading: the base leaves the raid, which is what
+                // lets the queued I/O drain. The raid itself survives.
+                "bdev_raid_remove_base_bdev" => {
+                    let base = p["name"].as_str().unwrap_or("").to_string();
+                    let mut raids = self.raids.lock().unwrap();
+                    let mut hit = false;
+                    for params in raids.values_mut() {
+                        if let Some(bases) = params["base_bdevs"].as_array_mut() {
+                            let before = bases.len();
+                            bases.retain(|b| b.as_str() != Some(base.as_str()));
+                            hit |= bases.len() != before;
+                        }
+                    }
+                    if hit { Ok(json!({ "result": true })) } else { Err("no such base".into()) }
+                }
                 "bdev_raid_delete" => {
                     let name = p["name"].as_str().unwrap_or("").to_string();
                     self.raids.lock().unwrap().remove(&name);
@@ -3142,6 +3282,108 @@ pub(crate) mod tests {
             "the composition object is dropped so the lvol's claim is released"
         );
         assert!(ns_bdev(&tgt).contains("pvc-mir"), "back to the lvol, no bytes moved");
+    }
+
+    /// THE DEGRADE BARRIER: the stale mark lands BEFORE the leg leaves
+    /// the raid, and the order is the whole property.
+    ///
+    /// Stock raid1 acks a solo-landing write and records the leg failure
+    /// afterwards; in that gap the record still calls the missing leg
+    /// in sync, so an election hands the volume to a leg already short
+    /// of acked bytes. Since flint is not on the data path it cannot
+    /// gate an ack — it gates the ABILITY to ack, by leaving the leg in
+    /// the raid (where its transport queues rather than fails) until the
+    /// mark is durable. Removing the leg first would be stock raid1's
+    /// order and the counterexample's shape.
+    #[tokio::test]
+    async fn the_barrier_marks_the_leg_stale_before_the_raid_degrades() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        let now = now_unix();
+        r.ensure("pvc-deg", Some(1 << 20)).await.expect("provision");
+        backend.block_target_register("node-peer", "10.0.0.2", 4420, now).await.unwrap().unwrap();
+        backend
+            .block_leg_mark(
+                "pvc-deg",
+                "node-peer",
+                crate::state_backend::extent_alloc::LEG_INSYNC,
+                now,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        r.reconcile_hosts("pvc-deg").await.expect("compose");
+
+        // The leg's transport QUEUES rather than fails — that is what
+        // makes a solo ack impossible while the peer is missing.
+        let calls = tgt.calls.lock().unwrap().clone();
+        let attach = tgt.call_with_method(&calls, "bdev_nvme_attach_controller").unwrap();
+        assert!(
+            attach["params"].get("fast_io_fail_timeout_sec").is_none(),
+            "a composed leg must not fail queued I/O — that is the ack window: {:?}",
+            attach["params"]
+        );
+        assert_eq!(attach["params"]["ctrlr_loss_timeout_sec"], -1);
+
+        // A peer that is merely SUSPECT keeps its place: the transport
+        // is queueing, so nothing can be acked behind its back, and
+        // degrading on a blip spends a rebuild for nothing.
+        r.observe("node-peer", false, now);
+        assert!(r.degrade_pass("pvc-deg").await.is_empty(), "a blip must not degrade");
+        let legs = backend.block_legs("pvc-deg").await.unwrap().unwrap();
+        assert_eq!(
+            legs.iter().find(|l| l.target_id == "node-peer").unwrap().sync_state,
+            crate::state_backend::extent_alloc::LEG_INSYNC
+        );
+
+        // The blip clears — which resets the failure clock, so the real
+        // outage below starts its own window rather than inheriting the
+        // blip's. (Getting this wrong in the test made the verdict read
+        // SUSPECT and the barrier look inert.)
+        r.observe("node-peer", true, now);
+
+        // Now the verdict lands.
+        let long_ago = now - 10 * verdict_min_secs();
+        for _ in 0..verdict_strikes() + 1 {
+            r.observe("node-peer", false, long_ago);
+        }
+        tgt.calls.lock().unwrap().clear();
+        assert_eq!(r.degrade_pass("pvc-deg").await, vec!["node-peer".to_string()]);
+
+        // THE ORDER. The mark is durable and the leg is gone from the
+        // raid — and the raid removal is the LAST thing that happened,
+        // because everything before it could still have acked.
+        let legs = backend.block_legs("pvc-deg").await.unwrap().unwrap();
+        assert_eq!(
+            legs.iter().find(|l| l.target_id == "node-peer").unwrap().sync_state,
+            crate::state_backend::extent_alloc::LEG_STALE,
+            "the record knows the leg is behind"
+        );
+        assert!(
+            tgt.methods().iter().any(|m| m == "bdev_raid_remove_base_bdev"),
+            "the leg left the composition: {:?}",
+            tgt.methods()
+        );
+
+        // And the leg is no longer electable — which is the point of
+        // marking it at all.
+        let seat = backend.block_volume_seat("pvc-deg").await.unwrap().unwrap().unwrap();
+        assert!(matches!(
+            backend
+                .block_promote("pvc-deg", seat.epoch, &seat.composer, "node-peer", now)
+                .await
+                .unwrap(),
+            Err(crate::state_backend::extent_alloc::ExtentAllocError::NotInSync { .. })
+        ));
     }
 
     /// THE LEG EXPORT is the door `EvictAtLeg` closes, and who may come

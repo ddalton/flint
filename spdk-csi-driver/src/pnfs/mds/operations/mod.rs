@@ -2013,6 +2013,18 @@ pub async fn export_reconcile_pass(
         }
     }
 
+    // THE DEGRADE BARRIER, before the converge that would rebuild the
+    // composition: for every volume this target composes, a peer leg
+    // under an unreachability verdict is marked STALE and only then
+    // removed from the raid. Until that mark lands the composed leg's
+    // transport is queueing, so no write can be acked behind the
+    // record's back — mark, then degrade, never the other way round.
+    for v in &volumes {
+        for leg in reconciler.degrade_pass(v).await {
+            tracing::warn!("⛓️ {} '{}': degraded away from leg '{}'", context, v, leg);
+        }
+    }
+
     reconciler.reconcile_all(&volumes).await;
     // Seats whose composer has no registry row cannot be dialed — the
     // deliberate refusal at every dial site. Say so once per pass,

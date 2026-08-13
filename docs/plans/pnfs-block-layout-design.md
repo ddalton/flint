@@ -1676,19 +1676,37 @@ Each phase ships standalone value; none is gated on the next.
   RAID makes a stale lvol-backed namespace look correct — the volume would keep
   serving one leg while the record claimed two, every write landing on a single
   copy. Silent divergence, from three characters.
-  **What remains, and it is the honest majority of "replication"**: the DEGRADE
-  BARRIER (`DegradeBarrier` — a solo-landing write acked only after the record
-  carries the peer's stale mark; flint is not on the data path, so this has to
-  interpose on LEG FAILURE, and how to quiesce a raid1 mid-flight through SPDK's RPC
-  surface is an open design question, not a coding task), the sparse-aware REBUILD
+  **THE DEGRADE BARRIER SHIPPED (same day), and the open design question had an
+  answer that needed no quiesce RPC at all.** flint is not on the data path and
+  cannot gate an ack — so it gates the ABILITY to ack. A composed leg attaches with
+  `fast_io_fail_timeout_sec` UNSET, so a missing peer's I/O QUEUES rather than
+  failing, and raid1 (which acks when all legs have responded and any one succeeded)
+  cannot complete a write only one leg took. Writes stall. Then, in this order:
+  the peer's stale mark lands DURABLY, and only then is the leg removed from the
+  raid, which drains the queue and serves degraded. After the mark, no ack can be a
+  lie — any write the raid completes is one the record already knows the peer
+  missed. Both halves are A/B'd: reverse the order and the record no longer knows;
+  restore the transport bound and the ack window re-opens.
+  **This is not F42 returning**, and the distinction is the design. F42's stall was
+  UNBOUNDED because nothing ever removed the leg — the raid reported online 2/2
+  while consumers sat in D-state. Here the bound is flint's own mark-then-degrade
+  loop rather than a transport timeout: the unreachability verdict fires, the mark
+  lands, the leg goes, I/O drains. A merely SUSPECT peer keeps its place — the
+  transport is queueing, so nothing can be acked behind its back, and degrading on a
+  blip spends a rebuild on a target that never left. If flint dies mid-window,
+  writes stall until it returns: an availability event, not a correctness one, and
+  the honest cost of not being on the data path. `FLINT_PNFS_BLOCK_LEG_FAST_IO_FAIL_SECS`
+  puts the bound back and says in its own warning that it switches the barrier off.
+  What remains: the sparse-aware REBUILD
   that clears a stale mark (`SEEK_DATA`/`SEEK_HOLE` on the source lvol — note the
   ephemeral raid makes this easier than the model assumed: flint can copy while the
   target is not a member and then re-create the composition with both legs, never
   touching raid1's allocation-blind process), the ANCESTRY proof that licenses a
-  delta rejoin, same-AZ leg PLACEMENT, and the StorageClass surface. **Until the
-  degrade barrier exists there is no `replicas: 2` parameter and no way to provision
-  a composed volume** — the substrate is reachable only through the record, so
-  nothing can be created in a state whose safety is not yet enforced.
+  delta rejoin, same-AZ leg PLACEMENT, and the StorageClass surface. **There is still no
+  `replicas: 2` parameter**: a composed volume whose peer leg is lost can now
+  degrade safely, but nothing yet REBUILDS that leg, so a volume provisioned
+  replicated would silently become and stay single-copy after its first peer
+  outage. The surface waits for the rebuild.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left
