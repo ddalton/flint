@@ -1538,10 +1538,45 @@ Each phase ships standalone value; none is gated on the next.
   and re-fence while the ones seated at a condemned peer go to the promotion path.
   The A/B is `a_condemned_peer_does_not_strand_the_volumes_seated_here`, which
   returns (0, 0) under the old whole-pass skip.
-  What remains of the epoch machine after this: the lease horizon and the
-  self-suspending dead-man, eviction at the survivor's leg-export, assembly (which
-  is also the lease grant, and where the deposed leg is marked stale and standing
-  fences are replayed into the allow-list), and the redirect actor.
+  **THE LEASE AND THE DEAD-MAN FOLLOWED (schema 13, same day)** — tranche 3's
+  finding, in code, both halves. `block_leases(volume, epoch, holder, expires_unix)`
+  is its OWN table and the reason is the finding: the CAS moves the seat while the
+  lease stays with the OLD epoch, expiring, **and that gap IS the eviction
+  horizon** — one row would collapse it. Renewal is record-conditioned, so a
+  deposed composer is refused however healthy it is (let it re-arm and the horizon
+  never comes: promotion wedges with every process alive), and an ELECTED composer
+  is refused too, because assembly grants a lease and a holder never takes one (let
+  it self-grant and it serves on an earlier epoch's lapse, which the promoter then
+  reads as an already-passed horizon and assembles over a still-serving zombie).
+  Each half is A/B'd by deleting exactly its guard. Seating grants the epoch-1
+  lease in the same transaction — the first composition is an assembly.
+  **The dead-man** (`DeadmanGate`) is the only exclusion a composer's LOCAL leg
+  has: eviction at a survivor's leg-export cannot reach a partitioned composer
+  serving its own disk to its own clients, so it must stop itself. Each pass it
+  renews every lease this target holds; a renewal the record REFUSES, on a lease
+  that has ALREADY EXPIRED, suspends the export — converging the allow-list down to
+  the fence lane, which tears every client's controller down at the device. Both
+  conditions are load-bearing and are tested separately: suspending on refusal
+  alone severs a still-entitled composition mid-horizon (the acked-writes-stranded
+  shape the CAS→horizon→evict order exists to prevent), and suspending on expiry
+  alone would take down a healthy volume whenever a loop ran late — since a renewal
+  that SUCCEEDS is what repairs the expiry, a stalled loop simply does not run, and
+  suspension can only ever fire where the record has stopped vouching.
+  Suspension is expressed as DESIRED STATE (a converge mode), not as a one-off
+  teardown, because an imperative one would be undone by the next converge; the
+  admissions in sqlite are deliberately kept, since the clients are still
+  legitimately admitted and it is this TARGET that lost the right to serve them.
+  What it cannot promise is timeliness, which is `DeadmanCertain` priced: a late
+  loop leaves a window of stale READS, writes staying contained by eviction and the
+  degrade barrier.
+  The pass now also skips volumes seated at a target that is neither this one nor
+  condemned — not ours to converge — and the fence path's converge-local/dial-remote
+  asymmetry is noted at the site: a deposed target's converge is refused there
+  (its lease will not renew) rather than fencing the wrong target.
+  What remains of the epoch machine after this: eviction at the survivor's
+  leg-export, assembly (the lease grant for the new epoch, where the deposed leg is
+  marked stale and standing fences are replayed into the allow-list), and the
+  redirect actor.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left

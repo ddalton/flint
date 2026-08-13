@@ -1900,10 +1900,38 @@ pub async fn export_reconcile_pass(
                 return (0, 0);
             }
         };
-    let (stranded, serviceable): (Vec<String>, Vec<String>) = volumes
-        .iter()
-        .cloned()
-        .partition(|v| seats.get(v).is_some_and(|c| condemned.contains(c)));
+    let me = crate::pnfs::mds::block_export::target_id();
+    let mut stranded: Vec<String> = Vec::new();
+    let mut serviceable: Vec<String> = Vec::new();
+    for v in &volumes {
+        match seats.get(v) {
+            Some(c) if condemned.contains(c) => stranded.push(v.clone()),
+            // Seated somewhere else and that somewhere is answering:
+            // not ours to converge. This reconciler drives one tgt, and
+            // the MDS that drives the composer's is the one that owns
+            // this volume's export.
+            Some(c) if *c != me => {
+                tracing::debug!("{} '{}': seated at '{}', not this target", context, v, c)
+            }
+            // Seated here, or unseated — the unseated case is left to
+            // converge so its refusal is reported where it always was.
+            _ => serviceable.push(v.clone()),
+        }
+    }
+
+    // THE DEAD-MAN, before converging anything. For every volume this
+    // target still holds a lease on, renew it; a renewal the record
+    // refuses, on a lease that has already expired, means this target
+    // has lost the right to serve and must stop itself. It is the only
+    // exclusion a composer's LOCAL leg has — eviction at a survivor's
+    // leg-export cannot reach a partitioned composer serving its own
+    // disk to its own clients.
+    for (v, why) in reconciler.deadman_pass().await {
+        tracing::error!(
+            "⛔ {} '{}': export SUSPENDED by the dead-man — {}",
+            context, v, why
+        );
+    }
 
     // Every volume whose composer is condemned is a promotion candidate.
     // The CAS's own gates decide; on a single-copy volume they refuse
@@ -1911,12 +1939,17 @@ pub async fn export_reconcile_pass(
     // answer, logged as one rather than left as silence.
     for v in &stranded {
         match reconciler.attempt_promotion(v).await {
-            crate::pnfs::mds::block_export::PromotionOutcome::Promoted { from, to, epoch } => {
+            crate::pnfs::mds::block_export::PromotionOutcome::Promoted {
+                from,
+                to,
+                epoch,
+                evict_after_unix,
+            } => {
                 tracing::warn!(
-                    "🔀 {} '{}': composer '{}' → '{}' at epoch {} — eviction, assembly and \
-                     client redirect are NOT yet implemented, so this record has moved ahead \
-                     of the machinery that follows it",
-                    context, v, from, to, epoch
+                    "🔀 {} '{}': composer '{}' → '{}' at epoch {} — the deposed lease runs to \
+                     {}, and eviction, assembly and client redirect are NOT yet implemented, \
+                     so this record has moved ahead of the machinery that follows it",
+                    context, v, from, to, epoch, evict_after_unix
                 );
             }
             crate::pnfs::mds::block_export::PromotionOutcome::NoCandidate { reason } => {
@@ -3152,7 +3185,7 @@ mod fallback_tests {
             .await
             .unwrap()
             .unwrap();
-        backend.block_seat_volume("volTheirs", "node-peer", 0).await.unwrap().unwrap();
+        backend.block_seat_volume("volTheirs", "node-peer", 0, 120).await.unwrap().unwrap();
         lm.attach_block_export(Arc::clone(&reconciler));
 
         // Condemn the peer: strikes far enough in the past that the

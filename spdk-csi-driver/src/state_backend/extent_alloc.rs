@@ -99,6 +99,12 @@ pub enum ExtentAllocError {
     NotInSync { candidate: String },
     /// The candidate is the sitting composer. Not an election.
     SelfPromotion { composer: String },
+    /// A lease renewal was refused. The reason matters and is carried:
+    /// a DEPOSED holder is refused even while perfectly healthy (its
+    /// lapsed horizon must stay passed), and a NEW composer is refused
+    /// because a lease is granted by assembly, never taken by the
+    /// holder that wants one.
+    LeaseRefused { reason: String },
     /// LAYOUTCOMMIT validation failed — the (client, gen-at-grant) pair
     /// does not match a live grant on a live extent.
     CommitRejected(&'static str),
@@ -160,6 +166,7 @@ impl std::fmt::Display for ExtentAllocError {
             Self::SelfPromotion { composer } => {
                 write!(f, "'{composer}' is already the composer — not an election")
             }
+            Self::LeaseRefused { reason } => write!(f, "serving lease refused: {reason}"),
             Self::CommitRejected(r) => write!(f, "commit rejected: {r}"),
             Self::InvalidRange(r) => write!(f, "invalid range: {r}"),
             Self::Corruption(r) => write!(f, "extent-table corruption: {r}"),
@@ -1190,6 +1197,9 @@ pub fn drop_volume(conn: &mut Connection, volume: &str) -> Result<u64> {
         // would vouch for bytes that are gone.
         "block_volume_target",
         "block_volume_legs",
+        // And the lease: the right to serve bytes that no longer exist
+        // is not a right worth keeping.
+        "block_leases",
     ] {
         n += tx.execute(&format!("DELETE FROM {table} WHERE volume = ?1"), params![volume])?
             as u64;
@@ -1473,6 +1483,7 @@ pub fn seat_volume(
     volume: &str,
     composer: &str,
     now_unix: i64,
+    lease_expires_unix: i64,
 ) -> Result<BlockSeat> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let seated = tx.execute(
@@ -1487,6 +1498,16 @@ pub fn seat_volume(
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (volume, target_id) DO NOTHING",
             params![volume, composer, LEG_INSYNC, now_unix],
+        )?;
+        // The first composition is an assembly, so it is also the first
+        // lease grant — same transaction, because "assembly is the lease
+        // grant" is one act and a seated volume with no lease is a
+        // volume its own composer may not serve.
+        tx.execute(
+            "INSERT INTO block_leases (volume, epoch, holder, expires_unix)
+             VALUES (?1, 1, ?2, ?3)
+             ON CONFLICT (volume) DO NOTHING",
+            params![volume, composer, lease_expires_unix],
         )?;
     }
     let seat = tx.query_row(
@@ -1561,6 +1582,200 @@ pub fn resolve_volume_target(
             composer: seat.composer.clone(),
         })?;
     Ok((seat, target))
+}
+
+// ---------------------------------------------------------------------
+// THE SERVING LEASE. FlintComposition tranche 3's finding, and both
+// halves of it were forced by counterexamples:
+//
+//   (a) Renewal is RECORD-CONDITIONED. A deposed composer that recovers
+//       and re-arms its own lease leaves the eviction horizon forever in
+//       the future, and promotion wedges with every process healthy. The
+//       MDS refuses a deposed node's renewal even when that node is
+//       perfectly alive: its lapsed horizon must STAY passed.
+//
+//   (b) ASSEMBLY IS THE LEASE GRANT. A node whose lease lapsed under an
+//       EARLIER epoch, later composing leaseless, gets deposed — and the
+//       promoter reads that ancient lapse as an already-passed horizon
+//       and assembles over a still-serving zombie (Inv_NoStaleServe).
+//       So activate-the-composition and grant-the-epoch's-lease are ONE
+//       act, and a holder can never take a lease for itself.
+//
+// Hence the lease names (volume, epoch, holder) and lives in its OWN
+// table rather than as columns on the seat. The two have different
+// lifetimes on purpose: the CAS moves the seat, and the lease stays with
+// the OLD epoch, expiring — that gap IS the eviction horizon, and a
+// shared row would collapse it, which is exactly the bug (b) describes.
+// ---------------------------------------------------------------------
+
+/// The right to serve a volume's bytes, held by one target, for one
+/// composition, until a stated moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockLease {
+    pub volume: String,
+    /// The composition this lease was granted FOR. A lease for epoch 1
+    /// licenses nothing at epoch 2.
+    pub epoch: i64,
+    pub holder: String,
+    pub expires_unix: i64,
+}
+
+impl BlockLease {
+    pub fn is_live_at(&self, now_unix: i64) -> bool {
+        now_unix < self.expires_unix
+    }
+}
+
+/// Grant the lease for a composition — assembly's act, and the ONLY way
+/// a lease comes into being. Upsert, because assembly at a new epoch
+/// legitimately replaces the previous composition's lease.
+///
+/// There is deliberately no "take a lease" entry point. A holder asking
+/// for one is the shape counterexample (b) is made of.
+pub fn lease_grant(
+    conn: &mut Connection,
+    volume: &str,
+    epoch: i64,
+    holder: &str,
+    expires_unix: i64,
+) -> Result<BlockLease> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute(
+        "INSERT INTO block_leases (volume, epoch, holder, expires_unix)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (volume) DO UPDATE SET epoch = ?2, holder = ?3, expires_unix = ?4",
+        params![volume, epoch, holder, expires_unix],
+    )?;
+    tx.commit()?;
+    Ok(BlockLease {
+        volume: volume.to_string(),
+        epoch,
+        holder: holder.to_string(),
+        expires_unix,
+    })
+}
+
+/// Extend a standing lease — RECORD-CONDITIONED, which is finding (a).
+///
+/// Two refusals, and they are different facts about the world:
+///   * the seat no longer names this holder — it has been deposed, and
+///     is refused however healthy it is;
+///   * the seat names it, but the standing lease belongs to another
+///     holder or another epoch — it has been ELECTED and not yet
+///     assembled, and a lease is granted, never taken.
+pub fn lease_renew(
+    conn: &mut Connection,
+    volume: &str,
+    holder: &str,
+    expires_unix: i64,
+) -> Result<BlockLease> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let seat: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT epoch, composer FROM block_volume_target WHERE volume = ?1",
+            params![volume],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((seat_epoch, composer)) = seat else {
+        return Err(ExtentAllocError::UnseatedVolume);
+    };
+    if composer != holder {
+        return Err(ExtentAllocError::LeaseRefused {
+            reason: format!(
+                "'{holder}' is not the composer of '{volume}' — the record seats it at \
+                 '{composer}' (epoch {seat_epoch})"
+            ),
+        });
+    }
+    let lease: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT epoch, holder FROM block_leases WHERE volume = ?1",
+            params![volume],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match lease {
+        Some((e, h)) if e == seat_epoch && h == holder => {}
+        Some((e, h)) => {
+            return Err(ExtentAllocError::LeaseRefused {
+                reason: format!(
+                    "the standing lease on '{volume}' belongs to '{h}' at epoch {e}, not to \
+                     '{holder}' at epoch {seat_epoch} — assembly grants it, the holder does not \
+                     take it"
+                ),
+            })
+        }
+        None => {
+            return Err(ExtentAllocError::LeaseRefused {
+                reason: format!("no lease on '{volume}' — assembly has not granted one"),
+            })
+        }
+    }
+    tx.execute(
+        "UPDATE block_leases SET expires_unix = ?1 WHERE volume = ?2",
+        params![expires_unix, volume],
+    )?;
+    tx.commit()?;
+    Ok(BlockLease {
+        volume: volume.to_string(),
+        epoch: seat_epoch,
+        holder: holder.to_string(),
+        expires_unix,
+    })
+}
+
+/// The standing lease on a volume, whoever holds it. The eviction
+/// horizon is read from here: the DEPOSED composer's lease is what must
+/// have expired before anything may be torn out from under it.
+pub fn lease_get(conn: &Connection, volume: &str) -> Result<Option<BlockLease>> {
+    Ok(conn
+        .query_row(
+            "SELECT volume, epoch, holder, expires_unix FROM block_leases WHERE volume = ?1",
+            params![volume],
+            |r| {
+                Ok(BlockLease {
+                    volume: r.get(0)?,
+                    epoch: r.get(1)?,
+                    holder: r.get(2)?,
+                    expires_unix: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Every lease a target holds — the dead-man's work list, and the only
+/// honest answer to "what am I entitled to be serving right now".
+pub fn leases_held_by(conn: &Connection, holder: &str) -> Result<Vec<BlockLease>> {
+    let mut stmt = conn.prepare(
+        "SELECT volume, epoch, holder, expires_unix FROM block_leases WHERE holder = ?1
+         ORDER BY volume",
+    )?;
+    let rows = stmt.query_map(params![holder], |r| {
+        Ok(BlockLease {
+            volume: r.get(0)?,
+            epoch: r.get(1)?,
+            holder: r.get(2)?,
+            expires_unix: r.get(3)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Give up a lease. The dead-man's own act once it has suspended the
+/// export: the entitlement is surrendered explicitly rather than left to
+/// rot, so nothing downstream has to distinguish "expired" from
+/// "expired and acted upon".
+pub fn lease_drop(conn: &mut Connection, volume: &str) -> Result<bool> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let n = tx.execute("DELETE FROM block_leases WHERE volume = ?1", params![volume])?;
+    tx.commit()?;
+    Ok(n > 0)
 }
 
 /// Record a leg's sync state. Upsert — this is the write the degrade
@@ -3927,11 +4142,11 @@ mod tests {
     #[test]
     fn a_seat_is_never_taken_by_a_second_claimant() {
         let mut conn = fresh();
-        let first = seat_volume(&mut conn, VOL, "node-a", 100).unwrap();
+        let first = seat_volume(&mut conn, VOL, "node-a", 100, 100 + 120).unwrap();
         assert_eq!(first.composer, "node-a");
         assert_eq!(first.epoch, 1, "epochs start at 1 and only promotion moves them");
 
-        let second = seat_volume(&mut conn, VOL, "node-b", 200).unwrap();
+        let second = seat_volume(&mut conn, VOL, "node-b", 200, 200 + 120).unwrap();
         assert_eq!(second.composer, "node-a", "the standing seat comes back");
         assert_eq!(second.seated_unix, 100, "and it was not rewritten");
     }
@@ -3951,7 +4166,7 @@ mod tests {
             "an unseated volume resolves to nothing"
         );
 
-        seat_volume(&mut conn, VOL, "node-gone", 100).unwrap();
+        seat_volume(&mut conn, VOL, "node-gone", 100, 100 + 120).unwrap();
         match resolve_volume_target(&conn, VOL) {
             Err(ExtentAllocError::UnknownComposer { composer }) => {
                 assert_eq!(composer, "node-gone", "the error names who to look for")
@@ -3982,7 +4197,7 @@ mod tests {
         let mut conn = fresh();
         target_register(&mut conn, "node-a", "10.0.0.1", 4420, 100).unwrap();
         target_register(&mut conn, "node-b", "10.0.0.2", 4420, 100).unwrap();
-        seat_volume(&mut conn, VOL, "node-a", 100).unwrap();
+        seat_volume(&mut conn, VOL, "node-a", 100, 100 + 120).unwrap();
 
         // Unseated volumes have nothing to promote.
         assert!(matches!(
@@ -4047,6 +4262,96 @@ mod tests {
         }
     }
 
+    /// THE LEASE BELONGS TO THE EPOCH, NOT THE NODE — both halves, each
+    /// of which was forced by a TLC counterexample before any of this
+    /// existed.
+    ///
+    /// (a) A DEPOSED composer is refused its renewal however healthy it
+    ///     is. Let it re-arm its own lease and the eviction horizon
+    ///     never comes: promotion wedges with every process alive.
+    /// (b) An ELECTED composer is refused too, because assembly grants a
+    ///     lease and a holder never takes one. Let it self-grant and it
+    ///     serves on an earlier epoch's lapse — the promoter then reads
+    ///     that ancient lapse as an already-passed horizon and assembles
+    ///     over a still-serving zombie.
+    #[test]
+    fn a_lease_is_refused_to_the_deposed_and_to_the_merely_elected() {
+        let mut conn = fresh();
+        target_register(&mut conn, "node-a", "10.0.0.1", 4420, 100).unwrap();
+        target_register(&mut conn, "node-b", "10.0.0.2", 4420, 100).unwrap();
+        seat_volume(&mut conn, VOL, "node-a", 100, 220).unwrap();
+
+        // The sitting composer renews freely.
+        let l = lease_renew(&mut conn, VOL, "node-a", 400).unwrap();
+        assert_eq!((l.epoch, l.holder.as_str(), l.expires_unix), (1, "node-a", 400));
+        assert!(l.is_live_at(399) && !l.is_live_at(400), "expiry is exclusive");
+
+        // Promote. The CAS moves the SEAT; the lease stays with epoch 1
+        // — and that gap is the eviction horizon.
+        leg_mark(&mut conn, VOL, "node-b", LEG_INSYNC, 150).unwrap();
+        promote_volume(&mut conn, VOL, 1, "node-a", "node-b", 200).unwrap();
+        let standing = lease_get(&conn, VOL).unwrap().unwrap();
+        assert_eq!(
+            (standing.epoch, standing.holder.as_str(), standing.expires_unix),
+            (1, "node-a", 400),
+            "the CAS must not touch the lease — collapsing the two erases the horizon"
+        );
+
+        // (a) node-a is deposed. Healthy, running, and refused.
+        match lease_renew(&mut conn, VOL, "node-a", 9_999) {
+            Err(ExtentAllocError::LeaseRefused { reason }) => {
+                assert!(reason.contains("not the composer"), "{reason}")
+            }
+            other => panic!("a deposed holder must not renew: {other:?}"),
+        }
+        assert_eq!(
+            lease_get(&conn, VOL).unwrap().unwrap().expires_unix,
+            400,
+            "a refused renewal must not move the horizon"
+        );
+
+        // (b) node-b is elected but not assembled. Also refused.
+        match lease_renew(&mut conn, VOL, "node-b", 9_999) {
+            Err(ExtentAllocError::LeaseRefused { reason }) => {
+                assert!(reason.contains("assembly grants it"), "{reason}")
+            }
+            other => panic!("an elected holder must not take a lease: {other:?}"),
+        }
+
+        // Assembly grants it, and only then does node-b hold one.
+        lease_grant(&mut conn, VOL, 2, "node-b", 600).unwrap();
+        let l = lease_renew(&mut conn, VOL, "node-b", 800).unwrap();
+        assert_eq!((l.epoch, l.holder.as_str(), l.expires_unix), (2, "node-b", 800));
+        // And node-a is still refused, now for the first reason.
+        assert!(matches!(
+            lease_renew(&mut conn, VOL, "node-a", 9_999),
+            Err(ExtentAllocError::LeaseRefused { .. })
+        ));
+    }
+
+    /// The dead-man's work list is "what do I hold", and a surrendered
+    /// lease leaves it. Also: a lease dies with its volume — the right
+    /// to serve bytes that no longer exist is not a right worth keeping.
+    #[test]
+    fn leases_are_listed_by_holder_surrendered_and_swept() {
+        let mut conn = setup();
+        target_register(&mut conn, "node-a", "10.0.0.1", 4420, 100).unwrap();
+        seat_volume(&mut conn, VOL, "node-a", 100, 220).unwrap();
+        seat_volume(&mut conn, "pvc-other", "node-a", 100, 220).unwrap();
+        lease_grant(&mut conn, "pvc-theirs", 1, "node-b", 220).unwrap();
+
+        let mine = leases_held_by(&conn, "node-a").unwrap();
+        assert_eq!(mine.len(), 2, "both of node-a's, and not node-b's");
+        assert!(mine.iter().all(|l| l.holder == "node-a"));
+
+        assert!(lease_drop(&mut conn, VOL).unwrap(), "surrendered");
+        assert!(!lease_drop(&mut conn, VOL).unwrap(), "and idempotent");
+        assert_eq!(leases_held_by(&conn, "node-a").unwrap().len(), 1);
+
+        drop_volume(&mut conn, "pvc-other").unwrap();
+        assert!(leases_held_by(&conn, "node-a").unwrap().is_empty(), "swept with the volume");
+    }
+
     /// Seating records the composer's own leg in sync — otherwise a
     /// volume could never be promoted AWAY from a target that does hold
     /// a good copy. But a re-seat must never re-mark: that would let an
@@ -4057,13 +4362,13 @@ mod tests {
     #[test]
     fn seating_marks_its_own_leg_but_a_reseat_never_clears_a_stale_mark() {
         let mut conn = fresh();
-        seat_volume(&mut conn, VOL, "node-a", 100).unwrap();
+        seat_volume(&mut conn, VOL, "node-a", 100, 100 + 120).unwrap();
         let legs = legs_for_volume(&conn, VOL).unwrap();
         assert_eq!(legs.len(), 1);
         assert_eq!((legs[0].target_id.as_str(), legs[0].sync_state.as_str()), ("node-a", LEG_INSYNC));
 
         leg_mark(&mut conn, VOL, "node-a", LEG_STALE, 200).unwrap();
-        seat_volume(&mut conn, VOL, "node-a", 300).unwrap();
+        seat_volume(&mut conn, VOL, "node-a", 300, 300 + 120).unwrap();
         let legs = legs_for_volume(&conn, VOL).unwrap();
         assert_eq!(
             legs[0].sync_state, LEG_STALE,
@@ -4078,7 +4383,7 @@ mod tests {
     #[test]
     fn dropping_a_volume_drops_its_seat() {
         let mut conn = setup();
-        seat_volume(&mut conn, VOL, "node-a", 100).unwrap();
+        seat_volume(&mut conn, VOL, "node-a", 100, 100 + 120).unwrap();
         target_register(&mut conn, "node-a", "10.0.0.9", 4420, 100).unwrap();
         assert!(volume_seat(&conn, VOL).unwrap().is_some());
 

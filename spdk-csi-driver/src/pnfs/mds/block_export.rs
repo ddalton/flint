@@ -89,6 +89,17 @@ fn verdict_strikes() -> u32 {
     env_u64("FLINT_PNFS_BLOCK_UNREACHABLE_STRIKES", 3) as u32
 }
 
+/// How long a serving lease is granted for. MUST comfortably exceed
+/// several reconcile intervals: the lease is renewed by the pass, so a
+/// TTL near the interval would let one slow pass expire a lease that
+/// nothing is wrong with. It is also the EVICTION HORIZON — the time a
+/// deposed composer is given to notice, in the worst case, before
+/// anything may be torn out from under it — so raising it trades
+/// failover latency for tolerance of a stalled loop.
+fn lease_ttl() -> i64 {
+    env_u64("FLINT_PNFS_BLOCK_LEASE_SECS", 120) as i64
+}
+
 /// Is a failed wire probe evidence of a broken LISTENER ADDRESS rather
 /// than of a target that is down? Only when both hold: the target is
 /// ours, so we have a second opinion at all, and its process answered
@@ -153,10 +164,41 @@ struct ProbeState {
     last_ok_unix: i64,
 }
 
+/// What one converge pass is FOR. The three differ only in what they
+/// require of the record and what allow-list they converge toward, so
+/// they share one spec builder rather than growing a second one that
+/// could drift.
+#[derive(Debug, Clone, Copy)]
+enum ConvergeMode {
+    /// CreateVolume: seat the volume here (which also grants its first
+    /// lease) and mint the lvol at this size.
+    Provision(u64),
+    /// The steady state: the record must seat the volume here AND the
+    /// lease must renew. Converging IS the assertion that this target
+    /// serves the volume, so it renews rather than merely checking —
+    /// otherwise an attach arriving between two passes could be refused
+    /// by a lease nothing was wrong with.
+    Reconcile,
+    /// THE DEAD-MAN's act: converge the allow-list down to the fence
+    /// lane alone, whatever the record says. Requires no seat and no
+    /// lease, because it runs precisely when those are gone.
+    Suspend,
+}
+
 /// The result of one promotion attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromotionOutcome {
-    Promoted { from: String, to: String, epoch: i64 },
+    Promoted {
+        from: String,
+        to: String,
+        epoch: i64,
+        /// When the deposed composer's lease expires. Eviction and
+        /// assembly may not begin before this: severing a still-acking
+        /// zombie's fan-in strands its clients' acked writes on the
+        /// doomed leg, which is why the model's order is CAS → horizon →
+        /// evict → assemble and not CAS → evict.
+        evict_after_unix: i64,
+    },
     /// The election gate had nobody to elect. Carries WHY, because on a
     /// single-replica volume this is the permanent and correct answer.
     NoCandidate { reason: String },
@@ -273,7 +315,12 @@ impl BlockExportReconciler {
         volume: &str,
     ) -> Result<crate::state_backend::extent_alloc::BlockSeat, String> {
         let me = target_id();
-        let seat = match self.backend.block_seat_volume(volume, &me, now_unix()).await {
+        let now = now_unix();
+        let seat = match self
+            .backend
+            .block_seat_volume(volume, &me, now, now + lease_ttl())
+            .await
+        {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => return Err(format!("seating '{volume}' refused: {e}")),
             Err(e) => return Err(format!("seating '{volume}' failed: {e}")),
@@ -513,7 +560,135 @@ impl BlockExportReconciler {
     pub async fn ensure(&self, volume: &str, size_bytes: Option<u64>) -> Result<(), String> {
         let lock = self.lock_for(volume);
         let _g = lock.lock().await;
-        self.ensure_locked(volume, size_bytes).await
+        let mode = match size_bytes {
+            Some(n) => ConvergeMode::Provision(n),
+            None => ConvergeMode::Reconcile,
+        };
+        self.ensure_locked(volume, mode).await
+    }
+
+    /// THE DEAD-MAN's act on one volume: converge the allow-list down to
+    /// the fence lane, so every client's controller is torn down and
+    /// this target stops serving bytes it no longer holds the right to
+    /// serve. The admissions in sqlite stay — the clients are still
+    /// legitimately admitted; it is this target that lost the lease.
+    pub async fn suspend_export(&self, volume: &str) -> Result<(), String> {
+        let lock = self.lock_for(volume);
+        let _g = lock.lock().await;
+        self.ensure_locked(volume, ConvergeMode::Suspend).await
+    }
+
+    /// Extend this target's lease on a volume. Record-conditioned at the
+    /// MDS; the refusal reason is carried up because the two refusals
+    /// mean different things (deposed vs. elected-but-not-assembled).
+    async fn renew_lease(
+        &self,
+        volume: &str,
+        holder: &str,
+    ) -> Result<crate::state_backend::extent_alloc::BlockLease, String> {
+        match self
+            .backend
+            .block_lease_renew(volume, holder, now_unix() + lease_ttl())
+            .await
+        {
+            Ok(Ok(l)) => Ok(l),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(e) => Err(format!("lease renewal failed: {e}")),
+        }
+    }
+
+    /// THE DEAD-MAN (design §12; `DeadmanGate`). For every volume this
+    /// target holds a lease on: renew it, and if the renewal is REFUSED
+    /// and the standing lease has already expired, suspend the export
+    /// and surrender the lease.
+    ///
+    /// This is the only exclusion a composer's LOCAL leg has. Eviction
+    /// at the survivor's leg-export cannot reach a partitioned composer
+    /// serving its own disk to its own clients; nothing the MDS says
+    /// reaches it either. It has to stop itself.
+    ///
+    /// Both conditions are required, and the order is what makes it
+    /// safe: a renewal that SUCCEEDS proves the record still vouches for
+    /// us, so a stalled loop can never suspend a healthy volume — it
+    /// simply does not run, and the expiry it would have found is
+    /// repaired by the very renewal that precedes the check. Suspension
+    /// happens only where the record has stopped vouching or cannot be
+    /// read at all.
+    ///
+    /// What it CANNOT promise is timeliness, and that is the model's
+    /// `DeadmanCertain` axiom priced: a loop that is late leaves a
+    /// window in which a deposed composer still answers reads. The Skew
+    /// run puts a number on what that costs — stale READS only, because
+    /// writes stay contained by eviction and the degrade barrier.
+    pub async fn deadman_pass(&self) -> Vec<(String, String)> {
+        let me = target_id();
+        let leases = match self.backend.block_leases_held(&me).await {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => {
+                tracing::error!("dead-man: lease list refused: {e}");
+                return Vec::new();
+            }
+            Err(e) => {
+                tracing::error!("dead-man: lease list unreadable: {e}");
+                return Vec::new();
+            }
+        };
+        let now = now_unix();
+        let mut suspended = Vec::new();
+        for lease in leases {
+            let Err(why) = self.renew_lease(&lease.volume, &me).await else {
+                continue;
+            };
+            if lease.is_live_at(now) {
+                // Refused, but the horizon has not passed. Serving
+                // continues, deliberately: the clients' writes are still
+                // this composition's to accept until the lease it was
+                // granted under actually runs out, and cutting them off
+                // early is what strands acked writes on a doomed leg.
+                tracing::warn!(
+                    "dead-man '{}': renewal refused ({}) — suspending in {}s when the epoch-{} \
+                     lease expires",
+                    lease.volume,
+                    why,
+                    lease.expires_unix - now,
+                    lease.epoch
+                );
+                continue;
+            }
+            tracing::error!(
+                "⛔ dead-man '{}': the epoch-{} lease expired at {} and renewal is refused ({}) \
+                 — SUSPENDING this target's export",
+                lease.volume,
+                lease.epoch,
+                lease.expires_unix,
+                why
+            );
+            match self.suspend_export(&lease.volume).await {
+                Ok(()) => {
+                    // Surrender explicitly, so nothing downstream has to
+                    // tell "expired" from "expired and acted upon".
+                    match self.backend.block_lease_drop(&lease.volume).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => tracing::error!(
+                            "dead-man '{}': suspended but lease not surrendered: {e}",
+                            lease.volume
+                        ),
+                        Err(e) => tracing::error!(
+                            "dead-man '{}': suspended but lease not surrendered: {e}",
+                            lease.volume
+                        ),
+                    }
+                    suspended.push((lease.volume.clone(), why));
+                }
+                Err(e) => tracing::error!(
+                    "dead-man '{}': SUSPENSION FAILED ({}) — this target may still be serving a \
+                     composition it no longer holds",
+                    lease.volume,
+                    e
+                ),
+            }
+        }
+        suspended
     }
 
     /// Re-read the desired allow-list and converge the export onto it.
@@ -783,8 +958,12 @@ impl BlockExportReconciler {
         ids
     }
 
-    async fn ensure_locked(&self, volume: &str, size_bytes: Option<u64>) -> Result<(), String> {
-        // ---- the seat, BEFORE any device state (design §12) ----
+    async fn ensure_locked(&self, volume: &str, mode: ConvergeMode) -> Result<(), String> {
+        let size_bytes = match mode {
+            ConvergeMode::Provision(n) => Some(n),
+            _ => None,
+        };
+        // ---- the seat and the LEASE, BEFORE any device state (§12) ----
         //
         // Provision seats the volume here; reconcile requires a seat
         // that already names this target. The order matters: seat then
@@ -808,33 +987,34 @@ impl BlockExportReconciler {
         // is what keeps the registry needed exactly where an address is
         // needed (the fence lane, the attach answer) and nowhere else.
         let me = target_id();
-        let seat = if size_bytes.is_some() {
-            // Announce before seating: the volume is about to be seated
-            // at this target, and the very next thing a new volume gets
-            // is a ControllerPublish that must resolve an address. The
-            // reconcile pass would get there eventually; a CreateVolume
-            // immediately followed by an attach would not wait for it.
-            self.self_register().await?;
-            self.seat_here(volume).await?
-        } else {
-            match self.backend.block_volume_seat(volume).await {
-                Ok(Ok(Some(seat))) => seat,
-                Ok(Ok(None)) => {
-                    return Err(format!(
-                        "refusing to converge '{volume}': no serving-target seat — this target \
-                         ('{me}') does not serve a volume the record does not give it"
-                    ))
-                }
-                Ok(Err(e)) => return Err(format!("seat lookup for '{volume}' refused: {e}")),
-                Err(e) => return Err(format!("seat lookup for '{volume}' failed: {e}")),
+        match mode {
+            ConvergeMode::Provision(_) => {
+                // Announce before seating: the volume is about to be
+                // seated at this target, and the very next thing a new
+                // volume gets is a ControllerPublish that must resolve an
+                // address. The reconcile pass would get there eventually;
+                // a CreateVolume immediately followed by an attach would
+                // not wait for it.
+                self.self_register().await?;
+                self.seat_here(volume).await?;
             }
-        };
-        if seat.composer != me {
-            return Err(format!(
-                "refusing to converge '{}': the record seats it at composer '{}' (epoch {}), \
-                 not at this target ('{}')",
-                volume, seat.composer, seat.epoch, me
-            ));
+            ConvergeMode::Reconcile => {
+                // RENEW, not merely check. Converging IS the assertion
+                // that this target serves the volume, and the renewal is
+                // record-conditioned at the MDS — so this one call
+                // enforces both doors: the record must still seat the
+                // volume here, and the lease must be the one assembly
+                // granted for the CURRENT epoch. A deposed composer is
+                // refused here however healthy it is, and an ELECTED one
+                // is refused too, because a lease is granted by assembly
+                // and never taken by the holder that wants it.
+                if let Err(e) = self.renew_lease(volume, &me).await {
+                    return Err(format!("refusing to converge '{volume}': {e}"));
+                }
+            }
+            // The dead-man has no record to satisfy. That is the point:
+            // it runs when the record has stopped vouching for us.
+            ConvergeMode::Suspend => {}
         }
 
         let bdev = self.bdev_name(volume);
@@ -880,7 +1060,21 @@ impl BlockExportReconciler {
         let lvol_id_refs: Vec<&str> = lvol_ids.iter().map(String::as_str).collect();
 
         // ---- subsystem / namespace / listener / hosts ----
-        let hosts = self.desired_hosts(volume).await?;
+        //
+        // Under `Suspend` the desired allow-list is the fence lane and
+        // nothing else. It is expressed as DESIRED STATE rather than as
+        // a one-off teardown for the reason everything here is
+        // level-triggered: a suspension applied imperatively would be
+        // undone by the next converge, and the admissions in sqlite are
+        // deliberately NOT deleted — the clients are still legitimately
+        // admitted, it is this TARGET that has lost the right to serve
+        // them. Removing a host from the allow-list tears its controller
+        // down, which is what makes this a real suspension and not a
+        // request.
+        let hosts = match mode {
+            ConvergeMode::Suspend => vec![crate::identity::block_mds_host_nqn()],
+            _ => self.desired_hosts(volume).await?,
+        };
         let nqn = crate::identity::block_volume_export_nqn(volume);
         let (uuid, nguid) = crate::nvmeof_export::stable_ns_identity(volume);
         let ptpl = format!("{}/flint-ptpl-{}.json", self.ptpl_dir, volume);
@@ -923,8 +1117,16 @@ impl BlockExportReconciler {
         // allow-list to connect (`desired_hosts` always includes it),
         // and reconverging is the idempotent way to get it there for
         // volumes provisioned before the fence lane existed.
+        // Converge first so the fence lane's host NQN is on the
+        // allow-list. NOTE the asymmetry this opens once seats can move:
+        // the converge reaches the LOCAL tgt while `resolve` below dials
+        // whatever the record names. They are the same target today, and
+        // when they stop being, a deposed target's converge is refused
+        // here (its lease will not renew) rather than fencing the wrong
+        // one — fail-closed, and the remote arm belongs to the same work
+        // that brings assembly.
         tracing::debug!("fence_preempt {}: converging export", volume);
-        self.ensure_locked(volume, None).await?;
+        self.ensure_locked(volume, ConvergeMode::Reconcile).await?;
         tracing::debug!("fence_preempt {}: converged, resolving nsid", volume);
         let nqn = crate::identity::block_volume_export_nqn(volume);
         // The namespace id, read from the live subsystem rather than
@@ -989,7 +1191,7 @@ impl BlockExportReconciler {
     pub async fn fence_release(&self, volume: &str) -> Result<String, String> {
         let lock = self.lock_for(volume);
         let _g = lock.lock().await;
-        self.ensure_locked(volume, None).await?;
+        self.ensure_locked(volume, ConvergeMode::Reconcile).await?;
         let nqn = crate::identity::block_volume_export_nqn(volume);
         let nsid = get_subsystem(self.rpc.as_ref(), &nqn)
             .await
@@ -1130,6 +1332,18 @@ impl BlockExportReconciler {
             };
         };
 
+        // The horizon the CAS is about to create, read BEFORE it: the
+        // deposed composer's lease is what eviction and assembly must
+        // wait out. Reading it after would race the dead-man's own
+        // surrender of that lease.
+        let horizon = match self.backend.block_lease(volume).await {
+            Ok(Ok(Some(l))) => l.expires_unix,
+            // No lease means nothing is entitled to be serving, so the
+            // horizon is already behind us.
+            Ok(Ok(None)) => now_unix(),
+            Ok(Err(e)) => return PromotionOutcome::Refused(format!("lease unreadable: {e}")),
+            Err(e) => return PromotionOutcome::Refused(format!("lease unreadable: {e}")),
+        };
         match self
             .backend
             .block_promote(volume, seat.epoch, &seat.composer, &candidate.target_id, now_unix())
@@ -1139,6 +1353,7 @@ impl BlockExportReconciler {
                 from: seat.composer,
                 to: new_seat.composer,
                 epoch: new_seat.epoch,
+                evict_after_unix: horizon,
             },
             Ok(Err(crate::state_backend::extent_alloc::ExtentAllocError::PromotionRaced {
                 epoch,
@@ -1900,7 +2115,7 @@ pub(crate) mod tests {
         // Seated at a composer that never registered: the other refusal,
         // naming who is missing so an operator can go look for it.
         backend
-            .block_seat_volume("pvc-elsewhere", "node-b", 100)
+            .block_seat_volume("pvc-elsewhere", "node-b", 100, 220)
             .await
             .unwrap()
             .unwrap();
@@ -2128,7 +2343,7 @@ pub(crate) mod tests {
         // Heard from, and healthy. Now the CAS fires.
         r.observe("node-b", true, now_unix());
         match r.attempt_promotion("pvc-p").await {
-            PromotionOutcome::Promoted { from, to, epoch } => {
+            PromotionOutcome::Promoted { from, to, epoch, .. } => {
                 assert_eq!((from.as_str(), to.as_str(), epoch), (me.as_str(), "node-b", 2))
             }
             other => panic!("expected a promotion, got {other:?}"),
@@ -2146,6 +2361,116 @@ pub(crate) mod tests {
             }
             other => panic!("the new composer is healthy; got {other:?}"),
         }
+    }
+
+    /// THE DEAD-MAN, end to end: a target that has lost the record's
+    /// vouching keeps serving until its lease actually runs out, and
+    /// then tears every client's controller down itself.
+    ///
+    /// Both conditions matter and are shown separately. Suspending on a
+    /// refused renewal ALONE would sever a still-entitled composition
+    /// mid-horizon, which is what strands acked writes on a doomed leg;
+    /// suspending on expiry alone would take down a healthy volume the
+    /// moment a loop ran late, since a renewal that SUCCEEDS is what
+    /// repairs the expiry in the first place.
+    #[tokio::test]
+    async fn the_deadman_suspends_only_after_the_horizon_it_was_granted() {
+        let tgt = Arc::new(FakeTgt::new());
+        // sqlite, not the memory backend: this test needs a real
+        // admission (`block_node_attach`), which the memory backend
+        // refuses because a block-class volume cannot live there.
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        r.ensure("pvc-dm", Some(1 << 20)).await.expect("provision");
+        let me = target_id();
+        let nqn = crate::identity::block_volume_export_nqn("pvc-dm");
+        let client = crate::nvmeof_export::flint_host_nqn("node-w1");
+        backend
+            .block_node_attach("pvc-dm", &client, "node-w1", now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+        r.reconcile_hosts("pvc-dm").await.expect("converge");
+        assert!(tgt.hosts_of(&nqn).contains(&client), "client admitted");
+
+        // Nothing wrong: the record vouches, the renewal succeeds, and
+        // the dead-man does nothing at all.
+        assert!(r.deadman_pass().await.is_empty());
+        assert!(tgt.hosts_of(&nqn).contains(&client), "a healthy volume is untouched");
+
+        // Depose this target. The lease it holds is still LIVE, so the
+        // composition keeps serving — deliberately.
+        backend
+            .block_target_register("node-b", "10.0.0.2", 4420, now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+        backend
+            .block_leg_mark(
+                "pvc-dm",
+                "node-b",
+                crate::state_backend::extent_alloc::LEG_INSYNC,
+                now_unix(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let seat = backend.block_volume_seat("pvc-dm").await.unwrap().unwrap().unwrap();
+        backend
+            .block_promote("pvc-dm", seat.epoch, &me, "node-b", now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            r.deadman_pass().await.is_empty(),
+            "refused renewal inside the horizon must not suspend"
+        );
+        assert!(
+            tgt.hosts_of(&nqn).contains(&client),
+            "the deposed composer serves out its granted horizon — cutting clients off early \
+             is what strands their acked writes"
+        );
+
+        // Now let the horizon pass: re-grant the OLD composition's lease
+        // with an expiry in the past, exactly as a lapse looks.
+        backend
+            .block_lease_grant("pvc-dm", 1, &me, now_unix() - 1)
+            .await
+            .unwrap()
+            .unwrap();
+        let suspended = r.deadman_pass().await;
+        assert_eq!(suspended.len(), 1, "the horizon passed: {suspended:?}");
+        assert_eq!(suspended[0].0, "pvc-dm");
+
+        // The client's controller is gone; the fence lane stays, because
+        // the MDS must still be able to preempt at this target.
+        let hosts = tgt.hosts_of(&nqn);
+        assert!(!hosts.contains(&client), "client evicted at the device: {hosts:?}");
+        assert!(hosts.contains(&crate::identity::block_mds_host_nqn()), "fence lane kept");
+
+        // The admission itself is NOT deleted: the client is still
+        // legitimately admitted, it is this TARGET that lost the right
+        // to serve it.
+        let admitted = backend.block_hosts("pvc-dm").await.unwrap().unwrap();
+        assert!(admitted.contains(&client), "admission survives a suspension: {admitted:?}");
+
+        // The lease was surrendered, so the dead-man is done with it.
+        assert!(backend.block_lease("pvc-dm").await.unwrap().unwrap().is_none());
+        assert!(r.deadman_pass().await.is_empty(), "nothing left to suspend");
+
+        // And a converge cannot re-open what the dead-man closed: the
+        // record does not seat this volume here any more.
+        let e = r.reconcile_hosts("pvc-dm").await.expect_err("must refuse");
+        assert!(e.contains("not the composer"), "got: {e}");
     }
 
     /// `RecordAssemblyOnly`'s door, shipped before promotion can open
@@ -2166,7 +2491,7 @@ pub(crate) mod tests {
             "/var/tmp".into(),
         );
         backend
-            .block_seat_volume("pvc-theirs", "node-b", 100)
+            .block_seat_volume("pvc-theirs", "node-b", 100, 220)
             .await
             .unwrap()
             .unwrap();

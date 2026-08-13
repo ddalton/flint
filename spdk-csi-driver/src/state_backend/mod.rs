@@ -859,13 +859,56 @@ pub trait StateBackend: Send + Sync {
 
     /// Seat a volume at `composer` if it has no seat; returns the seat
     /// that stands either way (which the caller MUST compare — a seat
-    /// naming someone else is never silently overwritten).
+    /// naming someone else is never silently overwritten). Seating a
+    /// volume for the first time is also its first assembly, so it
+    /// grants the epoch-1 lease in the same transaction.
     async fn block_seat_volume(
         &self,
         volume: &str,
         composer: &str,
         now_unix: i64,
+        lease_expires_unix: i64,
     ) -> StateBackendResult<Result<extent_alloc::BlockSeat, extent_alloc::ExtentAllocError>>;
+
+    /// Grant the serving lease for a composition — ASSEMBLY's act, and
+    /// the only way a lease comes into being.
+    async fn block_lease_grant(
+        &self,
+        volume: &str,
+        epoch: i64,
+        holder: &str,
+        expires_unix: i64,
+    ) -> StateBackendResult<Result<extent_alloc::BlockLease, extent_alloc::ExtentAllocError>>;
+
+    /// Extend a standing lease, RECORD-CONDITIONED: refused for a holder
+    /// the seat no longer names (however healthy it is) and for one the
+    /// seat names but assembly has not yet granted.
+    async fn block_lease_renew(
+        &self,
+        volume: &str,
+        holder: &str,
+        expires_unix: i64,
+    ) -> StateBackendResult<Result<extent_alloc::BlockLease, extent_alloc::ExtentAllocError>>;
+
+    /// The standing lease on a volume — where the eviction horizon is
+    /// read from.
+    async fn block_lease(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<Option<extent_alloc::BlockLease>, extent_alloc::ExtentAllocError>>;
+
+    /// Every lease a target holds: the dead-man's work list.
+    async fn block_leases_held(
+        &self,
+        holder: &str,
+    ) -> StateBackendResult<Result<Vec<extent_alloc::BlockLease>, extent_alloc::ExtentAllocError>>;
+
+    /// Surrender a lease — what the dead-man does once it has suspended
+    /// the export.
+    async fn block_lease_drop(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<bool, extent_alloc::ExtentAllocError>>;
 
     /// The volume's seat alone — who composes it, without asking where
     /// that composer answers. What the export reconciler's converge

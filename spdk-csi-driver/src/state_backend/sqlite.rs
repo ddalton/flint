@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 /// One request to the writer thread.
 enum Req {
@@ -1584,6 +1584,7 @@ impl StateBackend for SqliteBackend {
         volume: &str,
         composer: &str,
         now_unix: i64,
+        lease_expires_unix: i64,
     ) -> StateBackendResult<
         Result<
             crate::state_backend::extent_alloc::BlockSeat,
@@ -1593,9 +1594,93 @@ impl StateBackend for SqliteBackend {
         let v = volume.to_string();
         let c = composer.to_string();
         self.with_conn_mut(move |conn| {
-            crate::state_backend::extent_alloc::seat_volume(conn, &v, &c, now_unix)
+            crate::state_backend::extent_alloc::seat_volume(
+                conn,
+                &v,
+                &c,
+                now_unix,
+                lease_expires_unix,
+            )
         })
         .await
+    }
+
+    async fn block_lease_grant(
+        &self,
+        volume: &str,
+        epoch: i64,
+        holder: &str,
+        expires_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::BlockLease,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        let h = holder.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::lease_grant(conn, &v, epoch, &h, expires_unix)
+        })
+        .await
+    }
+
+    async fn block_lease_renew(
+        &self,
+        volume: &str,
+        holder: &str,
+        expires_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::BlockLease,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        let h = holder.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::lease_renew(conn, &v, &h, expires_unix)
+        })
+        .await
+    }
+
+    async fn block_lease(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<
+            Option<crate::state_backend::extent_alloc::BlockLease>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| crate::state_backend::extent_alloc::lease_get(conn, &v))
+            .await
+    }
+
+    async fn block_leases_held(
+        &self,
+        holder: &str,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockLease>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let h = holder.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::leases_held_by(conn, &h)
+        })
+        .await
+    }
+
+    async fn block_lease_drop(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<bool, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| crate::state_backend::extent_alloc::lease_drop(conn, &v))
+            .await
     }
 
     async fn block_volume_seat(
@@ -2300,6 +2385,33 @@ CREATE TABLE IF NOT EXISTS block_volume_legs (
     sync_state  TEXT NOT NULL,
     marked_unix INTEGER NOT NULL,
     PRIMARY KEY (volume, target_id)
+);
+
+-- block_leases: THE SERVING LEASE — the right to serve a volume's bytes,
+-- held by one target, for ONE COMPOSITION, until a stated moment.
+-- FlintComposition tranche 3's finding, whose two halves were each forced
+-- by a counterexample:
+--   (a) renewal is RECORD-CONDITIONED — a deposed composer that recovers
+--       and re-arms its own lease leaves the eviction horizon forever in
+--       the future and wedges promotion with every process healthy, so
+--       the MDS refuses a deposed node's renewal however alive it is;
+--   (b) ASSEMBLY IS THE LEASE GRANT — a node whose lease lapsed under an
+--       EARLIER epoch and later composed leaseless gets deposed, and the
+--       promoter reads that ancient lapse as an already-passed horizon
+--       and assembles over a still-serving zombie.
+--
+-- Its own table, not columns on the seat, and the reason is (b): the CAS
+-- moves the seat while the lease stays with the OLD epoch, expiring —
+-- and that gap IS the eviction horizon. One row would collapse it.
+--
+-- The epoch column is what makes a lease specific to a composition: a
+-- lease for epoch 1 licenses nothing at epoch 2, which is why an elected
+-- composer cannot serve until assembly grants it one.
+CREATE TABLE IF NOT EXISTS block_leases (
+    volume       TEXT PRIMARY KEY,
+    epoch        INTEGER NOT NULL,
+    holder       TEXT NOT NULL,
+    expires_unix INTEGER NOT NULL
 );
 "#;
 

@@ -40,6 +40,7 @@ pub struct MemoryBackend {
     block_seats: DashMap<String, super::extent_alloc::BlockSeat>,
     /// Keyed `(volume, target_id)`, mirroring the sqlite primary key.
     block_legs: DashMap<(String, String), super::extent_alloc::BlockLeg>,
+    block_leases: DashMap<String, super::extent_alloc::BlockLease>,
     instance_counter: AtomicU64,
     /// Lazily-initialised per-deployment server id. `OnceLock` makes
     /// the first call atomic (no two threads observe different values)
@@ -400,6 +401,7 @@ impl StateBackend for MemoryBackend {
         // be seated afresh, never inherit an epoch.
         let seat = self.block_seats.remove(volume).map(|_| 1).unwrap_or(0);
         self.block_legs.retain(|(v, _), _| v != volume);
+        self.block_leases.remove(volume);
         Ok(Ok(seat))
     }
 
@@ -693,6 +695,7 @@ impl StateBackend for MemoryBackend {
         volume: &str,
         composer: &str,
         now_unix: i64,
+        lease_expires_unix: i64,
     ) -> StateBackendResult<
         Result<
             crate::state_backend::extent_alloc::BlockSeat,
@@ -728,8 +731,119 @@ impl StateBackend for MemoryBackend {
                     marked_unix: now_unix,
                 },
             );
+            // First composition = first assembly = first lease grant.
+            self.block_leases.entry(volume.to_string()).or_insert(
+                crate::state_backend::extent_alloc::BlockLease {
+                    volume: volume.to_string(),
+                    epoch: 1,
+                    holder: composer.to_string(),
+                    expires_unix: lease_expires_unix,
+                },
+            );
         }
         Ok(Ok(seat))
+    }
+
+    async fn block_lease_grant(
+        &self,
+        volume: &str,
+        epoch: i64,
+        holder: &str,
+        expires_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::BlockLease,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let lease = crate::state_backend::extent_alloc::BlockLease {
+            volume: volume.to_string(),
+            epoch,
+            holder: holder.to_string(),
+            expires_unix,
+        };
+        self.block_leases.insert(volume.to_string(), lease.clone());
+        Ok(Ok(lease))
+    }
+
+    async fn block_lease_renew(
+        &self,
+        volume: &str,
+        holder: &str,
+        expires_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::BlockLease,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        use crate::state_backend::extent_alloc::ExtentAllocError as E;
+        let Some(seat) = self.block_seats.get(volume).map(|e| e.value().clone()) else {
+            return Ok(Err(E::UnseatedVolume));
+        };
+        if seat.composer != holder {
+            return Ok(Err(E::LeaseRefused {
+                reason: format!(
+                    "'{holder}' is not the composer of '{volume}' — the record seats it at \
+                     '{}' (epoch {})",
+                    seat.composer, seat.epoch
+                ),
+            }));
+        }
+        let Some(mut entry) = self.block_leases.get_mut(volume) else {
+            return Ok(Err(E::LeaseRefused {
+                reason: format!("no lease on '{volume}' — assembly has not granted one"),
+            }));
+        };
+        if entry.epoch != seat.epoch || entry.holder != holder {
+            return Ok(Err(E::LeaseRefused {
+                reason: format!(
+                    "the standing lease on '{volume}' belongs to '{}' at epoch {}, not to \
+                     '{holder}' at epoch {} — assembly grants it, the holder does not take it",
+                    entry.holder, entry.epoch, seat.epoch
+                ),
+            }));
+        }
+        entry.expires_unix = expires_unix;
+        Ok(Ok(entry.value().clone()))
+    }
+
+    async fn block_lease(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<
+            Option<crate::state_backend::extent_alloc::BlockLease>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        Ok(Ok(self.block_leases.get(volume).map(|e| e.value().clone())))
+    }
+
+    async fn block_leases_held(
+        &self,
+        holder: &str,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockLease>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let mut out: Vec<_> = self
+            .block_leases
+            .iter()
+            .filter(|e| e.value().holder == holder)
+            .map(|e| e.value().clone())
+            .collect();
+        out.sort_by(|a, b| a.volume.cmp(&b.volume));
+        Ok(Ok(out))
+    }
+
+    async fn block_lease_drop(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<bool, crate::state_backend::extent_alloc::ExtentAllocError>> {
+        Ok(Ok(self.block_leases.remove(volume).is_some()))
     }
 
     async fn block_volume_seat(

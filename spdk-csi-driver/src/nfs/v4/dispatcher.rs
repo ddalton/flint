@@ -3042,6 +3042,7 @@ impl CompoundDispatcher {
                     | E::PromotionRaced { .. }
                     | E::NotInSync { .. }
                     | E::SelfPromotion { .. }
+                    | E::LeaseRefused { .. }
                     | E::CommitRejected(_)
                     | E::Corruption(_)
                     | E::Sql(_) => Nfs4Status::ServerFault,
