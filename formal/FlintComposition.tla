@@ -190,6 +190,36 @@
 (* rebuilding leg's export, because the admitting reconciler consults      *)
 (* the record — the same one-door discipline Recover enforces.             *)
 (*                                                                         *)
+(* TRANCHE 3 (2026-08-12, same day): LIVENESS — SpecLive, four post-storm  *)
+(* progress theorems (promotion, fence confirmation, client redirect,      *)
+(* rebuild), and three REQUIRED-TO-FAIL runs: NoActor (the shipped world   *)
+(* has no redirect actor — SpecNoRedirect withholds exactly that one       *)
+(* fairness obligation and the parked-client lasso appears, the SpecNoP4   *)
+(* pattern), StaticTraddr (the review's FORWARD livelock: preempts pinned  *)
+(* to the constructor traddr never confirm after a failover, so the        *)
+(* quarantine sweep parks forever — the target-registry requirement with   *)
+(* teeth), and WaitsPrice (ElectInSync's availability bill as a lasso:     *)
+(* a degraded volume whose composer then partitions is DOWN until that     *)
+(* composer returns; the operator override is the undesigned escape).      *)
+(*                                                                         *)
+(* THE TRANCHE'S FINDING — THE LEASE BELONGS TO THE EPOCH, NOT THE NODE,   *)
+(* in BOTH directions, and each half came from a counterexample:           *)
+(*   (a) renewal is RECORD-CONDITIONED (first liveness lasso): a deposed   *)
+(*       node that recovers must NOT get its serving lease back — the      *)
+(*       MDS refuses renewal to anyone the record does not name — or       *)
+(*       eviction waits for a horizon that never comes and promotion       *)
+(*       wedges with every process healthy;                                *)
+(*   (b) ASSEMBLY IS THE GRANT (the safety re-run's counterexample):       *)
+(*       activating the composition and granting the epoch's serving       *)
+(*       lease are one act, or a composer whose lease lapsed under an      *)
+(*       earlier epoch serves leaseless — and when IT is deposed,          *)
+(*       promotion reads the ancient lapse as an already-passed horizon    *)
+(*       and assembles over a still-serving zombie.                        *)
+(* Implementation shape: the lease names (volume, epoch, composer);        *)
+(* Assemble writes it, renewal requests are validated against the          *)
+(* record, and the deadman horizon promotion waits for is the lapse of    *)
+(* THAT lease, never a node-liveness heartbeat.                            *)
+(*                                                                         *)
 (* ABSTRACTIONS, STATED:                                                   *)
 (*   1. Content is not tracked; harm is landing-set membership plus the    *)
 (*      diverged boolean (a torn death or an unguarded delta rejoin left   *)
@@ -251,10 +281,22 @@ CONSTANTS
                            \*        the write-hole belt (raid1 has NO dirty
                            \*        flag: equal-seq divergent legs assemble
                            \*        clean, bdev_raid.c:3390-3396)
-  AncestryGuard            \* TRUE = the RejoinGuard transfer: a leg may take
+  AncestryGuard,           \* TRUE = the RejoinGuard transfer: a leg may take
                            \*        the DELTA rejoin path only if provably at
                            \*        its cut state (no solo-acked bytes of its
                            \*        own, no divergence) — else full rebuild
+  \* ---- TRANCHE 3 (liveness). ----
+  PreemptFollowsRecord     \* TRUE = the fence preempt dials whichever tgt the
+                           \*        record CURRENTLY names (per-pass target
+                           \*        resolution).  FALSE is the shipped code's
+                           \*        constructor-traddr world (block_export.rs
+                           \*        traddr is reconciler config, not
+                           \*        per-volume state) — the review's FORWARD
+                           \*        livelock: after a failover every preempt
+                           \*        dials the dead node, delivered stays 0,
+                           \*        and every sweep parks in UnconfirmedFence
+                           \*        forever.  The StaticTraddr run is that
+                           \*        sentence as a lasso.
 
 ASSUME Cardinality(Tgts) = 2
 
@@ -411,7 +453,11 @@ Recover(t) ==
   IN
   /\ tgt[t] \in {"part", "dead"}
   /\ tgt' = [tgt EXCEPT ![t] = "ok"]
-  /\ lease' = [lease EXCEPT ![t] = "live"]
+  \* Record-conditioned renewal: only the node the record names gets its
+  \* serving lease back on recovery — a deposed node's renewal is refused
+  \* (see LeaseLapse's header), so its lapsed lease STAYS lapsed and the
+  \* eviction horizon it anchors stays passed.
+  /\ lease' = [lease EXCEPT ![t] = IF record.composer = t THEN "live" ELSE @]
   /\ serving' = [serving EXCEPT ![t] =
        IF record.composer = t
          THEN IF lastServed[t] = record.epoch THEN record.epoch ELSE 0
@@ -440,9 +486,22 @@ Recover(t) ==
 (* skew axiom: TRUE fuses the suspend into the lapse (the suspend          *)
 (* provably precedes anything the MDS does with its observation); FALSE    *)
 (* leaves the suspend to DeadmanFire, arbitrarily late.                    *)
+(*                                                                         *)
+(* THE LEASE BELONGS TO THE EPOCH, NOT THE NODE (tranche 3's finding,      *)
+(* from the liveness strict run's first lasso): a lease can fail to renew  *)
+(* for TWO reasons — the node is unreachable, OR the record no longer      *)
+(* names it, in which case the MDS REFUSES the renewal even from a         *)
+(* healthy node.  The first draft lapsed only on unreachability, and a     *)
+(* deposed composer that recovered re-armed its lease forever: eviction    *)
+(* waits for a horizon that never comes, assembly waits for eviction,      *)
+(* and the promotion pipeline wedges with every process healthy.  The      *)
+(* implementation commitment: lease renewal is RECORD-CONDITIONED — the    *)
+(* grant names (volume, epoch, composer), and a renewal request from       *)
+(* anyone else is refused (the same epoch-checked door Recover walks).     *)
 (***************************************************************************)
 LeaseLapse(t) ==
-  /\ tgt[t] # "ok" /\ lease[t] = "live"
+  /\ lease[t] = "live"
+  /\ (tgt[t] # "ok" \/ record.composer # t)
   /\ lease' = [lease EXCEPT ![t] = "lapsed"]
   /\ serving' = IF DeadmanGate /\ DeadmanCertain
                   THEN [serving EXCEPT ![t] = 0]
@@ -513,6 +572,13 @@ Assemble ==
   /\ DeadmanGate => lease[Deposed] = "lapsed"
   /\ serving' = [serving EXCEPT ![record.composer] = record.epoch]
   /\ lastServed' = [lastServed EXCEPT ![record.composer] = record.epoch]
+  \* ASSEMBLE IS ALSO THE LEASE GRANT (the second half of tranche 3's
+  \* lease finding): activating the composition and granting the epoch's
+  \* serving lease are ONE act.  Without this, a node whose lease lapsed
+  \* back when the record named someone else composes with a dead lease —
+  \* and when IT is later deposed, promotion reads that ancient lapse as
+  \* a horizon already passed and assembles over a still-serving zombie.
+  /\ lease' = [lease EXCEPT ![record.composer] = "live"]
   /\ legSync' = [legSync EXCEPT ![Deposed] = "stale"]
   /\ members' = {record.composer}
   /\ doomed' = (doomed \/ soloAcked[Deposed])
@@ -527,7 +593,7 @@ Assemble ==
   /\ excl' = IF FenceReplayOnAssemble
                THEN [excl EXCEPT ![record.composer] = @ \cup fenced]
                ELSE excl
-  /\ UNCHANGED <<tgt, record, legAdmit, lease, session, fenced, pendingEpoch,
+  /\ UNCHANGED <<tgt, record, legAdmit, session, fenced, pendingEpoch,
                  delivered, gen, clientHeld, owner, crashes,
                  divergent, staleWrite, staleServe, zombieWrote, soloAcked,
                  diverged, splitRead, rejoined>>
@@ -553,9 +619,11 @@ FenceClient(c) ==
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
 
 PreemptExecute(c) ==
+  LET target == IF PreemptFollowsRecord THEN record.composer ELSE InitComposer
+  IN
   /\ c \in fenced
-  /\ tgt[record.composer] = "ok"
-  /\ excl' = [excl EXCEPT ![record.composer] = @ \cup {c}]
+  /\ tgt[target] = "ok"
+  /\ excl' = [excl EXCEPT ![target] = @ \cup {c}]
   /\ pendingEpoch' = [pendingEpoch EXCEPT ![c] = record.epoch]
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  fenced, delivered, gen, clientHeld, owner, crashes,
@@ -900,5 +968,111 @@ ProbeTornReachable == ~diverged
 \* and a full FAIL-BACK really completes: promote away, rebuild the old
 \* leg, lose the survivor, promote back — the record machine's round trip.
 ProbeFailBackCompletes == ~(record.epoch = 3 /\ ActiveNew)
+
+(***************************************************************************)
+(* TRANCHE 3 — LIVENESS.  Progress is claimed in the POST-STORM QUIET      *)
+(* (crashes = MaxCrashes conditions every antecedent — under a crash       *)
+(* budget "transiently unavailable forever" is unrepresentable, the        *)
+(* WriterLimbo lesson, so the honest claim is: once the failures stop,     *)
+(* the machine finishes).  Fairness is placed on exactly the components    *)
+(* that are RETRIED LOOPS in the design: the MDS reconcile pipeline        *)
+(* (promotion, eviction, assembly, fence preempt + mark, rebuild, the      *)
+(* stale-mark report), the lease timers, and — separately, because it      *)
+(* DOES NOT EXIST in the code yet — the redirect actor.  SpecNoRedirect    *)
+(* is SpecLive minus that one obligation: the shipped world, where the     *)
+(* csi-node session record replays the dead traddr with a deliberate       *)
+(* "No MDS call".  Its run must FAIL, and that lasso is the review's       *)
+(* "redirect has no actor" finding as a machine-checked counterexample —   *)
+(* the SpecNoP4 pattern.                                                   *)
+(*                                                                         *)
+(* Failure events, Recover, FenceClient, client IO, RegrantRange and       *)
+(* DeltaRejoin carry NO fairness: failures are not obligated, a dead node  *)
+(* may stay dead, fences and grants happen on demand, and the delta door   *)
+(* is an optimization — the FULL rebuild carries the rejoin obligation.    *)
+(***************************************************************************)
+
+FairnessCtl ==
+  /\ WF_vars(PromoteCAS)
+  /\ WF_vars(EvictAtLeg)
+  /\ WF_vars(Assemble)
+  /\ WF_vars(MarkStale)
+  /\ WF_vars(RebuildStart)
+  /\ WF_vars(RebuildComplete)
+  /\ \A t \in Tgts : WF_vars(LeaseLapse(t))
+  /\ \A c \in Clients : WF_vars(PreemptExecute(c)) /\ WF_vars(DeliveredMark(c))
+
+SpecLive       == Spec /\ FairnessCtl /\ \A c \in Clients : WF_vars(ReAttach(c))
+SpecNoRedirect == Spec /\ FairnessCtl
+
+\* Once the failures stop: an unreachable composer with an in-sync,
+\* healthy peer is always failed over — the record moves and the survivor
+\* serves (or the composer itself comes back, which also re-activates the
+\* composition; both roads end at ActiveNew).  The legSync conjunct is
+\* NOT a dodge, it is ElectInSync's honest scope — see
+\* PromotionCompletesUnconditional below, which drops it and must FAIL.
+PromotionCompletes ==
+  [](( /\ tgt[record.composer] # "ok"
+       /\ crashes = MaxCrashes
+       /\ tgt[Deposed] = "ok"
+       /\ legSync[Deposed] = "insync"
+       /\ record.epoch < MaxEpoch )
+     => <>ActiveNew)
+
+\* THE PRICE OF ElectInSync, stated so it cannot be forgotten: drop the
+\* in-sync conjunct and the promise is FALSE — a degraded volume whose
+\* composer then partitions is DOWN until that composer recovers, because
+\* the election gate refuses the stale survivor and the suspended
+\* composer can drive no rebuild.  The WaitsPrice run requires TLC to
+\* produce this lasso: availability spent on durability, priced as a
+\* counterexample.  The undesigned escape is the operator override
+\* (FlintReplication's LastResortServe analog).
+PromotionCompletesUnconditional ==
+  [](( /\ tgt[record.composer] # "ok"
+       /\ crashes = MaxCrashes
+       /\ tgt[Deposed] = "ok"
+       /\ record.epoch < MaxEpoch )
+     => <>ActiveNew)
+
+\* Once the failures stop and a composer serves reachably, every standing
+\* fence is eventually CONFIRMED against the current composition — the
+\* reconcile retry re-earns delivery at whichever tgt the record names.
+\* This is the promise the constructor-traddr world breaks (StaticTraddr
+\* run): a preempt pinned to the original node can never confirm after a
+\* failover, delivered stays 0, and the quarantine sweep parks forever.
+FenceEventuallyConfirmed ==
+  \A c \in Clients :
+    [](( /\ c \in fenced
+         /\ crashes = MaxCrashes
+         /\ tgt[record.composer] = "ok" )
+       => <>(delivered[c] = record.epoch))
+
+\* Once the failures stop and the new composition serves, every client is
+\* eventually re-attached to it.  This obligation belongs to the REDIRECT
+\* ACTOR — the component the review found does not exist (the csi-node
+\* session record replays the recorded traddr, AttachBlockNode answers
+\* static per-shard config, and the only notify sender is expand).
+\* SpecLive grants the actor WF; SpecNoRedirect withholds it and the
+\* NoActor run must produce the parked-client lasso.  When the actor is
+\* built, this property is its acceptance test.
+ClientEventuallyRedirected ==
+  \A c \in Clients :
+    [](( /\ ActiveNew
+         /\ session[c] # record.composer
+         /\ tgt[record.composer] = "ok"
+         /\ crashes = MaxCrashes )
+       => <>(session[c] = record.composer))
+
+\* Once the failures stop, a stale leg on a healthy node behind an active
+\* composer is eventually rebuilt and rejoined — the record-driven
+\* rebuild is a retried reconcile task, not a hope.  The full-rebuild
+\* door carries the obligation (DeltaRejoin is unfaired: an optimization
+\* may be refused forever without breaking the promise).
+StaleLegEventuallyRejoins ==
+  [](( /\ legSync[Deposed] = "stale"
+       /\ tgt[record.composer] = "ok"
+       /\ tgt[Deposed] = "ok"
+       /\ ActiveNew
+       /\ crashes = MaxCrashes )
+     => <>(legSync[Deposed] = "insync"))
 
 ================================================================================

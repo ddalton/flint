@@ -1368,7 +1368,23 @@ Each phase ships standalone value; none is gated on the next.
   peer-stale, rebuild-only — stock raid1 reassembles equal-seq divergent legs as
   clean equals), the auto-examine self-rejoin refuted with teeth
   (`RecordRejoinOnly`), and the full fail-back round trip probed at MaxEpoch=3;
-  `Inv_NoSplitRead` is the new theorem;
+  `Inv_NoSplitRead` is the new theorem. **Tranche 3 (liveness) SHIPPED same day**,
+  and its two required-to-fail runs are build requirements stated as lassos: the
+  shipped world's missing redirect actor parks a client at the dead traddr forever
+  (`ClientEventuallyRedirected` is the actor's acceptance test), and the shipped
+  constructor-traddr preempt shape livelocks every post-failover fence confirmation
+  (the target-registry requirement with teeth). The tranche's own finding — both
+  halves forced by counterexamples — is a hard implementation commitment: **the
+  serving lease names (volume, epoch, composer), not a node.** Renewal is
+  record-conditioned (the MDS refuses a deposed node's renewal even when healthy;
+  its lapsed horizon must STAY passed), and **assembly is the lease grant** —
+  activate-the-composition and grant-the-epoch's-lease are one act, else a composer
+  serves leaseless on an earlier epoch's lapse and its eventual deposition reads
+  that ancient lapse as an already-passed dead-man horizon, assembling over a
+  still-serving zombie. A third run prices `ElectInSync` honestly: a degraded
+  volume whose composer then partitions is DOWN until that composer recovers —
+  availability spent on durability, with the operator override (LastResortServe
+  analog) undesigned and owed alongside the `release_quarantine` surface;
   (4) **PR state never travels** — reservations live at lib/nvmf per node, PTPL to a
   local file; an empty PTPL dir on the survivor loads zero state *silently*
   (`subsystem.c:3154-3158`);
@@ -1409,7 +1425,7 @@ Each phase ships standalone value; none is gated on the next.
   converged into its allow-list (admissions minus fenced, computed MDS-side,
   fail-closed — converge failure means no listener). With that replay in place, the
   epoch-keyed schema change is machine-checked redundant
-  (`FlintCompositionEpochKeyedToo.cfg` explores the identical 102,962-state graph),
+  (`FlintCompositionEpochKeyedToo.cfg` explores the identical distinct-state graph — 128,939 after tranche 3's lease correction, 102,962 when first proven),
   so `fenced_clients` keeps its schema.
   **Priced residuals, named:** the dead-man rests on a bounded-skew axiom
   (`DeadmanCertain`; the Skew run prices its absence at a window of stale READS —
@@ -1428,10 +1444,8 @@ Each phase ships standalone value; none is gated on the next.
   `grow()` for composed volumes (the read-back belt validates ONE LVOL, not the
   array — a one-leg ENOSPC mid-sequence could raise the ceiling past the raid), the
   write-hole divergence belt of limit (1) in code (the model's `UncleanResync` names
-  its shape: forced rebuild of one leg on any unclean assembly), the model's
-  liveness tranche (redirect-actor progress, promotion progress, the forward
-  livelock of a never-confirmable fence, rebuild progress — tranche 2's safety half
-  shipped 2026-08-12), and the long-owed operator surface for
+  its shape: forced rebuild of one leg on any unclean assembly), and the long-owed
+  operator surface for
   `release_quarantine`/`quarantine_stats`, which failover work makes load-bearing.
   Phases 1-3 continue to ship single-replica with `reclaimPolicy` and workload
   guidance saying so.

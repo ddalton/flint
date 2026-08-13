@@ -2,7 +2,7 @@
 
 Seven spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
-(`scripts/check-tla.sh`, **one hundred and thirty-nine** TLC runs).
+(`scripts/check-tla.sh`, **one hundred and forty-three** TLC runs).
 
 Both counts here have drifted before, in both files, because nothing
 regenerated them. They do now:
@@ -236,7 +236,7 @@ distinct-state graph).  `DeadmanCertain` is the module's honesty axiom
 (EvidenceStrict's shape): the Skew run prices leasing without consensus
 at a window of stale *reads*, writes already contained.  **Tranche 2**
 (same day, behind `RejoinEnabled` — tranche-1 state spaces bit-identical,
-flagship 102,962 verified twice): record-driven rebuild/rejoin.
+flagship count verified identical twice — 128,939 after tranche 3's lease correction): record-driven rebuild/rejoin.
 `members` becomes real state, `MaxEpoch = 3` makes the record machine's
 full round trip reachable (fail-back to an in-sync mark *earned* by a
 completed rebuild — probed, not assumed), and the sticky stale marks get
@@ -249,10 +249,25 @@ solo + peer-stale + rebuild-only), and `AncestryGuard` (the RejoinGuard
 transfer: the delta-rejoin door opens only for a leg provably at its
 cut — the delta copies the source's dirty regions and cannot erase what
 the target wrote alone).  New theorem `Inv_NoSplitRead`: no read served
-through divergent member legs.  Still owed: crash *inside* the rebuild
-copy (sim-harness territory, the esnap-window precedent), and all
-liveness (redirect actor, promotion progress, the forward livelock of a
-never-confirmable fence, rebuild progress).
+through divergent member legs.  **Tranche 3** (same day): liveness.
+`SpecLive` puts WF on the design's retried loops plus the redirect
+actor; four post-storm progress theorems (promotion, fence
+confirmation, client redirect, rebuild — antecedents conditioned on the
+exhausted crash budget, the WriterLimbo lesson) and three
+required-to-fail runs: `NoActor` (the shipped world's missing redirect
+actor as a parked-client lasso — `ClientEventuallyRedirected` is the
+actor's acceptance test when built), `StaticTraddr` (the review's
+forward livelock: constructor-traddr preempts never confirm after a
+failover, the target-registry requirement with teeth), and `WaitsPrice`
+(ElectInSync's availability bill as a lasso).  The tranche's finding,
+both halves from counterexamples: **the lease belongs to the epoch, not
+the node** — renewal is record-conditioned (a deposed node that
+recovers gets no lease back, or eviction waits forever), and assembly
+IS the lease grant (or a composer serves on a lease that lapsed under
+an earlier epoch, and its eventual deposition reads that ancient lapse
+as an already-passed horizon — a still-serving zombie assembled over).
+Still owed: crash *inside* the rebuild copy (sim-harness territory, the
+esnap-window precedent).
 
 Verification of snapshots is layered deliberately:
 

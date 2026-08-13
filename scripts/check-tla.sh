@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and thirty-nine runs, ALL required.
+# One hundred and forty-three runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -17,7 +17,7 @@
 #   awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
-#   71 FlintReplication   20 FlintComposition   15 FlintExtents
+#   71 FlintReplication   24 FlintComposition   15 FlintExtents
 #   11 FlintExtentsProbe   7 FlintTruncate       5 FlintAdmission
 #    4 FlintSnapshots      3 FlintClaims         3 FlintA2Probe)
 #
@@ -899,7 +899,8 @@ mutation_run FlintAdmission FlintAdmissionProbeReadmit.cfg "admission readmit pr
 # export MOUTH (FenceReplayOnAssemble: allow-list = admissions minus fenced,
 # converged before the listener exists, fail-closed), and under it the
 # keying is machine-checked redundant (EpochKeyedToo explores the IDENTICAL
-# 102,962-state graph as the shipped strict cfg — the guard is never the
+# distinct-state graph as the shipped strict cfg (128,939 after tranche 3's
+# lease correction; 102,962 when first proven) — the guard is never the
 # deciding guard anywhere).
 strict_run   FlintComposition FlintComposition.cfg "composition strict (all belts on, DeliveredEpochKeyed=FALSE as shipped: one full failover with a fallible verdict, a zombie composer, direct-session clients, and every theorem holding)"
 strict_run   FlintComposition FlintCompositionEpochKeyedToo.cfg "composition epoch-keyed A/B (DeliveredEpochKeyed=TRUE, full theorem stack: GREEN = the machine-checked REDUNDANCY verdict — with the fence replay at the export mouth and the free waiting on ActiveNew, the review's schema refinement changes nothing; identical distinct-state count is the receipt)"
@@ -917,7 +918,8 @@ mutation_run FlintComposition FlintCompositionProbeFree.cfg "composition post-fa
 
 # ---- composition tranche 2 (2026-08-12, same day): record-driven
 # rebuild/rejoin, behind RejoinEnabled — every tranche-1 cfg's state space
-# verified BIT-IDENTICAL (flagship distinct-count 102,962 unchanged, twice).
+# verified BIT-IDENTICAL at the then-flagship count (102,962 twice; the
+# count moved to 128,939 when tranche 3 corrected the lease semantics).
 # members becomes real state, MaxEpoch=3 makes the record machine's round
 # trip reachable, and the sticky stale marks from tranche 1 earn their one
 # clearing door.  Three belts, each a FlintReplication shape arriving at the
@@ -943,5 +945,29 @@ mutation_run FlintComposition FlintCompositionAncestryBlind.cfg "delta-ancestry 
 mutation_run FlintComposition FlintCompositionProbeRejoin.cfg "composition rejoin probe (a stale leg really re-enters the composition — without this every NoSplitRead green is compatible with nothing ever rejoining)" "ProbeRejoinCompletes"
 mutation_run FlintComposition FlintCompositionProbeTorn.cfg "composition torn-death probe (the write hole really occurs in the checked space — separates 'contained' from 'never happened')" "ProbeTornReachable"
 mutation_run FlintComposition FlintCompositionProbeFailBack.cfg "composition fail-back probe (the record machine's full round trip: promote away, rebuild record-driven, lose the survivor, promote BACK to an in-sync mark EARNED by a completed rebuild)" "ProbeFailBackCompletes"
+
+# ---- composition tranche 3 (2026-08-12, same day): LIVENESS. ----
+# SpecLive puts WF on exactly the components that are retried loops in the
+# design (the reconcile pipeline, lease timers, rebuild driver) plus the
+# redirect actor; every antecedent is conditioned on the exhausted crash
+# budget (post-storm progress — under a budget "transiently down forever"
+# is unrepresentable, the WriterLimbo lesson).  THE TRANCHE'S FINDING, both
+# halves from counterexamples: THE LEASE BELONGS TO THE EPOCH, NOT THE
+# NODE.  (a) Renewal is record-conditioned — the first strict-liveness
+# lasso was a deposed composer RECOVERING and re-arming its lease, leaving
+# eviction waiting on a horizon that never comes and promotion wedged with
+# every process healthy.  (b) Assembly IS the lease grant — fixing (a)
+# alone let a composer serve on a lease that lapsed under an earlier
+# epoch, and when IT was deposed, promotion read that ancient lapse as an
+# already-passed horizon and assembled over a still-serving zombie
+# (Inv_NoStaleServe caught it in the safety re-run).  The lease names
+# (volume, epoch, composer): Assemble writes it, renewal validates against
+# the record, and the deadman horizon is that lease's lapse — never a
+# node-liveness heartbeat.  The lease correction legitimately moved the
+# flagship counts (see the tranche-1/2 comments above).
+strict_run FlintComposition FlintCompositionLive.cfg "composition liveness strict (SpecLive: promotion completes to an in-sync survivor, fences confirm against the current composition, clients re-attach, stale legs rejoin — all in the post-storm quiet, 287k states)"
+liveness_mutation_run FlintComposition FlintCompositionNoActor.cfg "no-redirect-actor mutation (SpecNoRedirect withholds exactly one obligation — the actor the review found does not exist: the csi-node session record replays the dead traddr with a deliberate 'No MDS call' — and TLC produces the parked-client lasso; ClientEventuallyRedirected is the actor's acceptance test when it gets built)"
+liveness_mutation_run FlintComposition FlintCompositionStaticTraddr.cfg "static-traddr mutation (PreemptFollowsRecord=FALSE = the shipped constructor-traddr shape, block_export.rs:55-59: after a failover every preempt dials the dead node forever, delivered stays 0, and every parked range the quarantine sweep guards stays parked — the review's FORWARD livelock as a lasso, and the target-registry requirement with teeth)"
+liveness_mutation_run FlintComposition FlintCompositionWaitsPrice.cfg "election-wait price (REQUIRED TO FAIL with shipped constants: PromotionCompletesUnconditional drops the in-sync conjunct and TLC bills ElectInSync — a degraded volume whose composer then partitions is DOWN until that composer recovers, availability spent on durability; the operator override is the undesigned LastResortServe analog)"
 
 echo "TLA GATE PASSED"
