@@ -599,7 +599,43 @@ impl PnfsCsi {
             subnqn: resp.subnqn,
             nguid: resp.nguid,
             host_nqn: resp.host_nqn,
+            // The endpoint WE just used, which is by construction the
+            // one that owns this volume's shard.
+            mds_control: self.endpoint.clone(),
         })
+    }
+
+    /// Tell the MDS this node's nvme-tcp session to the volume is up
+    /// and its namespace device exists, so it may re-fire
+    /// CB_NOTIFY_DEVICEID to the clients that cached the device.
+    /// Returns `(notified, attempted)`.
+    ///
+    /// The ordering is the whole content of this call: the MDS cannot
+    /// observe a node's reconnect, and a notification that arrives
+    /// before the replacement device exists is accepted and does
+    /// nothing (measured, not inferred — the unfence drill).
+    pub async fn block_session_up(
+        &self,
+        volume_id: &str,
+        node_name: &str,
+    ) -> Result<(u32, u32), PnfsError> {
+        let mut client = self.dial().await?;
+        let resp = client
+            .block_session_up(crate::pnfs::grpc::BlockSessionUpRequest {
+                volume_id: volume_id.to_string(),
+                node_name: node_name.to_string(),
+            })
+            .await
+            .map_err(|e| PnfsError::Transport(format!("BlockSessionUp: {}", e)))?
+            .into_inner();
+        if !resp.acked {
+            return Err(PnfsError::Mds(if resp.message.is_empty() {
+                "MDS rejected BlockSessionUp (no message)".into()
+            } else {
+                resp.message
+            }));
+        }
+        Ok((resp.notified, resp.attempted))
     }
 
     /// Ask this shard where its block export lives and who is on it —
@@ -689,6 +725,19 @@ pub struct BlockAttach {
     pub subnqn: String,
     pub nguid: String,
     pub host_nqn: String,
+    /// The MDS CONTROL endpoint (`host:grpc-port`) that answered this
+    /// attach — the redirect actor's only way back to the record.
+    ///
+    /// It is stamped per (volume, node) rather than configured on the
+    /// node for one reason: with a sharded MDS the right endpoint is the
+    /// one that owns THIS volume, and the controller already dialled it
+    /// to produce this very answer. A node-wide env var would have to
+    /// re-derive the shard, and would be wrong the day routing changes.
+    ///
+    /// Empty on attachments that predate this key — those nodes keep the
+    /// old replay-the-record behaviour, which is exactly the world
+    /// `FlintCompositionNoActor.cfg` parks a client in.
+    pub mds_control: String,
 }
 
 /// One shard's block-export posture, as `BlockExportStatus` answered it.
@@ -725,6 +774,10 @@ pub mod block_ctx_keys {
     pub const SUBNQN: &str = "pnfs.flint.io/nvme-subnqn";
     pub const NGUID: &str = "pnfs.flint.io/nvme-nguid";
     pub const HOST_NQN: &str = "pnfs.flint.io/nvme-host-nqn";
+    /// The MDS control endpoint that answered the attach — what lets
+    /// the node ask "where does this volume live NOW" instead of
+    /// replaying an address that a failover may have retired.
+    pub const MDS_CONTROL: &str = "pnfs.flint.io/mds-control";
 }
 
 impl BlockAttach {
@@ -735,6 +788,9 @@ impl BlockAttach {
         ctx.insert(block_ctx_keys::SUBNQN.into(), self.subnqn.clone());
         ctx.insert(block_ctx_keys::NGUID.into(), self.nguid.clone());
         ctx.insert(block_ctx_keys::HOST_NQN.into(), self.host_nqn.clone());
+        if !self.mds_control.is_empty() {
+            ctx.insert(block_ctx_keys::MDS_CONTROL.into(), self.mds_control.clone());
+        }
     }
 
     /// Read back from NodeStage's publish_context. `None` when the keys
@@ -764,6 +820,13 @@ impl BlockAttach {
             subnqn: get(block_ctx_keys::SUBNQN)?,
             nguid: get(block_ctx_keys::NGUID)?,
             host_nqn: get(block_ctx_keys::HOST_NQN)?,
+            // Optional on purpose: an attachment stamped by an older
+            // controller has no control endpoint, and a node must stage
+            // it exactly as before rather than fail.
+            mds_control: ctx
+                .get(block_ctx_keys::MDS_CONTROL)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default(),
         }))
     }
 }
@@ -1195,6 +1258,12 @@ mod tests {
                 // the roller must never confuse with "nobody connected".
                 None => Err(Status::unavailable("mock: no canned block status")),
             }
+        }
+        async fn block_session_up(
+            &self,
+            _: Request<crate::pnfs::grpc::BlockSessionUpRequest>,
+        ) -> Result<Response<crate::pnfs::grpc::BlockSessionUpResponse>, Status> {
+            unimplemented!("not exercised in pnfs_csi tests")
         }
     }
 

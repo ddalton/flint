@@ -87,6 +87,24 @@ service MdsControl {
   // touched; only their own lifecycle ends them.
   rpc DetachBlockNode(DetachBlockNodeRequest) returns (DetachBlockNodeResponse);
 
+  // THE "SESSION UP" ACK — the second half of the redirect actor
+  // (design doc §12). A csi-node calls this after its nvme-tcp session
+  // to the volume's CURRENT target is established and the namespace
+  // device exists, and the MDS answers by re-firing CB_NOTIFY_DEVICEID
+  // to every client that cached the volume's device.
+  //
+  // Its whole reason for existing is ORDER, and the order was measured
+  // rather than reasoned: a notification sent before the replacement
+  // device exists is accepted by the client and does nothing (the
+  // unfence drill, 2026-08-12 — "accepted 1/1, write still failed").
+  // The MDS cannot know when a node's reconnect completed, so the node
+  // has to say so. Nothing else in the system carries that fact.
+  //
+  // Idempotent and best-effort: a node may ack a session that never
+  // moved, and a failed notification prunes nothing (right after a
+  // restart a live client has no back-channel yet).
+  rpc BlockSessionUp(BlockSessionUpRequest) returns (BlockSessionUpResponse);
+
   // Where this shard's block export lives, and who is connected to it.
   //
   // The maintenance roller's missing fact (design doc §11, "today's roll
@@ -204,6 +222,21 @@ message AttachBlockNodeResponse {
   // The NQN the MDS admitted. Connect with EXACTLY this string — it is
   // what keeps the controller, node, and MDS derivations from drifting.
   string host_nqn = 7;
+}
+
+message BlockSessionUpRequest {
+  string volume_id = 1;
+  string node_name = 2;
+}
+
+message BlockSessionUpResponse {
+  bool acked = 1;
+  string message = 2;
+  // How many clients accepted the re-fired CB_NOTIFY_DEVICEID, out of
+  // how many were attempted. Both zero is the ordinary steady state —
+  // nobody had cached the device.
+  uint32 notified = 3;
+  uint32 attempted = 4;
 }
 
 message DetachBlockNodeRequest {

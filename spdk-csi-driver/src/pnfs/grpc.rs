@@ -1346,6 +1346,78 @@ impl MdsControl for MdsControlService {
         }
     }
 
+    /// THE "SESSION UP" ACK — the redirect actor's second half.
+    ///
+    /// A csi-node calls this once its nvme-tcp session to the volume's
+    /// CURRENT target is up and the namespace device exists; the MDS
+    /// answers by re-firing CB_NOTIFY_DEVICEID to every client that
+    /// cached the device, so they drop it and fetch it again.
+    ///
+    /// The ordering is the entire point, and it was measured rather than
+    /// reasoned: a notification sent before the replacement device
+    /// exists is accepted and useless. The MDS has no way to observe a
+    /// node's reconnect, so the node says so — this RPC is that
+    /// sentence, and nothing else in the system carries it.
+    async fn block_session_up(
+        &self,
+        request: Request<BlockSessionUpRequest>,
+    ) -> Result<Response<BlockSessionUpResponse>, Status> {
+        let req = request.into_inner();
+        if req.volume_id.is_empty()
+            || req.volume_id.contains('/')
+            || req.volume_id.contains('\0')
+        {
+            return Ok(Response::new(BlockSessionUpResponse {
+                acked: false,
+                message: "volume_id must be non-empty and contain no '/' or NUL".into(),
+                notified: 0,
+                attempted: 0,
+            }));
+        }
+        let node = req.node_name.trim();
+        if node.is_empty() {
+            return Ok(Response::new(BlockSessionUpResponse {
+                acked: false,
+                message: "node_name must be non-empty".into(),
+                notified: 0,
+                attempted: 0,
+            }));
+        }
+        // The ack is a claim about a node this MDS admitted. An
+        // unadmitted node saying "my session is up" is either stale or
+        // hostile, and either way its word must not make the MDS fan
+        // callbacks out on a volume it has no business in.
+        let host_nqn = crate::nvmeof_export::flint_host_nqn(node);
+        let admitted = match self.layout_manager.state_backend().block_initiators().await {
+            Ok(Ok(rows)) => rows
+                .iter()
+                .any(|r| r.volume == req.volume_id && r.host_nqn == host_nqn),
+            _ => false,
+        };
+        if !admitted {
+            return Ok(Response::new(BlockSessionUpResponse {
+                acked: false,
+                message: format!("node '{node}' holds no admission on '{}'", req.volume_id),
+                notified: 0,
+                attempted: 0,
+            }));
+        }
+        let (accepted, attempted) =
+            self.layout_manager.notify_device_changed(&req.volume_id).await;
+        if attempted > 0 {
+            info!(
+                "🔔 BlockSessionUp '{}' from {}: re-fired device-notify, {}/{} accepted",
+                req.volume_id, node, accepted, attempted
+            );
+        }
+        Ok(Response::new(BlockSessionUpResponse {
+            acked: true,
+            message: String::new(),
+            notified: accepted as u32,
+            attempted: attempted as u32,
+        }))
+    }
+
     /// Where this shard's block export lives and who is on it — the
     /// roller's read (design §11). Read-only, and it must FAIL rather
     /// than answer partially: an empty initiator list is permission to
@@ -1919,6 +1991,94 @@ mod create_volume_tests {
         assert!(u.unfenced, "{}", u.detail);
         assert!(u.detail.contains("released=true"), "{}", u.detail);
         assert!(!nvme.state.lock().unwrap().registrants.iter().any(|(_, _, h)| *h));
+    }
+
+    /// THE "SESSION UP" ACK is a claim about a node the MDS admitted,
+    /// and it is checked.
+    ///
+    /// The ack makes the MDS fan callbacks out over a volume, so an
+    /// unadmitted node's word must not be enough to trigger that. A node
+    /// that never attached — or one whose attachment a fence removed —
+    /// gets a refusal naming itself, not a silent no-op that would read
+    /// in the log exactly like a successful ack with nobody to notify.
+    #[tokio::test]
+    async fn the_session_up_ack_is_refused_from_a_node_that_holds_no_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _tgt) = svc_sqlite(dir.path(), true);
+        let mut req = cvreq("pvc-ack", 1 << 20);
+        req.layout_class = "scsi".into();
+        assert!(s.create_volume(Request::new(req)).await.unwrap().into_inner().created);
+
+        // Never attached.
+        let r = s
+            .block_session_up(Request::new(BlockSessionUpRequest {
+                volume_id: "pvc-ack".into(),
+                node_name: "node-stranger".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.acked, "an unadmitted node must not be believed");
+        assert!(r.message.contains("node-stranger"), "{}", r.message);
+        assert_eq!((r.notified, r.attempted), (0, 0));
+
+        // Attached: the ack is accepted. Nobody has cached the device,
+        // so nothing is notified — and that is the ordinary steady
+        // state, reported as itself rather than as a failure.
+        assert!(
+            s.attach_block_node(Request::new(AttachBlockNodeRequest {
+                volume_id: "pvc-ack".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .attached
+        );
+        let r = s
+            .block_session_up(Request::new(BlockSessionUpRequest {
+                volume_id: "pvc-ack".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.acked, "{}", r.message);
+        assert_eq!((r.notified, r.attempted), (0, 0));
+
+        // And a detach takes the right to ack with it.
+        assert!(
+            s.detach_block_node(Request::new(DetachBlockNodeRequest {
+                volume_id: "pvc-ack".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .detached
+        );
+        let r = s
+            .block_session_up(Request::new(BlockSessionUpRequest {
+                volume_id: "pvc-ack".into(),
+                node_name: "node-w1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.acked, "a detached node holds no admission either");
+
+        // Malformed input is refused before any table is touched.
+        for (v, n) in [("", "node-w1"), ("pvc-ack", "  ")] {
+            let r = s
+                .block_session_up(Request::new(BlockSessionUpRequest {
+                    volume_id: v.into(),
+                    node_name: n.into(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(!r.acked, "volume_id={v:?} node_name={n:?}");
+        }
     }
 
     /// AttachBlockNode end to end (the ControllerPublish hook): the

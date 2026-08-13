@@ -1606,10 +1606,42 @@ Each phase ships standalone value; none is gated on the next.
   normally finds nothing to remove. The day replication puts a peer's NQN on a leg's
   allow-list so it can mirror, that changes — and this is the step that removes it,
   in the right place in the order.
-  What remains: the redirect actor (csi-node re-attach lane + "session up" ack +
-  per-client notify re-fire), and replication itself — the second leg, the degrade
-  barrier that writes stale marks on a solo ack, and the sparse-aware rebuild that
-  clears them.
+  **THE REDIRECT ACTOR FOLLOWED (same day)** — all three pieces the review named.
+  (1) **The re-attach lane**: `reestablish_sessions` no longer replays the recorded
+  traddr blind; it asks the MDS where the volume lives NOW via `AttachBlockNode`,
+  which is deliberately not a new RPC — it is idempotent, it resolves through the
+  serving-target record, and it refuses a node fenced meanwhile, which is exactly
+  what a re-attach needs. The call is BEST-EFFORT and that is load-bearing: the old
+  "No MDS call" behaviour is what makes this pass work through an MDS outage, so an
+  unreachable MDS falls back to the record exactly as before and only a successful
+  answer overrides it (A/B'd — making the failure fatal fails the test). A moved
+  address is persisted BEFORE connecting, so a reboot mid-repair starts from the
+  current target rather than walking back to the dead one.
+  (2) **The "session up" ack**, a new RPC whose entire content is ORDER: the MDS
+  cannot observe a node's reconnect, and a notification sent before the replacement
+  device exists is accepted and useless — measured in the unfence drill, not
+  reasoned. So the node says when its device exists. The MDS checks the acking node
+  actually holds an admission on that volume before fanning callbacks out (A/B'd);
+  an unadmitted or detached node is refused by name.
+  (3) **The per-client notify re-fire** is the ack's effect: `notify_device_changed`
+  over every client that cached the device.
+  The MDS control endpoint reaches the node in the publish context
+  (`pnfs.flint.io/mds-control`) and is persisted in the session record, stamped by
+  the controller with the endpoint it JUST USED — which is by construction the shard
+  that owns that volume, so sharding needs no node-side re-derivation. Records
+  written before this parse fine and keep the old behaviour, which is precisely the
+  world `FlintCompositionNoActor.cfg` parks a client in; the volume and node names
+  are derived by inverting `block_volume_export_nqn` and `node_host_nqn`, so no
+  record field was needed and the actor works on any record that carries an
+  endpoint. **`ClientEventuallyRedirected` now has its subject.**
+  **NOT PROVEN, and it needs a rig**: that a live MOUNT recovers end to end across a
+  redirect. The unfence drill measured that after a fence + re-stage the mount kept
+  issuing I/O to the OLD controller path and every write failed, and that a
+  notification landing before the replacement device existed did nothing. This
+  ordering — device first, then notify — is the fix that measurement points at, but
+  it is a hypothesis until a failover drill runs on hardware.
+  What remains: replication itself — the second leg, the degrade barrier that writes
+  stale marks on a solo ack, and the sparse-aware rebuild that clears them.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left

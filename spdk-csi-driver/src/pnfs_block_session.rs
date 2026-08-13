@@ -162,8 +162,13 @@ fn record_name(subnqn: &str) -> String {
 /// newlines by construction).
 fn render_session_record(attach: &BlockAttach) -> String {
     format!(
-        "traddr={}\ntrsvcid={}\nsubnqn={}\nnguid={}\nhost_nqn={}\n",
-        attach.traddr, attach.trsvcid, attach.subnqn, attach.nguid, attach.host_nqn
+        "traddr={}\ntrsvcid={}\nsubnqn={}\nnguid={}\nhost_nqn={}\nmds_control={}\n",
+        attach.traddr,
+        attach.trsvcid,
+        attach.subnqn,
+        attach.nguid,
+        attach.host_nqn,
+        attach.mds_control
     )
 }
 
@@ -175,6 +180,7 @@ fn parse_session_record(s: &str) -> Result<BlockAttach, String> {
     let mut subnqn = None;
     let mut nguid = None;
     let mut host_nqn = None;
+    let mut mds_control = String::new();
     for line in s.lines() {
         let Some((k, v)) = line.split_once('=') else { continue };
         match k {
@@ -183,6 +189,10 @@ fn parse_session_record(s: &str) -> Result<BlockAttach, String> {
             "subnqn" => subnqn = Some(v.to_string()),
             "nguid" => nguid = Some(v.to_string()),
             "host_nqn" => host_nqn = Some(v.to_string()),
+            // Optional: records written before the redirect actor
+            // existed have no control endpoint, and they must keep
+            // parsing — they simply get the old replay behaviour.
+            "mds_control" => mds_control = v.to_string(),
             _ => {}
         }
     }
@@ -191,7 +201,7 @@ fn parse_session_record(s: &str) -> Result<BlockAttach, String> {
             if !traddr.is_empty() && !subnqn.is_empty() && !nguid.is_empty()
                 && !host_nqn.is_empty() =>
         {
-            Ok(BlockAttach { traddr, trsvcid, subnqn, nguid, host_nqn })
+            Ok(BlockAttach { traddr, trsvcid, subnqn, nguid, host_nqn, mds_control })
         }
         _ => Err("missing or empty fields".into()),
     }
@@ -210,13 +220,120 @@ fn remove_session_record(subnqn: &str) -> bool {
     std::fs::remove_file(session_dir().join(record_name(subnqn))).is_ok()
 }
 
+/// The node the record's host NQN names. `node_host_nqn` is
+/// `…:node:<name>`, so the inverse is exact — and deriving it beats
+/// adding a field, because every record ever written already carries it.
+fn node_name_of(host_nqn: &str) -> Option<&str> {
+    host_nqn.rsplit_once(":node:").map(|(_, n)| n).filter(|n| !n.is_empty())
+}
+
+/// The volume id the record's subsystem NQN encodes (`…:block:<vol>`).
+fn volume_of(subnqn: &str) -> Option<&str> {
+    subnqn.rsplit_once(":block:").map(|(_, v)| v).filter(|v| !v.is_empty())
+}
+
+/// THE REDIRECT ACTOR, first half: ask the MDS where this volume lives
+/// NOW, instead of replaying an address a failover may have retired.
+///
+/// `AttachBlockNode` is the lane, and it is deliberately not a new RPC:
+/// it is idempotent, it resolves the target through the serving-target
+/// record, and it REFUSES a node that has been fenced meanwhile — the
+/// three things a re-attach needs. Calling it again is the re-attach.
+///
+/// BEST-EFFORT, and that is load-bearing. The old behaviour — replay
+/// the record, no MDS call — is what makes this pass work through an
+/// MDS outage, and losing that to gain a redirect would be a bad trade.
+/// So an unreachable MDS falls back to the record, exactly as before;
+/// only a successful answer overrides it.
+async fn resolve_current_coordinates(attach: &BlockAttach) -> Option<BlockAttach> {
+    if attach.mds_control.is_empty() {
+        // A record written before the redirect actor existed. It keeps
+        // the old behaviour, which is precisely the world
+        // `FlintCompositionNoActor.cfg` parks a client in — worth one
+        // line so an operator can see which nodes are still in it.
+        tracing::debug!(
+            "block session for {} carries no MDS control endpoint — replaying the recorded \
+             address (re-stage the volume to gain the redirect lane)",
+            attach.subnqn
+        );
+        return None;
+    }
+    let (volume, node) = (volume_of(&attach.subnqn)?, node_name_of(&attach.host_nqn)?);
+    let client = crate::pnfs_csi::PnfsCsi::new(attach.mds_control.clone())
+        .with_timeout(std::time::Duration::from_secs(
+            std::env::var("FLINT_PNFS_REATTACH_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+        ));
+    match client.attach_block_node(volume, node).await {
+        Ok(fresh) => Some(fresh),
+        Err(e) => {
+            // Includes the fenced case, which must stay loud: a fenced
+            // node re-entering silently is the door the durable eviction
+            // exists to close. Falling back to the record here does not
+            // re-open it — the connect itself is refused at the target.
+            tracing::warn!(
+                "re-attach lane for {} could not reach the MDS at {} ({}) — replaying the \
+                 recorded address",
+                attach.subnqn,
+                attach.mds_control,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// THE REDIRECT ACTOR, second half: tell the MDS the session is up, so
+/// it re-fires CB_NOTIFY_DEVICEID to the clients that cached this
+/// volume's device.
+///
+/// AFTER the device exists, never before, and that ordering is measured
+/// rather than reasoned: the unfence drill sent the notification while
+/// the replacement device did not yet exist and the client accepted it
+/// and did nothing (1/1 accepted, write still failed). The MDS cannot
+/// observe a node's reconnect, so the node says so.
+async fn ack_session_up(attach: &BlockAttach) {
+    if attach.mds_control.is_empty() {
+        return;
+    }
+    let (Some(volume), Some(node)) =
+        (volume_of(&attach.subnqn), node_name_of(&attach.host_nqn))
+    else {
+        return;
+    };
+    let client = crate::pnfs_csi::PnfsCsi::new(attach.mds_control.clone())
+        .with_timeout(std::time::Duration::from_secs(10));
+    match client.block_session_up(volume, node).await {
+        Ok((notified, attempted)) if attempted > 0 => tracing::info!(
+            "🔔 session-up ack for {}: MDS re-fired device-notify, {}/{} accepted",
+            attach.subnqn,
+            notified,
+            attempted
+        ),
+        Ok(_) => {}
+        // Best-effort by design: the session is up either way, and a
+        // client that missed the notification is in the documented
+        // recycle-the-mount state rather than a broken one.
+        Err(e) => tracing::warn!("session-up ack for {} failed: {}", attach.subnqn, e),
+    }
+}
+
 /// One pass of session re-establishment: for every durable record
 /// whose subsystem has NO kernel controller — the ctrl_loss-exhaustion
 /// signature; a controller merely `connecting` is left to its own
-/// reconnect policy — re-run `ensure_session` from the record. No MDS
-/// call: the admission is durable server-side, so this works through
-/// an MDS outage too, and a node that was fenced meanwhile gets a loud
-/// connect refusal rather than a silent re-entry.
+/// reconnect policy — re-establish the session.
+///
+/// THE REDIRECT ACTOR LIVES HERE (design §12). Before replaying the
+/// record, this asks the MDS where the volume lives now: a failover
+/// moves the serving target, and an address recorded at stage time
+/// points at a node that no longer serves the volume — the parked
+/// client `FlintCompositionNoActor.cfg` produces when the actor's
+/// fairness is withheld. The MDS call is BEST-EFFORT, so the pass still
+/// works through an MDS outage exactly as it did before, and a node
+/// fenced meanwhile still gets a loud connect refusal rather than a
+/// silent re-entry.
 ///
 /// Returns `(records, repaired, failed)`.
 pub async fn reestablish_sessions() -> (usize, usize, usize) {
@@ -245,13 +362,43 @@ pub async fn reestablish_sessions() -> (usize, usize, usize) {
         }
         tracing::warn!(
             "block session for {} has NO kernel controller (ctrl_loss exhausted \
-             during an outage?) — re-establishing from the durable record",
+             during an outage?) — re-establishing",
             attach.subnqn
         );
+        // THE REDIRECT: the record's address is a snapshot of where the
+        // volume lived at stage time. Ask where it lives now.
+        let attach = match resolve_current_coordinates(&attach).await {
+            Some(fresh) if (fresh.traddr.as_str(), fresh.trsvcid)
+                != (attach.traddr.as_str(), attach.trsvcid) =>
+            {
+                tracing::warn!(
+                    "🔀 {} MOVED: {}:{} → {}:{} — the recorded target no longer serves this \
+                     volume; re-attaching to the one the MDS names",
+                    attach.subnqn,
+                    attach.traddr,
+                    attach.trsvcid,
+                    fresh.traddr,
+                    fresh.trsvcid
+                );
+                // Persist before connecting: if the connect fails and
+                // this node reboots, the next pass must start from the
+                // CURRENT address, not walk back to the dead one.
+                if let Err(e) = write_session_record(&fresh) {
+                    tracing::error!("could not persist the redirected session record: {e}");
+                }
+                fresh
+            }
+            // Same address, or no answer — either way the record stands.
+            Some(_) | None => attach,
+        };
         match ensure_session(&attach).await {
             Ok(dev) => {
                 tracing::info!("🔌 block session re-established: {} → {}", attach.subnqn, dev);
                 repaired += 1;
+                // The device exists NOW. Only now may the clients be
+                // told to drop their cached deviceid — a notification
+                // that arrives first is accepted and useless, measured.
+                ack_session_up(&attach).await;
             }
             Err(e) => {
                 tracing::error!(
@@ -592,6 +739,7 @@ mod tests {
             subnqn: "nqn.2024-11.com.flint:block:pvc-x~m0".into(),
             nguid: "aabbccdd112233445566778899aabbcc".into(),
             host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
+            mds_control: "10.1.2.3:50051".into(),
         };
         let rendered = render_session_record(&attach);
         assert_eq!(parse_session_record(&rendered).unwrap(), attach);
@@ -610,6 +758,89 @@ mod tests {
         // Unknown keys are ignored (forward compatibility).
         let extended = format!("{rendered}future_key=whatever\n");
         assert_eq!(parse_session_record(&extended).unwrap(), attach);
+
+        // A record written BEFORE the redirect actor existed still
+        // parses, with no control endpoint — those nodes keep the old
+        // replay behaviour rather than failing to re-establish at all.
+        let legacy = rendered
+            .lines()
+            .filter(|l| !l.starts_with("mds_control="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed = parse_session_record(&legacy).expect("legacy records must still parse");
+        assert!(parsed.mds_control.is_empty());
+        assert_eq!(parsed.traddr, attach.traddr, "everything else survives");
+    }
+
+    /// THE REDIRECT ACTOR's two derivations. Both invert an identity
+    /// this codebase already mints, so every record ever written
+    /// carries them — which is why the actor needed no new record
+    /// field and works on sessions staged before it existed (given a
+    /// control endpoint).
+    #[test]
+    fn the_actor_recovers_the_volume_and_node_from_the_record_it_has() {
+        assert_eq!(
+            volume_of("nqn.2024-11.com.flint:block:pvc-x~m0"),
+            Some("pvc-x~m0")
+        );
+        assert_eq!(node_name_of("nqn.2024-11.com.flint:node:w1"), Some("w1"));
+
+        // And they round-trip against the producers, so a rename on
+        // either side is caught here rather than in a silent no-redirect.
+        let nqn = crate::identity::block_volume_export_nqn("pvc-round");
+        assert_eq!(volume_of(&nqn), Some("pvc-round"));
+        let host = crate::nvmeof_export::flint_host_nqn("node-round");
+        assert_eq!(node_name_of(&host), Some("node-round"));
+
+        // Malformed input yields None, never an empty name that would
+        // become an MDS call about volume "".
+        assert_eq!(volume_of("nqn.2024-11.com.flint:block:"), None);
+        assert_eq!(node_name_of("nqn.2024-11.com.flint:node:"), None);
+        assert_eq!(volume_of("not-an-nqn"), None);
+        assert_eq!(node_name_of("not-an-nqn"), None);
+    }
+
+    /// A record with no control endpoint must NOT attempt a redirect —
+    /// that is the pre-actor world, and it has to keep working. The
+    /// resolver returns `None` (fall back to the record) without so
+    /// much as constructing a client.
+    #[tokio::test]
+    async fn a_record_without_a_control_endpoint_never_dials() {
+        let attach = BlockAttach {
+            traddr: "10.0.0.9".into(),
+            trsvcid: 4420,
+            subnqn: "nqn.2024-11.com.flint:block:pvc-legacy".into(),
+            nguid: "aabbccdd112233445566778899aabbcc".into(),
+            host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
+            mds_control: String::new(),
+        };
+        assert!(resolve_current_coordinates(&attach).await.is_none());
+        // The ack is the same story: nothing to ack to.
+        ack_session_up(&attach).await; // must not hang or panic
+    }
+
+    /// An MDS that cannot be reached falls back to the recorded
+    /// address. This is the property the pre-actor code had for free
+    /// and the actor must not spend: the whole point of the durable
+    /// record is that re-establishment survives an MDS outage.
+    #[tokio::test]
+    async fn an_unreachable_mds_falls_back_to_the_record() {
+        let attach = BlockAttach {
+            traddr: "10.0.0.9".into(),
+            trsvcid: 4420,
+            subnqn: "nqn.2024-11.com.flint:block:pvc-out".into(),
+            nguid: "aabbccdd112233445566778899aabbcc".into(),
+            host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
+            // Port 1: refused at once, so the fallback is exercised
+            // without waiting out a timeout.
+            mds_control: "127.0.0.1:1".into(),
+        };
+        let started = std::time::Instant::now();
+        assert!(
+            resolve_current_coordinates(&attach).await.is_none(),
+            "an unreachable MDS must leave the recorded address standing"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "bounded");
     }
 
     #[test]
