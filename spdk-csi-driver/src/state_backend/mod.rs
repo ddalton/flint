@@ -891,6 +891,36 @@ pub trait StateBackend: Send + Sync {
         &self,
     ) -> StateBackendResult<Result<Vec<extent_alloc::BlockSeat>, extent_alloc::ExtentAllocError>>;
 
+    /// THE PROMOTION CAS: move the seat to `candidate` if it still reads
+    /// what the caller saw, the candidate is registered, and its leg is
+    /// in sync. The epoch advances by exactly one.
+    async fn block_promote(
+        &self,
+        volume: &str,
+        expected_epoch: i64,
+        expected_composer: &str,
+        candidate: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<extent_alloc::BlockSeat, extent_alloc::ExtentAllocError>>;
+
+    /// The volume's legs and their sync marks — the election gate's
+    /// input, and what a promotion refusal is explained against.
+    async fn block_legs(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<Vec<extent_alloc::BlockLeg>, extent_alloc::ExtentAllocError>>;
+
+    /// Move a leg's sync mark. The degrade barrier and the rebuild will
+    /// both use this; seating does NOT (an insert-if-absent there, so a
+    /// converge can never clear a stale mark).
+    async fn block_leg_mark(
+        &self,
+        volume: &str,
+        target_id: &str,
+        sync_state: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<(), extent_alloc::ExtentAllocError>>;
+
     /// Clear a client's fence (release / lease recovery). `true` if a
     /// record was removed.
     async fn block_unfence(

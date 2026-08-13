@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 /// One request to the writer thread.
 enum Req {
@@ -1644,6 +1644,67 @@ impl StateBackend for SqliteBackend {
         })
         .await
     }
+
+    async fn block_promote(
+        &self,
+        volume: &str,
+        expected_epoch: i64,
+        expected_composer: &str,
+        candidate: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::BlockSeat,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        let e = expected_composer.to_string();
+        let c = candidate.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::promote_volume(
+                conn,
+                &v,
+                expected_epoch,
+                &e,
+                &c,
+                now_unix,
+            )
+        })
+        .await
+    }
+
+    async fn block_legs(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockLeg>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::legs_for_volume(conn, &v)
+        })
+        .await
+    }
+
+    async fn block_leg_mark(
+        &self,
+        volume: &str,
+        target_id: &str,
+        sync_state: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<(), crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let v = volume.to_string();
+        let t = target_id.to_string();
+        let s = sync_state.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::leg_mark(conn, &v, &t, &s, now_unix)
+        })
+        .await
+    }
 }
 
 // ── Row decoders ──────────────────────────────────────────────────────
@@ -2215,6 +2276,30 @@ CREATE TABLE IF NOT EXISTS block_volume_target (
     epoch       INTEGER NOT NULL,
     composer    TEXT NOT NULL,
     seated_unix INTEGER NOT NULL
+);
+
+-- block_volume_legs: which targets hold a copy of the volume, and
+-- whether that copy is CURRENT. The promotion CAS's election gate reads
+-- exactly this — `ElectInSync` in FlintComposition, whose mutation
+-- (`FlintCompositionElectStale.cfg`) promotes the leg the record already
+-- knows is stale and discards every acked solo write.
+--
+-- Today a volume has one leg, its composer's, marked in sync when the
+-- volume is seated. Promotion therefore has no candidate and refuses,
+-- which is the right answer for a single-copy volume rather than a gap:
+-- there is nowhere to promote TO. Replication adds rows; nothing else
+-- about the gate changes.
+--
+-- A stale mark is cleared by a completed rebuild and by NOTHING else —
+-- in particular not by a converge pass or a re-seat. That rule is
+-- `RecordRejoinOnly`, and its mutation is auto-examine declaring a stale
+-- leg clean so the honest gate elects it in good faith.
+CREATE TABLE IF NOT EXISTS block_volume_legs (
+    volume      TEXT NOT NULL,
+    target_id   TEXT NOT NULL,
+    sync_state  TEXT NOT NULL,
+    marked_unix INTEGER NOT NULL,
+    PRIMARY KEY (volume, target_id)
 );
 "#;
 

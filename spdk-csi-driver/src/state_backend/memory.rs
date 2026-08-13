@@ -38,6 +38,8 @@ pub struct MemoryBackend {
     /// the admission tables are not.
     block_targets: DashMap<String, super::extent_alloc::BlockTargetRow>,
     block_seats: DashMap<String, super::extent_alloc::BlockSeat>,
+    /// Keyed `(volume, target_id)`, mirroring the sqlite primary key.
+    block_legs: DashMap<(String, String), super::extent_alloc::BlockLeg>,
     instance_counter: AtomicU64,
     /// Lazily-initialised per-deployment server id. `OnceLock` makes
     /// the first call atomic (no two threads observe different values)
@@ -396,7 +398,9 @@ impl StateBackend for MemoryBackend {
         // the registry impls below) — and it goes with the volume for
         // the same reason it does in sqlite: a re-created namesake must
         // be seated afresh, never inherit an epoch.
-        Ok(Ok(self.block_seats.remove(volume).map(|_| 1).unwrap_or(0)))
+        let seat = self.block_seats.remove(volume).map(|_| 1).unwrap_or(0);
+        self.block_legs.retain(|(v, _), _| v != volume);
+        Ok(Ok(seat))
     }
 
     async fn extent_grant_read(
@@ -695,19 +699,36 @@ impl StateBackend for MemoryBackend {
             crate::state_backend::extent_alloc::ExtentAllocError,
         >,
     > {
-        use crate::state_backend::extent_alloc::BlockSeat;
+        use crate::state_backend::extent_alloc::{BlockLeg, BlockSeat, LEG_INSYNC};
         // Insert-if-absent, matching the sqlite transaction exactly: a
         // standing seat is returned unchanged so the caller can refuse.
+        let mut seated = false;
         let seat = self
             .block_seats
             .entry(volume.to_string())
-            .or_insert_with(|| BlockSeat {
-                volume: volume.to_string(),
-                epoch: 1,
-                composer: composer.to_string(),
-                seated_unix: now_unix,
+            .or_insert_with(|| {
+                seated = true;
+                BlockSeat {
+                    volume: volume.to_string(),
+                    epoch: 1,
+                    composer: composer.to_string(),
+                    seated_unix: now_unix,
+                }
             })
             .clone();
+        if seated {
+            // The composer's own leg, in sync — and ONLY when the seat
+            // was actually taken. Re-marking on a converge would clear a
+            // stale mark with no copy behind it (`RecordRejoinOnly`).
+            self.block_legs.entry((volume.to_string(), composer.to_string())).or_insert(
+                BlockLeg {
+                    volume: volume.to_string(),
+                    target_id: composer.to_string(),
+                    sync_state: LEG_INSYNC.to_string(),
+                    marked_unix: now_unix,
+                },
+            );
+        }
         Ok(Ok(seat))
     }
 
@@ -756,6 +777,98 @@ impl StateBackend for MemoryBackend {
         let mut out: Vec<_> = self.block_seats.iter().map(|e| e.value().clone()).collect();
         out.sort_by(|a, b| a.volume.cmp(&b.volume));
         Ok(Ok(out))
+    }
+
+    async fn block_promote(
+        &self,
+        volume: &str,
+        expected_epoch: i64,
+        expected_composer: &str,
+        candidate: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::BlockSeat,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        use crate::state_backend::extent_alloc::{ExtentAllocError as E, BlockSeat, LEG_INSYNC};
+        // The DashMap entry is the lock: every guard and the swap run
+        // inside it, so the compare and the swap cannot be split. Same
+        // shape as the sqlite IMMEDIATE transaction, for the same reason.
+        let Some(mut entry) = self.block_seats.get_mut(volume) else {
+            return Ok(Err(E::UnseatedVolume));
+        };
+        let seat = entry.value().clone();
+        if seat.epoch != expected_epoch || seat.composer != expected_composer {
+            return Ok(Err(E::PromotionRaced { epoch: seat.epoch, composer: seat.composer }));
+        }
+        if candidate == seat.composer {
+            return Ok(Err(E::SelfPromotion { composer: seat.composer }));
+        }
+        if !self.block_targets.contains_key(candidate) {
+            return Ok(Err(E::UnknownComposer { composer: candidate.to_string() }));
+        }
+        let insync = self
+            .block_legs
+            .get(&(volume.to_string(), candidate.to_string()))
+            .map(|l| l.sync_state == LEG_INSYNC)
+            .unwrap_or(false);
+        if !insync {
+            return Ok(Err(E::NotInSync { candidate: candidate.to_string() }));
+        }
+        let promoted = BlockSeat {
+            volume: volume.to_string(),
+            epoch: expected_epoch + 1,
+            composer: candidate.to_string(),
+            seated_unix: now_unix,
+        };
+        *entry.value_mut() = promoted.clone();
+        Ok(Ok(promoted))
+    }
+
+    async fn block_legs(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockLeg>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let mut out: Vec<_> = self
+            .block_legs
+            .iter()
+            .filter(|e| e.key().0 == volume)
+            .map(|e| e.value().clone())
+            .collect();
+        out.sort_by(|a, b| a.target_id.cmp(&b.target_id));
+        Ok(Ok(out))
+    }
+
+    async fn block_leg_mark(
+        &self,
+        volume: &str,
+        target_id: &str,
+        sync_state: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<(), crate::state_backend::extent_alloc::ExtentAllocError>> {
+        use crate::state_backend::extent_alloc::{
+            BlockLeg, ExtentAllocError as E, LEG_INSYNC, LEG_STALE,
+        };
+        if sync_state != LEG_INSYNC && sync_state != LEG_STALE {
+            return Ok(Err(E::InvalidRange("leg sync state")));
+        }
+        self.block_legs.insert(
+            (volume.to_string(), target_id.to_string()),
+            BlockLeg {
+                volume: volume.to_string(),
+                target_id: target_id.to_string(),
+                sync_state: sync_state.to_string(),
+                marked_unix: now_unix,
+            },
+        );
+        Ok(Ok(()))
     }
 }
 

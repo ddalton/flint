@@ -80,6 +80,74 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+fn env_u64(var: &str, default: u64) -> u64 {
+    std::env::var(var).ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(default)
+}
+
+/// Consecutive failed probes before a target is called unreachable.
+fn verdict_strikes() -> u32 {
+    env_u64("FLINT_PNFS_BLOCK_UNREACHABLE_STRIKES", 3) as u32
+}
+
+/// And the wall-clock floor those strikes must span. BOTH conditions,
+/// because a count alone is a statement about loop cadence rather than
+/// about the target: the F60 lesson is that a pass's real period is the
+/// whole loop's duration, not its `interval`, and a loop that speeds up
+/// would otherwise start declaring targets dead faster.
+fn verdict_min_secs() -> i64 {
+    env_u64("FLINT_PNFS_BLOCK_UNREACHABLE_MIN_SECS", 30) as i64
+}
+
+/// THE UNREACHABILITY VERDICT — and the whole point is what it CANNOT
+/// say (design §12; `FlintComposition`'s `tgt[t] \in {"part", "dead"}`).
+///
+/// A target that stops answering this MDS may be dead, or may be
+/// perfectly alive and still serving every one of its clients over paths
+/// the MDS cannot see. Nothing available here distinguishes those, and
+/// the model is built on the assumption that nothing ever will: the
+/// composition machine's every belt exists because promotion happens
+/// under an unreachability verdict that might be WRONG about death.
+/// `Unreachable` therefore names reachability, never liveness, and no
+/// consumer may read it as "the target has stopped writing".
+///
+/// The other half of the exclusion is the composer's own dead-man
+/// (`DeadmanGate`), which is the only thing that can reach a partitioned
+/// composer's LOCAL leg — owed, and named here so the asymmetry is not
+/// mistaken for completeness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reachability {
+    Reachable,
+    /// Failing, but not yet for long enough or often enough to say so.
+    Suspect { strikes: u32, since_unix: i64 },
+    /// The verdict. Deliberately fallible; see the type's doc.
+    Unreachable { strikes: u32, since_unix: i64 },
+}
+
+impl Reachability {
+    pub fn is_unreachable(&self) -> bool {
+        matches!(self, Self::Unreachable { .. })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProbeState {
+    strikes: u32,
+    first_fail_unix: i64,
+    last_ok_unix: i64,
+}
+
+/// The result of one promotion attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionOutcome {
+    Promoted { from: String, to: String, epoch: i64 },
+    /// The election gate had nobody to elect. Carries WHY, because on a
+    /// single-replica volume this is the permanent and correct answer.
+    NoCandidate { reason: String },
+    /// The CAS lost — the seat had already moved.
+    Raced { epoch: i64, composer: String },
+    Refused(String),
+}
+
 /// How the reconciler reaches its spdk-tgt plus the export coordinates it
 /// converges toward. One target per MDS shard for phase 1 — allocation is
 /// per-volume inside the volume's own lvol (§8), and the volume pins to
@@ -103,6 +171,12 @@ pub struct BlockExportReconciler {
     ptpl_dir: String,
     /// Per-volume serialization of converge passes (see module doc).
     locks: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// Probe history per TARGET, keyed by target id even though this
+    /// MDS probes exactly one today. A scalar here would be an assertion
+    /// that there is only ever one target — the A2 tranche's lesson,
+    /// where a scalar `raidHost` made "two compositions exist"
+    /// unrepresentable and a green run meaningless.
+    probes: dashmap::DashMap<String, ProbeState>,
 }
 
 impl BlockExportReconciler {
@@ -122,6 +196,7 @@ impl BlockExportReconciler {
             trsvcid,
             ptpl_dir,
             locks: dashmap::DashMap::new(),
+            probes: dashmap::DashMap::new(),
         }
     }
 
@@ -227,6 +302,74 @@ impl BlockExportReconciler {
     pub async fn listener_for(&self, volume: &str) -> Result<(String, u16), String> {
         let (_seat, traddr, trsvcid) = self.resolve(volume).await?;
         Ok((traddr, trsvcid))
+    }
+
+    /// Record one observation of a target and return the verdict that
+    /// now stands. THE single mutation of probe history: `probe_target`
+    /// calls it for the local tgt, and the remote prober the failover
+    /// work owes will call it for everyone else — so there is one place
+    /// where a verdict can be reached, and one set of thresholds.
+    ///
+    /// A success resets everything. Strikes must clear BOTH the count
+    /// and the wall-clock floor; see `verdict_min_secs`.
+    pub fn observe(&self, target_id: &str, ok: bool, now_unix: i64) -> Reachability {
+        let mut st = self.probes.entry(target_id.to_string()).or_default();
+        if ok {
+            st.strikes = 0;
+            st.first_fail_unix = 0;
+            st.last_ok_unix = now_unix;
+            return Reachability::Reachable;
+        }
+        if st.strikes == 0 {
+            st.first_fail_unix = now_unix;
+        }
+        st.strikes = st.strikes.saturating_add(1);
+        let since = st.first_fail_unix;
+        if st.strikes >= verdict_strikes() && now_unix - since >= verdict_min_secs() {
+            Reachability::Unreachable { strikes: st.strikes, since_unix: since }
+        } else {
+            Reachability::Suspect { strikes: st.strikes, since_unix: since }
+        }
+    }
+
+    /// The verdict standing for a target, without probing. `None` = never
+    /// observed, which is NOT "reachable": a target this MDS has never
+    /// heard from is not a target it may promote a volume onto.
+    pub fn reachability(&self, target_id: &str) -> Option<Reachability> {
+        self.reachability_at(target_id, now_unix())
+    }
+
+    /// `reachability` with the clock passed in — the wall-clock floor is
+    /// half the verdict, so anything that judges must be able to say
+    /// WHEN it is judging.
+    pub fn reachability_at(&self, target_id: &str, now_unix: i64) -> Option<Reachability> {
+        let st = self.probes.get(target_id)?;
+        if st.strikes == 0 {
+            return Some(Reachability::Reachable);
+        }
+        let since = st.first_fail_unix;
+        Some(
+            if st.strikes >= verdict_strikes() && now_unix - since >= verdict_min_secs() {
+                Reachability::Unreachable { strikes: st.strikes, since_unix: since }
+            } else {
+                Reachability::Suspect { strikes: st.strikes, since_unix: since }
+            },
+        )
+    }
+
+    /// Probe THIS reconciler's own tgt and fold the result into the
+    /// verdict. `spdk_get_version` is the cheapest thing that proves the
+    /// process is answering, and reachability is all this asks: a tgt
+    /// that answers but has lost its bdevs is REACHABLE and broken, and
+    /// repairing that is `reconcile_all`'s job, not the verdict's. The
+    /// call is bounded by the transport's own RPC timeout.
+    pub async fn probe_target(&self) -> Reachability {
+        let ok = self
+            .rpc
+            .rpc(&json!({ "method": "spdk_get_version", "params": {} }))
+            .await
+            .is_ok();
+        self.observe(&target_id(), ok, now_unix())
     }
 
     /// Every seat this MDS holds, paired with whether its composer is
@@ -838,6 +981,92 @@ impl BlockExportReconciler {
         Ok(())
     }
 
+    /// What one promotion attempt did. Every non-`Promoted` arm is a
+    /// REFUSAL with its reason kept, because the reasons are the
+    /// interesting part today: a single-copy volume has no candidate,
+    /// and saying so plainly is `WaitsPrice`'s bill arriving in the log
+    /// instead of in a design doc.
+    pub async fn attempt_promotion(&self, volume: &str) -> PromotionOutcome {
+        let seat = match self.backend.block_volume_seat(volume).await {
+            Ok(Ok(Some(s))) => s,
+            Ok(Ok(None)) => return PromotionOutcome::Refused("no seat".into()),
+            Ok(Err(e)) => return PromotionOutcome::Refused(format!("seat read refused: {e}")),
+            Err(e) => return PromotionOutcome::Refused(format!("seat read failed: {e}")),
+        };
+        // Never promote away from a composer this MDS has not actually
+        // condemned: the model's CAS is guarded on the verdict, and a
+        // promotion without one is a failover invented out of nothing.
+        match self.reachability(&seat.composer) {
+            Some(v) if v.is_unreachable() => {}
+            other => {
+                return PromotionOutcome::Refused(format!(
+                    "composer '{}' is not under an unreachability verdict ({:?})",
+                    seat.composer, other
+                ))
+            }
+        }
+
+        let legs = match self.backend.block_legs(volume).await {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => return PromotionOutcome::Refused(format!("legs unreadable: {e}")),
+            Err(e) => return PromotionOutcome::Refused(format!("legs unreadable: {e}")),
+        };
+        let in_sync: Vec<&crate::state_backend::extent_alloc::BlockLeg> = legs
+            .iter()
+            .filter(|l| {
+                l.target_id != seat.composer
+                    && l.sync_state == crate::state_backend::extent_alloc::LEG_INSYNC
+            })
+            .collect();
+        if in_sync.is_empty() {
+            // The honest single-replica answer, and the degraded-volume
+            // answer too: `ElectInSync` refuses a stale survivor, so the
+            // volume waits rather than serving a leg that is missing
+            // acked bytes. Availability spent on durability.
+            return PromotionOutcome::NoCandidate {
+                reason: format!(
+                    "no in-sync leg other than '{}' ({} leg(s) recorded)",
+                    seat.composer,
+                    legs.len()
+                ),
+            };
+        }
+        // A candidate must be one this MDS has affirmatively heard from.
+        // "Never observed" is not "fine": promoting onto a target whose
+        // reachability is unknown is how a volume lands somewhere that
+        // cannot serve it.
+        let Some(candidate) = in_sync
+            .iter()
+            .find(|l| matches!(self.reachability(&l.target_id), Some(Reachability::Reachable)))
+        else {
+            return PromotionOutcome::NoCandidate {
+                reason: format!(
+                    "in-sync leg(s) {:?} exist, but none is affirmatively reachable — a remote \
+                     target prober is owed",
+                    in_sync.iter().map(|l| &l.target_id).collect::<Vec<_>>()
+                ),
+            };
+        };
+
+        match self
+            .backend
+            .block_promote(volume, seat.epoch, &seat.composer, &candidate.target_id, now_unix())
+            .await
+        {
+            Ok(Ok(new_seat)) => PromotionOutcome::Promoted {
+                from: seat.composer,
+                to: new_seat.composer,
+                epoch: new_seat.epoch,
+            },
+            Ok(Err(crate::state_backend::extent_alloc::ExtentAllocError::PromotionRaced {
+                epoch,
+                composer,
+            })) => PromotionOutcome::Raced { epoch, composer },
+            Ok(Err(e)) => PromotionOutcome::Refused(format!("CAS refused: {e}")),
+            Err(e) => PromotionOutcome::Refused(format!("CAS failed: {e}")),
+        }
+    }
+
     /// MDS-start replay: converge every known block-class volume. Runs
     /// with `size_bytes: None` (never mints an lvol — see `ensure`).
     /// Failures are LOUD but non-fatal: a down tgt must not crashloop
@@ -904,6 +1133,11 @@ pub(crate) mod tests {
         /// case the capacity gate must not read as "empty".
         pub(crate) free_clusters: Mutex<Option<u64>>,
         pub(crate) total_clusters: Mutex<u64>,
+        /// `false` = the tgt process is not answering AT ALL: every RPC
+        /// fails, which is what the reachability probe is looking for.
+        /// Distinct from the failures above, which are a live tgt
+        /// answering "no".
+        pub(crate) alive: Mutex<bool>,
     }
 
     /// The fake lvolstore's cluster size (SPDK's default is 4 MiB).
@@ -924,7 +1158,12 @@ pub(crate) mod tests {
                 // exact behaviour; the gate's own tests set it.
                 free_clusters: Mutex::new(Some(1 << 20)),
                 total_clusters: Mutex::new(1 << 20),
+                alive: Mutex::new(true),
             }
+        }
+        /// Kill or revive the fake tgt process.
+        pub(crate) fn set_alive(&self, alive: bool) {
+            *self.alive.lock().unwrap() = alive;
         }
         /// Size the fake store: `(total_clusters, free_clusters)`.
         pub(crate) fn set_store(&self, total: u64, free: u64) {
@@ -965,7 +1204,14 @@ pub(crate) mod tests {
             self.calls.lock().unwrap().push(payload.clone());
             let method = payload["method"].as_str().unwrap_or("");
             let p = &payload["params"];
+            if !*self.alive.lock().unwrap() {
+                // A dead process answers nothing, not "no".
+                return Err("connection refused".into());
+            }
             match method {
+                // The reachability probe: cheapest proof the process is
+                // answering, and it asserts nothing about its state.
+                "spdk_get_version" => Ok(json!({ "result": { "version": "SPDK v26.05" } })),
                 "bdev_get_bdevs" => {
                     let bdevs = self.bdevs.lock().unwrap();
                     // No `name` = list everything (what the capacity
@@ -1592,6 +1838,169 @@ pub(crate) mod tests {
             .unwrap();
         let e = r.listener_for("pvc-elsewhere").await.expect_err("must refuse");
         assert!(e.contains("node-b"), "got: {e}");
+    }
+
+    /// THE VERDICT's two conditions, each shown to be load-bearing on
+    /// its own. Strikes alone would make the verdict a statement about
+    /// loop cadence rather than about the target (F60's lesson: a pass's
+    /// real period is the whole loop's duration, not its `interval`),
+    /// and the window alone would condemn a target on one blip.
+    #[tokio::test]
+    async fn the_verdict_needs_both_the_strikes_and_the_window() {
+        let tgt = Arc::new(FakeTgt::new());
+        let r = reconciler(Arc::clone(&tgt));
+
+        // Enough strikes, no elapsed time: SUSPECT, not condemned.
+        assert!(matches!(r.observe("node-x", false, 1_000), Reachability::Suspect { .. }));
+        assert!(matches!(r.observe("node-x", false, 1_000), Reachability::Suspect { .. }));
+        let v = r.observe("node-x", false, 1_000);
+        assert!(
+            matches!(v, Reachability::Suspect { strikes: 3, .. }),
+            "three strikes inside one second is a fast loop, not a dead target: {v:?}"
+        );
+
+        // The same strike count once the window has passed: condemned.
+        let v = r.observe("node-x", false, 1_000 + verdict_min_secs());
+        assert!(matches!(v, Reachability::Unreachable { strikes: 4, .. }), "got {v:?}");
+
+        // Elapsed time with too few strikes is not a verdict either.
+        assert!(matches!(r.observe("node-y", false, 1_000), Reachability::Suspect { .. }));
+        let v = r.observe("node-y", false, 1_000 + 10 * verdict_min_secs());
+        assert!(
+            matches!(v, Reachability::Suspect { strikes: 2, .. }),
+            "a long-ago blip plus one is not a pattern: {v:?}"
+        );
+
+        // One success clears everything — including the clock.
+        assert_eq!(r.observe("node-x", true, 2_000), Reachability::Reachable);
+        assert!(matches!(
+            r.observe("node-x", false, 2_000 + 10 * verdict_min_secs()),
+            Reachability::Suspect { strikes: 1, .. }
+        ));
+
+        // A target nobody has ever probed has NO verdict — which is not
+        // the same as being fine, and the promotion path treats it that
+        // way.
+        assert!(r.reachability("node-never-seen").is_none());
+    }
+
+    /// The probe itself, against a tgt that stops answering: the RPC
+    /// fails, strikes accumulate, and the verdict lands. `spdk_get_
+    /// version` is the probe because reachability is all it must prove.
+    #[tokio::test]
+    async fn a_dead_tgt_earns_the_verdict_through_the_probe() {
+        let tgt = Arc::new(FakeTgt::new());
+        let r = reconciler(Arc::clone(&tgt));
+        assert_eq!(r.probe_target().await, Reachability::Reachable);
+
+        tgt.set_alive(false);
+        // The probe supplies OBSERVATIONS; the thresholds turn them into
+        // a verdict. These all land in the same second, so the window is
+        // what is still missing — and the verdict says so.
+        for _ in 0..verdict_strikes() + 1 {
+            let v = r.probe_target().await;
+            assert!(!v.is_unreachable(), "the window has not passed yet: {v:?}");
+        }
+        assert!(
+            tgt.methods().iter().any(|m| m == "spdk_get_version"),
+            "the probe must actually ask the target something"
+        );
+        // Read the same history once the window HAS passed.
+        let v = r
+            .reachability_at(&target_id(), now_unix() + verdict_min_secs())
+            .expect("observed");
+        assert!(v.is_unreachable(), "got {v:?}");
+
+        // And it recovers: a tgt that comes back is reachable again on
+        // the very next pass, with no operator step.
+        tgt.set_alive(true);
+        assert_eq!(r.probe_target().await, Reachability::Reachable);
+    }
+
+    /// The verdict drives the CAS, and on a single-copy volume the
+    /// answer is a REFUSAL with a reason — `WaitsPrice`'s bill arriving
+    /// in the log rather than in a design doc. Then a second in-sync,
+    /// reachable leg turns the same call into a promotion.
+    #[tokio::test]
+    async fn promotion_waits_on_a_single_copy_and_fires_once_a_survivor_exists() {
+        use crate::state_backend::extent_alloc::LEG_INSYNC;
+        let tgt = Arc::new(FakeTgt::new());
+        let backend = crate::state_backend::memory_backend();
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        r.ensure("pvc-p", Some(1 << 20)).await.expect("provision");
+        let me = target_id();
+
+        // No verdict yet ⇒ no promotion. A healthy composer is not
+        // deposed because someone asked.
+        match r.attempt_promotion("pvc-p").await {
+            PromotionOutcome::Refused(reason) => {
+                assert!(reason.contains("not under an unreachability verdict"), "{reason}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // Condemn the composer (strikes long ago ⇒ the window is past).
+        let long_ago = now_unix() - 10 * verdict_min_secs();
+        for _ in 0..verdict_strikes() + 1 {
+            r.observe(&me, false, long_ago);
+        }
+        assert!(r.reachability(&me).unwrap().is_unreachable());
+
+        // Under the verdict, and still nowhere to go: one copy.
+        match r.attempt_promotion("pvc-p").await {
+            PromotionOutcome::NoCandidate { reason } => {
+                assert!(reason.contains("no in-sync leg"), "{reason}")
+            }
+            other => panic!("expected NoCandidate, got {other:?}"),
+        }
+
+        // A survivor appears, in sync — but never probed. Still no
+        // promotion: unknown reachability is not permission.
+        backend
+            .block_target_register("node-b", "10.0.0.2", 4420, now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+        backend
+            .block_leg_mark("pvc-p", "node-b", LEG_INSYNC, now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+        match r.attempt_promotion("pvc-p").await {
+            PromotionOutcome::NoCandidate { reason } => {
+                assert!(reason.contains("affirmatively reachable"), "{reason}")
+            }
+            other => panic!("expected NoCandidate, got {other:?}"),
+        }
+
+        // Heard from, and healthy. Now the CAS fires.
+        r.observe("node-b", true, now_unix());
+        match r.attempt_promotion("pvc-p").await {
+            PromotionOutcome::Promoted { from, to, epoch } => {
+                assert_eq!((from.as_str(), to.as_str(), epoch), (me.as_str(), "node-b", 2))
+            }
+            other => panic!("expected a promotion, got {other:?}"),
+        }
+
+        // The record moved, so the dial sites follow it — this is the
+        // whole reason the registry went in first.
+        let (traddr, trsvcid) = r.listener_for("pvc-p").await.expect("resolves");
+        assert_eq!((traddr.as_str(), trsvcid), ("10.0.0.2", 4420));
+
+        // And the retry is not a second promotion.
+        match r.attempt_promotion("pvc-p").await {
+            PromotionOutcome::Refused(reason) => {
+                assert!(reason.contains("not under an unreachability verdict"), "{reason}")
+            }
+            other => panic!("the new composer is healthy; got {other:?}"),
+        }
     }
 
     /// `RecordAssemblyOnly`'s door, shipped before promotion can open

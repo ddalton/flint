@@ -1853,6 +1853,69 @@ pub async fn export_reconcile_pass(
         // both together (drop_volume).
         return (0, 0);
     }
+
+    // THE UNREACHABILITY VERDICT, before anything that talks to the tgt.
+    // One probe answers what N per-volume converge failures were only
+    // hinting at, and the answer is a named state rather than an error
+    // storm. Note what the verdict does NOT claim: `Unreachable` is
+    // about reach, never about liveness — the target may be serving
+    // every one of its clients through paths this MDS cannot see, which
+    // is exactly the world every belt in FlintComposition was built for.
+    let verdict = reconciler.probe_target().await;
+    if let crate::pnfs::mds::block_export::Reachability::Unreachable { strikes, since_unix } =
+        verdict
+    {
+        tracing::error!(
+            "🔻 {}: target '{}' UNREACHABLE ({} consecutive failed probes since {}) — this says \
+             nothing about whether it is still serving its clients",
+            context,
+            crate::pnfs::mds::block_export::target_id(),
+            strikes,
+            since_unix
+        );
+        // Under a verdict, every volume seated at that target is a
+        // promotion candidate. The CAS's own gates decide; today they
+        // refuse every time, because a single-copy volume has nowhere
+        // to go — which is the correct answer, logged as one.
+        for v in &volumes {
+            match reconciler.attempt_promotion(v).await {
+                crate::pnfs::mds::block_export::PromotionOutcome::Promoted { from, to, epoch } => {
+                    tracing::warn!(
+                        "🔀 {} '{}': composer '{}' → '{}' at epoch {} — eviction, assembly and \
+                         client redirect are NOT yet implemented, so this record has moved \
+                         ahead of the machinery that follows it",
+                        context, v, from, to, epoch
+                    );
+                }
+                crate::pnfs::mds::block_export::PromotionOutcome::NoCandidate { reason } => {
+                    tracing::warn!("⏸ {} '{}': no promotion — {}", context, v, reason);
+                }
+                crate::pnfs::mds::block_export::PromotionOutcome::Raced { epoch, composer } => {
+                    tracing::info!(
+                        "{} '{}': promotion raced, seat now epoch {} composer '{}'",
+                        context, v, epoch, composer
+                    );
+                }
+                crate::pnfs::mds::block_export::PromotionOutcome::Refused(r) => {
+                    tracing::warn!("{} '{}': promotion refused — {}", context, v, r);
+                }
+            }
+        }
+        // Converging against a target that is not answering produces one
+        // error per volume and repairs nothing — and re-fencing through
+        // it is the same story. The next pass re-probes; a target that
+        // comes back converges then.
+        //
+        // PRECONDITION, and it is exact: skipping the WHOLE pass is
+        // right only while every volume on this shard is seated at this
+        // MDS's own target, which is true until a promotion succeeds.
+        // The day the remote prober lands — the thing that lets a
+        // promotion fire at all — this must partition the volume list by
+        // composer and keep serving the ones seated elsewhere. Same
+        // place, same commit; the two are the same piece of work.
+        return (0, 0);
+    }
+
     reconciler.reconcile_all(&volumes).await;
     // Seats whose composer has no registry row cannot be dialed — the
     // deliberate refusal at every dial site. Say so once per pass,

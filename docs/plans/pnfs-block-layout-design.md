@@ -1472,9 +1472,43 @@ Each phase ships standalone value; none is gated on the next.
   seat names another composer, which is precisely `FlintCompositionAssembly.cfg`'s
   healed composer re-converging the same subnqn and NGUID over its stale leg — it
   cannot fire today (every volume is seated where it was provisioned), which is the
-  argument for having it in place BEFORE promotion can move a seat. What remains of
-  the epoch machine is the part that moves the row: the unreachability verdict, the
-  CAS, the lease horizon, and eviction.
+  argument for having it in place BEFORE promotion can move a seat.
+  **THE CAS AND THE UNREACHABILITY VERDICT FOLLOWED (schema 12, same day).** The
+  verdict is a per-TARGET probe (`spdk_get_version` — reachability is all it asks;
+  a tgt that answers but has lost its bdevs is REACHABLE and broken, which is
+  `reconcile_all`'s problem) whose strikes must clear BOTH a count and a wall-clock
+  floor. Both, because a count alone is a statement about loop cadence rather than
+  about the target — F60's lesson that a pass's real period is the whole loop's
+  duration, not its `interval` — and a window alone condemns on one blip. Each
+  condition is A/B'd: deleting the floor fails
+  `the_verdict_needs_both_the_strikes_and_the_window`. **What the verdict cannot
+  say is the point**: `Unreachable` names reach, never liveness, and the type says
+  so, because the whole composition machine exists to be correct when that verdict
+  is WRONG about death. The other half of the exclusion — the composer's own
+  dead-man, the only thing that can reach a partitioned composer's LOCAL leg — is
+  still owed and is named at the type so the asymmetry is not mistaken for
+  completeness.
+  The CAS is `PromoteCAS` verbatim: compare `(epoch, composer)`, refuse if the seat
+  moved (`PromotionRaced`), refuse the sitting composer, refuse an unregistered
+  candidate (an elected composer nobody can dial is a promotion into a black hole),
+  refuse a candidate whose leg is not in sync — `ElectInSync`, whose A/B is that
+  deleting it makes the guard test fail — then advance the epoch by exactly one. It
+  deliberately does NOT mark the deposed leg stale: that is assembly's, and between
+  the CAS and assembly the deposed composer may still be acking. A third table
+  `block_volume_legs` supplies the gate's input; today a volume has one leg, its
+  composer's, marked in sync at seating, so **promotion refuses every time — which
+  is the correct answer for a single-copy volume, not a gap**, and it is
+  `WaitsPrice`'s bill arriving in the log rather than in this document. Seating
+  marks that leg insert-if-absent, never upsert: re-marking on a converge would let
+  an ordinary pass clear a stale mark with no copy behind it, which is
+  `FlintCompositionSelfRejoin.cfg` exactly, and the A/B for that is a third
+  mutation. A candidate must also be a target this MDS has AFFIRMATIVELY heard
+  from — never-observed is not "fine" — so a remote target prober is the next
+  thing owed, and it is what makes promotion able to fire at all.
+  What remains of the epoch machine after this: the lease horizon and the
+  self-suspending dead-man, eviction at the survivor's leg-export, assembly (which
+  is also the lease grant, and where the deposed leg is marked stale and standing
+  fences are replayed into the allow-list), and the redirect actor.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left

@@ -85,6 +85,20 @@ pub enum ExtentAllocError {
     /// different id). Also fail-closed, and also diagnosable: the
     /// composer's name is in the error.
     UnknownComposer { composer: String },
+    /// The promotion CAS lost: the seat is no longer the (epoch,
+    /// composer) the caller read. Someone else already advanced it, so
+    /// this promotion is stale and must not be retried against the same
+    /// expectation — re-read and decide again.
+    PromotionRaced { epoch: i64, composer: String },
+    /// `ElectInSync` refused: the candidate's leg is not carrying an
+    /// in-sync mark, so promoting it would discard acked writes the
+    /// record already knows it is missing. `FlintCompositionElectStale.
+    /// cfg` is that discard as a counterexample; the volume WAITS
+    /// instead, which is availability spent on durability and is priced
+    /// by `FlintCompositionWaitsPrice.cfg`.
+    NotInSync { candidate: String },
+    /// The candidate is the sitting composer. Not an election.
+    SelfPromotion { composer: String },
     /// LAYOUTCOMMIT validation failed — the (client, gen-at-grant) pair
     /// does not match a live grant on a live extent.
     CommitRejected(&'static str),
@@ -133,6 +147,19 @@ impl std::fmt::Display for ExtentAllocError {
                 "the seat names composer '{composer}', which has no target-registry row \
                  (never self-registered against this MDS)"
             ),
+            Self::PromotionRaced { epoch, composer } => write!(
+                f,
+                "promotion lost the CAS: the seat now reads epoch {epoch} composer \
+                 '{composer}'"
+            ),
+            Self::NotInSync { candidate } => write!(
+                f,
+                "election refused: leg '{candidate}' is not in sync, and promoting it would \
+                 discard acked writes the record knows it is missing"
+            ),
+            Self::SelfPromotion { composer } => {
+                write!(f, "'{composer}' is already the composer — not an election")
+            }
             Self::CommitRejected(r) => write!(f, "commit rejected: {r}"),
             Self::InvalidRange(r) => write!(f, "invalid range: {r}"),
             Self::Corruption(r) => write!(f, "extent-table corruption: {r}"),
@@ -1159,7 +1186,10 @@ pub fn drop_volume(conn: &mut Connection, volume: &str) -> Result<u64> {
         // The seat goes with the volume: a re-created volume of the
         // same name must be seated afresh by whoever provisions it,
         // never inherit an epoch and a composer from a dead namesake.
+        // Its legs go for the same reason — an inherited in-sync mark
+        // would vouch for bytes that are gone.
         "block_volume_target",
+        "block_volume_legs",
     ] {
         n += tx.execute(&format!("DELETE FROM {table} WHERE volume = ?1"), params![volume])?
             as u64;
@@ -1398,14 +1428,46 @@ pub fn target_list(conn: &Connection) -> Result<Vec<BlockTargetRow>> {
     Ok(out)
 }
 
+/// One leg's sync state for a volume. The election gate's input, and the
+/// only thing that makes `ElectInSync` more than a wish.
+///
+/// Today a volume has exactly one leg — its composer's — marked in sync
+/// when the volume is seated, so promotion has no candidate and refuses.
+/// That refusal is the correct answer for a single-copy volume, not a
+/// gap: there is nowhere to promote TO. The mark's LIFECYCLE (the
+/// degrade barrier writing stale marks on a solo ack, a rebuild clearing
+/// them) belongs to the replication tranche.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockLeg {
+    pub volume: String,
+    pub target_id: String,
+    /// `"insync"` or `"stale"`.
+    pub sync_state: String,
+    pub marked_unix: i64,
+}
+
+pub const LEG_INSYNC: &str = "insync";
+pub const LEG_STALE: &str = "stale";
+
 /// Seat a volume at `composer` if it has no seat, and return the seat
-/// that stands either way.
+/// that stands either way. Seating also records the composer's own leg
+/// as in-sync, IN THE SAME TRANSACTION — a seated volume with no in-sync
+/// leg would be a volume the election gate could never promote away from
+/// even when a good copy existed.
 ///
 /// INSERT-if-absent, never an upsert: a seat is a claim about who serves
 /// the volume's bytes, and silently moving it would be a survivor
 /// adopting a volume with no election — `RecordAssemblyOnly`'s
 /// counterexample, minted by the provisioner. The caller compares the
 /// returned seat with what it asked for and refuses on a mismatch.
+///
+/// The leg row is insert-if-absent for a sharper reason: re-marking an
+/// existing leg in-sync here would let an ordinary converge pass clear a
+/// STALE mark with no copy behind it, which is precisely
+/// `FlintCompositionSelfRejoin.cfg` — auto-examine declaring a stale leg
+/// clean, so the honest election gate elects it in good faith and its
+/// assembly discards the survivor's acked bytes. A stale mark is cleared
+/// by a completed rebuild and by nothing else.
 pub fn seat_volume(
     conn: &mut Connection,
     volume: &str,
@@ -1413,12 +1475,20 @@ pub fn seat_volume(
     now_unix: i64,
 ) -> Result<BlockSeat> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    tx.execute(
+    let seated = tx.execute(
         "INSERT INTO block_volume_target (volume, epoch, composer, seated_unix)
          VALUES (?1, 1, ?2, ?3)
          ON CONFLICT (volume) DO NOTHING",
         params![volume, composer, now_unix],
     )?;
+    if seated > 0 {
+        tx.execute(
+            "INSERT INTO block_volume_legs (volume, target_id, sync_state, marked_unix)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (volume, target_id) DO NOTHING",
+            params![volume, composer, LEG_INSYNC, now_unix],
+        )?;
+    }
     let seat = tx.query_row(
         "SELECT volume, epoch, composer, seated_unix FROM block_volume_target WHERE volume = ?1",
         params![volume],
@@ -1491,6 +1561,162 @@ pub fn resolve_volume_target(
             composer: seat.composer.clone(),
         })?;
     Ok((seat, target))
+}
+
+/// Record a leg's sync state. Upsert — this is the write the degrade
+/// barrier and the rebuild will both use, and both legitimately move an
+/// existing mark. It is deliberately NOT what `seat_volume` calls.
+pub fn leg_mark(
+    conn: &mut Connection,
+    volume: &str,
+    target_id: &str,
+    sync_state: &str,
+    now_unix: i64,
+) -> Result<()> {
+    if sync_state != LEG_INSYNC && sync_state != LEG_STALE {
+        return Err(ExtentAllocError::InvalidRange("leg sync state"));
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute(
+        "INSERT INTO block_volume_legs (volume, target_id, sync_state, marked_unix)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (volume, target_id) DO UPDATE SET sync_state = ?3, marked_unix = ?4",
+        params![volume, target_id, sync_state, now_unix],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The volume's legs and their marks.
+pub fn legs_for_volume(conn: &Connection, volume: &str) -> Result<Vec<BlockLeg>> {
+    let mut stmt = conn.prepare(
+        "SELECT volume, target_id, sync_state, marked_unix FROM block_volume_legs
+         WHERE volume = ?1 ORDER BY target_id",
+    )?;
+    let rows = stmt.query_map(params![volume], |r| {
+        Ok(BlockLeg {
+            volume: r.get(0)?,
+            target_id: r.get(1)?,
+            sync_state: r.get(2)?,
+            marked_unix: r.get(3)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// THE PROMOTION CAS — `FlintComposition`'s `PromoteCAS`, which is the
+/// one act that moves a volume from one composer to another.
+///
+/// The caller supplies what it read (`expected_epoch`, `expected_
+/// composer`) and the transaction refuses if the seat has moved since.
+/// With one arbiter per shard today there is no peer to race, so the
+/// compare is really about ordering a retry against its own earlier
+/// attempt — and about being correct on the day there IS a second
+/// arbiter, which is the day it stops being cheap to add.
+///
+/// The guards, in the model's own terms:
+///   * `ElectInSync` — the candidate's leg must carry an in-sync mark.
+///     Promoting a leg the record already knows is stale discards every
+///     acked solo write (`FlintCompositionElectStale.cfg`). The price of
+///     refusing is that a degraded volume whose composer then dies WAITS
+///     (`FlintCompositionWaitsPrice.cfg`), and that is the trade.
+///   * the candidate must be a REGISTERED target — an elected composer
+///     nobody can dial is a promotion into a black hole.
+///   * the epoch advances by exactly one, monotonically.
+///
+/// What it deliberately does NOT do: mark the deposed leg stale. That
+/// belongs to assembly, and the model is emphatic about the order (CAS →
+/// horizon → evict → assemble): between the CAS and assembly the deposed
+/// composer may still be acking, and its leg is not yet behind.
+pub fn promote_volume(
+    conn: &mut Connection,
+    volume: &str,
+    expected_epoch: i64,
+    expected_composer: &str,
+    candidate: &str,
+    now_unix: i64,
+) -> Result<BlockSeat> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let seat: Option<BlockSeat> = tx
+        .query_row(
+            "SELECT volume, epoch, composer, seated_unix FROM block_volume_target
+             WHERE volume = ?1",
+            params![volume],
+            |r| {
+                Ok(BlockSeat {
+                    volume: r.get(0)?,
+                    epoch: r.get(1)?,
+                    composer: r.get(2)?,
+                    seated_unix: r.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(seat) = seat else {
+        return Err(ExtentAllocError::UnseatedVolume);
+    };
+    if seat.epoch != expected_epoch || seat.composer != expected_composer {
+        return Err(ExtentAllocError::PromotionRaced {
+            epoch: seat.epoch,
+            composer: seat.composer,
+        });
+    }
+    if candidate == seat.composer {
+        return Err(ExtentAllocError::SelfPromotion { composer: seat.composer });
+    }
+    let registered: bool = tx
+        .query_row(
+            "SELECT 1 FROM block_targets WHERE target_id = ?1",
+            params![candidate],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !registered {
+        return Err(ExtentAllocError::UnknownComposer {
+            composer: candidate.to_string(),
+        });
+    }
+    let insync: bool = tx
+        .query_row(
+            "SELECT sync_state FROM block_volume_legs WHERE volume = ?1 AND target_id = ?2",
+            params![volume, candidate],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|s| s == LEG_INSYNC)
+        .unwrap_or(false);
+    if !insync {
+        return Err(ExtentAllocError::NotInSync {
+            candidate: candidate.to_string(),
+        });
+    }
+    // The CAS repeated in the WHERE clause, not because the read above
+    // could go stale inside an IMMEDIATE transaction, but so the swap
+    // stays a swap if this statement is ever lifted out of one.
+    let moved = tx.execute(
+        "UPDATE block_volume_target SET epoch = epoch + 1, composer = ?1, seated_unix = ?2
+         WHERE volume = ?3 AND epoch = ?4 AND composer = ?5",
+        params![candidate, now_unix, volume, expected_epoch, expected_composer],
+    )?;
+    if moved != 1 {
+        return Err(ExtentAllocError::PromotionRaced {
+            epoch: seat.epoch,
+            composer: seat.composer,
+        });
+    }
+    let promoted = BlockSeat {
+        volume: volume.to_string(),
+        epoch: expected_epoch + 1,
+        composer: candidate.to_string(),
+        seated_unix: now_unix,
+    };
+    tx.commit()?;
+    Ok(promoted)
 }
 
 /// Every seat, for the startup audit and `BlockExportStatus`.
@@ -3748,6 +3974,103 @@ mod tests {
         assert_eq!((target.traddr.as_str(), target.trsvcid), ("10.0.0.7", 4421));
     }
 
+    /// The promotion CAS, all the way through: it moves the seat by
+    /// exactly one epoch, and every guard it is made of refuses on its
+    /// own terms.
+    #[test]
+    fn the_promotion_cas_advances_one_epoch_and_every_guard_refuses_alone() {
+        let mut conn = fresh();
+        target_register(&mut conn, "node-a", "10.0.0.1", 4420, 100).unwrap();
+        target_register(&mut conn, "node-b", "10.0.0.2", 4420, 100).unwrap();
+        seat_volume(&mut conn, VOL, "node-a", 100).unwrap();
+
+        // Unseated volumes have nothing to promote.
+        assert!(matches!(
+            promote_volume(&mut conn, "pvc-nope", 1, "node-a", "node-b", 200),
+            Err(ExtentAllocError::UnseatedVolume)
+        ));
+
+        // The sitting composer is not a candidate.
+        assert!(matches!(
+            promote_volume(&mut conn, VOL, 1, "node-a", "node-a", 200),
+            Err(ExtentAllocError::SelfPromotion { .. })
+        ));
+
+        // ElectInSync: node-b holds no in-sync leg yet. This is the
+        // single-copy volume's permanent answer, and the degraded
+        // volume's answer too.
+        match promote_volume(&mut conn, VOL, 1, "node-a", "node-b", 200) {
+            Err(ExtentAllocError::NotInSync { candidate }) => assert_eq!(candidate, "node-b"),
+            other => panic!("expected NotInSync, got {other:?}"),
+        }
+
+        // A STALE mark is not an in-sync mark — the whole point of the
+        // gate is that these are different.
+        leg_mark(&mut conn, VOL, "node-b", LEG_STALE, 150).unwrap();
+        assert!(matches!(
+            promote_volume(&mut conn, VOL, 1, "node-a", "node-b", 200),
+            Err(ExtentAllocError::NotInSync { .. })
+        ));
+
+        // An in-sync leg on an UNREGISTERED target is still no
+        // candidate: an elected composer nobody can dial is a promotion
+        // into a black hole.
+        leg_mark(&mut conn, VOL, "node-ghost", LEG_INSYNC, 150).unwrap();
+        match promote_volume(&mut conn, VOL, 1, "node-a", "node-ghost", 200) {
+            Err(ExtentAllocError::UnknownComposer { composer }) => {
+                assert_eq!(composer, "node-ghost")
+            }
+            other => panic!("expected UnknownComposer, got {other:?}"),
+        }
+
+        // In sync, registered, not the sitting composer: elected.
+        leg_mark(&mut conn, VOL, "node-b", LEG_INSYNC, 160).unwrap();
+        let promoted = promote_volume(&mut conn, VOL, 1, "node-a", "node-b", 200).unwrap();
+        assert_eq!(promoted.epoch, 2, "exactly one epoch, monotone");
+        assert_eq!(promoted.composer, "node-b");
+        assert_eq!(volume_seat(&conn, VOL).unwrap().unwrap(), promoted, "durable");
+
+        // The deposed leg's mark is UNTOUCHED. Marking it stale belongs
+        // to assembly, not to the CAS: between the two the deposed
+        // composer may still be acking, and its leg is not yet behind.
+        let legs = legs_for_volume(&conn, VOL).unwrap();
+        let a = legs.iter().find(|l| l.target_id == "node-a").unwrap();
+        assert_eq!(a.sync_state, LEG_INSYNC, "the CAS does not degrade the deposed leg");
+
+        // And the losing retry: the same call again reads the seat it
+        // no longer matches and refuses, naming what stands now.
+        match promote_volume(&mut conn, VOL, 1, "node-a", "node-b", 300) {
+            Err(ExtentAllocError::PromotionRaced { epoch, composer }) => {
+                assert_eq!((epoch, composer.as_str()), (2, "node-b"))
+            }
+            other => panic!("expected PromotionRaced, got {other:?}"),
+        }
+    }
+
+    /// Seating records the composer's own leg in sync — otherwise a
+    /// volume could never be promoted AWAY from a target that does hold
+    /// a good copy. But a re-seat must never re-mark: that would let an
+    /// ordinary converge clear a stale mark with no copy behind it,
+    /// which is `FlintCompositionSelfRejoin.cfg`'s counterexample
+    /// (auto-examine declaring a stale leg clean, so the honest election
+    /// gate elects it in good faith).
+    #[test]
+    fn seating_marks_its_own_leg_but_a_reseat_never_clears_a_stale_mark() {
+        let mut conn = fresh();
+        seat_volume(&mut conn, VOL, "node-a", 100).unwrap();
+        let legs = legs_for_volume(&conn, VOL).unwrap();
+        assert_eq!(legs.len(), 1);
+        assert_eq!((legs[0].target_id.as_str(), legs[0].sync_state.as_str()), ("node-a", LEG_INSYNC));
+
+        leg_mark(&mut conn, VOL, "node-a", LEG_STALE, 200).unwrap();
+        seat_volume(&mut conn, VOL, "node-a", 300).unwrap();
+        let legs = legs_for_volume(&conn, VOL).unwrap();
+        assert_eq!(
+            legs[0].sync_state, LEG_STALE,
+            "a converge pass must not vouch for bytes it has not copied"
+        );
+    }
+
     /// DeleteVolume takes the seat with it. A re-created namesake must
     /// be seated afresh by whoever provisions it — inheriting an epoch
     /// and a composer from a dead volume of the same name is the
@@ -3761,6 +4084,7 @@ mod tests {
 
         drop_volume(&mut conn, VOL).unwrap();
         assert!(volume_seat(&conn, VOL).unwrap().is_none(), "seat swept");
+        assert!(legs_for_volume(&conn, VOL).unwrap().is_empty(), "legs swept");
         assert_eq!(
             target_list(&conn).unwrap().len(),
             1,

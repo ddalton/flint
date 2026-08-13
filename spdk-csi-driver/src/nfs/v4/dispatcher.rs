@@ -3039,6 +3039,9 @@ impl CompoundDispatcher {
                     E::UnconfirmedFence
                     | E::UnseatedVolume
                     | E::UnknownComposer { .. }
+                    | E::PromotionRaced { .. }
+                    | E::NotInSync { .. }
+                    | E::SelfPromotion { .. }
                     | E::CommitRejected(_)
                     | E::Corruption(_)
                     | E::Sql(_) => Nfs4Status::ServerFault,
