@@ -74,6 +74,17 @@ pub enum ExtentAllocError {
     /// corruption through a side door. The sweep retries after the next
     /// fence attempt confirms.
     UnconfirmedFence,
+    /// The volume has no serving-target seat — nothing records WHICH
+    /// target composes it, so no dial site may guess. Fail-closed by
+    /// construction: falling back to the reconciler's own configured
+    /// listener is exactly `FlintCompositionStaticTraddr`, the shipped
+    /// livelock the target registry exists to delete.
+    UnseatedVolume,
+    /// The seat names a composer with no registry row — the target has
+    /// never self-registered against this MDS (or registered under a
+    /// different id). Also fail-closed, and also diagnosable: the
+    /// composer's name is in the error.
+    UnknownComposer { composer: String },
     /// LAYOUTCOMMIT validation failed — the (client, gen-at-grant) pair
     /// does not match a live grant on a live extent.
     CommitRejected(&'static str),
@@ -111,6 +122,16 @@ impl std::fmt::Display for ExtentAllocError {
             Self::UnconfirmedFence => write!(
                 f,
                 "revoke refused: the client's fence is absent or unconfirmed at the target"
+            ),
+            Self::UnseatedVolume => write!(
+                f,
+                "no serving-target seat for this volume — refusing to guess which target \
+                 composes it"
+            ),
+            Self::UnknownComposer { composer } => write!(
+                f,
+                "the seat names composer '{composer}', which has no target-registry row \
+                 (never self-registered against this MDS)"
             ),
             Self::CommitRejected(r) => write!(f, "commit rejected: {r}"),
             Self::InvalidRange(r) => write!(f, "invalid range: {r}"),
@@ -1135,6 +1156,10 @@ pub fn drop_volume(conn: &mut Connection, volume: &str) -> Result<u64> {
         "block_hosts",
         "block_node_attach",
         "fenced_clients",
+        // The seat goes with the volume: a re-created volume of the
+        // same name must be seated afresh by whoever provisions it,
+        // never inherit an epoch and a composer from a dead namesake.
+        "block_volume_target",
     ] {
         n += tx.execute(&format!("DELETE FROM {table} WHERE volume = ?1"), params![volume])?
             as u64;
@@ -1274,6 +1299,218 @@ pub fn node_detach(
 /// comparison in tests and logs).
 pub fn hosts_for_volume(conn: &Connection, volume: &str) -> Result<Vec<String>> {
     hosts_for_volume_conn(conn, volume)
+}
+
+// ---------------------------------------------------------------------
+// The target registry and the per-volume serving seat (design §12).
+//
+// `FlintCompositionStaticTraddr.cfg` is a REQUIRED-TO-FAIL run: with the
+// preempt aimed at a constructor-held address instead of at whatever the
+// record names, every post-failover fence confirmation livelocks and the
+// quarantine sweep parks ranges forever. These two tables are the
+// record it must follow.
+//
+// They are deliberately SEPARATE. A target's coordinates change without
+// its identity changing (a node restarts on a new address); the composer
+// of a volume changes only by promotion, which bumps the epoch. Folding
+// them into one row would make a re-addressed node indistinguishable
+// from a failover — and the epoch is the thing every belt keys on.
+// ---------------------------------------------------------------------
+
+/// A target that has announced where it can be dialed. One row per
+/// spdk-tgt this MDS can reach; today's phase-1 shard registers exactly
+/// itself, which is why the seat below can be written at provision time
+/// with no election.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockTargetRow {
+    pub target_id: String,
+    pub traddr: String,
+    pub trsvcid: u16,
+    /// First self-registration. Kept across re-registrations: a target
+    /// that comes back on a new address is the SAME target, and the
+    /// distinction between "new" and "moved" is one the failover work
+    /// will need.
+    pub registered_unix: i64,
+    pub updated_unix: i64,
+}
+
+/// The volume's serving seat — the model's `[epoch, composer]` record,
+/// one row per volume. Nothing moves it yet (promotion is the failover
+/// tranche); what exists today is the READ side, so every dial site is
+/// already record-driven and the tranche that lands promotion only has
+/// to CAS this row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockSeat {
+    pub volume: String,
+    /// Composition epoch. Starts at 1 and advances only by promotion.
+    pub epoch: i64,
+    /// `target_id` of the target composing this volume.
+    pub composer: String,
+    pub seated_unix: i64,
+}
+
+/// A target announces (or re-announces) its dial coordinates. Idempotent
+/// and level-triggered — the MDS calls this every reconcile pass, so a
+/// chart change to the listener converges without an operator.
+///
+/// Coordinates are overwritten in place: they are a fact about the
+/// target's present, and a stale address that stayed because it was
+/// written first is precisely the bug being deleted here.
+pub fn target_register(
+    conn: &mut Connection,
+    target_id: &str,
+    traddr: &str,
+    trsvcid: u16,
+    now_unix: i64,
+) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute(
+        "INSERT INTO block_targets (target_id, traddr, trsvcid, registered_unix, updated_unix)
+         VALUES (?1, ?2, ?3, ?4, ?4)
+         ON CONFLICT (target_id) DO UPDATE SET traddr = ?2, trsvcid = ?3, updated_unix = ?4",
+        params![target_id, traddr, trsvcid as i64, now_unix],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Every registered target, ordered. Observability and the startup
+/// audit — an unseated or unresolvable volume is diagnosed against this.
+pub fn target_list(conn: &Connection) -> Result<Vec<BlockTargetRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT target_id, traddr, trsvcid, registered_unix, updated_unix
+         FROM block_targets ORDER BY target_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let port: i64 = r.get(2)?;
+        Ok(BlockTargetRow {
+            target_id: r.get(0)?,
+            traddr: r.get(1)?,
+            trsvcid: port as u16,
+            registered_unix: r.get(3)?,
+            updated_unix: r.get(4)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Seat a volume at `composer` if it has no seat, and return the seat
+/// that stands either way.
+///
+/// INSERT-if-absent, never an upsert: a seat is a claim about who serves
+/// the volume's bytes, and silently moving it would be a survivor
+/// adopting a volume with no election — `RecordAssemblyOnly`'s
+/// counterexample, minted by the provisioner. The caller compares the
+/// returned seat with what it asked for and refuses on a mismatch.
+pub fn seat_volume(
+    conn: &mut Connection,
+    volume: &str,
+    composer: &str,
+    now_unix: i64,
+) -> Result<BlockSeat> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute(
+        "INSERT INTO block_volume_target (volume, epoch, composer, seated_unix)
+         VALUES (?1, 1, ?2, ?3)
+         ON CONFLICT (volume) DO NOTHING",
+        params![volume, composer, now_unix],
+    )?;
+    let seat = tx.query_row(
+        "SELECT volume, epoch, composer, seated_unix FROM block_volume_target WHERE volume = ?1",
+        params![volume],
+        |r| {
+            Ok(BlockSeat {
+                volume: r.get(0)?,
+                epoch: r.get(1)?,
+                composer: r.get(2)?,
+                seated_unix: r.get(3)?,
+            })
+        },
+    )?;
+    tx.commit()?;
+    Ok(seat)
+}
+
+/// The volume's seat, if it has one.
+pub fn volume_seat(conn: &Connection, volume: &str) -> Result<Option<BlockSeat>> {
+    Ok(conn
+        .query_row(
+            "SELECT volume, epoch, composer, seated_unix FROM block_volume_target
+             WHERE volume = ?1",
+            params![volume],
+            |r| {
+                Ok(BlockSeat {
+                    volume: r.get(0)?,
+                    epoch: r.get(1)?,
+                    composer: r.get(2)?,
+                    seated_unix: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// THE RESOLUTION every dial site goes through: volume → seat → dialable
+/// coordinates, in ONE read so the pair cannot be torn by a concurrent
+/// re-registration.
+///
+/// Both failure shapes are refusals, never fallbacks. A volume with no
+/// seat and a seat naming an unregistered composer are different
+/// operator stories and are reported as different errors, but they have
+/// the same answer: this MDS does not know where to dial, so it does not
+/// dial.
+pub fn resolve_volume_target(
+    conn: &Connection,
+    volume: &str,
+) -> Result<(BlockSeat, BlockTargetRow)> {
+    let Some(seat) = volume_seat(conn, volume)? else {
+        return Err(ExtentAllocError::UnseatedVolume);
+    };
+    let target = conn
+        .query_row(
+            "SELECT target_id, traddr, trsvcid, registered_unix, updated_unix
+             FROM block_targets WHERE target_id = ?1",
+            params![seat.composer],
+            |r| {
+                let port: i64 = r.get(2)?;
+                Ok(BlockTargetRow {
+                    target_id: r.get(0)?,
+                    traddr: r.get(1)?,
+                    trsvcid: port as u16,
+                    registered_unix: r.get(3)?,
+                    updated_unix: r.get(4)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| ExtentAllocError::UnknownComposer {
+            composer: seat.composer.clone(),
+        })?;
+    Ok((seat, target))
+}
+
+/// Every seat, for the startup audit and `BlockExportStatus`.
+pub fn seat_list(conn: &Connection) -> Result<Vec<BlockSeat>> {
+    let mut stmt = conn.prepare(
+        "SELECT volume, epoch, composer, seated_unix FROM block_volume_target ORDER BY volume",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(BlockSeat {
+            volume: r.get(0)?,
+            epoch: r.get(1)?,
+            composer: r.get(2)?,
+            seated_unix: r.get(3)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 /// Where a live admission came from. The distinction matters to the
@@ -3435,5 +3672,99 @@ mod tests {
         let captured = fence_record(&mut conn, VOL, C1, 0).unwrap();
         assert_eq!(captured, "", "no block_hosts row → empty nqn");
         assert!(is_fenced(&conn, VOL, C1).unwrap());
+    }
+
+    /// A target's coordinates are its PRESENT, so re-registration
+    /// overwrites them — that is the mechanism by which a target
+    /// returning on a new address stops being dialed at the old one.
+    /// Its identity and its first-seen stamp are not rewritten: same
+    /// target, moved.
+    #[test]
+    fn target_registration_moves_the_address_and_keeps_the_identity() {
+        let mut conn = fresh();
+        target_register(&mut conn, "node-a", "10.0.0.9", 4420, 100).unwrap();
+        target_register(&mut conn, "node-a", "10.0.0.42", 4421, 900).unwrap();
+
+        let all = target_list(&conn).unwrap();
+        assert_eq!(all.len(), 1, "re-registration is not a second target");
+        assert_eq!(all[0].traddr, "10.0.0.42");
+        assert_eq!(all[0].trsvcid, 4421);
+        assert_eq!(all[0].registered_unix, 100, "first-seen survives the move");
+        assert_eq!(all[0].updated_unix, 900);
+    }
+
+    /// Seating is INSERT-if-absent, and the distinction matters: a
+    /// second target calling `seat_volume` on a volume that is already
+    /// someone else's gets the STANDING seat back, not its own claim.
+    /// Moving a seat is promotion's job, and promotion is a CAS this
+    /// tranche does not ship — so nothing here may move one.
+    #[test]
+    fn a_seat_is_never_taken_by_a_second_claimant() {
+        let mut conn = fresh();
+        let first = seat_volume(&mut conn, VOL, "node-a", 100).unwrap();
+        assert_eq!(first.composer, "node-a");
+        assert_eq!(first.epoch, 1, "epochs start at 1 and only promotion moves them");
+
+        let second = seat_volume(&mut conn, VOL, "node-b", 200).unwrap();
+        assert_eq!(second.composer, "node-a", "the standing seat comes back");
+        assert_eq!(second.seated_unix, 100, "and it was not rewritten");
+    }
+
+    /// Resolution has two distinct failure shapes and NO third
+    /// (fall-back-to-something) shape. They are different operator
+    /// stories — nobody has seated this volume vs. its composer has
+    /// never announced itself — so they are different errors.
+    #[test]
+    fn resolution_refuses_unseated_and_unregistered_separately() {
+        let mut conn = fresh();
+        assert!(
+            matches!(
+                resolve_volume_target(&conn, VOL),
+                Err(ExtentAllocError::UnseatedVolume)
+            ),
+            "an unseated volume resolves to nothing"
+        );
+
+        seat_volume(&mut conn, VOL, "node-gone", 100).unwrap();
+        match resolve_volume_target(&conn, VOL) {
+            Err(ExtentAllocError::UnknownComposer { composer }) => {
+                assert_eq!(composer, "node-gone", "the error names who to look for")
+            }
+            other => panic!("expected UnknownComposer, got {other:?}"),
+        }
+
+        // Registering a DIFFERENT target does not make the seat
+        // resolvable: the registry is looked up by the composer the
+        // record names, never by "whoever is around".
+        target_register(&mut conn, "node-here", "10.0.0.9", 4420, 100).unwrap();
+        assert!(matches!(
+            resolve_volume_target(&conn, VOL),
+            Err(ExtentAllocError::UnknownComposer { .. })
+        ));
+
+        target_register(&mut conn, "node-gone", "10.0.0.7", 4421, 100).unwrap();
+        let (seat, target) = resolve_volume_target(&conn, VOL).expect("now resolvable");
+        assert_eq!(seat.composer, "node-gone");
+        assert_eq!((target.traddr.as_str(), target.trsvcid), ("10.0.0.7", 4421));
+    }
+
+    /// DeleteVolume takes the seat with it. A re-created namesake must
+    /// be seated afresh by whoever provisions it — inheriting an epoch
+    /// and a composer from a dead volume of the same name is the
+    /// stale-arena class of bug one table over.
+    #[test]
+    fn dropping_a_volume_drops_its_seat() {
+        let mut conn = setup();
+        seat_volume(&mut conn, VOL, "node-a", 100).unwrap();
+        target_register(&mut conn, "node-a", "10.0.0.9", 4420, 100).unwrap();
+        assert!(volume_seat(&conn, VOL).unwrap().is_some());
+
+        drop_volume(&mut conn, VOL).unwrap();
+        assert!(volume_seat(&conn, VOL).unwrap().is_none(), "seat swept");
+        assert_eq!(
+            target_list(&conn).unwrap().len(),
+            1,
+            "the TARGET outlives the volume — it serves others"
+        );
     }
 }

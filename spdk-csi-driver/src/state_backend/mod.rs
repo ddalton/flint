@@ -841,6 +841,56 @@ pub trait StateBackend: Send + Sync {
         client_id: u64,
     ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
 
+    /// A target announces where it can be dialed (design §12's target
+    /// registry). Idempotent and level-triggered: called every reconcile
+    /// pass, so a listener change converges without an operator.
+    async fn block_target_register(
+        &self,
+        target_id: &str,
+        traddr: &str,
+        trsvcid: u16,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<(), extent_alloc::ExtentAllocError>>;
+
+    /// Every registered target — observability and the startup audit.
+    async fn block_target_list(
+        &self,
+    ) -> StateBackendResult<Result<Vec<extent_alloc::BlockTargetRow>, extent_alloc::ExtentAllocError>>;
+
+    /// Seat a volume at `composer` if it has no seat; returns the seat
+    /// that stands either way (which the caller MUST compare — a seat
+    /// naming someone else is never silently overwritten).
+    async fn block_seat_volume(
+        &self,
+        volume: &str,
+        composer: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<extent_alloc::BlockSeat, extent_alloc::ExtentAllocError>>;
+
+    /// The volume's seat alone — who composes it, without asking where
+    /// that composer answers. What the export reconciler's converge
+    /// guard needs: it can only configure the tgt on its own socket, so
+    /// it wants WHO, never WHERE.
+    async fn block_volume_seat(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<Result<Option<extent_alloc::BlockSeat>, extent_alloc::ExtentAllocError>>;
+
+    /// THE RESOLUTION: volume → seat → dialable coordinates, in one
+    /// read. `UnseatedVolume` / `UnknownComposer` are refusals, never
+    /// invitations to fall back on a configured address.
+    async fn block_resolve_target(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<(extent_alloc::BlockSeat, extent_alloc::BlockTargetRow), extent_alloc::ExtentAllocError>,
+    >;
+
+    /// Every seat, for the startup audit.
+    async fn block_seat_list(
+        &self,
+    ) -> StateBackendResult<Result<Vec<extent_alloc::BlockSeat>, extent_alloc::ExtentAllocError>>;
+
     /// Clear a client's fence (release / lease recovery). `true` if a
     /// record was removed.
     async fn block_unfence(

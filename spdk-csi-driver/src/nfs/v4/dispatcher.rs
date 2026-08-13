@@ -3031,8 +3031,14 @@ impl CompoundDispatcher {
                     E::NoSpace { .. } | E::RowBudget { .. } => Nfs4Status::LayoutUnavail,
                     E::InvalidRange(_) => Nfs4Status::Inval,
                     // Never produced by a grant — revoke_client is the
-                    // lease sweep's transaction, not a wire op.
+                    // lease sweep's transaction, not a wire op, and the
+                    // seat resolution belongs to the dial sites (CSI
+                    // attach, the fence lane), which a LAYOUTGET does
+                    // not go through: the client already has its nvme
+                    // session by the time it asks for a layout.
                     E::UnconfirmedFence
+                    | E::UnseatedVolume
+                    | E::UnknownComposer { .. }
                     | E::CommitRejected(_)
                     | E::Corruption(_)
                     | E::Sql(_) => Nfs4Status::ServerFault,

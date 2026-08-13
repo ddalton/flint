@@ -1740,14 +1740,18 @@ pub async fn attach_block_node(
         // rather than letting the node connect into a refusal.
         format!("attach recorded but allow-list did not converge: {e}")
     })?;
-    let (traddr, trsvcid) = rec.listener();
+    // The address the node will dial comes from the volume's record, not
+    // from this MDS's configuration: after a failover the seat is what
+    // knows where the volume lives, and a csi-node handed a stale traddr
+    // connects to a target that no longer serves it.
+    let (traddr, trsvcid) = rec.listener_for(volume).await?;
     let (_uuid, nguid) = crate::nvmeof_export::stable_ns_identity(volume);
     info!(
-        "🔌 {}: node {} ({}) attached to '{}' — allow-list converged",
-        context, node_name, host_nqn, volume
+        "🔌 {}: node {} ({}) attached to '{}' — allow-list converged, dial {}:{}",
+        context, node_name, host_nqn, volume, traddr, trsvcid
     );
     Ok(BlockAttachInfo {
-        traddr: traddr.to_string(),
+        traddr,
         trsvcid,
         subnqn: crate::identity::block_volume_export_nqn(volume),
         nguid,
@@ -1834,6 +1838,14 @@ pub async fn export_reconcile_pass(
     let Some(reconciler) = layout_manager.block_export() else {
         return (0, 0);
     };
+    // Announce this target's coordinates first, and unconditionally: the
+    // registry row is a fact about the target, not about any volume, and
+    // a shard whose first block volume has not been created yet still
+    // needs a row by the time that volume's first attach resolves an
+    // address.
+    if let Err(e) = reconciler.self_register().await {
+        tracing::error!("{} target registration failed: {}", context, e);
+    }
     let volumes = layout_manager.scsi_volumes();
     if volumes.is_empty() {
         // No scsi volumes ⇒ no fences either: a fence record exists
@@ -1842,6 +1854,29 @@ pub async fn export_reconcile_pass(
         return (0, 0);
     }
     reconciler.reconcile_all(&volumes).await;
+    // Seats whose composer has no registry row cannot be dialed — the
+    // deliberate refusal at every dial site. Say so once per pass,
+    // naming the volumes, so the refusal downstream is diagnosable
+    // rather than mysterious.
+    match reconciler.seat_audit().await {
+        Ok(audit) => {
+            let orphaned: Vec<String> = audit
+                .iter()
+                .filter(|(_, resolvable)| !resolvable)
+                .map(|(s, _)| format!("{} → '{}'", s.volume, s.composer))
+                .collect();
+            if !orphaned.is_empty() {
+                tracing::error!(
+                    "{}: {} volume(s) seated at an UNREGISTERED composer — every fence and \
+                     attach for them will be refused until that target registers: {}",
+                    context,
+                    orphaned.len(),
+                    orphaned.join(", ")
+                );
+            }
+        }
+        Err(e) => tracing::warn!("{} seat audit unavailable: {}", context, e),
+    }
 
     let backend = layout_manager.state_backend();
     let mut refenced = 0usize;

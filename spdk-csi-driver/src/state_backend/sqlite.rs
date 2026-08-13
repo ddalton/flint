@@ -94,7 +94,7 @@ use tokio::sync::oneshot;
 /// misread — a dropped column reads as NULL, and a NULL that decodes to
 /// a default is exactly the silent-wrong-answer class this codebase
 /// keeps finding.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// One request to the writer thread.
 enum Req {
@@ -1549,6 +1549,101 @@ impl StateBackend for SqliteBackend {
         })
         .await
     }
+
+    async fn block_target_register(
+        &self,
+        target_id: &str,
+        traddr: &str,
+        trsvcid: u16,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<(), crate::state_backend::extent_alloc::ExtentAllocError>> {
+        let t = target_id.to_string();
+        let a = traddr.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::target_register(conn, &t, &a, trsvcid, now_unix)
+        })
+        .await
+    }
+
+    async fn block_target_list(
+        &self,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockTargetRow>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        self.with_conn_mut(|conn: &mut rusqlite::Connection| {
+            crate::state_backend::extent_alloc::target_list(conn)
+        })
+        .await
+    }
+
+    async fn block_seat_volume(
+        &self,
+        volume: &str,
+        composer: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::BlockSeat,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        let c = composer.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::seat_volume(conn, &v, &c, now_unix)
+        })
+        .await
+    }
+
+    async fn block_volume_seat(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<
+            Option<crate::state_backend::extent_alloc::BlockSeat>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| crate::state_backend::extent_alloc::volume_seat(conn, &v))
+            .await
+    }
+
+    async fn block_resolve_target(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<
+            (
+                crate::state_backend::extent_alloc::BlockSeat,
+                crate::state_backend::extent_alloc::BlockTargetRow,
+            ),
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let v = volume.to_string();
+        self.with_conn_mut(move |conn| {
+            crate::state_backend::extent_alloc::resolve_volume_target(conn, &v)
+        })
+        .await
+    }
+
+    async fn block_seat_list(
+        &self,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockSeat>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        self.with_conn_mut(|conn: &mut rusqlite::Connection| {
+            crate::state_backend::extent_alloc::seat_list(conn)
+        })
+        .await
+    }
 }
 
 // ── Row decoders ──────────────────────────────────────────────────────
@@ -2077,6 +2172,49 @@ CREATE TABLE IF NOT EXISTS fenced_clients (
     fenced_unix INTEGER NOT NULL,
     delivered_unix INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (volume, client_id)
+);
+
+-- block_targets: THE TARGET REGISTRY (design §12). Where each spdk-tgt
+-- this MDS can reach answers its door. Self-registered — a target
+-- announces its own coordinates every reconcile pass — so a listener
+-- change in the chart converges without an operator, and a target that
+-- comes back on a new address is the SAME target under the same id.
+--
+-- Its reason for existing is a machine-checked one: with the preempt
+-- aimed at the reconciler's constructor-held address instead of at
+-- whatever the record names, `FlintCompositionStaticTraddr.cfg` produces
+-- a lasso in which every post-failover fence confirmation is dialed at a
+-- dead node forever, `delivered_unix` never becomes nonzero, and every
+-- range the quarantine sweep guards stays parked. The registry is the
+-- indirection that mutation demands.
+CREATE TABLE IF NOT EXISTS block_targets (
+    target_id       TEXT PRIMARY KEY,
+    traddr          TEXT NOT NULL,
+    trsvcid         INTEGER NOT NULL,
+    registered_unix INTEGER NOT NULL,
+    updated_unix    INTEGER NOT NULL
+);
+
+-- block_volume_target: the volume's SERVING SEAT — FlintComposition's
+-- [epoch, composer] record, one row per volume. Written once at
+-- provision (INSERT-if-absent: moving a seat is promotion's job, never
+-- the provisioner's) and read by every site that dials or advertises the
+-- volume's target.
+--
+-- Two columns, deliberately not one table with the registry: coordinates
+-- change without identity changing (a node returns on a new address),
+-- while the composer changes only by promotion — which bumps the epoch,
+-- and the epoch is what every belt in the model keys on. Conflated, a
+-- re-addressed node would be indistinguishable from a failover.
+--
+-- `epoch` starts at 1 and nothing advances it yet: promotion is the
+-- failover tranche. What ships here is the READ side, so the dial sites
+-- are already record-driven and that tranche only has to CAS this row.
+CREATE TABLE IF NOT EXISTS block_volume_target (
+    volume      TEXT PRIMARY KEY,
+    epoch       INTEGER NOT NULL,
+    composer    TEXT NOT NULL,
+    seated_unix INTEGER NOT NULL
 );
 "#;
 

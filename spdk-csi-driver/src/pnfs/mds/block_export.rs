@@ -43,6 +43,43 @@ pub fn export_node_name() -> String {
     std::env::var("FLINT_NODE_NAME").unwrap_or_default()
 }
 
+/// This MDS's TARGET ID — the name its spdk-tgt is known by in the
+/// `block_targets` registry, and what a volume's seat names as its
+/// composer (design §12).
+///
+/// It identifies the TARGET, not the MDS. Today they resolve to the same
+/// string because the export socket is a shared hostPath, so the MDS and
+/// the tgt it drives are co-located by construction (see
+/// `export_node_name`). When the MDS is un-pinned from the tgt node —
+/// owed work, and the whole reason the registry is an indirection — this
+/// is the function that learns to name the tgt some other way; nothing
+/// downstream changes, because nothing downstream holds an address.
+///
+/// The fallback is for rigs with no downward API (lima, plain-process
+/// runs): a stable per-shard name, never the empty string. A deployment
+/// that GAINS `FLINT_NODE_NAME` after seating volumes under the fallback
+/// renames its target, and every seat then names a composer with no
+/// registry row — a loud refusal at the dial sites, not a silent
+/// mis-dial, which is the trade this whole table exists to make.
+pub fn target_id() -> String {
+    let node = export_node_name();
+    if !node.is_empty() {
+        return node;
+    }
+    let shard = std::env::var("FLINT_MDS_SHARD_ID")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    format!("mds-shard-{shard}")
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// How the reconciler reaches its spdk-tgt plus the export coordinates it
 /// converges toward. One target per MDS shard for phase 1 — allocation is
 /// per-volume inside the volume's own lvol (§8), and the volume pins to
@@ -99,12 +136,126 @@ impl BlockExportReconciler {
         format!("{}/{}", self.lvstore, volume)
     }
 
-    /// The listener coordinates kernel initiators dial — what
-    /// `AttachBlockNode` hands the csi-node for its `nvme connect`.
-    /// Reconciler config, not per-volume: one tgt per MDS shard
-    /// (phase 1), so the shard's listener is every volume's listener.
+    /// This reconciler's OWN listener coordinates — where the tgt it
+    /// drives answers. Configuration, not a routing decision: use it to
+    /// describe this node (self-registration, `BlockExportStatus`), and
+    /// `listener_for` to answer "where does THIS VOLUME live", which is
+    /// a question only the record may answer.
     pub fn listener(&self) -> (&str, u16) {
         (&self.traddr, self.trsvcid)
+    }
+
+    /// Announce this target's coordinates in the registry (design §12).
+    /// Idempotent and level-triggered — called at MDS start and on every
+    /// reconcile pass, so a chart change to the listener converges with
+    /// no operator step and a target returning on a new address updates
+    /// its own row.
+    pub async fn self_register(&self) -> Result<(), String> {
+        let id = target_id();
+        match self
+            .backend
+            .block_target_register(&id, &self.traddr, self.trsvcid, now_unix())
+            .await
+        {
+            Ok(Ok(())) => {
+                tracing::debug!(
+                    "block target '{}' registered at {}:{}",
+                    id,
+                    self.traddr,
+                    self.trsvcid
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => Err(format!("target registration refused: {e}")),
+            Err(e) => Err(format!("target registration failed: {e}")),
+        }
+    }
+
+    /// Seat a volume at THIS target if it has no seat, and return the
+    /// seat that stands. Provision-time only: `INSERT`-if-absent, so a
+    /// seat naming someone else comes back unchanged and the caller
+    /// refuses rather than adopting a volume by writing a row. Moving a
+    /// seat is promotion's job.
+    async fn seat_here(
+        &self,
+        volume: &str,
+    ) -> Result<crate::state_backend::extent_alloc::BlockSeat, String> {
+        let me = target_id();
+        let seat = match self.backend.block_seat_volume(volume, &me, now_unix()).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(format!("seating '{volume}' refused: {e}")),
+            Err(e) => return Err(format!("seating '{volume}' failed: {e}")),
+        };
+        if seat.composer != me {
+            return Err(format!(
+                "'{}' is already seated at composer '{}' (epoch {}) — this target is '{}' and \
+                 will not adopt a volume the record gives to someone else",
+                volume, seat.composer, seat.epoch, me
+            ));
+        }
+        Ok(seat)
+    }
+
+    /// THE RESOLUTION: where does this volume's target answer? Reads the
+    /// seat and the composer's registry row — never the constructor's
+    /// address.
+    ///
+    /// `FlintCompositionStaticTraddr.cfg` is why: aim the preempt at a
+    /// configured address instead of at what the record names and every
+    /// post-failover fence confirmation dials a dead node forever, so
+    /// `delivered_unix` stays 0 and the quarantine sweep's ranges park
+    /// permanently. A fallback here would restore that lasso exactly, so
+    /// there is none — an unresolvable volume is a refusal.
+    pub async fn resolve(
+        &self,
+        volume: &str,
+    ) -> Result<(crate::state_backend::extent_alloc::BlockSeat, String, u16), String> {
+        match self.backend.block_resolve_target(volume).await {
+            Ok(Ok((seat, target))) => {
+                let (traddr, trsvcid) = (target.traddr, target.trsvcid);
+                Ok((seat, traddr, trsvcid))
+            }
+            Ok(Err(e)) => Err(format!(
+                "cannot resolve the target serving '{volume}': {e}"
+            )),
+            Err(e) => Err(format!("target resolution for '{volume}' failed: {e}")),
+        }
+    }
+
+    /// What `AttachBlockNode` hands a csi-node for its `nvme connect` —
+    /// the volume's OWN listener, resolved through the record.
+    pub async fn listener_for(&self, volume: &str) -> Result<(String, u16), String> {
+        let (_seat, traddr, trsvcid) = self.resolve(volume).await?;
+        Ok((traddr, trsvcid))
+    }
+
+    /// Every seat this MDS holds, paired with whether its composer is
+    /// registered — the startup audit's input. Reported rather than
+    /// repaired: a seat naming an unknown composer is a fact an operator
+    /// must see, and inventing a registration for it would be the
+    /// adoption this whole mechanism refuses.
+    pub async fn seat_audit(
+        &self,
+    ) -> Result<Vec<(crate::state_backend::extent_alloc::BlockSeat, bool)>, String> {
+        let seats = match self.backend.block_seat_list().await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(format!("seat list refused: {e}")),
+            Err(e) => return Err(format!("seat list failed: {e}")),
+        };
+        let targets = match self.backend.block_target_list().await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => return Err(format!("target list refused: {e}")),
+            Err(e) => return Err(format!("target list failed: {e}")),
+        };
+        let known: std::collections::HashSet<&str> =
+            targets.iter().map(|t| t.target_id.as_str()).collect();
+        Ok(seats
+            .into_iter()
+            .map(|s| {
+                let ok = known.contains(s.composer.as_str());
+                (s, ok)
+            })
+            .collect())
     }
 
     /// Desired allow-list, read fresh from sqlite. A read failure is a
@@ -408,6 +559,59 @@ impl BlockExportReconciler {
     }
 
     async fn ensure_locked(&self, volume: &str, size_bytes: Option<u64>) -> Result<(), String> {
+        // ---- the seat, BEFORE any device state (design §12) ----
+        //
+        // Provision seats the volume here; reconcile requires a seat
+        // that already names this target. The order matters: seat then
+        // converge means a crash in between leaves a seat with no
+        // export, which the next pass converges. The reverse would leave
+        // an export no record names — a target serving bytes nobody
+        // elected it to serve.
+        //
+        // The reconcile-side refusal is `RecordAssemblyOnly` shipped
+        // early and for free. Its mutation (`FlintCompositionAssembly.
+        // cfg`) is the healed composer whose reconciler re-converges the
+        // same subnqn and NGUID over its stale leg and serves it; the
+        // record is the only door, and this is the door. It cannot fire
+        // today (every volume is seated where it was provisioned), which
+        // is exactly why it should exist before promotion can move a
+        // seat rather than after.
+        // Note this reads the SEAT, not the full resolution: converging
+        // needs to know WHO serves the volume, never WHERE — this
+        // reconciler can only ever configure the tgt on the other end of
+        // its own socket. Keeping the address out of the converge path
+        // is what keeps the registry needed exactly where an address is
+        // needed (the fence lane, the attach answer) and nowhere else.
+        let me = target_id();
+        let seat = if size_bytes.is_some() {
+            // Announce before seating: the volume is about to be seated
+            // at this target, and the very next thing a new volume gets
+            // is a ControllerPublish that must resolve an address. The
+            // reconcile pass would get there eventually; a CreateVolume
+            // immediately followed by an attach would not wait for it.
+            self.self_register().await?;
+            self.seat_here(volume).await?
+        } else {
+            match self.backend.block_volume_seat(volume).await {
+                Ok(Ok(Some(seat))) => seat,
+                Ok(Ok(None)) => {
+                    return Err(format!(
+                        "refusing to converge '{volume}': no serving-target seat — this target \
+                         ('{me}') does not serve a volume the record does not give it"
+                    ))
+                }
+                Ok(Err(e)) => return Err(format!("seat lookup for '{volume}' refused: {e}")),
+                Err(e) => return Err(format!("seat lookup for '{volume}' failed: {e}")),
+            }
+        };
+        if seat.composer != me {
+            return Err(format!(
+                "refusing to converge '{}': the record seats it at composer '{}' (epoch {}), \
+                 not at this target ('{}')",
+                volume, seat.composer, seat.epoch, me
+            ));
+        }
+
         let bdev = self.bdev_name(volume);
 
         // ---- lvol ----
@@ -513,10 +717,23 @@ impl BlockExportReconciler {
                     .as_u64()
             })
             .ok_or_else(|| format!("{} carries no namespace to fence on", nqn))?;
-        tracing::debug!("fence_preempt {}: nsid={}, opening NVMe session", volume, nsid);
+        // WHERE to preempt comes from the record, never from this
+        // reconciler's own configuration — see `resolve`. The epoch
+        // rides into the log so a fence can be read against the
+        // composition it was aimed at.
+        let (seat, traddr, trsvcid) = self.resolve(volume).await?;
+        tracing::debug!(
+            "fence_preempt {}: nsid={}, opening NVMe session to composer '{}' at {}:{} (epoch {})",
+            volume,
+            nsid,
+            seat.composer,
+            traddr,
+            trsvcid,
+            seat.epoch
+        );
         let ep = super::resv_fence::ResvEndpoint {
-            traddr: self.traddr.clone(),
-            trsvcid: self.trsvcid,
+            traddr,
+            trsvcid,
             subnqn: nqn,
             hostnqn: crate::identity::block_mds_host_nqn(),
             hostid: crate::identity::BLOCK_MDS_HOST_ID,
@@ -526,10 +743,13 @@ impl BlockExportReconciler {
             .fence_preempt(crate::identity::BLOCK_MDS_PR_KEY, victim_key)
             .await?;
         Ok(format!(
-            "victim={victim_key:#x} preempted={} (registered={} acquired={}) resv: {}",
+            "victim={victim_key:#x} preempted={} (registered={} acquired={}) \
+             composer={} epoch={} resv: {}",
             out.preempted,
             out.registered,
             out.acquired,
+            seat.composer,
+            seat.epoch,
             out.after.summary()
         ))
     }
@@ -557,9 +777,14 @@ impl BlockExportReconciler {
                     .as_u64()
             })
             .ok_or_else(|| format!("{} carries no namespace to release on", nqn))?;
+        // Record-driven for the same reason the preempt is: releasing at
+        // a stale address would report a clean unfence while the
+        // reservation that actually excludes the client stands at the
+        // composer the record names.
+        let (seat, traddr, trsvcid) = self.resolve(volume).await?;
         let ep = super::resv_fence::ResvEndpoint {
-            traddr: self.traddr.clone(),
-            trsvcid: self.trsvcid,
+            traddr,
+            trsvcid,
             subnqn: nqn,
             hostnqn: crate::identity::block_mds_host_nqn(),
             hostid: crate::identity::BLOCK_MDS_HOST_ID,
@@ -567,8 +792,10 @@ impl BlockExportReconciler {
         };
         let out = ep.release(crate::identity::BLOCK_MDS_PR_KEY).await?;
         Ok(format!(
-            "released={} resv: {}",
+            "released={} composer={} epoch={} resv: {}",
             out.released,
+            seat.composer,
+            seat.epoch,
             out.after.summary()
         ))
     }
@@ -619,6 +846,18 @@ impl BlockExportReconciler {
     /// periodic reconcile loop (next tranche); until then the runbook's
     /// answer is an MDS rollout after any tgt restart.
     pub async fn reconcile_all(&self, volumes: &[String]) {
+        // Announce first: the registry is level-triggered like everything
+        // else here, so a listener change in the chart converges on the
+        // next pass rather than needing an operator. Once per pass, not
+        // once per volume — the row is about this target, not about any
+        // volume.
+        if let Err(e) = self.self_register().await {
+            tracing::error!(
+                "block target registration failed: {} — fences and attach answers for this \
+                 target's volumes cannot resolve an address until this succeeds",
+                e
+            );
+        }
         for v in volumes {
             if let Err(e) = self.ensure(v, None).await {
                 tracing::error!(
@@ -1115,6 +1354,15 @@ pub(crate) mod tests {
     async fn reconcile_never_mints_an_lvol_over_a_lost_one() {
         let tgt = Arc::new(FakeTgt::new());
         let r = reconciler(Arc::clone(&tgt));
+        // Provision first, then lose the lvol behind the reconciler's
+        // back. The volume must be SEATED here for this test to be about
+        // what it claims to be about: reconciling an unseated volume is
+        // refused a step earlier (the record is the only door), and a
+        // test that passed on THAT refusal would stop watching the F67
+        // one entirely.
+        r.ensure("pvc-3", Some(1024 * 1024)).await.expect("provision");
+        tgt.bdevs.lock().unwrap().clear();
+        tgt.calls.lock().unwrap().clear();
         let err = r.ensure("pvc-3", None).await.expect_err("must refuse");
         assert!(err.contains("MISSING"), "got: {err}");
         assert!(
@@ -1253,6 +1501,139 @@ pub(crate) mod tests {
 
         let again = r.fence_release("pvc-r").await.expect("replay");
         assert!(again.contains("released=false"), "got: {again}");
+    }
+
+    /// THE ACCEPTANCE TEST for `FlintCompositionStaticTraddr.cfg`.
+    ///
+    /// That run is required to FAIL: with the preempt aimed at the
+    /// address the reconciler was constructed with, every post-failover
+    /// fence dials a node that no longer serves the volume, `delivered`
+    /// never becomes nonzero, and the quarantine sweep's ranges park
+    /// forever. Here the constructed address is deliberately DEAD and
+    /// the registry names the live one — the shape a failover produces —
+    /// and the fence must land at the address the RECORD gives.
+    ///
+    /// The constructor address is 127.0.0.1:1 rather than a black hole
+    /// on purpose: a regression to it fails this test in milliseconds
+    /// with a refused connection instead of hanging on a timeout.
+    #[tokio::test]
+    async fn the_fence_dials_the_record_not_the_constructor() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        nvme.state.lock().unwrap().registrants.push((42, [0xcc; 16], false));
+
+        let tgt = Arc::new(FakeTgt::new());
+        let backend = crate::state_backend::memory_backend();
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "127.0.0.1".into(),
+            1,
+            "/var/tmp".into(),
+        );
+        r.ensure("pvc-moved", Some(1024 * 1024)).await.expect("provision");
+
+        // The composer announces new coordinates — a target coming back
+        // somewhere else, which after failover is the ordinary case.
+        backend
+            .block_target_register(
+                &target_id(),
+                &nvme.addr.ip().to_string(),
+                nvme.addr.port(),
+                1_000,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (traddr, trsvcid) = r.listener_for("pvc-moved").await.expect("resolves");
+        assert_eq!(
+            (traddr.as_str(), trsvcid),
+            (nvme.addr.ip().to_string().as_str(), nvme.addr.port()),
+            "the attach answer follows the record, not the reconciler's config"
+        );
+
+        let summary = r.fence_preempt("pvc-moved", 42).await.expect("fence converges");
+        assert!(summary.contains("preempted=true"), "got: {summary}");
+        assert!(summary.contains("epoch=1"), "the fence names its composition: {summary}");
+        let st = nvme.state.lock().unwrap();
+        assert!(
+            !st.registrants.iter().any(|(k, _, _)| *k == 42),
+            "the victim was preempted at the address the record named"
+        );
+    }
+
+    /// Fail-closed, both shapes, with the constructor's address sitting
+    /// right there unused. An unresolvable volume is a refusal — the
+    /// moment it becomes a fallback, StaticTraddr's lasso is back.
+    #[tokio::test]
+    async fn an_unresolvable_volume_is_refused_never_defaulted() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend = crate::state_backend::memory_backend();
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+
+        let e = r.listener_for("pvc-unseated").await.expect_err("must refuse");
+        assert!(e.contains("no serving-target seat"), "got: {e}");
+        assert!(!e.contains("10.0.0.9"), "a refusal must not leak a guess: {e}");
+
+        // Seated at a composer that never registered: the other refusal,
+        // naming who is missing so an operator can go look for it.
+        backend
+            .block_seat_volume("pvc-elsewhere", "node-b", 100)
+            .await
+            .unwrap()
+            .unwrap();
+        let e = r.listener_for("pvc-elsewhere").await.expect_err("must refuse");
+        assert!(e.contains("node-b"), "got: {e}");
+    }
+
+    /// `RecordAssemblyOnly`'s door, shipped before promotion can open
+    /// it. `FlintCompositionAssembly.cfg` is the healed composer whose
+    /// reconciler re-converges the same subnqn and NGUID over its stale
+    /// leg and serves it; the record is the only door, and converge is
+    /// where that door lives.
+    #[tokio::test]
+    async fn a_volume_seated_elsewhere_is_neither_converged_nor_adopted() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend = crate::state_backend::memory_backend();
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        backend
+            .block_seat_volume("pvc-theirs", "node-b", 100)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let e = r.ensure("pvc-theirs", None).await.expect_err("reconcile must refuse");
+        assert!(e.contains("node-b"), "the refusal names the composer: {e}");
+
+        // And the provision shape does not take it either: seating is
+        // insert-if-absent, so re-provisioning someone else's volume
+        // reports the standing seat instead of stealing it.
+        let e = r
+            .ensure("pvc-theirs", Some(1 << 20))
+            .await
+            .expect_err("provision must refuse");
+        assert!(e.contains("will not adopt"), "got: {e}");
+
+        assert!(
+            tgt.methods().iter().all(|m| m.starts_with("bdev_get_") || m.starts_with("nvmf_get_")),
+            "a refused volume must not have touched the target: {:?}",
+            tgt.methods()
+        );
     }
 
     #[tokio::test]

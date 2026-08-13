@@ -1440,7 +1440,9 @@ Each phase ships standalone value; none is gated on the next.
   session record today replays the recorded traddr with a deliberate "No MDS call",
   and the only production CB_NOTIFY_DEVICEID sender is expand), a dead-vs-partitioned
   detection verdict (the reconcile pass only logs per-volume failures), un-pinning
-  the MDS from the tgt node it must survive (chart `nodeSelector` + static traddr),
+  the MDS from the tgt node it must survive (chart `nodeSelector` + static traddr —
+  that traddr is now the SEED its target self-registers with, not what any dial site
+  reads; see the registry note below),
   `grow()` for composed volumes (the read-back belt validates ONE LVOL, not the
   array — a one-leg ENOSPC mid-sequence could raise the ceiling past the raid), the
   write-hole divergence belt of limit (1) in code (the model's `UncleanResync` names
@@ -1449,6 +1451,30 @@ Each phase ships standalone value; none is gated on the next.
   `release_quarantine`/`quarantine_stats`, which failover work makes load-bearing.
   Phases 1-3 continue to ship single-replica with `reclaimPolicy` and workload
   guidance saying so.
+  **THE TARGET REGISTRY IS SHIPPED (schema 11, 2026-08-12)** — the first piece of
+  the epoch machine in code, and the one `StaticTraddr` demanded. Two tables:
+  `block_targets` (a target self-registers its dial coordinates every reconcile
+  pass, so a listener change converges with no operator and a target returning on a
+  new address updates its own row) and `block_volume_target`, the volume's SEAT —
+  `[epoch, composer]`, written once at provision, `INSERT`-if-absent so seating can
+  never be an adoption. They are two tables on purpose: coordinates change without
+  identity changing, while the composer changes only by promotion, which bumps the
+  epoch — conflated, a re-addressed node would be indistinguishable from a failover.
+  Every site that dials or advertises a volume's target now resolves through the
+  record — the fence preempt, the fence release, and the `AttachBlockNode` answer —
+  and there is NO fallback: an unseated volume and a seat naming an unregistered
+  composer are two different refusals, neither of which reaches for the configured
+  address, because the moment one does, StaticTraddr's lasso is back. The unit test
+  `the_fence_dials_the_record_not_the_constructor` is that run's acceptance test
+  (constructor address deliberately dead, registry naming the live one; reverting
+  the fence to `self.traddr` fails it). Converge picked up `RecordAssemblyOnly`'s
+  door for free while the seat was being read: a reconciler refuses a volume whose
+  seat names another composer, which is precisely `FlintCompositionAssembly.cfg`'s
+  healed composer re-converging the same subnqn and NGUID over its stale leg — it
+  cannot fire today (every volume is seated where it was provisioned), which is the
+  argument for having it in place BEFORE promotion can move a seat. What remains of
+  the epoch machine is the part that moves the row: the unreachability verdict, the
+  CAS, the lease horizon, and eviction.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left

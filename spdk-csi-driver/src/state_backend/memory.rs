@@ -33,6 +33,11 @@ pub struct MemoryBackend {
     placements: DashMap<String, PlacementRecord>,
     volume_geometry: DashMap<String, VolumeGeometryRecord>,
     fh_mappings: DashMap<u64, FhMappingRecord>,
+    /// The target registry and the per-volume serving seats (design
+    /// §12). See the impl block for why these two are real here while
+    /// the admission tables are not.
+    block_targets: DashMap<String, super::extent_alloc::BlockTargetRow>,
+    block_seats: DashMap<String, super::extent_alloc::BlockSeat>,
     instance_counter: AtomicU64,
     /// Lazily-initialised per-deployment server id. `OnceLock` makes
     /// the first call atomic (no two threads observe different values)
@@ -381,12 +386,17 @@ impl StateBackend for MemoryBackend {
 
     async fn extent_drop_volume(
         &self,
-        _volume: &str,
+        volume: &str,
     ) -> StateBackendResult<Result<u64, crate::state_backend::extent_alloc::ExtentAllocError>> {
         // Dropping rows that cannot exist is a clean no-op: DeleteVolume
         // calls this unconditionally, and memory-backed MDSes never had
         // a block-class volume to begin with (provision refuses).
-        Ok(Ok(0))
+        //
+        // The seat is the exception, because seating is real here (see
+        // the registry impls below) — and it goes with the volume for
+        // the same reason it does in sqlite: a re-created namesake must
+        // be seated afresh, never inherit an epoch.
+        Ok(Ok(self.block_seats.remove(volume).map(|_| 1).unwrap_or(0)))
     }
 
     async fn extent_grant_read(
@@ -621,6 +631,131 @@ impl StateBackend for MemoryBackend {
         // `rand::random::<u64>() | 1` keeps the value non-zero so a
         // caller treating zero as "uninitialised" still works.
         Ok(*self.server_id.get_or_init(|| rand::random::<u64>() | 1))
+    }
+
+    // ── target registry / serving seats ───────────────────────────────
+    //
+    // These four are REAL here, unlike the admission tables above, and
+    // the difference is not laziness. An admission is state about a
+    // block-class VOLUME, which cannot exist on this backend — so
+    // "empty" is the truth and a write is an error. A seat is MDS-side
+    // bookkeeping about which target composes a name; the block-export
+    // reconciler's own unit tests provision through this backend, and a
+    // registry that answered "no" there would either force those tests
+    // onto sqlite or, worse, tempt a fallback-to-constructor path into
+    // existence — which is the exact defect the registry deletes.
+
+    async fn block_target_register(
+        &self,
+        target_id: &str,
+        traddr: &str,
+        trsvcid: u16,
+        now_unix: i64,
+    ) -> StateBackendResult<Result<(), crate::state_backend::extent_alloc::ExtentAllocError>> {
+        use crate::state_backend::extent_alloc::BlockTargetRow;
+        let registered = self
+            .block_targets
+            .get(target_id)
+            .map(|r| r.registered_unix)
+            .unwrap_or(now_unix);
+        self.block_targets.insert(
+            target_id.to_string(),
+            BlockTargetRow {
+                target_id: target_id.to_string(),
+                traddr: traddr.to_string(),
+                trsvcid,
+                registered_unix: registered,
+                updated_unix: now_unix,
+            },
+        );
+        Ok(Ok(()))
+    }
+
+    async fn block_target_list(
+        &self,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockTargetRow>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let mut out: Vec<_> = self.block_targets.iter().map(|e| e.value().clone()).collect();
+        out.sort_by(|a, b| a.target_id.cmp(&b.target_id));
+        Ok(Ok(out))
+    }
+
+    async fn block_seat_volume(
+        &self,
+        volume: &str,
+        composer: &str,
+        now_unix: i64,
+    ) -> StateBackendResult<
+        Result<
+            crate::state_backend::extent_alloc::BlockSeat,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        use crate::state_backend::extent_alloc::BlockSeat;
+        // Insert-if-absent, matching the sqlite transaction exactly: a
+        // standing seat is returned unchanged so the caller can refuse.
+        let seat = self
+            .block_seats
+            .entry(volume.to_string())
+            .or_insert_with(|| BlockSeat {
+                volume: volume.to_string(),
+                epoch: 1,
+                composer: composer.to_string(),
+                seated_unix: now_unix,
+            })
+            .clone();
+        Ok(Ok(seat))
+    }
+
+    async fn block_volume_seat(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<
+            Option<crate::state_backend::extent_alloc::BlockSeat>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        Ok(Ok(self.block_seats.get(volume).map(|e| e.value().clone())))
+    }
+
+    async fn block_resolve_target(
+        &self,
+        volume: &str,
+    ) -> StateBackendResult<
+        Result<
+            (
+                crate::state_backend::extent_alloc::BlockSeat,
+                crate::state_backend::extent_alloc::BlockTargetRow,
+            ),
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        use crate::state_backend::extent_alloc::ExtentAllocError as E;
+        let Some(seat) = self.block_seats.get(volume).map(|e| e.value().clone()) else {
+            return Ok(Err(E::UnseatedVolume));
+        };
+        let Some(target) = self.block_targets.get(&seat.composer).map(|e| e.value().clone()) else {
+            return Ok(Err(E::UnknownComposer { composer: seat.composer }));
+        };
+        Ok(Ok((seat, target)))
+    }
+
+    async fn block_seat_list(
+        &self,
+    ) -> StateBackendResult<
+        Result<
+            Vec<crate::state_backend::extent_alloc::BlockSeat>,
+            crate::state_backend::extent_alloc::ExtentAllocError,
+        >,
+    > {
+        let mut out: Vec<_> = self.block_seats.iter().map(|e| e.value().clone()).collect();
+        out.sort_by(|a, b| a.volume.cmp(&b.volume));
+        Ok(Ok(out))
     }
 }
 
