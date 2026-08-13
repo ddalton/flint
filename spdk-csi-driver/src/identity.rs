@@ -465,6 +465,27 @@ pub fn block_volume_export_nqn(volume_id: &str) -> String {
     format!("nqn.2024-11.com.flint:block:{}", volume_id)
 }
 
+/// pnfs-block LEG export NQN: `…:leg:<vol>` — how a NON-composer target
+/// offers its copy of a volume to the composer that mirrors onto it.
+///
+/// A separate namespace from `:block:` on purpose. The `:block:` export
+/// is what KERNEL clients dial and its allow-list is the admission
+/// boundary for them; this one is dialled only by another flint target,
+/// its allow-list holds exactly the current composer, and it is the
+/// thing `EvictAtLeg` removes a deposed composer from. Sharing one NQN
+/// would make those two admission decisions one decision, and they are
+/// not: a client admitted to read a volume has no business reaching the
+/// leg, and a composer mirroring onto the leg is not a client.
+///
+/// A target exports its leg only while it is NOT the composer. The
+/// composer's own copy is claimed by the raid module, which takes an
+/// exclusive write open — an export of the same lvol would fail that
+/// claim with EPERM (the file tier's `drop_stale_local_exports` exists
+/// for exactly that collision).
+pub fn block_leg_export_nqn(volume_id: &str) -> String {
+    format!("nqn.2024-11.com.flint:leg:{}", volume_id)
+}
+
 /// Per-node initiator host NQN: `…:node:<node>` (what makes host fencing
 /// possible; fencing only ever removes hosts under this prefix).
 pub fn node_host_nqn(node_name: &str) -> String {

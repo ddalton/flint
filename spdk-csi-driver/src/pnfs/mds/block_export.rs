@@ -615,25 +615,132 @@ impl BlockExportReconciler {
         }
     }
 
+    /// Who may reach THIS target's leg copy of a volume: exactly the
+    /// current composer, and nobody else.
+    ///
+    /// That one sentence is the whole of `legAdmit` and the whole of
+    /// eviction. It is derived from the record every pass, so when the
+    /// seat moves the new composer is admitted and the old one is
+    /// dropped by the same converge — a deposed peer loses its reach
+    /// because the record stopped naming it, not because someone
+    /// remembered to revoke it.
+    ///
+    /// Empty when this target IS the composer: a composer mirrors onto
+    /// its peers, never onto itself, and its own copy is claimed by the
+    /// raid module anyway.
+    fn desired_leg_hosts(&self, seat: &crate::state_backend::extent_alloc::BlockSeat) -> Vec<String> {
+        if seat.composer == target_id() {
+            Vec::new()
+        } else {
+            vec![crate::nvmeof_export::flint_host_nqn(&seat.composer)]
+        }
+    }
+
+    /// Converge this target's LEG export for a volume it holds a copy of
+    /// but does not compose: the copy is offered to the composer named
+    /// by the record, over its own subsystem, default-closed.
+    ///
+    /// Level-triggered like everything else, and that is what makes the
+    /// eviction automatic: the allow-list is recomputed from the seat,
+    /// so a deposed composer is removed by the ordinary pass.
+    pub async fn ensure_leg_export(&self, volume: &str) -> Result<(), String> {
+        let lock = self.lock_for(volume);
+        let _g = lock.lock().await;
+        let seat = match self.backend.block_volume_seat(volume).await {
+            Ok(Ok(Some(s))) => s,
+            Ok(Ok(None)) => return Err(format!("'{volume}' has no seat — no leg to offer")),
+            Ok(Err(e)) => return Err(format!("seat unreadable: {e}")),
+            Err(e) => return Err(format!("seat unreadable: {e}")),
+        };
+        let me = target_id();
+        if seat.composer == me {
+            // We compose it; the raid claims the lvol. Any leg export
+            // left from when we did NOT compose it must go, or the
+            // claim fails with EPERM — the collision the file tier's
+            // stale-export cleanup exists for.
+            return self.drop_leg_export_locked(volume).await;
+        }
+        let bdev = self.bdev_name(volume);
+        if self.rpc.rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": bdev } }))
+            .await
+            .is_err()
+        {
+            return Err(format!(
+                "leg export for '{volume}': no local copy ({bdev}) — this target holds no leg \
+                 to offer, and minting one would offer zeros as if they were data"
+            ));
+        }
+        let hosts = self.desired_leg_hosts(&seat);
+        let nqn = crate::identity::block_leg_export_nqn(volume);
+        // The leg carries the volume's bytes but NOT its client-facing
+        // identity: the NGUID is what kernel clients resolve by-id, and
+        // two namespaces answering to it — the composer's raid and a
+        // peer's leg — is the one-identity rule broken. The composer
+        // dials this by NQN, never by designator.
+        let spec = ExportSpec {
+            nqn: &nqn,
+            bdev_name: &bdev,
+            bdev_aliases: &[],
+            trtype: "TCP",
+            traddr: &self.traddr,
+            trsvcid: self.trsvcid,
+            allowed_hosts: Some(&hosts),
+            ns_identity: None,
+            ptpl_file: None,
+        };
+        ensure_export(self.rpc.as_ref(), &spec)
+            .await
+            .map_err(|e| format!("leg export {nqn}: {e}"))?;
+        tracing::debug!(
+            "leg export for '{}' converged, offered to composer '{}'",
+            volume,
+            seat.composer
+        );
+        Ok(())
+    }
+
+    async fn drop_leg_export_locked(&self, volume: &str) -> Result<(), String> {
+        let nqn = crate::identity::block_leg_export_nqn(volume);
+        if get_subsystem(self.rpc.as_ref(), &nqn)
+            .await
+            .map_err(|e| format!("nvmf_get_subsystems {nqn}: {e}"))?
+            .is_none()
+        {
+            return Ok(());
+        }
+        // Guarded-destroy: this subsystem exists only to offer a leg to
+        // one composer, and the record no longer says it should. The
+        // bytes are untouched — only the door closes.
+        let del = json!({ "method": "nvmf_delete_subsystem", "params": { "nqn": nqn } }); // guarded-destroy-lint: allow
+        self.rpc
+            .rpc(&del)
+            .await
+            .map_err(|e| format!("nvmf_delete_subsystem {nqn}: {e}"))?;
+        tracing::info!("leg export for '{}' withdrawn — this target composes it now", volume);
+        Ok(())
+    }
+
     /// EVICTION AT THE LEG-EXPORT (`EvictAtLeg`): the deposed composer
     /// must not be able to reach this target's copy of the volume.
     ///
-    /// What this is in code today is a VERIFICATION with teeth, and the
-    /// reason is worth stating plainly. A target's allow-list is derived
-    /// level-triggered from the admission tables, and no inter-target
-    /// host NQN is ever in them — so a deposed peer is already excluded
-    /// by construction, and this call normally finds nothing to do. The
-    /// day replication adds the peer's NQN to a leg's allow-list so it
-    /// can mirror, that changes, and this is the step that removes it.
-    /// Failing loudly if it is still present after the removal is what
-    /// keeps that future change from silently skipping the eviction.
+    /// The subject is THIS target's leg export — the door a peer
+    /// composer mirrors through. Removing the deposed composer's host
+    /// NQN from it is what stops its fan-in reaching the copy this
+    /// target is about to serve from, and it is the only exclusion that
+    /// does not depend on the deposed cooperating.
     ///
-    /// The ORDER is the part that is load-bearing now: this runs after
-    /// the horizon and before assembly, because severing a still-acking
-    /// zombie's fan-in strands its clients' acked writes on the doomed
-    /// leg — CAS → horizon → evict → assemble, never CAS → evict.
+    /// The ORDER is load-bearing: this runs after the horizon and before
+    /// assembly, because severing a still-acking zombie's fan-in strands
+    /// its clients' acked writes on the doomed leg — CAS → horizon →
+    /// evict → assemble, never CAS → evict.
+    ///
+    /// The ordinary converge would reach the same state, since the leg
+    /// allow-list is derived from the seat and the seat no longer names
+    /// the deposed. This is the explicit act because assembly must not
+    /// proceed on the ASSUMPTION that a pass ran: the removal is
+    /// verified here, in the order the model requires.
     async fn evict_deposed_at_leg(&self, volume: &str, deposed: &str) -> Result<(), String> {
-        let nqn = crate::identity::block_volume_export_nqn(volume);
+        let nqn = crate::identity::block_leg_export_nqn(volume);
         let deposed_nqn = crate::nvmeof_export::flint_host_nqn(deposed);
         let present = get_subsystem(self.rpc.as_ref(), &nqn)
             .await
@@ -664,6 +771,240 @@ impl BlockExportReconciler {
             .await
             .map_err(|e| format!("evicting '{deposed}' from {nqn}: {e}"))?;
         tracing::warn!("⛔ evict '{}': deposed composer '{}' removed at the leg-export", volume, deposed);
+        Ok(())
+    }
+
+    /// The raid bdev name for a composed volume. Derived, never stored:
+    /// the composition is EPHEMERAL and re-created from the record, so
+    /// the name has to be a pure function of the volume.
+    fn raid_name(&self, volume: &str) -> String {
+        format!("flintraid-{volume}")
+    }
+
+    /// The bdev the client-facing export should serve: the RAID when
+    /// this volume has more than one leg, the bare lvol when it is
+    /// solo.
+    ///
+    /// Switching between them is safe, and that is not a lucky accident
+    /// — it is bought by `superblock: false`. SPDK's raid superblock
+    /// costs `RAID_BDEV_MIN_DATA_OFFSET_SIZE` (≥1 MiB) of data offset,
+    /// which would shift every byte under the volume's pinned NGUID and
+    /// make composing an existing volume a data migration. Without it
+    /// each base carries the volume's bytes at LBA 0, identical to the
+    /// bare lvol, so a solo volume can be composed in place and a
+    /// composition can fall back to solo — both without moving a byte.
+    /// The file tier reached the same conclusion for its own reasons
+    /// (driver.rs: snapshots and clones of superblocked bases were
+    /// unmountable raw); this tier inherits the property and depends on
+    /// it harder.
+    ///
+    /// The second thing `superblock: false` buys is the whole of
+    /// `RecordAssemblyOnly`: with no superblock there is no
+    /// examine-based auto-assembly to fight, so a composition exists
+    /// exactly when flint builds one from the record — which is the
+    /// review's "a survivor cannot self-promote" limit dissolved rather
+    /// than worked around. Nothing here ever consults a superblock to
+    /// decide who serves.
+    async fn compose_bdev(
+        &self,
+        volume: &str,
+        seat: &crate::state_backend::extent_alloc::BlockSeat,
+    ) -> Result<String, String> {
+        let me = target_id();
+        let local = self.bdev_name(volume);
+        let legs = match self.backend.block_legs(volume).await {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => return Err(format!("legs unreadable: {e}")),
+            Err(e) => return Err(format!("legs unreadable: {e}")),
+        };
+        // Only IN-SYNC peers join the composition. A stale leg holds
+        // bytes the composition has moved past; mirroring onto it would
+        // be a rebuild, and a rebuild is a deliberate act with its own
+        // ancestry proof (`AncestryGuard`), not something a converge
+        // pass starts by accident.
+        let peers: Vec<&crate::state_backend::extent_alloc::BlockLeg> = legs
+            .iter()
+            .filter(|l| {
+                l.target_id != me
+                    && l.sync_state == crate::state_backend::extent_alloc::LEG_INSYNC
+            })
+            .collect();
+        if peers.is_empty() {
+            // Solo. Any raid left from a previous composition must go,
+            // or it keeps its exclusive claim on the lvol.
+            self.drop_raid(volume).await?;
+            return Ok(local);
+        }
+        let mut bases = vec![local.clone()];
+        for peer in &peers {
+            bases.push(self.attach_peer_leg(volume, &peer.target_id).await?);
+        }
+        let raid = self.raid_name(volume);
+        self.ensure_raid(&raid, &bases).await?;
+        tracing::info!(
+            "🧬 '{}' composed at epoch {}: {} leg(s) — {:?}",
+            volume,
+            seat.epoch,
+            bases.len(),
+            bases
+        );
+        Ok(raid)
+    }
+
+    /// Attach a peer's leg export as a local bdev, dialling the address
+    /// the REGISTRY holds for that target — the same rule as every other
+    /// dial site, for the same reason.
+    async fn attach_peer_leg(&self, volume: &str, peer: &str) -> Result<String, String> {
+        let ctrl = format!("flintleg-{volume}-{peer}");
+        let expected = format!("{ctrl}n1");
+        if self
+            .rpc
+            .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": expected } }))
+            .await
+            .is_ok()
+        {
+            return Ok(expected); // already attached
+        }
+        let target = match self.backend.block_target_list().await {
+            Ok(Ok(t)) => t.into_iter().find(|t| t.target_id == peer),
+            Ok(Err(e)) => return Err(format!("target registry unreadable: {e}")),
+            Err(e) => return Err(format!("target registry unreadable: {e}")),
+        };
+        let Some(target) = target else {
+            return Err(format!(
+                "leg peer '{peer}' has no target-registry row — refusing to guess where its \
+                 copy answers"
+            ));
+        };
+        let mut params = json!({
+            "method": "bdev_nvme_attach_controller",
+            "params": {
+                "name": ctrl,
+                "trtype": "TCP",
+                "traddr": target.traddr,
+                "trsvcid": target.trsvcid.to_string(),
+                "subnqn": crate::identity::block_leg_export_nqn(volume),
+                "adrfam": "IPv4",
+                // The inter-target identity the peer's leg allow-list
+                // admits. Stable per target, which is what makes the
+                // peer's eviction possible at all.
+                "hostnqn": crate::nvmeof_export::flint_host_nqn(&target_id()),
+            }
+        });
+        // F42's belt, inherited: ctrlr-loss keeps the bdev identity
+        // alive across a peer outage, and fast_io_fail bounds the queue
+        // so a leg on a DEAD node faults out of the raid instead of
+        // stalling every consumer write forever.
+        crate::nvme_recovery::LegTransportPolicy::from_env().apply(&mut params["params"]);
+        let resp = self
+            .rpc
+            .rpc(&params)
+            .await
+            .map_err(|e| format!("attaching leg of '{peer}' for '{volume}': {e}"))?;
+        Ok(resp
+            .get("result")
+            .and_then(|r| r.as_array())
+            .and_then(|n| n.first())
+            .and_then(|b| b.as_str())
+            .map(String::from)
+            .unwrap_or(expected))
+    }
+
+    /// Create-or-reuse the raid1. `superblock: false` — see
+    /// `compose_bdev` for why that is the load-bearing choice and not a
+    /// detail.
+    async fn ensure_raid(&self, raid: &str, bases: &[String]) -> Result<(), String> {
+        if let Some(existing) = self.get_raid(raid).await? {
+            let state = existing.get("state").and_then(|s| s.as_str()).unwrap_or("");
+            let members: Vec<String> = existing
+                .get("base_bdevs_list")
+                .and_then(|b| b.as_array())
+                .map(|bs| {
+                    bs.iter()
+                        .filter_map(|b| b.get("name").and_then(|n| n.as_str()).map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if state == "online" && members.iter().all(|m| bases.contains(m)) {
+                return Ok(());
+            }
+            // Membership drifted from the record, or the raid never came
+            // up. Rebuild it from the record rather than reusing an
+            // object whose base set nobody validated — the file tier's
+            // ONLINE-reuse path is exactly the one its own A2 tranche
+            // flagged as needing base-set validation.
+            tracing::warn!(
+                "raid {} is '{}' over {:?}, record says {:?} — re-creating",
+                raid, state, members, bases
+            );
+            let del = json!({ "method": "bdev_raid_delete", "params": { "name": raid } }); // guarded-destroy-lint: allow
+            self.rpc
+                .rpc(&del)
+                .await
+                .map_err(|e| format!("bdev_raid_delete {raid}: {e}"))?;
+        }
+        // guarded-construct-lint: allow — the hazard this lint guards
+        // is a raid created or REUSED over a base set nobody validated
+        // (the A2 tranche's finding against the file tier's ONLINE-reuse
+        // path, which logs the base count and validates nothing). This
+        // call site self-guards in the way the lint's message asks for:
+        // the reuse branch above compares the live membership against
+        // the RECORD and re-creates on any drift, so a raid is only ever
+        // adopted when its bases are exactly the ones the record names.
+        // And with `superblock: false` there is no examine-based
+        // auto-assembly to race, so no phantom can exist under this name
+        // for the create to collide with.
+        let create = json!({
+            "method": "bdev_raid_create", // guarded-construct-lint: allow
+            "params": {
+                "name": raid,
+                "raid_level": "1",
+                "base_bdevs": bases,
+                "superblock": false,
+            }
+        });
+        self.rpc
+            .rpc(&create)
+            .await
+            .map_err(|e| format!("bdev_raid_create {raid}: {e}"))?;
+        Ok(())
+    }
+
+    async fn get_raid(&self, raid: &str) -> Result<Option<serde_json::Value>, String> {
+        match self
+            .rpc
+            .rpc(&json!({ "method": "bdev_raid_get_bdevs", "params": { "category": "all" } }))
+            .await
+        {
+            Ok(resp) => Ok(resp
+                .get("result")
+                .and_then(|r| r.as_array())
+                .and_then(|rs| {
+                    rs.iter()
+                        .find(|r| r.get("name").and_then(|n| n.as_str()) == Some(raid))
+                        .cloned()
+                })),
+            // A tgt without the raid module answers "method not found",
+            // which is "no raid", not an error.
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn drop_raid(&self, volume: &str) -> Result<(), String> {
+        let raid = self.raid_name(volume);
+        if self.get_raid(&raid).await?.is_none() {
+            return Ok(());
+        }
+        // Guarded-destroy: the record says this volume is solo, so the
+        // composition object is what is stale, not the bytes. Deleting
+        // the raid releases the lvol's claim; the lvol is untouched, and
+        // with no superblock its bytes are the volume's bytes.
+        let del = json!({ "method": "bdev_raid_delete", "params": { "name": raid } }); // guarded-destroy-lint: allow
+        self.rpc
+            .rpc(&del)
+            .await
+            .map_err(|e| format!("bdev_raid_delete {raid}: {e}"))?;
+        tracing::info!("'{}' is solo — composition object dropped", volume);
         Ok(())
     }
 
@@ -1276,6 +1617,41 @@ impl BlockExportReconciler {
         let lvol_ids = probe_resp.as_ref().map(Self::lvol_identities).unwrap_or_default();
         let lvol_id_refs: Vec<&str> = lvol_ids.iter().map(String::as_str).collect();
 
+        // ---- the composition ----
+        //
+        // What the namespace serves is the RAID when the record gives
+        // this volume more than one in-sync leg, and the bare lvol when
+        // it is solo. Both expose the same byte space (`superblock:
+        // false`), so this can change under a live volume without moving
+        // data — see `compose_bdev`.
+        //
+        // Not under `Suspend`: a target the dead-man is closing must not
+        // be reaching out to attach peer legs on its way out.
+        let seat = match self.backend.block_volume_seat(volume).await {
+            Ok(Ok(Some(s))) => Some(s),
+            _ => None,
+        };
+        let served = match (mode, &seat) {
+            (ConvergeMode::Suspend, _) | (_, None) => bdev.clone(),
+            (_, Some(seat)) => match self.compose_bdev(volume, seat).await {
+                Ok(b) => b,
+                Err(e) => {
+                    // A composition that will not build is a DEGRADED
+                    // volume, not a dead one: the local leg carries the
+                    // volume's bytes, so serve solo and say so loudly
+                    // rather than refusing every client because a peer
+                    // is unreachable.
+                    tracing::error!(
+                        "'{}' could not be composed ({}) — serving SOLO from the local leg; \
+                         acked writes from here will need a rebuild before that peer can be \
+                         elected",
+                        volume, e
+                    );
+                    bdev.clone()
+                }
+            },
+        };
+
         // ---- subsystem / namespace / listener / hosts ----
         //
         // Under `Suspend` the desired allow-list is the fence lane and
@@ -1295,10 +1671,20 @@ impl BlockExportReconciler {
         let nqn = crate::identity::block_volume_export_nqn(volume);
         let (uuid, nguid) = crate::nvmeof_export::stable_ns_identity(volume);
         let ptpl = format!("{}/flint-ptpl-{}.json", self.ptpl_dir, volume);
+        // The aliases belong to the bdev being SERVED, and getting this
+        // wrong is a silent-divergence bug rather than a cosmetic one:
+        // `ns_matches` accepts a namespace pointing at any alias of the
+        // spec's bdev, so handing it the LVOL's aliases while asking for
+        // the RAID makes a stale lvol-backed namespace look correct —
+        // the volume would keep serving one leg while the record said
+        // two, with every write landing on a single copy. Caught by
+        // `a_peer_leg_composes_a_raid_and_losing_it_falls_back_to_the_lvol`.
+        // A raid's name is canonical and has no aliases.
+        let served_aliases: &[&str] = if served == bdev { &lvol_id_refs } else { &[] };
         let spec = ExportSpec {
             nqn: &nqn,
-            bdev_name: &bdev,
-            bdev_aliases: &lvol_id_refs,
+            bdev_name: &served,
+            bdev_aliases: served_aliases,
             trtype: "TCP",
             traddr: &self.traddr,
             trsvcid: self.trsvcid,
@@ -1647,6 +2033,11 @@ pub(crate) mod tests {
         /// case the capacity gate must not read as "empty".
         pub(crate) free_clusters: Mutex<Option<u64>>,
         pub(crate) total_clusters: Mutex<u64>,
+        /// raid name → the create params it was built with. The fake
+        /// models the one property the composition path depends on:
+        /// a raid is an ordinary bdev once it exists, so the namespace
+        /// can point at it exactly as it points at an lvol.
+        pub(crate) raids: Mutex<std::collections::HashMap<String, Value>>,
     }
 
     /// The fake lvolstore's cluster size (SPDK's default is 4 MiB).
@@ -1667,6 +2058,7 @@ pub(crate) mod tests {
                 // exact behaviour; the gate's own tests set it.
                 free_clusters: Mutex::new(Some(1 << 20)),
                 total_clusters: Mutex::new(1 << 20),
+                raids: Mutex::new(Default::default()),
             }
         }
         /// Size the fake store: `(total_clusters, free_clusters)`.
@@ -1712,6 +2104,49 @@ pub(crate) mod tests {
                 // The reachability probe: cheapest proof the process is
                 // answering, and it asserts nothing about its state.
                 "spdk_get_version" => Ok(json!({ "result": { "version": "SPDK v26.05" } })),
+                // A peer's leg, attached as a local nvme bdev.
+                "bdev_nvme_attach_controller" => {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    let ns = format!("{name}n1");
+                    self.bdevs.lock().unwrap().insert(ns.clone(), ns.clone());
+                    Ok(json!({ "result": [ns] }))
+                }
+                "bdev_raid_create" => {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    if self.raids.lock().unwrap().contains_key(&name) {
+                        return Err("File exists".into());
+                    }
+                    self.raids.lock().unwrap().insert(name.clone(), p.clone());
+                    // A raid IS a bdev — that is the whole reason the
+                    // namespace can be re-pointed at it.
+                    self.bdevs.lock().unwrap().insert(name.clone(), name.clone());
+                    Ok(json!({ "result": true }))
+                }
+                "bdev_raid_delete" => {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    self.raids.lock().unwrap().remove(&name);
+                    self.bdevs.lock().unwrap().remove(&name);
+                    Ok(json!({ "result": true }))
+                }
+                "bdev_raid_get_bdevs" => {
+                    let raids: Vec<Value> = self
+                        .raids
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|(name, params)| {
+                            let bases: Vec<Value> = params["base_bdevs"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|b| json!({ "name": b, "is_configured": true }))
+                                .collect();
+                            json!({ "name": name, "state": "online", "base_bdevs_list": bases })
+                        })
+                        .collect();
+                    Ok(json!({ "result": raids }))
+                }
                 "bdev_get_bdevs" => {
                     let bdevs = self.bdevs.lock().unwrap();
                     // No `name` = list everything (what the capacity
@@ -1843,6 +2278,20 @@ pub(crate) mod tests {
                             "ptpl_file": p["namespace"]["ptpl_file"],
                         }));
                     Ok(json!({ "result": 1 }))
+                }
+                // Real SPDK drops the namespace; without this the fake
+                // kept a stale one alongside its replacement and the
+                // composition transition looked half-applied.
+                "nvmf_subsystem_remove_ns" => {
+                    let nqn = p["nqn"].as_str().unwrap();
+                    let nsid = p["nsid"].as_u64().unwrap_or(0);
+                    let mut subs = self.subsystems.lock().unwrap();
+                    let s = subs.get_mut(nqn).ok_or("no subsystem")?;
+                    s["namespaces"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|ns| ns["nsid"].as_u64() != Some(nsid));
+                    Ok(json!({ "result": true }))
                 }
                 "nvmf_subsystem_add_listener" => {
                     let nqn = p["nqn"].as_str().unwrap();
@@ -2091,7 +2540,14 @@ pub(crate) mod tests {
         let mutating: Vec<String> = tgt
             .methods()
             .into_iter()
-            .filter(|m| !m.starts_with("bdev_get_") && !m.starts_with("nvmf_get_"))
+            .filter(|m| {
+                // Reads, not mutations. `bdev_raid_get_bdevs` is the
+                // composition probe every converge makes to decide
+                // whether a raid should exist.
+                !m.starts_with("bdev_get_")
+                    && !m.starts_with("nvmf_get_")
+                    && m != "bdev_raid_get_bdevs"
+            })
             .collect();
         assert!(mutating.is_empty(), "second ensure mutated: {mutating:?}");
     }
@@ -2578,6 +3034,210 @@ pub(crate) mod tests {
             }
             other => panic!("the new composer is healthy; got {other:?}"),
         }
+    }
+
+    /// COMPOSITION IS DERIVED FROM THE RECORD, and it goes both ways: a
+    /// volume with an in-sync peer serves from a raid1, a volume without
+    /// one serves from the bare lvol, and moving between them moves no
+    /// bytes.
+    ///
+    /// That last part is what `superblock: false` buys and it is the
+    /// reason this tier can compose an EXISTING volume at all. SPDK's
+    /// raid superblock costs ≥1 MiB of data offset, which would shift
+    /// every byte under the volume's pinned NGUID and make composition a
+    /// data migration. Without it, each base carries the volume's bytes
+    /// at LBA 0 — identical to the bare lvol — so the namespace can be
+    /// re-pointed either way.
+    #[tokio::test]
+    async fn a_peer_leg_composes_a_raid_and_losing_it_falls_back_to_the_lvol() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        let me = target_id();
+        let now = now_unix();
+        r.ensure("pvc-mir", Some(1 << 20)).await.expect("provision");
+        let nqn = crate::identity::block_volume_export_nqn("pvc-mir");
+
+        // Solo: the namespace serves the LVOL, and no raid exists.
+        let ns_bdev = |t: &FakeTgt| -> String {
+            t.subsystems.lock().unwrap()[&nqn]["namespaces"][0]["bdev_name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(ns_bdev(&tgt).contains("pvc-mir"), "solo serves the lvol");
+        assert!(!tgt.methods().iter().any(|m| m == "bdev_raid_create"), "no raid when solo");
+
+        // A peer appears, registered and IN SYNC.
+        backend.block_target_register("node-peer", "10.0.0.2", 4420, now).await.unwrap().unwrap();
+        backend
+            .block_leg_mark(
+                "pvc-mir",
+                "node-peer",
+                crate::state_backend::extent_alloc::LEG_INSYNC,
+                now,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        r.reconcile_hosts("pvc-mir").await.expect("compose");
+
+        let calls = tgt.calls.lock().unwrap().clone();
+        let attach = tgt
+            .call_with_method(&calls, "bdev_nvme_attach_controller")
+            .expect("the peer's leg was attached");
+        assert_eq!(
+            attach["params"]["traddr"], "10.0.0.2",
+            "the peer is dialled at its REGISTRY address, like every other dial site"
+        );
+        assert_eq!(
+            attach["params"]["subnqn"],
+            crate::identity::block_leg_export_nqn("pvc-mir").as_str(),
+            "over the LEG export, not the client-facing one"
+        );
+        assert_eq!(
+            attach["params"]["hostnqn"],
+            crate::nvmeof_export::flint_host_nqn(&me).as_str(),
+            "as this target — the identity the peer's leg allow-list admits"
+        );
+        let create = tgt.call_with_method(&calls, "bdev_raid_create").expect("raid built");
+        assert_eq!(create["params"]["raid_level"], "1");
+        assert_eq!(
+            create["params"]["superblock"], false,
+            "a superblock would shift every byte under the pinned NGUID"
+        );
+        assert_eq!(create["params"]["base_bdevs"].as_array().unwrap().len(), 2);
+        assert!(ns_bdev(&tgt).starts_with("flintraid-"), "the namespace serves the RAID now");
+        assert_eq!(
+            tgt.subsystems.lock().unwrap()[&nqn]["namespaces"].as_array().unwrap().len(),
+            1,
+            "exactly one namespace — the lvol-backed one is REPLACED, not accompanied"
+        );
+
+        // The peer goes STALE — it holds bytes the composition has moved
+        // past. It leaves the composition, and the volume serves solo
+        // again from the lvol that has all the data.
+        backend
+            .block_leg_mark(
+                "pvc-mir",
+                "node-peer",
+                crate::state_backend::extent_alloc::LEG_STALE,
+                now,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        tgt.calls.lock().unwrap().clear();
+        r.reconcile_hosts("pvc-mir").await.expect("degrade");
+        assert!(
+            tgt.methods().iter().any(|m| m == "bdev_raid_delete"),
+            "the composition object is dropped so the lvol's claim is released"
+        );
+        assert!(ns_bdev(&tgt).contains("pvc-mir"), "back to the lvol, no bytes moved");
+    }
+
+    /// THE LEG EXPORT is the door `EvictAtLeg` closes, and who may come
+    /// through it is derived from the seat: exactly the current
+    /// composer.
+    ///
+    /// So a deposed peer loses its reach because the record stopped
+    /// naming it, not because anyone remembered to revoke it — and a
+    /// target that becomes the composer withdraws its own leg export,
+    /// because the raid module's exclusive claim on that lvol would
+    /// otherwise fail with EPERM.
+    #[tokio::test]
+    async fn a_leg_is_offered_to_the_composer_the_record_names_and_to_nobody_else() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        let now = now_unix();
+        r.self_register().await.expect("this target must be registered to be elected");
+        // We hold a copy but do NOT compose it: the seat names a peer.
+        backend.block_target_register("node-a", "10.0.0.1", 4420, now).await.unwrap().unwrap();
+        backend.block_seat_volume("pvc-leg", "node-a", now, now + 120).await.unwrap().unwrap();
+        tgt.bdevs.lock().unwrap().insert("lvs_test/pvc-leg".into(), "uuid-leg".into());
+
+        r.ensure_leg_export("pvc-leg").await.expect("offer the leg");
+        let leg_nqn = crate::identity::block_leg_export_nqn("pvc-leg");
+        let hosts = tgt.hosts_of(&leg_nqn);
+        assert_eq!(
+            hosts,
+            vec![crate::nvmeof_export::flint_host_nqn("node-a")],
+            "exactly the composer, and nobody else: {hosts:?}"
+        );
+        assert!(
+            tgt.subsystems.lock().unwrap().contains_key(&leg_nqn),
+            "the leg has its OWN subsystem — a client admitted to the volume has no \
+             business reaching the leg"
+        );
+
+        // The seat moves to another peer. The ordinary converge evicts
+        // the old composer and admits the new one — no separate act.
+        backend
+            .block_target_register("node-b", "10.0.0.2", 4420, now)
+            .await
+            .unwrap()
+            .unwrap();
+        backend
+            .block_leg_mark("pvc-leg", "node-b", crate::state_backend::extent_alloc::LEG_INSYNC, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let seat = backend.block_volume_seat("pvc-leg").await.unwrap().unwrap().unwrap();
+        backend
+            .block_promote("pvc-leg", seat.epoch, "node-a", "node-b", now)
+            .await
+            .unwrap()
+            .unwrap();
+        r.ensure_leg_export("pvc-leg").await.expect("re-offer");
+        let hosts = tgt.hosts_of(&leg_nqn);
+        assert!(
+            hosts.contains(&crate::nvmeof_export::flint_host_nqn("node-b"))
+                && !hosts.contains(&crate::nvmeof_export::flint_host_nqn("node-a")),
+            "the deposed composer lost its reach with the record, not with a revocation: \
+             {hosts:?}"
+        );
+
+        // And when WE become the composer, the leg export is withdrawn —
+        // the raid's exclusive claim cannot coexist with an export of
+        // the same lvol.
+        let seat = backend.block_volume_seat("pvc-leg").await.unwrap().unwrap().unwrap();
+        backend
+            .block_leg_mark(
+                "pvc-leg",
+                &target_id(),
+                crate::state_backend::extent_alloc::LEG_INSYNC,
+                now,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        backend
+            .block_promote("pvc-leg", seat.epoch, "node-b", &target_id(), now)
+            .await
+            .unwrap()
+            .unwrap();
+        r.ensure_leg_export("pvc-leg").await.expect("withdraw");
+        assert!(
+            !tgt.subsystems.lock().unwrap().contains_key(&leg_nqn),
+            "a composer exports no leg of its own"
+        );
     }
 
     /// THE WHOLE FAILOVER ORDER, on one volume: CAS → horizon → evict →

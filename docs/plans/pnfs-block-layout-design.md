@@ -1640,8 +1640,55 @@ Each phase ships standalone value; none is gated on the next.
   notification landing before the replacement device existed did nothing. This
   ordering — device first, then notify — is the fix that measurement points at, but
   it is a hypothesis until a failover drill runs on hardware.
-  What remains: replication itself — the second leg, the degrade barrier that writes
-  stale marks on a solo ack, and the sparse-aware rebuild that clears them.
+  **THE COMPOSITION SUBSTRATE SHIPPED (same day) — and two of the review's five
+  raid1 limits DISSOLVE under a choice the file tier already made.** flint builds
+  raid1 with `superblock: false`, and that single flag answers limits (2) and (5).
+  (5) said the superblock's ≥1 MiB `data_offset` makes composing an existing volume
+  a data migration — with no superblock each base carries the volume's bytes at LBA
+  0, identical to the bare lvol, so a solo volume composes IN PLACE and a
+  composition falls back to solo without moving a byte. (2) said a survivor cannot
+  self-promote because the superblock lists the peer CONFIGURED — with no superblock
+  there is no examine-based auto-assembly at all, so a composition exists exactly
+  when flint builds one from the record. That is `RecordAssemblyOnly` satisfied by
+  construction rather than defended, and `RecordRejoinOnly`'s "never let
+  auto-examine arbitrate" satisfied because auto-examine does not run. The file tier
+  reached `superblock: false` for its own reasons (snapshots and clones of
+  superblocked bases were unmountable raw, 2026-06-12); this tier depends on it
+  harder and for different reasons, so the flag is now load-bearing in two places
+  and must not be flipped without reading both.
+  What ships: **leg exports** (`…:leg:<vol>`, a separate NQN from the client-facing
+  `…:block:<vol>` because a client admitted to read a volume has no business
+  reaching a leg, and a composer mirroring onto a leg is not a client), whose
+  allow-list is derived from the seat as **exactly the current composer** — so
+  `EvictAtLeg` finally has a subject, and a deposed peer loses its reach because the
+  record stopped naming it rather than because someone remembered to revoke it. A
+  target exports its leg only while it is NOT the composer: the composer's copy is
+  claimed by the raid module, and an export of the same lvol fails that claim with
+  EPERM (the collision the file tier's `drop_stale_local_exports` exists for). And
+  **the composition itself**: the client-facing namespace serves the RAID when the
+  record gives the volume more than one IN-SYNC leg and the bare lvol when it is
+  solo, with peer legs attached at their REGISTRY addresses under this target's
+  inter-target host NQN and F42's `LegTransportPolicy` inherited so a leg on a dead
+  node faults out instead of stalling every write.
+  A bug worth recording, caught by its own test: the export spec's bdev ALIASES must
+  belong to the bdev being served. `ns_matches` accepts a namespace pointing at any
+  alias of the spec's bdev, so handing it the LVOL's aliases while asking for the
+  RAID makes a stale lvol-backed namespace look correct — the volume would keep
+  serving one leg while the record claimed two, every write landing on a single
+  copy. Silent divergence, from three characters.
+  **What remains, and it is the honest majority of "replication"**: the DEGRADE
+  BARRIER (`DegradeBarrier` — a solo-landing write acked only after the record
+  carries the peer's stale mark; flint is not on the data path, so this has to
+  interpose on LEG FAILURE, and how to quiesce a raid1 mid-flight through SPDK's RPC
+  surface is an open design question, not a coding task), the sparse-aware REBUILD
+  that clears a stale mark (`SEEK_DATA`/`SEEK_HOLE` on the source lvol — note the
+  ephemeral raid makes this easier than the model assumed: flint can copy while the
+  target is not a member and then re-create the composition with both legs, never
+  touching raid1's allocation-blind process), the ANCESTRY proof that licenses a
+  delta rejoin, same-AZ leg PLACEMENT, and the StorageClass surface. **Until the
+  degrade barrier exists there is no `replicas: 2` parameter and no way to provision
+  a composed volume** — the substrate is reachable only through the record, so
+  nothing can be created in a state whose safety is not yet enforced.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left
