@@ -151,7 +151,7 @@ async fn main() -> ExitCode {
     let result: Result<(), PnfsError> = match args[1].as_str() {
         "create" => {
             let size = size_bytes.unwrap_or_else(|| usage());
-            match pnfs.unwrap().create_volume_with(&volume_id, size, &opts).await {
+            match pnfs.unwrap().create_volume_with(&volume_id, size, &opts, None).await {
                 Ok(ctx) => {
                     // Single-line JSON for easy `jq -r` consumption.
                     let pairs: Vec<String> = ctx.iter()

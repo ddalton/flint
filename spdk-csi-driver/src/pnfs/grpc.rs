@@ -888,6 +888,52 @@ impl MdsControl for MdsControlService {
                     effective_layout_class: String::new(),
                 }));
             }
+            // PLACEMENT, composer side. After the export, because the
+            // leg row is what turns this volume's next converge into a
+            // TWO-SLOT frame, and framing a volume whose own lvol does
+            // not exist yet would refuse for the wrong reason.
+            //
+            // A placement that fails FAILS THE CREATE. The alternative —
+            // returning a healthy single-copy volume for a request that
+            // asked for two — is the silent-degradation the whole tier
+            // is built to refuse.
+            if !req.leg_target.is_empty() {
+                let Some(reconciler) = self.layout_manager.block_export() else {
+                    return Ok(Response::new(CreateVolumeResponse {
+                        created: false,
+                        export_path: String::new(),
+                        volume_file: String::new(),
+                        message: "placement was requested but this MDS has no block export"
+                            .into(),
+                        nfs_port: self.nfs_port as u32,
+                        directory: false,
+                        effective_stripe_size: 0,
+                        effective_stripe_width: 0,
+                        effective_layout_class: String::new(),
+                    }));
+                };
+                if let Err(msg) = reconciler
+                    .record_leg(
+                        &req.volume_id,
+                        &req.leg_target,
+                        &req.leg_traddr,
+                        req.leg_trsvcid as u16,
+                    )
+                    .await
+                {
+                    return Ok(Response::new(CreateVolumeResponse {
+                        created: false,
+                        export_path: String::new(),
+                        volume_file: String::new(),
+                        message: format!("recording the placed leg: {msg}"),
+                        nfs_port: self.nfs_port as u32,
+                        directory: false,
+                        effective_stripe_size: 0,
+                        effective_stripe_width: 0,
+                        effective_layout_class: String::new(),
+                    }));
+                }
+            }
         }
 
         info!(
@@ -1036,6 +1082,7 @@ impl MdsControl for MdsControlService {
             return Ok(Response::new(DeleteVolumeResponse {
                 deleted: false,
                 message: "volume_id must be non-empty and contain no '/' or NUL".into(),
+                leg_targets: Vec::new(),
             }));
         }
 
@@ -1079,7 +1126,13 @@ impl MdsControl for MdsControlService {
         // re-created same-name volume inheriting stale GRANTS is worse
         // than one colliding with a stale export (the create's ensure
         // pass converges the latter).
+        // Read the placed legs BEFORE the sweep below erases them. After
+        // it, nothing on this target — or any other — names the peer's
+        // lvol, and the only way it ever gets deleted is if the answer
+        // travelled out of here in this reply.
+        let mut leg_targets: Vec<String> = Vec::new();
         if let Some(reconciler) = self.layout_manager.block_export() {
+            leg_targets = reconciler.leg_targets(&req.volume_id).await;
             if let Err(e) = reconciler.delete_volume_export(&req.volume_id).await {
                 warn!(
                     "DeleteVolume {}: export teardown failed: {} — subsystem/lvol leak \
@@ -1126,6 +1179,7 @@ impl MdsControl for MdsControlService {
                 Ok(Response::new(DeleteVolumeResponse {
                     deleted: true,
                     message: String::new(),
+                    leg_targets,
                 }))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1134,6 +1188,7 @@ impl MdsControl for MdsControlService {
                 Ok(Response::new(DeleteVolumeResponse {
                     deleted: true,
                     message: "already absent".into(),
+                    leg_targets,
                 }))
             }
             Err(e) => {
@@ -1141,6 +1196,7 @@ impl MdsControl for MdsControlService {
                 Ok(Response::new(DeleteVolumeResponse {
                     deleted: false,
                     message: format!("{}", e),
+                    leg_targets,
                 }))
             }
         }
@@ -1423,6 +1479,80 @@ impl MdsControl for MdsControlService {
     /// than answer partially: an empty initiator list is permission to
     /// restart the target, so "I could not read the table" and "nobody
     /// is connected" must never arrive as the same answer.
+    /// PLACEMENT, peer side. The CSI controller is the caller because
+    /// it is the only component that sees the whole fleet: MDS shards
+    /// share nothing — each has its own sqlite — so a target learns
+    /// about another target by being told.
+    async fn host_block_leg(
+        &self,
+        request: Request<HostBlockLegRequest>,
+    ) -> Result<Response<HostBlockLegResponse>, Status> {
+        let req = request.into_inner();
+        if req.volume_id.is_empty()
+            || req.volume_id.contains('/')
+            || req.volume_id.contains('\0')
+        {
+            return Ok(Response::new(HostBlockLegResponse {
+                hosted: false,
+                message: "volume_id must be non-empty and contain no '/' or NUL".into(),
+            }));
+        }
+        if req.composer_target.is_empty() {
+            return Ok(Response::new(HostBlockLegResponse {
+                hosted: false,
+                message: "composer_target is required — a leg exists to be offered to exactly \
+                          one composer, and an empty allow-list would offer it to nobody"
+                    .into(),
+            }));
+        }
+        let Some(reconciler) = self.layout_manager.block_export() else {
+            return Ok(Response::new(HostBlockLegResponse {
+                hosted: false,
+                message: "this MDS has no block export configured".into(),
+            }));
+        };
+        match reconciler
+            .host_leg(&req.volume_id, req.size_bytes, &req.composer_target)
+            .await
+        {
+            Ok(()) => Ok(Response::new(HostBlockLegResponse {
+                hosted: true,
+                message: String::new(),
+            })),
+            Err(msg) => Ok(Response::new(HostBlockLegResponse {
+                hosted: false,
+                message: msg,
+            })),
+        }
+    }
+
+    /// The reverse, at DeleteVolume. Idempotent: a shard that holds no
+    /// leg for the volume answers success, because the controller fans
+    /// this at whatever the composer's record named and that record may
+    /// already have been swept by a retry.
+    async fn drop_block_leg(
+        &self,
+        request: Request<DropBlockLegRequest>,
+    ) -> Result<Response<DropBlockLegResponse>, Status> {
+        let req = request.into_inner();
+        let Some(reconciler) = self.layout_manager.block_export() else {
+            return Ok(Response::new(DropBlockLegResponse {
+                dropped: false,
+                message: "this MDS has no block export configured".into(),
+            }));
+        };
+        match reconciler.drop_leg(&req.volume_id).await {
+            Ok(()) => Ok(Response::new(DropBlockLegResponse {
+                dropped: true,
+                message: String::new(),
+            })),
+            Err(msg) => Ok(Response::new(DropBlockLegResponse {
+                dropped: false,
+                message: msg,
+            })),
+        }
+    }
+
     async fn block_export_status(
         &self,
         _request: Request<BlockExportStatusRequest>,
@@ -1519,6 +1649,9 @@ mod create_volume_tests {
             dir_gid: 0,
             dir_mode: 0,
             layout_class: String::new(),
+            leg_target: String::new(),
+            leg_traddr: String::new(),
+            leg_trsvcid: 0,
         }
     }
 
@@ -2886,7 +3019,7 @@ mod create_volume_tests {
 
         let r = s.create_volume(Request::new(CreateVolumeRequest {
             volume_id: "pvc-abc".into(),
-            size_bytes: 1024 * 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
+            size_bytes: 1024 * 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), ..Default::default() })).await.unwrap().into_inner();
         assert!(r.created, "create should succeed: {}", r.message);
         assert_eq!(r.volume_file, "pvc-abc");
         assert!(r.directory, "new volumes are directory subtrees");
@@ -2904,7 +3037,7 @@ mod create_volume_tests {
     async fn create_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let s = svc(dir.path());
-        let req = CreateVolumeRequest { volume_id: "v1".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), };
+        let req = CreateVolumeRequest { volume_id: "v1".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), ..Default::default() };
         assert!(s.create_volume(Request::new(req.clone())).await.unwrap().into_inner().created);
         let r = s.create_volume(Request::new(req)).await.unwrap().into_inner();
         assert!(r.created, "second call should also succeed");
@@ -2925,12 +3058,12 @@ mod create_volume_tests {
         f.set_len(4096).unwrap();
 
         let r = s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "v-legacy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
+            volume_id: "v-legacy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), ..Default::default() })).await.unwrap().into_inner();
         assert!(r.created, "same-size re-create of a legacy file: {}", r.message);
         assert!(!r.directory, "legacy volume must NOT be advertised as a directory");
 
         let r = s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "v-legacy".into(), size_bytes: 8192, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
+            volume_id: "v-legacy".into(), size_bytes: 8192, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), ..Default::default() })).await.unwrap().into_inner();
         assert!(!r.created);
         assert!(r.message.contains("refusing to resize"));
 
@@ -2951,7 +3084,7 @@ mod create_volume_tests {
 
         for v in ["vol", "volume2"] {
             let r = s.create_volume(Request::new(CreateVolumeRequest {
-                volume_id: v.into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
+                volume_id: v.into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), ..Default::default() })).await.unwrap().into_inner();
             assert!(r.created);
         }
         let rec = |key: &str| crate::state_backend::PlacementRecord {
@@ -2989,7 +3122,7 @@ mod create_volume_tests {
         let dir = tempfile::tempdir().unwrap();
         let s = svc(dir.path());
         s.create_volume(Request::new(CreateVolumeRequest {
-            volume_id: "busy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap();
+            volume_id: "busy".into(), size_bytes: 4096, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), ..Default::default() })).await.unwrap();
         std::fs::create_dir_all(dir.path().join("busy/deep/tree")).unwrap();
         std::fs::write(dir.path().join("busy/deep/tree/f.bin"), b"data").unwrap();
 
@@ -3017,7 +3150,7 @@ mod create_volume_tests {
         let s = svc(dir.path());
         for bad in &["", "../escape", "a/b", "with\0nul"] {
             let r = s.create_volume(Request::new(CreateVolumeRequest {
-                volume_id: (*bad).into(), size_bytes: 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), })).await.unwrap().into_inner();
+                volume_id: (*bad).into(), size_bytes: 1024, stripe_size: 0, stripe_width: 0, dir_gid: 0, dir_mode: 0, layout_class: String::new(), ..Default::default() })).await.unwrap().into_inner();
             assert!(!r.created, "should reject {:?}", bad);
         }
     }

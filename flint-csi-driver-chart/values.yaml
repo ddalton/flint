@@ -446,8 +446,24 @@ pnfs:
     storageClass:
       create: false
       name: flint-pnfs-block
-      # Single-replica: Retain, so data outlives an accidental claim
-      # delete. Flip to Delete for scratch classes.
+      # Copies of each volume: 1 (a lost storage node is lost data) or
+      # 2 (a second copy on another target, kept mirrored, rebuilt
+      # after an outage — design §12).
+      #
+      # EXPERIMENTAL: the composition machine is complete and unit
+      # tested end to end, but no cluster has run it yet.
+      #
+      # Placement is SAME-ZONE by default and refuses rather than
+      # silently crossing zones, because a cross-zone copy pays
+      # inter-zone egress on every mirrored write and again on every
+      # rebuilt byte. Nodes must carry topology.kubernetes.io/zone —
+      # an unlabelled node is "unknown", never "the same place".
+      replicas: 1
+      # Permit the second copy to land outside the composer's zone.
+      # Only meaningful with replicas: 2, and it is a bill, not a knob.
+      replicaCrossZone: false
+      # Retain, so data outlives an accidental claim delete. Flip to
+      # Delete for scratch classes.
       reclaimPolicy: Retain
       volumeBindingMode: WaitForFirstConsumer
       # Same replace-not-race semantics as the pnfs class above. The

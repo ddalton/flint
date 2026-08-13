@@ -2889,6 +2889,192 @@ impl BlockExportReconciler {
         Ok(())
     }
 
+    /// PLACEMENT, peer side: host a copy of a volume this target does
+    /// NOT compose (design §12).
+    ///
+    /// The CSI controller calls this, because it is the only component
+    /// that can see the whole fleet — an MDS shard's sqlite is its own
+    /// and shares nothing with its peers, which is why a target learns
+    /// about another target by being TOLD, never by discovery.
+    ///
+    /// Three acts, and the order is the usual one: the record first, so
+    /// a crash leaves a seat with no device (which the next pass
+    /// converges) rather than a device no record names.
+    ///   1. seat the volume at its COMPOSER — this shard's own statement
+    ///      that the volume is not its to serve, and what the leg
+    ///      export's allow-list is derived from;
+    ///   2. mint the lvol, thin and EMPTY. It holds none of the volume's
+    ///      bytes, which is exactly why the composer records this leg as
+    ///      STALE and why only a rebuild may say otherwise;
+    ///   3. converge the leg export that offers it to the composer.
+    ///
+    /// Idempotent throughout: CreateVolume is retried by the
+    /// provisioner, and placement is deterministic, so this runs again
+    /// with the same arguments and must reach the same state.
+    pub async fn host_leg(
+        &self,
+        volume: &str,
+        size_bytes: u64,
+        composer: &str,
+    ) -> Result<(), String> {
+        let me = target_id();
+        if composer == me {
+            return Err(format!(
+                "'{volume}' is composed HERE — a target cannot also host its leg: the raid holds \
+                 an exclusive claim on that lvol and a second export of it is EPERM"
+            ));
+        }
+        {
+            let lock = self.lock_for(volume);
+            let _g = lock.lock().await;
+            // Seat INSERT-if-absent, like every other seating: an upsert
+            // here would let a stale placement call move a live volume's
+            // composer, which is promotion's job and nobody else's.
+            match self
+                .backend
+                .block_seat_volume(volume, composer, now_unix(), now_unix() + lease_ttl())
+                .await
+            {
+                Ok(Ok(seat)) if seat.composer == composer => {}
+                Ok(Ok(seat)) => {
+                    return Err(format!(
+                        "'{volume}' is already seated at '{}' here, not at '{composer}' — \
+                         refusing to host a leg for a composer the record does not name",
+                        seat.composer
+                    ))
+                }
+                Ok(Err(e)) => return Err(format!("seating '{volume}': {e}")),
+                Err(e) => return Err(format!("seating '{volume}': {e}")),
+            }
+            let bdev = self.bdev_name(volume);
+            let probe = json!({ "method": "bdev_get_bdevs", "params": { "name": bdev } });
+            if self.rpc.rpc(&probe).await.is_err() {
+                self.check_store_has_room(volume, size_bytes).await?;
+                let size_mib = size_bytes.div_ceil(1024 * 1024).max(1);
+                let create = json!({
+                    "method": "bdev_lvol_create",
+                    "params": {
+                        "lvs_name": self.lvstore,
+                        "lvol_name": volume,
+                        "size_in_mib": size_mib,
+                        // Thin, like the volume's own lvol: an unwritten
+                        // cluster reads zeros, and this leg is nothing
+                        // BUT unwritten clusters until the rebuild runs.
+                        "thin_provision": true
+                    }
+                });
+                if let Err(e) = self.rpc.rpc(&create).await {
+                    if self.rpc.rpc(&probe).await.is_err() {
+                        return Err(format!("bdev_lvol_create {bdev}: {e}"));
+                    }
+                }
+            }
+        }
+        self.ensure_leg_export(volume).await?;
+        tracing::info!(
+            "🧩 '{}': hosting a leg here for composer '{}' ({} MiB, empty until it rebuilds)",
+            volume,
+            composer,
+            size_bytes / (1024 * 1024)
+        );
+        Ok(())
+    }
+
+    /// PLACEMENT, composer side: record WHERE the second copy lives.
+    ///
+    /// Two rows, and neither is a device act: the peer's registry row
+    /// (so every dial site can resolve it, the whole reason the registry
+    /// is an indirection) and the leg row, STALE. The frame and the
+    /// rebuild follow from those on the next pass — nothing here builds
+    /// anything, which is what makes it safe to run at CreateVolume
+    /// before the peer has ever been contacted.
+    pub async fn record_leg(
+        &self,
+        volume: &str,
+        leg: &str,
+        traddr: &str,
+        trsvcid: u16,
+    ) -> Result<(), String> {
+        if leg == target_id() {
+            return Err(format!(
+                "'{volume}': the placed leg names this target, which composes it — a volume \
+                 cannot be its own second copy"
+            ));
+        }
+        match self.backend.block_target_register(leg, traddr, trsvcid, now_unix()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("registering leg target '{leg}': {e}")),
+            Err(e) => return Err(format!("registering leg target '{leg}': {e}")),
+        }
+        // STALE, and this is the load-bearing word. The peer's lvol
+        // exists and is EMPTY; a leg row that said in-sync would make it
+        // electable, and `ElectInSync` would hand the volume to a copy
+        // of nothing.
+        match self
+            .backend
+            .block_leg_mark(volume, leg, crate::state_backend::extent_alloc::LEG_STALE, now_unix())
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("recording leg '{leg}' of '{volume}': {e}")),
+            Err(e) => return Err(format!("recording leg '{leg}' of '{volume}': {e}")),
+        }
+        tracing::info!(
+            "🧩 '{}': second copy placed at '{}' ({}:{}) — recorded STALE; the frame and the \
+             rebuild follow from the record",
+            volume, leg, traddr, trsvcid
+        );
+        Ok(())
+    }
+
+    /// Targets other than this one holding a leg of `volume`. Read
+    /// before DeleteVolume sweeps the record, because afterwards
+    /// nothing names the peer's lvol at all.
+    pub async fn leg_targets(&self, volume: &str) -> Vec<String> {
+        let me = target_id();
+        match self.backend.block_legs(volume).await {
+            Ok(Ok(legs)) => {
+                legs.into_iter().map(|l| l.target_id).filter(|t| *t != me).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Drop a leg this target hosts: the leg export, the lvol, the
+    /// record. DeleteVolume's authority, arriving second-hand.
+    pub async fn drop_leg(&self, volume: &str) -> Result<(), String> {
+        let me = target_id();
+        if let Ok(Ok(Some(seat))) = self.backend.block_volume_seat(volume).await {
+            if seat.composer == me {
+                return Err(format!(
+                    "'{volume}' is COMPOSED here — this is the volume itself, not a leg of it; \
+                     deleting it is DeleteVolume's act, not a leg drop's"
+                ));
+            }
+        }
+        let lock = self.lock_for(volume);
+        let _g = lock.lock().await;
+        self.drop_leg_export_locked(volume).await?;
+        let bdev = self.bdev_name(volume);
+        let probe = json!({ "method": "bdev_get_bdevs", "params": { "name": bdev } });
+        if self.rpc.rpc(&probe).await.is_ok() {
+            // Guarded-destroy: the volume this copy belongs to is being
+            // deleted, its export is already gone, and a leg whose
+            // volume no longer exists is unreachable by construction —
+            // no record on any target will ever name it again.
+            let delete = json!({ "method": "bdev_lvol_delete", "params": { "name": bdev } }); // guarded-destroy-lint: allow
+            self.rpc
+                .rpc(&delete)
+                .await
+                .map_err(|e| format!("bdev_lvol_delete {bdev}: {e}"))?;
+        }
+        if let Err(e) = self.backend.extent_drop_volume(volume).await {
+            tracing::warn!("'{}': leg record sweep failed ({}) — device state is gone", volume, e);
+        }
+        tracing::info!("🧹 '{}': leg dropped here — export, lvol and record", volume);
+        Ok(())
+    }
+
     /// What one promotion attempt did. Every non-`Promoted` arm is a
     /// REFUSAL with its reason kept, because the reasons are the
     /// interesting part today: a single-copy volume has no candidate,
@@ -4859,6 +5045,184 @@ pub(crate) mod tests {
             other => panic!("expected a refusal, got {other:?}"),
         }
         assert!(tgt.copies().is_empty());
+    }
+
+    /// PLACEMENT, peer side: hosting a copy mints an EMPTY lvol and
+    /// offers it to exactly one composer.
+    ///
+    /// Empty is the point. The leg holds none of the volume's bytes,
+    /// which is why the composer records it STALE and why only a
+    /// rebuild may ever say otherwise — a leg that arrived claiming to
+    /// be in sync would be electable, and `ElectInSync` would hand the
+    /// volume to a copy of nothing.
+    #[tokio::test]
+    async fn hosting_a_leg_mints_an_empty_lvol_and_offers_it_to_the_composer_alone() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        r.host_leg("pvc-host", 1 << 20, "node-composer").await.expect("host");
+
+        // The seat is this target's own statement that the volume is
+        // NOT its to serve — and it is what the allow-list below is
+        // derived from.
+        let seat = backend.block_volume_seat("pvc-host").await.unwrap().unwrap().unwrap();
+        assert_eq!(seat.composer, "node-composer");
+
+        let created = tgt
+            .call_with_method(&tgt.calls.lock().unwrap().clone(), "bdev_lvol_create")
+            .expect("lvol minted")
+            .clone();
+        assert_eq!(created["params"]["thin_provision"], true, "an empty leg is all holes");
+
+        let leg_nqn = crate::identity::block_leg_export_nqn("pvc-host");
+        assert_eq!(
+            tgt.hosts_of(&leg_nqn),
+            vec![crate::nvmeof_export::flint_host_nqn("node-composer")],
+            "offered to the composer the record names, and to nobody else"
+        );
+        assert!(
+            tgt.subsystems
+                .lock()
+                .unwrap()
+                .get(&crate::identity::block_volume_export_nqn("pvc-host"))
+                .is_none(),
+            "and NOT to clients — a leg is not an export of the volume"
+        );
+
+        // Idempotent: CreateVolume is retried by the provisioner, and
+        // placement is deterministic, so this runs again unchanged.
+        tgt.calls.lock().unwrap().clear();
+        r.host_leg("pvc-host", 1 << 20, "node-composer").await.expect("again");
+        assert!(
+            !tgt.methods().iter().any(|m| m == "bdev_lvol_create"),
+            "second call minted a second lvol: {:?}",
+            tgt.methods()
+        );
+
+        // A leg of a volume THIS target composes is a contradiction:
+        // the raid claims that lvol exclusively, so a second export of
+        // it is EPERM.
+        let err = r.host_leg("pvc-host", 1 << 20, &target_id()).await.unwrap_err();
+        assert!(err.contains("composed HERE"), "{err}");
+    }
+
+    /// PLACEMENT, composer side — and the whole pipeline behind it:
+    /// recording where the second copy lives is enough. The frame, the
+    /// rebuild and the in-sync mark all follow from the record.
+    #[tokio::test]
+    async fn a_recorded_placement_frames_the_volume_and_the_rebuild_fills_it() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        r.ensure("pvc-placed", Some(1 << 20)).await.expect("provision");
+        r.record_leg("pvc-placed", "node-peer", "10.0.0.2", 4420).await.expect("record");
+
+        // STALE, always: the peer's lvol exists and is empty.
+        let legs = backend.block_legs("pvc-placed").await.unwrap().unwrap();
+        assert_eq!(
+            legs.iter().find(|l| l.target_id == "node-peer").unwrap().sync_state,
+            crate::state_backend::extent_alloc::LEG_STALE
+        );
+        // And the peer is dialable — the registry row is what every
+        // dial site resolves through.
+        let (traddr, port) = {
+            let targets = backend.block_target_list().await.unwrap().unwrap();
+            let t = targets.iter().find(|t| t.target_id == "node-peer").expect("registered");
+            (t.traddr.clone(), t.trsvcid)
+        };
+        assert_eq!((traddr.as_str(), port), ("10.0.0.2", 4420));
+
+        // One converge, and the volume is composed with a slot waiting.
+        r.reconcile_hosts("pvc-placed").await.expect("frame");
+        assert_eq!(
+            tgt.members_of("flintraid-pvc-placed"),
+            vec![r.bdev_name("pvc-placed")],
+            "one member, one empty slot"
+        );
+
+        // The rebuild fills it, and only then is the copy real.
+        r.observe("node-peer", true, now_unix());
+        assert!(matches!(
+            r.rebuild_leg("pvc-placed", "node-peer").await,
+            RebuildOutcome::Rebuilt { .. }
+        ));
+        assert_eq!(tgt.members_of("flintraid-pvc-placed").len(), 2);
+        let legs = backend.block_legs("pvc-placed").await.unwrap().unwrap();
+        assert_eq!(
+            legs.iter().find(|l| l.target_id == "node-peer").unwrap().sync_state,
+            crate::state_backend::extent_alloc::LEG_INSYNC
+        );
+
+        // A placement naming this target is a volume as its own second
+        // copy.
+        let err = r.record_leg("pvc-placed", &target_id(), "10.0.0.9", 4420).await.unwrap_err();
+        assert!(err.contains("its own second copy"), "{err}");
+    }
+
+    /// A leg dies with its volume — and only a LEG does. The peer's
+    /// lvol is named by nothing once the composer's record is swept, so
+    /// the drop has to reach it, and it must never be mistaken for the
+    /// volume itself.
+    #[tokio::test]
+    async fn dropping_a_leg_takes_the_export_the_lvol_and_the_record() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        r.host_leg("pvc-gone", 1 << 20, "node-composer").await.expect("host");
+        r.drop_leg("pvc-gone").await.expect("drop");
+
+        assert!(
+            tgt.subsystems
+                .lock()
+                .unwrap()
+                .get(&crate::identity::block_leg_export_nqn("pvc-gone"))
+                .is_none(),
+            "the leg export is gone"
+        );
+        assert!(
+            !tgt.bdevs.lock().unwrap().contains_key(&r.bdev_name("pvc-gone")),
+            "and so is the copy"
+        );
+        assert!(
+            backend.block_volume_seat("pvc-gone").await.unwrap().unwrap().is_none(),
+            "and the record"
+        );
+        // Idempotent — the controller fans this at whatever the
+        // composer's record named, which a retry may already have swept.
+        r.drop_leg("pvc-gone").await.expect("again");
+
+        // A volume this target COMPOSES is not a leg of anything.
+        r.ensure("pvc-mine", Some(1 << 20)).await.expect("provision");
+        let err = r.drop_leg("pvc-mine").await.unwrap_err();
+        assert!(err.contains("COMPOSED here"), "{err}");
+        assert!(
+            tgt.bdevs.lock().unwrap().contains_key(&r.bdev_name("pvc-mine")),
+            "and its bytes are untouched"
+        );
     }
 
     /// THE LEG EXPORT is the door `EvictAtLeg` closes, and who may come

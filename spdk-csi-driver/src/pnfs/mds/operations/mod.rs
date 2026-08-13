@@ -1846,7 +1846,31 @@ pub async fn export_reconcile_pass(
     if let Err(e) = reconciler.self_register().await {
         tracing::error!("{} target registration failed: {}", context, e);
     }
-    let volumes = layout_manager.scsi_volumes();
+    // The pass's subject is every volume this target has anything to do
+    // with, which is NOT the same as every volume it serves: a target
+    // that merely HOSTS A LEG of someone else's volume has no geometry
+    // for it — geometry is recorded at CreateVolume, on the composer —
+    // and would drop out of the pass entirely, leaving the leg export
+    // nothing ever converges. The seat is what it does have, so the
+    // subject is the union.
+    let seats: std::collections::HashMap<String, String> =
+        match layout_manager.state_backend().block_seat_list().await {
+            Ok(Ok(list)) => list.into_iter().map(|s| (s.volume, s.composer)).collect(),
+            Ok(Err(e)) => {
+                tracing::error!("{} seat list unreadable: {} — converging none", context, e);
+                return (0, 0);
+            }
+            Err(e) => {
+                tracing::error!("{} seat list unreadable: {} — converging none", context, e);
+                return (0, 0);
+            }
+        };
+    let mut volumes = layout_manager.scsi_volumes();
+    for v in seats.keys() {
+        if !volumes.contains(v) {
+            volumes.push(v.clone());
+        }
+    }
     if volumes.is_empty() {
         // No scsi volumes ⇒ no fences either: a fence record exists
         // only for a volume with geometry, and DeleteVolume sweeps
@@ -1888,21 +1912,10 @@ pub async fn export_reconcile_pass(
     // being the same statement as "this volume is down", and a pass that
     // conflated them would strand every volume that had already been
     // promoted away.
-    let seats: std::collections::HashMap<String, String> =
-        match layout_manager.state_backend().block_seat_list().await {
-            Ok(Ok(list)) => list.into_iter().map(|s| (s.volume, s.composer)).collect(),
-            Ok(Err(e)) => {
-                tracing::error!("{} seat list unreadable: {} — converging none", context, e);
-                return (0, 0);
-            }
-            Err(e) => {
-                tracing::error!("{} seat list unreadable: {} — converging none", context, e);
-                return (0, 0);
-            }
-        };
     let me = crate::pnfs::mds::block_export::target_id();
     let mut stranded: Vec<String> = Vec::new();
     let mut serviceable: Vec<String> = Vec::new();
+    let mut hosted: Vec<String> = Vec::new();
     for v in &volumes {
         match seats.get(v) {
             Some(c) if condemned.contains(c) => stranded.push(v.clone()),
@@ -1910,8 +1923,15 @@ pub async fn export_reconcile_pass(
             // not ours to converge. This reconciler drives one tgt, and
             // the MDS that drives the composer's is the one that owns
             // this volume's export.
+            // Seated somewhere else, and this target holds a COPY of
+            // it: the leg export is ours to converge — the door the
+            // composer mirrors and rebuilds through, and the door
+            // `EvictAtLeg` closes when the seat moves. Level-triggered
+            // like everything else, so the allow-list follows the seat
+            // without anyone remembering to revoke.
             Some(c) if *c != me => {
-                tracing::debug!("{} '{}': seated at '{}', not this target", context, v, c)
+                tracing::debug!("{} '{}': seated at '{}', not this target", context, v, c);
+                hosted.push(v.clone());
             }
             // Seated here, or unseated — the unseated case is left to
             // converge so its refusal is reported where it always was.
@@ -1964,6 +1984,20 @@ pub async fn export_reconcile_pass(
             crate::pnfs::mds::block_export::PromotionOutcome::Refused(r) => {
                 tracing::warn!("{} '{}': promotion refused — {}", context, v, r);
             }
+        }
+    }
+
+    // The LEG exports, and they come BEFORE the early return below: a
+    // target may hold copies of volumes it composes none of, and for
+    // that target every list the rest of this pass works from is empty.
+    // For each volume this target holds a copy of but does not compose,
+    // offer that copy to the composer the record names. Nothing else
+    // builds these, and without them a placed leg is an lvol nobody can
+    // reach — the composer's rebuild would defer forever on a
+    // destination that never answers.
+    for v in &hosted {
+        if let Err(e) = reconciler.ensure_leg_export(v).await {
+            tracing::warn!("{} '{}': leg export not converged — {}", context, v, e);
         }
     }
 
@@ -3220,6 +3254,58 @@ mod fallback_tests {
             Arc::clone(&backend),
         );
         assert_eq!(export_reconcile_pass(&bare, "reconcile").await, (0, 0));
+    }
+
+    /// A HOSTED LEG HAS NO GEOMETRY, AND THE PASS MUST STILL SEE IT.
+    ///
+    /// Geometry is recorded at CreateVolume, on the composer. A target
+    /// that merely holds a COPY of someone else's volume has none, so a
+    /// pass whose subject was the geometry cache alone would drop the
+    /// volume entirely and never converge its leg export — leaving the
+    /// placed copy an lvol nobody can reach, and the composer's rebuild
+    /// deferring forever on a destination that does not answer.
+    ///
+    /// It also has no SERVICEABLE volumes, which is a second early
+    /// return the leg lane has to sit in front of.
+    ///
+    /// A/B: take either away and this shard converges nothing.
+    #[tokio::test]
+    async fn a_pass_converges_the_leg_export_of_a_volume_it_only_hosts() {
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
+        let reconciler = Arc::new(crate::pnfs::mds::block_export::BlockExportReconciler::new(
+            Arc::clone(&tgt)
+                as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        ));
+        // This target hosts a copy of a volume composed elsewhere — no
+        // geometry, no arena, no client-facing export. Just a leg.
+        reconciler.host_leg("volHosted", 1 << 20, "node-far").await.unwrap();
+        lm.attach_block_export(Arc::clone(&reconciler));
+        assert!(lm.scsi_volumes().is_empty(), "no geometry for a volume we do not compose");
+
+        // The leg export is what a pass must keep converged, so wipe it
+        // the way a tgt restart would.
+        let leg_nqn = crate::identity::block_leg_export_nqn("volHosted");
+        tgt.subsystems.lock().unwrap().clear();
+        export_reconcile_pass(&lm, "reconcile").await;
+
+        assert_eq!(
+            tgt.hosts_of(&leg_nqn),
+            vec![crate::nvmeof_export::flint_host_nqn("node-far")],
+            "the leg is offered again to the composer the record names"
+        );
     }
 
     /// ONE TARGET'S OUTAGE IS NOT ANOTHER VOLUME'S OUTAGE.

@@ -121,6 +121,44 @@ service MdsControl {
   // from LAYOUTGET. Fenced clients are absent by construction — the
   // fence deletes both rows.
   rpc BlockExportStatus(BlockExportStatusRequest) returns (BlockExportStatusResponse);
+
+  // PLACEMENT, peer side: host a copy of a block volume this shard does
+  // NOT compose. The caller is the CSI controller, which is the only
+  // component that can see the whole fleet — an MDS shard's record is
+  // its own and shares nothing with its peers.
+  //
+  // Idempotent: it mints the lvol, records who composes the volume, and
+  // converges the leg export that offers the copy to that composer. It
+  // does NOT copy any data — the composer's rebuild does that, and
+  // until it has, this leg is STALE by construction.
+  rpc HostBlockLeg(HostBlockLegRequest) returns (HostBlockLegResponse);
+
+  // The reverse: drop a leg this shard hosts. Sent at DeleteVolume to
+  // every target the composer's record named as holding a leg.
+  rpc DropBlockLeg(DropBlockLegRequest) returns (DropBlockLegResponse);
+}
+
+message HostBlockLegRequest {
+  string volume_id = 1;
+  uint64 size_bytes = 2;
+  // The target that composes this volume — the ONLY host admitted to
+  // the leg export, and what this shard's seat records so its own
+  // reconciler knows the volume is not its to serve.
+  string composer_target = 3;
+}
+
+message HostBlockLegResponse {
+  bool hosted = 1;
+  string message = 2;
+}
+
+message DropBlockLegRequest {
+  string volume_id = 1;
+}
+
+message DropBlockLegResponse {
+  bool dropped = 1;
+  string message = 2;
 }
 
 message BlockExportStatusRequest {}
@@ -297,6 +335,21 @@ message CreateVolumeRequest {
   // allocator instead of stripe maps). Closed set: an unknown value
   // fails the provision. Fixed at creation for the volume's lifetime.
   string layout_class = 7;
+
+  // PLACEMENT, composer side (scsi class only): the target the CSI
+  // controller placed this volume's second copy on, and where it
+  // answers. Empty = a single-copy volume, which is every volume an
+  // older driver provisions.
+  //
+  // The composer records this as a registry row plus a STALE leg row in
+  // the same act as seating the volume, and its next reconcile pass
+  // frames the composition with a slot for that leg and rebuilds into
+  // it. The leg is deliberately recorded STALE: the peer's lvol exists
+  // but holds none of the volume's bytes yet, and only the rebuild may
+  // say otherwise.
+  string leg_target = 8;
+  string leg_traddr = 9;
+  uint32 leg_trsvcid = 10;
 }
 
 message CreateVolumeResponse {
@@ -372,6 +425,12 @@ message DeleteVolumeRequest {
 message DeleteVolumeResponse {
   bool deleted = 1;
   string message = 2;
+
+  // Targets that held a leg of this volume, read from the composer's
+  // record BEFORE it was swept. The controller drops each one; without
+  // this the peer's lvol outlives the volume with nothing left in any
+  // record to name it.
+  repeated string leg_targets = 3;
 }
 
 // DS Control Service — the reverse direction: MDS → DS.

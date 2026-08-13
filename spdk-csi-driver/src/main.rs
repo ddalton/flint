@@ -1567,9 +1567,94 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     ));
                 }
                 vol_opts.layout_class = spdk_csi_driver::pnfs::mds::layout::LayoutClass::Scsi;
+            } else if vol_opts.replicas >= 2 {
+                // The files class has its own replication, with its own
+                // record, its own catch-up and its own parameters. One
+                // key meaning two different machines depending on a
+                // sibling parameter is how an operator ends up with
+                // neither.
+                return Err(tonic::Status::invalid_argument(format!(
+                    "{} applies to layout: pnfs-block only — the files class replicates through \
+                     its own machinery",
+                    spdk_csi_driver::pnfs_csi::sc_params::REPLICAS
+                )));
             }
 
             let (shard, shard_client) = pnfs.pick_for_create(&volume_id);
+
+            // PLACEMENT — where the SECOND copy goes, and the only
+            // decision in this tier that needs to see the whole fleet.
+            // MDS shards share nothing (each has its own sqlite), so a
+            // target cannot discover a peer; the controller is the one
+            // component that can, and it decides here, once, at create.
+            let placed = if vol_opts.replicas >= 2 {
+                let mut fleet = pnfs.block_fleet().await;
+                let zones = match self.driver.node_zones().await {
+                    Ok(z) => z,
+                    Err(e) => {
+                        return Err(tonic::Status::failed_precondition(format!(
+                            "replicas: 2 needs node topology and the Node list could not be \
+                             read ({e}) — refusing rather than placing a copy whose failure \
+                             domain is unknown"
+                        )))
+                    }
+                };
+                for h in fleet.iter_mut() {
+                    h.zone = zones.get(&h.target_id).cloned().unwrap_or_default();
+                }
+                let Some(composer) = fleet
+                    .iter()
+                    .find(|h| h.shard == shard)
+                    .map(|h| h.target_id.clone())
+                    .filter(|t| !t.is_empty())
+                else {
+                    return Err(tonic::Status::failed_precondition(format!(
+                        "replicas: 2 but MDS shard {shard} reports no block export to compose \
+                         the volume — is blockExport enabled on every shard?"
+                    )));
+                };
+                let leg = spdk_csi_driver::pnfs_csi::choose_leg_host(
+                    &volume_id,
+                    &composer,
+                    &fleet,
+                    vol_opts.cross_zone,
+                )
+                .map_err(|refusal| tonic::Status::failed_precondition(refusal.to_string()))?
+                .clone();
+                // Host the leg BEFORE creating the volume. The reverse
+                // order can return a healthy-looking volume whose second
+                // copy has nowhere to live, and nothing afterwards would
+                // ever go back and make one — a silently single-copy
+                // replicated volume, which is the exact failure this
+                // tier is built to refuse.
+                let Some(peer) = pnfs.shard_at(leg.shard) else {
+                    return Err(tonic::Status::internal(format!(
+                        "placement chose shard {} which is not configured",
+                        leg.shard
+                    )));
+                };
+                if let Err(e) =
+                    peer.host_block_leg(&volume_id, size_bytes, &composer).await
+                {
+                    return Err(tonic::Status::failed_precondition(format!(
+                        "hosting the second copy of {volume_id} on '{}' failed: {e}",
+                        leg.target_id
+                    )));
+                }
+                println!(
+                    "🧩 [pNFS] {}: second copy placed on '{}' (shard {}, zone {}) — composer \
+                     '{}' in zone {}",
+                    volume_id,
+                    leg.target_id,
+                    leg.shard,
+                    if leg.zone.is_empty() { "<unknown>" } else { &leg.zone },
+                    composer,
+                    zones.get(&composer).map(String::as_str).unwrap_or("<unknown>"),
+                );
+                Some(leg)
+            } else {
+                None
+            };
             println!(
                 "📡 [pNFS] Volume {} via MDS shard {} at {} ({} bytes)",
                 volume_id,
@@ -1579,7 +1664,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             );
 
             let ctx = match shard_client
-                .create_volume_with(&volume_id, size_bytes, &vol_opts)
+                .create_volume_with(&volume_id, size_bytes, &vol_opts, placed.as_ref())
                 .await
             {
                 Ok(ctx) => ctx,
@@ -1978,9 +2063,42 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 };
                 println!("🗑️ [pNFS] Deleting volume {} via MDS shard {} at {}",
                          bare_id, shard, shard_client.endpoint());
-                if let Err(e) = shard_client.delete_volume(bare_id).await {
-                    eprintln!("❌ [pNFS] DeleteVolume failed: {}", e);
-                    return Err(to_status(e));
+                let legs = match shard_client.delete_volume_reporting_legs(bare_id).await {
+                    Ok(legs) => legs,
+                    Err(e) => {
+                        eprintln!("❌ [pNFS] DeleteVolume failed: {}", e);
+                        return Err(to_status(e));
+                    }
+                };
+                // Second copies die with the volume. The composer's
+                // record named them and has now swept it, so this reply
+                // is the last thing in the system that knows where they
+                // are — a failure here leaks an lvol that no record on
+                // any target will ever name again, so it FAILS the
+                // delete and lets the provisioner retry (the MDS side is
+                // idempotent, and a shard that holds no leg says yes).
+                let fleet = if legs.is_empty() { Vec::new() } else { pnfs.block_fleet().await };
+                for target in &legs {
+                    let peer = fleet
+                        .iter()
+                        .find(|h| h.target_id == *target)
+                        .and_then(|h| pnfs.shard_at(h.shard));
+                    let Some(peer) = peer else {
+                        eprintln!(
+                            "❌ [pNFS] {}: leg target '{}' is not in the fleet — its copy \
+                             cannot be dropped and would leak",
+                            bare_id, target
+                        );
+                        return Err(tonic::Status::failed_precondition(format!(
+                            "leg target '{target}' of {bare_id} is unreachable or no longer \
+                             configured; retrying once it answers"
+                        )));
+                    };
+                    if let Err(e) = peer.drop_block_leg(bare_id).await {
+                        eprintln!("❌ [pNFS] {}: dropping the leg on '{}': {}", bare_id, target, e);
+                        return Err(to_status(e));
+                    }
+                    println!("🧹 [pNFS] {}: leg on '{}' dropped", bare_id, target);
                 }
                 println!("✅ [pNFS] Volume {} deleted (shard {})", bare_id, shard);
                 return Ok(tonic::Response::new(

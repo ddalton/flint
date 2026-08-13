@@ -1766,6 +1766,60 @@ Each phase ships standalone value; none is gated on the next.
   belt still validates one lvol, not the frame), and the StorageClass surface.
   **There is still no `replicas: 2` parameter** — the mechanism is complete but
   nothing has yet run it on hardware, and the surface should not ship ahead of a rig.
+- **PLACEMENT SHIPPED (same wave) — and it had to be the CONTROLLER'S decision,
+  because MDS shards share nothing.** The chart is explicit about it
+  (`pnfs-mds.yaml`: "Shards share nothing with each other" — N independent
+  Deployments, each with its own sqlite on its own RWO PVC, the attach being the
+  single-writer fence). So a target's `block_targets` registry can only ever hold
+  rows it wrote itself, which means **a target cannot discover a peer**: the whole
+  composition machine was structurally single-target until something told one target
+  about another. The CSI controller is the only component that sees the fleet — it
+  already enumerates every shard (`FLINT_PNFS_MDS_SHARD_ENDPOINTS`) and already asks
+  each for its posture (`BlockExportStatus`) — so placement is decided there, once,
+  at CreateVolume, and travels to both sides as a fact.
+  **Same-zone by default, and that default is a COST decision before it is a
+  durability one.** A cross-zone leg pays inter-zone egress on every mirrored write
+  for the life of the volume, and again on the whole allocated set every time the leg
+  is rebuilt — which on this tier happens after any unclean restart of the composer.
+  So `choose_leg_host` keeps only candidates in the composer's zone unless
+  `pnfs.flint.io/replicaCrossZone` says otherwise, and REFUSES rather than quietly
+  spending the money; the refusal names the zones that do have targets and the
+  parameter that would allow them. An unlabelled node is UNKNOWN, never "the same
+  place as every other unlabelled node" — two empty strings are not a shared failure
+  domain, and that refusal is its own A/B. The pick is deterministic (FNV-1a of the
+  volume name over the sorted eligible set) because the provisioner retries
+  CreateVolume by name: a placement that varied between attempts would host a leg on
+  a different peer each time and strand every loser as an orphan lvol.
+  **Zones come from the Node objects, read by the CONTROLLER, never by the MDS** —
+  the block record must not depend on the API server, since fencing and failover run
+  exactly when it is down. Topology is read once, at the only moment a placement
+  decision exists.
+  Two RPCs carry it: `HostBlockLeg` to the peer (seat the volume at its composer,
+  mint an EMPTY thin lvol, converge the leg export that offers it to that composer
+  alone) and three new `CreateVolume` fields to the composer (registry row + leg row,
+  **STALE** — the peer's copy holds none of the volume's bytes, and a leg that
+  arrived claiming to be in sync would be electable, with `ElectInSync` handing the
+  volume to a copy of nothing). Everything after that follows from the record: the
+  next converge frames two slots, the rebuild fills one. **Ordering: host the leg
+  BEFORE creating the volume.** The reverse returns a healthy-looking volume whose
+  second copy has nowhere to live, and nothing afterwards would ever go back and make
+  one — a silently single-copy replicated volume, which is the exact failure this
+  tier exists to refuse. The accepted cost of that order is an orphan lvol on the
+  peer if the create is then abandoned entirely; retries are idempotent and
+  deterministic, so it converges in every normal case.
+  **A gap the wiring exposed, and a test caught: `ensure_leg_export` had never been
+  called from anywhere but its own tests.** The pass's subject was `scsi_volumes()` —
+  the geometry cache — and geometry is recorded at CreateVolume ON THE COMPOSER, so a
+  target that merely hosts a copy has none and dropped out of the pass entirely. It
+  also has no *serviceable* volumes, which is a SECOND early return the leg lane has
+  to sit in front of. Fixed by making the subject the union of geometry and seats,
+  and by putting the leg lane before both returns.
+  DeleteVolume closes the loop: the composer reports the leg targets it is about to
+  sweep (`DeleteVolumeResponse.leg_targets`) and the controller drops each one. That
+  reply is the last thing in the system that knows where the copies are, so a failure
+  there FAILS the delete rather than leaking an lvol no record will ever name again.
+  **Still not proven on hardware.** The chart ships `replicas` (default 1) and the
+  values file says experimental in as many words.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left

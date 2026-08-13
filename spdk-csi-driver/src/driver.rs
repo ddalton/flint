@@ -3697,6 +3697,47 @@ impl SpdkCsiDriver {
 
     /// Get list of all node names in the cluster
     /// Used by snapshot controller to query all nodes for snapshots
+    /// Node name → failure domain, from the standard topology label
+    /// (with the pre-1.17 beta label as a fallback — clusters upgraded
+    /// from it keep both, but a long-lived one may carry only the old).
+    ///
+    /// This is the block tier's ONLY use of the Kubernetes API for
+    /// placement, and it lives here rather than in the MDS on purpose:
+    /// the block record must not depend on the API server being up
+    /// (fencing and failover run when it is not), so topology is read
+    /// once, by the controller, at the only moment a placement decision
+    /// is made.
+    ///
+    /// A node with no zone label maps to nothing rather than to an
+    /// empty-string zone shared with every other unlabelled node —
+    /// "unknown" and "the same place" must not be the same value.
+    pub async fn node_zones(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error + Send + Sync>>
+    {
+        use k8s_openapi::api::core::v1::Node as k8sNode;
+        use kube::api::ListParams;
+
+        const ZONE: &str = "topology.kubernetes.io/zone";
+        const ZONE_BETA: &str = "failure-domain.beta.kubernetes.io/zone";
+
+        let nodes_api: Api<k8sNode> = Api::all(self.kube_client.clone());
+        let nodes = nodes_api.list(&ListParams::default()).await?;
+        let mut out = std::collections::HashMap::new();
+        for n in nodes.items {
+            let Some(name) = n.metadata.name.clone() else { continue };
+            let labels = n.metadata.labels.unwrap_or_default();
+            if let Some(zone) = labels
+                .get(ZONE)
+                .or_else(|| labels.get(ZONE_BETA))
+                .filter(|z| !z.is_empty())
+            {
+                out.insert(name, zone.clone());
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn get_all_nodes(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         use kube::api::ListParams;
         use k8s_openapi::api::core::v1::Node as k8sNode;

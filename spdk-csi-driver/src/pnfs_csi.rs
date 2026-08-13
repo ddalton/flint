@@ -72,8 +72,145 @@ pub mod sc_params {
     pub const STRIPE_WIDTH: &str = "pnfs.flint.io/stripeWidth";
     pub const DIR_GID: &str = "pnfs.flint.io/dirGid";
     pub const DIR_MODE: &str = "pnfs.flint.io/dirMode";
+    /// Copies of a block-class volume: 1 (the default) or 2.
+    pub const REPLICAS: &str = "pnfs.flint.io/replicas";
+    /// Permit the second copy to land in a DIFFERENT failure domain.
+    /// Off by default, and the default is a COST decision — see
+    /// [`choose_leg_host`].
+    pub const CROSS_ZONE: &str = "pnfs.flint.io/replicaCrossZone";
 
-    pub const ALL: &[&str] = &[STRIPE_SIZE, STRIPE_WIDTH, DIR_GID, DIR_MODE];
+    pub const ALL: &[&str] =
+        &[STRIPE_SIZE, STRIPE_WIDTH, DIR_GID, DIR_MODE, REPLICAS, CROSS_ZONE];
+}
+
+/// A target that could hold a copy of a block volume: one MDS shard,
+/// the tgt it drives, and the failure domain that tgt is in.
+///
+/// Assembled by the CSI controller from `BlockExportStatus` (the shard's
+/// own statement about its export) joined with the Kubernetes Node
+/// object (the zone). The MDS never reads a Node — the block tier's
+/// record deliberately does not depend on the API server, and placement
+/// is decided once, at CreateVolume, by the component that already has
+/// a client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegHost {
+    pub shard: usize,
+    /// What the target calls itself: the seat's composer, the leg row's
+    /// target, the registry's key. `export_node` from BlockExportStatus.
+    pub target_id: String,
+    pub traddr: String,
+    pub trsvcid: u32,
+    /// `topology.kubernetes.io/zone` of the export node. EMPTY means
+    /// unknown, which placement treats as "not provably same-zone" —
+    /// never as "same zone as everything".
+    pub zone: String,
+}
+
+/// Why a second copy could not be placed. Each one is a different
+/// conversation with the operator, so they are different values rather
+/// than one string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlacementRefusal {
+    /// One target in the fleet. A second copy of a volume on the same
+    /// target is not a second copy.
+    Alone { composer: String },
+    /// Targets exist, but none in the composer's zone, and cross-zone
+    /// was not asked for.
+    NoneInZone { zone: String, elsewhere: Vec<String> },
+    /// Nobody knows what zone the composer is in, so "same zone" cannot
+    /// be asserted about anything. Refusing beats guessing: the guess
+    /// that costs money is the one that says "probably fine".
+    ZoneUnknown { composer: String },
+}
+
+impl std::fmt::Display for PlacementRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Alone { composer } => write!(
+                f,
+                "replicas: 2 needs a second target and '{composer}' is the only one with a block \
+                 export — a second copy on the same target is not a second copy"
+            ),
+            Self::NoneInZone { zone, elsewhere } => write!(
+                f,
+                "replicas: 2 found no target in zone '{zone}' (targets exist in: {}). Placing \
+                 the copy across zones is not free — every mirrored write and every rebuild \
+                 byte pays inter-zone egress, forever — so it must be asked for explicitly \
+                 with {}: \"true\"",
+                elsewhere.join(", "),
+                sc_params::CROSS_ZONE
+            ),
+            Self::ZoneUnknown { composer } => write!(
+                f,
+                "replicas: 2 cannot place a copy: the zone of '{composer}' is unknown (no \
+                 {} label on its node), so no target can be shown to share its failure domain. \
+                 Label the nodes, or ask for cross-zone placement explicitly with {}: \"true\"",
+                "topology.kubernetes.io/zone",
+                sc_params::CROSS_ZONE
+            ),
+        }
+    }
+}
+
+/// WHERE THE SECOND COPY GOES (design §12).
+///
+/// Same zone as the composer unless asked otherwise, and that default
+/// is a COST decision before it is a durability one. A cross-zone leg
+/// pays inter-zone egress on every mirrored write for the life of the
+/// volume, and pays it again on the whole allocated set every time the
+/// leg is rebuilt — which, on this tier, happens after any unclean
+/// restart of the composer. AZ-loss durability is a priced tier, not a
+/// default, and the price is large enough that it must be typed out by
+/// the person choosing it.
+///
+/// Deterministic, and that is load-bearing rather than tidy: the CSI
+/// provisioner retries CreateVolume by name, so a placement that varied
+/// between attempts would host legs on a different peer each time and
+/// leave the losers behind as orphans. Same volume, same fleet, same
+/// answer.
+pub fn choose_leg_host<'a>(
+    volume: &str,
+    composer: &str,
+    fleet: &'a [LegHost],
+    cross_zone: bool,
+) -> Result<&'a LegHost, PlacementRefusal> {
+    let mut candidates: Vec<&LegHost> = fleet
+        .iter()
+        .filter(|h| h.target_id != composer && !h.target_id.is_empty() && !h.traddr.is_empty())
+        .collect();
+    if candidates.is_empty() {
+        return Err(PlacementRefusal::Alone { composer: composer.to_string() });
+    }
+    if !cross_zone {
+        let zone = fleet
+            .iter()
+            .find(|h| h.target_id == composer)
+            .map(|h| h.zone.clone())
+            .unwrap_or_default();
+        if zone.is_empty() {
+            return Err(PlacementRefusal::ZoneUnknown { composer: composer.to_string() });
+        }
+        let in_zone: Vec<&LegHost> =
+            candidates.iter().copied().filter(|h| h.zone == zone).collect();
+        if in_zone.is_empty() {
+            let mut elsewhere: Vec<String> = candidates
+                .iter()
+                .map(|h| {
+                    if h.zone.is_empty() { "<unknown>".to_string() } else { h.zone.clone() }
+                })
+                .collect();
+            elsewhere.sort();
+            elsewhere.dedup();
+            return Err(PlacementRefusal::NoneInZone { zone, elsewhere });
+        }
+        candidates = in_zone;
+    }
+    // Sort before hashing: the fleet arrives in whatever order the
+    // shards answered, and a placement that depended on that would not
+    // survive its own retry.
+    candidates.sort_by(|a, b| a.target_id.cmp(&b.target_id));
+    let pick = (fnv1a(volume) % candidates.len() as u64) as usize;
+    Ok(candidates[pick])
 }
 
 /// Per-volume options carried from StorageClass parameters into
@@ -94,6 +231,12 @@ pub struct VolumeOptions {
     /// `pnfs.flint.io/*` parameter — the top-level `layout` key is the
     /// class selector, dispatched in main.rs before this struct exists.
     pub layout_class: crate::pnfs::mds::layout::LayoutClass,
+    /// Copies of a block-class volume. 0 and 1 both mean "one copy",
+    /// which is every volume provisioned before this existed.
+    pub replicas: u32,
+    /// Whether the second copy may land outside the composer's failure
+    /// domain. See [`choose_leg_host`] for why this is off by default.
+    pub cross_zone: bool,
 }
 
 impl VolumeOptions {
@@ -198,6 +341,42 @@ impl VolumeOptions {
                 sc_params::DIR_MODE,
                 o.dir_mode,
                 sc_params::DIR_GID
+            ));
+        }
+
+        if let Some(v) = num(sc_params::REPLICAS)? {
+            // Two is the ceiling because raid1 with two legs is what the
+            // composition machine was modelled and built for: the
+            // election gate, the degrade barrier and the rebuild all
+            // reason about ONE peer. A third leg is not a bigger number,
+            // it is a different machine.
+            if v == 0 || v > 2 {
+                return Err(format!(
+                    "{}: {} is out of range — 1 or 2",
+                    sc_params::REPLICAS,
+                    v
+                ));
+            }
+            o.replicas = v as u32;
+        }
+        match params.get(sc_params::CROSS_ZONE).map(|s| s.trim()) {
+            None => {}
+            Some("true") => o.cross_zone = true,
+            Some("false") => o.cross_zone = false,
+            Some(other) => {
+                return Err(format!(
+                    "{}: '{}' is not a boolean (\"true\" or \"false\")",
+                    sc_params::CROSS_ZONE,
+                    other
+                ))
+            }
+        }
+        if o.cross_zone && o.replicas < 2 {
+            return Err(format!(
+                "{} was set on a volume with no second copy — it governs where the SECOND copy \
+                 goes, so it means nothing without {}: \"2\"",
+                sc_params::CROSS_ZONE,
+                sc_params::REPLICAS
             ));
         }
 
@@ -365,16 +544,21 @@ impl PnfsCsi {
         volume_id: &str,
         size_bytes: u64,
     ) -> Result<HashMap<String, String>, PnfsError> {
-        self.create_volume_with(volume_id, size_bytes, &VolumeOptions::default())
+        self.create_volume_with(volume_id, size_bytes, &VolumeOptions::default(), None)
             .await
     }
 
-    /// `create_volume` with per-volume options from the StorageClass.
+    /// `create_volume` with per-volume options from the StorageClass,
+    /// and — for a replicated block volume — the target the controller
+    /// PLACED its second copy on. The composer records that as a
+    /// registry row and a stale leg row; everything after it (the
+    /// two-slot frame, the rebuild) follows from the record.
     pub async fn create_volume_with(
         &self,
         volume_id: &str,
         size_bytes: u64,
         opts: &VolumeOptions,
+        leg: Option<&LegHost>,
     ) -> Result<HashMap<String, String>, PnfsError> {
         let mut client = self.dial().await?;
         let resp = client
@@ -386,6 +570,9 @@ impl PnfsCsi {
                 dir_gid: opts.dir_gid,
                 dir_mode: opts.dir_mode,
                 layout_class: opts.layout_class.as_str().to_string(),
+                leg_target: leg.map(|l| l.target_id.clone()).unwrap_or_default(),
+                leg_traddr: leg.map(|l| l.traddr.clone()).unwrap_or_default(),
+                leg_trsvcid: leg.map(|l| l.trsvcid).unwrap_or(0),
             })
             .await
             .map_err(|e| PnfsError::Transport(format!("CreateVolume: {}", e)))?
@@ -494,6 +681,19 @@ impl PnfsCsi {
     /// Tear down a pNFS volume. Idempotent on the MDS side — deleting
     /// an absent volume returns success.
     pub async fn delete_volume(&self, volume_id: &str) -> Result<(), PnfsError> {
+        self.delete_volume_reporting_legs(volume_id).await.map(|_| ())
+    }
+
+    /// `delete_volume`, returning the targets that held a leg of it.
+    ///
+    /// The composer reads them from its record before sweeping it, and
+    /// this reply is the only place that answer ever exists: afterwards
+    /// no record on any target names the peer's lvol, so a caller that
+    /// discards this list has leaked it.
+    pub async fn delete_volume_reporting_legs(
+        &self,
+        volume_id: &str,
+    ) -> Result<Vec<String>, PnfsError> {
         let mut client = self.dial().await?;
         let resp = client
             .delete_volume(DeleteVolumeRequest {
@@ -510,7 +710,7 @@ impl PnfsCsi {
                 resp.message
             }));
         }
-        Ok(())
+        Ok(resp.leg_targets)
     }
 
     /// Grow a pNFS volume's recorded capacity.
@@ -645,6 +845,66 @@ impl PnfsCsi {
     /// empty initiator list into permission to restart a target, so a
     /// shard that cannot answer must be unmistakable from a shard that
     /// answers "nobody".
+    /// Ask this shard to host a copy of a volume it does not compose.
+    pub async fn host_block_leg(
+        &self,
+        volume_id: &str,
+        size_bytes: u64,
+        composer_target: &str,
+    ) -> Result<(), PnfsError> {
+        let mut client = self.dial().await?;
+        let resp = client
+            .host_block_leg(crate::pnfs::grpc::HostBlockLegRequest {
+                volume_id: volume_id.to_string(),
+                size_bytes,
+                composer_target: composer_target.to_string(),
+            })
+            .await
+            .map_err(|e| {
+                if e.code() == tonic::Code::Unimplemented {
+                    PnfsError::Mds(
+                        "this MDS predates HostBlockLeg — a replicated block volume needs \
+                         every shard on an image that can host a leg (the chart pins them \
+                         together)"
+                            .into(),
+                    )
+                } else {
+                    PnfsError::Transport(format!("HostBlockLeg: {}", e))
+                }
+            })?
+            .into_inner();
+        if resp.hosted {
+            Ok(())
+        } else {
+            Err(PnfsError::Mds(if resp.message.is_empty() {
+                "MDS refused HostBlockLeg (no message)".into()
+            } else {
+                resp.message
+            }))
+        }
+    }
+
+    /// Ask this shard to drop a leg it hosts. Idempotent at the MDS.
+    pub async fn drop_block_leg(&self, volume_id: &str) -> Result<(), PnfsError> {
+        let mut client = self.dial().await?;
+        let resp = client
+            .drop_block_leg(crate::pnfs::grpc::DropBlockLegRequest {
+                volume_id: volume_id.to_string(),
+            })
+            .await
+            .map_err(|e| PnfsError::Transport(format!("DropBlockLeg: {}", e)))?
+            .into_inner();
+        if resp.dropped {
+            Ok(())
+        } else {
+            Err(PnfsError::Mds(if resp.message.is_empty() {
+                "MDS refused DropBlockLeg (no message)".into()
+            } else {
+                resp.message
+            }))
+        }
+    }
+
     pub async fn block_export_status(&self) -> Result<BlockExportView, PnfsError> {
         let mut client = self.dial().await?;
         let resp = client
@@ -675,6 +935,7 @@ impl PnfsCsi {
             enabled: resp.enabled,
             export_node: resp.export_node,
             export_traddr: resp.export_traddr,
+            export_trsvcid: resp.export_trsvcid,
             initiators: resp
                 .initiators
                 .into_iter()
@@ -750,6 +1011,7 @@ pub struct BlockExportView {
     /// `export_traddr` against the Node objects instead.
     pub export_node: String,
     pub export_traddr: String,
+    pub export_trsvcid: u32,
     pub initiators: Vec<BlockInitiatorView>,
 }
 
@@ -940,6 +1202,48 @@ impl PnfsShards {
     /// one that happens to have fewer initiators, and the difference is
     /// exactly whether a node with live clients gets rolled. The
     /// campaign pausing on an unreachable MDS is the cheap failure.
+    /// The block fleet: every shard that has a block export, as a
+    /// placement candidate. Zones are left EMPTY — only the caller has
+    /// a Kubernetes client, and the MDS deliberately does not.
+    ///
+    /// Unreachable shards are skipped rather than fatal, unlike the
+    /// roller's union. The questions differ: the roller asks "may I
+    /// restart this node", where a missing answer could hide a live
+    /// initiator, and placement asks "where could a copy go", where a
+    /// shard that cannot answer is simply not a candidate. Placing a
+    /// copy on a target that is down would fail at the very next step
+    /// anyway.
+    pub async fn block_fleet(&self) -> Vec<LegHost> {
+        let mut out = Vec::new();
+        for (i, shard) in self.shards.iter().enumerate() {
+            match shard.block_export_status().await {
+                Ok(v) if v.enabled => out.push(LegHost {
+                    shard: i,
+                    target_id: v.export_node.clone(),
+                    traddr: v.export_traddr.clone(),
+                    trsvcid: v.export_trsvcid,
+                    zone: String::new(),
+                }),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "placement: shard {} ({}) did not answer ({}) — not a candidate this \
+                         round",
+                        i,
+                        shard.endpoint(),
+                        e
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// The shard client for a placement candidate.
+    pub fn shard_at(&self, shard: usize) -> Option<&PnfsCsi> {
+        self.shards.get(shard)
+    }
+
     pub async fn block_export_status_all(&self) -> Result<Vec<BlockExportView>, PnfsError> {
         let mut out = Vec::with_capacity(self.shards.len());
         for (i, shard) in self.shards.iter().enumerate() {
@@ -1146,6 +1450,8 @@ mod tests {
         last_create_request: Mutex<Option<CreateVolumeRequest>>,
         last_attach: Mutex<Option<(String, String)>>,
         last_detach: Mutex<Option<(String, String)>>,
+        last_host_leg: Mutex<Option<crate::pnfs::grpc::HostBlockLegRequest>>,
+        last_drop_leg: Mutex<Option<String>>,
     }
 
     impl MockMds {
@@ -1162,12 +1468,32 @@ mod tests {
                 last_delete_volume_id: Mutex::new(None),
                 last_attach: Mutex::new(None),
                 last_detach: Mutex::new(None),
+                last_host_leg: Mutex::new(None),
+                last_drop_leg: Mutex::new(None),
             }
         }
     }
 
     #[tonic::async_trait]
     impl MdsControl for MockMds {
+        async fn host_block_leg(
+            &self, r: Request<crate::pnfs::grpc::HostBlockLegRequest>,
+        ) -> Result<Response<crate::pnfs::grpc::HostBlockLegResponse>, Status> {
+            *self.last_host_leg.lock().unwrap() = Some(r.into_inner());
+            Ok(Response::new(crate::pnfs::grpc::HostBlockLegResponse {
+                hosted: true,
+                message: String::new(),
+            }))
+        }
+        async fn drop_block_leg(
+            &self, r: Request<crate::pnfs::grpc::DropBlockLegRequest>,
+        ) -> Result<Response<crate::pnfs::grpc::DropBlockLegResponse>, Status> {
+            *self.last_drop_leg.lock().unwrap() = Some(r.into_inner().volume_id);
+            Ok(Response::new(crate::pnfs::grpc::DropBlockLegResponse {
+                dropped: true,
+                message: String::new(),
+            }))
+        }
         async fn register_data_server(
             &self, _: Request<RegisterRequest>,
         ) -> Result<Response<RegisterResponse>, Status> {
@@ -1314,7 +1640,7 @@ mod tests {
                 message: String::new(),
                 nfs_port: 20490,
                 directory: true, effective_stripe_size: 0, effective_stripe_width: 0, effective_layout_class: String::new(), },
-            DeleteVolumeResponse { deleted: true, message: String::new() },
+            DeleteVolumeResponse { deleted: true, message: String::new(), ..Default::default() },
         ));
         let addr = start_mock_mds(mock.clone()).await;
 
@@ -1351,7 +1677,7 @@ mod tests {
                 message: "size mismatch: existing 4096, requested 8192".into(),
                 nfs_port: 0,
                 directory: false, effective_stripe_size: 0, effective_stripe_width: 0, effective_layout_class: String::new(), },
-            DeleteVolumeResponse { deleted: true, message: String::new() },
+            DeleteVolumeResponse { deleted: true, message: String::new(), ..Default::default() },
         ));
         let addr = start_mock_mds(mock).await;
         let p = PnfsCsi::new(&addr);
@@ -1373,7 +1699,7 @@ mod tests {
                 message: String::new(),
                 nfs_port: 2049,
                 directory: true, effective_stripe_size: 0, effective_stripe_width: 0, effective_layout_class: String::new(), },
-            DeleteVolumeResponse { deleted: true, message: String::new() },
+            DeleteVolumeResponse { deleted: true, message: String::new(), ..Default::default() },
         ));
         let addr = start_mock_mds(mock.clone()).await;
         let p = PnfsCsi::new(&addr);
@@ -1401,7 +1727,7 @@ mod tests {
                 effective_stripe_size: 0, effective_stripe_width: 0,
                 effective_layout_class: String::new(),
             },
-            DeleteVolumeResponse { deleted: true, message: String::new() },
+            DeleteVolumeResponse { deleted: true, message: String::new(), ..Default::default() },
         ));
         *mock.block_status_unimplemented.lock().unwrap() = true;
         let addr = start_mock_mds(mock.clone()).await;
@@ -1444,7 +1770,7 @@ mod tests {
                 effective_stripe_size: 0, effective_stripe_width: 0,
                 effective_layout_class: String::new(),
             },
-            DeleteVolumeResponse { deleted: true, message: String::new() },
+            DeleteVolumeResponse { deleted: true, message: String::new(), ..Default::default() },
         ));
         *mock.canned_attach.lock().unwrap() = Some(crate::pnfs::grpc::AttachBlockNodeResponse {
             attached: true,
@@ -1502,7 +1828,7 @@ mod tests {
                 effective_stripe_size: 0, effective_stripe_width: 0,
                 effective_layout_class: String::new(),
             },
-            DeleteVolumeResponse { deleted: true, message: String::new() },
+            DeleteVolumeResponse { deleted: true, message: String::new(), ..Default::default() },
         ));
         *mock.canned_attach.lock().unwrap() = Some(crate::pnfs::grpc::AttachBlockNodeResponse {
             attached: true,
@@ -1652,7 +1978,7 @@ mod tests {
             volume_file: "pvc-routed".into(),
             nfs_port: 2049,
             directory: true, effective_stripe_size: 0, effective_stripe_width: 0, effective_layout_class: String::new(), };
-        let canned_delete = DeleteVolumeResponse { deleted: true, message: String::new() };
+        let canned_delete = DeleteVolumeResponse { deleted: true, message: String::new(), ..Default::default() };
         let mock0 = std::sync::Arc::new(MockMds::new(canned_create.clone(), canned_delete.clone()));
         let mock1 = std::sync::Arc::new(MockMds::new(canned_create, canned_delete));
         let ep0 = start_mock_mds(std::sync::Arc::clone(&mock0)).await;
@@ -2089,5 +2415,129 @@ mod volume_options_tests {
     #[test]
     fn asking_for_no_geometry_tolerates_an_old_mds() {
         VolumeOptions::default().check_echo(0, 0).expect("must not fail");
+    }
+
+    fn host(shard: usize, id: &str, zone: &str) -> LegHost {
+        LegHost {
+            shard,
+            target_id: id.into(),
+            traddr: format!("10.0.0.{}", shard + 1),
+            trsvcid: 4420,
+            zone: zone.into(),
+        }
+    }
+
+    /// THE DEFAULT IS SAME-ZONE, AND IT IS A COST DECISION.
+    ///
+    /// A cross-zone leg pays inter-zone egress on every mirrored write
+    /// for the life of the volume, and again on the whole allocated set
+    /// every time that leg is rebuilt. So a fleet with a same-zone peer
+    /// places there, and a fleet without one REFUSES rather than
+    /// quietly spending the money.
+    ///
+    /// A/B: drop the zone filter and the second case silently places
+    /// across zones — which is exactly how a benchmark bill ends up
+    /// dominated by transfer rather than compute.
+    #[test]
+    fn the_second_copy_lands_in_the_composers_zone_or_not_at_all() {
+        let fleet = vec![
+            host(0, "tgt-a", "us-west-2a"),
+            host(1, "tgt-b", "us-west-2a"),
+            host(2, "tgt-c", "us-west-2b"),
+        ];
+        let leg = choose_leg_host("pvc-1", "tgt-a", &fleet, false).expect("placed");
+        assert_eq!(leg.target_id, "tgt-b", "the only peer in the composer's zone");
+
+        // Composer alone in its zone: the cross-zone candidates are
+        // named, and the parameter that would allow them is named too.
+        match choose_leg_host("pvc-1", "tgt-c", &fleet, false) {
+            Err(PlacementRefusal::NoneInZone { zone, elsewhere }) => {
+                assert_eq!(zone, "us-west-2b");
+                assert_eq!(elsewhere, vec!["us-west-2a".to_string()]);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // …and asked for explicitly, it places.
+        let leg = choose_leg_host("pvc-1", "tgt-c", &fleet, true).expect("placed");
+        assert_ne!(leg.target_id, "tgt-c", "never the composer itself");
+    }
+
+    /// An unlabelled node is UNKNOWN, never "the same place as
+    /// everything else". Two unlabelled nodes are not in the same zone
+    /// merely because both answers are empty.
+    #[test]
+    fn an_unknown_zone_refuses_rather_than_matching_every_other_unknown() {
+        let fleet = vec![host(0, "tgt-a", ""), host(1, "tgt-b", "")];
+        match choose_leg_host("pvc-1", "tgt-a", &fleet, false) {
+            Err(PlacementRefusal::ZoneUnknown { composer }) => assert_eq!(composer, "tgt-a"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// One target is not two copies.
+    #[test]
+    fn a_single_target_fleet_refuses_and_says_why() {
+        let fleet = vec![host(0, "tgt-a", "us-west-2a")];
+        match choose_leg_host("pvc-1", "tgt-a", &fleet, false) {
+            Err(PlacementRefusal::Alone { composer }) => {
+                assert_eq!(composer, "tgt-a");
+                let msg = PlacementRefusal::Alone { composer }.to_string();
+                assert!(msg.contains("not a second copy"), "{msg}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// DETERMINISM IS LOAD-BEARING, not tidiness: the provisioner
+    /// retries CreateVolume by name, and a placement that varied
+    /// between attempts would host a leg on a different peer each time
+    /// and strand every loser as an orphan lvol nothing names.
+    ///
+    /// A/B: pick by fleet order instead and the shuffled case moves.
+    #[test]
+    fn placement_is_stable_across_retries_and_answer_order() {
+        let fleet = vec![
+            host(0, "tgt-a", "z"),
+            host(1, "tgt-b", "z"),
+            host(2, "tgt-c", "z"),
+            host(3, "tgt-d", "z"),
+        ];
+        let first = choose_leg_host("pvc-stable", "tgt-a", &fleet, false).unwrap().target_id.clone();
+        let mut shuffled = fleet.clone();
+        shuffled.reverse();
+        let again = choose_leg_host("pvc-stable", "tgt-a", &shuffled, false).unwrap();
+        assert_eq!(again.target_id, first, "the shards answered in a different order");
+        // And different volumes do not all pile onto one peer.
+        let picks: std::collections::HashSet<String> = (0..24)
+            .map(|i| {
+                choose_leg_host(&format!("pvc-{i}"), "tgt-a", &fleet, false)
+                    .unwrap()
+                    .target_id
+                    .clone()
+            })
+            .collect();
+        assert!(picks.len() > 1, "every volume placed on the same peer: {picks:?}");
+    }
+
+    /// `replicas` is a block-class parameter with a closed range, and
+    /// the cross-zone switch means nothing without it.
+    #[test]
+    fn the_replicas_parameter_is_bounded_and_its_companion_needs_it() {
+        let p = |k: &str, v: &str| {
+            let mut m = std::collections::HashMap::new();
+            m.insert(k.to_string(), v.to_string());
+            m
+        };
+        assert_eq!(VolumeOptions::from_parameters(&p(sc_params::REPLICAS, "2")).unwrap().replicas, 2);
+        assert!(VolumeOptions::from_parameters(&p(sc_params::REPLICAS, "3")).is_err());
+        assert!(VolumeOptions::from_parameters(&p(sc_params::REPLICAS, "0")).is_err());
+        // The companion alone is a mistake worth naming: it governs
+        // where the SECOND copy goes, and there is no second copy.
+        let err = VolumeOptions::from_parameters(&p(sc_params::CROSS_ZONE, "true")).unwrap_err();
+        assert!(err.contains("no second copy"), "{err}");
+        let mut both = p(sc_params::REPLICAS, "2");
+        both.insert(sc_params::CROSS_ZONE.into(), "true".into());
+        let o = VolumeOptions::from_parameters(&both).unwrap();
+        assert!(o.cross_zone && o.replicas == 2);
     }
 }

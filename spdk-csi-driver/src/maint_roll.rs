@@ -1757,18 +1757,21 @@ mod tests {
                 enabled: true,
                 export_node: "tgt-1".into(),
                 export_traddr: "10.0.0.1".into(),
+                export_trsvcid: 4420,
                 initiators: vec![init("vol-a", "w1"), init("vol-a", "w2")],
             },
             BlockExportView {
                 enabled: true,
                 export_node: "tgt-1".into(),
                 export_traddr: "10.0.0.1".into(),
+                export_trsvcid: 4420,
                 initiators: vec![init("vol-b", "w1")],
             },
             BlockExportView {
                 enabled: true,
                 export_node: "tgt-2".into(),
                 export_traddr: "10.0.0.2".into(),
+                export_trsvcid: 4420,
                 initiators: vec![init("vol-c", "w3")],
             },
             // Enabled but idle, and not enabled at all: neither appears.
@@ -1776,6 +1779,7 @@ mod tests {
                 enabled: true,
                 export_node: "tgt-3".into(),
                 export_traddr: "10.0.0.3".into(),
+                export_trsvcid: 4420,
                 initiators: Vec::new(),
             },
             BlockExportView::default(),
@@ -1809,6 +1813,7 @@ mod tests {
             enabled: true,
             export_node: String::new(),
             export_traddr: "10.0.0.7".into(),
+                export_trsvcid: 4420,
             initiators: vec![BlockInitiatorView {
                 volume_id: "vol-a".into(),
                 host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
@@ -1841,6 +1846,7 @@ mod tests {
             enabled: true,
             export_node: String::new(),
             export_traddr: "10.9.9.9".into(),
+                export_trsvcid: 4420,
             initiators: vec![BlockInitiatorView {
                 volume_id: "vol-a".into(),
                 host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
@@ -1864,6 +1870,7 @@ mod tests {
             enabled: true,
             export_node: String::new(),
             export_traddr: "10.9.9.9".into(),
+                export_trsvcid: 4420,
             initiators: Vec::new(),
         }];
         assert!(resolve_block_busy(&exports, &[]).unwrap().is_empty());
@@ -1934,6 +1941,7 @@ mod tests {
             enabled: true,
             export_node: node.into(),
             export_traddr: traddr.into(),
+                export_trsvcid: 4420,
             initiators: vec![BlockInitiatorView {
                 volume_id: "vol-a".into(),
                 host_nqn: "nqn.2024-11.com.flint:node:w1".into(),
