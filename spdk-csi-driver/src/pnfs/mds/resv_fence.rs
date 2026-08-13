@@ -511,6 +511,42 @@ impl Queue {
     }
 }
 
+/// REACHABILITY PROBE for a target this MDS may not be colocated with
+/// (design §12's remote prober). TCP connect plus the NVMe/TCP
+/// initialize-connection exchange, then hang up.
+///
+/// Deliberately stops before the fabrics Connect: naming a subsystem
+/// would make the probe a question about one VOLUME's export, and the
+/// target this most needs to ask about is a promotion CANDIDATE, which
+/// by definition does not export the volume yet — its leg is a leg, not
+/// a composition. ICReq/ICResp is the strongest subsystem-agnostic
+/// statement available: not "a port is open" but "an NVMe/TCP target is
+/// speaking the protocol here".
+///
+/// The timeout is mandatory and is the whole reason this is not a bare
+/// `TcpStream::connect`: a partitioned node black-holes and the OS would
+/// wait out its own SYN retries, stalling the reconcile pass behind a
+/// node that is, by hypothesis, exactly the one that stopped answering.
+/// Note what the two socket outcomes ARE — a refusal (process gone) and
+/// a timeout (packets going nowhere) are precisely "dead" and
+/// "partitioned", and this deliberately folds them into one failure.
+/// That is not an approximation; distinguishing them is the thing the
+/// composition machine assumes nobody can do.
+pub async fn probe_nvme_tcp(
+    traddr: &str,
+    trsvcid: u16,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    match tokio::time::timeout(timeout, Queue::open(traddr, trsvcid)).await {
+        Ok(Ok(_queue)) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(format!(
+            "no NVMe/TCP response from {traddr}:{trsvcid} within {:?}",
+            timeout
+        )),
+    }
+}
+
 /// An enabled controller: admin queue held open (dropping it destroys
 /// the controller), I/O queue ready for NVM commands.
 struct Session {

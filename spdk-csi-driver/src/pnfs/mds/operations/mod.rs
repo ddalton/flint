@@ -1854,68 +1854,94 @@ pub async fn export_reconcile_pass(
         return (0, 0);
     }
 
-    // THE UNREACHABILITY VERDICT, before anything that talks to the tgt.
-    // One probe answers what N per-volume converge failures were only
-    // hinting at, and the answer is a named state rather than an error
-    // storm. Note what the verdict does NOT claim: `Unreachable` is
-    // about reach, never about liveness — the target may be serving
-    // every one of its clients through paths this MDS cannot see, which
-    // is exactly the world every belt in FlintComposition was built for.
-    let verdict = reconciler.probe_target().await;
-    if let crate::pnfs::mds::block_export::Reachability::Unreachable { strikes, since_unix } =
-        verdict
-    {
-        tracing::error!(
-            "🔻 {}: target '{}' UNREACHABLE ({} consecutive failed probes since {}) — this says \
-             nothing about whether it is still serving its clients",
-            context,
-            crate::pnfs::mds::block_export::target_id(),
-            strikes,
-            since_unix
-        );
-        // Under a verdict, every volume seated at that target is a
-        // promotion candidate. The CAS's own gates decide; today they
-        // refuse every time, because a single-copy volume has nowhere
-        // to go — which is the correct answer, logged as one.
-        for v in &volumes {
-            match reconciler.attempt_promotion(v).await {
-                crate::pnfs::mds::block_export::PromotionOutcome::Promoted { from, to, epoch } => {
-                    tracing::warn!(
-                        "🔀 {} '{}': composer '{}' → '{}' at epoch {} — eviction, assembly and \
-                         client redirect are NOT yet implemented, so this record has moved \
-                         ahead of the machinery that follows it",
-                        context, v, from, to, epoch
-                    );
-                }
-                crate::pnfs::mds::block_export::PromotionOutcome::NoCandidate { reason } => {
-                    tracing::warn!("⏸ {} '{}': no promotion — {}", context, v, reason);
-                }
-                crate::pnfs::mds::block_export::PromotionOutcome::Raced { epoch, composer } => {
-                    tracing::info!(
-                        "{} '{}': promotion raced, seat now epoch {} composer '{}'",
-                        context, v, epoch, composer
-                    );
-                }
-                crate::pnfs::mds::block_export::PromotionOutcome::Refused(r) => {
-                    tracing::warn!("{} '{}': promotion refused — {}", context, v, r);
-                }
+    // THE VERDICTS, before anything that talks to a target: probe every
+    // registered target at the coordinates the registry holds, and let
+    // the answers decide what the rest of this pass is even about.
+    //
+    // Note what a verdict does NOT claim. `Unreachable` is about reach,
+    // never about liveness — the target may be serving every one of its
+    // clients through paths this MDS cannot see, which is exactly the
+    // world every belt in FlintComposition was built for.
+    let verdicts = reconciler.probe_all_targets().await;
+    let condemned: std::collections::HashSet<String> = verdicts
+        .iter()
+        .filter(|(_, v)| v.is_unreachable())
+        .map(|(id, v)| {
+            if let crate::pnfs::mds::block_export::Reachability::Unreachable {
+                strikes,
+                since_unix,
+            } = v
+            {
+                tracing::error!(
+                    "🔻 {}: target '{}' UNREACHABLE ({} consecutive failed probes since {}) — \
+                     this says nothing about whether it is still serving its clients",
+                    context, id, strikes, since_unix
+                );
+            }
+            id.clone()
+        })
+        .collect();
+
+    // Partition the volumes by the composer their RECORD names. This is
+    // the obligation the CAS commit wrote down and left for the prober:
+    // once a seat can point somewhere else, "our target is down" stops
+    // being the same statement as "this volume is down", and a pass that
+    // conflated them would strand every volume that had already been
+    // promoted away.
+    let seats: std::collections::HashMap<String, String> =
+        match layout_manager.state_backend().block_seat_list().await {
+            Ok(Ok(list)) => list.into_iter().map(|s| (s.volume, s.composer)).collect(),
+            Ok(Err(e)) => {
+                tracing::error!("{} seat list unreadable: {} — converging none", context, e);
+                return (0, 0);
+            }
+            Err(e) => {
+                tracing::error!("{} seat list unreadable: {} — converging none", context, e);
+                return (0, 0);
+            }
+        };
+    let (stranded, serviceable): (Vec<String>, Vec<String>) = volumes
+        .iter()
+        .cloned()
+        .partition(|v| seats.get(v).is_some_and(|c| condemned.contains(c)));
+
+    // Every volume whose composer is condemned is a promotion candidate.
+    // The CAS's own gates decide; on a single-copy volume they refuse
+    // every time, because there is nowhere to promote TO — the correct
+    // answer, logged as one rather than left as silence.
+    for v in &stranded {
+        match reconciler.attempt_promotion(v).await {
+            crate::pnfs::mds::block_export::PromotionOutcome::Promoted { from, to, epoch } => {
+                tracing::warn!(
+                    "🔀 {} '{}': composer '{}' → '{}' at epoch {} — eviction, assembly and \
+                     client redirect are NOT yet implemented, so this record has moved ahead \
+                     of the machinery that follows it",
+                    context, v, from, to, epoch
+                );
+            }
+            crate::pnfs::mds::block_export::PromotionOutcome::NoCandidate { reason } => {
+                tracing::warn!("⏸ {} '{}': no promotion — {}", context, v, reason);
+            }
+            crate::pnfs::mds::block_export::PromotionOutcome::Raced { epoch, composer } => {
+                tracing::info!(
+                    "{} '{}': promotion raced, seat now epoch {} composer '{}'",
+                    context, v, epoch, composer
+                );
+            }
+            crate::pnfs::mds::block_export::PromotionOutcome::Refused(r) => {
+                tracing::warn!("{} '{}': promotion refused — {}", context, v, r);
             }
         }
-        // Converging against a target that is not answering produces one
-        // error per volume and repairs nothing — and re-fencing through
-        // it is the same story. The next pass re-probes; a target that
-        // comes back converges then.
-        //
-        // PRECONDITION, and it is exact: skipping the WHOLE pass is
-        // right only while every volume on this shard is seated at this
-        // MDS's own target, which is true until a promotion succeeds.
-        // The day the remote prober lands — the thing that lets a
-        // promotion fire at all — this must partition the volume list by
-        // composer and keep serving the ones seated elsewhere. Same
-        // place, same commit; the two are the same piece of work.
-        return (0, 0);
     }
 
+    // Converging a volume against a target that is not answering
+    // produces one error and repairs nothing; the next pass re-probes,
+    // and a target that comes back converges then. Volumes seated
+    // elsewhere are untouched by their neighbour's outage.
+    let volumes = serviceable;
+    if volumes.is_empty() {
+        return (0, 0);
+    }
     reconciler.reconcile_all(&volumes).await;
     // Seats whose composer has no registry row cannot be dialed — the
     // deliberate refusal at every dial site. Say so once per pass,
@@ -1946,6 +1972,22 @@ pub async fn export_reconcile_pass(
     match backend.block_fenced_all().await {
         Ok(Ok(fenced)) if !fenced.is_empty() => {
             for (v, c) in fenced {
+                // Re-fencing THROUGH a condemned composer dials a target
+                // that is not answering: it cannot land, and the fence
+                // stays undelivered — which is the safe side, and is
+                // already what the quarantine holds ranges for. Skip it
+                // for the same reason converge is skipped, and leave the
+                // record standing so the next pass retries.
+                if seats.get(&v).is_some_and(|comp| condemned.contains(comp)) {
+                    tracing::warn!(
+                        "{} '{}' client {}: re-fence deferred — composer '{}' is unreachable",
+                        context,
+                        v,
+                        c,
+                        seats.get(&v).map(String::as_str).unwrap_or("?")
+                    );
+                    continue;
+                }
                 match reconciler.fence_preempt(&v, c).await {
                     Ok(s) => {
                         info!("⛔ {} re-fence '{}' client {}: {}", context, v, c, s);
@@ -3058,6 +3100,92 @@ mod fallback_tests {
             Arc::clone(&backend),
         );
         assert_eq!(export_reconcile_pass(&bare, "reconcile").await, (0, 0));
+    }
+
+    /// ONE TARGET'S OUTAGE IS NOT ANOTHER VOLUME'S OUTAGE.
+    ///
+    /// This is the obligation the CAS commit wrote down and left for the
+    /// prober: once a seat can name someone else, "our target is down"
+    /// stops being the same statement as "this volume is down". Two
+    /// volumes here — one seated at this MDS's own (live) target, one
+    /// seated at a peer that is not answering — and the pass must
+    /// converge the first while leaving the second to the promotion
+    /// path. Before the partitioning, a single condemned target skipped
+    /// the WHOLE pass and this returns (0, 0).
+    #[tokio::test]
+    async fn a_condemned_peer_does_not_strand_the_volumes_seated_here() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        for v in ["volMine", "volTheirs"] {
+            lm.set_volume_geometry(
+                v,
+                crate::pnfs::mds::layout::VolumeGeometry {
+                    stripe_size: 0,
+                    stripe_width: 0,
+                    layout_class: crate::pnfs::mds::layout::LayoutClass::Scsi,
+                },
+            )
+            .await;
+            lm.register_extent_arena(v, 1 << 20).await.unwrap();
+        }
+        let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
+        let reconciler = Arc::new(crate::pnfs::mds::block_export::BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        ));
+        // Ours, provisioned here. Theirs, seated at a peer registered at
+        // a port nothing listens on — the "dead" socket shape.
+        reconciler.ensure("volMine", Some(1 << 20)).await.unwrap();
+        backend
+            .block_target_register("node-peer", "127.0.0.1", 1, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        backend.block_seat_volume("volTheirs", "node-peer", 0).await.unwrap().unwrap();
+        lm.attach_block_export(Arc::clone(&reconciler));
+
+        // Condemn the peer: strikes far enough in the past that the
+        // window has passed. The pass's own probe adds one more.
+        let long_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            - 3600;
+        for _ in 0..8 {
+            reconciler.observe("node-peer", false, long_ago);
+        }
+        assert!(reconciler.reachability("node-peer").unwrap().is_unreachable());
+
+        let (vols, _refenced) = export_reconcile_pass(&lm, "reconcile").await;
+        assert_eq!(vols, 1, "the volume seated HERE was converged, not skipped");
+
+        // And it really converged — the export chain is up for ours.
+        let nqn = crate::identity::block_volume_export_nqn("volMine");
+        assert!(
+            tgt.hosts_of(&nqn).contains(&crate::identity::block_mds_host_nqn()),
+            "the local volume's export converged despite the peer's outage"
+        );
+        // The stranded one was not converged through the dead peer.
+        let theirs = crate::identity::block_volume_export_nqn("volTheirs");
+        assert!(
+            tgt.subsystems.lock().unwrap().get(&theirs).is_none(),
+            "a volume seated elsewhere must not be built on THIS target"
+        );
+        // Its seat is untouched: promotion had no in-sync survivor to
+        // elect, which is the correct answer for a single-copy volume.
+        let seat = backend.block_volume_seat("volTheirs").await.unwrap().unwrap().unwrap();
+        assert_eq!((seat.epoch, seat.composer.as_str()), (1, "node-peer"));
     }
 
     /// THE QUARANTINE SWEEP IS WIRED, AND IT RUNS AFTER THE RETRY.

@@ -89,6 +89,23 @@ fn verdict_strikes() -> u32 {
     env_u64("FLINT_PNFS_BLOCK_UNREACHABLE_STRIKES", 3) as u32
 }
 
+/// Is a failed wire probe evidence of a broken LISTENER ADDRESS rather
+/// than of a target that is down? Only when both hold: the target is
+/// ours, so we have a second opinion at all, and its process answered
+/// that second opinion. A predicate rather than an `if` buried in a log
+/// call, because the message makes a claim ("configuration fault, not a
+/// dead target") and a claim is worth pinning.
+fn listener_is_misconfigured(is_self: bool, admin_ok: bool) -> bool {
+    is_self && admin_ok
+}
+
+/// How long one target's probe may take. Bounded and short: a
+/// partitioned node black-holes, and the pass must not wait out the
+/// kernel's SYN retries behind the very node that stopped answering.
+fn probe_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(env_u64("FLINT_PNFS_BLOCK_PROBE_TIMEOUT_SECS", 5))
+}
+
 /// And the wall-clock floor those strikes must span. BOTH conditions,
 /// because a count alone is a statement about loop cadence rather than
 /// about the target: the F60 lesson is that a pass's real period is the
@@ -357,19 +374,84 @@ impl BlockExportReconciler {
         )
     }
 
-    /// Probe THIS reconciler's own tgt and fold the result into the
-    /// verdict. `spdk_get_version` is the cheapest thing that proves the
-    /// process is answering, and reachability is all this asks: a tgt
-    /// that answers but has lost its bdevs is REACHABLE and broken, and
-    /// repairing that is `reconcile_all`'s job, not the verdict's. The
-    /// call is bounded by the transport's own RPC timeout.
-    pub async fn probe_target(&self) -> Reachability {
-        let ok = self
-            .rpc
-            .rpc(&json!({ "method": "spdk_get_version", "params": {} }))
-            .await
-            .is_ok();
-        self.observe(&target_id(), ok, now_unix())
+    /// Probe ONE target at the coordinates the registry holds for it,
+    /// and fold the result into its verdict.
+    ///
+    /// The probe is the DATA path (`resv_fence::probe_nvme_tcp`), and
+    /// uniformly so — for this MDS's own target exactly as for a remote
+    /// one. That uniformity is the point: "reachable" has to mean one
+    /// thing, and the thing the verdict licenses is a decision about who
+    /// SERVES a volume. A control-plane probe over the local RPC socket
+    /// answers a different question — whether the tgt can still be
+    /// administered — and a target whose process is fine while its nvmf
+    /// listener is wedged would pass it while serving nobody. Asking
+    /// each target a different question would make the verdict's meaning
+    /// depend on which target it looked at.
+    ///
+    /// The local RPC socket does keep one job here, as a DIAGNOSTIC: if
+    /// our own listener does not answer while the process does, the
+    /// configured `traddr` is not reachable from this MDS — and it is
+    /// the address every csi-node dials, so that is a live
+    /// misconfiguration and worth naming rather than leaving as a
+    /// mysterious verdict. It never overrides the verdict: the address
+    /// really is broken.
+    pub async fn probe_one(&self, target_id_: &str, traddr: &str, trsvcid: u16) -> Reachability {
+        let res = super::resv_fence::probe_nvme_tcp(traddr, trsvcid, probe_timeout()).await;
+        if let Err(ref why) = res {
+            let admin_ok = if target_id_ == target_id() {
+                self.rpc
+                    .rpc(&json!({ "method": "spdk_get_version", "params": {} }))
+                    .await
+                    .is_ok()
+            } else {
+                // Not ours to administer; no second opinion available.
+                false
+            };
+            if listener_is_misconfigured(target_id_ == target_id(), admin_ok) {
+                tracing::error!(
+                    "target '{}' answers its RPC socket but NOT its own listener {}:{} ({}) — \
+                     that is the address every csi-node dials, so this is a configuration \
+                     fault, not a dead target",
+                    target_id_,
+                    traddr,
+                    trsvcid,
+                    why
+                );
+            }
+        }
+        self.observe(target_id_, res.is_ok(), now_unix())
+    }
+
+    /// THE REMOTE PROBER: probe every registered target, concurrently,
+    /// and return the verdict standing for each.
+    ///
+    /// Concurrent because the timeout is the cost: a partitioned target
+    /// costs a full `probe_timeout()`, and probing serially would make
+    /// the pass's duration proportional to how many targets are down —
+    /// which is backwards, since that is exactly when the pass has work
+    /// to do.
+    ///
+    /// A target with no registry row is not probed and gets no verdict,
+    /// which is the correct answer rather than a gap: this MDS has no
+    /// address for it, and inventing one is what the registry exists to
+    /// prevent.
+    pub async fn probe_all_targets(&self) -> Vec<(String, Reachability)> {
+        let targets = match self.backend.block_target_list().await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                tracing::error!("target registry unreadable, no verdicts this pass: {e}");
+                return Vec::new();
+            }
+            Err(e) => {
+                tracing::error!("target registry unreadable, no verdicts this pass: {e}");
+                return Vec::new();
+            }
+        };
+        let probes = targets.into_iter().map(|t| async move {
+            let v = self.probe_one(&t.target_id, &t.traddr, t.trsvcid).await;
+            (t.target_id, v)
+        });
+        futures::future::join_all(probes).await
     }
 
     /// Every seat this MDS holds, paired with whether its composer is
@@ -1133,11 +1215,6 @@ pub(crate) mod tests {
         /// case the capacity gate must not read as "empty".
         pub(crate) free_clusters: Mutex<Option<u64>>,
         pub(crate) total_clusters: Mutex<u64>,
-        /// `false` = the tgt process is not answering AT ALL: every RPC
-        /// fails, which is what the reachability probe is looking for.
-        /// Distinct from the failures above, which are a live tgt
-        /// answering "no".
-        pub(crate) alive: Mutex<bool>,
     }
 
     /// The fake lvolstore's cluster size (SPDK's default is 4 MiB).
@@ -1158,12 +1235,7 @@ pub(crate) mod tests {
                 // exact behaviour; the gate's own tests set it.
                 free_clusters: Mutex::new(Some(1 << 20)),
                 total_clusters: Mutex::new(1 << 20),
-                alive: Mutex::new(true),
             }
-        }
-        /// Kill or revive the fake tgt process.
-        pub(crate) fn set_alive(&self, alive: bool) {
-            *self.alive.lock().unwrap() = alive;
         }
         /// Size the fake store: `(total_clusters, free_clusters)`.
         pub(crate) fn set_store(&self, total: u64, free: u64) {
@@ -1204,10 +1276,6 @@ pub(crate) mod tests {
             self.calls.lock().unwrap().push(payload.clone());
             let method = payload["method"].as_str().unwrap_or("");
             let p = &payload["params"];
-            if !*self.alive.lock().unwrap() {
-                // A dead process answers nothing, not "no".
-                return Err("connection refused".into());
-            }
             match method {
                 // The reachability probe: cheapest proof the process is
                 // answering, and it asserts nothing about its state.
@@ -1884,37 +1952,114 @@ pub(crate) mod tests {
         assert!(r.reachability("node-never-seen").is_none());
     }
 
-    /// The probe itself, against a tgt that stops answering: the RPC
-    /// fails, strikes accumulate, and the verdict lands. `spdk_get_
-    /// version` is the probe because reachability is all it must prove.
+    /// THE PROBE ITSELF, over the wire it is a claim about. A real
+    /// NVMe/TCP target answers the initialize-connection exchange; a
+    /// closed port does not; strikes accumulate and the verdict lands.
+    ///
+    /// The instrument is the DATA path deliberately — that is what a
+    /// verdict is used to decide about (who serves, and where a fence
+    /// can be delivered), and an RPC-socket probe would be answering
+    /// "can I still administer it", which a target with a wedged
+    /// listener passes while serving nobody.
     #[tokio::test]
-    async fn a_dead_tgt_earns_the_verdict_through_the_probe() {
+    async fn a_target_that_stops_answering_the_wire_earns_the_verdict() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
         let tgt = Arc::new(FakeTgt::new());
         let r = reconciler(Arc::clone(&tgt));
-        assert_eq!(r.probe_target().await, Reachability::Reachable);
 
-        tgt.set_alive(false);
-        // The probe supplies OBSERVATIONS; the thresholds turn them into
-        // a verdict. These all land in the same second, so the window is
-        // what is still missing — and the verdict says so.
+        let live = r.probe_one("node-live", &nvme.addr.ip().to_string(), nvme.addr.port()).await;
+        assert_eq!(live, Reachability::Reachable, "a real target answers ICReq");
+
+        // Port 1: nothing listens, so the connection is refused at once
+        // — the "dead" shape. The "partitioned" shape is a black hole
+        // and times out; the verdict folds them together on purpose,
+        // which is the whole premise of the composition machine.
         for _ in 0..verdict_strikes() + 1 {
-            let v = r.probe_target().await;
-            assert!(!v.is_unreachable(), "the window has not passed yet: {v:?}");
+            let v = r.probe_one("node-gone", "127.0.0.1", 1).await;
+            assert!(!v.is_unreachable(), "these all land in one second: {v:?}");
         }
-        assert!(
-            tgt.methods().iter().any(|m| m == "spdk_get_version"),
-            "the probe must actually ask the target something"
-        );
-        // Read the same history once the window HAS passed.
         let v = r
-            .reachability_at(&target_id(), now_unix() + verdict_min_secs())
+            .reachability_at("node-gone", now_unix() + verdict_min_secs())
             .expect("observed");
         assert!(v.is_unreachable(), "got {v:?}");
 
-        // And it recovers: a tgt that comes back is reachable again on
-        // the very next pass, with no operator step.
-        tgt.set_alive(true);
-        assert_eq!(r.probe_target().await, Reachability::Reachable);
+        // And recovery needs no operator: one answer clears it.
+        let back = r.probe_one("node-gone", &nvme.addr.ip().to_string(), nvme.addr.port()).await;
+        assert_eq!(back, Reachability::Reachable);
+    }
+
+    /// The misconfiguration diagnostic makes a CLAIM — "configuration
+    /// fault, not a dead target" — so the predicate behind it is pinned
+    /// rather than left inside a log call. It must never fire for a
+    /// remote target (we have no second opinion about someone else's
+    /// process) nor for a target whose process is also silent (that IS a
+    /// dead target, and saying otherwise would send an operator to
+    /// audit their network for nothing).
+    #[test]
+    fn the_misconfiguration_claim_needs_a_second_opinion_that_agrees() {
+        assert!(listener_is_misconfigured(true, true), "ours, and its process answers");
+        assert!(!listener_is_misconfigured(true, false), "ours and silent = down, not misconfigured");
+        assert!(!listener_is_misconfigured(false, true), "never claimed about a remote target");
+        assert!(!listener_is_misconfigured(false, false));
+    }
+
+    /// A black hole must cost the pass a BOUNDED wait, not the kernel's
+    /// SYN-retry budget — the listener here accepts and then says
+    /// nothing, which is what a half-open path looks like from a live
+    /// TCP stack.
+    #[tokio::test]
+    async fn a_silent_target_times_out_instead_of_stalling_the_pass() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Accept and hold: never answer the ICReq.
+            let _held = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+
+        let started = std::time::Instant::now();
+        let e = crate::pnfs::mds::resv_fence::probe_nvme_tcp(
+            &addr.ip().to_string(),
+            addr.port(),
+            std::time::Duration::from_millis(150),
+        )
+        .await
+        .expect_err("a silent target is not a reachable one");
+        assert!(e.contains("within"), "the error names the bound: {e}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "bounded");
+    }
+
+    /// The prober is level-triggered over the REGISTRY: it probes what
+    /// is registered, at the coordinates registered for it, and returns
+    /// one verdict per target. A target with no row is not probed — this
+    /// MDS has no address for it, and inventing one is what the registry
+    /// exists to prevent.
+    #[tokio::test]
+    async fn the_prober_covers_every_registered_target() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        let tgt = Arc::new(FakeTgt::new());
+        let backend = crate::state_backend::memory_backend();
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        );
+        r.self_register().await.expect("register self");
+        backend
+            .block_target_register("node-gone", "127.0.0.1", 1, now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let verdicts = r.probe_all_targets().await;
+        assert_eq!(verdicts.len(), 2, "one verdict per registered target");
+        let mine = verdicts.iter().find(|(id, _)| *id == target_id()).expect("self probed");
+        assert_eq!(mine.1, Reachability::Reachable);
+        let theirs = verdicts.iter().find(|(id, _)| id == "node-gone").expect("peer probed");
+        assert!(matches!(theirs.1, Reachability::Suspect { strikes: 1, .. }), "{:?}", theirs.1);
     }
 
     /// The verdict drives the CAS, and on a single-copy volume the

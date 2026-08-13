@@ -1503,8 +1503,41 @@ Each phase ships standalone value; none is gated on the next.
   an ordinary pass clear a stale mark with no copy behind it, which is
   `FlintCompositionSelfRejoin.cfg` exactly, and the A/B for that is a third
   mutation. A candidate must also be a target this MDS has AFFIRMATIVELY heard
-  from — never-observed is not "fine" — so a remote target prober is the next
-  thing owed, and it is what makes promotion able to fire at all.
+  from — never-observed is not "fine".
+  **THE REMOTE PROBER FOLLOWED (same day), and it made the verdict uniform.** The
+  probe is `resv_fence::probe_nvme_tcp` — TCP connect plus the NVMe/TCP
+  initialize-connection exchange, then hang up — run against every REGISTERED
+  target at the coordinates the registry holds, concurrently (a partitioned target
+  costs a full timeout, and probing serially would make the pass's duration
+  proportional to how many targets are down, which is backwards). It deliberately
+  stops before the fabrics Connect: naming a subsystem would make it a question
+  about one volume's EXPORT, and the target this most needs to ask about is a
+  promotion candidate, which by definition does not export the volume yet.
+  ICReq/ICResp is the strongest subsystem-agnostic statement available — not "a
+  port is open" but "an NVMe/TCP target is speaking the protocol here".
+  It probes this MDS's OWN target the same way, which is the point: "reachable"
+  must mean one thing, and what a verdict licenses is a decision about who SERVES.
+  A control-plane probe over the local RPC socket answers whether a tgt can still
+  be ADMINISTERED, and a target whose process is fine while its nvmf listener is
+  wedged passes that while serving nobody. The RPC socket keeps one job, as a
+  diagnostic: our own listener silent while our own process answers means the
+  configured `traddr` — the address every csi-node dials — is broken, which is a
+  configuration fault worth naming rather than a mysterious verdict. That claim is
+  a pinned predicate (`listener_is_misconfigured`), never asserted about a remote
+  target, because there is no second opinion to be had about someone else's
+  process. **Note what the two socket outcomes ARE:** a refusal (process gone) and
+  a timeout (packets going nowhere) are precisely "dead" and "partitioned", and the
+  verdict folds them together on purpose — distinguishing them is the thing the
+  composition machine assumes nobody can do. The timeout is mandatory and bounded
+  (`FLINT_PNFS_BLOCK_PROBE_TIMEOUT_SECS`, default 5): a partitioned node
+  black-holes, and the pass must not wait out the kernel's SYN retries behind the
+  very node that stopped answering.
+  **It also discharges the obligation the CAS commit wrote down**: the reconcile
+  pass now partitions volumes by the composer their RECORD names, so one target's
+  outage is no longer another volume's outage — the volumes seated here converge
+  and re-fence while the ones seated at a condemned peer go to the promotion path.
+  The A/B is `a_condemned_peer_does_not_strand_the_volumes_seated_here`, which
+  returns (0, 0) under the old whole-pass skip.
   What remains of the epoch machine after this: the lease horizon and the
   self-suspending dead-man, eviction at the survivor's leg-export, assembly (which
   is also the lease grant, and where the deposed leg is marked stale and standing
