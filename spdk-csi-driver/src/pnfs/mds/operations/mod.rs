@@ -2026,6 +2026,43 @@ pub async fn export_reconcile_pass(
     }
 
     reconciler.reconcile_all(&volumes).await;
+
+    // THE REBUILD, spawned and deliberately not awaited. A stale leg is
+    // brought back by a sparse copy of the whole volume, which at
+    // multi-TB takes hours — and the loop that would be blocked is this
+    // one, the loop that renews every serving lease this target holds.
+    // The in-flight guard lives in the reconciler, so a pass that comes
+    // round while a copy is still running starts nothing new.
+    //
+    // AFTER the converge, because the slot a leg rejoins through is part
+    // of the frame the converge builds. A rebuild that ran first would
+    // find no room and refuse.
+    for (v, peer) in reconciler.rebuild_candidates(&volumes).await {
+        let r = std::sync::Arc::clone(&reconciler);
+        let ctx = context.to_string();
+        tokio::spawn(async move {
+            use crate::pnfs::mds::block_export::RebuildOutcome;
+            match r.rebuild_leg(&v, &peer).await {
+                RebuildOutcome::Rebuilt { rounds, clusters, .. } => tracing::info!(
+                    "✅ {} '{}': leg '{}' rebuilt — {} cluster(s) over {} round(s); the volume \
+                     is two copies again",
+                    ctx, v, peer, clusters, rounds
+                ),
+                // The ordinary case while a peer is away or busy: the
+                // next pass tries again, so this is not news.
+                RebuildOutcome::Deferred(why) => {
+                    tracing::debug!("{} '{}': rebuild of '{}' deferred — {}", ctx, v, peer, why)
+                }
+                // This one IS news: retrying alone will never help.
+                RebuildOutcome::Refused(why) => tracing::warn!(
+                    "{} '{}': rebuild of leg '{}' REFUSED — {}",
+                    ctx, v, peer, why
+                ),
+                RebuildOutcome::NotNeeded => {}
+            }
+        });
+    }
+
     // Seats whose composer has no registry row cannot be dialed — the
     // deliberate refusal at every dial site. Say so once per pass,
     // naming the volumes, so the refusal downstream is diagnosable

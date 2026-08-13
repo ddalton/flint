@@ -126,6 +126,60 @@ fn verdict_min_secs() -> i64 {
     env_u64("FLINT_PNFS_BLOCK_UNREACHABLE_MIN_SECS", 30) as i64
 }
 
+/// How much un-copied delta the rebuild is willing to carry INTO the
+/// quiesced window. The window gates every client write on the volume,
+/// so this number is a latency budget spent on the clients: 64 MiB over
+/// a 10 GbE leg is tens of milliseconds, well under any initiator's I/O
+/// timeout. Raising it shortens the rebuild and lengthens the stall.
+fn rebuild_window_max_bytes() -> u64 {
+    env_u64("FLINT_PNFS_BLOCK_REBUILD_WINDOW_MAX_MIB", 64) * 1024 * 1024
+}
+
+/// How many delta rounds the ladder may run before it takes the window
+/// anyway. The ladder converges when the copy outruns the writer; it
+/// does NOT when the writer is faster, and without a bound that is an
+/// infinite chase. Reaching the bound is not a failure — it means the
+/// final window will be longer than the budget, which is logged.
+fn rebuild_max_rounds() -> u32 {
+    env_u64("FLINT_PNFS_BLOCK_REBUILD_MAX_ROUNDS", 6) as u32
+}
+
+/// The quiesce lease (`bdev_raid_quiesce`, flint's carried SPDK patch).
+/// Auto-expiring BY DESIGN: an orchestrator that dies mid-window must
+/// not leave guest I/O gated until the initiator escalates to resets.
+fn rebuild_lease_ms() -> u64 {
+    env_u64("FLINT_PNFS_BLOCK_REBUILD_LEASE_MS", 10_000)
+}
+
+/// Shallow-copy poll cadence.
+fn rebuild_poll() -> std::time::Duration {
+    std::time::Duration::from_millis(env_u64("FLINT_PNFS_BLOCK_REBUILD_POLL_MS", 500))
+}
+
+/// F39's bound, ported: a copy that stops making cluster progress for
+/// this long is declared wedged. The bound is on PROGRESS, never on
+/// total time — a wall-clock cap would kill a legitimate multi-hour
+/// bulk copy of a large volume.
+fn rebuild_stall_secs() -> u64 {
+    env_u64("FLINT_PNFS_BLOCK_REBUILD_STALL_SECS", 600)
+}
+
+/// What one rebuild attempt did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebuildOutcome {
+    /// The leg holds the volume's bytes, is a member of the composition
+    /// again, and the record says so — in that order.
+    Rebuilt { peer: String, rounds: u32, clusters: u64 },
+    /// No stale leg to rebuild.
+    NotNeeded,
+    /// Not now — the peer is unreachable, the frame has no slot, the
+    /// window could not be held. The next pass tries again.
+    Deferred(String),
+    /// Not without something changing. Distinct from `Deferred` because
+    /// retrying alone will never help.
+    Refused(String),
+}
+
 /// THE UNREACHABILITY VERDICT — and the whole point is what it CANNOT
 /// say (design §12; `FlintComposition`'s `tgt[t] \in {"part", "dead"}`).
 ///
@@ -254,6 +308,13 @@ pub struct BlockExportReconciler {
     /// where a scalar `raidHost` made "two compositions exist"
     /// unrepresentable and a green run meaningless.
     probes: dashmap::DashMap<String, ProbeState>,
+    /// Volumes with a rebuild running. In memory and not durable on
+    /// purpose: it answers "is this process already copying" and nothing
+    /// else. A rebuild that dies with the process leaves cuts, an
+    /// attached destination and possibly an unvouched member — all of
+    /// which the next attempt sweeps, prunes or re-copies, and none of
+    /// which a durable flag would have helped with.
+    rebuilding: dashmap::DashMap<String, ()>,
 }
 
 impl BlockExportReconciler {
@@ -274,6 +335,7 @@ impl BlockExportReconciler {
             ptpl_dir,
             locks: dashmap::DashMap::new(),
             probes: dashmap::DashMap::new(),
+            rebuilding: dashmap::DashMap::new(),
         }
     }
 
@@ -805,50 +867,282 @@ impl BlockExportReconciler {
     /// review's "a survivor cannot self-promote" limit dissolved rather
     /// than worked around. Nothing here ever consults a superblock to
     /// decide who serves.
+    /// THE FRAME, and why the composition outlives its legs: a raid
+    /// bdev's SLOT COUNT is fixed at creation (`bdev_raid_create` refuses
+    /// an empty base name, and `raid_bdev_add_base_bdev` only ever fills
+    /// a slot some removal emptied — bdev_raid.c:3672-3680). A volume
+    /// composed over one base can therefore never gain a second leg
+    /// without being torn down and rebuilt, which re-points the
+    /// namespace under a live client.
+    ///
+    /// So the frame is a function of the RECORD's leg count, not of how
+    /// many legs are currently healthy: a volume the record gives two
+    /// legs is served through a two-slot raid whether the peer is
+    /// present, stale, or missing. A leg leaves by emptying its slot and
+    /// rejoins into the same slot under a quiesce, and the client sees
+    /// neither.
     async fn compose_bdev(
         &self,
         volume: &str,
         seat: &crate::state_backend::extent_alloc::BlockSeat,
     ) -> Result<String, String> {
-        let me = target_id();
         let local = self.bdev_name(volume);
         let legs = match self.backend.block_legs(volume).await {
             Ok(Ok(l)) => l,
             Ok(Err(e)) => return Err(format!("legs unreadable: {e}")),
             Err(e) => return Err(format!("legs unreadable: {e}")),
         };
-        // Only IN-SYNC peers join the composition. A stale leg holds
-        // bytes the composition has moved past; mirroring onto it would
-        // be a rebuild, and a rebuild is a deliberate act with its own
-        // ancestry proof (`AncestryGuard`), not something a converge
-        // pass starts by accident.
-        let peers: Vec<&crate::state_backend::extent_alloc::BlockLeg> = legs
-            .iter()
-            .filter(|l| {
-                l.target_id != me
-                    && l.sync_state == crate::state_backend::extent_alloc::LEG_INSYNC
-            })
-            .collect();
-        if peers.is_empty() {
-            // Solo. Any raid left from a previous composition must go,
-            // or it keeps its exclusive claim on the lvol.
+        if legs.len() <= 1 {
+            // Genuinely solo — one leg in the record, nothing to
+            // compose. Any raid left from a previous composition must
+            // go, or it keeps its exclusive claim on the lvol.
             self.drop_raid(volume).await?;
             return Ok(local);
         }
-        let mut bases = vec![local.clone()];
-        for peer in &peers {
-            bases.push(self.attach_peer_leg(volume, &peer.target_id).await?);
-        }
         let raid = self.raid_name(volume);
-        self.ensure_raid(&raid, &bases).await?;
-        tracing::info!(
-            "🧬 '{}' composed at epoch {}: {} leg(s) — {:?}",
+        match self.get_raid(&raid).await? {
+            None => self.build_frame(volume, &raid, &local, &legs).await?,
+            Some(live) => self.prune_frame(volume, &raid, &local, &legs, &live).await?,
+        }
+        tracing::debug!(
+            "'{}' composed at epoch {}: frame of {} slot(s)",
             volume,
             seat.epoch,
-            bases.len(),
-            bases
+            legs.len()
         );
         Ok(raid)
+    }
+
+    /// Build the composition frame from nothing — a target that has just
+    /// started, or a volume being composed for the first time.
+    ///
+    /// TWO things happen here and both are load-bearing.
+    ///
+    /// (1) `UncleanResync`, the write-hole belt. A composition built
+    /// from nothing cannot prove that any peer's bytes equal ours: raid1
+    /// acks on any-one-leg success and records the leg failure
+    /// asynchronously (bdev_raid.c:705-718, 2440-2444), so a composer
+    /// that died mid-write left two legs holding different bytes with
+    /// nothing durable saying so, and there is no scrub or resync to
+    /// find out — the only process type raid1 has is REBUILD. Code can
+    /// only ever see "died while serving". So every peer is DEMOTED here
+    /// and earns its place back through a rebuild. The price is a copy
+    /// after an unclean restart; the alternative is reads that flap
+    /// between divergent legs on LAYOUTCOMMIT-confirmed data
+    /// (`Inv_NoSplitRead`).
+    ///
+    /// (2) The slot count. Slots cannot be created empty, so each
+    /// absent leg is stood in for by a null bdev of the same geometry
+    /// that is removed the instant the frame exists. That is safe
+    /// because the frame is built BEFORE the export — `ensure_locked`
+    /// composes and then converges the subsystem, and a raid that
+    /// vanished took its namespace with it (SPDK hot-removes a
+    /// namespace when its bdev unregisters) — so no read can reach the
+    /// stand-in's zeros. It is a narrow argument, so the belt is
+    /// explicit: if a stand-in cannot be removed, the whole frame is
+    /// deleted rather than left serving a leg of zeros.
+    async fn build_frame(
+        &self,
+        volume: &str,
+        raid: &str,
+        local: &str,
+        legs: &[crate::state_backend::extent_alloc::BlockLeg],
+    ) -> Result<(), String> {
+        let me = target_id();
+        for leg in legs.iter().filter(|l| l.target_id != me) {
+            if leg.sync_state != crate::state_backend::extent_alloc::LEG_INSYNC {
+                continue;
+            }
+            tracing::warn!(
+                "🧬 '{}': building the composition from nothing — leg '{}' is marked in-sync but \
+                 nothing here can prove its bytes equal ours (raid1 acks solo and records the \
+                 failure afterwards), so it is DEMOTED and owes a rebuild",
+                volume,
+                leg.target_id
+            );
+            match self
+                .backend
+                .block_leg_mark(
+                    volume,
+                    &leg.target_id,
+                    crate::state_backend::extent_alloc::LEG_STALE,
+                    now_unix(),
+                )
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(format!("demoting leg '{}': {e}", leg.target_id)),
+                Err(e) => return Err(format!("demoting leg '{}': {e}", leg.target_id)),
+            }
+        }
+        // Geometry for the stand-ins: the raid is sized to its smallest
+        // base, so a stand-in that is one block short would silently
+        // shrink the volume.
+        let probe = json!({ "method": "bdev_get_bdevs", "params": { "name": local } });
+        let resp = self
+            .rpc
+            .rpc(&probe)
+            .await
+            .map_err(|e| format!("bdev_get_bdevs {local}: {e}"))?;
+        let b = resp.get("result").and_then(|r| r.as_array()).and_then(|a| a.first());
+        let block_size = b.and_then(|b| b.get("block_size")).and_then(|v| v.as_u64());
+        let num_blocks = b.and_then(|b| b.get("num_blocks")).and_then(|v| v.as_u64());
+        let (Some(block_size), Some(num_blocks)) = (block_size, num_blocks) else {
+            return Err(format!(
+                "cannot frame '{volume}': {local} reports no block_size/num_blocks"
+            ));
+        };
+        let mut bases = vec![local.to_string()];
+        let mut pads = Vec::new();
+        for slot in 1..legs.len() {
+            let pad = format!("flintslot-{volume}-{slot}");
+            let create = json!({
+                "method": "bdev_null_create",
+                "params": { "name": pad, "num_blocks": num_blocks, "block_size": block_size }
+            });
+            if let Err(e) = self.rpc.rpc(&create).await {
+                // Leftover from a previous attempt is fine; anything
+                // else is not, and framing on a stand-in of unknown
+                // geometry would resize the volume.
+                let probe = json!({ "method": "bdev_get_bdevs", "params": { "name": pad } });
+                if self.rpc.rpc(&probe).await.is_err() {
+                    for p in &pads {
+                        let _ = self
+                            .rpc
+                            .rpc(&json!({ "method": "bdev_null_delete", "params": { "name": p } })) // guarded-destroy-lint: allow
+                            .await;
+                    }
+                    return Err(format!("bdev_null_create {pad}: {e}"));
+                }
+            }
+            bases.push(pad.clone());
+            pads.push(pad);
+        }
+        // guarded-construct-lint: allow — the hazard this lint guards is
+        // a raid created or REUSED over a base set nobody validated (the
+        // A2 tranche's finding against the file tier's ONLINE-reuse
+        // path). This site cannot reuse: it runs only when
+        // `bdev_raid_get_bdevs` says no raid of this name exists, and
+        // the base set it passes is derived from the record — the local
+        // leg plus one stand-in per recorded peer, every one of which is
+        // removed again below. With `superblock: false` there is no
+        // examine-based auto-assembly to race, so nothing can exist
+        // under this name for the create to adopt.
+        let create = json!({
+            "method": "bdev_raid_create", // guarded-construct-lint: allow
+            "params": {
+                "name": raid,
+                "raid_level": "1",
+                "base_bdevs": bases,
+                "superblock": false,
+            }
+        });
+        self.rpc
+            .rpc(&create)
+            .await
+            .map_err(|e| format!("bdev_raid_create {raid}: {e}"))?;
+        // Empty the stand-in slots. This is the fail-closed step: a
+        // stand-in left in the frame is a leg that answers reads with
+        // zeros.
+        for pad in &pads {
+            let remove = json!({
+                "method": "bdev_raid_remove_base_bdev",
+                "params": { "name": pad }
+            });
+            if let Err(e) = self.rpc.rpc(&remove).await {
+                let del = json!({ "method": "bdev_raid_delete", "params": { "name": raid } }); // guarded-destroy-lint: allow
+                let _ = self.rpc.rpc(&del).await;
+                return Err(format!(
+                    "framing '{volume}': stand-in {pad} could not be removed ({e}) — the \
+                     composition was deleted rather than left serving a leg of zeros"
+                ));
+            }
+        }
+        for pad in &pads {
+            let del = json!({ "method": "bdev_null_delete", "params": { "name": pad } }); // guarded-destroy-lint: allow
+            let _ = self.rpc.rpc(&del).await;
+        }
+        tracing::info!(
+            "🧬 '{}' framed: {} slot(s), {} filled — every absent leg has a slot waiting for it",
+            volume,
+            legs.len(),
+            bases.len() - pads.len()
+        );
+        Ok(())
+    }
+
+    /// A live composition, converged against the record: a member the
+    /// record does not vouch for is removed.
+    ///
+    /// The record is the authority in one direction only. A member it
+    /// does not name is removed here (a degrade whose removal failed, a
+    /// rebuild that crashed between the add and its mark). A leg it
+    /// names that is NOT a member is left alone — putting it back is the
+    /// rebuild's business, and only the rebuild can prove it belongs.
+    async fn prune_frame(
+        &self,
+        volume: &str,
+        raid: &str,
+        local: &str,
+        legs: &[crate::state_backend::extent_alloc::BlockLeg],
+        live: &serde_json::Value,
+    ) -> Result<(), String> {
+        let me = target_id();
+        let mut vouched = vec![local.to_string()];
+        for leg in legs.iter().filter(|l| {
+            l.target_id != me && l.sync_state == crate::state_backend::extent_alloc::LEG_INSYNC
+        }) {
+            vouched.push(self.leg_base_name(volume, &leg.target_id));
+        }
+        for member in Self::raid_members(live) {
+            if vouched.contains(&member) {
+                continue;
+            }
+            tracing::warn!(
+                "'{}': base '{}' is a member of the composition but the record does not vouch \
+                 for it — removing it (a rebuild is what puts a leg back)",
+                volume,
+                member
+            );
+            let remove = json!({
+                "method": "bdev_raid_remove_base_bdev",
+                "params": { "name": member }
+            });
+            self.rpc
+                .rpc(&remove)
+                .await
+                .map_err(|e| format!("removing unvouched base {member} from {raid}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// The base bdev name a peer's leg is attached under. One function,
+    /// because the composition, the degrade and the rebuild all have to
+    /// mean the same bdev.
+    fn leg_base_name(&self, volume: &str, peer: &str) -> String {
+        format!("flintleg-{volume}-{peer}n1")
+    }
+
+    /// Configured members of a live raid, from `bdev_raid_get_bdevs`.
+    /// Empty slots carry a null name — that is how SPDK reports a slot
+    /// waiting for a leg (bdev_raid.c: `raid_bdev_write_info_json`).
+    fn raid_members(live: &serde_json::Value) -> Vec<String> {
+        live.get("base_bdevs_list")
+            .and_then(|b| b.as_array())
+            .map(|bs| {
+                bs.iter()
+                    .filter_map(|b| b.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Slots with no leg in them.
+    fn raid_empty_slots(live: &serde_json::Value) -> usize {
+        live.get("base_bdevs_list")
+            .and_then(|b| b.as_array())
+            .map(|bs| bs.iter().filter(|b| b.get("name").map(|n| n.is_null()).unwrap_or(true)).count())
+            .unwrap_or(0)
     }
 
     /// Attach a peer's leg export as a local bdev, dialling the address
@@ -910,66 +1204,6 @@ impl BlockExportReconciler {
             .and_then(|b| b.as_str())
             .map(String::from)
             .unwrap_or(expected))
-    }
-
-    /// Create-or-reuse the raid1. `superblock: false` — see
-    /// `compose_bdev` for why that is the load-bearing choice and not a
-    /// detail.
-    async fn ensure_raid(&self, raid: &str, bases: &[String]) -> Result<(), String> {
-        if let Some(existing) = self.get_raid(raid).await? {
-            let state = existing.get("state").and_then(|s| s.as_str()).unwrap_or("");
-            let members: Vec<String> = existing
-                .get("base_bdevs_list")
-                .and_then(|b| b.as_array())
-                .map(|bs| {
-                    bs.iter()
-                        .filter_map(|b| b.get("name").and_then(|n| n.as_str()).map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if state == "online" && members.iter().all(|m| bases.contains(m)) {
-                return Ok(());
-            }
-            // Membership drifted from the record, or the raid never came
-            // up. Rebuild it from the record rather than reusing an
-            // object whose base set nobody validated — the file tier's
-            // ONLINE-reuse path is exactly the one its own A2 tranche
-            // flagged as needing base-set validation.
-            tracing::warn!(
-                "raid {} is '{}' over {:?}, record says {:?} — re-creating",
-                raid, state, members, bases
-            );
-            let del = json!({ "method": "bdev_raid_delete", "params": { "name": raid } }); // guarded-destroy-lint: allow
-            self.rpc
-                .rpc(&del)
-                .await
-                .map_err(|e| format!("bdev_raid_delete {raid}: {e}"))?;
-        }
-        // guarded-construct-lint: allow — the hazard this lint guards
-        // is a raid created or REUSED over a base set nobody validated
-        // (the A2 tranche's finding against the file tier's ONLINE-reuse
-        // path, which logs the base count and validates nothing). This
-        // call site self-guards in the way the lint's message asks for:
-        // the reuse branch above compares the live membership against
-        // the RECORD and re-creates on any drift, so a raid is only ever
-        // adopted when its bases are exactly the ones the record names.
-        // And with `superblock: false` there is no examine-based
-        // auto-assembly to race, so no phantom can exist under this name
-        // for the create to collide with.
-        let create = json!({
-            "method": "bdev_raid_create", // guarded-construct-lint: allow
-            "params": {
-                "name": raid,
-                "raid_level": "1",
-                "base_bdevs": bases,
-                "superblock": false,
-            }
-        });
-        self.rpc
-            .rpc(&create)
-            .await
-            .map_err(|e| format!("bdev_raid_create {raid}: {e}"))?;
-        Ok(())
     }
 
     async fn get_raid(&self, raid: &str) -> Result<Option<serde_json::Value>, String> {
@@ -1104,8 +1338,10 @@ impl BlockExportReconciler {
                     continue;
                 }
             }
-            // (2) Only now may the composition degrade.
-            let base = format!("flintleg-{volume}-{}n1", leg.target_id);
+            // (2) Only now may the composition degrade. The slot the
+            // removal empties is the one the leg rejoins through — the
+            // frame outlives the leg (see `compose_bdev`).
+            let base = self.leg_base_name(volume, &leg.target_id);
             let remove = json!({
                 "method": "bdev_raid_remove_base_bdev",
                 "params": { "name": base }
@@ -1131,6 +1367,666 @@ impl BlockExportReconciler {
             }
         }
         degraded
+    }
+
+    /// THE REBUILD (`RebuildStart` → `RebuildComplete`): how a stale leg
+    /// earns its place back — and the ONLY door through which a leg ever
+    /// becomes a member of a live composition.
+    ///
+    /// The copy engine is SPARSE BY CONSTRUCTION and it is not ours:
+    /// SPDK's `bdev_lvol_start_shallow_copy` walks the source blob's
+    /// cluster map and skips every cluster the blob does not own
+    /// (blobstore.c, `bs_shallow_copy_cluster_find_next`), writing the
+    /// rest at identical offsets on the destination. That is the whole
+    /// of §12's "flint-driven and sparse-aware, never raid1's own
+    /// process": raid1 rebuilds by walking the arena from zero with no
+    /// zero-detection (raid1.c:564-584), which densifies the thin target
+    /// leg — full logical size, hours at multi-TB, and cross-AZ egress
+    /// on every byte that was never written.
+    ///
+    /// The copy's source must be READ ONLY (blobstore.c: a shallow copy
+    /// of a writable blob is -EPERM). That is not an obstacle but the
+    /// mechanism: each round snapshots the live head, and the snapshot's
+    /// OWN clusters are exactly the bytes written since the previous
+    /// round. The blobstore's copy-on-write IS the dirty-region
+    /// tracking, so flint keeps none of its own and cannot get it wrong.
+    ///
+    ///   round 1   cut the head, copy the cut     — the volume, sparsely
+    ///   round n   cut again, copy the cut        — that round's writes
+    ///   window    quiesce, cut, copy, ADD, mark  — the last delta
+    ///
+    /// The ladder converges when the copy outruns the writer, and is
+    /// bounded when it does not (`rebuild_max_rounds`) because the
+    /// window's price is a stall on every client of the volume.
+    ///
+    /// THE WINDOW is flint's carried SPDK patch, and its contract is
+    /// enforced target-side: `bdev_raid_add_base_bdev --skip-rebuild`
+    /// refuses unless a `bdev_raid_quiesce` lease is HELD, because the
+    /// cut that produced the base and the add that admits it must sit
+    /// inside ONE quiesce or the writes between them exist nowhere on
+    /// the new leg. The lease auto-expires, so an orchestrator that dies
+    /// mid-window cannot leave guest I/O gated behind it.
+    ///
+    /// THE ORDER is the degrade barrier's, mirrored. There the record
+    /// went stale BEFORE the composition degraded; here the leg becomes
+    /// a member BEFORE the record calls it in sync. One rule stated
+    /// twice: THE RECORD'S OPTIMISM TRAILS REALITY. A mark that landed
+    /// first and then crashed would leave an electable leg missing the
+    /// final delta, and `ElectInSync` would hand it the composition in
+    /// good faith.
+    ///
+    /// Note which of the model's two rejoin doors this is. It is always
+    /// `RebuildComplete` — the full copy of the source's allocated set —
+    /// and never `DeltaRejoin`, which copies only what changed since the
+    /// stale leg's own cut and therefore needs `AncestryGuard` to prove
+    /// the leg is still AT that cut. flint does not take that door, so
+    /// it does not need that proof: every round after the first is a
+    /// delta of OUR OWN cuts, laid over a destination this rebuild
+    /// wrote from the beginning.
+    pub async fn rebuild_leg(&self, volume: &str, peer: &str) -> RebuildOutcome {
+        if self.rebuilding.insert(volume.to_string(), ()).is_some() {
+            return RebuildOutcome::Deferred(format!(
+                "a rebuild of '{volume}' is already running"
+            ));
+        }
+        let out = self.rebuild_inner(volume, peer).await;
+        self.rebuilding.remove(volume);
+        out
+    }
+
+    async fn rebuild_inner(&self, volume: &str, peer: &str) -> RebuildOutcome {
+        let me = target_id();
+        // ---- the record is the only door ----
+        let seat = match self.backend.block_volume_seat(volume).await {
+            Ok(Ok(Some(s))) => s,
+            Ok(Ok(None)) => {
+                return RebuildOutcome::Refused(format!("'{volume}' has no seat"))
+            }
+            Ok(Err(e)) => return RebuildOutcome::Deferred(format!("seat unreadable: {e}")),
+            Err(e) => return RebuildOutcome::Deferred(format!("seat unreadable: {e}")),
+        };
+        if seat.composer != me {
+            return RebuildOutcome::Refused(format!(
+                "'{volume}' is seated at '{}', not here — only the composer may rebuild a leg, \
+                 because only its bytes are the volume's",
+                seat.composer
+            ));
+        }
+        let legs = match self.backend.block_legs(volume).await {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => return RebuildOutcome::Deferred(format!("legs unreadable: {e}")),
+            Err(e) => return RebuildOutcome::Deferred(format!("legs unreadable: {e}")),
+        };
+        let Some(leg) = legs.iter().find(|l| l.target_id == peer) else {
+            return RebuildOutcome::Refused(format!(
+                "'{volume}' has no leg row for '{peer}' — a rebuild copies onto a leg the \
+                 record already knows about, it does not mint one"
+            ));
+        };
+        if leg.sync_state != crate::state_backend::extent_alloc::LEG_STALE {
+            return RebuildOutcome::NotNeeded;
+        }
+        // ---- the peer must be AFFIRMATIVELY reachable ----
+        //
+        // Not merely "not condemned": a rebuild pours the whole volume
+        // at this peer and ends by holding every client's I/O while it
+        // finishes. Starting one at a target nothing has heard from
+        // spends all of that to fail at the end.
+        match self.reachability(peer) {
+            Some(Reachability::Reachable) => {}
+            other => {
+                return RebuildOutcome::Deferred(format!(
+                    "leg peer '{peer}' is {}",
+                    match other {
+                        Some(v) => format!("{v:?}"),
+                        None => "not yet observed".to_string(),
+                    }
+                ))
+            }
+        }
+        // ---- the frame must have a slot for this leg ----
+        let raid = self.raid_name(volume);
+        let live = match self.get_raid(&raid).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return RebuildOutcome::Deferred(format!(
+                    "'{volume}' has no live composition to rejoin — the frame is built by the \
+                     converge pass"
+                ))
+            }
+            Err(e) => return RebuildOutcome::Deferred(e),
+        };
+        if live.get("state").and_then(|s| s.as_str()) != Some("online") {
+            return RebuildOutcome::Deferred(format!(
+                "composition of '{volume}' is not online — nothing to rejoin yet"
+            ));
+        }
+        if Self::raid_empty_slots(&live) == 0 {
+            // A raid's slot count is fixed at creation, so this is not a
+            // wait — it is a statement that the frame was built without
+            // room for this leg and only a re-frame (a converge that
+            // builds the composition from nothing) can make room.
+            return RebuildOutcome::Refused(format!(
+                "the composition of '{volume}' has no empty slot for leg '{peer}': a raid's \
+                 slots are fixed when it is created, so this leg can only join a frame built \
+                 while the record already named it"
+            ));
+        }
+        // ---- crash leftovers, then the parent guard ----
+        //
+        // Sweeping first is what makes the guard below meaningful: our
+        // own abandoned cuts are parents too, and merging them back into
+        // the head is also how the chain gets cleaned up. One mechanism,
+        // both jobs.
+        let head = self.bdev_name(volume);
+        let swept = self.sweep_cuts(volume).await;
+        if swept > 0 {
+            tracing::info!("'{}': swept {} abandoned rebuild cut(s) first", volume, swept);
+        }
+        let info = match self.lvol_info(&head).await {
+            Ok(i) => i,
+            Err(e) => return RebuildOutcome::Deferred(e),
+        };
+        let is_clone = info
+            .get("driver_specific")
+            .and_then(|d| d.get("lvol"))
+            .and_then(|l| l.get("clone"))
+            .and_then(|c| c.as_bool())
+            .unwrap_or(false);
+        if is_clone {
+            // A shallow copy carries only the blob's OWN clusters. If
+            // the head still has an ancestor, the clusters the ancestor
+            // holds are skipped and the destination reads ZEROS where
+            // the volume holds data — silent, and only discovered at a
+            // failover. Walking the chain oldest-first is the extension
+            // (the file tier's `copy_chain_to` does exactly that);
+            // refusing is the honest answer until it exists.
+            return RebuildOutcome::Refused(format!(
+                "'{volume}' still has a parent snapshot ({}): a sparse copy carries only the \
+                 head's own clusters, so the rebuilt leg would read zeros wherever the ancestor \
+                 holds the data. Refusing rather than building a leg with holes",
+                info.get("driver_specific")
+                    .and_then(|d| d.get("lvol"))
+                    .and_then(|l| l.get("base_snapshot"))
+                    .and_then(|b| b.as_str())
+                    .unwrap_or("unknown")
+            ));
+        }
+        // ---- the destination ----
+        //
+        // Attached but NOT a member: the raid holds a write claim on its
+        // bases, and a member would be taking live writes underneath the
+        // copy. It joins in the window, once it holds the bytes.
+        let dst = match self.attach_peer_leg(volume, peer).await {
+            Ok(d) => d,
+            Err(e) => return RebuildOutcome::Deferred(e),
+        };
+        let cluster = self.cluster_bytes().await.unwrap_or(4 * 1024 * 1024);
+        tracing::info!(
+            "🔧 '{}': rebuilding leg '{}' — sparse copy onto {}, window budget {} MiB",
+            volume,
+            peer,
+            dst,
+            rebuild_window_max_bytes() / (1024 * 1024)
+        );
+
+        // ---- the ladder ----
+        let max_rounds = rebuild_max_rounds();
+        let budget = rebuild_window_max_bytes();
+        let mut round = 0u32;
+        let mut clusters = 0u64;
+        loop {
+            let pending = self.allocated_bytes(&head, cluster).await.unwrap_or(u64::MAX);
+            if pending <= budget {
+                break;
+            }
+            if round >= max_rounds {
+                tracing::warn!(
+                    "'{}': leg '{}' still has {} MiB of delta after {} round(s) — the writer is \
+                     outrunning the copy, so the window will be longer than its budget",
+                    volume,
+                    peer,
+                    pending / (1024 * 1024),
+                    round
+                );
+                break;
+            }
+            round += 1;
+            let cut = self.cut_name(volume, round);
+            if let Err(e) = self.snapshot_lvol(&head, &cut).await {
+                self.abandon_rebuild(volume, peer).await;
+                return RebuildOutcome::Deferred(e);
+            }
+            match self.shallow_copy(&self.cut_alias(volume, round), &dst).await {
+                Ok(n) => {
+                    clusters += n;
+                    tracing::info!(
+                        "'{}': leg '{}' round {} copied {} cluster(s)",
+                        volume, peer, round, n
+                    );
+                }
+                Err(e) => {
+                    self.abandon_rebuild(volume, peer).await;
+                    return RebuildOutcome::Deferred(e);
+                }
+            }
+        }
+
+        // ---- the window ----
+        //
+        // Under the volume lock, so a converge cannot re-frame the
+        // composition underneath it.
+        let lock = self.lock_for(volume);
+        let _g = lock.lock().await;
+        // The world may have moved during a copy that took hours. A
+        // rebuild that started while we composed the volume must not
+        // finish after we were deposed: the leg would be marked in sync
+        // against bytes that are no longer the volume's.
+        match self.backend.block_volume_seat(volume).await {
+            Ok(Ok(Some(s))) if s.composer == me && s.epoch == seat.epoch => {}
+            Ok(Ok(Some(s))) => {
+                self.abandon_rebuild(volume, peer).await;
+                return RebuildOutcome::Refused(format!(
+                    "'{volume}' moved to epoch {} at '{}' during the rebuild — the copy is \
+                     abandoned rather than marked in sync",
+                    s.epoch, s.composer
+                ));
+            }
+            _ => {
+                self.abandon_rebuild(volume, peer).await;
+                return RebuildOutcome::Deferred("seat unreadable at the window".into());
+            }
+        }
+        match self.backend.block_lease(volume).await {
+            Ok(Ok(Some(l))) if l.holder == me && l.is_live_at(now_unix()) => {}
+            _ => {
+                self.abandon_rebuild(volume, peer).await;
+                return RebuildOutcome::Deferred(format!(
+                    "'{volume}': this target does not hold a live serving lease — the exercise \
+                     must not outlive the entitlement"
+                ));
+            }
+        }
+        round += 1;
+        let result = self.rebuild_window(volume, peer, &raid, &head, &dst, round).await;
+        // ALWAYS release. The lease would expire on its own — that is
+        // what it is for — but leaving client I/O gated for the rest of
+        // a lease we are finished with is a stall we chose not to spend.
+        if let Err(e) = self.unquiesce(&raid).await {
+            tracing::error!(
+                "'{}': releasing the quiesce failed ({}) — the lease expires on its own, so \
+                 client I/O resumes within {} ms",
+                volume, e, rebuild_lease_ms()
+            );
+        }
+        match result {
+            Ok(n) => {
+                clusters += n;
+                let swept = self.sweep_cuts(volume).await;
+                tracing::info!(
+                    "✅ '{}': leg '{}' is IN SYNC and back in the composition — {} cluster(s) \
+                     over {} round(s), {} cut(s) swept",
+                    volume, peer, clusters, round, swept
+                );
+                RebuildOutcome::Rebuilt { peer: peer.to_string(), rounds: round, clusters }
+            }
+            Err(e) => {
+                self.abandon_rebuild(volume, peer).await;
+                RebuildOutcome::Deferred(e)
+            }
+        }
+    }
+
+    /// The quiesced window: cut, copy, admit, mark. Every step of it is
+    /// ordered, and the ordering is the correctness argument — see
+    /// `rebuild_leg`. The caller releases the quiesce whatever happens
+    /// here.
+    async fn rebuild_window(
+        &self,
+        volume: &str,
+        peer: &str,
+        raid: &str,
+        head: &str,
+        dst: &str,
+        round: u32,
+    ) -> Result<u64, String> {
+        let lease_ms = rebuild_lease_ms();
+        self.quiesce(raid, lease_ms).await?;
+        let armed = std::time::Instant::now();
+        // The cut MUST be inside the held quiesce: a cut taken before it
+        // misses every write that landed between the two, and those
+        // writes would exist nowhere on the new leg.
+        let cut = self.cut_name(volume, round);
+        self.snapshot_lvol(head, &cut).await?;
+        let copied = self.shallow_copy(&self.cut_alias(volume, round), dst).await?;
+        // Did the window outlive its own lease? A lapsed lease
+        // auto-unquiesces, writes resume, and our cut is stale — and a
+        // renewal after that is indistinguishable from a fresh quiesce
+        // at the RPC, so the target's own contract check would pass
+        // while the base silently missed the writes. Our clock is the
+        // only witness, so it is the one that refuses.
+        let spent = armed.elapsed().as_millis() as u64;
+        if spent * 4 > lease_ms * 3 {
+            return Err(format!(
+                "'{volume}': the final delta took {spent} ms of a {lease_ms} ms quiesce lease — \
+                 abandoning the window rather than admitting a leg whose cut may predate a \
+                 lapse. The next attempt starts from a smaller delta"
+            ));
+        }
+        // Renew immediately before the add, so the add itself runs on a
+        // full lease. The target pins the lease across the add, so an
+        // expiry during channel installation defers to it.
+        self.quiesce(raid, lease_ms).await?;
+        self.raid_add_insync(raid, dst).await?;
+        // AND ONLY NOW the record. If this fails the leg is a member
+        // that the record does not vouch for, which the next converge
+        // prunes — the safe direction. The reverse would leave an
+        // electable leg missing the final delta.
+        match self
+            .backend
+            .block_leg_mark(
+                volume,
+                peer,
+                crate::state_backend::extent_alloc::LEG_INSYNC,
+                now_unix(),
+            )
+            .await
+        {
+            Ok(Ok(())) => Ok(copied),
+            other => {
+                let e = match other {
+                    Ok(Err(e)) => e.to_string(),
+                    Err(e) => e.to_string(),
+                    Ok(Ok(())) => unreachable!(),
+                };
+                let remove = json!({
+                    "method": "bdev_raid_remove_base_bdev",
+                    "params": { "name": dst }
+                });
+                let _ = self.rpc.rpc(&remove).await;
+                Err(format!(
+                    "'{volume}': leg '{peer}' was admitted but its in-sync mark did not land \
+                     ({e}) — the leg was removed again, because a member the record cannot \
+                     vouch for is a member nobody can elect"
+                ))
+            }
+        }
+    }
+
+    /// Give up on a rebuild in progress: drop the destination
+    /// controller, sweep our cuts. Best-effort by design — every one of
+    /// these is level-triggered and the next attempt re-does it.
+    ///
+    /// The detach matters more than it looks: a composed leg's transport
+    /// QUEUES I/O rather than failing it (the degrade barrier's other
+    /// half), so an abandoned destination whose peer never comes back
+    /// holds queued writes forever.
+    async fn abandon_rebuild(&self, volume: &str, peer: &str) {
+        let ctrl = format!("flintleg-{volume}-{peer}");
+        // guarded-destroy-lint: allow — the subject is a controller
+        // THIS rebuild attached as a copy destination, and dropping it
+        // destroys no data: the peer's leg keeps whatever was copied,
+        // and the next attempt starts the ladder again from a cut.
+        // Leaving it attached is the harmful option, not the safe one —
+        // a composed leg's transport queues I/O rather than failing it.
+        let detach = json!({
+            "method": "bdev_nvme_detach_controller", // guarded-destroy-lint: allow
+            "params": { "name": ctrl }
+        });
+        let _ = self.rpc.rpc(&detach).await;
+        let swept = self.sweep_cuts(volume).await;
+        tracing::warn!(
+            "'{}': rebuild of leg '{}' abandoned — destination detached, {} cut(s) swept",
+            volume, peer, swept
+        );
+    }
+
+    /// Every stale leg on a volume this target composes. The pass spawns
+    /// rebuilds rather than awaiting them: a full copy can take hours,
+    /// and the loop that would be blocked is the one that renews every
+    /// serving lease on this target.
+    pub async fn rebuild_candidates(&self, volumes: &[String]) -> Vec<(String, String)> {
+        let me = target_id();
+        let mut out = Vec::new();
+        for volume in volumes {
+            match self.backend.block_volume_seat(volume).await {
+                Ok(Ok(Some(s))) if s.composer == me => {}
+                _ => continue,
+            }
+            let Ok(Ok(legs)) = self.backend.block_legs(volume).await else { continue };
+            for leg in legs.iter().filter(|l| {
+                l.target_id != me
+                    && l.sync_state == crate::state_backend::extent_alloc::LEG_STALE
+            }) {
+                out.push((volume.clone(), leg.target_id.clone()));
+            }
+        }
+        out
+    }
+
+    // ---- the rebuild's primitives ----
+
+    fn cut_name(&self, volume: &str, round: u32) -> String {
+        format!("flintcut-{volume}-{round}")
+    }
+
+    fn cut_alias(&self, volume: &str, round: u32) -> String {
+        format!("{}/{}", self.lvstore, self.cut_name(volume, round))
+    }
+
+    async fn lvol_info(&self, name: &str) -> Result<serde_json::Value, String> {
+        let resp = self
+            .rpc
+            .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": name } }))
+            .await
+            .map_err(|e| format!("bdev_get_bdevs {name}: {e}"))?;
+        resp.get("result")
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+            .cloned()
+            .ok_or_else(|| format!("bdev_get_bdevs {name}: empty reply"))
+    }
+
+    /// The lvolstore's cluster size — the unit everything sparse is
+    /// counted in.
+    async fn cluster_bytes(&self) -> Option<u64> {
+        let resp = self
+            .rpc
+            .rpc(&json!({ "method": "bdev_lvol_get_lvstores" }))
+            .await
+            .ok()?;
+        resp.get("result")?
+            .as_array()?
+            .iter()
+            .find(|s| s.get("name").and_then(|n| n.as_str()) == Some(self.lvstore.as_str()))?
+            .get("cluster_size")?
+            .as_u64()
+    }
+
+    /// What the head owns RIGHT NOW — which, after a cut, is exactly
+    /// what has been written since it. The blobstore's copy-on-write
+    /// bookkeeping is the dirty-region tracking; this reads it.
+    async fn allocated_bytes(&self, lvol: &str, cluster: u64) -> Option<u64> {
+        let info = self.lvol_info(lvol).await.ok()?;
+        let n = info
+            .get("driver_specific")?
+            .get("lvol")?
+            .get("num_allocated_clusters")?
+            .as_u64()?;
+        Some(n * cluster)
+    }
+
+    async fn snapshot_lvol(&self, lvol: &str, snap: &str) -> Result<(), String> {
+        let payload = json!({
+            "method": "bdev_lvol_snapshot",
+            "params": { "lvol_name": lvol, "snapshot_name": snap }
+        });
+        match self.rpc.rpc(&payload).await {
+            Ok(_) => Ok(()),
+            // A resume after a crash between the cut and its copy: same
+            // head, same content, and the copy below is idempotent.
+            Err(e) if crate::epoch_scheduler::is_already_exists(&e.to_string()) => Ok(()),
+            Err(e) => Err(format!("cutting {snap} from {lvol}: {e}")),
+        }
+    }
+
+    /// One sparse copy, polled to a terminal state. Returns the clusters
+    /// copied.
+    ///
+    /// The poll's bound is PROGRESS, not wall clock (F39): a wall-clock
+    /// cap would kill a legitimate multi-hour bulk copy of a large
+    /// volume, while a copy that stops moving clusters is wedged no
+    /// matter how long it has been running.
+    async fn shallow_copy(&self, src_lvol: &str, dst_bdev: &str) -> Result<u64, String> {
+        let start = json!({
+            "method": "bdev_lvol_start_shallow_copy",
+            "params": { "src_lvol_name": src_lvol, "dst_bdev_name": dst_bdev }
+        });
+        let resp = self
+            .rpc
+            .rpc(&start)
+            .await
+            .map_err(|e| format!("shallow copy {src_lvol} → {dst_bdev}: {e}"))?;
+        let op = resp
+            .get("result")
+            .and_then(|r| r.get("operation_id"))
+            .and_then(|o| o.as_u64())
+            .ok_or_else(|| format!("shallow copy of {src_lvol} returned no operation_id"))?;
+        let stall = std::time::Duration::from_secs(rebuild_stall_secs());
+        let poll = rebuild_poll();
+        let mut last_copied: Option<u64> = None;
+        let mut last_progress = std::time::Instant::now();
+        loop {
+            let check = json!({
+                "method": "bdev_lvol_check_shallow_copy",
+                "params": { "operation_id": op }
+            });
+            let resp = self
+                .rpc
+                .rpc(&check)
+                .await
+                .map_err(|e| format!("checking the copy of {src_lvol}: {e}"))?;
+            let result = resp.get("result").cloned().unwrap_or_default();
+            let copied = result.get("copied_clusters").and_then(|c| c.as_u64());
+            match result.get("state").and_then(|s| s.as_str()) {
+                Some("complete") => return Ok(copied.unwrap_or(0)),
+                Some("in progress") => {
+                    if copied != last_copied {
+                        last_copied = copied;
+                        last_progress = std::time::Instant::now();
+                    } else if last_progress.elapsed() >= stall {
+                        return Err(format!(
+                            "the copy of {src_lvol} has moved no clusters for {}s (stuck at \
+                             {last_copied:?}) — declaring it wedged (F39)",
+                            stall.as_secs()
+                        ));
+                    }
+                    if !poll.is_zero() {
+                        tokio::time::sleep(poll).await;
+                    }
+                }
+                // Includes the destination running out of room: abort,
+                // stay stale, surface it — never retry into a full pool.
+                Some("error") => {
+                    let detail =
+                        result.get("error").and_then(|e| e.as_str()).unwrap_or("unknown");
+                    return Err(format!("the copy of {src_lvol} failed: {detail}"));
+                }
+                other => {
+                    return Err(format!(
+                        "the copy of {src_lvol} returned an unexpected state {other:?}"
+                    ))
+                }
+            }
+        }
+    }
+
+    async fn quiesce(&self, raid: &str, lease_ms: u64) -> Result<(), String> {
+        let payload = json!({
+            "method": "bdev_raid_quiesce",
+            "params": { "name": raid, "lease_ms": lease_ms }
+        });
+        self.rpc
+            .rpc(&payload)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("quiescing {raid}: {e}"))
+    }
+
+    async fn unquiesce(&self, raid: &str) -> Result<(), String> {
+        let payload = json!({ "method": "bdev_raid_unquiesce", "params": { "name": raid } });
+        self.rpc
+            .rpc(&payload)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("releasing the quiesce of {raid}: {e}"))
+    }
+
+    async fn raid_add_insync(&self, raid: &str, base: &str) -> Result<(), String> {
+        // guarded-construct-lint: allow — the hazard this lint guards is
+        // a composition assembled over bases nobody validated. This call
+        // is the opposite: it is the ONE site that has proof, and the
+        // proof is enforced target-side as well as here. `skip_rebuild`
+        // is refused by flint's carried patch unless a quiesce lease is
+        // held, and the caller took the cut this base was built from
+        // inside that same lease. No other site may add a base at all.
+        let payload = json!({
+            "method": "bdev_raid_add_base_bdev", // guarded-construct-lint: allow
+            "params": { "raid_bdev": raid, "base_bdev": base, "skip_rebuild": true }
+        });
+        self.rpc
+            .rpc(&payload)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("admitting {base} to {raid}: {e}"))
+    }
+
+    /// Merge our cuts back into the head, newest first.
+    ///
+    /// Deleting a snapshot with exactly one clone is a metadata act —
+    /// the blobstore hands the clusters to the clone rather than copying
+    /// them — so this is cheap, and it is also the crash recovery: a
+    /// chain left by an abandoned rebuild is swept before the next one
+    /// starts, which is what keeps the head parent-free.
+    async fn sweep_cuts(&self, volume: &str) -> usize {
+        let prefix = format!("{}/flintcut-{}-", self.lvstore, volume);
+        let Ok(resp) = self.rpc.rpc(&json!({ "method": "bdev_get_bdevs" })).await else {
+            return 0;
+        };
+        let mut cuts: Vec<(u32, String)> = resp
+            .get("result")
+            .and_then(|r| r.as_array())
+            .map(|bs| {
+                bs.iter()
+                    .flat_map(|b| {
+                        b.get("aliases")
+                            .and_then(|a| a.as_array())
+                            .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    })
+                    .filter_map(|alias| {
+                        let round = alias.strip_prefix(prefix.as_str())?.parse::<u32>().ok()?;
+                        Some((round, alias.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        cuts.sort_by_key(|c| std::cmp::Reverse(c.0));
+        let mut swept = 0;
+        for (_, alias) in cuts {
+            // Guarded-destroy: this is one of our own cuts, named by
+            // this volume and this mechanism, and its content is merged
+            // into its clone rather than discarded.
+            let del = json!({ "method": "bdev_lvol_delete", "params": { "name": alias } }); // guarded-destroy-lint: allow
+            match self.rpc.rpc(&del).await {
+                Ok(_) => swept += 1,
+                Err(e) => {
+                    tracing::warn!("'{}': could not sweep cut {} ({}) — leaving the rest", volume, alias, e);
+                    break;
+                }
+            }
+        }
+        swept
     }
 
     /// ASSEMBLY (`Assemble`) — the act that makes an elected composer a
@@ -2158,11 +3054,33 @@ pub(crate) mod tests {
         /// case the capacity gate must not read as "empty".
         pub(crate) free_clusters: Mutex<Option<u64>>,
         pub(crate) total_clusters: Mutex<u64>,
-        /// raid name → the create params it was built with. The fake
-        /// models the one property the composition path depends on:
-        /// a raid is an ordinary bdev once it exists, so the namespace
-        /// can point at it exactly as it points at an lvol.
-        pub(crate) raids: Mutex<std::collections::HashMap<String, Value>>,
+        /// raid name → its SLOT TABLE, `null` for an empty slot. The
+        /// fake models the two properties the composition path depends
+        /// on: a raid is an ordinary bdev once it exists (so the
+        /// namespace can point at it exactly as it points at an lvol),
+        /// and its slot COUNT is fixed at creation — a leg can only ever
+        /// rejoin a slot some removal emptied.
+        pub(crate) raids: Mutex<std::collections::HashMap<String, Vec<Option<String>>>>,
+        /// Raids under a held `bdev_raid_quiesce` lease.
+        pub(crate) quiesced: Mutex<std::collections::HashSet<String>>,
+        /// alias → clusters the blob OWNS. Snapshotting moves them to
+        /// the cut, which is what makes a shallow copy of the cut the
+        /// delta and nothing more.
+        pub(crate) alloc: Mutex<std::collections::HashMap<String, u64>>,
+        /// alias → parent alias, for the clone/`base_snapshot` fields a
+        /// rebuild has to read before it dares copy.
+        pub(crate) parents: Mutex<std::collections::HashMap<String, String>>,
+        /// Every shallow copy that ran: `(src, dst, clusters)`. The
+        /// sparseness claim is only testable because this records what
+        /// was actually moved.
+        pub(crate) copies: Mutex<Vec<(String, String, u64)>>,
+        /// `(head, clusters)`: a writer that dirties the head every time
+        /// a copy runs. Without one the ladder converges in a single
+        /// round and its bound is never exercised.
+        pub(crate) writer: Mutex<Option<(String, u64)>>,
+        /// method → the error it answers with. The rebuild's unwind
+        /// paths are only testable if a step can be made to fail.
+        pub(crate) failures: Mutex<std::collections::HashMap<String, String>>,
     }
 
     /// The fake lvolstore's cluster size (SPDK's default is 4 MiB).
@@ -2184,7 +3102,44 @@ pub(crate) mod tests {
                 free_clusters: Mutex::new(Some(1 << 20)),
                 total_clusters: Mutex::new(1 << 20),
                 raids: Mutex::new(Default::default()),
+                quiesced: Mutex::new(Default::default()),
+                alloc: Mutex::new(Default::default()),
+                parents: Mutex::new(Default::default()),
+                copies: Mutex::new(Default::default()),
+                writer: Mutex::new(None),
+                failures: Mutex::new(Default::default()),
             }
+        }
+
+        /// Make one RPC method fail from now on.
+        pub(crate) fn fail(&self, method: &str, msg: &str) {
+            self.failures.lock().unwrap().insert(method.to_string(), msg.to_string());
+        }
+
+        /// A client that writes `clusters` clusters to `head` during
+        /// every shallow copy.
+        pub(crate) fn set_writer(&self, head: &str, clusters: u64) {
+            *self.writer.lock().unwrap() = Some((head.to_string(), clusters));
+        }
+
+        /// Simulate writes: the head now owns `clusters` clusters.
+        pub(crate) fn set_allocated(&self, alias: &str, clusters: u64) {
+            self.alloc.lock().unwrap().insert(alias.to_string(), clusters);
+        }
+
+        /// Every shallow copy that ran, in order.
+        pub(crate) fn copies(&self) -> Vec<(String, String, u64)> {
+            self.copies.lock().unwrap().clone()
+        }
+
+        /// The live members of a raid, empty slots dropped.
+        pub(crate) fn members_of(&self, raid: &str) -> Vec<String> {
+            self.raids
+                .lock()
+                .unwrap()
+                .get(raid)
+                .map(|slots| slots.iter().flatten().cloned().collect())
+                .unwrap_or_default()
         }
         /// Size the fake store: `(total_clusters, free_clusters)`.
         pub(crate) fn set_store(&self, total: u64, free: u64) {
@@ -2225,6 +3180,9 @@ pub(crate) mod tests {
             self.calls.lock().unwrap().push(payload.clone());
             let method = payload["method"].as_str().unwrap_or("");
             let p = &payload["params"];
+            if let Some(msg) = self.failures.lock().unwrap().get(method) {
+                return Err(msg.clone().into());
+            }
             match method {
                 // The reachability probe: cheapest proof the process is
                 // answering, and it asserts nothing about its state.
@@ -2241,26 +3199,84 @@ pub(crate) mod tests {
                     if self.raids.lock().unwrap().contains_key(&name) {
                         return Err("File exists".into());
                     }
-                    self.raids.lock().unwrap().insert(name.clone(), p.clone());
+                    // Real SPDK refuses an empty base name, which is
+                    // precisely why the frame needs stand-ins.
+                    let slots: Vec<Option<String>> = p["base_bdevs"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|b| b.as_str().unwrap_or("").to_string())
+                        .map(|b| if b.is_empty() { None } else { Some(b) })
+                        .collect();
+                    if slots.iter().any(|s| s.is_none()) {
+                        return Err("The base bdev name cannot be empty".into());
+                    }
+                    self.raids.lock().unwrap().insert(name.clone(), slots);
                     // A raid IS a bdev — that is the whole reason the
                     // namespace can be re-pointed at it.
                     self.bdevs.lock().unwrap().insert(name.clone(), name.clone());
                     Ok(json!({ "result": true }))
                 }
                 // Degrading: the base leaves the raid, which is what
-                // lets the queued I/O drain. The raid itself survives.
+                // lets the queued I/O drain. The SLOT survives — that
+                // is what the leg rejoins through.
                 "bdev_raid_remove_base_bdev" => {
                     let base = p["name"].as_str().unwrap_or("").to_string();
                     let mut raids = self.raids.lock().unwrap();
                     let mut hit = false;
-                    for params in raids.values_mut() {
-                        if let Some(bases) = params["base_bdevs"].as_array_mut() {
-                            let before = bases.len();
-                            bases.retain(|b| b.as_str() != Some(base.as_str()));
-                            hit |= bases.len() != before;
+                    for slots in raids.values_mut() {
+                        for slot in slots.iter_mut() {
+                            if slot.as_deref() == Some(base.as_str()) {
+                                *slot = None;
+                                hit = true;
+                            }
                         }
                     }
                     if hit { Ok(json!({ "result": true })) } else { Err("no such base".into()) }
+                }
+                // The carried patch. Its contract is enforced HERE
+                // because that is where the real target enforces it: a
+                // skip_rebuild add without a held quiesce lease is
+                // -EPERM, since the cut that produced the base and the
+                // add that admits it must sit in one window.
+                "bdev_raid_add_base_bdev" => {
+                    let raid = p["raid_bdev"].as_str().unwrap_or("").to_string();
+                    let base = p["base_bdev"].as_str().unwrap_or("").to_string();
+                    let skip = p["skip_rebuild"].as_bool().unwrap_or(false);
+                    if skip && !self.quiesced.lock().unwrap().contains(&raid) {
+                        return Err(format!(
+                            "skip_rebuild add requires a held bdev_raid_quiesce lease on {raid}"
+                        )
+                        .into());
+                    }
+                    let mut raids = self.raids.lock().unwrap();
+                    let slots = raids.get_mut(&raid).ok_or("no such raid")?;
+                    match slots.iter_mut().find(|s| s.is_none()) {
+                        Some(slot) => {
+                            *slot = Some(base);
+                            Ok(json!({ "result": true }))
+                        }
+                        None => Err(format!(
+                            "no empty slot found in raid bdev '{raid}' for new base bdev '{base}'"
+                        )
+                        .into()),
+                    }
+                }
+                "bdev_raid_quiesce" => {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    if !self.raids.lock().unwrap().contains_key(&name) {
+                        return Err("raid bdev not found".into());
+                    }
+                    self.quiesced.lock().unwrap().insert(name);
+                    Ok(json!({ "result": true }))
+                }
+                "bdev_raid_unquiesce" => {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    if !self.quiesced.lock().unwrap().remove(&name) {
+                        return Err("no quiesce lease held".into());
+                    }
+                    Ok(json!({ "result": true }))
                 }
                 "bdev_raid_delete" => {
                     let name = p["name"].as_str().unwrap_or("").to_string();
@@ -2274,18 +3290,102 @@ pub(crate) mod tests {
                         .lock()
                         .unwrap()
                         .iter()
-                        .map(|(name, params)| {
-                            let bases: Vec<Value> = params["base_bdevs"]
-                                .as_array()
-                                .cloned()
-                                .unwrap_or_default()
+                        .map(|(name, slots)| {
+                            let bases: Vec<Value> = slots
                                 .iter()
-                                .map(|b| json!({ "name": b, "is_configured": true }))
+                                .map(|b| json!({ "name": b, "is_configured": b.is_some() }))
                                 .collect();
-                            json!({ "name": name, "state": "online", "base_bdevs_list": bases })
+                            json!({
+                                "name": name,
+                                "state": "online",
+                                "num_base_bdevs": slots.len(),
+                                "base_bdevs_list": bases,
+                            })
                         })
                         .collect();
                     Ok(json!({ "result": raids }))
+                }
+                // A stand-in for an absent leg's slot, and nothing else:
+                // created, framed over, removed, deleted.
+                "bdev_null_create" => {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    if self.bdevs.lock().unwrap().contains_key(&name) {
+                        return Err("File exists".into());
+                    }
+                    let bytes = p["num_blocks"].as_u64().unwrap_or(0)
+                        * p["block_size"].as_u64().unwrap_or(FAKE_BLOCK_SIZE);
+                    self.bdevs.lock().unwrap().insert(name.clone(), name.clone());
+                    self.bdev_bytes.lock().unwrap().insert(name, bytes);
+                    Ok(json!({ "result": true }))
+                }
+                "bdev_null_delete" => {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    self.bdevs.lock().unwrap().remove(&name);
+                    self.bdev_bytes.lock().unwrap().remove(&name);
+                    Ok(json!({ "result": true }))
+                }
+                "bdev_nvme_detach_controller" => {
+                    let name = p["name"].as_str().unwrap_or("").to_string();
+                    self.bdevs.lock().unwrap().remove(&format!("{name}n1"));
+                    Ok(json!({ "result": true }))
+                }
+                // THE CUT. The clusters the head owns become the
+                // snapshot's; the head starts owning nothing again and
+                // accumulates only what is written from here. That is
+                // the copy-on-write bookkeeping the ladder reads as its
+                // dirty set, so the fake has to model it or the delta
+                // rounds prove nothing.
+                "bdev_lvol_snapshot" => {
+                    let head = p["lvol_name"].as_str().unwrap_or("").to_string();
+                    let snap = format!(
+                        "{}/{}",
+                        head.split('/').next().unwrap_or(""),
+                        p["snapshot_name"].as_str().unwrap_or("")
+                    );
+                    if self.bdevs.lock().unwrap().contains_key(&snap) {
+                        return Err("File exists".into());
+                    }
+                    let owned = self.alloc.lock().unwrap().insert(head.clone(), 0).unwrap_or(0);
+                    self.alloc.lock().unwrap().insert(snap.clone(), owned);
+                    let bytes =
+                        self.bdev_bytes.lock().unwrap().get(&head).copied().unwrap_or(0);
+                    self.bdev_bytes.lock().unwrap().insert(snap.clone(), bytes);
+                    self.bdevs.lock().unwrap().insert(snap.clone(), snap.clone());
+                    let mut parents = self.parents.lock().unwrap();
+                    if let Some(grandparent) = parents.get(&head).cloned() {
+                        parents.insert(snap.clone(), grandparent);
+                    }
+                    parents.insert(head, snap);
+                    Ok(json!({ "result": "uuid-of-snapshot" }))
+                }
+                "bdev_lvol_start_shallow_copy" => {
+                    let src = p["src_lvol_name"].as_str().unwrap_or("").to_string();
+                    let dst = p["dst_bdev_name"].as_str().unwrap_or("").to_string();
+                    if !self.bdevs.lock().unwrap().contains_key(&dst) {
+                        return Err("destination does not exist".into());
+                    }
+                    // ONLY the clusters this blob owns — an ancestor's
+                    // are skipped, which is exactly the hazard the
+                    // parent guard refuses to walk into.
+                    let clusters =
+                        self.alloc.lock().unwrap().get(&src).copied().unwrap_or(0);
+                    // A client that kept writing while the copy ran —
+                    // which is the whole reason the ladder has more than
+                    // one rung.
+                    if let Some((head, per_copy)) = self.writer.lock().unwrap().clone() {
+                        *self.alloc.lock().unwrap().entry(head).or_insert(0) += per_copy;
+                    }
+                    let mut copies = self.copies.lock().unwrap();
+                    copies.push((src, dst, clusters));
+                    Ok(json!({ "result": { "operation_id": copies.len() } }))
+                }
+                "bdev_lvol_check_shallow_copy" => {
+                    let op = p["operation_id"].as_u64().unwrap_or(0) as usize;
+                    let copies = self.copies.lock().unwrap();
+                    let n = copies.get(op.saturating_sub(1)).map(|c| c.2).unwrap_or(0);
+                    Ok(json!({
+                        "result": { "state": "complete", "copied_clusters": n, "total_clusters": n }
+                    }))
                 }
                 "bdev_get_bdevs" => {
                     let bdevs = self.bdevs.lock().unwrap();
@@ -2310,6 +3410,8 @@ pub(crate) mod tests {
                     };
                     let bytes =
                         self.bdev_bytes.lock().unwrap().get(name).copied().unwrap_or(0);
+                    let parent = self.parents.lock().unwrap().get(name).cloned();
+                    let owned = self.alloc.lock().unwrap().get(name).copied().unwrap_or(0);
                     match bdevs.get(name) {
                         Some(canonical) => Ok(json!({ "result": [{
                             "name": canonical,
@@ -2317,6 +3419,11 @@ pub(crate) mod tests {
                             "aliases": [name],
                             "block_size": FAKE_BLOCK_SIZE,
                             "num_blocks": bytes / FAKE_BLOCK_SIZE,
+                            "driver_specific": { "lvol": {
+                                "num_allocated_clusters": owned,
+                                "clone": parent.is_some(),
+                                "base_snapshot": parent,
+                            }},
                         }] })),
                         None => Err("No such device".into()),
                     }
@@ -2369,6 +3476,25 @@ pub(crate) mod tests {
                     let name = p["name"].as_str().unwrap_or("").to_string();
                     self.bdevs.lock().unwrap().remove(&name);
                     self.bdev_bytes.lock().unwrap().remove(&name);
+                    // Deleting a snapshot with one clone MERGES: the
+                    // clone inherits its clusters and its parent. That
+                    // is what makes the cut sweep cheap, and what
+                    // leaves the head parent-free afterwards.
+                    let owned = self.alloc.lock().unwrap().remove(&name).unwrap_or(0);
+                    let mut parents = self.parents.lock().unwrap();
+                    let grandparent = parents.remove(&name);
+                    let clones: Vec<String> = parents
+                        .iter()
+                        .filter(|(_, v)| **v == name)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for clone in clones {
+                        *self.alloc.lock().unwrap().entry(clone.clone()).or_insert(0) += owned;
+                        match &grandparent {
+                            Some(g) => parents.insert(clone, g.clone()),
+                            None => parents.remove(&clone),
+                        };
+                    }
                     Ok(json!({ "result": true }))
                 }
                 "nvmf_get_subsystems" => {
@@ -3176,10 +4302,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// COMPOSITION IS DERIVED FROM THE RECORD, and it goes both ways: a
-    /// volume with an in-sync peer serves from a raid1, a volume without
-    /// one serves from the bare lvol, and moving between them moves no
-    /// bytes.
+    /// THE FRAME IS DERIVED FROM THE RECORD'S LEG COUNT, not from how
+    /// many legs are healthy: a volume the record gives two legs is
+    /// served through a two-slot composition even while the second leg
+    /// is absent, because a raid's slots are fixed when it is created
+    /// and a leg can only rejoin one that some removal emptied.
     ///
     /// That last part is what `superblock: false` buys and it is the
     /// reason this tier can compose an EXISTING volume at all. SPDK's
@@ -3189,7 +4316,7 @@ pub(crate) mod tests {
     /// at LBA 0 — identical to the bare lvol — so the namespace can be
     /// re-pointed either way.
     #[tokio::test]
-    async fn a_peer_leg_composes_a_raid_and_losing_it_falls_back_to_the_lvol() {
+    async fn a_recorded_leg_frames_the_composition_and_the_frame_outlives_it() {
         let tgt = Arc::new(FakeTgt::new());
         let backend: Arc<dyn crate::state_backend::StateBackend> =
             Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
@@ -3201,7 +4328,6 @@ pub(crate) mod tests {
             4420,
             "/var/tmp".into(),
         );
-        let me = target_id();
         let now = now_unix();
         r.ensure("pvc-mir", Some(1 << 20)).await.expect("provision");
         let nqn = crate::identity::block_volume_export_nqn("pvc-mir");
@@ -3213,58 +4339,12 @@ pub(crate) mod tests {
                 .unwrap_or_default()
                 .to_string()
         };
-        assert!(ns_bdev(&tgt).contains("pvc-mir"), "solo serves the lvol");
-        assert!(!tgt.methods().iter().any(|m| m == "bdev_raid_create"), "no raid when solo");
+        assert!(ns_bdev(&tgt).contains("pvc-mir"), "one leg serves the lvol");
+        assert!(!tgt.methods().iter().any(|m| m == "bdev_raid_create"), "nothing to compose");
 
-        // A peer appears, registered and IN SYNC.
+        // A peer leg appears in the record — STALE, because it has no
+        // copy yet. The frame is built for it anyway.
         backend.block_target_register("node-peer", "10.0.0.2", 4420, now).await.unwrap().unwrap();
-        backend
-            .block_leg_mark(
-                "pvc-mir",
-                "node-peer",
-                crate::state_backend::extent_alloc::LEG_INSYNC,
-                now,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        r.reconcile_hosts("pvc-mir").await.expect("compose");
-
-        let calls = tgt.calls.lock().unwrap().clone();
-        let attach = tgt
-            .call_with_method(&calls, "bdev_nvme_attach_controller")
-            .expect("the peer's leg was attached");
-        assert_eq!(
-            attach["params"]["traddr"], "10.0.0.2",
-            "the peer is dialled at its REGISTRY address, like every other dial site"
-        );
-        assert_eq!(
-            attach["params"]["subnqn"],
-            crate::identity::block_leg_export_nqn("pvc-mir").as_str(),
-            "over the LEG export, not the client-facing one"
-        );
-        assert_eq!(
-            attach["params"]["hostnqn"],
-            crate::nvmeof_export::flint_host_nqn(&me).as_str(),
-            "as this target — the identity the peer's leg allow-list admits"
-        );
-        let create = tgt.call_with_method(&calls, "bdev_raid_create").expect("raid built");
-        assert_eq!(create["params"]["raid_level"], "1");
-        assert_eq!(
-            create["params"]["superblock"], false,
-            "a superblock would shift every byte under the pinned NGUID"
-        );
-        assert_eq!(create["params"]["base_bdevs"].as_array().unwrap().len(), 2);
-        assert!(ns_bdev(&tgt).starts_with("flintraid-"), "the namespace serves the RAID now");
-        assert_eq!(
-            tgt.subsystems.lock().unwrap()[&nqn]["namespaces"].as_array().unwrap().len(),
-            1,
-            "exactly one namespace — the lvol-backed one is REPLACED, not accompanied"
-        );
-
-        // The peer goes STALE — it holds bytes the composition has moved
-        // past. It leaves the composition, and the volume serves solo
-        // again from the lvol that has all the data.
         backend
             .block_leg_mark(
                 "pvc-mir",
@@ -3276,12 +4356,116 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         tgt.calls.lock().unwrap().clear();
-        r.reconcile_hosts("pvc-mir").await.expect("degrade");
-        assert!(
-            tgt.methods().iter().any(|m| m == "bdev_raid_delete"),
-            "the composition object is dropped so the lvol's claim is released"
+        r.reconcile_hosts("pvc-mir").await.expect("frame");
+
+        let calls = tgt.calls.lock().unwrap().clone();
+        let create = tgt.call_with_method(&calls, "bdev_raid_create").expect("frame built");
+        assert_eq!(create["params"]["raid_level"], "1");
+        assert_eq!(
+            create["params"]["superblock"], false,
+            "a superblock would shift every byte under the pinned NGUID"
         );
-        assert!(ns_bdev(&tgt).contains("pvc-mir"), "back to the lvol, no bytes moved");
+        assert_eq!(
+            create["params"]["base_bdevs"].as_array().unwrap().len(),
+            2,
+            "two slots — one per RECORDED leg, whatever their state"
+        );
+        // The stand-in exists only to make the slot, and it is gone
+        // before anything can read zeros out of it.
+        let idx = |m: &str| tgt.methods().iter().position(|x| x == m).unwrap();
+        assert!(idx("bdev_null_create") < idx("bdev_raid_create"), "stand-in before the frame");
+        assert!(
+            idx("bdev_raid_create") < idx("bdev_raid_remove_base_bdev"),
+            "and emptied immediately after"
+        );
+        assert!(tgt.methods().iter().any(|m| m == "bdev_null_delete"), "then deleted");
+        assert_eq!(
+            tgt.members_of("flintraid-pvc-mir"),
+            vec![r.bdev_name("pvc-mir")],
+            "the composition serves ONE leg — the local one — with a slot standing empty"
+        );
+        assert!(ns_bdev(&tgt).starts_with("flintraid-"), "the namespace serves the RAID now");
+        assert_eq!(
+            tgt.subsystems.lock().unwrap()[&nqn]["namespaces"].as_array().unwrap().len(),
+            1,
+            "exactly one namespace — the lvol-backed one is REPLACED, not accompanied"
+        );
+
+        // THE FRAME OUTLIVES THE LEG. A further converge with the peer
+        // still absent must not tear the composition down and re-point
+        // the namespace at the lvol: that slot is what the leg rejoins
+        // through, and re-framing is what a live client would feel.
+        tgt.calls.lock().unwrap().clear();
+        r.reconcile_hosts("pvc-mir").await.expect("re-converge");
+        assert!(
+            !tgt.methods().iter().any(|m| m == "bdev_raid_delete"),
+            "the frame stands while the leg is away: {:?}",
+            tgt.methods()
+        );
+        assert!(ns_bdev(&tgt).starts_with("flintraid-"), "still the raid");
+    }
+
+    /// `UncleanResync`, the write-hole belt: a composition built from
+    /// nothing DEMOTES every peer it cannot prove.
+    ///
+    /// raid1 acks on any-one-leg success and writes the leg-failed
+    /// record asynchronously afterwards, so a composer that died
+    /// mid-write left two legs holding different bytes with nothing
+    /// durable saying which. There is no scrub and no resync — REBUILD
+    /// is raid1's only process — so "the record said in sync" is not
+    /// evidence, and re-composing over both would let reads flap
+    /// between divergent legs on LAYOUTCOMMIT-confirmed data.
+    ///
+    /// A/B: keep the in-sync mark here and the leg re-enters the
+    /// composition on nothing but its own last word.
+    #[tokio::test]
+    async fn a_composition_built_from_nothing_demotes_every_peer_it_cannot_prove() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        let now = now_unix();
+        r.ensure("pvc-unclean", Some(1 << 20)).await.expect("provision");
+        backend.block_target_register("node-peer", "10.0.0.2", 4420, now).await.unwrap().unwrap();
+        // The record's last word before the target died: both in sync.
+        backend
+            .block_leg_mark(
+                "pvc-unclean",
+                "node-peer",
+                crate::state_backend::extent_alloc::LEG_INSYNC,
+                now,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The target restarts: no raid exists, so the composition is
+        // built from nothing.
+        r.reconcile_hosts("pvc-unclean").await.expect("frame");
+
+        let legs = backend.block_legs("pvc-unclean").await.unwrap().unwrap();
+        assert_eq!(
+            legs.iter().find(|l| l.target_id == "node-peer").unwrap().sync_state,
+            crate::state_backend::extent_alloc::LEG_STALE,
+            "the peer is demoted: nothing here can prove its bytes equal ours"
+        );
+        assert_eq!(
+            tgt.members_of("flintraid-pvc-unclean"),
+            vec![r.bdev_name("pvc-unclean")],
+            "and it is NOT a member — it owes a rebuild"
+        );
+        assert!(
+            !tgt.methods().iter().any(|m| m == "bdev_nvme_attach_controller"),
+            "an unproven peer is not even dialled: {:?}",
+            tgt.methods()
+        );
     }
 
     /// THE DEGRADE BARRIER: the stale mark lands BEFORE the leg leaves
@@ -3315,13 +4499,21 @@ pub(crate) mod tests {
             .block_leg_mark(
                 "pvc-deg",
                 "node-peer",
-                crate::state_backend::extent_alloc::LEG_INSYNC,
+                crate::state_backend::extent_alloc::LEG_STALE,
                 now,
             )
             .await
             .unwrap()
             .unwrap();
-        r.reconcile_hosts("pvc-deg").await.expect("compose");
+        r.reconcile_hosts("pvc-deg").await.expect("frame");
+        // The only way into a live composition: a rebuild. Setting the
+        // record to in-sync by hand would be testing a state the code
+        // can no longer reach.
+        r.observe("node-peer", true, now);
+        assert!(matches!(
+            r.rebuild_leg("pvc-deg", "node-peer").await,
+            RebuildOutcome::Rebuilt { .. }
+        ));
 
         // The leg's transport QUEUES rather than fails — that is what
         // makes a solo ack impossible while the peer is missing.
@@ -3384,6 +4576,289 @@ pub(crate) mod tests {
                 .unwrap(),
             Err(crate::state_backend::extent_alloc::ExtentAllocError::NotInSync { .. })
         ));
+    }
+
+    /// A framed volume with a stale peer, ready to be rebuilt: the
+    /// record's two legs, the frame with its empty slot, the peer heard
+    /// from, and `head` holding `clusters` clusters of data.
+    async fn framed_with_a_stale_peer(
+        volume: &str,
+        clusters: u64,
+    ) -> (Arc<FakeTgt>, Arc<dyn crate::state_backend::StateBackend>, BlockExportReconciler) {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        let now = now_unix();
+        r.ensure(volume, Some(1 << 20)).await.expect("provision");
+        backend.block_target_register("node-peer", "10.0.0.2", 4420, now).await.unwrap().unwrap();
+        backend
+            .block_leg_mark(
+                volume,
+                "node-peer",
+                crate::state_backend::extent_alloc::LEG_STALE,
+                now,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        r.reconcile_hosts(volume).await.expect("frame");
+        r.observe("node-peer", true, now);
+        tgt.set_allocated(&r.bdev_name(volume), clusters);
+        tgt.calls.lock().unwrap().clear();
+        (tgt, backend, r)
+    }
+
+    /// THE REBUILD COPIES ONLY WHAT THE CUT OWNS — that is the whole
+    /// sparseness claim, and it is SPDK's, not ours: a shallow copy
+    /// walks the source blob's cluster map and skips every cluster the
+    /// blob does not own. raid1's own rebuild would walk the arena from
+    /// zero with no zero-detection and densify the thin target leg.
+    ///
+    /// And the ladder: round 1 carries the volume, every later round
+    /// carries only what the writer dirtied while the previous round
+    /// ran, because a cut takes the head's clusters with it.
+    #[tokio::test]
+    async fn the_rebuild_copies_only_the_clusters_each_cut_owns() {
+        // 100 clusters = 400 MiB of data, well past the 64 MiB window
+        // budget, so the ladder runs before the window does.
+        let (tgt, backend, r) = framed_with_a_stale_peer("pvc-rb", 100).await;
+        // A writer dirtying 4 clusters (16 MiB) per copy: under the
+        // budget, so the ladder converges after one round.
+        tgt.set_writer(&r.bdev_name("pvc-rb"), 4);
+
+        let out = r.rebuild_leg("pvc-rb", "node-peer").await;
+        assert!(matches!(out, RebuildOutcome::Rebuilt { .. }), "{out:?}");
+
+        let copies = tgt.copies();
+        assert_eq!(copies.len(), 2, "one ladder round and the window: {copies:?}");
+        assert_eq!(
+            (copies[0].0.as_str(), copies[0].2),
+            ("lvs_test/flintcut-pvc-rb-1", 100),
+            "round 1 carries the volume's allocated clusters — and nothing else"
+        );
+        assert_eq!(
+            (copies[1].0.as_str(), copies[1].2),
+            ("lvs_test/flintcut-pvc-rb-2", 4),
+            "the window carries ONLY what was written while round 1 ran"
+        );
+        assert!(
+            copies.iter().all(|c| c.1 == r.leg_base_name("pvc-rb", "node-peer")),
+            "every copy lands on the peer's leg: {copies:?}"
+        );
+
+        // The leg is a member again, the record says so, and our cuts
+        // are gone — a chain left behind would make the next rebuild
+        // refuse, because a head with a parent cannot be copied sparsely.
+        assert_eq!(
+            tgt.members_of("flintraid-pvc-rb").len(),
+            2,
+            "the leg rejoined the slot its absence left"
+        );
+        let legs = backend.block_legs("pvc-rb").await.unwrap().unwrap();
+        assert_eq!(
+            legs.iter().find(|l| l.target_id == "node-peer").unwrap().sync_state,
+            crate::state_backend::extent_alloc::LEG_INSYNC
+        );
+        let head = r.lvol_info(&r.bdev_name("pvc-rb")).await.unwrap();
+        assert_eq!(
+            head["driver_specific"]["lvol"]["clone"], false,
+            "the cuts were swept back into the head"
+        );
+    }
+
+    /// THE WINDOW'S CONTRACT, and the ORDER inside it.
+    ///
+    /// The cut that produced the leg's bytes and the add that admits it
+    /// must sit inside ONE held quiesce, or the writes between them
+    /// exist nowhere on the new leg — flint's carried SPDK patch refuses
+    /// a `skip_rebuild` add without a held lease for exactly that
+    /// reason, and the fake enforces it the same way.
+    ///
+    /// Then the mark, and only then: the leg becomes a member BEFORE the
+    /// record calls it in sync, mirroring the degrade barrier. A mark
+    /// that landed first and then crashed would leave an electable leg
+    /// missing the final delta.
+    ///
+    /// A/B: mark before the add and the "record trails reality" order
+    /// fails; drop either quiesce and the admission is refused outright.
+    #[tokio::test]
+    async fn the_leg_is_admitted_inside_the_quiesce_and_only_then_called_in_sync() {
+        let (tgt, _backend, r) = framed_with_a_stale_peer("pvc-win", 4).await;
+        assert!(matches!(
+            r.rebuild_leg("pvc-win", "node-peer").await,
+            RebuildOutcome::Rebuilt { .. }
+        ));
+
+        let methods = tgt.methods();
+        let idx = |m: &str| methods.iter().position(|x| x == m).expect(m);
+        let last = |m: &str| methods.iter().rposition(|x| x == m).expect(m);
+        assert!(
+            idx("bdev_raid_quiesce") < idx("bdev_lvol_snapshot"),
+            "the cut is taken INSIDE the window, not before it: {methods:?}"
+        );
+        assert!(
+            idx("bdev_lvol_snapshot") < idx("bdev_lvol_start_shallow_copy"),
+            "cut, then copy"
+        );
+        assert!(
+            last("bdev_raid_quiesce") < idx("bdev_raid_add_base_bdev"),
+            "the lease is renewed immediately before the add, so the add runs on a full lease"
+        );
+        assert!(
+            idx("bdev_raid_add_base_bdev") < idx("bdev_raid_unquiesce"),
+            "and the add completes before client I/O resumes"
+        );
+        let add = tgt
+            .call_with_method(&tgt.calls.lock().unwrap().clone(), "bdev_raid_add_base_bdev")
+            .expect("admitted")
+            .clone();
+        assert_eq!(
+            add["params"]["skip_rebuild"], true,
+            "no rebuild process: the leg already holds the bytes"
+        );
+        assert!(
+            tgt.methods().iter().any(|m| m == "bdev_raid_unquiesce"),
+            "the quiesce is always released — the lease would expire anyway, but a stall we \
+             are finished with is one we chose not to spend"
+        );
+    }
+
+    /// THE RECORD'S OPTIMISM TRAILS REALITY — proven by the failure.
+    ///
+    /// If the admission itself fails, the leg must still be STALE: a
+    /// mark placed in anticipation would leave an ELECTABLE leg that is
+    /// missing the final delta, and `ElectInSync` would hand it the
+    /// composition in good faith. That is the degrade barrier's rule
+    /// pointing the other way — there the record went stale before the
+    /// composition degraded, here the member comes before the mark.
+    ///
+    /// A/B: mark before the add and this leg comes back elected on a
+    /// window that never closed.
+    #[tokio::test]
+    async fn an_admission_that_fails_leaves_the_leg_stale_and_the_quiesce_released() {
+        let (tgt, backend, r) = framed_with_a_stale_peer("pvc-undo", 8).await;
+        tgt.fail("bdev_raid_add_base_bdev", "slot vanished");
+
+        match r.rebuild_leg("pvc-undo", "node-peer").await {
+            RebuildOutcome::Deferred(why) => assert!(why.contains("admitting"), "{why}"),
+            other => panic!("expected a deferral, got {other:?}"),
+        }
+        let legs = backend.block_legs("pvc-undo").await.unwrap().unwrap();
+        assert_eq!(
+            legs.iter().find(|l| l.target_id == "node-peer").unwrap().sync_state,
+            crate::state_backend::extent_alloc::LEG_STALE,
+            "the leg was never admitted, so nothing may say it is in sync"
+        );
+        assert!(
+            tgt.quiesced.lock().unwrap().is_empty(),
+            "and client I/O is not left gated behind a window that failed"
+        );
+        // The abandoned destination is dropped: a composed leg's
+        // transport QUEUES rather than fails, so one left attached to a
+        // peer that never returns holds queued writes forever.
+        assert!(
+            tgt.methods().iter().any(|m| m == "bdev_nvme_detach_controller"),
+            "{:?}",
+            tgt.methods()
+        );
+    }
+
+    /// A HEAD WITH A PARENT IS REFUSED. A shallow copy carries only the
+    /// blob's own clusters, so a head that still has an ancestor would
+    /// produce a leg that reads zeros wherever the ancestor holds the
+    /// data — silent, and only discovered at a failover. Walking the
+    /// chain oldest-first is the extension; refusing is the honest
+    /// answer until it exists.
+    #[tokio::test]
+    async fn a_rebuild_refuses_a_head_with_an_ancestor_rather_than_building_holes() {
+        let (tgt, _backend, r) = framed_with_a_stale_peer("pvc-anc", 8).await;
+        // A parent the sweep cannot merge away: not one of our cuts.
+        tgt.parents
+            .lock()
+            .unwrap()
+            .insert(r.bdev_name("pvc-anc"), "lvs_test/some-restore-source".into());
+
+        match r.rebuild_leg("pvc-anc", "node-peer").await {
+            RebuildOutcome::Refused(why) => {
+                assert!(why.contains("parent snapshot"), "{why}");
+                assert!(why.contains("read zeros"), "{why}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(tgt.copies().is_empty(), "and not a byte was copied");
+    }
+
+    /// A rebuild pours the whole volume at a peer and ends by holding
+    /// every client's I/O while it finishes. So the peer must be
+    /// AFFIRMATIVELY reachable — never-observed is not "probably fine",
+    /// it is a target nothing has heard from.
+    ///
+    /// A/B: accept anything that is merely not-condemned and the rebuild
+    /// spends the whole copy to fail at the window.
+    #[tokio::test]
+    async fn a_rebuild_waits_for_a_peer_it_has_actually_heard_from() {
+        let (tgt, _backend, r) = framed_with_a_stale_peer("pvc-unheard", 8).await;
+        r.probes.clear(); // never observed
+        match r.rebuild_leg("pvc-unheard", "node-peer").await {
+            RebuildOutcome::Deferred(why) => assert!(why.contains("not yet observed"), "{why}"),
+            other => panic!("expected a deferral, got {other:?}"),
+        }
+        assert!(tgt.copies().is_empty());
+
+        // Suspect is not enough either: the verdict has not landed, and
+        // a rebuild started at a target that is on its way out is a
+        // whole copy spent for nothing.
+        r.observe("node-peer", false, now_unix());
+        match r.rebuild_leg("pvc-unheard", "node-peer").await {
+            RebuildOutcome::Deferred(why) => assert!(why.contains("Suspect"), "{why}"),
+            other => panic!("expected a deferral, got {other:?}"),
+        }
+        assert!(tgt.copies().is_empty());
+    }
+
+    /// Only the composer may rebuild a leg, because only its bytes are
+    /// the volume's. The same predicate is re-checked inside the window
+    /// under the volume lock, where it catches the seat moving during a
+    /// copy that took hours.
+    #[tokio::test]
+    async fn only_the_composer_rebuilds_and_a_leg_the_record_omits_is_not_minted() {
+        let (tgt, backend, r) = framed_with_a_stale_peer("pvc-who", 8).await;
+        match r.rebuild_leg("pvc-who", "node-ghost").await {
+            RebuildOutcome::Refused(why) => assert!(why.contains("no leg row"), "{why}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // The seat moves away from us: the copy would be of bytes that
+        // are no longer the volume's.
+        let seat = backend.block_volume_seat("pvc-who").await.unwrap().unwrap().unwrap();
+        backend
+            .block_leg_mark(
+                "pvc-who",
+                "node-peer",
+                crate::state_backend::extent_alloc::LEG_INSYNC,
+                now_unix(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        backend
+            .block_promote("pvc-who", seat.epoch, &seat.composer, "node-peer", now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+        match r.rebuild_leg("pvc-who", "node-peer").await {
+            RebuildOutcome::Refused(why) => assert!(why.contains("not here"), "{why}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(tgt.copies().is_empty());
     }
 
     /// THE LEG EXPORT is the door `EvictAtLeg` closes, and who may come

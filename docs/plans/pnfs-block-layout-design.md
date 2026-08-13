@@ -1351,7 +1351,9 @@ Each phase ships standalone value; none is gated on the next.
   `SEEK_DATA`/`SEEK_HOLE` against the source lvol (lvol bdevs support it), copying
   allocated clusters only — so rebuild cost is proportional to allocated bytes, the
   thin target stays thin, and the cross-AZ worst case scales with data, not logical
-  size. The incremental ladder above that is the "rebuilds at scale" tranche, in
+  size. (SHIPPED as `bdev_lvol_start_shallow_copy` instead, which reads the blob's
+  cluster map directly rather than seeking over it — same property, no round trips,
+  and the same primitive the file tier already uses. See the rebuild entry below.) The incremental ladder above that is the "rebuilds at scale" tranche, in
   cost order: degraded-window dirty tracking (falls out of the DegradeBarrier
   interposition the model already requires — delta rejoin for the
   brief-absence case), lvol snapshot-diff at the stale-mark cut (the file tier's
@@ -1697,16 +1699,73 @@ Each phase ships standalone value; none is gated on the next.
   writes stall until it returns: an availability event, not a correctness one, and
   the honest cost of not being on the data path. `FLINT_PNFS_BLOCK_LEG_FAST_IO_FAIL_SECS`
   puts the bound back and says in its own warning that it switches the barrier off.
-  What remains: the sparse-aware REBUILD
-  that clears a stale mark (`SEEK_DATA`/`SEEK_HOLE` on the source lvol — note the
-  ephemeral raid makes this easier than the model assumed: flint can copy while the
-  target is not a member and then re-create the composition with both legs, never
-  touching raid1's allocation-blind process), the ANCESTRY proof that licenses a
-  delta rejoin, same-AZ leg PLACEMENT, and the StorageClass surface. **There is still no
-  `replicas: 2` parameter**: a composed volume whose peer leg is lost can now
-  degrade safely, but nothing yet REBUILDS that leg, so a volume provisioned
-  replicated would silently become and stay single-copy after its first peer
-  outage. The surface waits for the rebuild.
+  **THE REBUILD SHIPPED (same wave) — and the copy engine was already in the tree,
+  twice over.** The design said `SEEK_DATA`/`SEEK_HOLE` against the source lvol; what
+  shipped is `bdev_lvol_start_shallow_copy`, which is strictly better and needs no
+  round trips: it walks the source blob's own cluster map and skips every cluster the
+  blob does not own (`blobstore.c`, `bs_shallow_copy_cluster_find_next`), writing the
+  rest at identical offsets on the destination. Sparse by construction, entirely
+  inside the target, and the same primitive the FILE tier's catch-up has used since
+  Tier-2. Its precondition — the source must be READ ONLY, or -EPERM — turns out to
+  be the mechanism rather than an obstacle: each round snapshots the live head, and
+  the snapshot's OWN clusters are exactly the bytes written since the previous round,
+  so **the blobstore's copy-on-write IS the dirty-region tracking** and flint keeps
+  none of its own. round 1 carries the volume; round n carries what the writer
+  dirtied while round n-1 ran; the window carries the last delta. Bounded at
+  `FLINT_PNFS_BLOCK_REBUILD_MAX_ROUNDS` because the ladder converges only when the
+  copy outruns the writer.
+  **The design note about "copy while the target is not a member, then re-create the
+  composition with both legs" was WRONG in its second half, and the correction is the
+  most load-bearing thing here.** A raid bdev's SLOT COUNT is fixed at creation —
+  `bdev_raid_create` refuses an empty base name, and `raid_bdev_add_base_bdev` only
+  ever fills a slot some removal emptied — so re-creating the composition to admit a
+  leg re-points the namespace under a live client. Instead **the frame is a function
+  of the RECORD's leg count**: a volume the record gives two legs is served through a
+  two-slot raid whether the peer is present, stale or missing, each absent leg's slot
+  made by a null-bdev stand-in that is removed the instant the frame exists (and if a
+  stand-in cannot be removed, the whole frame is deleted rather than left serving a
+  leg of zeros). A leg then leaves by emptying its slot and rejoins into the same
+  slot, and the client sees neither. That also means the composition SURVIVES a
+  degrade — it no longer falls back to the bare lvol, because falling back is what
+  would cost a re-frame later.
+  The window is flint's **carried SPDK patch, whose contract the target enforces**:
+  `bdev_raid_add_base_bdev --skip-rebuild` is refused unless a `bdev_raid_quiesce`
+  lease is HELD, because the cut that produced the base and the add that admits it
+  must sit inside ONE quiesce or the writes between them exist nowhere on the new
+  leg. The lease auto-expires, so an orchestrator that dies mid-window cannot leave
+  guest I/O gated. flint adds the check the target CANNOT make: a lapsed lease
+  auto-unquiesces and a later renewal is indistinguishable from a fresh quiesce at
+  the RPC, so the window compares its OWN clock against the lease before admitting
+  and abandons rather than admit a leg whose cut may predate a lapse.
+  **The order is the degrade barrier's, mirrored**: there the record went stale
+  BEFORE the composition degraded; here the leg becomes a member BEFORE the record
+  calls it in sync. One rule stated twice — THE RECORD'S OPTIMISM TRAILS REALITY. A
+  mark placed in anticipation would leave an electable leg missing the final delta,
+  and `ElectInSync` would hand it the composition in good faith; A/B'd by failing the
+  admission and asserting the leg is still stale.
+  **`UncleanResync` shipped with it, as the frame's own rule**: a composition built
+  from nothing DEMOTES every peer it cannot prove, because raid1 acks on any-one-leg
+  and records the failure asynchronously, so "the record said in sync" is not
+  evidence that two legs hold the same bytes and there is no scrub to ask. The price
+  is a copy after an unclean restart; the alternative is reads flapping between
+  divergent legs on LAYOUTCOMMIT-confirmed data. A cheaper answer exists — a clean
+  marker written when a composition is torn down deliberately, which is what raid1's
+  superblock would have carried — but it must be written on a path a crash cannot
+  take, and that proof is not free, so it is owed rather than assumed.
+  Note WHICH of the model's two rejoin doors this is: always `RebuildComplete`, the
+  full copy of the source's allocated set, and never `DeltaRejoin` — so
+  `AncestryGuard`'s proof is not needed, because flint does not take the door it
+  guards. What it needs instead is the ANCESTOR guard: a shallow copy carries only
+  the head's own clusters, so a head that still has a parent snapshot would produce a
+  leg reading zeros wherever the ancestor holds data. That is refused, loudly, rather
+  than walked (the file tier's `copy_chain_to` is the extension).
+  No new schema: the rebuild's durable state is the leg's sync mark, and every
+  intermediate — cuts named by volume and round, an attached destination, a quiesce
+  lease — is reconstructible or self-expiring on the ONE target that owns them.
+  What remains: same-AZ leg PLACEMENT, expand-under-composition (`grow`'s read-back
+  belt still validates one lvol, not the frame), and the StorageClass surface.
+  **There is still no `replicas: 2` parameter** — the mechanism is complete but
+  nothing has yet run it on hardware, and the surface should not ship ahead of a rig.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left
