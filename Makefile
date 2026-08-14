@@ -280,8 +280,8 @@ test-pnfs-placement: build-pnfs ## Fleet-growth placement drill (durable-DS plan
 test-pnfs-recall: build-pnfs ## DS-death CB_LAYOUTRECALL e2e (kill DS1, assert MDS recall fires)
 	tests/lima/pnfs/recall.sh
 
-.PHONY: test-pnfs-restart
-test-pnfs-restart: build-pnfs ## MDS restart survival e2e (Phase B: kill MDS, restart over same state.db, mount keeps working)
+.PHONY: test-pnfs-mds-restart
+test-pnfs-mds-restart: build-pnfs ## MDS restart survival e2e (Phase B: kill MDS, restart over same state.db, mount keeps working)
 	tests/lima/pnfs/restart.sh
 
 .PHONY: test-pnfs-nconnect
@@ -385,13 +385,14 @@ test-pnfs-shard-bench: build-pnfs ## MDS sharding aggregate throughput (SHARDS=,
 	tests/lima/pnfs/shard-bench.sh
 
 .PHONY: test-pnfs-all
-test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart + identity + fallback + enospc + fsx + shard tests in sequence
+test-pnfs-all: ## Run smoke + pynfs + csi-e2e + placement + recall + restart (F67) + mds-restart + identity + fallback + enospc + fsx + shard tests in sequence
 	$(MAKE) test-pnfs-smoke
 	$(MAKE) test-pnfs-pynfs
 	$(MAKE) test-pnfs-csi
 	$(MAKE) test-pnfs-placement
 	$(MAKE) test-pnfs-recall
 	$(MAKE) test-pnfs-restart
+	$(MAKE) test-pnfs-mds-restart
 	$(MAKE) test-pnfs-identity
 	$(MAKE) test-pnfs-fallback
 	$(MAKE) test-pnfs-enospc
