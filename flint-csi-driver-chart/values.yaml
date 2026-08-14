@@ -586,6 +586,40 @@ pnfs:
         # Pin the MDS to the tgt/lvstore node, e.g.
         #   kubernetes.io/hostname: ip-172-31-1-23
         nodeSelector: {}
+        # THE COMPOSITION WITNESS — required for `replicas: 2` block
+        # volumes, and inert for single-copy ones.
+        #
+        # A two-copy volume lives on two targets driven by two MDS
+        # shards, and those shards share nothing: separate sqlite on
+        # separate PVCs. So a failover has no arbiter — every fact the
+        # survivor's election reads (its composer's coordinates, its own
+        # leg's in-sync mark) is written in the database that dies with
+        # the composer. Two records cannot arbitrate; they can only
+        # disagree.
+        #
+        # Enabling this puts the arbitration facts — the seat
+        # [epoch, composer], the leg sync marks, the serving lease and
+        # the allow-list identities — in ONE ConfigMap per volume in
+        # this release's namespace, advanced by resourceVersion
+        # compare-and-swap. That is the same arbiter the file tier
+        # already trusts for its replica record.
+        #
+        # WHAT IT COSTS: those acts become API calls, so an API-server
+        # outage longer than the serving lease suspends REPLICATED
+        # volumes — their writes stall until it returns, and nothing
+        # corrupts. Volumes with replicas: 1 never touch the witness.
+        # What does NOT become an API call is fence ENFORCEMENT: the
+        # reservation preempt, the delivered mark and the extent rows
+        # stay local, so a client can still be fenced with the control
+        # plane unreachable.
+        #
+        # Leaving it disabled with replicas: 2 is a volume that mirrors
+        # and rebuilds but CANNOT fail over.
+        witness:
+          enabled: false
+          # Namespace for the ConfigMaps. Empty → this release's
+          # namespace, which is what the RBAC below grants.
+          namespace: ""
 
     dataServers:
       # DS fleet width. Scaling UP is safe (new files stripe wider;

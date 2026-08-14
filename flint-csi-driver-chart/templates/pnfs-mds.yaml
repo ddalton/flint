@@ -207,6 +207,13 @@ spec:
       {{- with $.Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
+      {{- if ((($.Values.pnfs.server.mds.blockExport).witness).enabled) }}
+      # The composition witness reads and CAS's ConfigMaps in this
+      # namespace; without this ServiceAccount the MDS falls back to its
+      # own record and says so at startup, and replicated volumes cannot
+      # fail over.
+      serviceAccountName: flint-pnfs-mds
+      {{- end }}
       {{- if ($.Values.pnfs.server.mds.blockExport).enabled }}
       {{- with $.Values.pnfs.server.mds.blockExport.nodeSelector }}
       # blockExport: pin to the tgt/lvstore node — lvols are
@@ -227,6 +234,15 @@ spec:
               value: "mds"
             - name: FLINT_MDS_SHARD_ID
               value: {{ $i | quote }}
+            {{- if ((($.Values.pnfs.server.mds.blockExport).witness).enabled) }}
+            # THE ARBITER for replicated block volumes. Set = the seat,
+            # the leg marks, the serving lease and the allow-list live
+            # in rv-CAS'd ConfigMaps here; unset = this shard's own
+            # record, which is correct for single-copy volumes and
+            # cannot arbitrate a two-copy one.
+            - name: FLINT_PNFS_WITNESS_NAMESPACE
+              value: {{ ($.Values.pnfs.server.mds.blockExport.witness.namespace | default $.Release.Namespace) | quote }}
+            {{- end }}
             - name: RUST_LOG
               value: {{ $.Values.pnfs.server.logLevel | default "info" | quote }}
             # The node this MDS runs on — and therefore, when blockExport

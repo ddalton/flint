@@ -244,7 +244,42 @@ impl MetadataServer {
             // nodes — and the startup line says so, because an operator
             // who points this at a per-node path has a witness that
             // witnesses nothing.
-            if let Some(path) = std::env::var("FLINT_PNFS_WITNESS_SQLITE")
+            // PRODUCTION FIRST: a namespace here puts arbitration in
+            // Kubernetes, one ConfigMap per volume under resourceVersion
+            // CAS — the only witness that is a third party to two
+            // targets on two nodes. The sqlite path below stays for the
+            // rig and for a single host.
+            let kube_ns = std::env::var("FLINT_PNFS_WITNESS_NAMESPACE")
+                .ok()
+                .filter(|n| !n.trim().is_empty());
+            if let Some(ns) = kube_ns {
+                match crate::pnfs::mds::witness_kube::ConfigMapStore::new(&ns).await {
+                    Ok(store) => {
+                        reconciler = reconciler.with_witness(Arc::new(
+                            crate::pnfs::mds::witness_kube::KubeWitness::new(Arc::new(store)),
+                        ));
+                        info!(
+                            "⚖️  composition witness: Kubernetes ConfigMaps in namespace {} — \
+                             one rv-CAS'd object per volume holds the seat, the leg marks, the \
+                             serving lease and the allow-list identities. An API outage longer \
+                             than the lease TTL suspends REPLICATED volumes (writes stall, \
+                             nothing corrupts); single-copy volumes never touch it",
+                            ns
+                        );
+                    }
+                    Err(e) => {
+                        // Keep the local record and say so: a witness
+                        // that silently is not one is how a failover
+                        // gets decided twice.
+                        error!(
+                            "composition witness for namespace {} could not be reached ({}) — \
+                             falling back to this shard's OWN record, which means a replicated \
+                             volume here cannot fail over. Single-copy volumes are unaffected",
+                            ns, e
+                        );
+                    }
+                }
+            } else if let Some(path) = std::env::var("FLINT_PNFS_WITNESS_SQLITE")
                 .ok()
                 .filter(|p| !p.trim().is_empty())
             {

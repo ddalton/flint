@@ -152,3 +152,54 @@ roleRef:
   kind: ClusterRole
   name: flint-csi-node
   apiGroup: rbac.authorization.k8s.io
+
+{{- if and (.Values.pnfs.server).enabled ((((.Values.pnfs.server).mds).blockExport).witness).enabled }}
+---
+# ── THE COMPOSITION WITNESS ──────────────────────────────────────────
+#
+# A two-copy block volume's failover has to be decided by something both
+# of its targets can reach independently of each other's health. MDS
+# shards share nothing, so that cannot be either shard's own sqlite; it
+# is one ConfigMap per volume, here, advanced by resourceVersion
+# compare-and-swap.
+#
+# NAMESPACED on purpose. The witness holds arbitration facts for this
+# release's volumes and nothing else, so it needs no cluster-scoped
+# reach — and a Role that cannot leave the namespace cannot become an
+# accidental cluster-wide credential.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flint-pnfs-mds
+  namespace: {{ .Release.Namespace }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flint-pnfs-mds-witness
+  namespace: {{ .Release.Namespace }}
+rules:
+  # get/list: read the record and enumerate seats, leases and fences.
+  # create/update/patch: the CAS itself — patch carries the
+  # resourceVersion the API server refuses the write against.
+  # delete: DeleteVolume sweeps a volume's arbitration record.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flint-pnfs-mds-witness
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flint-pnfs-mds-witness
+subjects:
+  - kind: ServiceAccount
+    name: flint-pnfs-mds
+    namespace: {{ .Release.Namespace }}
+{{- end }}

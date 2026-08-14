@@ -57,6 +57,10 @@ pub mod resv_fence;
 /// reach independently of each other's health.
 pub mod witness;
 
+/// The production witness: one Kubernetes object per volume, advanced
+/// by resourceVersion CAS — the arbiter the file tier already trusts.
+pub mod witness_kube;
+
 // Re-exports
 pub use device::{DeviceRegistry, DeviceInfo, DeviceStatus};
 pub use layout::{LayoutManager, IoMode, LayoutType};
