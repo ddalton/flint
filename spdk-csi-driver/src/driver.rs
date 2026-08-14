@@ -3338,6 +3338,7 @@ impl SpdkCsiDriver {
             allowed_hosts: crate::nvmeof_export::fencing_enabled().then_some(allowed.as_slice()),
             ns_identity: None,
             ptpl_file: None,
+            cntlid_band: None,
         };
         crate::nvmeof_export::ensure_export(&transport, &spec).await?;
 

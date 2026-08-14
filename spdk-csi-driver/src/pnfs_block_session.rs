@@ -406,32 +406,123 @@ pub async fn reestablish_sessions() -> (usize, usize, usize) {
                     ctrl.as_deref().unwrap_or("?"),
                     state.as_deref().unwrap_or("unknown")
                 );
-                // `ensure_session` REUSES any existing controller whatever
-                // its state, so without this disconnect the redirect would
-                // silently re-adopt the session aimed at the dead target.
+                // CONNECT BEFORE DISCONNECT, and the reason is the mount.
+                //
+                // Tearing the dead path down first takes the NAMESPACE
+                // with it, so the reconnect builds a NEW one and every
+                // consumer holding the old device is left holding a
+                // corpse — measured: a mounted ext4 ends up with the
+                // mount table still reading `rw` while the filesystem
+                // has shut down, and the volume needs a pod restart it
+                // gives no sign of needing.
+                //
+                // Both targets export the SAME subsystem NQN with the
+                // same serial (derived from the NQN) and the same pinned
+                // (uuid, nguid) — so the survivor's controller joins the
+                // subsystem the client already has and its namespace
+                // becomes a second PATH to the head the mount is bound
+                // to, rather than a new namespace beside it.
+                //
                 // The durable record is NOT removed (that is
                 // `teardown_session`'s job, and it means unstage): this
                 // volume is still staged here, it just answers elsewhere.
-                match tokio::process::Command::new("nvme")
-                    .args(["disconnect", "-n", &attach.subnqn])
-                    .output()
-                    .await
-                {
-                    Ok(out) if out.status.success() => {}
-                    Ok(out) => {
-                        tracing::error!(
-                            "could not disconnect the stale controller for {}: {} — retried \
-                             next pass",
-                            attach.subnqn,
-                            String::from_utf8_lossy(&out.stderr).trim()
-                        );
-                        failed += 1;
-                        continue;
+                let policy = crate::nvme_recovery::ReconnectPolicy::from_env();
+                let target = match fresh.clone() {
+                    Some(t) => t,
+                    // Unreachable: Redirect is only chosen when `moved`,
+                    // which requires a fresh answer. Defended anyway —
+                    // the alternative is an unwrap in the failover path.
+                    None => continue,
+                };
+                let before = controllers_for_nqn(&attach.subnqn);
+                match connect_path(&target, &policy).await {
+                    Ok(()) => {
+                        // AND WAIT FOR IT TO CARRY THE NAMESPACE. The
+                        // connect returns when the controller is live;
+                        // the namespace scan finishes after. Remove the
+                        // old path inside that window and the head the
+                        // client's mount is bound to loses its last
+                        // path and dies — the new controller then
+                        // builds a fresh head, which is the zombie
+                        // mount this whole change exists to prevent.
+                        let fresh_ctrl = wait_for_new_path(&attach.subnqn, &before).await;
+                        match &fresh_ctrl {
+                            Some(c) => tracing::info!(
+                                "🔀 {}: path '{}' to {}:{} is carrying the namespace — now \
+                                 removing the dead controller '{}'",
+                                attach.subnqn,
+                                c,
+                                target.traddr,
+                                target.trsvcid,
+                                ctrl.as_deref().unwrap_or("?")
+                            ),
+                            // Removing the old path anyway: leaving both
+                            // a dead controller and an unscanned new one
+                            // is worse than one clean path, and the
+                            // reconnect policy owns whatever is left.
+                            None => tracing::warn!(
+                                "🔀 {}: the new path to {}:{} did not present a namespace in \
+                                 time — removing the dead controller anyway; a mounted \
+                                 client may need a remount",
+                                attach.subnqn,
+                                target.traddr,
+                                target.trsvcid
+                            ),
+                        }
+                        if let Some(old) = ctrl.as_deref() {
+                            if let Err(e) = disconnect_controller(old).await {
+                                // NOT fatal, and not a `continue`: the
+                                // volume is already serving over the new
+                                // path. A lingering dead path costs a
+                                // failed-over I/O retry, and the next
+                                // pass tries the removal again.
+                                tracing::error!(
+                                    "the dead controller '{}' for {} did not go away ({}) — \
+                                     the volume IS serving over the new path; retried next pass",
+                                    old,
+                                    attach.subnqn,
+                                    e
+                                );
+                            }
+                        }
                     }
                     Err(e) => {
-                        tracing::error!("nvme disconnect exec for {}: {e}", attach.subnqn);
-                        failed += 1;
-                        continue;
+                        // The fallback is the old behaviour, and it is
+                        // worse on purpose rather than by accident: it
+                        // restores the path at the cost of the namespace,
+                        // so a mounted consumer will need a remount.
+                        tracing::warn!(
+                            "could not add {}'s new path before removing the old one ({}) — \
+                             falling back to disconnect-then-connect, which costs any mount \
+                             on this volume its device",
+                            attach.subnqn,
+                            e
+                        );
+                        match tokio::process::Command::new("nvme")
+                            .args(["disconnect", "-n", &attach.subnqn])
+                            .output()
+                            .await
+                        {
+                            Ok(out) if out.status.success() => {}
+                            Ok(out) => {
+                                tracing::error!(
+                                    "could not disconnect the stale controller for {}: {} — \
+                                     retried next pass",
+                                    attach.subnqn,
+                                    String::from_utf8_lossy(&out.stderr).trim()
+                                );
+                                failed += 1;
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "nvme disconnect exec for {}: {e}",
+                                    attach.subnqn
+                                );
+                                failed += 1;
+                                continue;
+                            }
+                        }
                     }
                 }
             }
@@ -479,6 +570,68 @@ pub async fn reestablish_sessions() -> (usize, usize, usize) {
     (records, repaired, failed)
 }
 
+/// Add ONE path to the volume's subsystem, unconditionally.
+///
+/// Split out of `ensure_session` because the redirect needs to add the
+/// survivor's path while the dead composer's controller is STILL
+/// PRESENT, and `ensure_session` deliberately refuses to connect when
+/// any controller exists (an existing one is reused whatever its state).
+///
+/// A second connect to the same subsystem NQN at a DIFFERENT address is
+/// not a duplicate: the kernel's existing-controller check compares the
+/// transport address alongside the subsystem and host NQNs, so this
+/// becomes a second PATH rather than an -EALREADY. That is the whole
+/// basis of connect-before-disconnect.
+async fn connect_path(
+    attach: &BlockAttach,
+    policy: &crate::nvme_recovery::ReconnectPolicy,
+) -> Result<(), String> {
+    let mut args: Vec<String> = vec![
+        "connect".into(),
+        "-t".into(), "tcp".into(),
+        "-a".into(), attach.traddr.clone(),
+        "-s".into(), attach.trsvcid.to_string(),
+        "-n".into(), attach.subnqn.clone(),
+        // The MDS-admitted identity, verbatim — connecting as
+        // anything else is refused by the default-closed allow-list.
+        "-q".into(), attach.host_nqn.clone(),
+    ];
+    args.extend(policy.connect_args());
+    let out = tokio::process::Command::new("nvme")
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| format!("nvme connect exec: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !stderr.contains("already connected") {
+            return Err(format!(
+                "nvme connect to {} at {}:{} failed: {}",
+                attach.subnqn,
+                attach.traddr,
+                attach.trsvcid,
+                stderr.trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Remove ONE controller by name (`nvme1`), leaving every other path to
+/// the same subsystem alone. `nvme disconnect -n <nqn>` would take them
+/// all, including the one just added.
+async fn disconnect_controller(ctrl: &str) -> Result<(), String> {
+    let out = tokio::process::Command::new("nvme")
+        .args(["disconnect", "-d", ctrl])
+        .output()
+        .await
+        .map_err(|e| format!("nvme disconnect exec: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+}
+
 /// Establish (or repair) the volume's nvme-tcp session and return the
 /// resolved namespace device path (`/dev/nvmeXnY`).
 pub async fn ensure_session(attach: &BlockAttach) -> Result<String, String> {
@@ -496,34 +649,7 @@ pub async fn ensure_session(attach: &BlockAttach) -> Result<String, String> {
     // policy is for), and a second connect to the same subsystem would
     // either dup the session or fail — neither helps.
     if controller_for_nqn(&attach.subnqn).is_none() {
-        let mut args: Vec<String> = vec![
-            "connect".into(),
-            "-t".into(), "tcp".into(),
-            "-a".into(), attach.traddr.clone(),
-            "-s".into(), attach.trsvcid.to_string(),
-            "-n".into(), attach.subnqn.clone(),
-            // The MDS-admitted identity, verbatim — connecting as
-            // anything else is refused by the default-closed allow-list.
-            "-q".into(), attach.host_nqn.clone(),
-        ];
-        args.extend(policy.connect_args());
-        let out = tokio::process::Command::new("nvme")
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| format!("nvme connect exec: {e}"))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !stderr.contains("already connected") {
-                return Err(format!(
-                    "nvme connect to {} at {}:{} failed: {}",
-                    attach.subnqn,
-                    attach.traddr,
-                    attach.trsvcid,
-                    stderr.trim()
-                ));
-            }
-        }
+        connect_path(attach, &policy).await?;
     }
 
     // Bound queued I/O (best-effort, loud — same contract as the
@@ -624,6 +750,78 @@ pub fn controller_for_nqn(nqn: &str) -> Option<String> {
                 return Some(entry.file_name().to_string_lossy().to_string());
             }
         }
+    }
+    None
+}
+
+/// EVERY controller attached to `nqn`, not just the first. The redirect
+/// needs this to tell its freshly added path apart from the dead one it
+/// is about to remove.
+pub fn controllers_for_nqn(nqn: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/nvme") else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| {
+            std::fs::read_to_string(e.path().join("subsysnqn"))
+                .map(|s| s.trim() == nqn)
+                .unwrap_or(false)
+        })
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Has this controller finished attaching a namespace?
+///
+/// THE WHOLE REDIRECT TURNS ON THIS. `nvme connect` returns when the
+/// controller is live, and the namespace scan completes AFTER that.
+/// Removing the old path in that window takes the last path off the
+/// namespace head the client's mount is bound to; the head dies, and
+/// the new controller's scan then has to build a FRESH head — which is
+/// how a failover produced /dev/nvme0n2 beside a zombie /dev/nvme0n1,
+/// measured at 1.4ms between "new ctrl" and "Removing ctrl".
+///
+/// Under multipath the per-controller namespace appears as
+/// `nvme<subsys>c<ctrl>n<nsid>`; without it, `nvme<ctrl>n<nsid>`. Both
+/// end in `n<digits>`, which is what this looks for.
+fn controller_has_namespace(ctrl: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(format!("/sys/class/nvme/{ctrl}")) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with("nvme") {
+            return false;
+        }
+        match name.rsplit_once('n') {
+            Some((_, nsid)) => !nsid.is_empty() && nsid.chars().all(|c| c.is_ascii_digit()),
+            None => false,
+        }
+    })
+}
+
+/// Wait for a controller that was not in `before` to appear on `nqn`
+/// AND to have attached its namespace. Returns its name, or `None` if
+/// it never got there — the caller decides what to do with that, and
+/// deciding is not this function's job.
+///
+/// Bounded: the whole redirect runs inside a reconcile pass, so an
+/// unbounded wait here would stall every other volume's session behind
+/// one that is not coming back.
+async fn wait_for_new_path(nqn: &str, before: &[String]) -> Option<String> {
+    for _ in 0..50 {
+        if let Some(fresh) = controllers_for_nqn(nqn)
+            .into_iter()
+            .find(|c| !before.contains(c))
+        {
+            if controller_has_namespace(&fresh) {
+                return Some(fresh);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     None
 }

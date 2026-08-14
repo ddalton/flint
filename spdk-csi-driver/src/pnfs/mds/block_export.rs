@@ -905,6 +905,7 @@ impl BlockExportReconciler {
             allowed_hosts: Some(&hosts),
             ns_identity: None,
             ptpl_file: None,
+            cntlid_band: None,
         };
         ensure_export(self.rpc.as_ref(), &spec)
             .await
@@ -3113,6 +3114,41 @@ impl BlockExportReconciler {
         // `a_peer_leg_composes_a_raid_and_losing_it_falls_back_to_the_lvol`.
         // A raid's name is canonical and has no aliases.
         let served_aliases: &[&str] = if served == bdev { &lvol_id_refs } else { &[] };
+        // THE CNTLID BAND, and it is what makes a failover survivable by
+        // anything holding this device open.
+        //
+        // Every target of a replicated volume exports the SAME subsystem
+        // NQN, and two independent spdk-tgt processes both hand out
+        // cntlid 1 — so a client holding a controller from one of them
+        // has the other REFUSED: "Duplicate cntlid 1 with nvme0, subsys
+        // …:block:repvol, rejecting" (measured on the rig). That refusal
+        // is why a redirect has to disconnect before it can connect, and
+        // disconnecting takes the client's namespace with it: the mount
+        // on top is left holding a device that no longer exists.
+        //
+        // Derived from the volume's recorded members, so both targets
+        // reach the same answer without asking each other — which is the
+        // only kind of agreement available when the peer may be dead.
+        // Single-copy volumes get None: nothing to collide with.
+        let band = match self.witness.legs(volume).await {
+            Ok(legs) => {
+                let members: Vec<String> = legs.into_iter().map(|l| l.target_id).collect();
+                crate::nvmeof_export::cntlid_band_for(&members, &self.me)
+            }
+            // Unreadable legs must not change the export's identity: a
+            // band assigned on a partial view could differ from the one
+            // this subsystem was created with, and the range is fixed at
+            // creation. Falling back to the default is what every export
+            // did before this existed.
+            Err(e) => {
+                tracing::warn!(
+                    "'{}': could not read the legs for a cntlid band ({}) — exporting with \
+                     SPDK's default range; a mounted client may need a remount on failover",
+                    volume, e
+                );
+                None
+            }
+        };
         let spec = ExportSpec {
             nqn: &nqn,
             bdev_name: &served,
@@ -3130,6 +3166,7 @@ impl BlockExportReconciler {
             // survive lvol rebuild and tgt restart.
             ns_identity: Some((&uuid, &nguid)),
             ptpl_file: Some(&ptpl),
+            cntlid_band: band,
         };
         ensure_export(self.rpc.as_ref(), &spec)
             .await

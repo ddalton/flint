@@ -2067,6 +2067,7 @@ impl NodeAgent {
             allowed_hosts: crate::nvmeof_export::fencing_enabled().then_some(allowed.as_slice()),
             ns_identity: Some((&ns_uuid, &ns_nguid)),
             ptpl_file: None,
+            cntlid_band: None,
         };
         crate::nvmeof_export::ensure_export(&self.disk_service, &spec).await?;
 
@@ -3647,6 +3648,7 @@ impl NodeAgent {
                     allowed_hosts: fencing.then_some(allowed.as_slice()),
                     ns_identity: None,
                     ptpl_file: None,
+                    cntlid_band: None,
                 };
                 match crate::nvmeof_export::ensure_export(&self.disk_service, &spec).await {
                     Ok(()) => {
@@ -5262,6 +5264,7 @@ impl NodeAgent {
             allowed_hosts: crate::nvmeof_export::fencing_enabled().then_some(allowed.as_slice()),
             ns_identity: Some((&ns_uuid, &ns_nguid)),
             ptpl_file: None,
+            cntlid_band: None,
         };
         crate::nvmeof_export::ensure_export(&self.disk_service, &spec).await?;
         Ok(())
@@ -5957,6 +5960,7 @@ impl NodeAgent {
             allowed_hosts: allowed.as_deref(),
             ns_identity: None,
             ptpl_file: None,
+            cntlid_band: None,
         };
         crate::nvmeof_export::ensure_export(&self.disk_service, &spec)
             .await

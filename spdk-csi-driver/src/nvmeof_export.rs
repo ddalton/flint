@@ -103,6 +103,63 @@ pub struct ExportSpec<'a> {
     /// degrades to the (refused) MDS path. `None` = raid-leg/loopback
     /// exports, whose consumers never issue PR commands.
     pub ptpl_file: Option<&'a str>,
+    /// Controller-ID band for this subsystem, `(min, max)`.
+    ///
+    /// THE KERNEL REQUIRES CNTLIDS TO BE UNIQUE WITHIN A SUBSYSTEM, and
+    /// two independent spdk-tgt processes both start at 1. A replicated
+    /// volume's targets export the SAME subsystem NQN, so the moment a
+    /// client holds a controller from one of them, a controller from
+    /// the other is refused:
+    ///
+    ///   nvme nvme1: Duplicate cntlid 1 with nvme0,
+    ///               subsys nqn.…:block:repvol, rejecting
+    ///
+    /// which is measured, not predicted. That refusal is what forces a
+    /// failover to disconnect before it can connect — and disconnecting
+    /// takes the client's NAMESPACE with it, so a mounted filesystem is
+    /// left holding a device that no longer exists. Disjoint bands are
+    /// what let the survivor join as a second PATH instead.
+    ///
+    /// `None` = SPDK's default (1..0xFFEF), correct for every export
+    /// only one target can ever serve.
+    pub cntlid_band: Option<(u16, u16)>,
+}
+
+/// Width of one target's controller-ID band. Generous on purpose: a
+/// band is exhausted only by that many *concurrent live controllers*
+/// from one target for one volume, and SPDK reuses ids as controllers
+/// go away.
+const CNTLID_BAND: u32 = 4096;
+
+/// The cntlid band `me` must use for a volume served by `members`.
+///
+/// Derived, never assigned: every target computes the same answer from
+/// the composition record it already reads, so no target has to ask
+/// another one — which matters, because MDS shards share nothing and
+/// the whole point is to survive a peer being dead.
+///
+/// The member SET is what a volume was created with and does not change
+/// when the seat moves, so a target's band is stable for the life of
+/// the volume. Sorting makes the assignment order-independent.
+///
+/// `None` for a single-member volume (nothing to collide with) and for
+/// a member index that would run past the spec's 0xFFEF ceiling — both
+/// mean "SPDK's default range", which is what every export used before
+/// this existed.
+pub fn cntlid_band_for(members: &[String], me: &str) -> Option<(u16, u16)> {
+    let mut sorted: Vec<&str> = members.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted.len() < 2 {
+        return None;
+    }
+    let idx = sorted.iter().position(|m| *m == me)? as u32;
+    let min = 1 + idx * CNTLID_BAND;
+    let max = min + CNTLID_BAND - 1;
+    if max > 0xFFEF {
+        return None;
+    }
+    Some((min as u16, max as u16))
 }
 
 /// Deterministic (UUID, NGUID) for a volume's kernel-facing namespace,
@@ -286,7 +343,7 @@ pub async fn ensure_export(
     // ---- subsystem ----
     let mut subsystem = get_subsystem(rpc, spec.nqn).await?;
     if subsystem.is_none() {
-        let create = json!({
+        let mut create = json!({
             "method": "nvmf_create_subsystem",
             "params": {
                 "nqn": spec.nqn,
@@ -295,6 +352,14 @@ pub async fn ensure_export(
                 "model_number": "SPDK CSI Volume"
             }
         });
+        // Only when asked. The band is set at CREATE and cannot be
+        // changed afterwards, so an existing subsystem keeps whatever
+        // range it was born with — which is why the composer's own
+        // export has to be created with it rather than repaired into it.
+        if let Some((min, max)) = spec.cntlid_band {
+            create["params"]["min_cntlid"] = json!(min);
+            create["params"]["max_cntlid"] = json!(max);
+        }
         if let Err(e) = rpc.rpc(&create).await {
             // Lost a race with a concurrent creator? Re-read before failing.
             subsystem = get_subsystem(rpc, spec.nqn).await?;
@@ -760,6 +825,7 @@ mod tests {
             allowed_hosts: None,
             ns_identity: None,
             ptpl_file: None,
+            cntlid_band: None,
         }
     }
 
@@ -770,6 +836,37 @@ mod tests {
         assert_eq!(rpc.method_calls("nvmf_create_subsystem"), 1);
         assert_eq!(rpc.method_calls("nvmf_subsystem_add_ns"), 1);
         assert_eq!(rpc.method_calls("nvmf_subsystem_add_listener"), 1);
+    }
+
+    /// THE BANDS MUST BE DISJOINT, and both targets must reach the same
+    /// assignment without talking to each other — a peer that can be
+    /// asked is a peer that can be dead.
+    ///
+    /// The kernel refuses a second controller whose cntlid duplicates
+    /// one already in the subsystem ("Duplicate cntlid 1 with nvme0 …,
+    /// rejecting"), and two spdk-tgt processes both start at 1. That
+    /// refusal is what forces a failover to disconnect before it
+    /// connects, which costs any mount on the volume its device.
+    #[test]
+    fn cntlid_bands_are_disjoint_order_independent_and_absent_for_single_copy() {
+        let members = vec!["rig-b".to_string(), "rig-a".to_string()];
+        let a = cntlid_band_for(&members, "rig-a").expect("a member gets a band");
+        let b = cntlid_band_for(&members, "rig-b").expect("a member gets a band");
+        assert!(
+            a.1 < b.0 || b.1 < a.0,
+            "the bands overlap — a duplicate cntlid is exactly what this prevents: {a:?} {b:?}"
+        );
+        // Same record, either order, same answer: the two targets never
+        // compare notes.
+        let reversed = vec!["rig-a".to_string(), "rig-b".to_string()];
+        assert_eq!(cntlid_band_for(&reversed, "rig-a"), Some(a));
+        assert_eq!(cntlid_band_for(&reversed, "rig-b"), Some(b));
+        // Inside the spec's range.
+        assert!(a.0 >= 1 && b.1 <= 0xFFEF, "{a:?} {b:?}");
+        // A single-copy volume has nothing to collide with, and a
+        // non-member gets NOTHING rather than somebody else's band.
+        assert_eq!(cntlid_band_for(&["solo".to_string()], "solo"), None);
+        assert_eq!(cntlid_band_for(&members, "rig-c"), None);
     }
 
     #[test]

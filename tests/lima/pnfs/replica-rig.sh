@@ -126,6 +126,13 @@ vsudo(){ limactl shell "$LIMA_VM" -- sudo bash -c "$*"; }
 
 fail() {
   echo "✗ $*"
+  # The redirect lane's own words, when there are any. Everything about
+  # a failover's client half is decided in this log, and a drill that
+  # cannot show it can only report the symptom.
+  if vsh "test -s /tmp/rig-reestablish.log" 2>/dev/null; then
+    echo "── reestablish log (redirect lane) ──"
+    vsh "grep -vE 'SPDK_RPC|SPDK_FIX|records=' /tmp/rig-reestablish.log 2>/dev/null | tail -20" || true
+  fi
   echo "── MDS-A log tail ──"; vsh "tail -40 $RIG_A/mds.log 2>/dev/null" || true
   echo "── MDS-B log tail ──"; vsh "tail -20 $RIG_B/mds.log 2>/dev/null" || true
   exit 1
@@ -134,7 +141,7 @@ fail() {
 cleanup() {
   set +e
   vsudo "[ -f /tmp/rig-churn.pid ] && kill -9 -\$(cat /tmp/rig-churn.pid) >/dev/null 2>&1
-         rm -f /tmp/rig-churn.pid /tmp/rig-churn.sh /tmp/rig-churn.err /tmp/rig-churn.stop /tmp/rig-churn.count
+         rm -f /tmp/rig-churn.pid /tmp/rig-churn.sh /tmp/rig-churn.err /tmp/rig-churn.stop /tmp/rig-churn.count /tmp/rig-reestablish.log
          umount -lf $MNT >/dev/null 2>&1
          nvme disconnect -n $SUBNQN >/dev/null 2>&1
          nvme disconnect -n $LEGNQN >/dev/null 2>&1
@@ -676,8 +683,9 @@ echo "  … client controller is '$STATE_PRE' at $ADDR_PRE, ctrl_loss has ${CTRL
 # lands is the real failure.
 T0=$(vsh "date +%s")
 REDIR_MAX=$((4 * RECON_SECS + 40))
+vsudo "rm -f /tmp/rig-reestablish.log"
 for i in $(seq 1 $REDIR_MAX); do
-  vsudo "$CSI_CLI reestablish" >/dev/null 2>&1
+  vsudo "$CSI_CLI reestablish >> /tmp/rig-reestablish.log 2>&1"
   ADDR=$(vsudo "$CTRL_ADDR" | tr -d ' \r')
   echo "$ADDR" | grep -q "trsvcid=4421" && break
   [ "$i" = "$REDIR_MAX" ] \
@@ -685,6 +693,26 @@ for i in $(seq 1 $REDIR_MAX); do
   sleep 1
 done
 ELAPSED=$(( $(vsh "date +%s") - T0 ))
+# WHICH MECHANISM FIRED, from the node's own log rather than inferred
+# from the outcome. connect-before-disconnect keeps the client's
+# namespace alive across the move; the fallback restores the path at the
+# cost of the namespace, and a mounted consumer pays for that difference.
+PATHADD=$(vsudo "grep -c 'carrying the namespace' /tmp/rig-reestablish.log 2>/dev/null" | tr -d ' \r')
+FELLBACK=$(vsudo "grep -c 'falling back to disconnect-then-connect' /tmp/rig-reestablish.log 2>/dev/null" | tr -d ' \r')
+echo "  … redirect mechanism: path-add=${PATHADD:-0}, fallback=${FELLBACK:-0}"
+# THE CONTROLLER INVENTORY, because a redirect is a claim about which
+# controllers exist and what they are attached to — and every wrong
+# conclusion in this leg so far came from inferring that from a single
+# address string instead of listing it.
+echo "  … controllers on this subsystem:"
+vsudo "for c in /sys/class/nvme/nvme*; do \
+  [ \"\$(cat \$c/subsysnqn 2>/dev/null)\" = '$SUBNQN' ] || continue; \
+  ns=\$(ls -d \$c/nvme*n* 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' '); \
+  echo \"       \$(basename \$c): \$(cat \$c/address 2>/dev/null) state=\$(cat \$c/state 2>/dev/null) ns=[\$ns]\"; \
+done" 2>/dev/null | tr -d '\r'
+if [ "${FELLBACK:-0}" != "0" ]; then
+  echo "     $(vsudo "grep -m1 'could not add' /tmp/rig-reestablish.log 2>/dev/null" | tr -d '\r')"
+fi
 [ "$ELAPSED" -lt $((CTRL_LOSS / 2)) ] \
   || fail "the redirect took ${ELAPSED}s of a ${CTRL_LOSS}s ctrl_loss_tmo — that is the \
 timeout expiring, not the pass noticing the volume moved"
@@ -744,20 +772,35 @@ esac
 # mount whose every I/O fails. Ask the filesystem to do something.
 MNT_OPTS=$(vsudo "findmnt -no OPTIONS $MNT 2>/dev/null" | tr -d '\r')
 MNT_LIVE=no
-vsudo "dd if=$MNT/payload.bin of=/dev/null bs=64k count=1 status=none" >/dev/null 2>&1 \
+# O_DIRECT, or the probe proves the PAGE CACHE is alive rather than the
+# device. A 32 MiB payload fits in this VM's RAM several times over, so
+# a buffered read succeeds long after the storage under it has gone —
+# which is exactly how this leg once reported a mount as LIVE while the
+# next line found it refusing writes.
+vsudo "dd if=$MNT/payload.bin of=/dev/null bs=4k count=1 iflag=direct status=none" >/dev/null 2>&1 \
   && MNT_LIVE=yes
 # `shutdown` in the options is ext4 saying the filesystem is dead. It
 # sits AFTER `rw` in the same string, which is how the first version of
 # this leg called a corpse LIVE: it pattern-matched the prefix and the
 # kernel's actual verdict was three fields to the right.
-case "$MNT_OPTS" in *shutdown*) MNT_SHUT=yes ;; *) MNT_SHUT=no ;; esac
-case "$MNT_OPTS:$MNT_LIVE:$MNT_SHUT" in
-  rw*:yes:no) MNT_WORLD="LIVE (read-write, and it actually reads)" ;;
-  rw*:*:yes)  MNT_WORLD="ZOMBIE (mount table says rw; ext4 says 'shutdown')" ;;
-  rw*:no:*)   MNT_WORLD="ZOMBIE (mount table says rw; every I/O fails)" ;;
-  ro*:*:*)    MNT_WORLD="READ-ONLY (errors=remount-ro fired)" ;;
-  :*)         MNT_WORLD="GONE (the mount did not survive)" ;;
-  *)          MNT_WORLD="unrecognised options '$MNT_OPTS' (usable=$MNT_LIVE)" ;;
+# ext4's own verdict lives PAST the `rw` prefix, and this leg has now
+# been fooled by two different words in that position: `shutdown` (the
+# filesystem is dead) and `emergency_ro` (it took an I/O error and
+# flipped itself read-only). The mount flags say `rw` in both cases.
+# Read the state, never the prefix.
+case "$MNT_OPTS" in
+  *shutdown*)     MNT_STATE=shutdown ;;
+  *emergency_ro*) MNT_STATE=emergency_ro ;;
+  "")             MNT_STATE=gone ;;
+  *)              MNT_STATE=rw ;;
+esac
+case "$MNT_STATE:$MNT_LIVE" in
+  rw:yes)          MNT_WORLD="LIVE (read-write, and it reads through O_DIRECT)" ;;
+  rw:no)           MNT_WORLD="ZOMBIE (mount table says rw; every I/O fails)" ;;
+  emergency_ro:*)  MNT_WORLD="READ-ONLY (errors=remount-ro fired during the outage)" ;;
+  shutdown:*)      MNT_WORLD="ZOMBIE (ext4 shut the filesystem down)" ;;
+  gone:*)          MNT_WORLD="GONE (the mount did not survive)" ;;
+  *)               MNT_WORLD="unrecognised options '$MNT_OPTS' (usable=$MNT_LIVE)" ;;
 esac
 echo "  … the mount after the failover: $MNT_WORLD"
 echo "  … the device the redirect produced: $NSDEV2 (staged on $NSDEV)"
@@ -765,12 +808,40 @@ CHURN_ITERS=$(vsudo "cat /tmp/rig-churn.count 2>/dev/null" | tr -d ' \r')
 echo "  … churn writer: ${CHURN_ITERS:-?} write(s) attempted, $CHURN_ERR recorded error(s), $CHURN_NOTE"
 # DURABILITY IS THE ASSERTION. A remount is allowed to get there — that
 # is what a pod restart would do — but the bytes are not negotiable.
+# THE DEVICE IS THE ASSERTION connect-and-wait bought. If the head
+# survived, the client is on the SAME device node it staged — no
+# unmount, no new namespace, and recovery is at worst a remount in
+# place. A different device here means the head died and everything
+# below is the consolation prize.
+[ "$NSDEV2" = "$NSDEV" ] \
+  || fail "V8: the redirect produced a DIFFERENT device ($NSDEV2, staged on $NSDEV) — \
+the namespace head did not survive, so every consumer holding it is holding a corpse"
 REMOUNTED=no
-if [ "$MNT_LIVE" != "yes" ] || [ "${MNT_OPTS#ro}" != "$MNT_OPTS" ]; then
-  vsudo "umount -lf $MNT >/dev/null 2>&1; mount -o errors=remount-ro $NSDEV2 $MNT" \
-    || fail "V8: the filesystem could not even be remounted after the failover \
+# READS ARE NOT THE TEST. An O_DIRECT read succeeds on a read-only
+# filesystem, so `MNT_LIVE=yes` says the device is reachable, not that
+# the mount is usable — keying recovery off it left the filesystem
+# read-only and failed the next line instead.
+if [ "$MNT_STATE" != "rw" ] || [ "$MNT_LIVE" != "yes" ]; then
+  # In place first, keeping the device: this is what a node plugin
+  # could do for a pod without evicting it. `--options-mode=ignore`
+  # because mount(8) otherwise replays the CURRENT option string back
+  # at the kernel — including ext4's own `emergency_ro` state flag,
+  # which is not a mount parameter and which the kernel then rejects.
+  # AND THEN PROVE IT TOOK. ext4 ACCEPTS `remount,rw` after
+  # errors=remount-ro has fired — mount(8) returns 0 and the kernel
+  # logs "re-mounted" — while leaving the filesystem read-only and
+  # `emergency_ro` still in its options. The exit status is not the
+  # state; only a write is.
+  if vsudo "mount --options-mode=ignore -o remount,rw,errors=remount-ro $NSDEV2 $MNT" \
+       >/dev/null 2>&1 \
+     && vsudo "touch $MNT/.rw-probe && rm -f $MNT/.rw-probe" >/dev/null 2>&1; then
+    REMOUNTED="remount,rw (in place, device kept)"
+  else
+    vsudo "umount -lf $MNT >/dev/null 2>&1; mount -o errors=remount-ro $NSDEV2 $MNT" \
+      || fail "V8: the filesystem could not even be remounted after the failover \
 (device $NSDEV2, mount was: $MNT_WORLD)"
-  REMOUNTED=yes
+    REMOUNTED="unmount+mount (same device, $NSDEV2)"
+  fi
 fi
 PAY_NOW=$(vsudo "md5sum $MNT/payload.bin 2>/dev/null | cut -d' ' -f1")
 [ "$PAY_NOW" = "$PAY_MD5" ] \
@@ -779,23 +850,53 @@ ${PAY_NOW:-<unreadable>} != $PAY_MD5 (mount was: $MNT_WORLD, remounted=$REMOUNTE
 echo "✓ V8a: the payload is byte-identical through the failover (remounted=$REMOUNTED)"
 # And the filesystem takes writes again — the difference between a
 # volume that recovered and one that is merely readable.
-vsudo "dd if=/dev/urandom of=$MNT/after.bin bs=1M count=4 conv=fsync status=none && sync" \
-  || fail "V8: the filesystem refused a write after the failover (mount: $MNT_WORLD, \
+WRITE_ERR=$(vsudo "dd if=/dev/urandom of=$MNT/after.bin bs=1M count=4 conv=fsync status=none 2>&1 && sync 2>&1")
+if [ $? -ne 0 ]; then
+  echo "── the write's own words ──"
+  echo "   dd: ${WRITE_ERR:-<silent>}"
+  echo "   $(vsudo "df -h $MNT | tail -1" 2>/dev/null | tr -d '\r')"
+  echo "   $(vsudo "findmnt -no OPTIONS $MNT" 2>/dev/null | tr -d '\r')"
+  vsudo "dmesg | tail -6" 2>/dev/null | sed 's/^/   /'
+  fail "V8: the filesystem refused a write after the failover (mount: $MNT_WORLD, \
 remounted=$REMOUNTED)"
-echo "✓ V8b: and it takes writes again"
-if [ "$REMOUNTED" = "no" ]; then
-  echo "✓ V8c: THE MOUNT RODE THE REDIRECT LIVE — no remount, no unmount, $CHURN_ERR lost write(s)"
-else
-  echo "⚠ V8c: THE MOUNT DID NOT RIDE IT — $MNT_WORLD"
-  echo "   Nothing was lost: every byte came back through a remount. But the redirect"
-  echo "   DISCONNECTS and reconnects, so the kernel built a NEW namespace ($NSDEV2)"
-  echo "   instead of restoring the staged one ($NSDEV) — and the mount stayed bound to"
-  echo "   the device that went away. For a filesystem consumer that means a pod restart,"
-  echo "   and the mount table gives no sign: it still reads 'rw'."
-  echo "   The fix this points at is connect-BEFORE-disconnect: same subsystem NQN and"
-  echo "   the same pinned NGUID on both targets means B is a second PATH to the same"
-  echo "   namespace, not a new one — which is what would let a mount ride a failover."
 fi
+echo "✓ V8b: and it takes writes again"
+echo "✓ V8c: THE DEVICE SURVIVED — $NSDEV throughout, no new namespace, nothing to re-stage"
+case "$REMOUNTED" in
+  no)
+    echo "✓ V8d: and the mount RODE IT LIVE — read-write the whole way, $CHURN_ERR lost write(s)"
+    ;;
+  "unmount+mount"*)
+    echo "⚠ V8d: the mount went READ-ONLY and needed an unmount+mount — ON THE SAME DEVICE"
+    echo "   ext4 saw $CHURN_ERR real I/O errors while the volume had no path, and"
+    echo "   errors=remount-ro did what it promises. Note what does NOT work: ext4"
+    echo "   ACCEPTS 'mount -o remount,rw' afterwards — mount(8) returns 0, the kernel"
+    echo "   logs 're-mounted' — and stays read-only, so in-place recovery is not"
+    echo "   available and a pod must restart. What connect-and-wait bought is that the"
+    echo "   DEVICE NODE never changed: no new namespace, no stale device, nothing to"
+    echo "   re-stage at the storage layer."
+    echo "   To ride it read-WRITE the I/O has to QUEUE instead of erroring, i.e."
+    echo "   fast_io_fail_tmo (${FAST_IO_FAIL:-5}s here) must exceed the whole failover"
+    echo "   window — which the serving lease dominates (${LEASE_SECS}s here, 120s in"
+    echo "   production). That is a real trade against the D-state wedge class."
+    ;;
+  "remount,rw"*)
+    echo "⚠ V8d: the mount went READ-ONLY and came back with a remount in place"
+    echo "   ext4 saw $CHURN_ERR real I/O errors while the volume had no path, and"
+    echo "   errors=remount-ro did exactly what it promises. Nothing was lost and the"
+    echo "   DEVICE never changed, so recovery is 'mount -o remount,rw' — no unmount,"
+    echo "   no new device node, no pod eviction. That is the difference connect-and-"
+    echo "   wait-before-disconnect bought; before it, this needed a fresh namespace."
+    echo "   To ride it read-WRITE the I/O has to QUEUE instead of erroring, i.e."
+    echo "   fast_io_fail_tmo (${FAST_IO_FAIL:-5}s here) must exceed the whole failover"
+    echo "   window — which the serving lease dominates (${LEASE_SECS}s here, 120s in"
+    echo "   production). That is a real trade against the D-state wedge class, not an"
+    echo "   oversight."
+    ;;
+  *)
+    echo "⚠ V8d: the mount needed a $REMOUNTED — $MNT_WORLD"
+    ;;
+esac
 fi
 
 # The mount holds the device open: unstage would refuse (or leak a

@@ -63,6 +63,27 @@ fn usage() -> ! {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // THE SESSION CODE TALKS THROUGH `tracing`, AND NOBODY WAS
+    // LISTENING. `pnfs_block_session` reports the whole redirect lane —
+    // which target the volume moved to, whether the new path was added
+    // before the old one was torn down, why a fallback fired — through
+    // tracing macros. Without a subscriber they are no-ops, so every
+    // rig that drives this binary was proving the lane blind: a drill
+    // grepping the CLI's output for those lines finds nothing and
+    // cannot tell "it did not happen" from "nobody wrote it down".
+    //
+    // STDERR, not stdout: this CLI's stdout is a JSON contract the rigs
+    // parse (`stage` prints the device), and `tracing_subscriber::fmt()`
+    // defaults to stdout, which would corrupt it. That is also why the
+    // module's existing progress lines are `eprintln!`.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         usage();
