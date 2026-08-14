@@ -66,6 +66,13 @@ SOCK_A=/var/tmp/spdk-rig.sock
 SOCK_B=/var/tmp/spdk-rigb.sock
 RIG_A=/var/tmp/flint-rig
 RIG_B=/var/tmp/flint-rig-b
+# THE WITNESS: one sqlite file BOTH shards open. Their own records stay
+# separate (that is the architecture, and §V1's assertions still read
+# them) — what moves here is arbitration alone: the seat, the leg sync
+# marks, the serving leases, the target registry and the allow-list.
+# A store on one of the two targets cannot arbitrate between them, so
+# this file is what makes §V7 possible at all.
+WITNESS=/var/tmp/flint-rig-witness.db
 TGT_A=rig-a
 TGT_B=rig-b
 SUBNQN="nqn.2024-11.com.flint:block:$VOL"
@@ -80,6 +87,11 @@ RECON_SECS=5
 STRIKES=2
 UNREACH_SECS=5
 PROBE_TMO=2
+# The serving lease, and it is the FAILOVER's clock: assembly refuses
+# until the deposed composer's lease lapses, because tearing its fan-in
+# away while it can still ack is what strands acked writes. 120s in
+# production; here it is the horizon §V7 waits out.
+LEASE_SECS=10
 
 RPC_A="sudo PYTHONPATH=$RIG_TOOLS/py python3 $RIG_TOOLS/scripts/rpc.py -s $SOCK_A"
 RPC_B="sudo PYTHONPATH=$RIG_TOOLS/py python3 $RIG_TOOLS/scripts/rpc.py -s $SOCK_B"
@@ -112,7 +124,8 @@ cleanup() {
          # and made create_lvstore fail with 'already claimed'.
          pkill -9 -x spdk_tgt; pkill -9 -x reactor_0; pkill -9 -x reactor_1
          sleep 0.5
-         rm -rf $RIG_A $RIG_B /var/tmp/rig-disk.img /var/tmp/rig-disk-b.img \
+         rm -rf $RIG_A $RIG_B $WITNESS ${WITNESS}-wal ${WITNESS}-shm \
+                /var/tmp/rig-disk.img /var/tmp/rig-disk-b.img \
                 $SOCK_A ${SOCK_A}.lock $SOCK_B ${SOCK_B}.lock /var/tmp/spdk_cpu_lock_*
          rm -f /dev/disk/by-id/nvme-eui.*"
   set -o pipefail
@@ -193,6 +206,8 @@ start_mds() {
         FLINT_PNFS_BLOCK_UNREACHABLE_STRIKES=$STRIKES \
         FLINT_PNFS_BLOCK_UNREACHABLE_MIN_SECS=$UNREACH_SECS \
         FLINT_PNFS_BLOCK_PROBE_TIMEOUT_SECS=$PROBE_TMO \
+        FLINT_PNFS_WITNESS_SQLITE=$WITNESS \
+        FLINT_PNFS_BLOCK_LEASE_SECS=$LEASE_SECS \
         FLINT_NFS_GRACE_SECS=5 RUST_LOG='${MDS_LOG:-info}' \
         nohup $MDS_BIN --config $cfg >>$log 2>&1 & sleep 0.5"
   local i
@@ -235,11 +250,11 @@ CV=$(vsh "$GRPC -d '{\"volumeId\":\"$VOL\",\"sizeBytes\":$VOL_BYTES,\"layoutClas
       127.0.0.1:50051 pnfs.control.MdsControl/CreateVolume") || fail "CreateVolume RPC"
 echo "$CV" | grep -q '"created": true' || fail "CreateVolume refused: $CV"
 
-LEGROW=$(vsh "sudo sqlite3 $RIG_A/state.db \
+LEGROW=$(vsh "sudo sqlite3 $WITNESS \
   \"select target_id||':'||sync_state from block_volume_legs where volume='$VOL' order by target_id\"")
 echo "$LEGROW" | tr '\n' ' ' | grep -q "$TGT_B:stale" \
   || fail "A's record does not carry the placed leg as STALE: $LEGROW"
-REG=$(vsh "sudo sqlite3 $RIG_A/state.db \
+REG=$(vsh "sudo sqlite3 $WITNESS \
   \"select traddr||':'||trsvcid from block_targets where target_id='$TGT_B'\"")
 [ "$REG" = "127.0.0.1:4421" ] || fail "A cannot dial the leg target: '$REG'"
 echo "✓ V1b: A records the leg STALE (an empty copy is not electable) and can dial it"
@@ -309,7 +324,7 @@ print(len([b for b in r['base_bdevs_list'] if b.get('name')]) if r else 0)
   [ "$i" = 40 ] && fail "the leg never joined the composition (see $RIG_A/mds.log)"
   sleep 1
 done
-SYNC=$(vsh "sudo sqlite3 $RIG_A/state.db \
+SYNC=$(vsh "sudo sqlite3 $WITNESS \
   \"select sync_state from block_volume_legs where volume='$VOL' and target_id='$TGT_B'\"")
 [ "$SYNC" = "insync" ] || fail "the leg is a member but the record says '$SYNC'"
 vsh "grep -c 'is IN SYNC and back in the composition' $RIG_A/mds.log" >/dev/null \
@@ -372,7 +387,7 @@ echo "✓ V4: the leg refuses an unnamed host, and its copy is byte-identical ov
 vsudo "pkill -9 -x reactor_1"
 echo "  … tgt-B killed; waiting for the verdict (strikes=$STRIKES, floor=${UNREACH_SECS}s)"
 for i in $(seq 1 60); do
-  SYNC=$(vsh "sudo sqlite3 $RIG_A/state.db \
+  SYNC=$(vsh "sudo sqlite3 $WITNESS \
     \"select sync_state from block_volume_legs where volume='$VOL' and target_id='$TGT_B'\"")
   [ "$SYNC" = "stale" ] && break
   [ "$i" = 60 ] && fail "the leg never went stale after its target died"
@@ -428,6 +443,140 @@ SHA_NOW=$(vsudo "dd if=$NSDEV bs=1M count=$IO_MIB iflag=direct status=none | sha
 read_leg "$SHA_NOW" "V6"
 echo "✓ V6: the leg rejoined and carries the bytes written while it was gone"
 
+# ── V7. THE FAILOVER ─────────────────────────────────────────────────
+# Everything above kills the LEG HOST. This kills the COMPOSER, which is
+# the case the whole composition machine exists for and the one nothing
+# had ever run: the CAS, the eviction horizon, assembly and the client's
+# redirect, driven from the side that has to be right.
+#
+# It is only possible because the two shards now arbitrate in ONE record.
+# Before the witness, every fact this section reads — that rig-a is
+# unreachable, that rig-b's leg is in sync, that the client was ever
+# admitted — lived in the database that dies with the composer.
+echo "── V7: the composer dies ──"
+SHA_PRE=$(vsudo "dd if=$NSDEV bs=1M count=$IO_MIB iflag=direct status=none | sha256sum | cut -d' ' -f1")
+CLIENT_NQN="nqn.2024-11.com.flint:node:$(vsh hostname)"
+# The client is attached HERE, at A, and its admission was recorded by
+# A's shard. Whether B can see it is the allow-list half of the proof.
+ADMITTED=$(vsh "sudo sqlite3 $WITNESS \
+  \"select count(*) from block_node_attach where volume='$VOL' and host_nqn='$CLIENT_NQN'\"")
+[ "$ADMITTED" = "1" ] || fail "the client's admission is not in the witness: '$ADMITTED'"
+
+# Kill tgt-A by its reactor name (core mask 0x1 ⇒ 'reactor_0'). MDS-A
+# stays UP on purpose: its record is fine, its disk arm is gone, and a
+# composer that cannot serve but can still talk is exactly the world the
+# dead-man was written for.
+vsudo "pkill -9 -x reactor_0"
+echo "  … tgt-A killed (MDS-A still running); waiting for B to condemn it"
+
+# THE CAS, observed in the witness rather than in a log line.
+for i in $(seq 1 90); do
+  SEAT=$(vsh "sudo sqlite3 $WITNESS \
+    \"select epoch||':'||composer from block_volume_target where volume='$VOL'\"")
+  [ "$SEAT" = "2:$TGT_B" ] && break
+  [ "$i" = 90 ] && fail "the seat never moved (still '$SEAT') — see $RIG_B/mds.log"
+  sleep 1
+done
+echo "  … seat moved: $SEAT"
+# The deposed leg is marked stale by ASSEMBLY, not by the CAS: between
+# them the old composer may still be acking, so its leg is not demoted
+# until the new one actually takes the composition.
+for i in $(seq 1 60); do
+  ASYNC=$(vsh "sudo sqlite3 $WITNESS \
+    \"select sync_state from block_volume_legs where volume='$VOL' and target_id='$TGT_A'\"")
+  [ "$ASYNC" = "stale" ] && break
+  [ "$i" = 60 ] && fail "the deposed leg never went stale — assembly did not complete"
+  sleep 1
+done
+# THE HORIZON WAS REAL: assembly must have REFUSED at least once while
+# A's lease still ran. Without that line the failover happened to be
+# fast enough to skip the wait, and this drill would not have tested it.
+vsh "grep -q 'assembly waits' $RIG_B/mds.log" \
+  || fail "assembly never waited out the deposed lease — the horizon was not exercised"
+# And A stopped itself: its renewal is refused by a record that no longer
+# names it, and its lease lapses, so its own dead-man suspends the export
+# it can no longer serve. This is the only exclusion a partitioned
+# composer's LOCAL leg has.
+# It does NOT happen at once, and waiting is the assertion: the
+# dead-man needs BOTH a refused renewal and an EXPIRED lease, so the
+# deposed composer keeps serving until the lease it was granted runs
+# out. Suspending on the refusal alone would sever a composition that
+# was still entitled — this wait IS the horizon, from A's side.
+for i in $(seq 1 $((LEASE_SECS + 3 * RECON_SECS + 15))); do
+  vsh "grep -q 'SUSPENDED by the dead-man' $RIG_A/mds.log" && break
+  [ "$i" = $((LEASE_SECS + 3 * RECON_SECS + 15)) ] \
+    && fail "MDS-A never suspended its export after being deposed"
+  sleep 1
+done
+# And the suspension LANDED. The rig's first composer kill caught this
+# exact gap: the dead-man decided correctly and then failed to execute,
+# because suspension ran through the ordinary converge and that path
+# refuses when the lvol probe does not come back — which on a dead tgt
+# it never does. A decision that cannot be carried out is not an
+# exclusion.
+vsh "grep -q 'SUSPENSION FAILED' $RIG_A/mds.log" \
+  && fail "the dead-man decided to suspend and could not — the deposed target may still serve"
+echo "✓ V7a: CAS → horizon → assembly at $TGT_B, and the deposed composer suspended itself"
+
+# THE DOOR TRAVELLED. B builds its allow-list from the witness, so the
+# client admitted at A — a client B's own record has never heard of — is
+# on the survivor's export without anyone re-admitting it.
+# WAIT for it: assembly and A's self-suspension key off the SAME lease
+# lapse, so A can stop a pass before B starts serving — checking once
+# here raced the reconcile loop rather than testing it. Everything on
+# this tier is level-triggered; assertions about it have to be too.
+for i in $(seq 1 $((4 * RECON_SECS + 20))); do
+  VOLSUB=$(vsh "$RPC_B nvmf_get_subsystems")
+  echo "$VOLSUB" | grep -q "$SUBNQN" && break
+  [ "$i" = $((4 * RECON_SECS + 20)) ] \
+    && fail "the survivor never built the volume export (see $RIG_B/mds.log)"
+  sleep 1
+done
+VOLHOSTS=$(echo "$VOLSUB" | python3 -c "
+import json,sys
+for s in json.load(sys.stdin):
+    if s.get('nqn') == '$SUBNQN':
+        print(','.join(h['nqn'] for h in s.get('hosts', []))); break
+")
+echo "$VOLHOSTS" | grep -q "$CLIENT_NQN" \
+  || fail "the survivor does not admit the client attached at A: '$VOLHOSTS'"
+echo "✓ V7b: the survivor's allow-list carries the client admitted at the dead composer"
+
+# THE CLIENT FOLLOWS, and it asks the SAME MDS it always asked. MDS-A is
+# alive and answers AttachBlockNode by resolving the record — which now
+# names B — so the redirect needs no new endpoint and no operator: the
+# node is told where the volume lives NOW.
+vsudo "nvme disconnect -n $SUBNQN" >/dev/null 2>&1
+# RETRIED, because that is the contract the tier runs on: the admission
+# is durable the moment the record takes it, and the composer's own
+# level-triggered pass is what opens its door. A stage landing inside
+# that window connects into a refusal, and kubelet retries
+# NodeStageVolume for exactly this reason — so the drill retries too,
+# and a stage that never succeeds is the real failure.
+for i in $(seq 1 $((3 * RECON_SECS + 10))); do
+  RESTAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=30 FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+          $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)") \
+    && break
+  [ "$i" = $((3 * RECON_SECS + 10)) ] && fail "re-stage after failover: $RESTAGE"
+  sleep 1
+done
+NSDEV2=$(echo "$RESTAGE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)
+[ -n "$NSDEV2" ] || fail "re-stage reported no device: $RESTAGE"
+# It must be a session to B — the whole point. A is dead, so a device
+# that appeared at all proves the address came from the record.
+TRA=$(vsudo "nvme list-subsys $NSDEV2 | grep -o 'traddr=[0-9.]*,trsvcid=[0-9]*' | head -1")
+echo "$TRA" | grep -q "trsvcid=4421" || fail "the client re-attached to '$TRA', not to the survivor"
+SHA_POST=$(vsudo "dd if=$NSDEV2 bs=1M count=$IO_MIB iflag=direct status=none | sha256sum | cut -d' ' -f1")
+[ "$SHA_POST" = "$SHA_PRE" ] \
+  || fail "THE BYTES DID NOT SURVIVE THE FAILOVER: ${SHA_POST:0:12}… != ${SHA_PRE:0:12}…"
+echo "✓ V7c: the client re-attached to the survivor and read ${IO_MIB} MiB byte-identical"
+# And it can still WRITE, which is what makes it a volume rather than a
+# snapshot: the survivor serves solo (its peer is the dead A), so this
+# also exercises the degrade barrier from the other side.
+vsudo "dd if=/dev/urandom of=$NSDEV2 bs=1M count=4 oflag=direct conv=notrunc status=none" \
+  || fail "the promoted volume refused a write"
+echo "✓ V7d: and the promoted composition takes writes"
+
 vsudo "$CSI_CLI unstage --volume-id $VOL" >/dev/null 2>&1
 echo
-echo "✅ replica-rig: every proof held — placement, frame, rebuild, mirror, degrade, rejoin"
+echo "✅ replica-rig: every proof held — placement, frame, rebuild, mirror, degrade, rejoin, FAILOVER"

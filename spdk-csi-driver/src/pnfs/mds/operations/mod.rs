@@ -1746,12 +1746,44 @@ pub async fn attach_block_node(
         }
         Err(e) => return Err(format!("node attach refused: {e}")),
     }
-    rec.reconcile_hosts(volume).await.map_err(|e| {
-        // The durable row stands; a retry (or the next reconcile pass)
-        // converges. Surfacing the error makes the CSI attacher retry
-        // rather than letting the node connect into a refusal.
-        format!("attach recorded but allow-list did not converge: {e}")
-    })?;
+    // CONVERGE ONLY WHAT THIS TARGET SERVES. The allow-list lives on the
+    // COMPOSER's tgt, and after a failover the shard answering this
+    // attach is no longer it: the client still asks the MDS it has
+    // always asked, and that MDS still answers correctly (the address
+    // below comes from the record), but it cannot open a door on
+    // somebody else's target — its own converge refuses, rightly,
+    // because the lease it would need belongs to the new composer.
+    //
+    // The rig caught this on the first client redirect after a
+    // promotion: the attach was RECORDED and then reported as failed,
+    // so the node never dialled the survivor that was already serving.
+    // Skipping the local converge is not a gap — the admission is in
+    // the witness, and the composer's own level-triggered pass builds
+    // its door from there. The node's connect may land a pass early;
+    // NodeStageVolume is retried, which is the same contract the
+    // refusal above was relying on.
+    let seated_here = match rec.seat_list().await {
+        Ok(seats) => seats
+            .iter()
+            .any(|s| s.volume == volume && s.composer == rec.target_id()),
+        // Unreadable record: converge as before rather than assume.
+        Err(_) => true,
+    };
+    if seated_here {
+        rec.reconcile_hosts(volume).await.map_err(|e| {
+            // The durable row stands; a retry (or the next reconcile
+            // pass) converges. Surfacing the error makes the CSI
+            // attacher retry rather than letting the node connect into
+            // a refusal.
+            format!("attach recorded but allow-list did not converge: {e}")
+        })?;
+    } else {
+        info!(
+            "{}: '{}' is composed elsewhere — the admission is recorded and the composer's \
+             next pass opens its door; this shard converges nothing it does not serve",
+            context, volume
+        );
+    }
     // The address the node will dial comes from the volume's record, not
     // from this MDS's configuration: after a failover the seat is what
     // knows where the volume lives, and a csi-node handed a stale traddr
@@ -1979,8 +2011,9 @@ pub async fn export_reconcile_pass(
             } => {
                 tracing::warn!(
                     "🔀 {} '{}': composer '{}' → '{}' at epoch {} — the deposed lease runs to \
-                     {}, and eviction, assembly and client redirect are NOT yet implemented, \
-                     so this record has moved ahead of the machinery that follows it",
+                     {}, and nothing may assemble until it lapses: the deposed composer can \
+                     still be acking, and tearing its fan-in away before then is what strands \
+                     those writes",
                     context, v, from, to, epoch, evict_after_unix
                 );
             }
@@ -2034,8 +2067,8 @@ pub async fn export_reconcile_pass(
             crate::pnfs::mds::block_export::AssemblyOutcome::Assembled { epoch, deposed } => {
                 tracing::warn!(
                     "🔧 {} '{}': ASSEMBLED at epoch {}{} — the export is up with standing \
-                     fences replayed; clients still need the redirect actor, which does not \
-                     exist yet",
+                     fences replayed and the allow-list rebuilt from the witness; clients \
+                     follow when their node re-resolves the record",
                     context,
                     v,
                     epoch,

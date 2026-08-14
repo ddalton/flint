@@ -255,10 +255,6 @@ enum ConvergeMode {
     /// otherwise an attach arriving between two passes could be refused
     /// by a lease nothing was wrong with.
     Reconcile,
-    /// THE DEAD-MAN's act: converge the allow-list down to the fence
-    /// lane alone, whatever the record says. Requires no seat and no
-    /// lease, because it runs precisely when those are gone.
-    Suspend,
 }
 
 /// What one assembly attempt did.
@@ -732,10 +728,75 @@ impl BlockExportReconciler {
     /// this target stops serving bytes it no longer holds the right to
     /// serve. The admissions in sqlite stay — the clients are still
     /// legitimately admitted; it is this target that lost the lease.
+    ///
+    /// IT IS ITS OWN PATH, NOT A CONVERGE MODE, and the replica rig is
+    /// why. Suspension used to run through `ensure_locked`, which
+    /// begins by probing the lvol and REFUSES when it is absent (F67:
+    /// re-creating an lvol under committed extents would serve zeros).
+    /// That guard exists to stop a CREATE, and suspension creates
+    /// nothing — it only ever takes reach away. Worse, `lvol_present`
+    /// is `probe.is_ok()`, so an unreachable tgt reads as a missing
+    /// lvol: the guard fired on a target that had merely stopped
+    /// answering, and the log said the lvol was gone when nothing had
+    /// been asked.
+    ///
+    /// The rig caught it on the first composer kill: the dead-man
+    /// decided correctly ("SUSPENDING this target's export") and then
+    /// failed to execute ("SUSPENSION FAILED … this target may still be
+    /// serving a composition it no longer holds") — the one exclusion a
+    /// deposed composer has, refused exactly when it is needed. A dead
+    /// tgt serves nobody, so that trace was harmless; the case it
+    /// predicts is not. A tgt whose RPC socket has wedged while its
+    /// data path still serves clients (`listener_is_misconfigured`'s
+    /// world, F42's shape) is a zombie this was supposed to stop.
+    ///
+    /// So the act is now the MINIMAL one, which is also the one most
+    /// likely to succeed in the conditions that call for it: find the
+    /// export, narrow it to the fence lane, touch nothing else. No
+    /// lvol, no composition, no record. An export that does not exist
+    /// is already suspended.
     pub async fn suspend_export(&self, volume: &str) -> Result<(), String> {
         let lock = self.lock_for(volume);
         let _g = lock.lock().await;
-        self.ensure_locked(volume, ConvergeMode::Suspend).await
+        let nqn = crate::identity::block_volume_export_nqn(volume);
+        let Some(sub) = get_subsystem(self.rpc.as_ref(), &nqn)
+            .await
+            .map_err(|e| format!("suspend '{volume}': {e}"))?
+        else {
+            // Nothing is serving. Not an error, and not a silence
+            // either — the dead-man's caller logs the suspension.
+            return Ok(());
+        };
+        let keep = crate::identity::block_mds_host_nqn();
+        let current: Vec<String> = sub
+            .get("hosts")
+            .and_then(|h| h.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.get("nqn").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The fence lane STAYS: the MDS still has to be able to preempt
+        // reservations here, and it is not a client.
+        for h in current.iter().filter(|h| *h != &keep) {
+            let rm = json!({
+                "method": "nvmf_subsystem_remove_host",
+                "params": { "nqn": nqn, "host": h }
+            });
+            self.rpc
+                .rpc(&rm)
+                .await
+                .map_err(|e| format!("suspend '{volume}': removing {h}: {e}"))?;
+        }
+        if !current.iter().any(|h| h == &keep) {
+            let add = json!({
+                "method": "nvmf_subsystem_add_host",
+                "params": { "nqn": nqn, "host": keep }
+            });
+            let _ = self.rpc.rpc(&add).await;
+        }
+        Ok(())
     }
 
     /// Extend this target's lease on a volume. Record-conditioned at the
@@ -2914,9 +2975,6 @@ impl BlockExportReconciler {
                     return Err(format!("refusing to converge '{volume}': {e}"));
                 }
             }
-            // The dead-man has no record to satisfy. That is the point:
-            // it runs when the record has stopped vouching for us.
-            ConvergeMode::Suspend => {}
         }
 
         let bdev = self.bdev_name(volume);
@@ -2975,8 +3033,39 @@ impl BlockExportReconciler {
             Ok(Some(s)) => Some(s),
             _ => None,
         };
+        // A TARGET EITHER OFFERS A LEG OR COMPOSES, NEVER BOTH — and
+        // until the rig promoted a real target, only the leg side of
+        // that rule was enforced. `ensure_leg_export` withdraws the
+        // offer when the seat names us, but the pass never calls it for
+        // a volume seated HERE: the leg lane runs over volumes we host
+        // for somebody else. So a promoted target kept the leg export
+        // it had been offering, and an nvmf namespace CLAIMS its bdev
+        // (`spdk_bdev_module_claim_bdev`) — so `bdev_raid_create`
+        // answered EPERM, the composition could not be built at the
+        // survivor, and the solo fallback then failed too because
+        // `nvmf_subsystem_add_ns` cannot add a bdev that is already
+        // claimed. The volume had nowhere to be served.
+        //
+        // This is the SAME trap the rig found on the provisioning path
+        // (an export built before the placed leg was recorded), arriving
+        // by the promotion road, which no unit test had a way to drive:
+        // the fake target grew a claim model for the first one, and a
+        // claim model cannot catch an act nobody performs.
+        //
+        // Idempotent and cheap: a target that never offered a leg for
+        // this volume has no subsystem here and this returns at once.
+        if seat.as_ref().is_some_and(|s| s.composer == me) {
+            if let Err(e) = self.drop_leg_export_locked(volume).await {
+                tracing::error!(
+                    "'{}': the leg export this target used to offer could not be withdrawn \
+                     ({}) — its namespace still claims the lvol, so no composition can be \
+                     built here",
+                    volume, e
+                );
+            }
+        }
         let served = match (mode, &seat) {
-            (ConvergeMode::Suspend, _) | (_, None) => bdev.clone(),
+            (_, None) => bdev.clone(),
             (_, Some(seat)) => match self.compose_bdev(volume, seat).await {
                 Ok(b) => b,
                 Err(e) => {
@@ -3009,7 +3098,6 @@ impl BlockExportReconciler {
         // down, which is what makes this a real suspension and not a
         // request.
         let hosts = match mode {
-            ConvergeMode::Suspend => vec![crate::identity::block_mds_host_nqn()],
             _ => self.desired_hosts(volume).await?,
         };
         let nqn = crate::identity::block_volume_export_nqn(volume);
@@ -6478,6 +6566,158 @@ pub(crate) mod tests {
     /// vouching keeps serving until its lease actually runs out, and
     /// then tears every client's controller down itself.
     ///
+    /// A PROMOTED TARGET MUST WITHDRAW ITS OWN LEG OFFER BEFORE IT CAN
+    /// COMPOSE — the replica rig's second finding, and the same trap it
+    /// found on the provisioning path arriving by a different road.
+    ///
+    /// An nvmf namespace CLAIMS its bdev. While this target hosted the
+    /// leg it offered `lvs/vol` through `…:leg:<vol>`, and that claim
+    /// does not care that the seat has moved: `bdev_raid_create`
+    /// answers EPERM, and the solo fallback fails too, because
+    /// `nvmf_subsystem_add_ns` will not take a claimed bdev either. The
+    /// survivor is elected, assembles, and can serve nothing.
+    ///
+    /// The rule was always written down — `ensure_leg_export` withdraws
+    /// the offer when the seat names us — but the pass only ever calls
+    /// that for volumes hosted FOR somebody else, so on the promotion
+    /// path nothing ran it. No unit test caught it because no unit test
+    /// promoted a target that had really been offering a leg.
+    #[tokio::test]
+    async fn a_promoted_target_drops_the_leg_export_that_claims_its_lvol() {
+        use crate::state_backend::extent_alloc::LEG_INSYNC;
+        let tgt = Arc::new(FakeTgt::new());
+        let backend = crate::state_backend::memory_backend();
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        )
+        .with_identity("node-b".into());
+        let me = "node-b";
+
+        // This target hosts a leg for a composer elsewhere: the lvol
+        // exists here and its leg export claims it.
+        r.host_leg("pvc-pr", 8 * 1024 * 1024, "node-a").await.expect("host the leg");
+        let legnqn = crate::identity::block_leg_export_nqn("pvc-pr");
+        assert!(
+            tgt.subsystems.lock().unwrap().contains_key(&legnqn),
+            "the leg is being offered, and its namespace claims the lvol"
+        );
+
+        // The seat moves here — a promotion, played by the record.
+        backend
+            .block_promote("pvc-pr", 1, "node-a", me, now_unix())
+            .await
+            .unwrap()
+            .unwrap_err(); // refused: node-b's leg is not marked in-sync yet
+        backend.block_leg_mark("pvc-pr", me, LEG_INSYNC, now_unix()).await.unwrap().unwrap();
+        backend
+            .block_target_register(me, "10.0.0.9", 4420, now_unix())
+            .await
+            .unwrap()
+            .unwrap();
+        backend
+            .block_promote("pvc-pr", 1, "node-a", me, now_unix())
+            .await
+            .unwrap()
+            .expect("the CAS moves the seat");
+        backend
+            .block_lease_grant("pvc-pr", 2, me, now_unix() + 60)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Converge as the new composer. Without the withdrawal this
+        // fails at the namespace: the leg export still holds the claim.
+        r.ensure("pvc-pr", None).await.expect("the survivor must be able to serve");
+        assert!(
+            !tgt.subsystems.lock().unwrap().contains_key(&legnqn),
+            "the leg offer must be withdrawn — one target, one role"
+        );
+        let volnqn = crate::identity::block_volume_export_nqn("pvc-pr");
+        let served = {
+            let subs = tgt.subsystems.lock().unwrap();
+            let vol = subs.get(&volnqn).expect("the volume export is up at the survivor");
+            vol["namespaces"][0]["bdev_name"].as_str().unwrap_or_default().to_string()
+        };
+        // The frame is a function of the RECORD's leg count, not of how
+        // many legs are healthy, so the survivor serves a TWO-slot raid
+        // with the deposed peer's slot standing empty — the composition
+        // survives the degrade, which is what lets that leg rejoin the
+        // same slot later without re-pointing the namespace.
+        let raid = format!("flintraid-pvc-pr");
+        assert_eq!(served, raid, "the namespace serves the composition");
+        let raids = tgt.raids.lock().unwrap();
+        let slots = raids.get(&raid).expect("the frame exists");
+        assert_eq!(slots.len(), 2, "two recorded legs, two slots: {slots:?}");
+        assert!(
+            slots.iter().flatten().any(|b| b == "lvs_test/pvc-pr"),
+            "and this target's own copy is the member that fills one: {slots:?}"
+        );
+    }
+
+    /// THE SUSPENSION MUST NOT NEED A HEALTHY TARGET — the replica rig's
+    /// finding, pinned.
+    ///
+    /// The dead-man exists for the composer nobody else can reach, so
+    /// the conditions it runs in are the degraded ones by definition.
+    /// It used to run through the ordinary converge, which begins by
+    /// probing the lvol and refuses when that probe does not come back
+    /// (F67, a guard against RE-CREATING an lvol under committed
+    /// extents). Suspension creates nothing; it only takes reach away.
+    /// So on the rig's first composer kill the dead-man decided
+    /// correctly and then reported SUSPENSION FAILED, leaving a target
+    /// that "may still be serving a composition it no longer holds".
+    ///
+    /// Here the lvol is gone from under a live export — the shape a
+    /// wedged tgt or a lost lvolstore presents — and the suspension
+    /// must still take every client off the allow-list.
+    #[tokio::test]
+    async fn suspension_lands_even_when_the_lvol_is_gone() {
+        let tgt = Arc::new(FakeTgt::new());
+        let r = reconciler(Arc::clone(&tgt));
+        r.ensure("pvc-sus", Some(1 << 20)).await.expect("provision");
+        let nqn = crate::identity::block_volume_export_nqn("pvc-sus");
+        let client = crate::nvmeof_export::flint_host_nqn("node-client");
+        tgt.rpc(&json!({
+            "method": "nvmf_subsystem_add_host",
+            "params": { "nqn": nqn, "host": client }
+        }))
+        .await
+        .expect("admit a client");
+        assert!(tgt.hosts_of(&nqn).contains(&client), "the client is on the allow-list");
+
+        // The lvol vanishes — a lost lvolstore, or (identically, since
+        // the probe cannot tell) a tgt that has stopped answering.
+        tgt.bdevs.lock().unwrap().remove("lvs_test/pvc-sus");
+        assert!(
+            r.ensure("pvc-sus", None).await.is_err(),
+            "the ordinary converge still refuses — the F67 guard is untouched, and that \
+             refusal is the reason this test exists"
+        );
+
+        r.suspend_export("pvc-sus").await.expect("the dead-man must be able to suspend");
+        let hosts = tgt.hosts_of(&nqn);
+        assert!(!hosts.contains(&client), "every client must lose its reach: {hosts:?}");
+        assert!(
+            hosts.contains(&crate::identity::block_mds_host_nqn()),
+            "the fence lane STAYS — the MDS still has to preempt here: {hosts:?}"
+        );
+    }
+
+    /// An export that does not exist is already suspended, and saying so
+    /// is not the same as failing: the dead-man's caller drops the lease
+    /// on success, and an error here would leave it holding one forever.
+    #[tokio::test]
+    async fn suspending_what_was_never_exported_is_a_no_op() {
+        let tgt = Arc::new(FakeTgt::new());
+        let r = reconciler(Arc::clone(&tgt));
+        r.suspend_export("pvc-none").await.expect("nothing to suspend is success");
+    }
+
     /// Both conditions matter and are shown separately. Suspending on a
     /// refused renewal ALONE would sever a still-entitled composition
     /// mid-horizon, which is what strands acked writes on a doomed leg;
