@@ -4979,6 +4979,112 @@ pub(crate) mod tests {
         }
     }
 
+    /// THE SHARD BOUNDARY, AND IT IS WHERE THE FAILOVER ORDER ENDS.
+    ///
+    /// Every failover test in this file builds its world in ONE record.
+    /// Production has two. MDS shards share nothing — own sqlite, own
+    /// RWO PVC, single-writer by attach — so the composer's record and
+    /// the leg host's record are different databases on different nodes,
+    /// and the only fact that ever crosses between them is one somebody
+    /// wrote an RPC for.
+    ///
+    /// So this test builds the leg host's side through the ONLY
+    /// production path that touches it — `host_leg`, what the CSI
+    /// controller calls at CreateVolume — and then asks that side to do
+    /// what a failover needs it to do. It cannot, and it cannot for two
+    /// independent reasons, both of the same shape: every fact a
+    /// survivor's election reads is a fact the composer wrote in ITS OWN
+    /// record.
+    ///
+    ///   * the composer's dial coordinates. `record_leg` registers the
+    ///     LEG's address in the COMPOSER's registry; nothing registers
+    ///     the composer's in the leg host's. This shard's prober probes
+    ///     only targets it has rows for, so it never probes the composer
+    ///     and can never condemn it — `attempt_promotion` is never even
+    ///     reached, because the pass classifies the volume as one seated
+    ///     at a target that is not condemned.
+    ///
+    ///   * this target's own leg, and the in-sync mark on it. The mark
+    ///     is EARNED by a rebuild, and the rebuild runs on the composer,
+    ///     which writes the mark where it can see it. This shard's leg
+    ///     table holds exactly one row — the composer's, in-sync,
+    ///     written by its own seating — and no row at all for the copy
+    ///     it is physically holding.
+    ///
+    /// Hand it the verdict it could never form and the election still
+    /// refuses, correctly, under `ElectInSync`: it can see no in-sync
+    /// leg but the dead composer's. The CAS, the horizon, the eviction
+    /// and the assembly behind it are all real, all tested, and in a
+    /// two-shard deployment all unreachable.
+    #[tokio::test]
+    async fn the_leg_host_cannot_elect_itself_because_both_facts_live_in_the_composers_record() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend = crate::state_backend::memory_backend();
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        let me = target_id();
+        let composer = "node-composer";
+
+        // The whole of what the fleet ever says to a leg host: place a
+        // copy of this volume here, for that composer. It mints the
+        // lvol, seats the volume and offers the leg — and it is the only
+        // call this shard receives about this volume, ever.
+        r.host_leg("pvc-sb", 8 * 1024 * 1024, composer).await.expect("host the leg");
+        r.self_register().await.expect("register");
+
+        // FACT ONE, missing: the composer is not in this shard's
+        // registry, so the prober has no address to probe it at.
+        let targets = backend.block_target_list().await.unwrap().unwrap();
+        assert!(
+            targets.iter().any(|t| t.target_id == me),
+            "this target registers itself: {targets:?}"
+        );
+        assert!(
+            !targets.iter().any(|t| t.target_id == composer),
+            "the composer this shard is holding a copy FOR has no dial coordinates here — \
+             its outage is unobservable from this side: {targets:?}"
+        );
+
+        // FACT TWO, missing: the leg table names the composer and not
+        // this target. The copy is on this target's disk; nothing in
+        // this target's record knows it exists.
+        let legs = backend.block_legs("pvc-sb").await.unwrap().unwrap();
+        assert_eq!(
+            legs.iter().map(|l| (l.target_id.as_str(), l.sync_state.as_str())).collect::<Vec<_>>(),
+            vec![(composer, crate::state_backend::extent_alloc::LEG_INSYNC)],
+            "seating marks the COMPOSER's leg in-sync and stops there"
+        );
+        assert!(
+            !legs.iter().any(|l| l.target_id == me),
+            "the copy this target is physically holding has no row in this target's record"
+        );
+
+        // Grant the verdict this shard could never form, so the refusal
+        // below is attributable to the leg table alone.
+        let long_ago = now_unix() - 10 * verdict_min_secs();
+        for _ in 0..verdict_strikes() + 1 {
+            r.observe(composer, false, long_ago);
+        }
+        r.observe(&me, true, now_unix());
+        assert!(r.reachability(composer).unwrap().is_unreachable());
+
+        match r.attempt_promotion("pvc-sb").await {
+            PromotionOutcome::NoCandidate { reason } => {
+                assert!(reason.contains("no in-sync leg"), "{reason}");
+                assert!(reason.contains("1 leg(s) recorded"), "one row, the composer's: {reason}");
+            }
+            other => panic!(
+                "the survivor holds the bytes and cannot be elected for them; got {other:?}"
+            ),
+        }
+    }
+
     /// THE FRAME IS DERIVED FROM THE RECORD'S LEG COUNT, not from how
     /// many legs are healthy: a volume the record gives two legs is
     /// served through a two-slot composition even while the second leg
