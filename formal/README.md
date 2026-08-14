@@ -2,7 +2,7 @@
 
 Seven spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
-(`scripts/check-tla.sh`, **one hundred and forty-three** TLC runs).
+(`scripts/check-tla.sh`, **one hundred and fifty-two** TLC runs).
 
 Both counts here have drifted before, in both files, because nothing
 regenerated them. They do now:
@@ -266,6 +266,40 @@ recovers gets no lease back, or eviction waits forever), and assembly
 IS the lease grant (or a composer serves on a lease that lapsed under
 an earlier epoch, and its eventual deposition reads that ancient lapse
 as an already-passed horizon — a still-serving zombie assembled over).
+**Tranche 4** (2026-08-14): the witness.  The implementation found the
+record this module CAS's does not exist (MDS shards share nothing — a
+two-copy volume has TWO sqlites, and every fact the survivor's election
+reads lives in the dead composer's), and the arbiter fork was decided
+for the **etcd witness** — at which point the module's own history
+became the argument: tranches 1–3 had always modelled a store both
+targets reach independently of each other's health, which sqlite on one
+of them cannot be and K8s rv-CAS can.  The tranche adds the witness's
+*reachability* (`apiCut`: a target loses the control plane; `peerCut`:
+the tgt↔tgt wire cut with both nodes healthy — the symmetric partition
+that refuted peer-arbitrated leases) behind `MaxCuts` (0 in every
+earlier cfg — flagship count verified identical, 128,939) and lets TLC
+referee the fork: the `Witness` strict green (6.4M states) carries the
+serialization argument — under a pure peerCut the composer races to
+mark its peer stale while the peer races to CAS the seat, and whoever
+lands second is refused (which is real only if seat, marks and lease
+share **one rv-CAS'd object per volume**, the tranche's implementation
+obligation); `LocalMark` is peer-arbitration's degraded window as a
+counterexample (the mark lands where the election never reads);
+`FenceLocal` corrected the decision's own first scoping — fence
+**identities** must be witness-carried or the survivor's fail-closed
+replay reads an empty table, while the fence *enforcement* lane stays
+sqlite-local and witness-free (the actions carry no apiCut guard);
+`WitnessDeadman` reaches stale service at `MaxCrashes = 0` — a cut
+cable is a full failover trigger; and `ProbeBill` makes TLC collect the
+decision's availability cost (a healthy composer suspended because only
+its witness path failed — the TTL is the knob, replicas=1 never pays).
+The first `LiveWitness` run **found a protocol hole in the tranche
+itself**: a suspended-healthy composer had no road back after the heal
+(legacy tranches never needed one — the state was unreachable), forcing
+`ResumeServing`, whose guards are the finding (only the current
+composer, only at an epoch it actually assembled); `NoWitness`
+withholds the heal obligation — the NoActor pattern — and produces the
+shipped two-sqlite world's parked-promotion lasso.
 Still owed: crash *inside* the rebuild copy (sim-harness territory, the
 esnap-window precedent).
 
@@ -281,7 +315,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs one hundred and nineteen configs, ALL required:
+on first use).  It runs one hundred and fifty-two configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus

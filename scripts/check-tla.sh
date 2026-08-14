@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and forty-three runs, ALL required.
+# One hundred and fifty-two runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -17,7 +17,7 @@
 #   awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
-#   71 FlintReplication   24 FlintComposition   15 FlintExtents
+#   71 FlintReplication   33 FlintComposition   15 FlintExtents
 #   11 FlintExtentsProbe   7 FlintTruncate       5 FlintAdmission
 #    4 FlintSnapshots      3 FlintClaims         3 FlintA2Probe)
 #
@@ -969,5 +969,37 @@ strict_run FlintComposition FlintCompositionLive.cfg "composition liveness stric
 liveness_mutation_run FlintComposition FlintCompositionNoActor.cfg "no-redirect-actor mutation (SpecNoRedirect withholds exactly one obligation — the actor the review found does not exist: the csi-node session record replays the dead traddr with a deliberate 'No MDS call' — and TLC produces the parked-client lasso; ClientEventuallyRedirected is the actor's acceptance test when it gets built)"
 liveness_mutation_run FlintComposition FlintCompositionStaticTraddr.cfg "static-traddr mutation (PreemptFollowsRecord=FALSE = the shipped constructor-traddr shape, block_export.rs:55-59: after a failover every preempt dials the dead node forever, delivered stays 0, and every parked range the quarantine sweep guards stays parked — the review's FORWARD livelock as a lasso, and the target-registry requirement with teeth)"
 liveness_mutation_run FlintComposition FlintCompositionWaitsPrice.cfg "election-wait price (REQUIRED TO FAIL with shipped constants: PromotionCompletesUnconditional drops the in-sync conjunct and TLC bills ElectInSync — a degraded volume whose composer then partitions is DOWN until that composer recovers, availability spent on durability; the operator override is the undesigned LastResortServe analog)"
+
+# FlintComposition TRANCHE 4 (2026-08-14) — THE WITNESS.  The
+# implementation found the record this module CAS's does not exist
+# (9fcdd05: MDS shards share nothing, so every fact a survivor's election
+# reads lives in the dead composer's sqlite), and the arbiter fork was
+# decided for the etcd witness — at which point the module's own history
+# became the argument: tranches 1-3 had ALWAYS modelled a store both
+# targets reach independently of each other's health, which sqlite on one
+# of them cannot be and etcd rv-CAS can.  The tranche adds the witness's
+# REACHABILITY (apiCut — a target loses the control plane; peerCut — the
+# tgt<->tgt wire cut with both nodes healthy, the symmetric partition
+# that refuted peer-arbitrated leases) and lets TLC referee the fork:
+# the Witness strict green carries the serialization argument (both
+# sides race to the witness, whoever lands second is refused), LocalMark
+# is peer-arbitration's degraded window as a counterexample, FenceLocal
+# corrected the decision's own first scoping (fence IDENTITIES must be
+# witness-carried; the enforcement lane stays sqlite-local and
+# witness-free), and ProbeBill collects the availability cost the
+# decision signs up for.  The first LiveWitness run FOUND A PROTOCOL
+# HOLE in the tranche itself — a healthy composer suspended by an API
+# outage had no road back after the heal — which forced ResumeServing
+# (the un-suspend), whose implementation half was already written into
+# the lease commit ("a successful renewal is what repairs the expiry").
+strict_run   FlintComposition FlintCompositionWitness.cfg "composition tranche-4 strict (the witness world: apiCut + peerCut live, every belt on, all six theorems over the complete cut graph — incl. the symmetric-partition race the witness serializes)"
+mutation_run FlintComposition FlintCompositionLocalMark.cfg "local-mark mutation (MarkAtWitness=FALSE: the degrade's stale mark lands in the composer's own record — available exactly when the witness is not, which is the temptation and the whole peer-arbitration design — and the election reads a witness that was never told; the arbiter fork's refutation as a run)" "Inv_NoDoomedAck"
+mutation_run FlintComposition FlintCompositionFenceLocal.cfg "fence-locality mutation (FenceAtWitness=FALSE = the decision's first scoping: fence rows live only in the home shard, the survivor's fail-closed replay reads an EMPTY table, and the fenced victim re-attaches — the NoReplay counterexample arriving through fact locality with the belt armed)" "Inv_NoStaleExtentWrite"
+mutation_run FlintComposition FlintCompositionWitnessDeadman.cfg "dead-man in the pure-partition world (DeadmanGate=FALSE at MaxCrashes=0: a cut cable condemns the composer, the witness seats its peer, and with no dead-man the refusal never becomes a suspension — an abandoned lineage served with every process healthy)" "Inv_NoStaleServe"
+mutation_run FlintComposition FlintCompositionProbeCutFailover.cfg "composition pure-partition failover probe (a COMPLETE failover really runs at MaxCrashes=0, driven by nothing but a peer cut — the new axis's non-vacuity; without it every cut-world green is compatible with cuts never enabling anything)" "ProbeCutFailoverCompletes"
+mutation_run FlintComposition FlintCompositionProbeMarkFirst.cfg "composition mark-first race probe (the OTHER order of the symmetric-partition race: the composer's stale mark lands at the witness while the seat still reads epoch 1, and the peer's election is refused by ElectInSync in good faith — only this probe plus CutFailover together license the 'both orders explored' claim)" "ProbeMarkFirst"
+mutation_run FlintComposition FlintCompositionProbeBill.cfg "composition witness bill probe (the etcd decision's availability cost COLLECTED by TLC at MaxCrashes=0: a healthy composer suspended because only its path to the witness failed — the WaitsPrice pattern in probe form; the TTL is the knob, replicas=1 never pays)" "ProbeHealthySuspend"
+strict_run   FlintComposition FlintCompositionLiveWitness.cfg "composition tranche-4 liveness strict (SpecLiveW = SpecLive + cuts HEAL: all four progress theorems hold with a cut in the world — promotions, rebuilds, fences and redirects all complete after the control plane returns; the run whose first execution forced ResumeServing)"
+liveness_mutation_run FlintComposition FlintCompositionNoWitness.cfg "no-witness mutation (SpecLive withholding exactly the heal obligation = the shipped two-sqlite world, where a witness that never heals is a witness that never existed: the survivor is healthy, in-sync, client-reachable and witnessless, and promotion parks forever — the 9fcdd05 finding as a lasso, the NoActor pattern)"
 
 echo "TLA GATE PASSED"

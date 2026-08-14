@@ -220,6 +220,67 @@
 (* record, and the deadman horizon promotion waits for is the lapse of    *)
 (* THAT lease, never a node-liveness heartbeat.                            *)
 (*                                                                         *)
+(* TRANCHE 4 (2026-08-14): THE WITNESS — and the admission that tranches   *)
+(* 1-3 had already assumed one.  The implementation found (9fcdd05,        *)
+(* the_leg_host_cannot_elect_itself...) that the record this module CAS's  *)
+(* does not exist: MDS shards share nothing, so a two-copy volume has TWO  *)
+(* records, and every fact the survivor's election reads lives in the      *)
+(* dead composer's sqlite.  This module never noticed because its record   *)
+(* was implicitly a THIRD PARTY: PromoteCAS needs no reachability,         *)
+(* LeaseLapse observes expiry spontaneously, MarkStale is guarded on the   *)
+(* ACTOR's health alone.  A store both targets reach independently of      *)
+(* each other's health IS a witness — sqlite on one of the targets         *)
+(* cannot implement this module; etcd (K8s rv-CAS, the file tier's         *)
+(* replica_sync.rs pattern) can.  DECIDED 2026-08-14: the witness holds    *)
+(* the arbitration facts — seat, leg sync marks, serving lease — and THE   *)
+(* FENCE IDENTITIES (the FenceLocal run corrected the first scoping,       *)
+(* which left fences "sqlite-local": a survivor's fail-closed replay      *)
+(* then reads an EMPTY table and the fenced victim re-attaches — the       *)
+(* NoReplay counterexample arriving through fact LOCALITY with the belt    *)
+(* ON).  The fence ENFORCEMENT lane — preempt RPCs, delivered marks, the   *)
+(* quarantine sweep — stays sqlite-local and witness-free, visible below   *)
+(* as the actions that carry no apiCut guard.                              *)
+(*                                                                         *)
+(* The tranche adds the witness's REACHABILITY, because that is the price  *)
+(* of the decision:                                                        *)
+(*   apiCut   targets that cannot reach the witness (API-server outage,    *)
+(*            per-node control-plane partition).  A cut composer's         *)
+(*            heartbeat fails, its lease lapses, and the dead-man          *)
+(*            suspends a perfectly healthy export: ProbeHealthySuspend     *)
+(*            REQUIRES TLC to produce that bill (the WaitsPrice pattern)   *)
+(*            — availability spent on arbitration, the etcd decision's     *)
+(*            one honest cost.  The TTL is the knob trading failover       *)
+(*            latency against API-outage tolerance; there is no third      *)
+(*            setting.                                                     *)
+(*   peerCut  the tgt<->tgt channel cut with BOTH nodes healthy (verdict   *)
+(*            probe and mirror fan-in ride the same wire) — the            *)
+(*            symmetric partition that REFUTED peer-arbitrated leases      *)
+(*            during the design fork.  Both sides race to the witness:     *)
+(*            the composer to mark its peer stale, the peer to CAS the     *)
+(*            seat.  The witness SERIALIZES them — whoever lands second    *)
+(*            is refused (the mark: no longer the composer; the CAS:       *)
+(*            ElectInSync reads the fresh stale mark) — which is the       *)
+(*            whole argument for a third party, machine-checked by the     *)
+(*            Witness strict run exploring both orders.                    *)
+(* IMPLEMENTATION OBLIGATION the model's atomicity encodes: that           *)
+(* serialization is real only if seat, marks and lease share ONE          *)
+(* rv-CAS'd witness object per volume.  Split objects re-open the race    *)
+(* between them, and no run here covers that world.                        *)
+(*                                                                         *)
+(* The lease's REFUSAL arm becomes load-bearing here in a way tranche 3    *)
+(* could not show: under peerCut the composer's heartbeat channel is       *)
+(* fine, and only the witness's refusal tells it it was deposed — and      *)
+(* the refusal arrives ON the composer's own renewal call, so on that      *)
+(* path DeadmanCertain is not an axiom at all, it is the mechanism.        *)
+(* Required-to-fail runs: LocalMark (the mark lands in the composer's      *)
+(* local record instead of the witness = peer-arbitration's degraded       *)
+(* window, doomed acks), FenceLocal (above), WitnessDeadman (no dead-man   *)
+(* in a pure-partition world: a condemned composer that clients still      *)
+(* reach serves a moved record with ZERO process failures), NoWitness      *)
+(* (SpecLive withholding the heal obligation = the shipped two-sqlite      *)
+(* world: the survivor is healthy, in-sync and witnessless, and the        *)
+(* 9fcdd05 finding appears as a parked-promotion lasso).                   *)
+(*                                                                         *)
 (* ABSTRACTIONS, STATED:                                                   *)
 (*   1. Content is not tracked; harm is landing-set membership plus the    *)
 (*      diverged boolean (a torn death or an unguarded delta rejoin left   *)
@@ -285,6 +346,29 @@ CONSTANTS
                            \*        the DELTA rejoin path only if provably at
                            \*        its cut state (no solo-acked bytes of its
                            \*        own, no divergence) — else full rebuild
+  \* ---- TRANCHE 4 (the witness; MaxCuts = 0 in every earlier cfg, which
+  \* keeps those state spaces bit-identical — the MaintEnabled pattern
+  \* again: the cut actions are disabled, so apiCut/peerCut/localStale
+  \* freeze at their Init values and every new guard reduces to the old
+  \* text). ----
+  MaxCuts,                 \* budget for control-plane cuts (witness cuts +
+                           \* peer cuts share it, like crashes share theirs)
+  MarkAtWitness,           \* TRUE = the degrade's stale mark lands in the
+                           \*        WITNESS (the decided design).  FALSE =
+                           \*        it lands in the composer's own local
+                           \*        record — always writable, exactly when
+                           \*        the witness is not, which is the
+                           \*        temptation — and the election reads a
+                           \*        witness that was never told: the
+                           \*        peer-arbitration refutation as a flag
+  FenceAtWitness,          \* TRUE = standing fence IDENTITIES are carried
+                           \*        by the witness, so a SURVIVOR's
+                           \*        assembly can replay them.  FALSE = the
+                           \*        first scoping ("client fencing stays
+                           \*        sqlite-local"): fence rows live only in
+                           \*        the volume's home shard, and a
+                           \*        survivor's fail-closed replay reads an
+                           \*        empty table
   \* ---- TRANCHE 3 (liveness). ----
   PreemptFollowsRecord     \* TRUE = the fence preempt dials whichever tgt the
                            \*        record CURRENTLY names (per-pass target
@@ -348,18 +432,48 @@ VARIABLES
   splitRead,  \* theorem ghost: a read was served through a composition with
               \* two divergent member legs — raid1's least-loaded balancer
               \* (raid1.c:227-233) makes every such read a coin flip
-  rejoined    \* probe ghost: a stale leg actually re-entered the composition
+  rejoined,   \* probe ghost: a stale leg actually re-entered the composition
+  \* ---- tranche 4 ----
+  apiCut,     \* SUBSET Tgts — targets that cannot reach the WITNESS.  A
+              \* separate axis from tgt-state on purpose: "part" is the
+              \* control plane losing the TARGET; this is a target losing
+              \* the control plane, clients and peer untouched
+  peerCut,    \* BOOLEAN — the tgt<->tgt channel is down, both nodes "ok".
+              \* One wire on purpose: the verdict probe (probe_nvme_tcp)
+              \* and the mirror fan-in dial the same registry coordinates
+  localStale, \* [Tgts -> BOOLEAN] — t's LOCAL record's claim that Peer(t)
+              \* is stale.  Written only under ~MarkAtWitness; the witness
+              \* never hears it, which is the whole defect
+  cuts        \* the cut budget spent
 
 vars == <<tgt, record, serving, lastServed, legAdmit, lease, session, excl,
           fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
           divergent, doomed, staleWrite, staleServe, zombieWrote,
-          legSync, soloAcked, members, diverged, splitRead, rejoined>>
+          legSync, soloAcked, members, diverged, splitRead, rejoined,
+          apiCut, peerCut, localStale, cuts>>
+
+\* The cut state as one tuple: every pre-tranche-4 action leaves it
+\* unchanged, and appending this is a smaller, safer diff than editing
+\* twenty-five UNCHANGED lists item by item.
+cutVars == <<apiCut, peerCut, localStale, cuts>>
 
 \* The composition's member set.  Tranche 2 made it a variable; the alias
 \* keeps tranche 1's ghost predicates textually unchanged.
 CurrentLegs == members
 ActiveNew   == serving[record.composer] = record.epoch
 Deposed     == Peer(record.composer)
+
+\* The volume's HOME shard: where its geometry lives, where fences are
+\* minted, where the free/sweep lane runs.  A fixed fact of the volume —
+\* the seat moves at promotion, the home does not (the home's sqlite is
+\* the extent record, and THAT failover is a different workstream).
+FenceHome == InitComposer
+
+\* What t can read of the standing fence set at assembly time.  The home
+\* shard always knows its own rows; anyone else knows them only if the
+\* witness carries them.  Under FenceAtWitness this is the old global
+\* read, verbatim.
+KnownFences(t) == IF FenceAtWitness \/ t = FenceHome THEN fenced ELSE {}
 
 TypeOK ==
   /\ tgt \in [Tgts -> {"ok","part","dead"}]
@@ -389,6 +503,10 @@ TypeOK ==
   \* composition
   /\ ActiveNew => record.composer \in members
   /\ {diverged, splitRead, rejoined} \subseteq BOOLEAN
+  /\ apiCut \subseteq Tgts
+  /\ peerCut \in BOOLEAN
+  /\ localStale \in [Tgts -> BOOLEAN]
+  /\ cuts \in 0..MaxCuts
 
 Init ==
   /\ tgt = [t \in Tgts |-> "ok"]
@@ -412,6 +530,9 @@ Init ==
   /\ soloAcked = [t \in Tgts |-> FALSE]
   /\ members = Tgts
   /\ diverged = FALSE /\ splitRead = FALSE /\ rejoined = FALSE
+  /\ apiCut = {} /\ peerCut = FALSE
+  /\ localStale = [t \in Tgts |-> FALSE]
+  /\ cuts = 0
 
 (***************************************************************************)
 (* Failure events.  "part" is the load-bearing state: the MDS's only       *)
@@ -427,6 +548,7 @@ Partition(t) ==
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 Die(t) ==
   /\ tgt[t] \in {"ok", "part"} /\ crashes < MaxCrashes
@@ -436,6 +558,7 @@ Die(t) ==
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 (***************************************************************************)
 (* Recovery is where RecordAssemblyOnly bites: the recovered node's        *)
@@ -452,6 +575,11 @@ Recover(t) ==
                    /\ lastServed[t] = record.epoch
   IN
   /\ tgt[t] \in {"part", "dead"}
+  \* Recovery's first act is consulting the record (RecordAssemblyOnly's
+  \* whole point), and the record is the witness: a recovered node that
+  \* cannot reach it DEFERS — serving anything on local memory alone is
+  \* exactly the auto-examine door this module spent tranche 2 closing.
+  /\ t \notin apiCut
   /\ tgt' = [tgt EXCEPT ![t] = "ok"]
   \* Record-conditioned renewal: only the node the record names gets its
   \* serving lease back on recovery — a deposed node's renewal is refused
@@ -478,6 +606,7 @@ Recover(t) ==
                  delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  soloAcked, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 (***************************************************************************)
 (* The lease horizon.  The lapse is one FACT both sides key off — the      *)
@@ -501,7 +630,13 @@ Recover(t) ==
 (***************************************************************************)
 LeaseLapse(t) ==
   /\ lease[t] = "live"
-  /\ (tgt[t] # "ok" \/ record.composer # t)
+  \* Three roads to a lapse now: unreachable (can't renew), deposed (the
+  \* witness REFUSES — and the refusal arrives on t's own renewal call,
+  \* so on this road the "certain" suspend is mechanism, not axiom), and
+  \* — tranche 4 — witness-cut: the heartbeat has nowhere to land, and a
+  \* composer that cannot prove its entitlement must stop claiming it.
+  \* That third road is the etcd bill; ProbeHealthySuspend collects it.
+  /\ (tgt[t] # "ok" \/ record.composer # t \/ t \in apiCut)
   /\ lease' = [lease EXCEPT ![t] = "lapsed"]
   /\ serving' = IF DeadmanGate /\ DeadmanCertain
                   THEN [serving EXCEPT ![t] = 0]
@@ -510,7 +645,10 @@ LeaseLapse(t) ==
                  pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
+\* The dead-man is LOCAL by design — it exists precisely for the node
+\* that can reach nobody, so it carries no witness guard.
 DeadmanFire(t) ==
   /\ DeadmanGate /\ ~DeadmanCertain
   /\ lease[t] = "lapsed" /\ serving[t] > 0 /\ tgt[t] # "dead"
@@ -519,6 +657,7 @@ DeadmanFire(t) ==
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 (***************************************************************************)
 (* Promotion, as the pipeline the implementation must be: CAS the record,  *)
@@ -529,16 +668,25 @@ DeadmanFire(t) ==
 (* finding, sequencing dimension).                                         *)
 (***************************************************************************)
 PromoteCAS ==
-  /\ tgt[record.composer] \in {"part", "dead"}
+  \* The verdict is the peer's DATA-PATH probe, so a pure peer-cut
+  \* condemns exactly like a partition — deliberately: probe_nvme_tcp and
+  \* the mirror fan-in ride the same wire, and a verdict that cannot tell
+  \* dead from partitioned certainly cannot tell either from a cut cable.
+  /\ (tgt[record.composer] \in {"part", "dead"} \/ peerCut)
   /\ record.epoch < MaxEpoch
   /\ \E s \in Tgts :
        /\ s # record.composer /\ tgt[s] = "ok"
+       \* The CAS is a WITNESS write: an elector that cannot reach the
+       \* witness cannot promote — the 9fcdd05 world, where this guard is
+       \* permanently unsatisfiable because the witness does not exist.
+       /\ s \notin apiCut
        /\ ElectInSync => legSync[s] = "insync"
        /\ record' = [epoch |-> record.epoch + 1, composer |-> s]
   /\ UNCHANGED <<tgt, serving, lastServed, legAdmit, lease, session, excl,
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 \* THE ORDERING GUARD: never sever the zombie's fan-in while it can still
 \* ack (lease[d] = "lapsed" is the horizon).  Dropping this guard makes the
@@ -548,6 +696,9 @@ EvictAtLeg ==
   /\ record.epoch >= 2
   /\ serving[record.composer] # record.epoch
   /\ tgt[record.composer] = "ok"
+  \* The horizon this action waits on is READ FROM THE WITNESS (the
+  \* deposed lease's expiry lives there), so the evictor needs reach.
+  /\ record.composer \notin apiCut
   /\ Deposed \in legAdmit[record.composer]
   /\ lease[Deposed] = "lapsed"
   /\ legAdmit' = [legAdmit EXCEPT ![record.composer] = @ \ {Deposed}]
@@ -555,6 +706,7 @@ EvictAtLeg ==
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 \* Assembly is the force-degraded decision: the survivor's raid comes up on
 \* its own leg and the deposed leg is marked FAILED in the superblock —
@@ -568,6 +720,9 @@ Assemble ==
   /\ record.epoch >= 2
   /\ serving[record.composer] < record.epoch
   /\ tgt[record.composer] = "ok"
+  \* Assembly writes the witness twice (the deposed leg's stale mark, the
+  \* epoch's lease grant) — no reach, no assembly.
+  /\ record.composer \notin apiCut
   /\ LegAdmissionGate => Deposed \notin legAdmit[record.composer]
   /\ DeadmanGate => lease[Deposed] = "lapsed"
   /\ serving' = [serving EXCEPT ![record.composer] = record.epoch]
@@ -590,13 +745,21 @@ Assemble ==
   \* and re-granted a whole epoch ago re-attaches to the survivor
   \* UNFENCED — the trace TLC found on this module's second strict run,
   \* which no delivered-keying can close because the free was legal.
+  \* TRANCHE 4 refinement: the replay converges what the ASSEMBLER CAN
+  \* READ.  With witness-carried fences that is the full standing set,
+  \* the old semantics verbatim; under FenceLocal (the first scoping's
+  \* world) a survivor reads an empty table and this belt — still ON,
+  \* still fail-closed, still passing its own unit tests — replays
+  \* nothing.  A belt is only as good as the fact's reach.
   /\ excl' = IF FenceReplayOnAssemble
-               THEN [excl EXCEPT ![record.composer] = @ \cup fenced]
+               THEN [excl EXCEPT ![record.composer] =
+                       @ \cup KnownFences(record.composer)]
                ELSE excl
   /\ UNCHANGED <<tgt, record, legAdmit, session, fenced, pendingEpoch,
                  delivered, gen, clientHeld, owner, crashes,
                  divergent, staleWrite, staleServe, zombieWrote, soloAcked,
                  diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 (***************************************************************************)
 (* The fence, in the code's real granularity.  FenceClient is the MDS      *)
@@ -610,6 +773,12 @@ Assemble ==
 (* failover), though under finding 4 nothing downstream reads it as a      *)
 (* key unless DeliveredEpochKeyed re-arms the refinement.                  *)
 (***************************************************************************)
+\* The fence ENFORCEMENT lane — mint, preempt, delivered-mark, free —
+\* carries no apiCut guard anywhere: it is sqlite-co-transactional at the
+\* home shard and tgt-RPC-driven, and keeping it witness-free is the half
+\* of the "fencing must not depend on the API server" invariant that
+\* SURVIVES the witness decision.  (What had to move is the fence
+\* IDENTITIES — see KnownFences and the FenceLocal run.)
 FenceClient(c) ==
   /\ c \notin fenced
   /\ fenced' = fenced \cup {c}
@@ -617,6 +786,7 @@ FenceClient(c) ==
                  excl, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 PreemptExecute(c) ==
   LET target == IF PreemptFollowsRecord THEN record.composer ELSE InitComposer
@@ -629,6 +799,7 @@ PreemptExecute(c) ==
                  fenced, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 DeliveredMark(c) ==
   /\ pendingEpoch[c] # 0
@@ -638,6 +809,7 @@ DeliveredMark(c) ==
                  excl, fenced, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 (***************************************************************************)
 (* The free/regrant, gated exactly as the code's FreeRequiresDelivered     *)
@@ -659,7 +831,11 @@ RegrantRange ==
   \* confirming epoch's composition is the only reachable one: ACTIVE
   \* (assembled => evicted + horizon passed).  At epoch 1 ActiveNew is
   \* trivially true and this clause costs nothing.
-  /\ FreeWaitsActive => ActiveNew
+  \* ActiveNew is a WITNESS read (the sweep asking "is the confirming
+  \* epoch's composition the serving one?"), made by the home shard: cut
+  \* from the witness, the sweep DEFERS — undelivered is the safe side
+  \* quarantine already holds for, so the guard only narrows.
+  /\ FreeWaitsActive => (ActiveNew /\ FenceHome \notin apiCut)
   /\ gen < MaxGen
   /\ \E c \in Clients \ fenced :
        /\ owner' = c
@@ -669,6 +845,7 @@ RegrantRange ==
                  excl, fenced, pendingEpoch, delivered, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 (***************************************************************************)
 (* The client write — the entire data path in one action, because that is  *)
@@ -687,8 +864,11 @@ RegrantRange ==
 (***************************************************************************)
 ClientWrite(c) ==
   LET t == session[c]
+      \* peerCut severs the mirror fan-in: it is the same wire the
+      \* verdict probe dials, which is what makes a pure cable cut
+      \* condemn AND degrade together.
       landed == {t} \cup {p \in Tgts \ {t} :
-                            t \in legAdmit[p] /\ tgt[p] # "dead"}
+                            t \in legAdmit[p] /\ tgt[p] # "dead" /\ ~peerCut}
   IN
   /\ tgt[t] # "dead"
   /\ serving[t] > 0
@@ -699,7 +879,13 @@ ClientWrite(c) ==
   \* silences a partitioned composer whose fan-in has been evicted: it
   \* cannot mark through the partition, so it cannot ack solo — its
   \* clients' writes fail instead of quietly landing on a doomed leg.
-  /\ DegradeBarrier => (landed # {t} \/ legSync[Peer(t)] = "stale")
+  \* TRANCHE 4: "the record" means THE WITNESS.  Under ~MarkAtWitness the
+  \* barrier reads the composer's own local mark instead — always
+  \* satisfiable, exactly when the witness is not, and the election never
+  \* hears it: the LocalMark run's doomed acks.
+  /\ DegradeBarrier => (landed # {t}
+                          \/ IF MarkAtWitness THEN legSync[Peer(t)] = "stale"
+                                              ELSE localStale[t])
   /\ divergent' = (divergent \/ (/\ ActiveNew
                                  /\ serving[t] < record.epoch
                                  /\ landed \cap CurrentLegs # {}))
@@ -714,6 +900,7 @@ ClientWrite(c) ==
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  crashes, doomed, legSync, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 \* Reads take the same door minus the mirror fan-out: a deposed-but-alive
 \* composer serving READS of an abandoned lineage is the harm the dead-man
@@ -737,21 +924,42 @@ ClientRead(c) ==
                  excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  crashes, divergent, doomed, staleWrite, zombieWrote,
                  legSync, soloAcked, members, diverged, rejoined>>
+  /\ UNCHANGED cutVars
 
-\* The composer reports a lost peer leg to the MDS — the stale mark the
-\* barrier waits on and the election gate reads.  It requires the composer
-\* to REACH the MDS: a partitioned composer cannot mark, which is exactly
-\* why the barrier turns its degradation into a stall instead of a doom.
+\* The composer reports a lost peer leg — the stale mark the barrier
+\* waits on and the election gate reads.  TRANCHE 4 makes the mark's HOME
+\* the load-bearing choice:
+\*   MarkAtWitness: the mark is a WITNESS write.  The composer needs
+\*     witness reach (a fully-partitioned composer cannot mark, which is
+\*     exactly why the barrier turns its degradation into a stall instead
+\*     of a doom) — and the action is guarded on being the CURRENT
+\*     composer, which is the model's rendering of the rv-CAS refusal: a
+\*     deposed node's mark bounces off the moved seat.  Under a pure
+\*     peerCut this is one side of the race the witness serializes.
+\*   ~MarkAtWitness: the mark lands in the composer's OWN record — no
+\*     reach required, which is the temptation (it is available exactly
+\*     when the witness is not), and the refutation: the barrier opens on
+\*     a fact the election will never read.  Peer-arbitration's degraded
+\*     window, and the split-record world's, in one flag.
+\* The trigger gains peerCut: the composer's own probe of its peer fails
+\* the same way on a dead node and a cut cable.
 MarkStale ==
   LET t == record.composer IN
   /\ serving[t] > 0 /\ tgt[t] = "ok"
-  /\ tgt[Peer(t)] = "dead"
-  /\ legSync[Peer(t)] = "insync"
-  /\ legSync' = [legSync EXCEPT ![Peer(t)] = "stale"]
+  /\ (tgt[Peer(t)] = "dead" \/ peerCut)
+  /\ IF MarkAtWitness
+       THEN /\ t \notin apiCut
+            /\ legSync[Peer(t)] = "insync"
+            /\ legSync' = [legSync EXCEPT ![Peer(t)] = "stale"]
+            /\ UNCHANGED localStale
+       ELSE /\ ~localStale[t]
+            /\ localStale' = [localStale EXCEPT ![t] = TRUE]
+            /\ UNCHANGED legSync
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
                  excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  crashes, divergent, doomed, staleWrite, staleServe,
                  zombieWrote, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED <<apiCut, peerCut, cuts>>
 
 (***************************************************************************)
 (* TRANCHE 2 — record-driven rebuild/rejoin.  A torn composer death, the   *)
@@ -778,6 +986,7 @@ DieMidWrite ==
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 \* The rebuild pipeline, step 1: the STALE leg's node re-admits the current
 \* composer at its leg-export.  Epoch-checked by construction — the only
@@ -794,6 +1003,10 @@ RebuildStart ==
   /\ ActiveNew
   /\ legSync[d] = "stale"
   /\ tgt[s] = "ok" /\ tgt[d] = "ok"
+  \* The admitting reconciler CONSULTS THE RECORD (that is this action's
+  \* whole discipline), and the record is the witness: the stale leg's
+  \* node needs reach before it may open its door.
+  /\ d \notin apiCut
   /\ s \notin legAdmit[d]
   /\ legAdmit' = [legAdmit EXCEPT ![d] = @ \cup {s}]
   /\ UNCHANGED <<tgt, record, serving, lastServed, lease, session, excl,
@@ -801,6 +1014,7 @@ RebuildStart ==
                  crashes, divergent, doomed, staleWrite, staleServe,
                  zombieWrote, legSync, soloAcked, members, diverged,
                  splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 \* Step 2, the FULL copy (flint-driven, sparse-aware — §12's decided
 \* rebuild engine; raid1's own allocation-blind process is never used).
@@ -817,6 +1031,9 @@ RebuildComplete ==
   /\ legSync[d] = "stale"
   /\ s \in legAdmit[d]
   /\ tgt[s] = "ok" /\ tgt[d] = "ok"
+  \* The copy crosses the tgt<->tgt wire; the in-sync mark is a witness
+  \* write by the composer.  Both reaches required, or the rebuild waits.
+  /\ ~peerCut /\ s \notin apiCut
   /\ legSync' = [legSync EXCEPT ![d] = "insync"]
   /\ members' = members \cup {d}
   /\ soloAcked' = [t \in Tgts |-> FALSE]
@@ -826,6 +1043,7 @@ RebuildComplete ==
                  excl, fenced, pendingEpoch, delivered, gen, clientHeld,
                  owner, crashes, divergent, doomed, staleWrite, staleServe,
                  zombieWrote, splitRead>>
+  /\ UNCHANGED cutVars
 
 \* Step 2, the DELTA path: copy only the regions the record's dirty
 \* tracking knows changed since the leg's cut (the degraded-window dirty
@@ -848,6 +1066,7 @@ DeltaRejoin ==
   /\ legSync[d] = "stale"
   /\ s \in legAdmit[d]
   /\ tgt[s] = "ok" /\ tgt[d] = "ok"
+  /\ ~peerCut /\ s \notin apiCut
   /\ AncestryGuard => (~soloAcked[d] /\ ~diverged)
   /\ legSync' = [legSync EXCEPT ![d] = "insync"]
   /\ members' = members \cup {d}
@@ -858,6 +1077,7 @@ DeltaRejoin ==
                  excl, fenced, pendingEpoch, delivered, gen, clientHeld,
                  owner, crashes, divergent, doomed, staleWrite, staleServe,
                  zombieWrote, splitRead>>
+  /\ UNCHANGED cutVars
 
 \* The door RecordRejoinOnly closes: the recovered node's auto-examine
 \* wins seq_number arbitration (bdev_raid.c:3883-3904 — it only ever sees
@@ -875,6 +1095,7 @@ SelfRejoin ==
                  owner, crashes, divergent, doomed, staleWrite, staleServe,
                  zombieWrote, soloAcked, members, diverged, splitRead,
                  rejoined>>
+  /\ UNCHANGED cutVars
 
 (***************************************************************************)
 (* The redirect lane, timing-free.  The review found no ACTOR exists to    *)
@@ -886,22 +1107,113 @@ SelfRejoin ==
 (***************************************************************************)
 ReAttach(c) ==
   /\ tgt[record.composer] = "ok"
+  \* The redirect's answer ("where does the volume live NOW?") is a
+  \* record read served by the composer's shard — a witness read.
+  /\ record.composer \notin apiCut
   /\ session[c] # record.composer
   /\ session' = [session EXCEPT ![c] = record.composer]
   /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, excl,
                  fenced, pendingEpoch, delivered, gen, clientHeld, owner, crashes,
                  divergent, doomed, staleWrite, staleServe, zombieWrote,
                  legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
+
+(***************************************************************************)
+(* TRANCHE 4 — the control-plane failure events.  Cuts spend a budget      *)
+(* like crashes spend theirs (a finite budget is also what keeps the       *)
+(* heal-obligated liveness spec from churning forever); heals are free     *)
+(* and carry NO fairness in SpecLive — a cut may persist, which is         *)
+(* exactly what the NoWitness run exploits: a witness that never heals     *)
+(* is a witness that never existed, i.e. the shipped two-sqlite world.     *)
+(***************************************************************************)
+CutWitness(t) ==
+  /\ cuts < MaxCuts
+  /\ t \notin apiCut
+  /\ apiCut' = apiCut \cup {t}
+  /\ cuts' = cuts + 1
+  /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
+                 excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
+                 crashes, divergent, doomed, staleWrite, staleServe, zombieWrote,
+                 legSync, soloAcked, members, diverged, splitRead, rejoined,
+                 peerCut, localStale>>
+
+HealWitness(t) ==
+  /\ t \in apiCut
+  /\ apiCut' = apiCut \ {t}
+  /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
+                 excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
+                 crashes, divergent, doomed, staleWrite, staleServe, zombieWrote,
+                 legSync, soloAcked, members, diverged, splitRead, rejoined,
+                 peerCut, localStale, cuts>>
+
+CutPeer ==
+  /\ cuts < MaxCuts
+  /\ ~peerCut
+  /\ peerCut' = TRUE
+  /\ cuts' = cuts + 1
+  /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
+                 excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
+                 crashes, divergent, doomed, staleWrite, staleServe, zombieWrote,
+                 legSync, soloAcked, members, diverged, splitRead, rejoined,
+                 apiCut, localStale>>
+
+HealPeer ==
+  /\ peerCut
+  /\ peerCut' = FALSE
+  /\ UNCHANGED <<tgt, record, serving, lastServed, legAdmit, lease, session,
+                 excl, fenced, pendingEpoch, delivered, gen, clientHeld, owner,
+                 crashes, divergent, doomed, staleWrite, staleServe, zombieWrote,
+                 legSync, soloAcked, members, diverged, splitRead, rejoined,
+                 apiCut, localStale, cuts>>
+
+(***************************************************************************)
+(* THE UN-SUSPEND — added because the FIRST LiveWitness run demanded it:   *)
+(* TLC produced a healthy composer, suspended by an API outage, parked     *)
+(* FOREVER after the heal.  Legacy tranches never needed this action       *)
+(* because the suspended-while-ok-and-seated state was unreachable there   *)
+(* (the lapse required unreachable-or-deposed, and both roads back run     *)
+(* through Recover or Assemble); the apiCut lapse creates it, so the       *)
+(* protocol owes the road back out.  The implementation half already       *)
+(* exists in the lease commit's own words — "a SUCCESSFUL renewal is what  *)
+(* repairs the expiry", suspension is a converge MODE — this action is     *)
+(* that sentence, with the guards that make it safe:                       *)
+(*   - only the CURRENT composer (a deposed node's renewal is refused at   *)
+(*     the witness — post-CAS this action is disabled, the rv refusal      *)
+(*     again), and                                                         *)
+(*   - only at an epoch it actually ASSEMBLED (an elected-but-never-       *)
+(*     assembled composer must come up through Assemble's horizon and      *)
+(*     eviction guards, never through a lease repair).                     *)
+(* Promotion cannot race it: a pure apiCut is not a verdict (the peer's    *)
+(* data-path probe still succeeds), so while this action is enabled no     *)
+(* CAS is justified; once a CAS lands, the seat has moved and the guard    *)
+(* fails.  The serialization is the witness's, one more time.              *)
+(***************************************************************************)
+ResumeServing ==
+  LET t == record.composer IN
+  /\ tgt[t] = "ok"
+  /\ t \notin apiCut
+  /\ lease[t] = "lapsed"
+  /\ serving[t] = 0
+  /\ lastServed[t] = record.epoch
+  /\ lease' = [lease EXCEPT ![t] = "live"]
+  /\ serving' = [serving EXCEPT ![t] = record.epoch]
+  /\ UNCHANGED <<tgt, record, lastServed, legAdmit, session, excl, fenced,
+                 pendingEpoch, delivered, gen, clientHeld, owner, crashes,
+                 divergent, doomed, staleWrite, staleServe, zombieWrote,
+                 legSync, soloAcked, members, diverged, splitRead, rejoined>>
+  /\ UNCHANGED cutVars
 
 Next ==
   \/ \E t \in Tgts : Partition(t) \/ Die(t) \/ Recover(t)
                        \/ LeaseLapse(t) \/ DeadmanFire(t)
-  \/ PromoteCAS \/ EvictAtLeg \/ Assemble \/ MarkStale
+                       \/ CutWitness(t) \/ HealWitness(t)
+  \/ PromoteCAS \/ EvictAtLeg \/ Assemble \/ MarkStale \/ ResumeServing
   \/ \E c \in Clients : FenceClient(c) \/ PreemptExecute(c)
                           \/ DeliveredMark(c) \/ ClientWrite(c)
                           \/ ClientRead(c) \/ ReAttach(c)
   \/ RegrantRange
   \/ DieMidWrite \/ RebuildStart \/ RebuildComplete \/ DeltaRejoin \/ SelfRejoin
+  \/ CutPeer \/ HealPeer
 
 Spec == Init /\ [][Next]_vars
 
@@ -969,6 +1281,29 @@ ProbeTornReachable == ~diverged
 \* leg, lose the survivor, promote back — the record machine's round trip.
 ProbeFailBackCompletes == ~(record.epoch = 3 /\ ActiveNew)
 
+\* Tranche-4 witnesses:
+\* a COMPLETE failover with ZERO process failures — a pure peer-cut
+\* condemns, the witness serializes, and the survivor serves.  This is
+\* the non-vacuity of the whole new axis: without it, every green in the
+\* cut world is compatible with "cuts never do anything";
+ProbeCutFailoverCompletes == ~(record.epoch >= 2 /\ ActiveNew /\ crashes = 0)
+\* and THE BILL, collected: a perfectly healthy composer, suspended,
+\* because only its path to the witness failed.  TLC must produce this
+\* state — the etcd decision's honest cost as a reachability witness
+\* (the WaitsPrice pattern in probe form; in the run's cfg MaxCrashes = 0
+\* so the suspension is attributable to the cut alone).
+ProbeHealthySuspend == ~(/\ tgt[record.composer] = "ok"
+                         /\ record.composer \in apiCut
+                         /\ serving[record.composer] = 0)
+\* The OTHER order of the symmetric-partition race: the composer's stale
+\* mark lands FIRST, the seat still un-CAS'd at epoch 1 — from here the
+\* peer's election is refused by ElectInSync reading the fresh mark.
+\* ProbeCutFailover witnesses the CAS-first order; the pair together is
+\* what licenses the claim that the Witness strict green explored BOTH
+\* sides of the race the witness serializes (a probe must name the
+\* action's effect, the void-A2 lesson).
+ProbeMarkFirst == ~(peerCut /\ record.epoch = 1 /\ legSync[Deposed] = "stale")
+
 (***************************************************************************)
 (* TRANCHE 3 — LIVENESS.  Progress is claimed in the POST-STORM QUIET      *)
 (* (crashes = MaxCrashes conditions every antecedent — under a crash       *)
@@ -996,6 +1331,11 @@ FairnessCtl ==
   /\ WF_vars(EvictAtLeg)
   /\ WF_vars(Assemble)
   /\ WF_vars(MarkStale)
+  \* The un-suspend is the converge loop's work like the rest of the
+  \* pipeline.  Vacuous in every legacy graph (the action is never
+  \* enabled there — the suspended-while-seated state needs an apiCut),
+  \* so legacy liveness runs keep their exact obligations.
+  /\ WF_vars(ResumeServing)
   /\ WF_vars(RebuildStart)
   /\ WF_vars(RebuildComplete)
   /\ \A t \in Tgts : WF_vars(LeaseLapse(t))
@@ -1003,6 +1343,16 @@ FairnessCtl ==
 
 SpecLive       == Spec /\ FairnessCtl /\ \A c \in Clients : WF_vars(ReAttach(c))
 SpecNoRedirect == Spec /\ FairnessCtl
+
+\* TRANCHE 4's live spec: SpecLive plus the obligation that CONTROL-PLANE
+\* CUTS HEAL — the K8s API comes back.  Progress in the witness world is
+\* promised on exactly that premise and no weaker one; SpecLive WITHOUT
+\* it is the NoWitness run, whose lasso (survivor healthy, in-sync, and
+\* witnessless forever) is the shipped two-sqlite world's permanent form
+\* — the 9fcdd05 finding as a machine-checked counterexample, the NoActor
+\* pattern: specify a missing thing as a fairness obligation you withhold.
+SpecLiveW == SpecLive /\ (\A t \in Tgts : WF_vars(HealWitness(t)))
+                      /\ WF_vars(HealPeer)
 
 \* Once the failures stop: an unreachable composer with an in-sync,
 \* healthy peer is always failed over — the record moves and the survivor
