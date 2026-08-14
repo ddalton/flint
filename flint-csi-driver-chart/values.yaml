@@ -586,6 +586,37 @@ pnfs:
         # Pin the MDS to the tgt/lvstore node, e.g.
         #   kubernetes.io/hostname: ip-172-31-1-23
         nodeSelector: {}
+        # PER-SHARD OVERRIDES, and `replicas: 2` block volumes are not
+        # installable without them.
+        #
+        # lvols are NODE-LOCAL, so every block-export shard is pinned to
+        # its own tgt's node and backed by THAT node's lvstore — and
+        # lvstore names are per node (the disk-init mints
+        # `lvs_<node>_<pci>`). The three values above are single-valued,
+        # so on their own they can only ever describe ONE shard. A
+        # two-copy volume needs two, on two nodes, with two different
+        # lvstores; before this list existed the chart could not express
+        # that at all, and the only way to run it was hand-written MDS
+        # config outside the chart.
+        #
+        # Entry i configures shard i. Each field falls back to the
+        # single-valued setting above when the entry omits it, so a
+        # count:1 install can ignore this list entirely and renders
+        # exactly as it did before it existed.
+        #
+        #   shards:
+        #     - lvstore: lvs_node-a_0000-00-1f-0
+        #       traddr: "172.31.31.8"
+        #       nodeSelector: {kubernetes.io/hostname: node-a}
+        #     - lvstore: lvs_node-b_0000-00-1f-0
+        #       traddr: "172.31.25.192"
+        #       nodeSelector: {kubernetes.io/hostname: node-b}
+        #
+        # The MDS count must cover them: entries beyond
+        # `pnfs.server.mds.count` are refused rather than ignored,
+        # because a silently-undeployed shard is a volume whose second
+        # copy has nowhere to live.
+        shards: []
         # THE COMPOSITION WITNESS — required for `replicas: 2` block
         # volumes, and inert for single-copy ones.
         #

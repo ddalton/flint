@@ -147,11 +147,15 @@ BLOCK_ON=(--set pnfs.enabled=true --set pnfs.server.enabled=true
 render_must_fail "blockExport-no-lvstore" "${BLOCK_ON[@]}" \
   --set pnfs.server.mds.blockExport.traddr=10.0.0.9 || exit 1
 ERR="$RENDER"
-has "lvstore is required" "$ERR" || fail "the missing-lvstore refusal does not name lvstore"
+# Assert on the KEY, not on one phrasing: the refusal must tell an
+# operator which value to set. The wording moved when blockExport
+# became per-shard (it now names the shard and both places the value
+# can live) and this leg rightly failed on the change.
+has "lvstore" "$ERR" || fail "the missing-lvstore refusal does not name lvstore"
 render_must_fail "blockExport-no-traddr" "${BLOCK_ON[@]}" \
   --set pnfs.server.mds.blockExport.lvstore=lvs_flint || exit 1
 ERR="$RENDER"
-has "traddr is required" "$ERR" || fail "the missing-traddr refusal does not name traddr"
+has "traddr" "$ERR" || fail "the missing-traddr refusal does not name traddr"
 pass "blockExport refuses to render without lvstore and traddr, and names each"
 
 # ── 5. the full block surface, accepted by the API server ────────────
@@ -192,6 +196,38 @@ has "udev" "$OUT" || fail "no udev rule surface on the node DaemonSet"
 #     against Node objects when an older MDS cannot name its own node.
 has "nodes" "$OUT" || fail "RBAC does not grant nodes (the roller's fallback resolution)"
 pass "full block surface renders, and the API server accepts every object"
+
+# ── 5g. TWO BLOCK-EXPORT SHARDS, which is the whole point of replicas:2 ─
+#
+# A two-copy volume lives on two targets driven by two MDS shards, and
+# blockExport is per NODE — lvols are node-local and lvstore names are
+# minted per node. While the chart carried ONE shared MDS ConfigMap,
+# `lvstore`/`traddr`/`nodeSelector` were single-valued, so this topology
+# could not be expressed at all and the only way to run it was
+# hand-written config outside the chart. Found on a real cluster.
+TWO=("${BLOCK_ON[@]}"
+     --set pnfs.server.mds.count=2
+     --set pnfs.server.mds.blockExport.shards[0].lvstore=lvs_a
+     --set pnfs.server.mds.blockExport.shards[0].traddr=10.0.0.1
+     --set pnfs.server.mds.blockExport.shards[0].nodeSelector.kubernetes\\.io/hostname=node-a
+     --set pnfs.server.mds.blockExport.shards[1].lvstore=lvs_b
+     --set pnfs.server.mds.blockExport.shards[1].traddr=10.0.0.2
+     --set pnfs.server.mds.blockExport.shards[1].nodeSelector.kubernetes\\.io/hostname=node-b)
+render_ok "two-block-shards" "${TWO[@]}" || fail "the two-shard block surface did not validate"
+OUT="$RENDER"
+has "lvs_a" "$OUT" || fail "shard 0's lvstore is missing"
+has "lvs_b" "$OUT" || fail "shard 1's lvstore is missing — the shards share one ConfigMap again"
+has "flint-pnfs-mds-config-1" "$OUT" || fail "shard 1 has no ConfigMap of its own"
+has "node-b" "$OUT" || fail "shard 1 is not pinned to its own node"
+pass "two block-export shards render with their own lvstore, ConfigMap and node pin"
+
+# A shard entry nothing will deploy is a volume whose second copy has
+# nowhere to live — that must refuse, not be silently dropped.
+render_must_fail "shards-exceed-count" "${TWO[@]}" --set pnfs.server.mds.count=1 || exit 1
+ERR="$RENDER"
+has "cannot host a second copy" "$ERR" \
+  || fail "an over-long shards list did not refuse with the reason: $ERR"
+pass "more shard entries than shards refuses, and says why"
 
 # ── 6. the master switch really is one switch ────────────────────────
 render_ok "block-sc-only" --set pnfs.enabled=true --set pnfs.server.enabled=true \

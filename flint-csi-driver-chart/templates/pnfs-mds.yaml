@@ -18,10 +18,14 @@ Shape (mds-sharding-plan.md Phase 0; durable-DS Phase 1 lineage):
   The legacy `flint-pnfs-mds` Service remains as an alias for shard 0:
   pre-sharding PVs have its ClusterIP stamped in their volume context,
   and the DS config points at it until Phase 2 fan-out.
-- One shared ConfigMap: shard config is identical; only
-  FLINT_MDS_SHARD_ID differs (injected per Deployment; folded into
-  file_id allocation from Phase 2 so stripe-file namespaces are
-  disjoint by construction).
+- ONE CONFIGMAP PER SHARD (`flint-pnfs-mds-config`, then -<i>). It was
+  one shared map while shard config was identical, but blockExport is
+  per NODE — lvols are node-local and lvstore names are minted per node
+  — so a shared map could only ever describe one block-export shard,
+  and `replicas: 2` volumes were therefore not installable at all.
+  Shard 0 keeps the legacy ConfigMap name, so count:1 is unchanged.
+  FLINT_MDS_SHARD_ID still differs per Deployment (folded into file_id
+  allocation from Phase 2 so stripe-file namespaces are disjoint).
 - dataServers is deliberately EMPTY: DS pods register dynamically over
   gRPC. Until Phase 2 (DS fan-out) lands in the images, only shard 0
   receives DS registrations — set count > 1 only with images that
@@ -31,14 +35,37 @@ Shape (mds-sharding-plan.md Phase 0; durable-DS Phase 1 lineage):
 */}}
 {{- if and .Values.pnfs.enabled .Values.pnfs.server.enabled }}
 {{- $count := int (.Values.pnfs.server.mds.count | default 1) }}
+{{- $be := .Values.pnfs.server.mds.blockExport }}
+{{- $beShards := ($be.shards | default list) }}
+{{- /* A shard entry that no Deployment will ever read is a volume whose
+second copy has nowhere to live — refuse rather than silently drop it. */}}
+{{- if gt (len $beShards) $count }}
+{{- fail (printf "pnfs.server.mds.blockExport.shards has %d entries but pnfs.server.mds.count is %d — raise the count or remove the extra entries; a shard that is never deployed cannot host a second copy" (len $beShards) $count) }}
+{{- end }}
+{{- range $i := until $count }}
+{{- /* THE CONFIGMAP IS PER SHARD, and it has to be: blockExport pins
+each shard to its own tgt node, and lvstore names are node-local
+(`lvs_<node>_<pci>`), so one shared config can only ever describe one
+shard. Shard 0 keeps the pre-sharding name, so a count:1 install — with
+or without blockExport — renders exactly as it did before. */}}
+{{- $cmName := ternary "flint-pnfs-mds-config" (printf "flint-pnfs-mds-config-%d" $i) (eq $i 0) }}
+{{- /* `index` ERRORS on an out-of-range slice rather than yielding nil,
+so an absent entry has to be tested for, not defaulted. */}}
+{{- $shard := dict }}
+{{- if lt $i (len $beShards) }}{{- $shard = (index $beShards $i) }}{{- end }}
+{{- $lvstore := ($shard.lvstore | default $be.lvstore) }}
+{{- $traddr := ($shard.traddr | default $be.traddr) }}
+{{- $trsvcid := ($shard.trsvcid | default $be.trsvcid) }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: flint-pnfs-mds-config
-  namespace: {{ .Release.Namespace }}
+  name: {{ $cmName }}
+  namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
     app.kubernetes.io/component: pnfs-mds
+    flint.io/mds-shard: {{ $i | quote }}
 data:
   mds.yaml: |
     apiVersion: flint.io/v1alpha1
@@ -50,7 +77,7 @@ data:
         port: 2049
       layout:
         type: file
-        stripeSize: {{ int64 .Values.pnfs.server.stripeSize }}
+        stripeSize: {{ int64 $.Values.pnfs.server.stripeSize }}
         policy: stripe
       dataServers: []
       # F68b: NACK a DS registration until its per-pod Service actually
@@ -64,21 +91,20 @@ data:
         backend: sqlite
         config:
           path: /data/state/state.db
-      {{- with .Values.pnfs.server.mds.blockExport }}
-      {{- if .enabled }}
+      {{- if $be.enabled }}
       # pnfs-block export surface: the MDS drives the COLOCATED
       # csi-node spdk-tgt (socket via the shared hostPath) — one tgt
-      # per shard, pinned by blockExport.nodeSelector.
+      # per shard, pinned to its node. lvols are node-local, so THIS
+      # shard's lvstore and listener are this shard's own.
       blockExport:
-        spdkSocket: {{ .spdkSocket }}
-        lvstore: {{ required "pnfs.server.mds.blockExport.lvstore is required when blockExport is enabled" .lvstore }}
-        traddr: {{ required "pnfs.server.mds.blockExport.traddr is required when blockExport is enabled (the pinned node's IP)" .traddr | quote }}
-        trsvcid: {{ .trsvcid }}
-        ptplDir: {{ .ptplDir }}
-      {{- end }}
+        spdkSocket: {{ $be.spdkSocket }}
+        lvstore: {{ required (printf "shard %d has no lvstore: set pnfs.server.mds.blockExport.shards[%d].lvstore (lvstores are per node, e.g. lvs_<node>_<pci>) or the single-valued blockExport.lvstore" $i $i) $lvstore }}
+        traddr: {{ required (printf "shard %d has no traddr: set pnfs.server.mds.blockExport.shards[%d].traddr to THAT node's IP, or the single-valued blockExport.traddr" $i $i) $traddr | quote }}
+        trsvcid: {{ $trsvcid }}
+        ptplDir: {{ $be.ptplDir }}
       {{- end }}
       failover:
-        heartbeatTimeout: {{ .Values.pnfs.server.mds.heartbeatTimeout }}
+        heartbeatTimeout: {{ $.Values.pnfs.server.mds.heartbeatTimeout }}
         policy: recall_affected
         gracePeriod: 60
     exports:
@@ -89,8 +115,9 @@ data:
           - network: 0.0.0.0/0
             permissions: rw
     logging:
-      level: {{ .Values.pnfs.server.logLevel | default "info" }}
+      level: {{ $.Values.pnfs.server.logLevel | default "info" }}
       format: text
+{{- end }}
 ---
 {{- /* Legacy alias Service — shard 0. Pre-sharding PVs carry this
 Service's ClusterIP in pnfs.flint.io/mds-ip, and the DS config points
@@ -122,6 +149,15 @@ Deployment selectors are immutable, and shard 0's must stay exactly
 `app: flint-pnfs-mds` for in-place upgrade. */}}
 {{- $name := ternary "flint-pnfs-mds" (printf "flint-pnfs-mds-%d" $i) (eq $i 0) }}
 {{- $pvc := ternary "flint-pnfs-mds-data" (printf "flint-pnfs-mds-data-%d" $i) (eq $i 0) }}
+{{- $cmName := ternary "flint-pnfs-mds-config" (printf "flint-pnfs-mds-config-%d" $i) (eq $i 0) }}
+{{- /* `index` ERRORS on an out-of-range slice rather than yielding nil,
+so an absent entry has to be tested for, not defaulted. */}}
+{{- $shard := dict }}
+{{- if lt $i (len $beShards) }}{{- $shard = (index $beShards $i) }}{{- end }}
+{{- /* This shard's node pin: its own if given, else the single-valued
+one. A shard pinned to the wrong node finds no tgt socket, and a fresh
+lvstore under committed extents is refused outright (F67). */}}
+{{- $nodeSel := ($shard.nodeSelector | default $be.nodeSelector) }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -214,9 +250,9 @@ spec:
       # fail over.
       serviceAccountName: flint-pnfs-mds
       {{- end }}
-      {{- if ($.Values.pnfs.server.mds.blockExport).enabled }}
-      {{- with $.Values.pnfs.server.mds.blockExport.nodeSelector }}
-      # blockExport: pin to the tgt/lvstore node — lvols are
+      {{- if $be.enabled }}
+      {{- with $nodeSel }}
+      # blockExport: pin to THIS shard's tgt/lvstore node — lvols are
       # node-local, and a rescheduled MDS elsewhere finds no socket
       # (and a fresh lvstore under committed extents is refused, F67).
       nodeSelector:
@@ -296,7 +332,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: flint-pnfs-mds-config
+            name: {{ $cmName }}
         - name: data
           persistentVolumeClaim:
             claimName: {{ $pvc }}
