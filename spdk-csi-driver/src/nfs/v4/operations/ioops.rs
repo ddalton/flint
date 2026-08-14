@@ -564,8 +564,11 @@ impl IoOperationHandler {
             // size=0 via createattrs (RFC 8881 §18.16.3). File::create's
             // implicit O_TRUNC would wipe it.
             let existed = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
-            match tokio::fs::OpenOptions::new().write(true).create(true).open(&file_path).await {
-                Ok(_) => {
+            // read+write: this fd is seeded into the fd-cache below and
+            // must serve BOTH directions (a write-only fd turns a later
+            // READ through the cache into EBADF).
+            match tokio::fs::OpenOptions::new().read(true).write(true).create(true).open(&file_path).await {
+                Ok(created) => {
                     debug!(
                         "OPEN: {} file {:?}",
                         if existed { "opened existing" } else { "created" },
@@ -682,8 +685,31 @@ impl IoOperationHandler {
 
                             debug!("OPEN: stateid {:?} for client {}", stateid, client_id);
 
-                            // F17c: anchor the open with an fd immediately.
-                            self.seed_open_fd(&stateid, &file_path, true);
+                            // F17c: anchor the open with an fd immediately —
+                            // and prefer the CREATE's OWN fd over a fresh
+                            // open. The create's fd is writable regardless
+                            // of the mode the file was born with (git
+                            // creates loose objects 0444 at birth, then
+                            // flushes through the open); a fresh open of a
+                            // 0444 file can only ever be read-only, and the
+                            // close-time flush would die EIO.
+                            if cacheable_stateid(&stateid.other)
+                                && !self.fd_cache.contains(&stateid.other)
+                            {
+                                let file = Arc::new(created.into_std().await);
+                                let ino = CachedFile::ino_of(&file);
+                                self.fd_cache.insert(
+                                    stateid.other,
+                                    CachedFile {
+                                        file,
+                                        path: file_path.clone(),
+                                        writable: true,
+                                        ino,
+                                    },
+                                );
+                            } else {
+                                self.seed_open_fd(&stateid, &file_path, true);
+                            }
 
                             return OpenRes {
                                 status: Nfs4Status::Ok,
@@ -1285,16 +1311,71 @@ impl IoOperationHandler {
                     .open(&path_clone)
             }).await;
             
-            let file = match file_result {
-                Ok(Ok(f)) => f,
+            let file_arc: Arc<File> = match file_result {
+                Ok(Ok(f)) => {
+                    let file_arc = Arc::new(f);
+                    // Cache the file descriptor (never under special stateids)
+                    if cacheable {
+                        self.fd_cache.insert(op.stateid.other, CachedFile {
+                            file: Arc::clone(&file_arc),
+                            path: path.clone(),
+                            writable: true,
+                            ino: CachedFile::ino_of(&file_arc),
+                        });
+                        debug!("WRITE: Cached new FD for {:?} (path: {:?})", op.stateid, path);
+                    }
+                    file_arc
+                }
                 Ok(Err(e)) => {
-                    warn!("WRITE: Failed to open file {:?}: {}", path, e);
-                    return WriteRes {
-                        status: Nfs4Status::Io,
-                        count: 0,
-                        committed: UNSTABLE4,
-                        writeverf: 0,
-                    };
+                    // POSIX checks permission at OPEN time, not per
+                    // write: a file chmoded read-only AFTER a valid
+                    // write-open must keep accepting that open's
+                    // flushes. git fchmods every loose object to 0444
+                    // before close, and small writes flush LAST — so
+                    // the first WRITE RPC can arrive after the chmod
+                    // and a fresh open here gets EACCES. The open-time
+                    // fd is in the cache under some key (F17c seeds it
+                    // at OPEN); the stateid-keyed lookup above can
+                    // still miss it on a path-form mismatch or an
+                    // eviction, so find it BY INODE before surfacing
+                    // EIO to a legally-open writer.
+                    let by_ino_fd = std::fs::metadata(&path)
+                        .ok()
+                        .map(|m| {
+                            use std::os::unix::fs::MetadataExt;
+                            m.ino()
+                        })
+                        .and_then(|ino| self.fd_cache.find_by_ino(ino, true));
+                    match by_ino_fd {
+                        Some(hit) => {
+                            debug!(
+                                "WRITE: open failed ({}) but a writable open-time fd \
+                                 exists for the same inode — serving the flush from it",
+                                e
+                            );
+                            if cacheable {
+                                self.fd_cache.insert(
+                                    op.stateid.other,
+                                    CachedFile {
+                                        file: Arc::clone(&hit.file),
+                                        path: path.clone(),
+                                        writable: true,
+                                        ino: hit.ino,
+                                    },
+                                );
+                            }
+                            hit.file
+                        }
+                        None => {
+                            warn!("WRITE: Failed to open file {:?}: {}", path, e);
+                            return WriteRes {
+                                status: Nfs4Status::Io,
+                                count: 0,
+                                committed: UNSTABLE4,
+                                writeverf: 0,
+                            };
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!("WRITE: spawn_blocking error: {}", e);
@@ -1306,19 +1387,7 @@ impl IoOperationHandler {
                     };
                 }
             };
-            
-            let file_arc = Arc::new(file);
 
-            // Cache the file descriptor (never under special stateids)
-            if cacheable {
-                self.fd_cache.insert(op.stateid.other, CachedFile {
-                    file: Arc::clone(&file_arc),
-                    path: path.clone(),
-                    writable: true,
-                    ino: CachedFile::ino_of(&file_arc),
-                });
-                debug!("WRITE: Cached new FD for {:?} (path: {:?})", op.stateid, path);
-            }
             file_arc
         };
 
@@ -1730,6 +1799,67 @@ mod tests {
         let write_res = handler.handle_write(write_op, &ctx).await;
         assert_eq!(write_res.status, Nfs4Status::Ok);
         assert_eq!(write_res.count, 11);
+    }
+
+    /// POSIX checks permission at OPEN, not per write: git fchmods
+    /// every loose object 0444 BEFORE close, and a small file's dirty
+    /// pages flush LAST — so the first WRITE RPC can arrive after the
+    /// chmod. If the stateid-keyed fd lookup misses (path-form
+    /// mismatch, eviction), the lazy re-open gets EACCES; the write
+    /// must then be served from any open-time fd of the same inode,
+    /// never surfaced as EIO to a legally-open writer.
+    #[tokio::test]
+    async fn write_after_chmod_readonly_served_from_open_time_fd() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+
+        let test_file_path = fh_mgr.get_export_path().join("testfile.txt");
+        let test_fh = fh_mgr.path_to_filehandle(&test_file_path).unwrap();
+        ctx.current_fh = Some(test_fh);
+
+        let open_res = handler.handle_open(OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_WRITE,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: b"chmod-owner".to_vec(),
+            openhow: OpenHow::NoCreate,
+            claim: OpenClaim::Fh,
+        }, &mut ctx).await;
+        let stateid = open_res.stateid.unwrap();
+
+        // Manufacture the miss the wild produces via path-form mismatch
+        // or eviction: the stateid's own entry is gone, but a writable
+        // open-time fd for the inode survives under another key.
+        let seeded = handler.fd_cache.remove(&stateid.other)
+            .expect("OPEN should have seeded an fd (F17c)");
+        handler.fd_cache.insert([0xAB; 12], CachedFile {
+            file: Arc::clone(&seeded.file),
+            path: seeded.path.clone(),
+            writable: seeded.writable,
+            ino: seeded.ino,
+        });
+        assert!(seeded.writable, "seed must be a write-open fd");
+
+        // The chmod lands before the flush, as git does it.
+        let mut perms = std::fs::metadata(&test_file_path).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&test_file_path, perms).unwrap();
+
+        let write_res = handler.handle_write(WriteOp {
+            stateid,
+            offset: 0,
+            stable: UNSTABLE4,
+            data: Bytes::from("flush after chmod"),
+        }, &ctx).await;
+        assert_eq!(write_res.status, Nfs4Status::Ok,
+            "flush of a valid write-open must survive a prior chmod 0444");
+        assert_eq!(write_res.count, 17);
+
+        // Restore mode so TempDir cleanup can delete the file.
+        let mut perms = std::fs::metadata(&test_file_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&test_file_path, perms).unwrap();
     }
 
     #[tokio::test]

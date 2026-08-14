@@ -156,10 +156,40 @@ impl Lock {
 /// - Concurrent reads without blocking
 /// - Lock-free lookups for read-heavy workloads
 /// - Per-file lock tracking for fine-grained concurrency
+/// The identity a lock stateid stands for. NFSv4's model is one lock
+/// stateid per (client, lock-owner, file) covering a SET of ranges;
+/// this table's entries are per-RANGE. The map below keeps a presented
+/// stateid resolvable to its OWNER even after the specific range entry
+/// it was minted for has been unlocked — without it, sqlite's ordinary
+/// lock-PENDING / lock-SHARED / unlock-PENDING sequence orphans the
+/// client's held stateid and every later lock op wedges in BadStateId
+/// recovery.
+#[derive(Debug, Clone)]
+pub struct LockOwnerKey {
+    pub client_id: u64,
+    pub owner: Vec<u8>,
+}
+
 pub struct LockManager {
     /// Active locks (stateid → lock)
     /// DashMap provides lock-free concurrent access
     locks: DashMap<[u8; 12], Lock>,  // Key is stateid.other
+
+    /// Every client-visible lock stateid → its owner identity. Entries
+    /// OUTLIVE the range entries (removed only with the client), so a
+    /// client's held stateid keeps resolving between unlock and relock.
+    /// The client-visible stateid is CANONICAL per owner: Linux's
+    /// nfs4_update_lock_stateid refuses a reply whose `other` differs
+    /// from the lock state it holds and silently RESTARTS the RPC — a
+    /// server that mints a fresh stateid per exist-owner LOCK puts
+    /// every locker (sqlite's first transaction, measured at 5.8M
+    /// retries) into an infinite resend loop.
+    stateid_owners: DashMap<[u8; 12], LockOwnerKey>,
+
+    /// Mint for INTERNAL range-entry keys (never client-visible, never
+    /// in the stateid table): an owner's ranges each need a distinct
+    /// row key while the client sees only the canonical stateid.
+    entry_key_counter: std::sync::atomic::AtomicU64,
 
     /// Locks by filehandle (for conflict detection)
     /// Enables per-file locking - only locks on same file conflict
@@ -189,6 +219,8 @@ impl LockManager {
     pub fn new() -> Self {
         Self {
             locks: DashMap::new(),
+            stateid_owners: DashMap::new(),
+            entry_key_counter: std::sync::atomic::AtomicU64::new(1),
             locks_by_fh: DashMap::new(),
             backend: None,
             restored_clean: AtomicBool::new(true),
@@ -200,6 +232,8 @@ impl LockManager {
     pub fn with_backend(backend: Arc<dyn StateBackend>) -> Self {
         Self {
             locks: DashMap::new(),
+            stateid_owners: DashMap::new(),
+            entry_key_counter: std::sync::atomic::AtomicU64::new(1),
             locks_by_fh: DashMap::new(),
             backend: Some(backend),
             restored_clean: AtomicBool::new(true),
@@ -245,11 +279,123 @@ impl LockManager {
     fn insert_in_memory(&self, lock: Lock) {
         let stateid_key = lock.stateid.other;
         let fh_key = lock.filehandle.clone();
+        self.stateid_owners.insert(stateid_key, LockOwnerKey {
+            client_id: lock.client_id,
+            owner: lock.owner.clone(),
+        });
         self.locks.insert(stateid_key, lock);
         self.locks_by_fh
             .entry(fh_key)
             .or_insert_with(Vec::new)
             .push(stateid_key);
+    }
+
+    /// Resolve a presented lock stateid to the owner it stands for —
+    /// via the long-lived owner map first, falling back to a live
+    /// entry (covers restored rows from before the map existed).
+    pub fn resolve_owner(&self, stateid: &StateId) -> Option<(u64, Vec<u8>)> {
+        if let Some(o) = self.stateid_owners.get(&stateid.other) {
+            return Some((o.client_id, o.owner.clone()));
+        }
+        self.locks
+            .get(&stateid.other)
+            .map(|l| (l.client_id, l.owner.clone()))
+    }
+
+    /// Mint an internal range-entry key. The 0xFC prefix keeps it out
+    /// of any client-visible stateid space; these keys exist only as
+    /// row identities in the lock table and its persistence.
+    fn mint_entry_stateid(&self) -> StateId {
+        let n = self
+            .entry_key_counter
+            .fetch_add(1, Ordering::Relaxed);
+        let mut other = [0u8; 12];
+        other[0] = 0xFC;
+        other[1] = b'l';
+        other[2] = b'k';
+        other[4..12].copy_from_slice(&n.to_be_bytes());
+        StateId { seqid: 1, other }
+    }
+
+    /// Register a client-visible (canonical) stateid as standing for
+    /// an owner — the map consulted by [`LockManager::resolve_owner`].
+    pub fn register_owner_stateid(&self, other: [u8; 12], client_id: u64, owner: Vec<u8>) {
+        self.stateid_owners
+            .insert(other, LockOwnerKey { client_id, owner });
+    }
+
+    /// Carve `cut` out of every range this owner holds on `filehandle`
+    /// — the shared engine of LOCKU and of an owner's own re-lock
+    /// (upgrade/downgrade). Fully-covered entries are removed; partial
+    /// overlaps shrink, and an unlock strictly inside a held range
+    /// splits it in two (`mint` supplies stateids for the survivors).
+    /// A cut that touches nothing is a no-op — POSIX unlock of an
+    /// unheld range succeeds.
+    pub fn trim_owner_range(
+        &self,
+        client_id: u64,
+        owner: &[u8],
+        filehandle: &[u8],
+        cut: &LockRange,
+    ) {
+        let keys: Vec<[u8; 12]> = match self.locks_by_fh.get(filehandle) {
+            Some(k) => k.value().clone(),
+            None => return,
+        };
+        for key in keys {
+            let (lock_type, held) = match self.locks.get(&key) {
+                Some(e)
+                    if e.client_id == client_id
+                        && e.owner.as_slice() == owner
+                        && e.range.overlaps(cut) =>
+                {
+                    (e.lock_type, e.range)
+                }
+                _ => continue,
+            };
+            // Ref dropped above (match arm ended) — safe to remove.
+            self.remove_lock(&StateId { seqid: 0, other: key });
+
+            // Left survivor: bytes of the held range before the cut.
+            if held.offset < cut.offset {
+                self.add_lock(Lock {
+                    stateid: self.mint_entry_stateid(),
+                    client_id,
+                    owner: owner.to_vec(),
+                    filehandle: filehandle.to_vec(),
+                    lock_type,
+                    range: LockRange {
+                        offset: held.offset,
+                        length: cut.offset - held.offset,
+                    },
+                });
+            }
+            // Right survivor: bytes after the cut (none if the cut
+            // runs to EOF).
+            if cut.length != 0 {
+                let cut_end = cut.offset + cut.length;
+                let survives = match held.length {
+                    0 => true,
+                    l => held.offset + l > cut_end,
+                };
+                if survives {
+                    self.add_lock(Lock {
+                        stateid: self.mint_entry_stateid(),
+                        client_id,
+                        owner: owner.to_vec(),
+                        filehandle: filehandle.to_vec(),
+                        lock_type,
+                        range: LockRange {
+                            offset: cut_end,
+                            length: match held.length {
+                                0 => 0,
+                                l => held.offset + l - cut_end,
+                            },
+                        },
+                    });
+                }
+            }
+        }
     }
 
     /// Add a lock
@@ -268,25 +414,36 @@ impl LockManager {
     ///
     /// LOCK-FREE: Uses per-file lock tracking for fine-grained concurrency
     /// Only checks locks on the same file, enabling concurrent ops on different files
+    ///
+    /// `exclude_owner` is the REQUESTER's (client_id, owner): that owner's
+    /// own locks never conflict with its request — a write lock over its
+    /// own read lock is an atomic upgrade (RFC 8881 §18.10), not a denial.
+    /// Passing `None` (LOCKT-style probes) checks against every holder.
     pub fn check_conflicts(
         &self,
         filehandle: &[u8],
         range: &LockRange,
         lock_type: LockType,
-        exclude_stateid: Option<StateId>,
+        exclude_owner: Option<(u64, &[u8])>,
     ) -> Option<Lock> {
         // Get all locks on this filehandle (lock-free read)
         if let Some(lock_stateids) = self.locks_by_fh.get(filehandle) {
             for stateid_key in lock_stateids.value() {
-                // Skip the lock we're excluding (for lock upgrades)
-                if let Some(ref exclude) = exclude_stateid {
-                    if stateid_key == &exclude.other {
-                        continue;
-                    }
-                }
-
                 // Lock-free lookup
                 if let Some(existing_lock) = self.locks.get(stateid_key) {
+                    // The requester's own locks are upgrade material,
+                    // never conflicts. (Before this exclusion, a lock
+                    // owner's SH→EX upgrade was denied against its own
+                    // read lock — sqlite's first CREATE TABLE wedged
+                    // every client in blocking-retry forever.)
+                    if let Some((cid, owner)) = exclude_owner {
+                        if existing_lock.client_id == cid
+                            && existing_lock.owner.as_slice() == owner
+                        {
+                            continue;
+                        }
+                    }
+
                     // Check for conflict
                     if range.conflicts_with(
                         &existing_lock.range,
@@ -395,6 +552,10 @@ impl LockManager {
             };
             self.remove_lock(&stateid);
         }
+
+        // The owner map outlives range entries by design; a departing
+        // client is the one boundary where it must be purged too.
+        self.stateid_owners.retain(|_, v| v.client_id != client_id);
     }
 }
 
@@ -608,12 +769,46 @@ impl LockOperationHandler {
             };
         }
 
-        // Check for conflicts
+        // exist_lock_owner4: op.stateid is a LOCK stateid and the wire
+        // carries no owner bytes — the owner map is the authority (it
+        // outlives individual range entries, so a stateid whose ranges
+        // were all unlocked still resolves). An unresolvable stateid
+        // is stale; refuse it rather than granting under an empty
+        // owner identity.
+        let resolved_owner = if op.new_lock_owner {
+            None
+        } else {
+            match self.lock_mgr.resolve_owner(&op.stateid) {
+                Some((cid, owner)) if cid == client_id => Some(owner),
+                Some(_) => {
+                    warn!("LOCK: lock stateid belongs to another client");
+                    return LockRes {
+                        status: Nfs4Status::BadStateId,
+                        stateid: None,
+                        denied: None,
+                    };
+                }
+                None => {
+                    warn!("LOCK: exist_lock_owner stateid resolves to no owner");
+                    return LockRes {
+                        status: Nfs4Status::BadStateId,
+                        stateid: None,
+                        denied: None,
+                    };
+                }
+            }
+        };
+        let owner_bytes: Vec<u8> =
+            resolved_owner.unwrap_or_else(|| op.owner.clone());
+
+        // Check for conflicts — excluding the requester's own locks:
+        // an owner re-locking its own range is an atomic upgrade or
+        // downgrade, never a self-denial (the sqlite-wedge bug).
         if let Some(conflicting_lock) = self.lock_mgr.check_conflicts(
             &current_fh.data,
             &range,
             op.locktype,
-            None,
+            Some((client_id, owner_bytes.as_slice())),
         ) {
             warn!("LOCK: Conflict detected with existing lock");
             return LockRes {
@@ -629,17 +824,59 @@ impl LockOperationHandler {
             };
         }
 
-        let lock_stateid = self.state_mgr.stateids.allocate(
-            StateType::Lock,
-            client_id,
-            Some(current_fh.data.clone()),
-        );
+        // An existing owner re-locking over its own ranges is an atomic
+        // upgrade/downgrade (RFC 8881 §18.10): carve the requested
+        // range out of the owner's own entries first, then grant one
+        // clean entry of the requested type over it. Without the carve,
+        // the pre-upgrade read lock survives as a phantom that denies
+        // every future writer.
+        //
+        // THE REPLY STATEID IS THE OWNER'S CANONICAL ONE — the same
+        // `other` the client presented, seqid advanced through the
+        // stateid table. Linux's nfs4_update_lock_stateid REFUSES a
+        // reply whose `other` differs from the lock state it holds and
+        // silently restarts the RPC: a fresh stateid per exist-owner
+        // LOCK is an infinite resend loop (sqlite's first transaction,
+        // measured at 5.8M LOCKs before diagnosis), not a protocol
+        // liberty. Range entries therefore carry internal keys; only
+        // the canonical stateid is ever client-visible.
+        let reply_stateid = if op.new_lock_owner {
+            let canonical = self.state_mgr.stateids.allocate(
+                StateType::Lock,
+                client_id,
+                Some(current_fh.data.clone()),
+            );
+            self.lock_mgr.register_owner_stateid(
+                canonical.other,
+                client_id,
+                owner_bytes.clone(),
+            );
+            canonical
+        } else {
+            self.lock_mgr.trim_owner_range(
+                client_id,
+                &owner_bytes,
+                &current_fh.data,
+                &range,
+            );
+            match self.state_mgr.stateids.update_seqid(&op.stateid) {
+                Ok(sid) => sid,
+                // A restored-from-backend canonical may predate the
+                // stateid table row; keep the client's `other` and
+                // advance its presented seqid rather than minting a
+                // stateid it would refuse.
+                Err(_) => StateId {
+                    seqid: op.stateid.seqid.wrapping_add(1),
+                    other: op.stateid.other,
+                },
+            }
+        };
 
-        // Create lock entry
+        // Create lock entry (internal key — never client-visible)
         let lock = Lock {
-            stateid: lock_stateid,
+            stateid: self.lock_mgr.mint_entry_stateid(),
             client_id,
-            owner: op.owner,
+            owner: owner_bytes,
             filehandle: current_fh.data.clone(),
             lock_type: op.locktype,
             range,
@@ -652,7 +889,7 @@ impl LockOperationHandler {
 
         LockRes {
             status: Nfs4Status::Ok,
-            stateid: Some(lock_stateid),
+            stateid: Some(reply_stateid),
             denied: None,
         }
     }
@@ -711,6 +948,14 @@ impl LockOperationHandler {
     }
 
     /// Handle LOCKU operation (unlock)
+    ///
+    /// The stateid names the OWNER, the (offset, length) names the
+    /// range — NFSv4's model, not "delete the entry behind the
+    /// stateid". The kernel client holds ONE lock stateid per owner
+    /// and unlocks ranges through it; releasing whichever single
+    /// entry the stateid happened to be minted for (the previous
+    /// behavior) freed the wrong range the moment an owner held more
+    /// than one — sqlite's unlock-PENDING dropped its SHARED lock.
     pub fn handle_locku(
         &self,
         op: LockUOp,
@@ -719,12 +964,15 @@ impl LockOperationHandler {
         debug!("LOCKU: offset={}, length={}", op.offset, op.length);
 
         // Check current filehandle
-        if ctx.current_fh.is_none() {
-            return LockURes {
-                status: Nfs4Status::NoFileHandle,
-                stateid: None,
-            };
-        }
+        let current_fh = match &ctx.current_fh {
+            Some(fh) => fh.clone(),
+            None => {
+                return LockURes {
+                    status: Nfs4Status::NoFileHandle,
+                    stateid: None,
+                };
+            }
+        };
 
         // Validate lock stateid
         if let Err(e) = self.state_mgr.stateids.validate(&op.stateid) {
@@ -735,26 +983,44 @@ impl LockOperationHandler {
             };
         }
 
-        // Remove lock
-        if self.lock_mgr.remove_lock(&op.stateid).is_some() {
-            debug!("LOCKU: Released lock on range {}+{}", op.offset, op.length);
+        let (client_id, owner) = match self.lock_mgr.resolve_owner(&op.stateid) {
+            Some(o) => o,
+            None => {
+                warn!("LOCKU: stateid resolves to no lock owner");
+                return LockURes {
+                    status: Nfs4Status::BadStateId,
+                    stateid: None,
+                };
+            }
+        };
 
-            // Return updated stateid
-            let new_stateid = StateId {
-                seqid: op.stateid.seqid + 1,
+        let cut = LockRange {
+            offset: op.offset,
+            length: op.length,
+        };
+        self.lock_mgr.trim_owner_range(
+            client_id,
+            &owner,
+            &current_fh.data,
+            &cut,
+        );
+        debug!("LOCKU: Released range {}+{} for owner", op.offset, op.length);
+
+        // Advance the seqid through the stateid table — the copy
+        // validate() checks on the client's next presentation. The
+        // old reply (op.seqid+1, table untouched) meant a second
+        // LOCKU/LOCK under the same owner failed strict validation.
+        let new_stateid = match self.state_mgr.stateids.update_seqid(&op.stateid) {
+            Ok(sid) => sid,
+            Err(_) => StateId {
+                seqid: op.stateid.seqid.wrapping_add(1),
                 other: op.stateid.other,
-            };
+            },
+        };
 
-            LockURes {
-                status: Nfs4Status::Ok,
-                stateid: Some(new_stateid),
-            }
-        } else {
-            warn!("LOCKU: Lock not found");
-            LockURes {
-                status: Nfs4Status::BadStateId,
-                stateid: None,
-            }
+        LockURes {
+            status: Nfs4Status::Ok,
+            stateid: Some(new_stateid),
         }
     }
 }
@@ -890,6 +1156,330 @@ mod tests {
         let res2 = handler.handle_lock(op2, &ctx);
         assert_eq!(res2.status, Nfs4Status::Denied);
         assert!(res2.denied.is_some());
+    }
+
+    /// The sqlite wedge: an owner holding a READ lock upgrades to WRITE
+    /// on the same range. Before the fix the conflict check counted the
+    /// owner's own read lock and denied — the kernel's blocking-lock
+    /// path then retried forever, D-stating the caller. The upgrade
+    /// must succeed IN PLACE: same stateid `other`, advanced seqid.
+    #[test]
+    fn upgrade_read_to_write_by_own_owner_succeeds_in_place() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+
+        let open_stateid = create_test_stateid(&handler, 1);
+        let sh = handler.handle_lock(LockOp {
+            locktype: LockType::Read,
+            reclaim: false,
+            offset: 0,
+            length: 512,
+            stateid: open_stateid,
+            owner: b"sqlite-owner".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(sh.status, Nfs4Status::Ok);
+        let sh_sid = sh.stateid.unwrap();
+
+        // exist_lock_owner4: lock stateid, no owner bytes on the wire.
+        let up = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 512,
+            stateid: sh_sid,
+            owner: Vec::new(),
+            new_lock_owner: false,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(up.status, Nfs4Status::Ok, "own-owner upgrade must never self-conflict");
+        // Linux's nfs4_update_lock_stateid refuses a reply whose `other`
+        // differs from the held lock stateid and RESTARTS the RPC — the
+        // canonical stateid is a client contract, not a nicety.
+        let up_sid = up.stateid.unwrap();
+        assert_eq!(up_sid.other, sh_sid.other,
+            "exist-owner LOCK must return the canonical stateid (same other)");
+        assert!(up_sid.seqid > sh_sid.seqid, "and advance its seqid");
+
+        // The write lock must now be real: another client's read is denied.
+        let mut ctx2 = CompoundContext::new(0);
+        ctx2.session_id = Some(create_test_session(&handler, 2));
+        ctx2.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        let rd = handler.handle_lock(LockOp {
+            locktype: LockType::Read,
+            reclaim: false,
+            offset: 100,
+            length: 10,
+            stateid: create_test_stateid(&handler, 2),
+            owner: b"other-owner".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx2);
+        assert_eq!(rd.status, Nfs4Status::Denied, "upgraded WRITE lock must exclude readers");
+    }
+
+    /// After an upgrade, ONE LOCKU must free the whole claim — a second
+    /// surviving entry (the pre-upgrade read lock) would be an immortal
+    /// phantom that denies every future writer on the file.
+    #[test]
+    fn upgrade_leaves_no_phantom_lock_after_unlock() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+
+        let sh = handler.handle_lock(LockOp {
+            locktype: LockType::Read,
+            reclaim: false,
+            offset: 0,
+            length: 512,
+            stateid: create_test_stateid(&handler, 1),
+            owner: b"sqlite-owner".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx);
+        let up = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 512,
+            stateid: sh.stateid.unwrap(),
+            owner: Vec::new(),
+            new_lock_owner: false,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(up.status, Nfs4Status::Ok);
+        let up_sid = up.stateid.unwrap();
+
+        let un = handler.handle_locku(LockUOp {
+            locktype: LockType::Write,
+            seqid: 0,
+            stateid: up_sid,
+            offset: 0,
+            length: 512,
+        }, &ctx);
+        assert_eq!(un.status, Nfs4Status::Ok);
+
+        // A different client's WRITE on the range must now succeed:
+        // nothing of the original claim may survive.
+        let mut ctx2 = CompoundContext::new(0);
+        ctx2.session_id = Some(create_test_session(&handler, 2));
+        ctx2.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        let wr = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 512,
+            stateid: create_test_stateid(&handler, 2),
+            owner: b"other-owner".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx2);
+        assert_eq!(wr.status, Nfs4Status::Ok,
+            "a phantom pre-upgrade lock survived the unlock");
+    }
+
+    /// Same (client, owner) exclusion must NOT leak across owners: a
+    /// different owner on the SAME client still conflicts.
+    #[test]
+    fn same_client_different_owner_still_conflicts() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+
+        let a = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 512,
+            stateid: create_test_stateid(&handler, 1),
+            owner: b"owner-a".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(a.status, Nfs4Status::Ok);
+
+        let b = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 512,
+            stateid: create_test_stateid(&handler, 1),
+            owner: b"owner-b".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(b.status, Nfs4Status::Denied,
+            "two owners on one client must still exclude each other");
+    }
+
+    /// The sqlite wedge, part 2 — the exact shape that survived the
+    /// self-conflict fix: an owner holds TWO ranges (PENDING byte +
+    /// SHARED range in sqlite's terms) and unlocks ONE of them through
+    /// its current stateid. The old LOCKU deleted "the entry behind
+    /// the stateid" — the WRONG range — and the owner's next lock op
+    /// found its stateid orphaned. LOCKU must free exactly the named
+    /// range, keep the other, and keep the stateid usable.
+    #[test]
+    fn unlock_frees_the_named_range_not_the_stateids_entry() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+
+        // Range A ("PENDING byte"), new owner.
+        let a = handler.handle_lock(LockOp {
+            locktype: LockType::Read,
+            reclaim: false,
+            offset: 1000,
+            length: 1,
+            stateid: create_test_stateid(&handler, 1),
+            owner: b"sqlite-owner".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(a.status, Nfs4Status::Ok);
+
+        // Range B ("SHARED range"), same owner via the returned stateid.
+        let b = handler.handle_lock(LockOp {
+            locktype: LockType::Read,
+            reclaim: false,
+            offset: 2000,
+            length: 510,
+            stateid: a.stateid.unwrap(),
+            owner: Vec::new(),
+            new_lock_owner: false,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(b.status, Nfs4Status::Ok);
+        let held = b.stateid.unwrap();
+
+        // Unlock range A through the CURRENT stateid (whose entry is B).
+        let un = handler.handle_locku(LockUOp {
+            locktype: LockType::Read,
+            seqid: 0,
+            stateid: held,
+            offset: 1000,
+            length: 1,
+        }, &ctx);
+        assert_eq!(un.status, Nfs4Status::Ok);
+        let held2 = un.stateid.unwrap();
+
+        // Range A must be free, range B must still be held.
+        let mut ctx2 = CompoundContext::new(0);
+        ctx2.session_id = Some(create_test_session(&handler, 2));
+        ctx2.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        let wr_a = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 1000,
+            length: 1,
+            stateid: create_test_stateid(&handler, 2),
+            owner: b"other".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx2);
+        assert_eq!(wr_a.status, Nfs4Status::Ok, "the unlocked range must be free");
+        let wr_b = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 2100,
+            length: 10,
+            stateid: create_test_stateid(&handler, 2),
+            owner: b"other".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx2);
+        assert_eq!(wr_b.status, Nfs4Status::Denied, "the still-held range must deny");
+
+        // And the owner's stateid must remain usable for its next lock.
+        let c = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 3000,
+            length: 8,
+            stateid: held2,
+            owner: Vec::new(),
+            new_lock_owner: false,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(c.status, Nfs4Status::Ok, "owner stateid orphaned by the unlock");
+    }
+
+    /// Unlocking the middle of a held range splits it: both edges stay
+    /// locked, the hole is free.
+    #[test]
+    fn unlock_inside_a_range_splits_it() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+
+        let a = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 300,
+            stateid: create_test_stateid(&handler, 1),
+            owner: b"owner".to_vec(),
+            new_lock_owner: true,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(a.status, Nfs4Status::Ok);
+
+        let un = handler.handle_locku(LockUOp {
+            locktype: LockType::Write,
+            seqid: 0,
+            stateid: a.stateid.unwrap(),
+            offset: 100,
+            length: 100,
+        }, &ctx);
+        assert_eq!(un.status, Nfs4Status::Ok);
+
+        let mut ctx2 = CompoundContext::new(0);
+        ctx2.session_id = Some(create_test_session(&handler, 2));
+        ctx2.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+        let probe = |off: u64, len: u64| {
+            handler.handle_lock(LockOp {
+                locktype: LockType::Write,
+                reclaim: false,
+                offset: off,
+                length: len,
+                stateid: create_test_stateid(&handler, 2),
+                owner: b"other".to_vec(),
+                new_lock_owner: true,
+                open_seqid: Some(0),
+            }, &ctx2).status
+        };
+        assert_eq!(probe(100, 100), Nfs4Status::Ok, "the hole must be free");
+        assert_eq!(probe(0, 50), Nfs4Status::Denied, "left edge must stay locked");
+        assert_eq!(probe(250, 50), Nfs4Status::Denied, "right edge must stay locked");
+    }
+
+    /// exist_lock_owner4 with a stateid that has no live lock entry is
+    /// stale — BadStateId, never a grant under an empty owner identity.
+    #[test]
+    fn exist_owner_without_lock_entry_is_bad_stateid() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        ctx.session_id = Some(create_test_session(&handler, 1));
+        ctx.current_fh = Some(fh_mgr.get_root_fh().unwrap());
+
+        let res = handler.handle_lock(LockOp {
+            locktype: LockType::Write,
+            reclaim: false,
+            offset: 0,
+            length: 512,
+            stateid: create_test_stateid(&handler, 1), // open stateid, no lock entry
+            owner: Vec::new(),
+            new_lock_owner: false,
+            open_seqid: Some(0),
+        }, &ctx);
+        assert_eq!(res.status, Nfs4Status::BadStateId);
     }
 
     #[test]

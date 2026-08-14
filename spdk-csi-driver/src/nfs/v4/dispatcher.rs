@@ -1754,7 +1754,7 @@ impl CompoundDispatcher {
             }
 
             // Locking operations
-            Operation::Lock { locktype, reclaim, offset, length, stateid, owner } => {
+            Operation::Lock { locktype, reclaim, offset, length, stateid, owner, new_lock_owner } => {
                 // Per-class refusal (libflint design §3): byte-range
                 // locks are NOTSUPP on scsi-class volumes, refused HERE
                 // where the volume identity is known (lockops has none)
@@ -1768,8 +1768,12 @@ impl CompoundDispatcher {
                     Some(s) => s,
                     None => return OperationResult::Lock(Nfs4Status::BadStateId, None, None),
                 };
-                // Convert u32 to LockType
-                let lock_type = if locktype == 1 {
+                // READ_LT=1 / READW_LT=3 are read locks; WRITE_LT=2 /
+                // WRITEW_LT=4 are write locks. The W variants only add
+                // "willing to wait" — mapping READW to Write (as this
+                // did) turned every blocking read lock into an exclusive
+                // one.
+                let lock_type = if locktype == 1 || locktype == 3 {
                     LockType::Read
                 } else {
                     LockType::Write
@@ -1781,7 +1785,7 @@ impl CompoundDispatcher {
                     length,
                     stateid,
                     owner,
-                    new_lock_owner: true,
+                    new_lock_owner,
                     open_seqid: Some(0),
                 };
                 let res = self.lock_handler.handle_lock(op, context);

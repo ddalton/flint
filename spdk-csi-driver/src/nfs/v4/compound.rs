@@ -326,6 +326,12 @@ pub enum Operation {
         length: u64,
         stateid: StateId,
         owner: Vec<u8>,
+        /// locker4 discriminant. FALSE = exist_lock_owner4: `stateid` is a
+        /// LOCK stateid and `owner` is empty (the wire doesn't repeat the
+        /// owner bytes) — the handler must resolve the owner from the lock
+        /// table, and the request may be an atomic upgrade/downgrade of
+        /// that owner's own lock, never a conflict against it.
+        new_lock_owner: bool,
     },
     LockT {
         locktype: u32,
@@ -1725,6 +1731,7 @@ impl CompoundRequest {
                     length,
                     stateid,
                     owner,
+                    new_lock_owner,
                 })
             }
             opcode::LOCKT => {
