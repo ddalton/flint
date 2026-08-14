@@ -92,6 +92,14 @@ PROBE_TMO=2
 # away while it can still ack is what strands acked writes. 120s in
 # production; here it is the horizon §V7 waits out.
 LEASE_SECS=10
+# The client's ctrl_loss_tmo, and it is deliberately LONG — this is the
+# clock §V7c proves the redirect does not wait for. When the composer
+# dies the kernel controller does not disappear; it sits in `connecting`
+# for this many seconds, retrying an address that will never answer
+# again (1800s in production). A redirect observed well inside this
+# window cannot be ctrl_loss expiry, which is what makes the assertion
+# mean anything.
+CTRL_LOSS=600
 
 RPC_A="sudo PYTHONPATH=$RIG_TOOLS/py python3 $RIG_TOOLS/scripts/rpc.py -s $SOCK_A"
 RPC_B="sudo PYTHONPATH=$RIG_TOOLS/py python3 $RIG_TOOLS/scripts/rpc.py -s $SOCK_B"
@@ -301,7 +309,7 @@ echo "✓ V2: two-slot raid1 (superblock:false) sized by the record, and the nam
 
 # ── V3. REAL BYTES, THEN THE REBUILD ─────────────────────────────────
 vsudo "modprobe nvme-tcp"
-STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=30 FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
+STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
         $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)") \
   || fail "stage: $STAGE"
 NSDEV=$(echo "$STAGE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)
@@ -542,30 +550,66 @@ echo "$VOLHOSTS" | grep -q "$CLIENT_NQN" \
   || fail "the survivor does not admit the client attached at A: '$VOLHOSTS'"
 echo "✓ V7b: the survivor's allow-list carries the client admitted at the dead composer"
 
-# THE CLIENT FOLLOWS, and it asks the SAME MDS it always asked. MDS-A is
-# alive and answers AttachBlockNode by resolving the record — which now
-# names B — so the redirect needs no new endpoint and no operator: the
-# node is told where the volume lives NOW.
-vsudo "nvme disconnect -n $SUBNQN" >/dev/null 2>&1
+# THE CLIENT FOLLOWS ON ITS OWN, and it asks the SAME MDS it always
+# asked. MDS-A is alive and answers AttachBlockNode by resolving the
+# record — which now names B — so the redirect needs no new endpoint and
+# no operator: the node is told where the volume lives NOW.
+#
+# THERE USED TO BE AN `nvme disconnect` HERE, and it was the drill
+# standing in for a mechanism that did not exist. tgt-A died, so the
+# client's controller is not GONE — it is `connecting`, retrying an
+# address that will never answer again, and it stays that way for
+# ctrl_loss_tmo (${CTRL_LOSS}s here, 1800s by default). The reconcile
+# pass skipped any record whose controller still existed — "present
+# (live or reconnecting), not ours to touch" — so the composition
+# failed over in seconds and its client followed half an hour later.
+# The pass now asks where the volume lives whenever the controller is
+# NOT live, and only a MOVED answer interrupts the reconnect; the same
+# address, or an MDS it could not reach, still belongs to the reconnect
+# policy, or one control-plane outage would become a fleet-wide
+# disconnect storm.
+#
+# THE CLOCK IS THE PROOF: a redirect observed inside this window cannot
+# be ctrl_loss expiry, which still has minutes to run.
+CTRL_ADDR="for c in /sys/class/nvme/nvme*; do \
+  [ \"\$(cat \$c/subsysnqn 2>/dev/null)\" = '$SUBNQN' ] && cat \$c/address 2>/dev/null; done"
+ADDR_PRE=$(vsudo "$CTRL_ADDR" | tr -d ' \r')
+echo "$ADDR_PRE" | grep -q "trsvcid=4420" \
+  || fail "before the redirect the client is not attached to A: '$ADDR_PRE'"
+STATE_PRE=$(vsudo "for c in /sys/class/nvme/nvme*; do \
+  [ \"\$(cat \$c/subsysnqn 2>/dev/null)\" = '$SUBNQN' ] && cat \$c/state; done" | tr -d ' \r')
+[ "$STATE_PRE" != "live" ] \
+  || fail "the client's controller still reads 'live' after its target died — the drill \
+would prove nothing (fast_io_fail=${FAST_IO_FAIL:-5}s should have taken it out of service)"
+echo "  … client controller is '$STATE_PRE' at $ADDR_PRE, ctrl_loss has ${CTRL_LOSS}s to run"
 # RETRIED, because that is the contract the tier runs on: the admission
 # is durable the moment the record takes it, and the composer's own
-# level-triggered pass is what opens its door. A stage landing inside
-# that window connects into a refusal, and kubelet retries
-# NodeStageVolume for exactly this reason — so the drill retries too,
-# and a stage that never succeeds is the real failure.
-for i in $(seq 1 $((3 * RECON_SECS + 10))); do
-  RESTAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=30 FLINT_NVME_RECONNECT_DELAY=2 FLINT_NVME_FAST_IO_FAIL=5 \
-          $CSI_CLI stage --endpoint 127.0.0.1:50051 --volume-id $VOL --node \$(hostname)") \
-    && break
-  [ "$i" = $((3 * RECON_SECS + 10)) ] && fail "re-stage after failover: $RESTAGE"
+# level-triggered pass is what opens its door. A connect landing inside
+# that window is refused, and the node agent runs this pass on a timer
+# for exactly that reason — so the drill runs it on a timer too (every
+# 30s in production; every second here), and a redirect that never
+# lands is the real failure.
+T0=$(vsh "date +%s")
+REDIR_MAX=$((4 * RECON_SECS + 40))
+for i in $(seq 1 $REDIR_MAX); do
+  vsudo "$CSI_CLI reestablish" >/dev/null 2>&1
+  ADDR=$(vsudo "$CTRL_ADDR" | tr -d ' \r')
+  echo "$ADDR" | grep -q "trsvcid=4421" && break
+  [ "$i" = "$REDIR_MAX" ] \
+    && fail "the client never followed the volume to B — still at '$ADDR' after ${REDIR_MAX}s"
   sleep 1
 done
-NSDEV2=$(echo "$RESTAGE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)
-[ -n "$NSDEV2" ] || fail "re-stage reported no device: $RESTAGE"
-# It must be a session to B — the whole point. A is dead, so a device
-# that appeared at all proves the address came from the record.
-TRA=$(vsudo "nvme list-subsys $NSDEV2 | grep -o 'traddr=[0-9.]*,trsvcid=[0-9]*' | head -1")
-echo "$TRA" | grep -q "trsvcid=4421" || fail "the client re-attached to '$TRA', not to the survivor"
+ELAPSED=$(( $(vsh "date +%s") - T0 ))
+[ "$ELAPSED" -lt $((CTRL_LOSS / 2)) ] \
+  || fail "the redirect took ${ELAPSED}s of a ${CTRL_LOSS}s ctrl_loss_tmo — that is the \
+timeout expiring, not the pass noticing the volume moved"
+# The device the redirect produced, found the way production finds it:
+# the udev/eui link keyed by the pinned NGUID. It is the same NGUID
+# across the failover, which is what lets a client keep its identity for
+# the volume while the target underneath it changes.
+NSDEV2=$(vsudo "readlink -f /dev/disk/by-id/nvme-eui.* 2>/dev/null | head -1" | tr -d ' \r')
+[ -n "$NSDEV2" ] || fail "the redirect left no eui link — the client has no stable device path"
+echo "✓ V7c-pre: the client redirected itself to B in ${ELAPSED}s (ctrl_loss_tmo=${CTRL_LOSS}s) → $NSDEV2"
 SHA_POST=$(vsudo "dd if=$NSDEV2 bs=1M count=$IO_MIB iflag=direct status=none | sha256sum | cut -d' ' -f1")
 [ "$SHA_POST" = "$SHA_PRE" ] \
   || fail "THE BYTES DID NOT SURVIVE THE FAILOVER: ${SHA_POST:0:12}… != ${SHA_PRE:0:12}…"

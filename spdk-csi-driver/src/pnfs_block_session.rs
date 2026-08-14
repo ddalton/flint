@@ -320,10 +320,17 @@ async fn ack_session_up(attach: &BlockAttach) {
     }
 }
 
-/// One pass of session re-establishment: for every durable record
-/// whose subsystem has NO kernel controller — the ctrl_loss-exhaustion
-/// signature; a controller merely `connecting` is left to its own
-/// reconnect policy — re-establish the session.
+/// One pass of session re-establishment. Three worlds per record, and
+/// [`action_for`] is the decision:
+///
+///   * the controller is `live` — serving I/O, left alone, and not even
+///     asked about (a fleet at rest makes no control-plane calls);
+///   * no controller at all — `ctrl_loss_tmo` exhausted during an
+///     outage; connect afresh;
+///   * a controller that is NOT live — `connecting`, `resetting`. The
+///     reconnect policy owns it UNLESS the volume has moved, because
+///     then the address it is patiently retrying will never answer
+///     again and the patience is spent waiting for a corpse.
 ///
 /// THE REDIRECT ACTOR LIVES HERE (design §12). Before replaying the
 /// record, this asks the MDS where the volume lives now: a failover
@@ -357,20 +364,80 @@ pub async fn reestablish_sessions() -> (usize, usize, usize) {
                 continue;
             }
         };
-        if controller_for_nqn(&attach.subnqn).is_some() {
-            continue; // present (live or reconnecting) — not ours to touch
+        let ctrl = controller_for_nqn(&attach.subnqn);
+        let state = ctrl.as_deref().and_then(controller_state);
+        // A LIVE controller is serving I/O: never disturbed, and never
+        // even asked about — a fleet at rest must make no control-plane
+        // calls.
+        if controller_is_live(state.as_deref()) {
+            continue;
         }
-        tracing::warn!(
-            "block session for {} has NO kernel controller (ctrl_loss exhausted \
-             during an outage?) — re-establishing",
-            attach.subnqn
-        );
         // THE REDIRECT: the record's address is a snapshot of where the
         // volume lived at stage time. Ask where it lives now.
-        let attach = match resolve_current_coordinates(&attach).await {
-            Some(fresh) if (fresh.traddr.as_str(), fresh.trsvcid)
-                != (attach.traddr.as_str(), attach.trsvcid) =>
-            {
+        let fresh = resolve_current_coordinates(&attach).await;
+        let moved = fresh.as_ref().is_some_and(|f| {
+            (f.traddr.as_str(), f.trsvcid) != (attach.traddr.as_str(), attach.trsvcid)
+        });
+        match action_for(ctrl.is_some(), moved) {
+            SessionAction::LeaveAlone => continue,
+            SessionAction::Reestablish => tracing::warn!(
+                "block session for {} has NO kernel controller (ctrl_loss exhausted \
+                 during an outage?) — re-establishing",
+                attach.subnqn
+            ),
+            SessionAction::Redirect => {
+                // THE 30-MINUTE HOLE THIS CLOSES. A controller whose
+                // target died sits in `connecting` for ctrl_loss_tmo —
+                // 1800s by default — and the old guard here skipped it
+                // as "not ours to touch". That patience is right for a
+                // target COMING BACK at the same address (a tgt restart,
+                // a drainRoll) and wrong for a volume that has MOVED:
+                // the address it is retrying will never answer again.
+                // So the composition failed over in seconds and its
+                // client followed half an hour later.
+                //
+                // Only the moved case acts. Same address, or an MDS we
+                // could not reach, still belongs to the reconnect policy
+                // — an outage must not become a disconnect storm.
+                tracing::warn!(
+                    "🔀 {} moved while its controller ({}) was still {} — the reconnect it is \
+                     retrying can never succeed; tearing it down for the redirect",
+                    attach.subnqn,
+                    ctrl.as_deref().unwrap_or("?"),
+                    state.as_deref().unwrap_or("unknown")
+                );
+                // `ensure_session` REUSES any existing controller whatever
+                // its state, so without this disconnect the redirect would
+                // silently re-adopt the session aimed at the dead target.
+                // The durable record is NOT removed (that is
+                // `teardown_session`'s job, and it means unstage): this
+                // volume is still staged here, it just answers elsewhere.
+                match tokio::process::Command::new("nvme")
+                    .args(["disconnect", "-n", &attach.subnqn])
+                    .output()
+                    .await
+                {
+                    Ok(out) if out.status.success() => {}
+                    Ok(out) => {
+                        tracing::error!(
+                            "could not disconnect the stale controller for {}: {} — retried \
+                             next pass",
+                            attach.subnqn,
+                            String::from_utf8_lossy(&out.stderr).trim()
+                        );
+                        failed += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("nvme disconnect exec for {}: {e}", attach.subnqn);
+                        failed += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        let attach = match fresh {
+            Some(fresh) if moved => {
                 tracing::warn!(
                     "🔀 {} MOVED: {}:{} → {}:{} — the recorded target no longer serves this \
                      volume; re-attaching to the one the MDS names",
@@ -559,6 +626,55 @@ pub fn controller_for_nqn(nqn: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// A kernel controller's state (`live`, `connecting`, `resetting`,
+/// `deleting`…) — the word sysfs uses, not our interpretation of it.
+pub fn controller_state(ctrl: &str) -> Option<String> {
+    std::fs::read_to_string(format!("/sys/class/nvme/{ctrl}/state"))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Is this controller serving I/O? Only `live` is, and the distinction
+/// is what keeps the reconcile pass free at rest: a live session is
+/// never disturbed and never even asked about.
+fn controller_is_live(state: Option<&str>) -> bool {
+    matches!(state, Some("live"))
+}
+
+/// What a non-live session record deserves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionAction {
+    /// The reconnect policy owns this one.
+    LeaveAlone,
+    /// The controller is gone (ctrl_loss exhausted) — connect afresh.
+    Reestablish,
+    /// The volume answers somewhere else now: tear the stale controller
+    /// down and connect to where it moved.
+    Redirect,
+}
+
+/// The whole decision, in one place so it can be tested without sysfs.
+///
+/// `present` = a kernel controller still exists for this subsystem, and
+/// (by the caller's guard) it is NOT live. `moved` = the MDS named an
+/// address different from the record's.
+///
+/// The load-bearing row is `(true, true)`. Before it existed, a
+/// controller retrying a dead composer was skipped as "not ours to
+/// touch" until `ctrl_loss_tmo` — 1800s by default — expired, so a
+/// failover that completed in seconds reached its client half an hour
+/// later. `(true, false)` stays LeaveAlone on purpose: same address, or
+/// an MDS we could not reach, is exactly what the reconnect policy is
+/// for, and acting there would turn a control-plane outage into a
+/// disconnect storm across every node at once.
+fn action_for(present: bool, moved: bool) -> SessionAction {
+    match (present, moved) {
+        (false, _) => SessionAction::Reestablish,
+        (true, true) => SessionAction::Redirect,
+        (true, false) => SessionAction::LeaveAlone,
+    }
 }
 
 /// Write `fast_io_fail_tmo` to every controller serving `nqn`
@@ -770,6 +886,34 @@ mod tests {
         let parsed = parse_session_record(&legacy).expect("legacy records must still parse");
         assert!(parsed.mds_control.is_empty());
         assert_eq!(parsed.traddr, attach.traddr, "everything else survives");
+    }
+
+    /// THE 30-MINUTE HOLE, as a table.
+    ///
+    /// The redirect actor was written, correct, and UNREACHABLE while a
+    /// kernel controller existed — and after a composer dies one exists
+    /// for `ctrl_loss_tmo`, whose default is 1800s. So the composition
+    /// failed over in seconds and the client that had to follow it
+    /// waited half an hour, retrying an address that would never answer
+    /// again.
+    ///
+    /// The other three rows are the ones that must NOT change: a live
+    /// session is untouchable, an absent controller is the classic
+    /// re-establish, and a reconnecting controller whose volume has not
+    /// moved (or whose MDS we could not reach, which reads the same
+    /// here) still belongs to the reconnect policy — acting on that row
+    /// would turn one control-plane outage into a fleet-wide disconnect
+    /// storm.
+    #[test]
+    fn only_a_volume_that_moved_interrupts_a_reconnecting_controller() {
+        assert!(controller_is_live(Some("live")));
+        for s in [Some("connecting"), Some("resetting"), Some("deleting"), None] {
+            assert!(!controller_is_live(s), "{s:?} must not read as serving I/O");
+        }
+        assert_eq!(action_for(true, true), SessionAction::Redirect);
+        assert_eq!(action_for(true, false), SessionAction::LeaveAlone);
+        assert_eq!(action_for(false, false), SessionAction::Reestablish);
+        assert_eq!(action_for(false, true), SessionAction::Reestablish);
     }
 
     /// THE REDIRECT ACTOR's two derivations. Both invert an identity
