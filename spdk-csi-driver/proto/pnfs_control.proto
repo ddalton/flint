@@ -181,6 +181,25 @@ message BlockExportStatusResponse {
 
   // Every live initiator, across every block volume on this shard.
   repeated BlockInitiator initiators = 5;
+
+  // CAPACITY, FOR PLACEMENT — and it is the PROMISED figure, never the
+  // physically free one. Every flint block volume is thin, so SPDK's
+  // free-cluster count says nothing about what this store has already
+  // promised (`blob_resize` skips its free-cluster check entirely for
+  // thin blobs). `lvstore_free_promise_bytes` is what a NEW promise can
+  // still take: total minus everything already committed.
+  //
+  // BOTH ZERO means the store could not be read. Placement treats that
+  // as UNKNOWN and keeps the shard as a candidate — the same stance the
+  // MDS's own capacity gate takes, because turning an unreadable number
+  // into a refusal would make an RPC blip look like a full fleet.
+  uint64 lvstore_free_promise_bytes = 6;
+  uint64 lvstore_total_bytes = 7;
+
+  // This shard accepts promises past its store's capacity
+  // (FLINT_PNFS_BLOCK_OVERCOMMIT=1). Placement must not exclude it for
+  // want of room the operator has already decided to hand out anyway.
+  bool overcommit = 8;
 }
 
 message BlockInitiator {

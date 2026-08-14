@@ -1602,6 +1602,9 @@ impl MdsControl for MdsControlService {
                 export_traddr: String::new(),
                 export_trsvcid: 0,
                 initiators: Vec::new(),
+                lvstore_free_promise_bytes: 0,
+                lvstore_total_bytes: 0,
+                overcommit: false,
             }));
         };
         let (traddr, trsvcid) = reconciler.listener();
@@ -1612,8 +1615,15 @@ impl MdsControl for MdsControlService {
             .await
             .map_err(|e| Status::unavailable(format!("block initiators unreadable: {e}")))?
             .map_err(|e| Status::unavailable(format!("block initiators unreadable: {e}")))?;
+        // UNREADABLE stays (0, 0), which placement reads as UNKNOWN and
+        // keeps as a candidate. Reporting a shard as full because its
+        // RPC blipped would empty the fleet on a blip.
+        let (free_promise, store_total) = reconciler.promise_headroom().await.unwrap_or((0, 0));
         Ok(Response::new(BlockExportStatusResponse {
             enabled: true,
+            lvstore_free_promise_bytes: free_promise,
+            lvstore_total_bytes: store_total,
+            overcommit: reconciler.overcommits(),
             export_node: crate::pnfs::mds::block_export::export_node_name(),
             export_traddr: traddr.to_string(),
             export_trsvcid: trsvcid as u32,

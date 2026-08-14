@@ -139,6 +139,19 @@ async fn main() -> ExitCode {
                     if st.export_traddr.is_empty() { "-" } else { &st.export_traddr },
                     st.initiators.len()
                 );
+                // The number PLACEMENT decides on, printed where a rig
+                // and an operator can both read it. `unreadable` is a
+                // distinct word from `0` on purpose: they mean opposite
+                // things to the filter — unknown stays a candidate,
+                // zero does not.
+                if st.lvstore_total_bytes == 0 {
+                    println!("capacity promise=unreadable overcommit={}", st.overcommit);
+                } else {
+                    println!(
+                        "capacity promise_free={} total={} overcommit={}",
+                        st.lvstore_free_promise_bytes, st.lvstore_total_bytes, st.overcommit
+                    );
+                }
                 for i in &st.initiators {
                     println!(
                         "initiator volume={} node={} source={} nqn={}",

@@ -2620,6 +2620,32 @@ impl BlockExportReconciler {
             .unwrap_or(false)
     }
 
+    /// What a NEW promise can still take, and the store's total — the
+    /// numbers PLACEMENT needs, from the same arithmetic the local
+    /// capacity gate uses.
+    ///
+    /// Reported as PROMISED headroom rather than physically free space
+    /// on purpose: every flint block volume is thin, so free clusters
+    /// describe what has been WRITTEN, while placement is deciding
+    /// whether a promise can be made. Those diverge by the whole
+    /// oversubscription, which is the entire question.
+    ///
+    /// `None` when the store cannot be read. The caller must carry that
+    /// through as UNKNOWN and never as FULL: a shard that cannot answer
+    /// an RPC is not a shard that is out of space, and
+    /// [`check_store_has_room`](Self::check_store_has_room) already
+    /// takes exactly that stance locally.
+    pub async fn promise_headroom(&self) -> Option<(u64, u64)> {
+        let (total, _free, cluster) = self.lvstore_totals().await?;
+        let committed = self.committed_logical_bytes(cluster).await?;
+        Some((total.saturating_sub(committed), total))
+    }
+
+    /// Whether this shard hands out capacity it does not have.
+    pub fn overcommits(&self) -> bool {
+        Self::overcommit_allowed()
+    }
+
     /// Refuse to promise capacity the lvolstore does not have.
     ///
     /// `need` is the NEW promise — a create's full size, a grow's DELTA

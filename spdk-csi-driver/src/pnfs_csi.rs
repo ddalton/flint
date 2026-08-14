@@ -104,6 +104,21 @@ pub struct LegHost {
     /// unknown, which placement treats as "not provably same-zone" —
     /// never as "same zone as everything".
     pub zone: String,
+    /// What a new promise can still take on this target's lvolstore,
+    /// and the store's total. PROMISED headroom, not free space: every
+    /// block volume is thin, so free clusters describe what has been
+    /// written while placement is deciding what may be promised.
+    ///
+    /// `total == 0` means UNREADABLE, and placement keeps such a shard
+    /// as a candidate. A shard whose RPC blipped is not a shard that is
+    /// out of room, and the alternative — an unreadable number emptying
+    /// the fleet — turns a blip into "no second copy is possible".
+    pub free_promise_bytes: u64,
+    pub total_bytes: u64,
+    /// This target hands out capacity it does not have
+    /// (`FLINT_PNFS_BLOCK_OVERCOMMIT=1`), so it is never excluded for
+    /// want of room its operator has already chosen to promise.
+    pub overcommit: bool,
 }
 
 /// Why a second copy could not be placed. Each one is a different
@@ -121,6 +136,11 @@ pub enum PlacementRefusal {
     /// be asserted about anything. Refusing beats guessing: the guess
     /// that costs money is the one that says "probably fine".
     ZoneUnknown { composer: String },
+    /// Every eligible target has already promised more than its store
+    /// can hold. A DIFFERENT refusal from the zone ones on purpose: the
+    /// operator's next action is to grow a store or delete a volume,
+    /// not to label a node or accept egress.
+    NoRoom { needed: u64, had: Vec<(String, u64, u64)> },
 }
 
 impl std::fmt::Display for PlacementRefusal {
@@ -139,6 +159,22 @@ impl std::fmt::Display for PlacementRefusal {
                  with {}: \"true\"",
                 elsewhere.join(", "),
                 sc_params::CROSS_ZONE
+            ),
+            Self::NoRoom { needed, had } => write!(
+                f,
+                "replicas: 2 found no target with room for {needed} bytes: {}. Every flint \
+                 block volume is thin, so this is the PROMISED total, not what has been \
+                 written — the stores are oversubscribed to their limit already. Grow an \
+                 lvolstore, delete a volume, or set FLINT_PNFS_BLOCK_OVERCOMMIT=1 on the \
+                 target that should take it",
+                had.iter()
+                    .map(|(t, free, total)| if *total == 0 {
+                        format!("'{t}' capacity unreadable")
+                    } else {
+                        format!("'{t}' can promise {free} of {total}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Self::ZoneUnknown { composer } => write!(
                 f,
@@ -168,11 +204,30 @@ impl std::fmt::Display for PlacementRefusal {
 /// between attempts would host legs on a different peer each time and
 /// leave the losers behind as orphans. Same volume, same fleet, same
 /// answer.
+/// # Capacity is an ADMISSION FILTER, never a ranking
+///
+/// `need` (the volume's size) excludes targets that cannot promise it,
+/// and then the hash picks among the survivors exactly as before.
+/// Ranking by free space would be the obvious design and it would break
+/// the determinism above: free space moves between a CreateVolume and
+/// its retry, so "the emptiest peer" is a different peer each time, and
+/// the losers are left holding orphan legs.
+///
+/// Without the filter a full target is not merely a poor choice, it is
+/// a PERMANENT one: `host_leg` refuses on its own capacity gate, the
+/// provisioner retries, the hash is deterministic, and the same full
+/// target is chosen again forever while its roomy peer sits idle. The
+/// filter turns that poison into a skip.
+///
+/// An UNREADABLE store (`total_bytes == 0`) stays a candidate. The MDS
+/// takes the same stance on its own gate, and the alternative is that
+/// one blipped RPC reads as "no second copy is possible anywhere".
 pub fn choose_leg_host<'a>(
     volume: &str,
     composer: &str,
     fleet: &'a [LegHost],
     cross_zone: bool,
+    need: u64,
 ) -> Result<&'a LegHost, PlacementRefusal> {
     let mut candidates: Vec<&LegHost> = fleet
         .iter()
@@ -204,6 +259,25 @@ pub fn choose_leg_host<'a>(
             return Err(PlacementRefusal::NoneInZone { zone, elsewhere });
         }
         candidates = in_zone;
+    }
+    // THE CAPACITY FILTER, applied after the zone filter so the refusal
+    // names the right conversation: "nobody in your zone has room" is a
+    // different problem from "nobody has room".
+    if need > 0 {
+        let fits: Vec<&LegHost> = candidates
+            .iter()
+            .copied()
+            .filter(|h| h.overcommit || h.total_bytes == 0 || h.free_promise_bytes >= need)
+            .collect();
+        if fits.is_empty() {
+            let mut had: Vec<(String, u64, u64)> = candidates
+                .iter()
+                .map(|h| (h.target_id.clone(), h.free_promise_bytes, h.total_bytes))
+                .collect();
+            had.sort();
+            return Err(PlacementRefusal::NoRoom { needed: need, had });
+        }
+        candidates = fits;
     }
     // Sort before hashing: the fleet arrives in whatever order the
     // shards answered, and a placement that depended on that would not
@@ -956,6 +1030,9 @@ impl PnfsCsi {
             export_node: resp.export_node,
             export_traddr: resp.export_traddr,
             export_trsvcid: resp.export_trsvcid,
+            lvstore_free_promise_bytes: resp.lvstore_free_promise_bytes,
+            lvstore_total_bytes: resp.lvstore_total_bytes,
+            overcommit: resp.overcommit,
             initiators: resp
                 .initiators
                 .into_iter()
@@ -1033,6 +1110,12 @@ pub struct BlockExportView {
     pub export_traddr: String,
     pub export_trsvcid: u32,
     pub initiators: Vec<BlockInitiatorView>,
+    /// PROMISED headroom and the store's total. Both 0 = unreadable,
+    /// which placement must treat as unknown rather than as full.
+    pub lvstore_free_promise_bytes: u64,
+    pub lvstore_total_bytes: u64,
+    /// This shard promises past its store's capacity by operator choice.
+    pub overcommit: bool,
 }
 
 /// One live initiator on a shard's export.
@@ -1243,6 +1326,9 @@ impl PnfsShards {
                     traddr: v.export_traddr.clone(),
                     trsvcid: v.export_trsvcid,
                     zone: String::new(),
+                    free_promise_bytes: v.lvstore_free_promise_bytes,
+                    total_bytes: v.lvstore_total_bytes,
+                    overcommit: v.overcommit,
                 }),
                 Ok(_) => {}
                 Err(e) => {
@@ -1772,6 +1858,7 @@ mod tests {
                 export_traddr: "10.0.0.9".into(),
                 export_trsvcid: 4420,
                 initiators: Vec::new(),
+                ..Default::default()
             });
         let good = PnfsCsi::new(&addr).block_export_status().await.expect("status");
         assert_eq!(good.export_node, "tgt-1");
@@ -2440,13 +2527,145 @@ mod volume_options_tests {
     }
 
     fn host(shard: usize, id: &str, zone: &str) -> LegHost {
+        // Roomy by default so the zone tests keep testing zones. The
+        // capacity tests set these explicitly.
         LegHost {
             shard,
             target_id: id.into(),
             traddr: format!("10.0.0.{}", shard + 1),
             trsvcid: 4420,
             zone: zone.into(),
+            free_promise_bytes: 1 << 40,
+            total_bytes: 1 << 40,
+            overcommit: false,
         }
+    }
+
+    fn host_with_room(shard: usize, id: &str, zone: &str, free: u64, total: u64) -> LegHost {
+        LegHost { free_promise_bytes: free, total_bytes: total, ..host(shard, id, zone) }
+    }
+
+    /// A FULL TARGET IS NOT A POOR CHOICE, IT IS A PERMANENT ONE.
+    ///
+    /// `host_leg` refuses on its own capacity gate, the CSI provisioner
+    /// retries CreateVolume by name, and the pick is deterministic — so
+    /// without this filter the same full target is chosen again on every
+    /// retry, forever, while its roomy peer sits idle. The volume can
+    /// never be created. That is the bug, and it is invisible to any
+    /// test that only checks a single attempt.
+    #[test]
+    fn a_full_target_is_skipped_rather_than_chosen_forever() {
+        let need = 100 << 30;
+        // tgt-b is the one the hash would pick if capacity were ignored;
+        // assert that first, or this test proves nothing about the fix.
+        let roomy_fleet = vec![
+            host(0, "tgt-a", "z1"),
+            host(1, "tgt-b", "z1"),
+        ];
+        assert_eq!(
+            choose_leg_host("pvc-full", "tgt-a", &roomy_fleet, false, need).unwrap().target_id,
+            "tgt-b",
+            "the hash must land on tgt-b when both fit, or the skip below is vacuous"
+        );
+        // Two targets and the only peer is full: REFUSE. Placing there
+        // anyway would hand the volume to a target whose own gate is
+        // about to refuse it, which is the poison this exists to stop.
+        let fleet = vec![
+            host_with_room(0, "tgt-a", "z1", 500 << 30, 1 << 40),
+            host_with_room(1, "tgt-b", "z1", 1 << 30, 1 << 40), // promised out
+        ];
+        assert!(
+            matches!(
+                choose_leg_host("pvc-full", "tgt-a", &fleet, false, need),
+                Err(PlacementRefusal::NoRoom { .. })
+            ),
+            "a fleet whose only peer is full must refuse at CreateVolume, not at host_leg"
+        );
+        // With a real third candidate the full one is skipped for it.
+        let fleet3 = vec![
+            host_with_room(0, "tgt-a", "z1", 500 << 30, 1 << 40),
+            host_with_room(1, "tgt-b", "z1", 1 << 30, 1 << 40),
+            host_with_room(2, "tgt-c", "z1", 900 << 30, 1 << 40),
+        ];
+        assert_eq!(
+            choose_leg_host("pvc-full", "tgt-a", &fleet3, false, need).unwrap().target_id,
+            "tgt-c",
+            "the full target must be skipped, not chosen and refused forever"
+        );
+    }
+
+    /// UNREADABLE IS NOT FULL. A shard whose lvolstore could not be read
+    /// reports (0, 0); excluding it would turn one blipped RPC into
+    /// "no second copy is possible anywhere". The MDS takes the same
+    /// stance on its own gate.
+    #[test]
+    fn an_unreadable_store_stays_a_candidate_and_overcommit_is_never_excluded() {
+        let need = 100 << 30;
+        let unreadable = vec![
+            host_with_room(0, "tgt-a", "z1", 0, 0),
+            host_with_room(1, "tgt-b", "z1", 0, 0),
+        ];
+        choose_leg_host("pvc-x", "tgt-a", &unreadable, false, need)
+            .expect("an unreadable store must not read as a full one");
+        // And a target whose operator has chosen to overcommit is
+        // eligible however little it can promise.
+        let over = vec![
+            host_with_room(0, "tgt-a", "z1", 500 << 30, 1 << 40),
+            LegHost { overcommit: true, ..host_with_room(1, "tgt-b", "z1", 0, 1 << 40) },
+        ];
+        choose_leg_host("pvc-x", "tgt-a", &over, false, need)
+            .expect("an overcommitting target is never excluded for want of room");
+    }
+
+    /// The refusal names the numbers, because the operator's next action
+    /// depends on them — grow a store, delete a volume, or accept the
+    /// overcommit. It is a DIFFERENT conversation from the zone ones.
+    #[test]
+    fn no_room_anywhere_refuses_with_the_figures() {
+        let need = 100 << 30;
+        let fleet = vec![
+            host_with_room(0, "tgt-a", "z1", 500 << 30, 1 << 40),
+            host_with_room(1, "tgt-b", "z1", 1 << 30, 2 << 40),
+        ];
+        match choose_leg_host("pvc-x", "tgt-a", &fleet, false, need) {
+            Err(PlacementRefusal::NoRoom { needed, had }) => {
+                assert_eq!(needed, need);
+                assert_eq!(had.len(), 1, "only the eligible peers are reported");
+                let msg = PlacementRefusal::NoRoom { needed, had }.to_string();
+                assert!(msg.contains("tgt-b"), "{msg}");
+                assert!(msg.contains("PROMISED"), "the message must say this is not free space: {msg}");
+                assert!(msg.contains("OVERCOMMIT"), "the operator's escape hatch must be named: {msg}");
+            }
+            other => panic!("expected NoRoom, got {other:?}"),
+        }
+    }
+
+    /// Capacity FILTERS, it never RANKS — and that is what keeps the
+    /// placement deterministic across a retry. Free space moves between
+    /// a CreateVolume and its retry; if the emptiest peer won, the retry
+    /// would host the leg somewhere else and orphan the first one.
+    #[test]
+    fn capacity_filters_but_does_not_rank() {
+        let need = 1 << 30;
+        let fleet = vec![
+            host_with_room(0, "tgt-a", "z1", 900 << 30, 1 << 40),
+            host_with_room(1, "tgt-b", "z1", 10 << 30, 1 << 40),
+            host_with_room(2, "tgt-c", "z1", 500 << 30, 1 << 40),
+        ];
+        let first = choose_leg_host("pvc-rank", "tgt-a", &fleet, false, need).unwrap().target_id.clone();
+        // The same fleet with the free figures shuffled among the peers
+        // must still place the volume on the SAME target: the choice is
+        // the hash, and capacity only says who was allowed to be in it.
+        let moved = vec![
+            host_with_room(0, "tgt-a", "z1", 11 << 30, 1 << 40),
+            host_with_room(1, "tgt-b", "z1", 900 << 30, 1 << 40),
+            host_with_room(2, "tgt-c", "z1", 12 << 30, 1 << 40),
+        ];
+        let again = choose_leg_host("pvc-rank", "tgt-a", &moved, false, need).unwrap();
+        assert_eq!(
+            first, again.target_id,
+            "placement followed free space instead of the hash — a retry would orphan the first leg"
+        );
     }
 
     /// THE DEFAULT IS SAME-ZONE, AND IT IS A COST DECISION.
@@ -2467,12 +2686,12 @@ mod volume_options_tests {
             host(1, "tgt-b", "us-west-2a"),
             host(2, "tgt-c", "us-west-2b"),
         ];
-        let leg = choose_leg_host("pvc-1", "tgt-a", &fleet, false).expect("placed");
+        let leg = choose_leg_host("pvc-1", "tgt-a", &fleet, false, 0).expect("placed");
         assert_eq!(leg.target_id, "tgt-b", "the only peer in the composer's zone");
 
         // Composer alone in its zone: the cross-zone candidates are
         // named, and the parameter that would allow them is named too.
-        match choose_leg_host("pvc-1", "tgt-c", &fleet, false) {
+        match choose_leg_host("pvc-1", "tgt-c", &fleet, false, 0) {
             Err(PlacementRefusal::NoneInZone { zone, elsewhere }) => {
                 assert_eq!(zone, "us-west-2b");
                 assert_eq!(elsewhere, vec!["us-west-2a".to_string()]);
@@ -2480,7 +2699,7 @@ mod volume_options_tests {
             other => panic!("expected a refusal, got {other:?}"),
         }
         // …and asked for explicitly, it places.
-        let leg = choose_leg_host("pvc-1", "tgt-c", &fleet, true).expect("placed");
+        let leg = choose_leg_host("pvc-1", "tgt-c", &fleet, true, 0).expect("placed");
         assert_ne!(leg.target_id, "tgt-c", "never the composer itself");
     }
 
@@ -2490,7 +2709,7 @@ mod volume_options_tests {
     #[test]
     fn an_unknown_zone_refuses_rather_than_matching_every_other_unknown() {
         let fleet = vec![host(0, "tgt-a", ""), host(1, "tgt-b", "")];
-        match choose_leg_host("pvc-1", "tgt-a", &fleet, false) {
+        match choose_leg_host("pvc-1", "tgt-a", &fleet, false, 0) {
             Err(PlacementRefusal::ZoneUnknown { composer }) => assert_eq!(composer, "tgt-a"),
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -2500,7 +2719,7 @@ mod volume_options_tests {
     #[test]
     fn a_single_target_fleet_refuses_and_says_why() {
         let fleet = vec![host(0, "tgt-a", "us-west-2a")];
-        match choose_leg_host("pvc-1", "tgt-a", &fleet, false) {
+        match choose_leg_host("pvc-1", "tgt-a", &fleet, false, 0) {
             Err(PlacementRefusal::Alone { composer }) => {
                 assert_eq!(composer, "tgt-a");
                 let msg = PlacementRefusal::Alone { composer }.to_string();
@@ -2524,15 +2743,15 @@ mod volume_options_tests {
             host(2, "tgt-c", "z"),
             host(3, "tgt-d", "z"),
         ];
-        let first = choose_leg_host("pvc-stable", "tgt-a", &fleet, false).unwrap().target_id.clone();
+        let first = choose_leg_host("pvc-stable", "tgt-a", &fleet, false, 0).unwrap().target_id.clone();
         let mut shuffled = fleet.clone();
         shuffled.reverse();
-        let again = choose_leg_host("pvc-stable", "tgt-a", &shuffled, false).unwrap();
+        let again = choose_leg_host("pvc-stable", "tgt-a", &shuffled, false, 0).unwrap();
         assert_eq!(again.target_id, first, "the shards answered in a different order");
         // And different volumes do not all pile onto one peer.
         let picks: std::collections::HashSet<String> = (0..24)
             .map(|i| {
-                choose_leg_host(&format!("pvc-{i}"), "tgt-a", &fleet, false)
+                choose_leg_host(&format!("pvc-{i}"), "tgt-a", &fleet, false, 0)
                     .unwrap()
                     .target_id
                     .clone()

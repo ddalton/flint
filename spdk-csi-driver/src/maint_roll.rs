@@ -1754,6 +1754,9 @@ mod tests {
         };
         let exports = vec![
             BlockExportView {
+                lvstore_free_promise_bytes: 0,
+                lvstore_total_bytes: 0,
+                overcommit: false,
                 enabled: true,
                 export_node: "tgt-1".into(),
                 export_traddr: "10.0.0.1".into(),
@@ -1761,6 +1764,9 @@ mod tests {
                 initiators: vec![init("vol-a", "w1"), init("vol-a", "w2")],
             },
             BlockExportView {
+                lvstore_free_promise_bytes: 0,
+                lvstore_total_bytes: 0,
+                overcommit: false,
                 enabled: true,
                 export_node: "tgt-1".into(),
                 export_traddr: "10.0.0.1".into(),
@@ -1768,6 +1774,9 @@ mod tests {
                 initiators: vec![init("vol-b", "w1")],
             },
             BlockExportView {
+                lvstore_free_promise_bytes: 0,
+                lvstore_total_bytes: 0,
+                overcommit: false,
                 enabled: true,
                 export_node: "tgt-2".into(),
                 export_traddr: "10.0.0.2".into(),
@@ -1776,6 +1785,9 @@ mod tests {
             },
             // Enabled but idle, and not enabled at all: neither appears.
             BlockExportView {
+                lvstore_free_promise_bytes: 0,
+                lvstore_total_bytes: 0,
+                overcommit: false,
                 enabled: true,
                 export_node: "tgt-3".into(),
                 export_traddr: "10.0.0.3".into(),
@@ -1810,6 +1822,9 @@ mod tests {
     fn resolve_block_busy_falls_back_to_the_listener_address() {
         use crate::pnfs_csi::{BlockExportView, BlockInitiatorView};
         let exports = vec![BlockExportView {
+                lvstore_free_promise_bytes: 0,
+                lvstore_total_bytes: 0,
+                overcommit: false,
             enabled: true,
             export_node: String::new(),
             export_traddr: "10.0.0.7".into(),
@@ -1843,6 +1858,9 @@ mod tests {
     fn an_unnameable_export_node_is_an_error_not_an_empty_answer() {
         use crate::pnfs_csi::{BlockExportView, BlockInitiatorView};
         let exports = vec![BlockExportView {
+                lvstore_free_promise_bytes: 0,
+                lvstore_total_bytes: 0,
+                overcommit: false,
             enabled: true,
             export_node: String::new(),
             export_traddr: "10.9.9.9".into(),
@@ -1867,6 +1885,9 @@ mod tests {
     fn an_unnameable_but_idle_export_is_not_an_error() {
         use crate::pnfs_csi::BlockExportView;
         let exports = vec![BlockExportView {
+                lvstore_free_promise_bytes: 0,
+                lvstore_total_bytes: 0,
+                overcommit: false,
             enabled: true,
             export_node: String::new(),
             export_traddr: "10.9.9.9".into(),
@@ -1938,6 +1959,9 @@ mod tests {
     async fn the_node_list_is_only_read_when_a_shard_cannot_name_itself() {
         use crate::pnfs_csi::{BlockExportView, BlockInitiatorView};
         let one = |node: &str, traddr: &str| BlockExportView {
+                lvstore_free_promise_bytes: 0,
+                lvstore_total_bytes: 0,
+                overcommit: false,
             enabled: true,
             export_node: node.into(),
             export_traddr: traddr.into(),

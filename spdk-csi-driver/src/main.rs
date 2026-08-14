@@ -1618,6 +1618,12 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     &composer,
                     &fleet,
                     vol_opts.cross_zone,
+                    // The leg is the same size as the volume, and it is
+                    // a PROMISE the peer's store has to be able to make:
+                    // `host_leg` runs its own capacity gate and refuses,
+                    // and the pick here is deterministic, so a full peer
+                    // chosen once is chosen on every retry forever.
+                    size_bytes,
                 )
                 .map_err(|refusal| tonic::Status::failed_precondition(refusal.to_string()))?
                 .clone();
