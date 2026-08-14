@@ -337,6 +337,22 @@ pub struct BlockExportReconciler {
     /// which the next attempt sweeps, prunes or re-copies, and none of
     /// which a durable flag would have helped with.
     rebuilding: dashmap::DashMap<String, ()>,
+    /// THE ARBITRATION RECORD — seat, legs, leases, target registry.
+    /// Separate from `backend` because they answer different questions
+    /// and, in a replicated deployment, LIVE IN DIFFERENT PLACES: the
+    /// backend is this shard's own sqlite (geometry, extents,
+    /// admissions, fences — the allocation lane), while the witness is
+    /// the one store both of a volume's targets can reach independently
+    /// of each other's health. Defaults to a `BackendWitness` over the
+    /// same backend, which is exactly the pre-witness behaviour and
+    /// exactly right for a single-copy volume.
+    witness: Arc<dyn crate::pnfs::mds::witness::CompositionWitness>,
+    /// WHO THIS RECONCILER IS. Was `self.me.clone()` read at every site;
+    /// now a field, because "which target am I" is a property of the
+    /// reconciler and not of the process — and a process that cannot
+    /// hold two identities cannot host a two-shard test, which is
+    /// precisely the test the witness exists to make possible.
+    me: String,
 }
 
 impl BlockExportReconciler {
@@ -348,6 +364,9 @@ impl BlockExportReconciler {
         trsvcid: u16,
         ptpl_dir: String,
     ) -> Self {
+        let witness: Arc<dyn crate::pnfs::mds::witness::CompositionWitness> = Arc::new(
+            crate::pnfs::mds::witness::BackendWitness::new(Arc::clone(&backend)),
+        );
         Self {
             rpc,
             backend,
@@ -358,7 +377,43 @@ impl BlockExportReconciler {
             locks: dashmap::DashMap::new(),
             probes: dashmap::DashMap::new(),
             rebuilding: dashmap::DashMap::new(),
+            witness,
+            me: target_id(),
         }
+    }
+
+    /// Point this reconciler's arbitration at a SHARED witness — the
+    /// whole point of the type. Everything else (geometry, extents,
+    /// admissions, fences) stays in this shard's own backend.
+    pub fn with_witness(
+        mut self,
+        witness: Arc<dyn crate::pnfs::mds::witness::CompositionWitness>,
+    ) -> Self {
+        self.witness = witness;
+        self
+    }
+
+    /// Override this reconciler's target identity. Production reads it
+    /// from the environment once (`self.me.clone()`); tests use this to put
+    /// two shards in one process, which is the only way to exercise the
+    /// case the whole witness exists for.
+    pub fn with_identity(mut self, me: String) -> Self {
+        self.me = me;
+        self
+    }
+
+    /// This reconciler's target id — the name the record knows it by.
+    pub fn target_id(&self) -> &str {
+        &self.me
+    }
+
+    /// Every seat the witness holds — the reconcile pass's subject
+    /// list. Goes through the witness because a volume this target
+    /// merely HOSTS A LEG of was seated by another shard entirely.
+    pub async fn seat_list(
+        &self,
+    ) -> Result<Vec<crate::state_backend::extent_alloc::BlockSeat>, String> {
+        self.witness.seat_list().await.map_err(|e| e.to_string())
     }
 
     fn lock_for(&self, volume: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -387,13 +442,13 @@ impl BlockExportReconciler {
     /// no operator step and a target returning on a new address updates
     /// its own row.
     pub async fn self_register(&self) -> Result<(), String> {
-        let id = target_id();
+        let id = self.me.clone();
         match self
-            .backend
-            .block_target_register(&id, &self.traddr, self.trsvcid, now_unix())
+            .witness
+            .target_register(&id, &self.traddr, self.trsvcid, now_unix())
             .await
         {
-            Ok(Ok(())) => {
+            Ok(()) => {
                 tracing::debug!(
                     "block target '{}' registered at {}:{}",
                     id,
@@ -402,8 +457,7 @@ impl BlockExportReconciler {
                 );
                 Ok(())
             }
-            Ok(Err(e)) => Err(format!("target registration refused: {e}")),
-            Err(e) => Err(format!("target registration failed: {e}")),
+            Err(e) => Err(format!("target registration refused: {e}")),
         }
     }
 
@@ -416,16 +470,15 @@ impl BlockExportReconciler {
         &self,
         volume: &str,
     ) -> Result<crate::state_backend::extent_alloc::BlockSeat, String> {
-        let me = target_id();
+        let me = self.me.clone();
         let now = now_unix();
         let seat = match self
-            .backend
-            .block_seat_volume(volume, &me, now, now + lease_ttl())
+            .witness
+            .seat_volume(volume, &me, now, now + lease_ttl())
             .await
         {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(format!("seating '{volume}' refused: {e}")),
-            Err(e) => return Err(format!("seating '{volume}' failed: {e}")),
+            Ok(s) => s,
+            Err(e) => return Err(format!("seating '{volume}' refused: {e}")),
         };
         if seat.composer != me {
             return Err(format!(
@@ -451,15 +504,14 @@ impl BlockExportReconciler {
         &self,
         volume: &str,
     ) -> Result<(crate::state_backend::extent_alloc::BlockSeat, String, u16), String> {
-        match self.backend.block_resolve_target(volume).await {
-            Ok(Ok((seat, target))) => {
+        match self.witness.resolve_target(volume).await {
+            Ok((seat, target)) => {
                 let (traddr, trsvcid) = (target.traddr, target.trsvcid);
                 Ok((seat, traddr, trsvcid))
             }
-            Ok(Err(e)) => Err(format!(
+            Err(e) => Err(format!(
                 "cannot resolve the target serving '{volume}': {e}"
             )),
-            Err(e) => Err(format!("target resolution for '{volume}' failed: {e}")),
         }
     }
 
@@ -547,7 +599,7 @@ impl BlockExportReconciler {
     pub async fn probe_one(&self, target_id_: &str, traddr: &str, trsvcid: u16) -> Reachability {
         let res = super::resv_fence::probe_nvme_tcp(traddr, trsvcid, probe_timeout()).await;
         if let Err(ref why) = res {
-            let admin_ok = if target_id_ == target_id() {
+            let admin_ok = if target_id_ == self.me.clone() {
                 self.rpc
                     .rpc(&json!({ "method": "spdk_get_version", "params": {} }))
                     .await
@@ -556,7 +608,7 @@ impl BlockExportReconciler {
                 // Not ours to administer; no second opinion available.
                 false
             };
-            if listener_is_misconfigured(target_id_ == target_id(), admin_ok) {
+            if listener_is_misconfigured(target_id_ == self.me.clone(), admin_ok) {
                 tracing::error!(
                     "target '{}' answers its RPC socket but NOT its own listener {}:{} ({}) — \
                      that is the address every csi-node dials, so this is a configuration \
@@ -585,12 +637,8 @@ impl BlockExportReconciler {
     /// address for it, and inventing one is what the registry exists to
     /// prevent.
     pub async fn probe_all_targets(&self) -> Vec<(String, Reachability)> {
-        let targets = match self.backend.block_target_list().await {
-            Ok(Ok(t)) => t,
-            Ok(Err(e)) => {
-                tracing::error!("target registry unreadable, no verdicts this pass: {e}");
-                return Vec::new();
-            }
+        let targets = match self.witness.target_list().await {
+            Ok(t) => t,
             Err(e) => {
                 tracing::error!("target registry unreadable, no verdicts this pass: {e}");
                 return Vec::new();
@@ -611,15 +659,13 @@ impl BlockExportReconciler {
     pub async fn seat_audit(
         &self,
     ) -> Result<Vec<(crate::state_backend::extent_alloc::BlockSeat, bool)>, String> {
-        let seats = match self.backend.block_seat_list().await {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(format!("seat list refused: {e}")),
-            Err(e) => return Err(format!("seat list failed: {e}")),
+        let seats = match self.witness.seat_list().await {
+            Ok(s) => s,
+            Err(e) => return Err(format!("seat list refused: {e}")),
         };
-        let targets = match self.backend.block_target_list().await {
-            Ok(Ok(t)) => t,
-            Ok(Err(e)) => return Err(format!("target list refused: {e}")),
-            Err(e) => return Err(format!("target list failed: {e}")),
+        let targets = match self.witness.target_list().await {
+            Ok(t) => t,
+            Err(e) => return Err(format!("target list refused: {e}")),
         };
         let known: std::collections::HashSet<&str> =
             targets.iter().map(|t| t.target_id.as_str()).collect();
@@ -689,13 +735,12 @@ impl BlockExportReconciler {
         holder: &str,
     ) -> Result<crate::state_backend::extent_alloc::BlockLease, String> {
         match self
-            .backend
-            .block_lease_renew(volume, holder, now_unix() + lease_ttl())
+            .witness
+            .lease_renew(volume, holder, now_unix() + lease_ttl())
             .await
         {
-            Ok(Ok(l)) => Ok(l),
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(e) => Err(format!("lease renewal failed: {e}")),
+            Ok(l) => Ok(l),
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -713,7 +758,7 @@ impl BlockExportReconciler {
     /// its peers, never onto itself, and its own copy is claimed by the
     /// raid module anyway.
     fn desired_leg_hosts(&self, seat: &crate::state_backend::extent_alloc::BlockSeat) -> Vec<String> {
-        if seat.composer == target_id() {
+        if seat.composer == self.me.clone() {
             Vec::new()
         } else {
             vec![crate::nvmeof_export::flint_host_nqn(&seat.composer)]
@@ -730,13 +775,12 @@ impl BlockExportReconciler {
     pub async fn ensure_leg_export(&self, volume: &str) -> Result<(), String> {
         let lock = self.lock_for(volume);
         let _g = lock.lock().await;
-        let seat = match self.backend.block_volume_seat(volume).await {
-            Ok(Ok(Some(s))) => s,
-            Ok(Ok(None)) => return Err(format!("'{volume}' has no seat — no leg to offer")),
-            Ok(Err(e)) => return Err(format!("seat unreadable: {e}")),
+        let seat = match self.witness.volume_seat(volume).await {
+            Ok(Some(s)) => s,
+            Ok(None) => return Err(format!("'{volume}' has no seat — no leg to offer")),
             Err(e) => return Err(format!("seat unreadable: {e}")),
         };
-        let me = target_id();
+        let me = self.me.clone();
         if seat.composer == me {
             // We compose it; the raid claims the lvol. Any leg export
             // left from when we did NOT compose it must go, or the
@@ -926,9 +970,8 @@ impl BlockExportReconciler {
         seat: &crate::state_backend::extent_alloc::BlockSeat,
     ) -> Result<String, String> {
         let local = self.bdev_name(volume);
-        let legs = match self.backend.block_legs(volume).await {
-            Ok(Ok(l)) => l,
-            Ok(Err(e)) => return Err(format!("legs unreadable: {e}")),
+        let legs = match self.witness.legs(volume).await {
+            Ok(l) => l,
             Err(e) => return Err(format!("legs unreadable: {e}")),
         };
         if legs.len() <= 1 {
@@ -987,7 +1030,7 @@ impl BlockExportReconciler {
         local: &str,
         legs: &[crate::state_backend::extent_alloc::BlockLeg],
     ) -> Result<(), String> {
-        let me = target_id();
+        let me = self.me.clone();
         for leg in legs.iter().filter(|l| l.target_id != me) {
             if leg.sync_state != crate::state_backend::extent_alloc::LEG_INSYNC {
                 continue;
@@ -1000,8 +1043,8 @@ impl BlockExportReconciler {
                 leg.target_id
             );
             match self
-                .backend
-                .block_leg_mark(
+                .witness
+                .leg_mark(
                     volume,
                     &leg.target_id,
                     crate::state_backend::extent_alloc::LEG_STALE,
@@ -1009,8 +1052,7 @@ impl BlockExportReconciler {
                 )
                 .await
             {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(format!("demoting leg '{}': {e}", leg.target_id)),
+                Ok(()) => {}
                 Err(e) => return Err(format!("demoting leg '{}': {e}", leg.target_id)),
             }
         }
@@ -1184,7 +1226,7 @@ impl BlockExportReconciler {
         legs: &[crate::state_backend::extent_alloc::BlockLeg],
         live: &serde_json::Value,
     ) -> Result<(), String> {
-        let me = target_id();
+        let me = self.me.clone();
         let mut vouched = vec![local.to_string()];
         for leg in legs.iter().filter(|l| {
             l.target_id != me && l.sync_state == crate::state_backend::extent_alloc::LEG_INSYNC
@@ -1256,9 +1298,8 @@ impl BlockExportReconciler {
         {
             return Ok(expected); // already attached
         }
-        let target = match self.backend.block_target_list().await {
-            Ok(Ok(t)) => t.into_iter().find(|t| t.target_id == peer),
-            Ok(Err(e)) => return Err(format!("target registry unreadable: {e}")),
+        let target = match self.witness.target_list().await {
+            Ok(t) => t.into_iter().find(|t| t.target_id == peer),
             Err(e) => return Err(format!("target registry unreadable: {e}")),
         };
         let Some(target) = target else {
@@ -1279,7 +1320,7 @@ impl BlockExportReconciler {
                 // The inter-target identity the peer's leg allow-list
                 // admits. Stable per target, which is what makes the
                 // peer's eviction possible at all.
-                "hostnqn": crate::nvmeof_export::flint_host_nqn(&target_id()),
+                "hostnqn": crate::nvmeof_export::flint_host_nqn(&self.me.clone()),
             }
         });
         // THE DEGRADE BARRIER's transport half: a composed leg QUEUES
@@ -1375,13 +1416,13 @@ impl BlockExportReconciler {
     ///
     /// Returns the legs degraded this pass.
     pub async fn degrade_pass(&self, volume: &str) -> Vec<String> {
-        let me = target_id();
-        let seat = match self.backend.block_volume_seat(volume).await {
-            Ok(Ok(Some(s))) if s.composer == me => s,
+        let me = self.me.clone();
+        let seat = match self.witness.volume_seat(volume).await {
+            Ok(Some(s)) if s.composer == me => s,
             _ => return Vec::new(), // not ours to compose
         };
-        let legs = match self.backend.block_legs(volume).await {
-            Ok(Ok(l)) => l,
+        let legs = match self.witness.legs(volume).await {
+            Ok(l) => l,
             _ => return Vec::new(),
         };
         let mut degraded = Vec::new();
@@ -1405,8 +1446,8 @@ impl BlockExportReconciler {
             );
             // (1) THE MARK, first and durable.
             match self
-                .backend
-                .block_leg_mark(
+                .witness
+                .leg_mark(
                     volume,
                     &leg.target_id,
                     crate::state_backend::extent_alloc::LEG_STALE,
@@ -1414,22 +1455,14 @@ impl BlockExportReconciler {
                 )
                 .await
             {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
+                Ok(()) => {}
+                Err(e) => {
                     // The mark did not land, so the barrier is not up.
                     // Leave the leg in the raid: I/O stays stalled,
                     // which is the safe side of this trade.
                     tracing::error!(
                         "'{}' leg '{}': stale mark FAILED ({}) — leaving the leg in the \
                          composition, so writes stall rather than acking behind the record",
-                        volume, leg.target_id, e
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "'{}' leg '{}': stale mark FAILED ({}) — writes stall rather than \
-                         acking behind the record",
                         volume, leg.target_id, e
                     );
                     continue;
@@ -1532,14 +1565,13 @@ impl BlockExportReconciler {
     }
 
     async fn rebuild_inner(&self, volume: &str, peer: &str) -> RebuildOutcome {
-        let me = target_id();
+        let me = self.me.clone();
         // ---- the record is the only door ----
-        let seat = match self.backend.block_volume_seat(volume).await {
-            Ok(Ok(Some(s))) => s,
-            Ok(Ok(None)) => {
+        let seat = match self.witness.volume_seat(volume).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
                 return RebuildOutcome::Refused(format!("'{volume}' has no seat"))
             }
-            Ok(Err(e)) => return RebuildOutcome::Deferred(format!("seat unreadable: {e}")),
             Err(e) => return RebuildOutcome::Deferred(format!("seat unreadable: {e}")),
         };
         if seat.composer != me {
@@ -1549,9 +1581,8 @@ impl BlockExportReconciler {
                 seat.composer
             ));
         }
-        let legs = match self.backend.block_legs(volume).await {
-            Ok(Ok(l)) => l,
-            Ok(Err(e)) => return RebuildOutcome::Deferred(format!("legs unreadable: {e}")),
+        let legs = match self.witness.legs(volume).await {
+            Ok(l) => l,
             Err(e) => return RebuildOutcome::Deferred(format!("legs unreadable: {e}")),
         };
         let Some(leg) = legs.iter().find(|l| l.target_id == peer) else {
@@ -1742,9 +1773,9 @@ impl BlockExportReconciler {
         // rebuild that started while we composed the volume must not
         // finish after we were deposed: the leg would be marked in sync
         // against bytes that are no longer the volume's.
-        match self.backend.block_volume_seat(volume).await {
-            Ok(Ok(Some(s))) if s.composer == me && s.epoch == seat.epoch => {}
-            Ok(Ok(Some(s))) => {
+        match self.witness.volume_seat(volume).await {
+            Ok(Some(s)) if s.composer == me && s.epoch == seat.epoch => {}
+            Ok(Some(s)) => {
                 self.abandon_rebuild(volume, peer).await;
                 return RebuildOutcome::Refused(format!(
                     "'{volume}' moved to epoch {} at '{}' during the rebuild — the copy is \
@@ -1757,8 +1788,8 @@ impl BlockExportReconciler {
                 return RebuildOutcome::Deferred("seat unreadable at the window".into());
             }
         }
-        match self.backend.block_lease(volume).await {
-            Ok(Ok(Some(l))) if l.holder == me && l.is_live_at(now_unix()) => {}
+        match self.witness.lease(volume).await {
+            Ok(Some(l)) if l.holder == me && l.is_live_at(now_unix()) => {}
             _ => {
                 self.abandon_rebuild(volume, peer).await;
                 return RebuildOutcome::Deferred(format!(
@@ -1843,8 +1874,8 @@ impl BlockExportReconciler {
         // prunes — the safe direction. The reverse would leave an
         // electable leg missing the final delta.
         match self
-            .backend
-            .block_leg_mark(
+            .witness
+            .leg_mark(
                 volume,
                 peer,
                 crate::state_backend::extent_alloc::LEG_INSYNC,
@@ -1852,12 +1883,11 @@ impl BlockExportReconciler {
             )
             .await
         {
-            Ok(Ok(())) => Ok(copied),
+            Ok(()) => Ok(copied),
             other => {
                 let e = match other {
-                    Ok(Err(e)) => e.to_string(),
                     Err(e) => e.to_string(),
-                    Ok(Ok(())) => unreachable!(),
+                    Ok(()) => unreachable!(),
                 };
                 let remove = json!({
                     "method": "bdev_raid_remove_base_bdev",
@@ -1906,14 +1936,14 @@ impl BlockExportReconciler {
     /// and the loop that would be blocked is the one that renews every
     /// serving lease on this target.
     pub async fn rebuild_candidates(&self, volumes: &[String]) -> Vec<(String, String)> {
-        let me = target_id();
+        let me = self.me.clone();
         let mut out = Vec::new();
         for volume in volumes {
-            match self.backend.block_volume_seat(volume).await {
-                Ok(Ok(Some(s))) if s.composer == me => {}
+            match self.witness.volume_seat(volume).await {
+                Ok(Some(s)) if s.composer == me => {}
                 _ => continue,
             }
-            let Ok(Ok(legs)) = self.backend.block_legs(volume).await else { continue };
+            let Ok(legs) = self.witness.legs(volume).await else { continue };
             for leg in legs.iter().filter(|l| {
                 l.target_id != me
                     && l.sync_state == crate::state_backend::extent_alloc::LEG_STALE
@@ -2185,14 +2215,13 @@ impl BlockExportReconciler {
     /// is no separate "who was serving" record because the lease is
     /// exactly that record — holder plus epoch.
     pub async fn assemble(&self, volume: &str) -> AssemblyOutcome {
-        let me = target_id();
+        let me = self.me.clone();
         let lock = self.lock_for(volume);
         let _g = lock.lock().await;
 
-        let seat = match self.backend.block_volume_seat(volume).await {
-            Ok(Ok(Some(s))) => s,
-            Ok(Ok(None)) => return AssemblyOutcome::Refused("no seat".into()),
-            Ok(Err(e)) => return AssemblyOutcome::Refused(format!("seat unreadable: {e}")),
+        let seat = match self.witness.volume_seat(volume).await {
+            Ok(Some(s)) => s,
+            Ok(None) => return AssemblyOutcome::Refused("no seat".into()),
             Err(e) => return AssemblyOutcome::Refused(format!("seat unreadable: {e}")),
         };
         if seat.composer != me {
@@ -2202,9 +2231,8 @@ impl BlockExportReconciler {
             ));
         }
 
-        let standing = match self.backend.block_lease(volume).await {
-            Ok(Ok(l)) => l,
-            Ok(Err(e)) => return AssemblyOutcome::Refused(format!("lease unreadable: {e}")),
+        let standing = match self.witness.lease(volume).await {
+            Ok(l) => l,
             Err(e) => return AssemblyOutcome::Refused(format!("lease unreadable: {e}")),
         };
         let now = now_unix();
@@ -2236,26 +2264,24 @@ impl BlockExportReconciler {
             // only a completed rebuild clears the mark
             // (`RecordRejoinOnly`).
             match self
-                .backend
-                .block_leg_mark(volume, d, crate::state_backend::extent_alloc::LEG_STALE, now)
+                .witness
+                .leg_mark(volume, d, crate::state_backend::extent_alloc::LEG_STALE, now)
                 .await
             {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
+                Ok(()) => {}
+                Err(e) => {
                     return AssemblyOutcome::Refused(format!("stale mark refused: {e}"))
                 }
-                Err(e) => return AssemblyOutcome::Refused(format!("stale mark failed: {e}")),
             }
         }
 
         match self
-            .backend
-            .block_lease_grant(volume, seat.epoch, &me, now + lease_ttl())
+            .witness
+            .lease_grant(volume, seat.epoch, &me, now + lease_ttl())
             .await
         {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => return AssemblyOutcome::Refused(format!("lease grant refused: {e}")),
-            Err(e) => return AssemblyOutcome::Refused(format!("lease grant failed: {e}")),
+            Ok(_) => {}
+            Err(e) => return AssemblyOutcome::Refused(format!("lease grant refused: {e}")),
         }
 
         // Now the export, through the ordinary converge path so the
@@ -2274,19 +2300,19 @@ impl BlockExportReconciler {
     /// acted on or is waiting on, so a steady-state pass reports
     /// nothing.
     pub async fn assembly_pass(&self, volumes: &[String]) -> Vec<(String, AssemblyOutcome)> {
-        let me = target_id();
+        let me = self.me.clone();
         let mut out = Vec::new();
         for v in volumes {
-            let seat = match self.backend.block_volume_seat(v).await {
-                Ok(Ok(Some(s))) => s,
+            let seat = match self.witness.volume_seat(v).await {
+                Ok(Some(s)) => s,
                 _ => continue,
             };
             if seat.composer != me {
                 continue;
             }
             let held = matches!(
-                self.backend.block_lease(v).await,
-                Ok(Ok(Some(ref l))) if l.holder == me && l.epoch == seat.epoch
+                self.witness.lease(v).await,
+                Ok(Some(ref l)) if l.holder == me && l.epoch == seat.epoch
             );
             if held {
                 continue;
@@ -2320,15 +2346,11 @@ impl BlockExportReconciler {
     /// run puts a number on what that costs — stale READS only, because
     /// writes stay contained by eviction and the degrade barrier.
     pub async fn deadman_pass(&self) -> Vec<(String, String)> {
-        let me = target_id();
-        let leases = match self.backend.block_leases_held(&me).await {
-            Ok(Ok(l)) => l,
-            Ok(Err(e)) => {
-                tracing::error!("dead-man: lease list refused: {e}");
-                return Vec::new();
-            }
+        let me = self.me.clone();
+        let leases = match self.witness.leases_held(&me).await {
+            Ok(l) => l,
             Err(e) => {
-                tracing::error!("dead-man: lease list unreadable: {e}");
+                tracing::error!("dead-man: lease list refused: {e}");
                 return Vec::new();
             }
         };
@@ -2366,12 +2388,8 @@ impl BlockExportReconciler {
                 Ok(()) => {
                     // Surrender explicitly, so nothing downstream has to
                     // tell "expired" from "expired and acted upon".
-                    match self.backend.block_lease_drop(&lease.volume).await {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => tracing::error!(
-                            "dead-man '{}': suspended but lease not surrendered: {e}",
-                            lease.volume
-                        ),
+                    match self.witness.lease_drop(&lease.volume).await {
+                        Ok(_) => {}
                         Err(e) => tracing::error!(
                             "dead-man '{}': suspended but lease not surrendered: {e}",
                             lease.volume
@@ -2742,7 +2760,7 @@ impl BlockExportReconciler {
     /// the difference between it and the array's own size is the only
     /// thing an expand can usefully wait for.
     async fn visible_legs_min(&self, volume: &str) -> Option<u64> {
-        let me = target_id();
+        let me = self.me.clone();
         let mut min = self
             .rpc
             .rpc(&json!({
@@ -2752,7 +2770,7 @@ impl BlockExportReconciler {
             .await
             .ok()
             .and_then(|r| Self::bdev_capacity(&r))?;
-        if let Ok(Ok(legs)) = self.backend.block_legs(volume).await {
+        if let Ok(legs) = self.witness.legs(volume).await {
             for leg in legs.iter().filter(|l| {
                 l.target_id != me
                     && l.sync_state == crate::state_backend::extent_alloc::LEG_INSYNC
@@ -2777,9 +2795,9 @@ impl BlockExportReconciler {
     /// this target, so its size is readable here. A leg we cannot read
     /// is reported too — unknown is not evidence of being big enough.
     async fn short_legs(&self, volume: &str, need: u64) -> Vec<String> {
-        let me = target_id();
-        let legs = match self.backend.block_legs(volume).await {
-            Ok(Ok(l)) => l,
+        let me = self.me.clone();
+        let legs = match self.witness.legs(volume).await {
+            Ok(l) => l,
             _ => return Vec::new(),
         };
         let mut short = Vec::new();
@@ -2858,7 +2876,7 @@ impl BlockExportReconciler {
         // its own socket. Keeping the address out of the converge path
         // is what keeps the registry needed exactly where an address is
         // needed (the fence lane, the attach answer) and nowhere else.
-        let me = target_id();
+        let me = self.me.clone();
         match mode {
             ConvergeMode::Provision(_) => {
                 // Announce before seating: the volume is about to be
@@ -2941,8 +2959,8 @@ impl BlockExportReconciler {
         //
         // Not under `Suspend`: a target the dead-man is closing must not
         // be reaching out to attach peer legs on its way out.
-        let seat = match self.backend.block_volume_seat(volume).await {
-            Ok(Ok(Some(s))) => Some(s),
+        let seat = match self.witness.volume_seat(volume).await {
+            Ok(Some(s)) => Some(s),
             _ => None,
         };
         let served = match (mode, &seat) {
@@ -3210,7 +3228,7 @@ impl BlockExportReconciler {
         size_bytes: u64,
         composer: &str,
     ) -> Result<(), String> {
-        let me = target_id();
+        let me = self.me.clone();
         if composer == me {
             return Err(format!(
                 "'{volume}' is composed HERE — a target cannot also host its leg: the raid holds \
@@ -3224,19 +3242,18 @@ impl BlockExportReconciler {
             // here would let a stale placement call move a live volume's
             // composer, which is promotion's job and nobody else's.
             match self
-                .backend
-                .block_seat_volume(volume, composer, now_unix(), now_unix() + lease_ttl())
+                .witness
+                .seat_volume(volume, composer, now_unix(), now_unix() + lease_ttl())
                 .await
             {
-                Ok(Ok(seat)) if seat.composer == composer => {}
-                Ok(Ok(seat)) => {
+                Ok(seat) if seat.composer == composer => {}
+                Ok(seat) => {
                     return Err(format!(
                         "'{volume}' is already seated at '{}' here, not at '{composer}' — \
                          refusing to host a leg for a composer the record does not name",
                         seat.composer
                     ))
                 }
-                Ok(Err(e)) => return Err(format!("seating '{volume}': {e}")),
                 Err(e) => return Err(format!("seating '{volume}': {e}")),
             }
             let bdev = self.bdev_name(volume);
@@ -3321,15 +3338,14 @@ impl BlockExportReconciler {
         traddr: &str,
         trsvcid: u16,
     ) -> Result<(), String> {
-        if leg == target_id() {
+        if leg == self.me.clone() {
             return Err(format!(
                 "'{volume}': the placed leg names this target, which composes it — a volume \
                  cannot be its own second copy"
             ));
         }
-        match self.backend.block_target_register(leg, traddr, trsvcid, now_unix()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(format!("registering leg target '{leg}': {e}")),
+        match self.witness.target_register(leg, traddr, trsvcid, now_unix()).await {
+            Ok(()) => {}
             Err(e) => return Err(format!("registering leg target '{leg}': {e}")),
         }
         // STALE, and this is the load-bearing word. The peer's lvol
@@ -3337,12 +3353,11 @@ impl BlockExportReconciler {
         // electable, and `ElectInSync` would hand the volume to a copy
         // of nothing.
         match self
-            .backend
-            .block_leg_mark(volume, leg, crate::state_backend::extent_alloc::LEG_STALE, now_unix())
+            .witness
+            .leg_mark(volume, leg, crate::state_backend::extent_alloc::LEG_STALE, now_unix())
             .await
         {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(format!("recording leg '{leg}' of '{volume}': {e}")),
+            Ok(()) => {}
             Err(e) => return Err(format!("recording leg '{leg}' of '{volume}': {e}")),
         }
         tracing::info!(
@@ -3357,9 +3372,9 @@ impl BlockExportReconciler {
     /// before DeleteVolume sweeps the record, because afterwards
     /// nothing names the peer's lvol at all.
     pub async fn leg_targets(&self, volume: &str) -> Vec<String> {
-        let me = target_id();
-        match self.backend.block_legs(volume).await {
-            Ok(Ok(legs)) => {
+        let me = self.me.clone();
+        match self.witness.legs(volume).await {
+            Ok(legs) => {
                 legs.into_iter().map(|l| l.target_id).filter(|t| *t != me).collect()
             }
             _ => Vec::new(),
@@ -3369,8 +3384,8 @@ impl BlockExportReconciler {
     /// Drop a leg this target hosts: the leg export, the lvol, the
     /// record. DeleteVolume's authority, arriving second-hand.
     pub async fn drop_leg(&self, volume: &str) -> Result<(), String> {
-        let me = target_id();
-        if let Ok(Ok(Some(seat))) = self.backend.block_volume_seat(volume).await {
+        let me = self.me.clone();
+        if let Ok(Some(seat)) = self.witness.volume_seat(volume).await {
             if seat.composer == me {
                 return Err(format!(
                     "'{volume}' is COMPOSED here — this is the volume itself, not a leg of it; \
@@ -3407,11 +3422,10 @@ impl BlockExportReconciler {
     /// and saying so plainly is `WaitsPrice`'s bill arriving in the log
     /// instead of in a design doc.
     pub async fn attempt_promotion(&self, volume: &str) -> PromotionOutcome {
-        let seat = match self.backend.block_volume_seat(volume).await {
-            Ok(Ok(Some(s))) => s,
-            Ok(Ok(None)) => return PromotionOutcome::Refused("no seat".into()),
-            Ok(Err(e)) => return PromotionOutcome::Refused(format!("seat read refused: {e}")),
-            Err(e) => return PromotionOutcome::Refused(format!("seat read failed: {e}")),
+        let seat = match self.witness.volume_seat(volume).await {
+            Ok(Some(s)) => s,
+            Ok(None) => return PromotionOutcome::Refused("no seat".into()),
+            Err(e) => return PromotionOutcome::Refused(format!("seat read refused: {e}")),
         };
         // Never promote away from a composer this MDS has not actually
         // condemned: the model's CAS is guarded on the verdict, and a
@@ -3426,9 +3440,8 @@ impl BlockExportReconciler {
             }
         }
 
-        let legs = match self.backend.block_legs(volume).await {
-            Ok(Ok(l)) => l,
-            Ok(Err(e)) => return PromotionOutcome::Refused(format!("legs unreadable: {e}")),
+        let legs = match self.witness.legs(volume).await {
+            Ok(l) => l,
             Err(e) => return PromotionOutcome::Refused(format!("legs unreadable: {e}")),
         };
         let in_sync: Vec<&crate::state_backend::extent_alloc::BlockLeg> = legs
@@ -3472,31 +3485,37 @@ impl BlockExportReconciler {
         // deposed composer's lease is what eviction and assembly must
         // wait out. Reading it after would race the dead-man's own
         // surrender of that lease.
-        let horizon = match self.backend.block_lease(volume).await {
-            Ok(Ok(Some(l))) => l.expires_unix,
+        let horizon = match self.witness.lease(volume).await {
+            Ok(Some(l)) => l.expires_unix,
             // No lease means nothing is entitled to be serving, so the
             // horizon is already behind us.
-            Ok(Ok(None)) => now_unix(),
-            Ok(Err(e)) => return PromotionOutcome::Refused(format!("lease unreadable: {e}")),
+            Ok(None) => now_unix(),
             Err(e) => return PromotionOutcome::Refused(format!("lease unreadable: {e}")),
         };
         match self
-            .backend
-            .block_promote(volume, seat.epoch, &seat.composer, &candidate.target_id, now_unix())
+            .witness
+            .promote(volume, seat.epoch, &seat.composer, &candidate.target_id, now_unix())
             .await
         {
-            Ok(Ok(new_seat)) => PromotionOutcome::Promoted {
+            Ok(new_seat) => PromotionOutcome::Promoted {
                 from: seat.composer,
                 to: new_seat.composer,
                 epoch: new_seat.epoch,
                 evict_after_unix: horizon,
             },
-            Ok(Err(crate::state_backend::extent_alloc::ExtentAllocError::PromotionRaced {
-                epoch,
-                composer,
-            })) => PromotionOutcome::Raced { epoch, composer },
-            Ok(Err(e)) => PromotionOutcome::Refused(format!("CAS refused: {e}")),
-            Err(e) => PromotionOutcome::Refused(format!("CAS failed: {e}")),
+            // A RACE IS NOT A FAILURE: somebody moved the seat between
+            // our read and our write, which is the CAS doing exactly
+            // its job — report where the record actually is.
+            Err(e) => match e.refusal() {
+                Some(crate::state_backend::extent_alloc::ExtentAllocError::PromotionRaced {
+                    epoch,
+                    composer,
+                }) => PromotionOutcome::Raced {
+                    epoch: *epoch,
+                    composer: composer.clone(),
+                },
+                _ => PromotionOutcome::Refused(format!("CAS refused: {e}")),
+            },
         }
     }
 
@@ -5082,6 +5101,194 @@ pub(crate) mod tests {
             other => panic!(
                 "the survivor holds the bytes and cannot be elected for them; got {other:?}"
             ),
+        }
+    }
+
+    /// THE SAME WORLD WITH A WITNESS — and now the survivor is elected.
+    ///
+    /// This is the inverse of the test above, built the same way and
+    /// differing in ONE thing: the two shards' arbitration goes to a
+    /// store they both reach, instead of to two stores neither can see
+    /// into. Everything else is as production has it — TWO reconcilers
+    /// with TWO separate backends (their own geometry, their own
+    /// admissions, their own fences), two identities, two fake targets.
+    ///
+    /// That pair of reconcilers is why `me` had to stop being a process
+    /// global: a shard boundary cannot be tested by a process that can
+    /// only ever be one shard.
+    ///
+    /// What the witness restores is exactly the two facts the shard
+    /// boundary hid, in the order the failover needs them:
+    ///   * the composer's registry row is visible from the leg host, so
+    ///     its outage is OBSERVABLE and a verdict can be formed;
+    ///   * the leg host's own leg row exists, and the in-sync mark the
+    ///     composer's rebuild earned is readable by the node that will
+    ///     be elected on it.
+    /// Then the CAS fires, the horizon is the deposed lease, assembly
+    /// waits it out, and the survivor serves at epoch 2 — the whole
+    /// order, driven from the side that has to be right.
+    #[tokio::test]
+    async fn with_a_shared_witness_the_leg_host_is_elected_and_assembles() {
+        use crate::state_backend::extent_alloc::{LEG_INSYNC, LEG_STALE};
+        // ONE witness, and it is a THIRD store: neither shard's own
+        // record, which is the entire point — a store on one of the two
+        // targets is unreachable exactly when that target is.
+        let witness: Arc<dyn crate::pnfs::mds::witness::CompositionWitness> =
+            Arc::new(crate::pnfs::mds::witness::BackendWitness::new(
+                crate::state_backend::memory_backend(),
+            ));
+        let mk = |me: &str, traddr: &str| {
+            let tgt = Arc::new(FakeTgt::new());
+            let r = BlockExportReconciler::new(
+                Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+                // ITS OWN backend: geometry, admissions and fences stay
+                // shard-local, exactly as they are in production.
+                crate::state_backend::memory_backend(),
+                "lvs_test".into(),
+                traddr.into(),
+                4420,
+                "/var/tmp".into(),
+            )
+            .with_witness(Arc::clone(&witness))
+            .with_identity(me.into());
+            (r, tgt)
+        };
+        let (a, _tgt_a) = mk("node-a", "10.0.0.1");
+        let (b, tgt_b) = mk("node-b", "10.0.0.2");
+
+        // ── provision, exactly as the controller drives it ──
+        a.self_register().await.expect("A registers");
+        b.self_register().await.expect("B registers");
+        a.ensure("pvc-w", Some(8 * 1024 * 1024)).await.expect("provision at A");
+        a.record_leg("pvc-w", "node-b", "10.0.0.2", 4420).await.expect("record the leg");
+        b.host_leg("pvc-w", 8 * 1024 * 1024, "node-a").await.expect("host the leg at B");
+
+        // FACT ONE, present: B can see where A answers, so A's outage
+        // is observable from B. This read returned nothing before.
+        let targets = witness.target_list().await.unwrap();
+        assert!(
+            targets.iter().any(|t| t.target_id == "node-a" && t.traddr == "10.0.0.1"),
+            "the leg host can dial — and therefore probe — its composer: {targets:?}"
+        );
+
+        // FACT TWO, present: B's own leg exists in the record, and it
+        // is STALE until a rebuild says otherwise (an arriving copy of
+        // nothing must never be electable).
+        let legs = witness.legs("pvc-w").await.unwrap();
+        let bleg = legs.iter().find(|l| l.target_id == "node-b").expect("B's leg is recorded");
+        assert_eq!(bleg.sync_state, LEG_STALE, "an empty copy is not a candidate");
+        match b.attempt_promotion("pvc-w").await {
+            PromotionOutcome::Refused(_) | PromotionOutcome::NoCandidate { .. } => {}
+            other => panic!("a stale leg must not be electable: {other:?}"),
+        }
+
+        // ── the rebuild earns the mark, on the composer, in the witness ──
+        witness.leg_mark("pvc-w", "node-b", LEG_INSYNC, now_unix()).await.unwrap();
+
+        // ── A dies. B forms the verdict ITSELF, from its own probes ──
+        let long_ago = now_unix() - 10 * verdict_min_secs();
+        for _ in 0..verdict_strikes() + 1 {
+            b.observe("node-a", false, long_ago);
+        }
+        b.observe("node-b", true, now_unix());
+
+        // THE CAS: the seat moves to B at epoch 2.
+        match b.attempt_promotion("pvc-w").await {
+            PromotionOutcome::Promoted { from, to, epoch, .. } => {
+                assert_eq!((from.as_str(), to.as_str(), epoch), ("node-a", "node-b", 2))
+            }
+            other => panic!("the survivor holds the bytes and must be elected: {other:?}"),
+        }
+
+        // ASSEMBLY waits out the deposed lease — the order is unchanged
+        // by the witness; only the record it reads has moved.
+        match b.assemble("pvc-w").await {
+            AssemblyOutcome::AwaitingHorizon { deposed, .. } => assert_eq!(deposed, "node-a"),
+            other => panic!("assembly must wait out A's lease: {other:?}"),
+        }
+        witness.lease_grant("pvc-w", 1, "node-a", now_unix() - 1).await.unwrap();
+        // B's copy is on B's disk (the rebuild's output, standing in).
+        tgt_b.bdevs.lock().unwrap().insert("lvs_test/pvc-w".into(), "uuid-w".into());
+        match b.assemble("pvc-w").await {
+            AssemblyOutcome::Assembled { epoch, deposed } => {
+                assert_eq!(epoch, 2);
+                assert_eq!(deposed.as_deref(), Some("node-a"));
+            }
+            other => panic!("expected assembly at B: {other:?}"),
+        }
+
+        // The record names B, the deposed leg is stale, the lease is
+        // B's — read back through the witness, which is where A's own
+        // shard would read it too if A came back.
+        let seat = witness.volume_seat("pvc-w").await.unwrap().expect("seated");
+        assert_eq!((seat.epoch, seat.composer.as_str()), (2, "node-b"));
+        let lease = witness.lease("pvc-w").await.unwrap().expect("leased");
+        assert_eq!((lease.epoch, lease.holder.as_str()), (2, "node-b"));
+        let legs = witness.legs("pvc-w").await.unwrap();
+        let aleg = legs.iter().find(|l| l.target_id == "node-a").expect("A's leg");
+        assert_eq!(
+            aleg.sync_state, LEG_STALE,
+            "the deposed leg cannot be handed the volume back"
+        );
+        assert!(
+            tgt_b
+                .subsystems
+                .lock()
+                .unwrap()
+                .contains_key(&crate::identity::block_volume_export_nqn("pvc-w")),
+            "the survivor's client-facing export is up"
+        );
+    }
+
+    /// THE A/B, and it is the whole argument in one flag: give each
+    /// shard its OWN witness — two stores, which is the shipped
+    /// two-sqlite world — and the identical script cannot elect
+    /// anybody. Same reconcilers, same calls, same verdict, same bytes
+    /// on the same disks; only the arbiter's location differs.
+    #[tokio::test]
+    async fn two_witnesses_are_no_witness_and_the_survivor_parks() {
+        use crate::state_backend::extent_alloc::LEG_INSYNC;
+        let mk = |me: &str, traddr: &str| {
+            let tgt = Arc::new(FakeTgt::new());
+            let own = crate::state_backend::memory_backend();
+            let w: Arc<dyn crate::pnfs::mds::witness::CompositionWitness> = Arc::new(
+                crate::pnfs::mds::witness::BackendWitness::new(Arc::clone(&own)),
+            );
+            let r = BlockExportReconciler::new(
+                Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+                own,
+                "lvs_test".into(),
+                traddr.into(),
+                4420,
+                "/var/tmp".into(),
+            )
+            .with_witness(Arc::clone(&w))
+            .with_identity(me.into());
+            (r, tgt, w)
+        };
+        let (a, _tgt_a, wa) = mk("node-a", "10.0.0.1");
+        let (b, _tgt_b, _wb) = mk("node-b", "10.0.0.2");
+
+        a.self_register().await.expect("A registers");
+        b.self_register().await.expect("B registers");
+        a.ensure("pvc-x", Some(8 * 1024 * 1024)).await.expect("provision at A");
+        a.record_leg("pvc-x", "node-b", "10.0.0.2", 4420).await.expect("record the leg");
+        b.host_leg("pvc-x", 8 * 1024 * 1024, "node-a").await.expect("host the leg at B");
+        // The rebuild completes and marks B in sync — in A's record,
+        // because that is the only record A can write.
+        wa.leg_mark("pvc-x", "node-b", LEG_INSYNC, now_unix()).await.unwrap();
+
+        // B condemns A (granted, since B cannot even probe it), and is
+        // still unelectable: the mark it would be elected on is in the
+        // database that just died with the node.
+        let long_ago = now_unix() - 10 * verdict_min_secs();
+        for _ in 0..verdict_strikes() + 1 {
+            b.observe("node-a", false, long_ago);
+        }
+        b.observe("node-b", true, now_unix());
+        match b.attempt_promotion("pvc-x").await {
+            PromotionOutcome::NoCandidate { reason } => assert!(reason.contains("no in-sync leg")),
+            other => panic!("without a shared witness there is nothing to elect on: {other:?}"),
         }
     }
 

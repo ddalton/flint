@@ -52,6 +52,11 @@ pub mod block_export;
 /// The MDS-as-NVMe-host reservation fence lane (RFC 9561 §2.2 preempt).
 pub mod resv_fence;
 
+/// The composition witness — the arbitration record a two-copy volume's
+/// failover is decided in, and the one store both its targets must
+/// reach independently of each other's health.
+pub mod witness;
+
 // Re-exports
 pub use device::{DeviceRegistry, DeviceInfo, DeviceStatus};
 pub use layout::{LayoutManager, IoMode, LayoutType};

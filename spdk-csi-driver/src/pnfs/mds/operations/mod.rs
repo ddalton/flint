@@ -1853,18 +1853,19 @@ pub async fn export_reconcile_pass(
     // and would drop out of the pass entirely, leaving the leg export
     // nothing ever converges. The seat is what it does have, so the
     // subject is the union.
-    let seats: std::collections::HashMap<String, String> =
-        match layout_manager.state_backend().block_seat_list().await {
-            Ok(Ok(list)) => list.into_iter().map(|s| (s.volume, s.composer)).collect(),
-            Ok(Err(e)) => {
-                tracing::error!("{} seat list unreadable: {} — converging none", context, e);
-                return (0, 0);
-            }
-            Err(e) => {
-                tracing::error!("{} seat list unreadable: {} — converging none", context, e);
-                return (0, 0);
-            }
-        };
+    //
+    // Read from the WITNESS, not this shard's own record: the volumes
+    // this target hosts a leg of were seated by somebody else, and in a
+    // replicated deployment "somebody else" is a different database on
+    // a different node. A seat list read locally is a list of the
+    // volumes this shard happens to have heard about.
+    let seats: std::collections::HashMap<String, String> = match reconciler.seat_list().await {
+        Ok(list) => list.into_iter().map(|s| (s.volume, s.composer)).collect(),
+        Err(e) => {
+            tracing::error!("{} seat list unreadable: {} — converging none", context, e);
+            return (0, 0);
+        }
+    };
     let mut volumes = layout_manager.scsi_volumes();
     for v in seats.keys() {
         if !volumes.contains(v) {

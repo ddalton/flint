@@ -220,16 +220,62 @@ impl MetadataServer {
                 "mds".to_string(),
                 be.spdk_socket.clone(),
             ));
-            let reconciler =
-                Arc::new(crate::pnfs::mds::block_export::BlockExportReconciler::new(
-                    rpc,
-                    state_mgr.backend(),
-                    be.lvstore.clone(),
-                    be.traddr.clone(),
-                    be.trsvcid,
-                    be.ptpl_dir.clone(),
-                ));
-            layout_manager.attach_block_export(reconciler);
+            let mut reconciler = crate::pnfs::mds::block_export::BlockExportReconciler::new(
+                rpc,
+                state_mgr.backend(),
+                be.lvstore.clone(),
+                be.traddr.clone(),
+                be.trsvcid,
+                be.ptpl_dir.clone(),
+            );
+            // THE WITNESS. Unset, arbitration runs in this shard's own
+            // record — correct for a single-copy volume, where "both
+            // targets" is one target, and bit-identical to what shipped
+            // before the witness existed. Set, it points at a store BOTH
+            // of a volume's targets can reach independently of each
+            // other's health, which is the only thing that makes a
+            // failover decidable (see `witness.rs`).
+            //
+            // A path here is the SHARED-SQLITE witness: real CAS from
+            // sqlite's own transactions, correct for every shard on one
+            // host, and what lets the two-target lima rig fail over at
+            // zero cluster spend. It is NOT a production answer for a
+            // multi-node cluster — nothing replicates a file between
+            // nodes — and the startup line says so, because an operator
+            // who points this at a per-node path has a witness that
+            // witnesses nothing.
+            if let Some(path) = std::env::var("FLINT_PNFS_WITNESS_SQLITE")
+                .ok()
+                .filter(|p| !p.trim().is_empty())
+            {
+                match crate::state_backend::SqliteBackend::open(&path) {
+                    Ok(w) => {
+                        let w: Arc<dyn crate::state_backend::StateBackend> = Arc::new(w);
+                        reconciler = reconciler.with_witness(Arc::new(
+                            crate::pnfs::mds::witness::BackendWitness::new(w),
+                        ));
+                        info!(
+                            "⚖️  composition witness: shared sqlite at {} — arbitration (seat, \
+                             legs, leases, target registry) is read and CAS'd THERE, not in this \
+                             shard's own record. Correct only if every shard that can compose \
+                             these volumes opens the SAME file",
+                            path
+                        );
+                    }
+                    Err(e) => {
+                        // Fail LOUD and keep the local record: a witness
+                        // that silently is not one is how a failover gets
+                        // decided twice.
+                        error!(
+                            "composition witness at {} could not be opened ({}) — falling back to \
+                             this shard's OWN record, which means a replicated volume here cannot \
+                             fail over. Single-copy volumes are unaffected",
+                            path, e
+                        );
+                    }
+                }
+            }
+            layout_manager.attach_block_export(Arc::new(reconciler));
             info!(
                 "🧱 block-export reconciler attached: socket={} lvstore={} listener={}:{}",
                 be.spdk_socket, be.lvstore, be.traddr, be.trsvcid
