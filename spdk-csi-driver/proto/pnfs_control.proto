@@ -413,9 +413,16 @@ message ExpandVolumeResponse {
   bool expanded = 1;
   // Size the MDS now records. For directory volumes this echoes the
   // request (nothing is stored per-volume); for legacy file volumes it
-  // is the sparse file's new length.
+  // is the sparse file's new length. When `expanded` is false because a
+  // leg is short, this is what the COMPOSITION currently serves.
   uint64 size_bytes = 2;
   string message = 3;
+
+  // Legs that must grow before this volume can. raid1 serves the
+  // SMALLEST leg, so a composed volume expands only as far as its
+  // shortest copy — and a copy on another target is only reachable by
+  // the controller. Empty on every solo volume and every success.
+  repeated string leg_targets = 4;
 }
 
 message DeleteVolumeRequest {

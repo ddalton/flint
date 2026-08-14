@@ -1820,6 +1820,41 @@ Each phase ships standalone value; none is gated on the next.
   there FAILS the delete rather than leaking an lvol no record will ever name again.
   **Still not proven on hardware.** The chart ships `replicas` (default 1) and the
   values file says experimental in as many words.
+- **EXPAND-UNDER-COMPOSITION SHIPPED (same wave) — the review's finding, and its
+  mirror.** The finding: `grow`'s read-back belt validated ONE LVOL, not the array, so
+  a one-leg ENOSPC could raise the ceiling past what the composition can serve. raid1
+  serves `min(legs)` — `raid1_resize` recomputes exactly that on every base resize
+  (raid1.c:587-617) — so the lvol is the one number guaranteed to look right. `grow`
+  now reads back the SERVED bdev (the raid when there is one), and when the array is
+  short it returns the LEGS rather than an error: only the controller can reach a copy
+  on another target, and only if the reply names it. The ceiling stays exactly where
+  it was, which turns a one-leg ENOSPC into a refused expand instead of EIO at the
+  tail of a volume the PVC claims is bigger.
+  The peer's half is the SAME idempotent call that placed the leg: `HostBlockLeg`
+  carries the leg's DESIRED size, so hosting one that already exists at a smaller size
+  grows it, with its own capacity gate running on the target that would run out of
+  room. ControllerExpandVolume therefore does: expand → if legs are short, grow each
+  named leg → expand again.
+  **The mirror is worse than the finding, and it comes from the file tier's
+  `leg_size_guard`:** a leg SHORTER than the array is not merely wasteful, it is
+  corruption waiting for a reassembly. Adding an undersized base to a live raid is
+  refused (-EINVAL at `raid_bdev_configure_base_bdev`, because `data_size` is already
+  set), but a fresh CREATE has NO error path — `raid1_start` assigns `min(legs)` before
+  registration, so the bdev layer's shrink guard is structurally unreachable and the
+  volume silently SHRINKS under a filesystem that already grew. flint's frame never
+  creates over a peer leg (stand-ins are sized from the local lvol, and legs enter only
+  through the quiesced add), so the create path is safe by construction — but the
+  REBUILD now refuses a destination smaller than the volume before copying a byte,
+  rather than spending a full copy to fail at the admission.
+  The settle wait is bounded and it waits for the right thing: growth reaches the array
+  by AEN (peer lvol → peer namespace → composer's nvme bdev → `raid1_resize`), so
+  `grow` polls only while the array disagrees with the legs THIS target can already
+  see. If the smallest visible leg is itself short there is nothing in flight to wait
+  for, and saying so immediately is both faster and more honest.
+  Known gap, named rather than papered over: a leg that missed an expand while it was
+  down needs ANOTHER expand to become rejoinable — there is no other lane that grows a
+  peer's copy today, so a volume can sit with a stale leg that refuses to rebuild until
+  someone grows the PVC again.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left

@@ -729,6 +729,25 @@ impl PnfsCsi {
         volume_id: &str,
         size_bytes: u64,
     ) -> Result<u64, PnfsError> {
+        match self.try_expand_volume(volume_id, size_bytes).await? {
+            Ok(n) => Ok(n),
+            Err((msg, _legs)) => Err(PnfsError::Mds(msg)),
+        }
+    }
+
+    /// `expand_volume`, distinguishing "a leg must grow first" from
+    /// every other refusal.
+    ///
+    /// The inner `Err` carries the message and the legs that are short.
+    /// A composed volume serves min(legs) — raid1 has no other
+    /// behaviour — so a copy on another target has to grow before the
+    /// ceiling can, and only the controller can reach that target.
+    #[allow(clippy::type_complexity)]
+    pub async fn try_expand_volume(
+        &self,
+        volume_id: &str,
+        size_bytes: u64,
+    ) -> Result<Result<u64, (String, Vec<String>)>, PnfsError> {
         let mut client = self.dial().await?;
         let resp = client
             .expand_volume(crate::pnfs::grpc::ExpandVolumeRequest {
@@ -740,13 +759,14 @@ impl PnfsCsi {
             .into_inner();
 
         if !resp.expanded {
-            return Err(PnfsError::Mds(if resp.message.is_empty() {
-                "MDS rejected ExpandVolume (no message)".into()
+            let msg = if resp.message.is_empty() {
+                "MDS rejected ExpandVolume (no message)".to_string()
             } else {
                 resp.message
-            }));
+            };
+            return Ok(Err((msg, resp.leg_targets)));
         }
-        Ok(resp.size_bytes)
+        Ok(Ok(resp.size_bytes))
     }
 
     /// Per-node host admission for a block-class volume
@@ -1519,7 +1539,9 @@ mod tests {
         ) -> Result<Response<ExpandVolumeResponse>, Status> {
             let req = req.into_inner();
             let canned = self.canned_expand.lock().unwrap().clone();
+            #[allow(clippy::needless_update)]
             Ok(Response::new(canned.unwrap_or(ExpandVolumeResponse {
+                leg_targets: Vec::new(),
                 expanded: true,
                 size_bytes: req.size_bytes,
                 message: String::new(),

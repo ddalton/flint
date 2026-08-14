@@ -2987,7 +2987,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             // `route` also strips the `~m<shard>` pin — the MDS knows the
             // volume by its bare name, and passing the pinned id would
             // 404 on a name that has never existed on disk.
-            let (_shard, shard_client, bare) = match pnfs.route(&volume_id) {
+            let (shard, shard_client, bare) = match pnfs.route(&volume_id) {
                 Ok(c) => c,
                 Err(e) => {
                     return Err(tonic::Status::failed_precondition(format!(
@@ -2995,14 +2995,69 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     )));
                 }
             };
-            let recorded = shard_client
-                .expand_volume(bare, new_size_bytes as u64)
+            let to_err = |e: spdk_csi_driver::pnfs_csi::PnfsError| match e {
+                spdk_csi_driver::pnfs_csi::PnfsError::Transport(m) => {
+                    tonic::Status::unavailable(format!("pNFS transport: {}", m))
+                }
+                other => tonic::Status::failed_precondition(other.to_string()),
+            };
+            let mut attempt = shard_client
+                .try_expand_volume(bare, new_size_bytes as u64)
                 .await
-                .map_err(|e| match e {
-                    spdk_csi_driver::pnfs_csi::PnfsError::Transport(m) =>
-                        tonic::Status::unavailable(format!("pNFS transport: {}", m)),
-                    other => tonic::Status::failed_precondition(other.to_string()),
-                })?;
+                .map_err(to_err)?;
+            // A COMPOSED volume serves min(legs), so it expands only as
+            // far as its smallest copy — and a copy on another target is
+            // reachable only from here. Grow the named legs, then ask
+            // again. The MDS raises no ceiling until the array can
+            // actually serve it, which is what keeps a one-leg ENOSPC
+            // from becoming EIO at the tail of a volume the PVC says is
+            // bigger.
+            if let Err((msg, legs)) = &attempt {
+                if legs.is_empty() {
+                    return Err(tonic::Status::failed_precondition(msg.clone()));
+                }
+                println!("📏 [pNFS] {}: growing leg(s) {:?} first — {}", bare, legs, msg);
+                let fleet = pnfs.block_fleet().await;
+                // The composer's own name, so the peer's leg export
+                // keeps admitting exactly it — the same argument that
+                // placed the leg, because this is the same call.
+                let Some(composer) = fleet
+                    .iter()
+                    .find(|h| h.shard == shard)
+                    .map(|h| h.target_id.clone())
+                    .filter(|t| !t.is_empty())
+                else {
+                    return Err(tonic::Status::unavailable(format!(
+                        "cannot grow the legs of {bare}: MDS shard {shard} did not report its \
+                         block export"
+                    )));
+                };
+                for target in legs {
+                    let Some(peer) =
+                        fleet.iter().find(|h| h.target_id == *target).and_then(|h| pnfs.shard_at(h.shard))
+                    else {
+                        return Err(tonic::Status::unavailable(format!(
+                            "leg target '{target}' of {bare} is unreachable — its copy cannot \
+                             grow, so the volume cannot either"
+                        )));
+                    };
+                    // The same idempotent call that placed the leg: it
+                    // carries the leg's DESIRED size, so this grows it.
+                    // Its own capacity gate runs there, on the target
+                    // that would run out of room.
+                    peer.host_block_leg(bare, new_size_bytes as u64, &composer)
+                        .await
+                        .map_err(to_err)?;
+                }
+                attempt = shard_client
+                    .try_expand_volume(bare, new_size_bytes as u64)
+                    .await
+                    .map_err(to_err)?;
+            }
+            let recorded = match attempt {
+                Ok(n) => n,
+                Err((msg, _)) => return Err(tonic::Status::failed_precondition(msg)),
+            };
             println!(
                 "✅ [pNFS] Volume {} expanded to {} bytes (metadata-only; capacity is \
                  pool-side at the data servers)",

@@ -229,13 +229,41 @@ impl MdsControlService {
                     "block-class volume {volume} cannot be expanded on this MDS: no \
                      blockExport configured (mds.blockExport: spdkSocket/lvstore/traddr)"
                 ),
+                leg_targets: Vec::new(),
             }));
         };
 
-        let device_bytes = reconciler.grow(volume, size_bytes).await.map_err(|e| {
+        let device_bytes = match reconciler.grow(volume, size_bytes).await.map_err(|e| {
             tracing::error!("📏 ExpandVolume: {} device grow failed: {}", volume, e);
             Status::unavailable(format!("block volume {volume}: device grow failed: {e}"))
-        })?;
+        })? {
+            crate::pnfs::mds::block_export::GrowOutcome::Grown(n) => n,
+            // The local copy grew; the COMPOSITION did not, because a
+            // leg on another target has not. This is an answer, not an
+            // error: only the controller can reach that target, and it
+            // can only do so if this reply names it. The ceiling stays
+            // exactly where it was — a volume that promises room its
+            // array cannot serve is the review's "one-leg ENOSPC raises
+            // the ceiling past the raid", and it ends in EIO at the tail
+            // rather than ENOSPC at allocation.
+            crate::pnfs::mds::block_export::GrowOutcome::LegsShort { served, legs } => {
+                warn!(
+                    "📏 ExpandVolume: {} serves {} of {} requested — leg(s) {:?} must grow \
+                     first; the ceiling is unchanged",
+                    volume, served, size_bytes, legs
+                );
+                return Ok(Response::new(ExpandVolumeResponse {
+                    expanded: false,
+                    size_bytes: served,
+                    message: format!(
+                        "the composition serves {served} bytes: leg(s) {} have not grown. \
+                         Grow them and retry — raid1 serves the smallest leg",
+                        legs.join(", ")
+                    ),
+                    leg_targets: legs,
+                }));
+            }
+        };
 
         // Ceiling second, and never above what the device just proved it
         // has. `grow` already refuses to return less than requested, so
@@ -286,6 +314,7 @@ impl MdsControlService {
             expanded: true,
             size_bytes: ceiling,
             message: String::new(),
+            leg_targets: Vec::new(),
         }))
     }
 
@@ -995,6 +1024,7 @@ impl MdsControl for MdsControlService {
                 expanded: false,
                 size_bytes: 0,
                 message: "volume_id must be non-empty and contain no '/' or NUL".into(),
+                leg_targets: Vec::new(),
             }));
         }
 
@@ -1006,6 +1036,7 @@ impl MdsControl for MdsControlService {
                     expanded: false,
                     size_bytes: 0,
                     message: format!("volume {} not found: {}", req.volume_id, e),
+                    leg_targets: Vec::new(),
                 }));
             }
         };
@@ -1025,6 +1056,7 @@ impl MdsControl for MdsControlService {
                 expanded: true,
                 size_bytes: req.size_bytes,
                 message: String::new(),
+                leg_targets: Vec::new(),
             }));
         }
 
@@ -1038,6 +1070,7 @@ impl MdsControl for MdsControlService {
                     meta.len(),
                     req.size_bytes
                 ),
+                leg_targets: Vec::new(),
             }));
         }
         if req.size_bytes > meta.len() {
@@ -1050,6 +1083,7 @@ impl MdsControl for MdsControlService {
                     expanded: false,
                     size_bytes: meta.len(),
                     message: format!("grow {}: {}", req.volume_id, e),
+                    leg_targets: Vec::new(),
                 }));
             }
             info!(
@@ -1063,6 +1097,7 @@ impl MdsControl for MdsControlService {
             expanded: true,
             size_bytes: req.size_bytes,
             message: String::new(),
+            leg_targets: Vec::new(),
         }))
     }
 

@@ -164,6 +164,28 @@ fn rebuild_stall_secs() -> u64 {
     env_u64("FLINT_PNFS_BLOCK_REBUILD_STALL_SECS", 600)
 }
 
+/// How long to wait for a leg's resize to reach the composition. The
+/// chain is asynchronous by construction — the peer's lvol grows, its
+/// namespace follows, an AEN crosses the wire, the composer's nvme bdev
+/// resizes, and only then does raid1 recompute its own block count — so
+/// the composer's own clock is the only thing that can bound it.
+fn expand_settle() -> std::time::Duration {
+    std::time::Duration::from_millis(env_u64("FLINT_PNFS_BLOCK_EXPAND_SETTLE_MS", 5_000))
+}
+
+/// What one expand did to the DEVICE — never to the ceiling, which is
+/// the caller's act and must never outrun this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrowOutcome {
+    /// The bytes the volume's clients can now reach.
+    Grown(u64),
+    /// The local copy grew and the composition did NOT, because a leg
+    /// is still short. raid1 serves min(legs), so the ceiling must wait
+    /// — this is the review's "one-leg ENOSPC raises the ceiling past
+    /// the array", refused at the only place that can see both.
+    LegsShort { served: u64, legs: Vec<String> },
+}
+
 /// What one rebuild attempt did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebuildOutcome {
@@ -1561,6 +1583,29 @@ impl BlockExportReconciler {
             Ok(d) => d,
             Err(e) => return RebuildOutcome::Deferred(e),
         };
+        // THE LEG-SIZE PRECONDITION, before a byte is copied. raid1
+        // refuses a base smaller than the array's data_size (-EINVAL at
+        // `raid_bdev_configure_base_bdev`), so a short leg would spend
+        // the whole copy and fail at the admission — and on the create
+        // path the same mismatch is worse than an error, because
+        // `raid1_start` assigns min(legs) with no error path at all and
+        // the volume SHRINKS under a filesystem that already grew (the
+        // file tier's `leg_size_guard`, same hazard one tier down).
+        let capacity_of = |info: &serde_json::Value| -> u64 {
+            let block_size = info.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
+            let num_blocks = info.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+            block_size.saturating_mul(num_blocks)
+        };
+        let need = self.lvol_info(&head).await.as_ref().map(&capacity_of).unwrap_or(0);
+        let have = self.lvol_info(&dst).await.as_ref().map(&capacity_of).unwrap_or(0);
+        if need > 0 && have < need {
+            return RebuildOutcome::Refused(format!(
+                "leg '{peer}' holds {have} bytes and '{volume}' is {need} — a short leg cannot \
+                 join the composition (raid1 would refuse the admission, and a re-created array \
+                 would silently serve the smaller size). Expand the volume to push the size to \
+                 every leg, then this rebuild proceeds"
+            ));
+        }
         let cluster = self.cluster_bytes().await.unwrap_or(4 * 1024 * 1024);
         tracing::info!(
             "🔧 '{}': rebuilding leg '{}' — sparse copy onto {}, window budget {} MiB",
@@ -2448,23 +2493,41 @@ impl BlockExportReconciler {
     /// `lib/nvmf/subsystem.c`; growth needs no I/O quiesce, which is why
     /// this is safe under live initiators). Shrinking has no path here
     /// at all — CSI forbids it and the extents would be unaddressable.
-    pub async fn grow(&self, volume: &str, new_size_bytes: u64) -> Result<u64, String> {
+    pub async fn grow(&self, volume: &str, new_size_bytes: u64) -> Result<GrowOutcome, String> {
         let lock = self.lock_for(volume);
         let _g = lock.lock().await;
         let bdev = self.bdev_name(volume);
         let probe = json!({ "method": "bdev_get_bdevs", "params": { "name": bdev } });
 
+        // WHAT THE CLIENTS ACTUALLY REACH is the composition, not this
+        // target's copy of it. raid1 serves min(legs) — `raid1_resize`
+        // recomputes exactly that on every base resize — so a volume
+        // whose local lvol grew while a peer's did not has MORE room in
+        // the record than on the wire. The whole of this rewrite is
+        // reading the right number.
+        let raid = self.raid_name(volume);
+        let composed = self.get_raid(&raid).await?.is_some();
+        let served = if composed { raid.clone() } else { bdev.clone() };
+        let served_probe = json!({ "method": "bdev_get_bdevs", "params": { "name": served } });
+
         let before = self
             .rpc
-            .rpc(&probe)
+            .rpc(&served_probe)
             .await
-            .map_err(|e| format!("bdev_get_bdevs {bdev}: {e}"))?;
+            .map_err(|e| format!("bdev_get_bdevs {served}: {e}"))?;
         let current = Self::bdev_capacity(&before).ok_or_else(|| {
-            format!("bdev_get_bdevs {bdev}: reply carries no block_size/num_blocks")
+            format!("bdev_get_bdevs {served}: reply carries no block_size/num_blocks")
         })?;
         if current >= new_size_bytes {
-            return Ok(current);
+            return Ok(GrowOutcome::Grown(current));
         }
+        // The LOCAL copy's own size, which is what the resize below acts
+        // on and what the capacity gate must be funded against.
+        let local_now = Self::bdev_capacity(
+            &self.rpc.rpc(&probe).await.map_err(|e| format!("bdev_get_bdevs {bdev}: {e}"))?,
+        )
+        .ok_or_else(|| format!("bdev_get_bdevs {bdev}: reply carries no block_size/num_blocks"))?;
+        let current = local_now.min(current);
 
         // The store must be able to fund the GROWTH. Checked before the
         // resize because after it the promise is already made: SPDK
@@ -2474,38 +2537,145 @@ impl BlockExportReconciler {
         self.check_store_has_room(volume, new_size_bytes - current).await?;
 
         let size_mib = new_size_bytes.div_ceil(1024 * 1024).max(1);
-        let resize = json!({
-            "method": "bdev_lvol_resize",
-            "params": { "name": bdev, "size_in_mib": size_mib }
-        });
-        self.rpc
-            .rpc(&resize)
-            .await
-            .map_err(|e| format!("bdev_lvol_resize {bdev} to {size_mib} MiB: {e}"))?;
+        if local_now < new_size_bytes {
+            let resize = json!({
+                "method": "bdev_lvol_resize",
+                "params": { "name": bdev, "size_in_mib": size_mib }
+            });
+            self.rpc
+                .rpc(&resize)
+                .await
+                .map_err(|e| format!("bdev_lvol_resize {bdev} to {size_mib} MiB: {e}"))?;
+        }
 
-        let after = self
-            .rpc
-            .rpc(&probe)
-            .await
-            .map_err(|e| format!("bdev_get_bdevs {bdev} (post-resize): {e}"))?;
-        let grown = Self::bdev_capacity(&after).ok_or_else(|| {
-            format!("bdev_get_bdevs {bdev} (post-resize): reply carries no block_size/num_blocks")
-        })?;
-        // Belt: an acked resize that did not actually grow the device
-        // must not become a raised ceiling. Refusing here leaves the
-        // volume at its old (working) size for the resizer to retry.
+        // Read back the SERVED bdev, not the one just resized. On a solo
+        // volume they are the same object and this is the belt that has
+        // always been here: an acked resize that did not grow the device
+        // must not become a raised ceiling. On a composed volume they
+        // are NOT the same object, and reading the lvol would be reading
+        // the one number guaranteed to look right.
+        //
+        // Composed also means WAITING: a peer's growth reaches the raid
+        // by AEN (peer lvol → peer namespace → composer's nvme bdev →
+        // raid1_resize), so the composition catches up after this call
+        // rather than during it.
+        let deadline = std::time::Instant::now() + expand_settle();
+        let mut grown;
+        loop {
+            let after = self
+                .rpc
+                .rpc(&served_probe)
+                .await
+                .map_err(|e| format!("bdev_get_bdevs {served} (post-resize): {e}"))?;
+            grown = Self::bdev_capacity(&after).ok_or_else(|| {
+                format!("bdev_get_bdevs {served} (post-resize): no block_size/num_blocks")
+            })?;
+            if grown >= new_size_bytes || !composed || std::time::Instant::now() >= deadline {
+                break;
+            }
+            // Wait only while the array disagrees with the legs THIS
+            // target can already see. If the smallest visible leg is
+            // itself short, nothing is in flight to wait for — the
+            // growth has not happened on the peer yet, and sleeping out
+            // the budget would only delay saying so. (If the peer grew
+            // and its AEN has not landed here yet, this reports short
+            // one round early; the controller's next attempt sees it,
+            // and its leg growth is idempotent.)
+            if grown >= self.visible_legs_min(volume).await.unwrap_or(u64::MAX) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         if grown < new_size_bytes {
-            return Err(format!(
-                "lvol {bdev} is {grown} bytes after a resize to {new_size_bytes} — \
-                 refusing to raise the allocation ceiling past the device"
-            ));
+            if !composed {
+                return Err(format!(
+                    "lvol {bdev} is {grown} bytes after a resize to {new_size_bytes} — \
+                     refusing to raise the allocation ceiling past the device"
+                ));
+            }
+            // The composition is capped by a leg. Name them: only the
+            // controller can grow a copy that lives on another target,
+            // and it cannot do that without being told which.
+            let legs = self.short_legs(volume, new_size_bytes).await;
+            tracing::warn!(
+                "📏 '{}': the local copy is {} bytes but the composition serves {} — \
+                 leg(s) {:?} have not grown, so the ceiling stays where it is",
+                volume, size_mib * 1024 * 1024, grown, legs
+            );
+            return Ok(GrowOutcome::LegsShort { served: grown, legs });
         }
         tracing::info!(
-            "📏 block volume '{}': lvol grown {} → {} bytes (namespace follows via \
+            "📏 block volume '{}': {} grown {} → {} bytes (namespace follows via \
              the SPDK resize AEN)",
-            volume, current, grown
+            volume, served, current, grown
         );
-        Ok(grown)
+        Ok(GrowOutcome::Grown(grown))
+    }
+
+    /// The smallest leg this target can currently SEE — the local copy
+    /// and every attached peer leg. `None` when nothing is readable.
+    ///
+    /// It is the composition's ceiling as far as this target knows, and
+    /// the difference between it and the array's own size is the only
+    /// thing an expand can usefully wait for.
+    async fn visible_legs_min(&self, volume: &str) -> Option<u64> {
+        let me = target_id();
+        let mut min = self
+            .rpc
+            .rpc(&json!({
+                "method": "bdev_get_bdevs",
+                "params": { "name": self.bdev_name(volume) }
+            }))
+            .await
+            .ok()
+            .and_then(|r| Self::bdev_capacity(&r))?;
+        if let Ok(Ok(legs)) = self.backend.block_legs(volume).await {
+            for leg in legs.iter().filter(|l| {
+                l.target_id != me
+                    && l.sync_state == crate::state_backend::extent_alloc::LEG_INSYNC
+            }) {
+                let base = self.leg_base_name(volume, &leg.target_id);
+                if let Some(n) = self
+                    .rpc
+                    .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": base } }))
+                    .await
+                    .ok()
+                    .and_then(|r| Self::bdev_capacity(&r))
+                {
+                    min = min.min(n);
+                }
+            }
+        }
+        Some(min)
+    }
+
+    /// Legs whose copy is smaller than `need`, as bdev-backed evidence
+    /// rather than as a guess: each peer leg is a live attached bdev on
+    /// this target, so its size is readable here. A leg we cannot read
+    /// is reported too — unknown is not evidence of being big enough.
+    async fn short_legs(&self, volume: &str, need: u64) -> Vec<String> {
+        let me = target_id();
+        let legs = match self.backend.block_legs(volume).await {
+            Ok(Ok(l)) => l,
+            _ => return Vec::new(),
+        };
+        let mut short = Vec::new();
+        for leg in legs.iter().filter(|l| l.target_id != me) {
+            let base = self.leg_base_name(volume, &leg.target_id);
+            let size = match self
+                .rpc
+                .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": base } }))
+                .await
+            {
+                Ok(resp) => Self::bdev_capacity(&resp),
+                Err(_) => None,
+            };
+            match size {
+                Some(n) if n >= need => {}
+                _ => short.push(leg.target_id.clone()),
+            }
+        }
+        short
     }
 
     /// Every name the lvol answers to, from a live `bdev_get_bdevs`
@@ -2948,24 +3118,57 @@ impl BlockExportReconciler {
             }
             let bdev = self.bdev_name(volume);
             let probe = json!({ "method": "bdev_get_bdevs", "params": { "name": bdev } });
-            if self.rpc.rpc(&probe).await.is_err() {
-                self.check_store_has_room(volume, size_bytes).await?;
-                let size_mib = size_bytes.div_ceil(1024 * 1024).max(1);
-                let create = json!({
-                    "method": "bdev_lvol_create",
-                    "params": {
-                        "lvs_name": self.lvstore,
-                        "lvol_name": volume,
-                        "size_in_mib": size_mib,
-                        // Thin, like the volume's own lvol: an unwritten
-                        // cluster reads zeros, and this leg is nothing
-                        // BUT unwritten clusters until the rebuild runs.
-                        "thin_provision": true
+            let size_mib = size_bytes.div_ceil(1024 * 1024).max(1);
+            match self.rpc.rpc(&probe).await {
+                Err(_) => {
+                    self.check_store_has_room(volume, size_bytes).await?;
+                    let create = json!({
+                        "method": "bdev_lvol_create",
+                        "params": {
+                            "lvs_name": self.lvstore,
+                            "lvol_name": volume,
+                            "size_in_mib": size_mib,
+                            // Thin, like the volume's own lvol: an unwritten
+                            // cluster reads zeros, and this leg is nothing
+                            // BUT unwritten clusters until the rebuild runs.
+                            "thin_provision": true
+                        }
+                    });
+                    if let Err(e) = self.rpc.rpc(&create).await {
+                        if self.rpc.rpc(&probe).await.is_err() {
+                            return Err(format!("bdev_lvol_create {bdev}: {e}"));
+                        }
                     }
-                });
-                if let Err(e) = self.rpc.rpc(&create).await {
-                    if self.rpc.rpc(&probe).await.is_err() {
-                        return Err(format!("bdev_lvol_create {bdev}: {e}"));
+                }
+                // THE EXPAND LANE. `size_bytes` is the leg's DESIRED
+                // size, not just its birth size, so the same idempotent
+                // call that places a copy also grows one — and a leg
+                // that is short is a leg the composition would cap
+                // itself to, or refuse to re-admit at all (raid1 rejects
+                // a base smaller than the array's data_size with
+                // -EINVAL; a fresh create would silently SHRINK, which
+                // is the file tier's leg-size guard, same hazard).
+                Ok(resp) => {
+                    let have = Self::bdev_capacity(&resp).unwrap_or(0);
+                    if have < size_bytes {
+                        // Funded before the promise, like every other
+                        // growth on this tier: SPDK accepts a thin
+                        // resize whatever the store has left, so an
+                        // unfunded one surfaces as a failing write in
+                        // the application and nowhere else.
+                        self.check_store_has_room(volume, size_bytes - have).await?;
+                        let resize = json!({
+                            "method": "bdev_lvol_resize",
+                            "params": { "name": bdev, "size_in_mib": size_mib }
+                        });
+                        self.rpc
+                            .rpc(&resize)
+                            .await
+                            .map_err(|e| format!("bdev_lvol_resize {bdev}: {e}"))?;
+                        tracing::info!(
+                            "📏 '{}': leg here grown {} → {} bytes for composer '{}'",
+                            volume, have, size_bytes, composer
+                        );
                     }
                 }
             }
@@ -3267,6 +3470,8 @@ pub(crate) mod tests {
         /// method → the error it answers with. The rebuild's unwind
         /// paths are only testable if a step can be made to fail.
         pub(crate) failures: Mutex<std::collections::HashMap<String, String>>,
+        /// leg bdev → its size, for the leg that missed an expand.
+        pub(crate) leg_sizes: Mutex<std::collections::HashMap<String, u64>>,
     }
 
     /// The fake lvolstore's cluster size (SPDK's default is 4 MiB).
@@ -3294,7 +3499,14 @@ pub(crate) mod tests {
                 copies: Mutex::new(Default::default()),
                 writer: Mutex::new(None),
                 failures: Mutex::new(Default::default()),
+                leg_sizes: Mutex::new(Default::default()),
             }
+        }
+
+        /// A peer whose copy is smaller than the volume — the leg that
+        /// was down when the volume was expanded.
+        pub(crate) fn set_leg_size(&self, leg_bdev: &str, bytes: u64) {
+            self.leg_sizes.lock().unwrap().insert(leg_bdev.to_string(), bytes);
         }
 
         /// Make one RPC method fail from now on.
@@ -3377,7 +3589,38 @@ pub(crate) mod tests {
                 "bdev_nvme_attach_controller" => {
                     let name = p["name"].as_str().unwrap_or("").to_string();
                     let ns = format!("{name}n1");
+                    // A leg's size is the PEER's lvol size, and placement
+                    // keeps that equal to the volume's — `HostBlockLeg`
+                    // carries the size and grows a short copy. The fake
+                    // models that, because a leg of unknown size would
+                    // make the leg-size precondition untestable in both
+                    // directions. `set_leg_size` overrides it for the
+                    // leg-that-missed-an-expand case.
+                    // Both the volume and the peer may contain dashes, so
+                    // the name is matched against the lvols that exist
+                    // rather than split on one.
+                    let volume_size = {
+                        let sizes = self.bdev_bytes.lock().unwrap();
+                        sizes
+                            .iter()
+                            .filter(|(alias, _)| {
+                                alias.split_once('/').is_some_and(|(_, v)| {
+                                    name.starts_with(&format!("flintleg-{v}-"))
+                                })
+                            })
+                            .map(|(_, b)| *b)
+                            .next()
+                    };
+                    let bytes = self
+                        .leg_sizes
+                        .lock()
+                        .unwrap()
+                        .get(&ns)
+                        .copied()
+                        .or(volume_size)
+                        .unwrap_or(0);
                     self.bdevs.lock().unwrap().insert(ns.clone(), ns.clone());
+                    self.bdev_bytes.lock().unwrap().insert(ns.clone(), bytes);
                     Ok(json!({ "result": [ns] }))
                 }
                 "bdev_raid_create" => {
@@ -3594,8 +3837,23 @@ pub(crate) mod tests {
                             .collect();
                         return Ok(json!({ "result": all }));
                     };
-                    let bytes =
-                        self.bdev_bytes.lock().unwrap().get(name).copied().unwrap_or(0);
+                    // A RAID's capacity is min(members) — `raid1_resize`
+                    // recomputes exactly that on every base resize, and
+                    // it is the number an expand must read back. Empty
+                    // slots are skipped (the resize walks configured
+                    // bases only), so a degraded array is not zero-sized.
+                    let bytes = match self.raids.lock().unwrap().get(name) {
+                        Some(slots) => {
+                            let sizes = self.bdev_bytes.lock().unwrap();
+                            slots
+                                .iter()
+                                .flatten()
+                                .map(|m| sizes.get(m).copied().unwrap_or(0))
+                                .min()
+                                .unwrap_or(0)
+                        }
+                        None => self.bdev_bytes.lock().unwrap().get(name).copied().unwrap_or(0),
+                    };
                     let parent = self.parents.lock().unwrap().get(name).cloned();
                     let owned = self.alloc.lock().unwrap().get(name).copied().unwrap_or(0);
                     match bdevs.get(name) {
@@ -3848,7 +4106,11 @@ pub(crate) mod tests {
         let resize = tgt.call_with_method(&calls, "bdev_lvol_resize").expect("resized");
         assert_eq!(resize["params"]["name"], "lvs_test/pvc-1");
         assert_eq!(resize["params"]["size_in_mib"], 11, "rounded UP to MiB");
-        assert_eq!(got, 11 * 1024 * 1024, "the DEVICE's capacity, not the request");
+        assert_eq!(
+            got,
+            GrowOutcome::Grown(11 * 1024 * 1024),
+            "the DEVICE's capacity, not the request"
+        );
     }
 
     /// Idempotent: a re-driven ExpandVolume (external-resizer does this
@@ -3861,7 +4123,7 @@ pub(crate) mod tests {
         tgt.calls.lock().unwrap().clear();
 
         let got = r.grow("pvc-1", 8 * 1024 * 1024).await.expect("grow");
-        assert_eq!(got, 16 * 1024 * 1024);
+        assert_eq!(got, GrowOutcome::Grown(16 * 1024 * 1024));
         assert!(
             !tgt.methods().contains(&"bdev_lvol_resize".to_string()),
             "a device that already fits must not be resized: {:?}",
@@ -5223,6 +5485,116 @@ pub(crate) mod tests {
             tgt.bdevs.lock().unwrap().contains_key(&r.bdev_name("pvc-mine")),
             "and its bytes are untouched"
         );
+    }
+
+    /// EXPAND READS THE COMPOSITION, NOT THIS TARGET'S COPY OF IT.
+    ///
+    /// raid1 serves min(legs) — `raid1_resize` recomputes exactly that
+    /// on every base resize — so a volume whose local lvol grew while a
+    /// peer's did not has more room in the record than on the wire. The
+    /// old belt read back the LVOL, which is the one number guaranteed
+    /// to look right, and a ceiling raised past the array ends as EIO at
+    /// the tail rather than ENOSPC at allocation (the review's finding).
+    ///
+    /// A/B: read back the lvol instead and the short-leg case reports a
+    /// clean expand it cannot serve.
+    #[tokio::test]
+    async fn expand_refuses_the_ceiling_while_a_leg_is_short_and_names_it() {
+        let (tgt, backend, r) = framed_with_a_stale_peer("pvc-exp", 4).await;
+        r.observe("node-peer", true, now_unix());
+        assert!(matches!(
+            r.rebuild_leg("pvc-exp", "node-peer").await,
+            RebuildOutcome::Rebuilt { .. }
+        ));
+        assert_eq!(tgt.members_of("flintraid-pvc-exp").len(), 2, "composed");
+
+        // The peer misses the growth: its copy stays at the old size,
+        // which is exactly what a peer that was down during the expand
+        // looks like when it returns.
+        let leg = r.leg_base_name("pvc-exp", "node-peer");
+        tgt.bdev_bytes.lock().unwrap().insert(leg.clone(), 1 << 20);
+
+        match r.grow("pvc-exp", 4 << 20).await.expect("grow") {
+            GrowOutcome::LegsShort { served, legs } => {
+                assert_eq!(legs, vec!["node-peer".to_string()], "named, so it can be grown");
+                assert!(served < 4 << 20, "the array still serves the smaller size");
+            }
+            other => panic!("expected a short-leg answer, got {other:?}"),
+        }
+        // The local copy DID grow — the refusal is about the ceiling,
+        // not about doing nothing.
+        let local = r.lvol_info(&r.bdev_name("pvc-exp")).await.unwrap();
+        let bytes = local["block_size"].as_u64().unwrap() * local["num_blocks"].as_u64().unwrap();
+        assert_eq!(bytes, 4 << 20);
+
+        // The peer catches up (its own HostBlockLeg, driven by the
+        // controller) and the composition follows.
+        tgt.bdev_bytes.lock().unwrap().insert(leg, 4 << 20);
+        assert_eq!(r.grow("pvc-exp", 4 << 20).await.unwrap(), GrowOutcome::Grown(4 << 20));
+        let _ = backend;
+    }
+
+    /// A LEG THAT MISSED AN EXPAND MAY NOT JOIN, and the refusal comes
+    /// BEFORE the copy rather than at the admission.
+    ///
+    /// raid1 rejects a base smaller than the array's data_size with
+    /// -EINVAL, so the copy would be spent and then thrown away; and on
+    /// a fresh create the same mismatch is worse than an error, because
+    /// `raid1_start` assigns min(legs) with no error path at all — the
+    /// volume would SHRINK under a filesystem that already grew.
+    #[tokio::test]
+    async fn a_leg_that_missed_an_expand_is_refused_before_a_byte_is_copied() {
+        let (tgt, _backend, r) = framed_with_a_stale_peer("pvc-short", 4).await;
+        r.observe("node-peer", true, now_unix());
+        // The peer's copy is half the volume: it was down when the
+        // volume grew.
+        tgt.set_leg_size(&r.leg_base_name("pvc-short", "node-peer"), 512 * 1024);
+
+        match r.rebuild_leg("pvc-short", "node-peer").await {
+            RebuildOutcome::Refused(why) => {
+                assert!(why.contains("short leg cannot join"), "{why}");
+                assert!(why.contains("Expand the volume"), "{why}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(tgt.copies().is_empty(), "and not a byte was copied");
+    }
+
+    /// The peer side of an expand is the SAME idempotent call that
+    /// placed the leg: `host_leg` carries the leg's desired size, so
+    /// hosting one that already exists at a smaller size grows it.
+    #[tokio::test]
+    async fn hosting_a_leg_that_already_exists_grows_it_to_the_asked_size() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        r.host_leg("pvc-grow", 1 << 20, "node-composer").await.expect("host");
+        tgt.calls.lock().unwrap().clear();
+        r.host_leg("pvc-grow", 4 << 20, "node-composer").await.expect("grow");
+
+        let resize = tgt
+            .call_with_method(&tgt.calls.lock().unwrap().clone(), "bdev_lvol_resize")
+            .expect("resized")
+            .clone();
+        assert_eq!(resize["params"]["size_in_mib"], 4);
+        assert!(
+            !tgt.methods().iter().any(|m| m == "bdev_lvol_create"),
+            "grown, not re-minted: {:?}",
+            tgt.methods()
+        );
+        // And it is funded before the promise, like every other growth
+        // on this tier: a thin resize succeeds whatever the store has.
+        tgt.set_store(4, 0);
+        let err = r.host_leg("pvc-grow", 64 << 20, "node-composer").await.unwrap_err();
+        assert!(err.contains("lvolstore"), "{err}");
     }
 
     /// THE LEG EXPORT is the door `EvictAtLeg` closes, and who may come
