@@ -191,6 +191,32 @@ pub enum PutOutcome {
 pub const KIND_COMPOSITION: &str = "composition";
 pub const KIND_TARGET: &str = "target";
 
+/// The ONE place a kind becomes a name prefix. [`object_name`] writes
+/// it and [`kind_of_name`] reads it back, both from here — because the
+/// label a document is stored under and the selector `list` fetches it
+/// by have to agree, and a rule stated twice is a rule that can drift.
+///
+/// It did drift: the store used to decide the label by asking whether
+/// `-c-` appeared ANYWHERE in the name, so a TARGET whose id carried
+/// that infix — `mds-c-2`, `gke-c-1-pool` — was labelled a composition
+/// and disappeared from `target_list`, taking its dial coordinates with
+/// it. A target that cannot be listed cannot be probed, placed against,
+/// or promoted to. The in-memory store in the tests had the prefix rule
+/// right, which is exactly why no unit test could see it.
+fn name_prefix(kind: &str) -> String {
+    format!("flint-blk-{}-", &kind[..1])
+}
+
+/// Which kind an object name belongs to — the inverse of the prefix,
+/// and never a substring search.
+pub fn kind_of_name(name: &str) -> &'static str {
+    if name.starts_with(&name_prefix(KIND_COMPOSITION)) {
+        KIND_COMPOSITION
+    } else {
+        KIND_TARGET
+    }
+}
+
 /// Object names are derived, never chosen: DNS-1123, and a short hash
 /// of the original so two ids that sanitize alike cannot collide.
 pub fn object_name(kind: &str, id: &str) -> String {
@@ -206,7 +232,7 @@ pub fn object_name(kind: &str, id: &str) -> String {
         .collect();
     safe.truncate(180);
     let safe = safe.trim_matches(|c: char| c == '-' || c == '.').to_string();
-    format!("flint-blk-{}-{}-{:x}", &kind[..1], safe, fnv1a(id))
+    format!("{}{}-{:x}", name_prefix(kind), safe, fnv1a(id))
 }
 
 fn fnv1a(s: &str) -> u64 {
@@ -840,7 +866,7 @@ impl DocStore for ConfigMapStore {
     }
 
     async fn put(&self, name: &str, body: &str, rv: Option<&str>) -> WitnessResult<PutOutcome> {
-        let kind = if name.contains("-c-") { KIND_COMPOSITION } else { KIND_TARGET };
+        let kind = kind_of_name(name);
         let mut meta = serde_json::json!({
             "name": name,
             "labels": {
@@ -967,13 +993,15 @@ mod tests {
         }
 
         async fn list(&self, kind: &str) -> WitnessResult<Vec<String>> {
-            let marker = format!("flint-blk-{}-", &kind[..1]);
+            // The same rule the real store labels by — a label selector
+            // over what `put` wrote. A fake that classifies documents
+            // its own way tests the fake.
             Ok(self
                 .docs
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(n, _)| n.starts_with(&marker))
+                .filter(|(n, _)| kind_of_name(n) == kind)
                 .map(|(_, (b, _))| b.clone())
                 .collect())
         }
@@ -1214,5 +1242,35 @@ mod tests {
             );
             assert!(!n.starts_with('-') && !n.ends_with('-'), "{n}");
         }
+    }
+
+    /// A TARGET whose id carries the composition infix is still a
+    /// target — and the bug this names was invisible to every test in
+    /// this module, because the fake store classified by PREFIX while
+    /// the real one sniffed `-c-` anywhere in the name.
+    ///
+    /// The damage was not cosmetic. A mislabelled target is absent from
+    /// `target_list`, so nothing can dial it, the prober has no subject
+    /// for it, and a promotion to it is refused as an unregistered
+    /// candidate: a healthy replica that silently cannot be failed over
+    /// to, on nothing worse than a node named `gke-c-1-pool`.
+    #[tokio::test]
+    async fn a_target_named_like_a_composition_is_still_a_target() {
+        let (w, _store) = witness();
+        for id in ["mds-c-2", "gke-c-1-pool", "plain-target"] {
+            assert_eq!(
+                kind_of_name(&object_name(KIND_TARGET, id)),
+                KIND_TARGET,
+                "{id} classified as a composition"
+            );
+            w.target_register(id, "10.0.0.9", 4420, 100).await.unwrap();
+        }
+        let listed: Vec<String> =
+            w.target_list().await.unwrap().into_iter().map(|t| t.target_id).collect();
+        assert_eq!(
+            listed,
+            vec!["gke-c-1-pool", "mds-c-2", "plain-target"],
+            "a target vanished from the registry on the strength of its NAME"
+        );
     }
 }
