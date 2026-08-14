@@ -309,6 +309,62 @@ vsh "$RPC bdev_get_bdevs --name lvs_rig/rigvol-toobig" >/dev/null 2>&1 \
   && fail "the refused volume left an lvol behind — the gate fired after the create"
 echo "✓ capacity gate: 4GiB refused on a 1GiB store, no lvol created"
 
+# ── 4c. the gate must not bill a SNAPSHOT twice ──────────────────────
+# A snapshot blob is read-only, so it can never allocate another
+# cluster: its footprint is fixed at num_allocated_clusters and its
+# logical size is a promise nobody can redeem. Charged its SPAN it
+# double-counts the volume, because at the instant of a cut the
+# snapshot owns all the head's clusters and the head owns none.
+#
+# That is the rebuild ladder's exact shape — one cut per round, all of
+# them alive until the window closes — so billing spans makes a rebuild
+# read as a full store and refuses every unrelated provision on this
+# target, blaming the operator for flint's own transient state.
+#
+# This lives in the rig and not only in a unit test because the fix
+# rests on two FIELD NAMES from real SPDK. The gate's safe branch is
+# PROCEED, so a mis-parse reads as "not a snapshot" and silently
+# restores the bug — which is precisely how `total_clusters` (a field
+# SPDK never emits) disabled this gate's first version.
+vsh "$RPC bdev_lvol_create -l lvs_rig -t probe-thin 320" >/dev/null \
+  || fail "probe lvol"
+vsh "$RPC bdev_lvol_snapshot lvs_rig/probe-thin probe-cut" >/dev/null \
+  || fail "probe snapshot"
+CUTJSON=$(vsh "$RPC bdev_get_bdevs --name lvs_rig/probe-cut") || fail "probe cut bdev"
+echo "$CUTJSON" | python3 -c "
+import json,sys
+b = json.load(sys.stdin)[0]
+lv = b.get('driver_specific', {}).get('lvol', {})
+assert lv.get('snapshot') is True, 'a real snapshot is not labelled snapshot=true: %r' % lv
+assert isinstance(lv.get('num_allocated_clusters'), int), \
+    'no num_allocated_clusters on a real snapshot: %r' % lv
+print('  cut: snapshot=%s allocated=%d clusters, span=%d bytes'
+      % (lv['snapshot'], lv['num_allocated_clusters'],
+         b['block_size'] * b['num_blocks']))
+" || fail "the fields the capacity gate reads are not on a real SPDK snapshot: $CUTJSON"
+
+# 512 (rigvol) + 320 (the probe head, writable) + 64 = 896 MiB of a
+# ~1020 MiB store, so this fits — but ONLY because the unwritten cut is
+# charged the 0 clusters it holds. Billed its 320 MiB span the store is
+# already 1152 MiB promised and the request is refused whatever its
+# size, which is what makes this an A/B and not an arithmetic coin-flip.
+THIN=$(vsh "$RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+      -d '{\"volumeId\":\"rigvol-beside-a-cut\",\"sizeBytes\":$((64 * 1024 * 1024)),\"layoutClass\":\"scsi\"}' \
+      127.0.0.1:50051 pnfs.control.MdsControl/CreateVolume") || fail "CreateVolume (beside a cut) RPC"
+[ "$(echo "$THIN" | grep -c '"created": true' || true)" -ge 1 ] \
+  || fail "a create the store CAN fund was refused because an empty snapshot was billed its span: $THIN"
+echo "✓ 4c: an unwritten cut is charged 0, not its 320 MiB span — the create beside it stands"
+
+# Put the store back the way section 4b left it: everything after this
+# reasons about the promise budget, and a stray 384 MiB of probe would
+# make a later refusal mean something other than what it says.
+vsh "$RIG_TOOLS/grpcurl -plaintext -import-path $PROTO_DIR -proto pnfs_control.proto \
+      -d '{\"volumeId\":\"rigvol-beside-a-cut\"}' \
+      127.0.0.1:50051 pnfs.control.MdsControl/DeleteVolume" >/dev/null \
+  || fail "DeleteVolume (beside a cut)"
+vsh "$RPC bdev_lvol_delete lvs_rig/probe-thin" >/dev/null || fail "probe clone cleanup"
+vsh "$RPC bdev_lvol_delete lvs_rig/probe-cut" >/dev/null || fail "probe cut cleanup"
+
 # ── 5. stage the node session — THE PRODUCTION PATH ──────────────────
 # AttachBlockNode (per-node hostnqn admission, the ControllerPublish
 # verb — the allow-list is default-closed, so this must precede the

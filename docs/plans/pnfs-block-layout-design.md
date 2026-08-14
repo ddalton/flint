@@ -1228,6 +1228,27 @@ Each phase ships standalone value; none is gated on the next.
   not emit (it writes `total_data_clusters`), so that field had been silently 0 on
   every lvstore; the gate read 0 and disabled itself on its first rig run, which
   is exactly the kind of self-disabling a unit test against a fake cannot catch.
+  **AMENDED 2026-08-13 — A SNAPSHOT IS CHARGED WHAT IT HOLDS, NOT WHAT IT SPANS.**
+  The rule above ("promise = logical size") is right for a writable blob and wrong
+  for a read-only one, and the replication work made that reachable. A snapshot
+  blob cannot allocate another cluster (`spdk_blob_is_read_only` — it is why a
+  shallow copy demands one as its source), so its footprint is fixed at
+  `num_allocated_clusters` and its logical size is a promise nobody can redeem.
+  Charging it the span DOUBLE-COUNTS the volume: at the instant of a cut the
+  snapshot owns all the head's clusters and the head owns none, yet both are
+  billed in full. That is precisely the rebuild ladder's shape (§13) — one cut per
+  round, every one alive until the window closes — so billing spans made a rebuild
+  read as a full store and refused every unrelated create, expand or leg-host on
+  that target, with a message blaming the operator ("delete a volume, grow the
+  lvolstore") for flint's own transient state. The sum remains a true UPPER BOUND
+  on future physical use: every writable blob is charged everything it may yet
+  allocate, every read-only one exactly what it already did, so the gate still
+  refuses in the direction it exists to refuse in — an unwritten cut costs
+  nothing, a cut holding 8 MiB costs 8 MiB. Rig §4c asserts the two field names
+  (`snapshot`, `num_allocated_clusters`) against a REAL SPDK snapshot rather than
+  the fake, because this gate's safe branch is PROCEED: a mis-parse reads as "not
+  a snapshot" and silently restores the double-count, which is the same shape as
+  the `total_clusters` bug above.
 - **An MDS restart made the next expand fail with EIO — MEASURED
   2026-08-12, and FIXED the same day.** The device-notify address book
   (`LayoutManager.device_notify`) is an in-memory map of which sessions

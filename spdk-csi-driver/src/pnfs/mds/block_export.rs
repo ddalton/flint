@@ -2397,12 +2397,16 @@ impl BlockExportReconciler {
     }
 
     /// The backing lvolstore's totals, straight from SPDK
-    /// (`bdev_lvol_get_lvstores`): `(total_bytes, free_bytes)`.
+    /// (`bdev_lvol_get_lvstores`): `(total_bytes, free_bytes,
+    /// cluster_bytes)`. The cluster size rides along because the promise
+    /// sum needs it to price a snapshot's allocation, and taking it from
+    /// the same reply keeps both halves of the gate on one snapshot of
+    /// the store rather than two RPCs that can disagree.
     ///
     /// `None` when the store cannot be read. Callers treat that as
     /// "unknown", never "empty" — refusing every provision because one
     /// RPC blipped is worse than the oversubscription it guards.
-    async fn lvstore_totals(&self) -> Option<(u64, u64)> {
+    async fn lvstore_totals(&self) -> Option<(u64, u64, u64)> {
         let resp = self
             .rpc
             .rpc(&json!({
@@ -2431,12 +2435,11 @@ impl BlockExportReconciler {
             .and_then(|v| v.as_u64())
             .filter(|t| *t > 0)?;
         let free = s.get("free_clusters").and_then(|v| v.as_u64())?;
-        Some((total.checked_mul(cluster)?, free.checked_mul(cluster)?))
+        Some((total.checked_mul(cluster)?, free.checked_mul(cluster)?, cluster))
     }
 
-    /// Bytes this store has already PROMISED: the sum of every lvol's
-    /// logical size, read from one `bdev_get_bdevs` and filtered to this
-    /// lvolstore by alias.
+    /// Bytes this store has already PROMISED, read from one
+    /// `bdev_get_bdevs` and filtered to this lvolstore by alias.
     ///
     /// Logical, not allocated, and that distinction is the whole gate.
     /// `free_clusters` cannot answer this question: a thin lvol consumes
@@ -2444,7 +2447,28 @@ impl BlockExportReconciler {
     /// store leave the store reporting itself nearly empty right up
     /// until the writes land. The oversubscription is invisible in the
     /// physical numbers and visible in the logical ones.
-    async fn committed_logical_bytes(&self) -> Option<u64> {
+    ///
+    /// EXCEPT for a SNAPSHOT, which is charged what it HOLDS. A snapshot
+    /// blob is read-only (`spdk_blob_is_read_only` — it is why a shallow
+    /// copy demands one as its source), so it can never allocate another
+    /// cluster: its footprint is fixed at `num_allocated_clusters` and
+    /// its logical size is a promise nobody can redeem. Charging it the
+    /// logical size double-counts the volume, because at the instant of
+    /// the cut the snapshot holds ALL the head's clusters and the head
+    /// holds none — both would be billed in full.
+    ///
+    /// That is not hypothetical: the rebuild ladder cuts a snapshot per
+    /// round and keeps every one of them alive until the window closes
+    /// (`rebuild_inner`). Charged logically, one rebuild of a volume
+    /// filling half its store makes the store look full, and the next
+    /// create/expand/leg-host is refused with a message blaming the
+    /// operator for flint's own transient state.
+    ///
+    /// The sum stays a true UPPER BOUND on future physical use — every
+    /// writable blob is charged everything it may yet allocate, every
+    /// read-only one exactly what it already did — so the gate still
+    /// refuses in the direction it exists to refuse in.
+    async fn committed_logical_bytes(&self, cluster: u64) -> Option<u64> {
         let resp = self
             .rpc
             .rpc(&json!({ "method": "bdev_get_bdevs" }))
@@ -2465,9 +2489,28 @@ impl BlockExportReconciler {
             if !mine {
                 continue;
             }
-            let bs = b.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
-            let nb = b.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
-            sum = sum.saturating_add(bs.saturating_mul(nb));
+            let lvol = b.get("driver_specific").and_then(|d| d.get("lvol"));
+            let is_snapshot = lvol
+                .and_then(|l| l.get("snapshot"))
+                .and_then(|s| s.as_bool())
+                .unwrap_or(false);
+            // A snapshot with no allocation count is charged its logical
+            // size: unknown must not read as free. (It only happens if
+            // SPDK stops emitting the field — both come from the same
+            // `dump_info_json`.)
+            let held = lvol
+                .and_then(|l| l.get("num_allocated_clusters"))
+                .and_then(|n| n.as_u64())
+                .map(|n| n.saturating_mul(cluster));
+            let charge = match (is_snapshot, held) {
+                (true, Some(bytes)) => bytes,
+                _ => {
+                    let bs = b.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let nb = b.get("num_blocks").and_then(|v| v.as_u64()).unwrap_or(0);
+                    bs.saturating_mul(nb)
+                }
+            };
+            sum = sum.saturating_add(charge);
         }
         Some(sum)
     }
@@ -2501,9 +2544,14 @@ impl BlockExportReconciler {
         if need == 0 {
             return Ok(());
         }
-        let (Some((total, free)), Some(committed)) =
-            (self.lvstore_totals().await, self.committed_logical_bytes().await)
-        else {
+        // Sequential, not joined: the promise sum is priced with THIS
+        // store's cluster size, so it cannot be read before the store is.
+        let totals = self.lvstore_totals().await;
+        let committed = match totals {
+            Some((_, _, cluster)) => self.committed_logical_bytes(cluster).await,
+            None => None,
+        };
+        let (Some((total, free, _)), Some(committed)) = (totals, committed) else {
             tracing::warn!(
                 "📏 block volume '{}': lvolstore '{}' capacity UNREADABLE — proceeding \
                  without the capacity gate (a write may still hit the store's real limit)",
@@ -3929,16 +3977,30 @@ pub(crate) mod tests {
                     // gate uses to sum promised logical bytes).
                     let Some(name) = p["name"].as_str() else {
                         let sizes = self.bdev_bytes.lock().unwrap();
+                        let alloc = self.alloc.lock().unwrap();
+                        let parents = self.parents.lock().unwrap();
                         let all: Vec<Value> = bdevs
                             .iter()
                             .map(|(alias, canonical)| {
                                 let bytes = sizes.get(alias).copied().unwrap_or(0);
+                                // A blob is a SNAPSHOT iff something
+                                // names it as a parent — the same shape
+                                // SPDK reports, and the reason the
+                                // promise sum can tell a read-only cut
+                                // from a volume that may still grow.
+                                let is_snap = parents.values().any(|p| p == alias);
                                 json!({
                                     "name": canonical,
                                     "uuid": canonical,
                                     "aliases": [alias],
                                     "block_size": FAKE_BLOCK_SIZE,
                                     "num_blocks": bytes / FAKE_BLOCK_SIZE,
+                                    "driver_specific": { "lvol": {
+                                        "num_allocated_clusters":
+                                            alloc.get(alias).copied().unwrap_or(0),
+                                        "snapshot": is_snap,
+                                        "clone": parents.contains_key(alias),
+                                    }},
                                 })
                             })
                             .collect();
@@ -3962,6 +4024,8 @@ pub(crate) mod tests {
                         None => self.bdev_bytes.lock().unwrap().get(name).copied().unwrap_or(0),
                     };
                     let parent = self.parents.lock().unwrap().get(name).cloned();
+                    let is_snap =
+                        self.parents.lock().unwrap().values().any(|p| p == name);
                     let owned = self.alloc.lock().unwrap().get(name).copied().unwrap_or(0);
                     match bdevs.get(name) {
                         Some(canonical) => Ok(json!({ "result": [{
@@ -3972,6 +4036,7 @@ pub(crate) mod tests {
                             "num_blocks": bytes / FAKE_BLOCK_SIZE,
                             "driver_specific": { "lvol": {
                                 "num_allocated_clusters": owned,
+                                "snapshot": is_snap,
                                 "clone": parent.is_some(),
                                 "base_snapshot": parent,
                             }},
@@ -4295,6 +4360,54 @@ pub(crate) mod tests {
         r.ensure("pvc-c", Some(8 * 1024 * 1024))
             .await
             .expect("a request inside the remaining budget must succeed");
+    }
+
+    /// A SNAPSHOT IS CHARGED WHAT IT HOLDS, NOT WHAT IT SPANS.
+    ///
+    /// A snapshot blob is read-only, so it can never allocate another
+    /// cluster — its logical size is a promise nobody can redeem. Charged
+    /// logically it double-counts the volume, because at the instant of
+    /// the cut the snapshot owns ALL the head's clusters and the head
+    /// owns none, yet both get billed in full.
+    ///
+    /// The rebuild ladder makes that concrete: it cuts one snapshot per
+    /// round and keeps every one alive until the window closes. Billed
+    /// logically, a rebuild of a volume that fills half its store makes
+    /// the store read as full and refuses every unrelated provision on
+    /// this target — blaming the operator ("delete a volume, grow the
+    /// lvolstore") for flint's own transient state.
+    #[tokio::test]
+    async fn a_rebuild_cut_is_charged_its_allocation_not_its_span() {
+        let tgt = Arc::new(FakeTgt::new());
+        tgt.set_store(12, 12); // 48 MiB, cluster = 4 MiB
+        let r = reconciler(Arc::clone(&tgt));
+        r.ensure("pvc-s", Some(32 * 1024 * 1024)).await.expect("create");
+        // 8 MiB of the volume has actually been written.
+        tgt.set_allocated("lvs_test/pvc-s", 2);
+
+        // The ladder's cut: the head's clusters move to the snapshot and
+        // the head is left owning nothing (the fake models the transfer
+        // because that is what makes a cut a DELTA).
+        r.snapshot_lvol("lvs_test/pvc-s", "flintcut-pvc-s-1")
+            .await
+            .expect("cut");
+
+        // Promised is now 32 MiB (the volume, which may still grow into
+        // all of it) + 8 MiB (what the cut holds and can never exceed) =
+        // 40 of 48. Charged the cut's SPAN it would read 64 of 48, and
+        // this would be refused.
+        r.ensure("pvc-t", Some(8 * 1024 * 1024))
+            .await
+            .expect("8 MiB fits beside a cut that only holds 8");
+
+        // ...and the cut is still REAL capacity: the 8 MiB it holds is
+        // charged, so a request that needs those bytes is refused. The
+        // gate got tighter in the honest direction, not looser.
+        let e = r
+            .ensure("pvc-u", Some(8 * 1024 * 1024))
+            .await
+            .expect_err("40 + 8 + 8 > 48 must still be refused");
+        assert!(e.contains("promised"), "got: {e}");
     }
 
     /// The opt-out exists because thin provisioning legitimately means
