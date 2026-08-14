@@ -352,6 +352,14 @@ test-pnfs-reconcile-rig: ## A tgt-ONLY restart repairs WITHOUT an MDS roll: the 
 test-pnfs-sweep-rig: ## Lease-sweep partition drill: NFS port dropped under a live raw writer, the sweep fences/revokes/auto-unfences on the timer, successor recovers leverless (block-rig SWEEP=1)
 	SWEEP=1 tests/lima/pnfs/block-rig.sh
 
+.PHONY: test-pnfs-replica-rig
+test-pnfs-replica-rig: ## Two-target composition on real spdk-tgt: placement, frame, sparse rebuild, byte-for-byte mirror, degrade barrier, rejoin, and the COMPOSER-DEATH failover with the client redirecting itself
+	tests/lima/pnfs/replica-rig.sh
+
+.PHONY: test-pnfs-replica-fs-rig
+test-pnfs-replica-fs-rig: ## The same failover with a MOUNTED ext4 and I/O in flight (replica-rig FS=1): durability across the redirect is asserted, whether the mount rides it live is MEASURED
+	FS=1 tests/lima/pnfs/replica-rig.sh
+
 .PHONY: test-pnfs-preempt-rig
 test-pnfs-preempt-rig: ## Foreign-holder fence arm: an adversarial registered key + WE reservation is preempted away, and a second volume on the same tgt never notices (block-rig PREEMPT=1)
 	PREEMPT=1 tests/lima/pnfs/block-rig.sh

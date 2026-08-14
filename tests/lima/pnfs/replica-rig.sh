@@ -100,6 +100,22 @@ LEASE_SECS=10
 # window cannot be ctrl_loss expiry, which is what makes the assertion
 # mean anything.
 CTRL_LOSS=600
+# FS=1 swaps the raw-device payload for a MOUNTED FILESYSTEM and runs
+# §V8 — the question §V7 cannot ask. V7 proves the BYTES survive a
+# failover, read back with O_DIRECT by a process that opens the device
+# fresh. A mounted ext4 is a different consumer: it holds the device
+# open across the redirect, it has dirty pages and in-flight I/O when
+# the composer dies, and `errors=remount-ro` means one EIO can take it
+# out of service even though every byte is intact. Nothing had ever
+# asked what a real consumer does here.
+#
+# It SKIPS §V4-V6 (the leg-mirror and rejoin legs), which compare raw
+# device checksums taken at different times — under a mounted
+# filesystem those samples are not stable and the drill would flake
+# rather than prove. Those legs run in the default (raw) mode, which is
+# where they belong.
+FS=${FS:-0}
+MNT=/mnt/repfs
 
 RPC_A="sudo PYTHONPATH=$RIG_TOOLS/py python3 $RIG_TOOLS/scripts/rpc.py -s $SOCK_A"
 RPC_B="sudo PYTHONPATH=$RIG_TOOLS/py python3 $RIG_TOOLS/scripts/rpc.py -s $SOCK_B"
@@ -117,7 +133,10 @@ fail() {
 
 cleanup() {
   set +e
-  vsudo "nvme disconnect -n $SUBNQN >/dev/null 2>&1
+  vsudo "[ -f /tmp/rig-churn.pid ] && kill -9 -\$(cat /tmp/rig-churn.pid) >/dev/null 2>&1
+         rm -f /tmp/rig-churn.pid /tmp/rig-churn.sh /tmp/rig-churn.err /tmp/rig-churn.stop /tmp/rig-churn.count
+         umount -lf $MNT >/dev/null 2>&1
+         nvme disconnect -n $SUBNQN >/dev/null 2>&1
          nvme disconnect -n $LEGNQN >/dev/null 2>&1
          pkill -9 -x flint-pnfs-mds
          # BY EXACT NAME, and both reactors. Two rig-found traps in one
@@ -314,10 +333,25 @@ STAGE=$(vsudo "env FLINT_NVME_CTRL_LOSS_TMO=$CTRL_LOSS FLINT_NVME_RECONNECT_DELA
   || fail "stage: $STAGE"
 NSDEV=$(echo "$STAGE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"])' 2>/dev/null)
 [ -n "$NSDEV" ] || fail "stage reported no device: $STAGE"
+if [ "$FS" = "1" ]; then
+# THE CONSUMER IS A FILESYSTEM. Everything downstream of here is about
+# what a mount does, not what a byte does.
+vsudo "mkfs.ext4 -q -F -E lazy_itable_init=0,lazy_journal_init=0 $NSDEV" \
+  || fail "mkfs.ext4 on the composition"
+vsudo "mkdir -p $MNT && mount -o errors=remount-ro $NSDEV $MNT" \
+  || fail "mount the composition"
+vsudo "dd if=/dev/urandom of=$MNT/payload.bin bs=1M count=$IO_MIB conv=fsync status=none" \
+  || fail "writing the payload through the filesystem"
+vsudo "sync"
+PAY_MD5=$(vsudo "md5sum $MNT/payload.bin | cut -d' ' -f1")
+[ -n "$PAY_MD5" ] || fail "no payload checksum"
+echo "✓ V3a: ext4 on the composition, ${IO_MIB} MiB payload written and synced (md5 ${PAY_MD5:0:12}…)"
+else
 vsudo "dd if=/dev/urandom of=$NSDEV bs=1M count=$IO_MIB oflag=direct conv=notrunc status=none" \
   || fail "raw write to the composition"
 SHA_SRC=$(vsudo "dd if=$NSDEV bs=1M count=$IO_MIB iflag=direct status=none | sha256sum | cut -d' ' -f1")
 echo "✓ V3a: ${IO_MIB} MiB written raw through the composition (sha ${SHA_SRC:0:12}…)"
+fi
 
 # The rebuild is spawned by the reconcile pass — never awaited by it,
 # because a full copy can take hours and that loop renews every serving
@@ -345,6 +379,9 @@ echo "✓ V3b: the rebuild ran — 2 members, record in-sync"
 # makes this comparison meaningful: with no data offset, leg byte N is
 # volume byte N.
 # The reader needs an identity of its own. The composer's NQN is taken:
+if [ "$FS" = "1" ]; then
+echo "  … FS=1: skipping V4-V6 (raw checksum legs; they run in the default mode)"
+else
 # SPDK already holds a controller under it, and NVMe binds one host NQN
 # to one host ID, so the kernel's connect under the same NQN is refused
 # (rig-found — the obvious "just read it as the composer" does not work
@@ -450,6 +487,7 @@ SHA_NOW=$(vsudo "dd if=$NSDEV bs=1M count=$IO_MIB iflag=direct status=none | sha
 [ "$SHA_NOW" != "$SHA_SRC" ] || fail "the degraded write did not change the volume — the drill proves nothing"
 read_leg "$SHA_NOW" "V6"
 echo "✓ V6: the leg rejoined and carries the bytes written while it was gone"
+fi  # end of the raw-checksum legs (V4-V6)
 
 # ── V7. THE FAILOVER ─────────────────────────────────────────────────
 # Everything above kills the LEG HOST. This kills the COMPOSER, which is
@@ -462,7 +500,9 @@ echo "✓ V6: the leg rejoined and carries the bytes written while it was gone"
 # unreachable, that rig-b's leg is in sync, that the client was ever
 # admitted — lived in the database that dies with the composer.
 echo "── V7: the composer dies ──"
+if [ "$FS" != "1" ]; then
 SHA_PRE=$(vsudo "dd if=$NSDEV bs=1M count=$IO_MIB iflag=direct status=none | sha256sum | cut -d' ' -f1")
+fi
 CLIENT_NQN="nqn.2024-11.com.flint:node:$(vsh hostname)"
 # The client is attached HERE, at A, and its admission was recorded by
 # A's shard. Whether B can see it is the allow-list half of the proof.
@@ -474,6 +514,51 @@ ADMITTED=$(vsh "sudo sqlite3 $WITNESS \
 # stays UP on purpose: its record is fine, its disk arm is gone, and a
 # composer that cannot serve but can still talk is exactly the world the
 # dead-man was written for.
+if [ "$FS" = "1" ]; then
+# I/O IN FLIGHT WHEN THE COMPOSER DIES, which is the only version of
+# this question worth asking. A quiescent mount survives anything: the
+# filesystem never issues a request, so it never sees an error, and the
+# drill would be reporting that nothing happened. This writer keeps
+# real fsync'd traffic on the device across the whole failover and
+# counts what it loses.
+# IDENTIFIED BY A PIDFILE, not by a pattern. `pkill -f rig-churn` matches
+# the command line of the very shell running it (the trap this rig's
+# cleanup already documents), and `pkill -x rig-churn.sh` matches
+# nothing at all — `-x` compares the process NAME, which for a
+# `#!/bin/sh` script is the INTERPRETER (`dash`), never the script. The
+# first cost a whole run: the pkill killed its own shell, every cleanup
+# line after it silently never ran, and the next run collided with the
+# survivors. The second made "the churn writer never started" fire on a
+# writer that had.
+#
+# setsid, because the writer has to outlive the ssh session that starts
+# it — a backgrounded child of `limactl shell` goes away with it.
+vsudo "rm -f /tmp/rig-churn.err /tmp/rig-churn.pid /tmp/rig-churn.stop
+cat > /tmp/rig-churn.sh <<'EOS'
+#!/bin/sh
+# RUNS UNTIL TOLD TO STOP, not for a fixed count. A counted loop got
+# through all 900 iterations in under two seconds — 512 KiB with an
+# fsync is a millisecond here — so by the time the drill looked, the
+# writer it was about to check had finished and exited cleanly, and
+# 'the churn writer never started' was reporting the opposite of what
+# happened. The bound below is a runaway guard, not the plan.
+echo \$\$ > /tmp/rig-churn.pid
+i=0
+while [ ! -f /tmp/rig-churn.stop ] && [ \$i -lt 1000000 ]; do
+  dd if=/dev/urandom of=$MNT/churn.\$((i%4)) bs=64k count=8 conv=fsync status=none \\
+    2>/dev/null || echo x >> /tmp/rig-churn.err
+  i=\$((i+1))
+done
+echo \$i > /tmp/rig-churn.count
+EOS
+chmod +x /tmp/rig-churn.sh
+setsid /tmp/rig-churn.sh >/dev/null 2>&1 < /dev/null &"
+sleep 2
+CHURN_PID=$(vsudo "cat /tmp/rig-churn.pid 2>/dev/null" | tr -d ' \r')
+[ -n "$CHURN_PID" ] && vsudo "kill -0 $CHURN_PID 2>/dev/null" \
+  || fail "the churn writer never started (pid='$CHURN_PID')"
+echo "  … a churn writer is running against the mount"
+fi
 vsudo "pkill -9 -x reactor_0"
 echo "  … tgt-A killed (MDS-A still running); waiting for B to condemn it"
 
@@ -610,6 +695,7 @@ timeout expiring, not the pass noticing the volume moved"
 NSDEV2=$(vsudo "readlink -f /dev/disk/by-id/nvme-eui.* 2>/dev/null | head -1" | tr -d ' \r')
 [ -n "$NSDEV2" ] || fail "the redirect left no eui link — the client has no stable device path"
 echo "✓ V7c-pre: the client redirected itself to B in ${ELAPSED}s (ctrl_loss_tmo=${CTRL_LOSS}s) → $NSDEV2"
+if [ "$FS" != "1" ]; then
 SHA_POST=$(vsudo "dd if=$NSDEV2 bs=1M count=$IO_MIB iflag=direct status=none | sha256sum | cut -d' ' -f1")
 [ "$SHA_POST" = "$SHA_PRE" ] \
   || fail "THE BYTES DID NOT SURVIVE THE FAILOVER: ${SHA_POST:0:12}… != ${SHA_PRE:0:12}…"
@@ -620,7 +706,105 @@ echo "✓ V7c: the client re-attached to the survivor and read ${IO_MIB} MiB byt
 vsudo "dd if=/dev/urandom of=$NSDEV2 bs=1M count=4 oflag=direct conv=notrunc status=none" \
   || fail "the promoted volume refused a write"
 echo "✓ V7d: and the promoted composition takes writes"
+fi
 
+# ── V8. THE FILESYSTEM (FS=1) ────────────────────────────────────────
+# §V7 proves the BYTES survive: a process opens the device fresh, reads
+# with O_DIRECT, and the checksum matches. A mounted filesystem is the
+# consumer that was never asked. It held the device open across the
+# redirect, it had dirty pages and fsync'd traffic in flight when the
+# composer died, and `errors=remount-ro` means one EIO takes it out of
+# service with every byte on disk intact.
+#
+# WHAT IS ASSERTED vs WHAT IS MEASURED, because these are different
+# claims: durability is an ASSERTION — the payload's md5 must survive,
+# through a remount if it comes to that. Whether the mount rode the
+# failover LIVE is a MEASUREMENT, reported either way, because a
+# filesystem that goes read-only has still lost nothing and the honest
+# answer decides whether a pod must restart or merely wait.
+if [ "$FS" = "1" ]; then
+# The writer's OWN state first: a process stuck in uninterruptible I/O
+# on a dead device reports zero errors forever, so "lost 0 writes" is
+# only meaningful next to what the writer was doing when it stopped.
+CHURN_STATE=$(vsudo "ps -o stat= -p $CHURN_PID 2>/dev/null" | tr -d ' \r')
+# Ask it to stop, then insist. setsid made it a group leader, so the
+# negative pid takes its dd with it.
+vsudo "touch /tmp/rig-churn.stop; sleep 1
+       kill -9 -$CHURN_PID >/dev/null 2>&1; kill -9 $CHURN_PID >/dev/null 2>&1"
+sleep 1
+CHURN_ERR=$(vsudo "wc -l < /tmp/rig-churn.err 2>/dev/null" | tr -d ' \r')
+CHURN_ERR=${CHURN_ERR:-0}
+case "$CHURN_STATE" in
+  D*) CHURN_NOTE="stuck in uninterruptible I/O (D) — its writes neither landed nor failed" ;;
+  "") CHURN_NOTE="already gone" ;;
+  *)  CHURN_NOTE="state '$CHURN_STATE'" ;;
+esac
+# WHERE DID THE MOUNT END UP? The mount table is not the answer: it
+# OUTLIVES the device under it, so `findmnt` happily reports `rw` for a
+# mount whose every I/O fails. Ask the filesystem to do something.
+MNT_OPTS=$(vsudo "findmnt -no OPTIONS $MNT 2>/dev/null" | tr -d '\r')
+MNT_LIVE=no
+vsudo "dd if=$MNT/payload.bin of=/dev/null bs=64k count=1 status=none" >/dev/null 2>&1 \
+  && MNT_LIVE=yes
+# `shutdown` in the options is ext4 saying the filesystem is dead. It
+# sits AFTER `rw` in the same string, which is how the first version of
+# this leg called a corpse LIVE: it pattern-matched the prefix and the
+# kernel's actual verdict was three fields to the right.
+case "$MNT_OPTS" in *shutdown*) MNT_SHUT=yes ;; *) MNT_SHUT=no ;; esac
+case "$MNT_OPTS:$MNT_LIVE:$MNT_SHUT" in
+  rw*:yes:no) MNT_WORLD="LIVE (read-write, and it actually reads)" ;;
+  rw*:*:yes)  MNT_WORLD="ZOMBIE (mount table says rw; ext4 says 'shutdown')" ;;
+  rw*:no:*)   MNT_WORLD="ZOMBIE (mount table says rw; every I/O fails)" ;;
+  ro*:*:*)    MNT_WORLD="READ-ONLY (errors=remount-ro fired)" ;;
+  :*)         MNT_WORLD="GONE (the mount did not survive)" ;;
+  *)          MNT_WORLD="unrecognised options '$MNT_OPTS' (usable=$MNT_LIVE)" ;;
+esac
+echo "  … the mount after the failover: $MNT_WORLD"
+echo "  … the device the redirect produced: $NSDEV2 (staged on $NSDEV)"
+CHURN_ITERS=$(vsudo "cat /tmp/rig-churn.count 2>/dev/null" | tr -d ' \r')
+echo "  … churn writer: ${CHURN_ITERS:-?} write(s) attempted, $CHURN_ERR recorded error(s), $CHURN_NOTE"
+# DURABILITY IS THE ASSERTION. A remount is allowed to get there — that
+# is what a pod restart would do — but the bytes are not negotiable.
+REMOUNTED=no
+if [ "$MNT_LIVE" != "yes" ] || [ "${MNT_OPTS#ro}" != "$MNT_OPTS" ]; then
+  vsudo "umount -lf $MNT >/dev/null 2>&1; mount -o errors=remount-ro $NSDEV2 $MNT" \
+    || fail "V8: the filesystem could not even be remounted after the failover \
+(device $NSDEV2, mount was: $MNT_WORLD)"
+  REMOUNTED=yes
+fi
+PAY_NOW=$(vsudo "md5sum $MNT/payload.bin 2>/dev/null | cut -d' ' -f1")
+[ "$PAY_NOW" = "$PAY_MD5" ] \
+  || fail "V8: THE FILESYSTEM'S PAYLOAD DID NOT SURVIVE THE FAILOVER: \
+${PAY_NOW:-<unreadable>} != $PAY_MD5 (mount was: $MNT_WORLD, remounted=$REMOUNTED)"
+echo "✓ V8a: the payload is byte-identical through the failover (remounted=$REMOUNTED)"
+# And the filesystem takes writes again — the difference between a
+# volume that recovered and one that is merely readable.
+vsudo "dd if=/dev/urandom of=$MNT/after.bin bs=1M count=4 conv=fsync status=none && sync" \
+  || fail "V8: the filesystem refused a write after the failover (mount: $MNT_WORLD, \
+remounted=$REMOUNTED)"
+echo "✓ V8b: and it takes writes again"
+if [ "$REMOUNTED" = "no" ]; then
+  echo "✓ V8c: THE MOUNT RODE THE REDIRECT LIVE — no remount, no unmount, $CHURN_ERR lost write(s)"
+else
+  echo "⚠ V8c: THE MOUNT DID NOT RIDE IT — $MNT_WORLD"
+  echo "   Nothing was lost: every byte came back through a remount. But the redirect"
+  echo "   DISCONNECTS and reconnects, so the kernel built a NEW namespace ($NSDEV2)"
+  echo "   instead of restoring the staged one ($NSDEV) — and the mount stayed bound to"
+  echo "   the device that went away. For a filesystem consumer that means a pod restart,"
+  echo "   and the mount table gives no sign: it still reads 'rw'."
+  echo "   The fix this points at is connect-BEFORE-disconnect: same subsystem NQN and"
+  echo "   the same pinned NGUID on both targets means B is a second PATH to the same"
+  echo "   namespace, not a new one — which is what would let a mount ride a failover."
+fi
+fi
+
+# The mount holds the device open: unstage would refuse (or leak a
+# dangling mount into the next run) with it standing.
+[ "$FS" = "1" ] && vsudo "umount -lf $MNT >/dev/null 2>&1"
 vsudo "$CSI_CLI unstage --volume-id $VOL" >/dev/null 2>&1
 echo
+if [ "$FS" = "1" ]; then
+echo "✅ replica-rig FS=1: every proof held — placement, frame, rebuild, FAILOVER, and a MOUNTED FILESYSTEM across it"
+else
 echo "✅ replica-rig: every proof held — placement, frame, rebuild, mirror, degrade, rejoin, FAILOVER"
+fi
