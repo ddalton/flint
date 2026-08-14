@@ -284,6 +284,10 @@ test-pnfs-recall: build-pnfs ## DS-death CB_LAYOUTRECALL e2e (kill DS1, assert M
 test-pnfs-mds-restart: build-pnfs ## MDS restart survival e2e (Phase B: kill MDS, restart over same state.db, mount keeps working)
 	tests/lima/pnfs/restart.sh
 
+.PHONY: test-pnfs-crosscluster
+test-pnfs-crosscluster: build-pnfs ## Two DISTINCT NFS clients (netns+UTS = two "clusters") share one volume: close-to-open, cross-client locks, sqlite/git battery, mid-flight DS-direct census, metadata rates
+	tests/lima/pnfs/cross-cluster-drill.sh
+
 .PHONY: test-pnfs-nconnect
 test-pnfs-nconnect: build-pnfs ## Single-host nconnect sweep — exposes per-TCP-serial RPC ceiling (loopback only; cross-host is a separate bench)
 	tests/lima/pnfs/nconnect.sh
