@@ -745,15 +745,32 @@ impl BlockExportReconciler {
             return self.drop_leg_export_locked(volume).await;
         }
         let bdev = self.bdev_name(volume);
-        if self.rpc.rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": bdev } }))
+        let probe = match self
+            .rpc
+            .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": bdev } }))
             .await
-            .is_err()
         {
-            return Err(format!(
-                "leg export for '{volume}': no local copy ({bdev}) — this target holds no leg \
-                 to offer, and minting one would offer zeros as if they were data"
-            ));
-        }
+            Ok(r) => r,
+            Err(_) => {
+                return Err(format!(
+                    "leg export for '{volume}': no local copy ({bdev}) — this target holds no \
+                     leg to offer, and minting one would offer zeros as if they were data"
+                ))
+            }
+        };
+        // The lvol's OTHER names, and they are load-bearing. A namespace
+        // record carries the CANONICAL bdev name (UUID-form for an
+        // lvol), never the `lvs/vol` alias this module addresses it by,
+        // so a spec with no aliases makes `ns_matches` see a namespace
+        // pointing somewhere else on EVERY pass and take the
+        // remove-and-re-add repair arm — which disconnects whoever is
+        // attached. Rig-found: the composer's leg session was reset
+        // ~200 ms after every rebuild, and the freshly admitted base
+        // fell out of the array with nothing in flint's own log to say
+        // why. The volume export learned this once already; the leg
+        // export had to learn it again.
+        let ids = Self::lvol_identities(&probe);
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
         let hosts = self.desired_leg_hosts(&seat);
         let nqn = crate::identity::block_leg_export_nqn(volume);
         // The leg carries the volume's bytes but NOT its client-facing
@@ -764,7 +781,7 @@ impl BlockExportReconciler {
         let spec = ExportSpec {
             nqn: &nqn,
             bdev_name: &bdev,
-            bdev_aliases: &[],
+            bdev_aliases: &id_refs,
             trtype: "TCP",
             traddr: &self.traddr,
             trsvcid: self.trsvcid,
@@ -995,6 +1012,64 @@ impl BlockExportReconciler {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => return Err(format!("demoting leg '{}': {e}", leg.target_id)),
                 Err(e) => return Err(format!("demoting leg '{}': {e}", leg.target_id)),
+            }
+        }
+        // THE CLAIM. An nvmf namespace claims its bdev
+        // (`spdk_bdev_module_claim_bdev`, subsystem.c:2592), and a raid
+        // claims its bases — so a volume already serving its bare lvol
+        // cannot be composed until that namespace lets go. Without this
+        // the create fails EPERM and the volume serves solo forever,
+        // which is what the rig found on the first two-target run: the
+        // provision path builds the export and only then records the
+        // placed leg, so by the first converge the claim is always
+        // taken. The file tier met the same wall from the other side
+        // (F49, the local-leg export squatter) and answers it the same
+        // way: drop the claim, then compose.
+        //
+        // Safe because `ensure_locked` composes BEFORE it converges the
+        // export: the namespace is re-added in the same pass, pointing
+        // at the composition. And a volume gains its second leg at
+        // provision time, before any client has been admitted.
+        let nqn = crate::identity::block_volume_export_nqn(volume);
+        if let Ok(Some(sub)) = get_subsystem(self.rpc.as_ref(), &nqn).await {
+            // The namespace record carries the CANONICAL bdev name
+            // (UUID-form for an lvol), never the `lvs/vol` alias this
+            // module addresses it by — the same trap `ns_matches` exists
+            // for, and comparing against the alias alone would find
+            // nothing and leave the claim in place.
+            let ids = match self
+                .rpc
+                .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": local } }))
+                .await
+            {
+                Ok(resp) => Self::lvol_identities(&resp),
+                Err(_) => Vec::new(),
+            };
+            let holds_local = sub
+                .get("namespaces")
+                .and_then(|n| n.as_array())
+                .map(|ns| {
+                    ns.iter().any(|n| {
+                        n.get("bdev_name")
+                            .and_then(|b| b.as_str())
+                            .map(|b| b == local || ids.iter().any(|i| i == b))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if holds_local {
+                tracing::info!(
+                    "🧬 '{}': releasing the namespace's claim on {} so the composition can \
+                     take it — the export is rebuilt onto the raid in this same pass",
+                    volume, local
+                );
+                let remove = json!({
+                    "method": "nvmf_subsystem_remove_ns",
+                    "params": { "nqn": nqn, "nsid": 1 }
+                }); // guarded-destroy-lint: allow
+                self.rpc.rpc(&remove).await.map_err(|e| {
+                    format!("releasing the namespace claim on {local} for the composition: {e}")
+                })?;
             }
         }
         // Geometry for the stand-ins: the raid is sized to its smallest
@@ -3472,6 +3547,14 @@ pub(crate) mod tests {
         pub(crate) failures: Mutex<std::collections::HashMap<String, String>>,
         /// leg bdev → its size, for the leg that missed an expand.
         pub(crate) leg_sizes: Mutex<std::collections::HashMap<String, u64>>,
+        /// bdev → who claims it. SPDK lets exactly ONE module hold a
+        /// bdev for writing: an nvmf namespace claims its bdev
+        /// (subsystem.c:2592) and so does a raid its bases. Modelling
+        /// it is not decoration — without it a raid create over a bdev
+        /// a namespace already serves SUCCEEDS here and fails EPERM on
+        /// a real target, which is exactly what the two-target rig
+        /// found on its first run.
+        pub(crate) claims: Mutex<std::collections::HashMap<String, String>>,
     }
 
     /// The fake lvolstore's cluster size (SPDK's default is 4 MiB).
@@ -3500,6 +3583,7 @@ pub(crate) mod tests {
                 writer: Mutex::new(None),
                 failures: Mutex::new(Default::default()),
                 leg_sizes: Mutex::new(Default::default()),
+                claims: Mutex::new(Default::default()),
             }
         }
 
@@ -3641,6 +3725,28 @@ pub(crate) mod tests {
                     if slots.iter().any(|s| s.is_none()) {
                         return Err("The base bdev name cannot be empty".into());
                     }
+                    {
+                        let mut claims = self.claims.lock().unwrap();
+                        let bdevs = self.bdevs.lock().unwrap();
+                        for base in slots.iter().flatten() {
+                            let canonical =
+                                bdevs.get(base).cloned().unwrap_or_else(|| base.clone());
+                            if let Some(holder) =
+                                claims.get(&canonical).or_else(|| claims.get(base))
+                            {
+                                return Err(format!(
+                                    "Failed to create RAID bdev {name}: Operation not \
+                                     permitted (base {base} is claimed by {holder})"
+                                )
+                                .into());
+                            }
+                        }
+                        for base in slots.iter().flatten() {
+                            let canonical =
+                                bdevs.get(base).cloned().unwrap_or_else(|| base.clone());
+                            claims.insert(canonical, format!("raid:{name}"));
+                        }
+                    }
                     self.raids.lock().unwrap().insert(name.clone(), slots);
                     // A raid IS a bdev — that is the whole reason the
                     // namespace can be re-pointed at it.
@@ -3711,6 +3817,7 @@ pub(crate) mod tests {
                     let name = p["name"].as_str().unwrap_or("").to_string();
                     self.raids.lock().unwrap().remove(&name);
                     self.bdevs.lock().unwrap().remove(&name);
+                    self.claims.lock().unwrap().retain(|_, v| v != &format!("raid:{name}"));
                     Ok(json!({ "result": true }))
                 }
                 "bdev_raid_get_bdevs" => {
@@ -3977,6 +4084,10 @@ pub(crate) mod tests {
                         .unwrap_or_else(|| requested.to_string());
                     let mut subs = self.subsystems.lock().unwrap();
                     let s = subs.get_mut(nqn).ok_or("no subsystem")?;
+                    self.claims
+                        .lock()
+                        .unwrap()
+                        .insert(canonical.clone(), format!("nvmf:{nqn}"));
                     s["namespaces"]
                         .as_array_mut()
                         .unwrap()
@@ -3997,10 +4108,13 @@ pub(crate) mod tests {
                     let nsid = p["nsid"].as_u64().unwrap_or(0);
                     let mut subs = self.subsystems.lock().unwrap();
                     let s = subs.get_mut(nqn).ok_or("no subsystem")?;
-                    s["namespaces"]
-                        .as_array_mut()
-                        .unwrap()
-                        .retain(|ns| ns["nsid"].as_u64() != Some(nsid));
+                    let arr = s["namespaces"].as_array_mut().unwrap();
+                    for ns in arr.iter().filter(|n| n["nsid"].as_u64() == Some(nsid)) {
+                        if let Some(b) = ns["bdev_name"].as_str() {
+                            self.claims.lock().unwrap().remove(b);
+                        }
+                    }
+                    arr.retain(|ns| ns["nsid"].as_u64() != Some(nsid));
                     Ok(json!({ "result": true }))
                 }
                 "nvmf_subsystem_add_listener" => {
@@ -4030,7 +4144,9 @@ pub(crate) mod tests {
                     Ok(json!({ "result": true }))
                 }
                 "nvmf_delete_subsystem" => {
-                    self.subsystems.lock().unwrap().remove(p["nqn"].as_str().unwrap_or(""));
+                    let nqn = p["nqn"].as_str().unwrap_or("");
+                    self.claims.lock().unwrap().retain(|_, v| v != &format!("nvmf:{nqn}"));
+                    self.subsystems.lock().unwrap().remove(nqn);
                     Ok(json!({ "result": true }))
                 }
                 "nvmf_subsystem_get_controllers" => Ok(json!({ "result": [] })),
@@ -5484,6 +5600,58 @@ pub(crate) mod tests {
         assert!(
             tgt.bdevs.lock().unwrap().contains_key(&r.bdev_name("pvc-mine")),
             "and its bytes are untouched"
+        );
+    }
+
+    /// A LEG EXPORT MUST CONVERGE TO NOTHING ON THE SECOND PASS.
+    ///
+    /// A namespace record carries the CANONICAL bdev name (UUID-form
+    /// for an lvol), never the `lvs/vol` alias this module addresses it
+    /// by. A spec without the lvol's other names therefore makes
+    /// `ns_matches` see a namespace pointing somewhere else on every
+    /// pass and take the remove-and-re-add repair arm — which
+    /// disconnects whoever is attached, once per reconcile.
+    ///
+    /// The volume export learned this on the rig long ago (the device
+    /// node vanished for ~0.5 s at every admit). The LEG export shipped
+    /// with the same three-character gap and the two-target rig found
+    /// it the same way: the composer's session to the leg reset ~200 ms
+    /// after every rebuild, and the freshly admitted base fell straight
+    /// back out of the array.
+    ///
+    /// A/B: pass `&[]` for the aliases and the second pass bounces the
+    /// namespace.
+    #[tokio::test]
+    async fn a_leg_export_converges_to_nothing_the_second_time() {
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        );
+        r.host_leg("pvc-idem", 1 << 20, "node-composer").await.expect("host");
+        tgt.calls.lock().unwrap().clear();
+        r.ensure_leg_export("pvc-idem").await.expect("second pass");
+
+        let mutations: Vec<String> = tgt
+            .methods()
+            .into_iter()
+            .filter(|m| {
+                !m.starts_with("bdev_get")
+                    && !m.starts_with("nvmf_get")
+                    && !m.starts_with("bdev_lvol_get")
+                    && m != "ublk_get_disks"
+            })
+            .collect();
+        assert!(
+            mutations.is_empty(),
+            "a second converge bounced the leg export — every attached composer is \
+             disconnected by this: {mutations:?}"
         );
     }
 

@@ -1855,6 +1855,38 @@ Each phase ships standalone value; none is gated on the next.
   down needs ANOTHER expand to become rejoinable — there is no other lane that grows a
   peer's copy today, so a volume can sit with a stale leg that refuses to rebuild until
   someone grows the PVC again.
+- **THE RIG RAN, AND IT FOUND TWO BUGS NO UNIT TEST COULD (`tests/lima/pnfs/
+  replica-rig.sh`, green ×3, zero cluster spend).** Two spdk-tgt processes and two MDS
+  shards with separate sqlite inside one lima VM — the production shape, because shards
+  share nothing and every fact that crosses between them has to cross the wire. Six
+  proofs: placement, the two-slot frame, the rebuild, THE MIRROR BYTE FOR BYTE (32 MiB
+  sha-identical, read back over the peer's own leg export), the degrade barrier
+  (mark-then-degrade in that order, writes continue), and the rejoin (the sparse copy
+  carried the 8 clusters written while the leg was away).
+  **BUG 1 — the composition could never be built at all.** `bdev_raid_create` returned
+  EPERM on the first two-target run: an nvmf namespace CLAIMS its bdev
+  (`spdk_bdev_module_claim_bdev`, subsystem.c:2592), and CreateVolume builds the export
+  before it records the placed leg, so by the first converge the volume's own namespace
+  held the lvol and no raid could take it. Every unit test passed because the FakeTgt
+  had no claim model. The fix is the file tier's F49 answer from the other side —
+  release the namespace's claim, then compose, in the same pass that rebuilds the
+  export onto the composition — and the fake now models claims, so the A/B fails eight
+  tests instead of none.
+  **BUG 2 — the leg export bounced its composer every 5 seconds.** `ensure_leg_export`
+  passed NO bdev aliases, and a namespace record carries the CANONICAL bdev name, never
+  the `lvs/vol` alias — so `ns_matches` saw a namespace pointing elsewhere on every
+  pass and took the remove-and-re-add repair arm, resetting the composer's session
+  ~200 ms after each rebuild and dropping the freshly admitted base straight back out
+  of the array. The volume export learned this on the rig long ago; the leg export
+  shipped with the same three-character gap. Now A/B'd by a test that asserts a second
+  converge mutates NOTHING.
+  Rig lessons worth keeping: an spdk_tgt renames its process to `reactor_<core>`, so a
+  second target (`-m 0x2`) survives `pkill -x spdk_tgt`; and `pkill -f <path>` matches
+  the command line of the shell running it, so it kills itself and silently skips every
+  cleanup line after it. Reading a peer's copy needs its own host NQN **and its own
+  host ID** — the kernel binds one to the other system-wide, and SPDK already holds the
+  composer's NQN — which turned the read into a proof that the leg export refuses a
+  host its record never named.
 - **THE REGISTRATION QUESTION IS SETTLED: the client registers, and the TRIGGER is
   device resolution (measured 2026-08-12, `nvme resv-report`, base rig §9b).** §5's
   preempt-drill correction already retired "the kernel registers NO key" and left
