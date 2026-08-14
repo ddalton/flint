@@ -1173,6 +1173,25 @@ impl LayoutManager {
         Arc::clone(&self.backend)
     }
 
+    /// THE ARBITRATION RECORD for block-class work — one way to reach
+    /// it from every control path, so no site has to decide for itself
+    /// where a fence or an admission belongs.
+    ///
+    /// With a block export attached this is that reconciler's witness
+    /// (shared, in a replicated deployment). Without one it falls back
+    /// to this MDS's own backend, which is precisely today's behaviour
+    /// and is right for the case: a shard with no block export composes
+    /// nothing, so nothing will ever fail over to another shard and its
+    /// own record is a perfectly good witness for it.
+    pub fn block_witness(&self) -> Arc<dyn crate::pnfs::mds::witness::CompositionWitness> {
+        match self.block_export() {
+            Some(rec) => rec.witness(),
+            None => Arc::new(crate::pnfs::mds::witness::BackendWitness::new(Arc::clone(
+                &self.backend,
+            ))),
+        }
+    }
+
     /// Resolve a scsi deviceid — the volume's NGUID — back to its
     /// volume by scanning the geometry cache's scsi-class entries.
     /// O(volumes) per call and restart-proof: the identity is derived,

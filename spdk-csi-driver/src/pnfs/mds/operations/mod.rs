@@ -1451,6 +1451,7 @@ pub async fn fence_block_client(
     client_id: u64,
 ) -> Result<String, String> {
     let backend = layout_manager.state_backend();
+    let witness = layout_manager.block_witness();
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1463,10 +1464,16 @@ pub async fn fence_block_client(
     // crash anywhere after this point still leaves a positive record the
     // next startup re-establishes the fence from (and it grabs the
     // host_nqn while block_hosts still holds it, pre-eviction).
-    let fenced_nqn = match backend.block_fence_record(volume, client_id, now_unix).await {
-        Ok(Ok(nqn)) => nqn,
-        Ok(Err(e)) => return Err(format!("fence record refused: {e}")),
-        Err(e) => return Err(format!("fence record failed: {e}")),
+    // THE FENCE IDENTITY goes to the witness, because the target that
+    // must keep this client out may not be this one: after a failover
+    // the survivor builds its allow-list from what IT can read, and a
+    // fence recorded only here is a fence that does not travel —
+    // FlintCompositionFenceLocal.cfg is that counterexample. The
+    // ENFORCEMENT that follows (the extent rows, the preempt, the
+    // delivered mark) stays local and witness-free.
+    let fenced_nqn = match witness.fence_record(volume, client_id, now_unix).await {
+        Ok(nqn) => nqn,
+        Err(e) => return Err(format!("fence record refused: {e}")),
     };
     match backend.extent_fence_client(volume, client_id).await {
         Ok(Ok(_)) => {}
@@ -1530,8 +1537,10 @@ pub async fn fence_block_client(
         }
     }
 
-    match backend.block_host_evict(volume, client_id).await {
-        Ok(Ok((evicted, _))) if !evicted.is_empty() => {
+    // The eviction is the allow-list half of the fence, so it lands
+    // where the allow-list is read from.
+    match witness.host_evict(volume, client_id).await {
+        Ok((evicted, _)) if !evicted.is_empty() => {
             if let Err(e) = rec.reconcile_hosts(volume).await {
                 tracing::error!(
                     "{}: host eviction of {:?} did not converge: {} — the fenced \
@@ -1549,16 +1558,12 @@ pub async fn fence_block_client(
                 summary.push_str("; host evicted");
             }
         }
-        Ok(Ok(_)) => {
+        Ok(_) => {
             // The NQN stays: another live client of the volume shares it.
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             tracing::error!("{}: host-evict rows for {} refused: {}", context, client_id, e);
             summary.push_str("; host-evict refused");
-        }
-        Err(e) => {
-            tracing::error!("{}: host-evict rows for {} failed: {}", context, client_id, e);
-            summary.push_str("; host-evict failed");
         }
     }
     Ok(summary)
@@ -1591,11 +1596,10 @@ pub async fn unfence_block_client(
     volume: &str,
     client_id: u64,
 ) -> Result<String, String> {
-    let backend = layout_manager.state_backend();
-    let cleared = match backend.block_unfence(volume, client_id).await {
-        Ok(Ok(cleared)) => cleared,
-        Ok(Err(e)) => return Err(format!("unfence record refused: {e}")),
-        Err(e) => return Err(format!("unfence record failed: {e}")),
+    let witness = layout_manager.block_witness();
+    let cleared = match witness.unfence(volume, client_id).await {
+        Ok(cleared) => cleared,
+        Err(e) => return Err(format!("unfence record refused: {e}")),
     };
     let mut summary = if cleared {
         format!("client {client_id} unfenced (durable record cleared)")
@@ -1605,14 +1609,13 @@ pub async fn unfence_block_client(
         format!("client {client_id} held no fence record (replay)")
     };
 
-    let still_fenced: Vec<u64> = match backend.block_fenced_all().await {
-        Ok(Ok(all)) => all
+    let still_fenced: Vec<u64> = match witness.fenced_all().await {
+        Ok(all) => all
             .into_iter()
             .filter(|(v, _)| v == volume)
             .map(|(_, c)| c)
             .collect(),
-        Ok(Err(e)) => return Err(format!("fenced-set read refused: {e}")),
-        Err(e) => return Err(format!("fenced-set read failed: {e}")),
+        Err(e) => return Err(format!("fenced-set read refused: {e}")),
     };
     if !still_fenced.is_empty() {
         summary.push_str(&format!(
@@ -1715,24 +1718,33 @@ pub async fn attach_block_node(
         return Err("no block export attached — this MDS cannot serve block volumes".into());
     };
     let host_nqn = crate::nvmeof_export::flint_host_nqn(node_name);
-    let backend = layout_manager.state_backend();
+    let witness = layout_manager.block_witness();
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    match backend
-        .block_node_attach(volume, &host_nqn, node_name, now_unix)
+    // The admission goes to the witness — this is the row that makes
+    // the client reachable, so it has to be readable by whichever
+    // target ends up composing the volume. Its fence guard travels with
+    // it, which is what keeps a fenced node refused at a SURVIVOR that
+    // never saw the fence being minted.
+    match witness
+        .node_attach(volume, &host_nqn, node_name, now_unix)
         .await
     {
-        Ok(Ok(_)) => {}
-        Ok(Err(crate::state_backend::extent_alloc::ExtentAllocError::FencedClient)) => {
+        Ok(_) => {}
+        Err(e)
+            if matches!(
+                e.refusal(),
+                Some(crate::state_backend::extent_alloc::ExtentAllocError::FencedClient)
+            ) =>
+        {
             return Err(format!(
                 "node {node_name} ({host_nqn}) is fenced on '{volume}' — refusing \
                  attach (clear the fence with UnfenceBlockClient to re-admit)"
             ));
         }
-        Ok(Err(e)) => return Err(format!("node attach refused: {e}")),
-        Err(e) => return Err(format!("node attach failed: {e}")),
+        Err(e) => return Err(format!("node attach refused: {e}")),
     }
     rec.reconcile_hosts(volume).await.map_err(|e| {
         // The durable row stands; a retry (or the next reconcile pass)
@@ -1771,11 +1783,10 @@ pub async fn detach_block_node(
     node_name: &str,
 ) -> Result<String, String> {
     let host_nqn = crate::nvmeof_export::flint_host_nqn(node_name);
-    let backend = layout_manager.state_backend();
-    let (removed, remaining) = match backend.block_node_detach(volume, &host_nqn).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => return Err(format!("node detach refused: {e}")),
-        Err(e) => return Err(format!("node detach failed: {e}")),
+    let witness = layout_manager.block_witness();
+    let (removed, remaining) = match witness.node_detach(volume, &host_nqn).await {
+        Ok(r) => r,
+        Err(e) => return Err(format!("node detach refused: {e}")),
     };
     let mut summary = if removed {
         format!("node {node_name} ({host_nqn}) detached from '{volume}'")
@@ -2122,10 +2133,13 @@ pub async fn export_reconcile_pass(
         Err(e) => tracing::warn!("{} seat audit unavailable: {}", context, e),
     }
 
+    // The fence IDENTITIES come from the witness; everything this loop
+    // then does with them — the delivered mark, the quarantine sweep —
+    // is the enforcement lane and stays on this shard's own record.
     let backend = layout_manager.state_backend();
     let mut refenced = 0usize;
-    match backend.block_fenced_all().await {
-        Ok(Ok(fenced)) if !fenced.is_empty() => {
+    match reconciler.witness().fenced_all().await {
+        Ok(fenced) if !fenced.is_empty() => {
             for (v, c) in fenced {
                 // Re-fencing THROUGH a condemned composer dials a target
                 // that is not answering: it cannot land, and the fence
@@ -2175,8 +2189,7 @@ pub async fn export_reconcile_pass(
                 }
             }
         }
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::error!("{} fenced-set read refused: {}", context, e),
+        Ok(_) => {}
         Err(e) => tracing::error!("{} fenced-set read failed: {}", context, e),
     }
 
@@ -2541,7 +2554,7 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         client_id: u64,
         host_nqn: &str,
     ) -> Result<(), String> {
-        let backend = self.layout_manager.state_backend();
+        let witness = self.layout_manager.block_witness();
         // Fence guard FIRST: a fenced client must not be re-admitted by
         // its own fresh LAYOUTGET. The reservation blocks it at the
         // device regardless, but re-admitting it to the allow-list would
@@ -2549,16 +2562,15 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         // undoes the durable eviction. This is the whole point of the
         // positive `fenced_clients` record — the block_hosts absence
         // could not distinguish "fenced" from "never admitted".
-        match backend.block_is_fenced(volume, client_id).await {
-            Ok(Ok(true)) => {
+        match witness.is_fenced(volume, client_id).await {
+            Ok(true) => {
                 return Err(format!(
                     "client {client_id} is fenced on '{volume}' — refusing admission \
                      (clear the fence to re-admit)"
                 ))
             }
-            Ok(Ok(false)) => {}
-            Ok(Err(e)) => return Err(format!("fence check refused: {e}")),
-            Err(e) => return Err(format!("fence check failed: {e}")),
+            Ok(false) => {}
+            Err(e) => return Err(format!("fence check refused: {e}")),
         }
         // Was the NQN already desired? Only the RPC converge may be
         // skipped on that answer — never the per-client row below. The
@@ -2569,22 +2581,20 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         // fenced client simply reconnected (the fence rig's F5 caught
         // this live — the exact side door the attach-row purge exists
         // to close, entered through the fast path).
-        let already_desired = match backend.block_hosts(volume).await {
-            Ok(Ok(hosts)) => hosts.iter().any(|h| h == host_nqn),
-            Ok(Err(e)) => return Err(format!("block_hosts read refused: {e}")),
-            Err(e) => return Err(format!("block_hosts read failed: {e}")),
+        let already_desired = match witness.hosts(volume).await {
+            Ok(hosts) => hosts.iter().any(|h| h == host_nqn),
+            Err(e) => return Err(format!("allow-list read refused: {e}")),
         };
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        match backend
-            .block_host_admit(volume, client_id, host_nqn, now_unix)
+        match witness
+            .host_admit(volume, client_id, host_nqn, now_unix)
             .await
         {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(format!("host admit refused: {e}")),
-            Err(e) => return Err(format!("host admit failed: {e}")),
+            Ok(_) => {}
+            Err(e) => return Err(format!("host admit refused: {e}")),
         }
         // Steady state: the tgt already carries the NQN — assume it
         // converged when the first admission wrote it and skip the RPC

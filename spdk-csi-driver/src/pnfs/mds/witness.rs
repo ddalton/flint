@@ -254,6 +254,88 @@ pub trait CompositionWitness: Send + Sync {
 
     /// Sweep a volume's whole arbitration record — DeleteVolume's act.
     async fn drop_volume(&self, volume: &str) -> WitnessResult<()>;
+
+    // ── THE ALLOW-LIST, and why it is arbitration and not allocation ──
+    //
+    // A composition's export is `allow_any_host: false` plus a list of
+    // host NQNs, so the allow-list is not a description of the volume —
+    // it is the volume's DOOR. Whoever composes has to be able to build
+    // it, and after a failover that is a target whose own shard has
+    // never heard of these clients: admissions are earned at LAYOUTGET
+    // and at ControllerPublish, both answered by the volume's home
+    // shard, and fences are minted there too.
+    //
+    // The model missed this because it never modelled admissions as
+    // shard-local state — `FenceReplayOnAssemble` is stated over a
+    // global `fenced`, and `KnownFences` (tranche 4) only asked whether
+    // the ASSEMBLER can read the fence set. The generalization is the
+    // same shape: every identity the door is built from must be
+    // readable by whoever may one day have to build it.
+    //
+    // What stays local is the ENFORCEMENT lane, and it is the half that
+    // matters for the invariant: the preempt RPC, the delivered mark,
+    // the quarantine sweep and the extent rows are all acts against
+    // this target's own tgt and its own record.
+
+    /// The volume's desired allow-list: client-earned admissions ∪
+    /// node-level attaches, distinct and sorted.
+    async fn hosts(&self, volume: &str) -> WitnessResult<Vec<String>>;
+
+    /// Admit a client-earned host (the LAYOUTGET path). Returns the
+    /// allow-list that now stands.
+    async fn host_admit(
+        &self,
+        volume: &str,
+        client_id: u64,
+        host_nqn: &str,
+        now_unix: i64,
+    ) -> WitnessResult<Vec<String>>;
+
+    /// Drop a client's admission (the durable half of the fence lever's
+    /// eviction). Returns `(removed_nqns, remaining_allow_list)`.
+    async fn host_evict(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> WitnessResult<(Vec<String>, Vec<String>)>;
+
+    /// Record a NODE's attachment (ControllerPublish) — the pre-NFS
+    /// admission that lets `nvme connect` succeed before the first
+    /// LAYOUTGET. REFUSED while a fence record names the NQN, which is
+    /// the door the survivor has to be able to keep shut.
+    async fn node_attach(
+        &self,
+        volume: &str,
+        host_nqn: &str,
+        node_name: &str,
+        now_unix: i64,
+    ) -> WitnessResult<Vec<String>>;
+
+    /// Drop a node's attach row (ControllerUnpublish).
+    async fn node_detach(
+        &self,
+        volume: &str,
+        host_nqn: &str,
+    ) -> WitnessResult<(bool, Vec<String>)>;
+
+    /// Mint the durable fence record, returning the NQN it names.
+    async fn fence_record(
+        &self,
+        volume: &str,
+        client_id: u64,
+        now_unix: i64,
+    ) -> WitnessResult<String>;
+
+    /// Is this client fenced on this volume? The admission guard.
+    async fn is_fenced(&self, volume: &str, client_id: u64) -> WitnessResult<bool>;
+
+    /// Every `(volume, client_id)` fence record — the startup
+    /// re-establishment sweep, which re-acquires the MDS reservation on
+    /// each fenced volume after a tgt lost its PTPL file.
+    async fn fenced_all(&self) -> WitnessResult<Vec<(String, u64)>>;
+
+    /// Clear a fence. `true` if a record was removed.
+    async fn unfence(&self, volume: &str, client_id: u64) -> WitnessResult<bool>;
 }
 
 /// The witness backed by a [`StateBackend`](crate::state_backend::StateBackend).
@@ -432,5 +514,66 @@ impl CompositionWitness for BackendWitness {
 
     async fn drop_volume(&self, volume: &str) -> WitnessResult<()> {
         flatten(self.backend.extent_drop_volume(volume).await).map(|_rows| ())
+    }
+
+    async fn hosts(&self, volume: &str) -> WitnessResult<Vec<String>> {
+        flatten(self.backend.block_hosts(volume).await)
+    }
+
+    async fn host_admit(
+        &self,
+        volume: &str,
+        client_id: u64,
+        host_nqn: &str,
+        now_unix: i64,
+    ) -> WitnessResult<Vec<String>> {
+        flatten(self.backend.block_host_admit(volume, client_id, host_nqn, now_unix).await)
+    }
+
+    async fn host_evict(
+        &self,
+        volume: &str,
+        client_id: u64,
+    ) -> WitnessResult<(Vec<String>, Vec<String>)> {
+        flatten(self.backend.block_host_evict(volume, client_id).await)
+    }
+
+    async fn node_attach(
+        &self,
+        volume: &str,
+        host_nqn: &str,
+        node_name: &str,
+        now_unix: i64,
+    ) -> WitnessResult<Vec<String>> {
+        flatten(self.backend.block_node_attach(volume, host_nqn, node_name, now_unix).await)
+    }
+
+    async fn node_detach(
+        &self,
+        volume: &str,
+        host_nqn: &str,
+    ) -> WitnessResult<(bool, Vec<String>)> {
+        flatten(self.backend.block_node_detach(volume, host_nqn).await)
+    }
+
+    async fn fence_record(
+        &self,
+        volume: &str,
+        client_id: u64,
+        now_unix: i64,
+    ) -> WitnessResult<String> {
+        flatten(self.backend.block_fence_record(volume, client_id, now_unix).await)
+    }
+
+    async fn is_fenced(&self, volume: &str, client_id: u64) -> WitnessResult<bool> {
+        flatten(self.backend.block_is_fenced(volume, client_id).await)
+    }
+
+    async fn fenced_all(&self) -> WitnessResult<Vec<(String, u64)>> {
+        flatten(self.backend.block_fenced_all().await)
+    }
+
+    async fn unfence(&self, volume: &str, client_id: u64) -> WitnessResult<bool> {
+        flatten(self.backend.block_unfence(volume, client_id).await)
     }
 }

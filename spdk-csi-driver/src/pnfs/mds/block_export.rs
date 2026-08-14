@@ -407,6 +407,15 @@ impl BlockExportReconciler {
         &self.me
     }
 
+    /// The arbitration record this reconciler decides against. Handed
+    /// out because the block-tier control paths that live outside this
+    /// type — the fence lever, the attach lane, the LAYOUTGET
+    /// admission — write facts the SAME failover reads, and a fact
+    /// written anywhere else is a fact the survivor cannot see.
+    pub fn witness(&self) -> Arc<dyn crate::pnfs::mds::witness::CompositionWitness> {
+        Arc::clone(&self.witness)
+    }
+
     /// Every seat the witness holds — the reconcile pass's subject
     /// list. Goes through the witness because a volume this target
     /// merely HOSTS A LEG of was seated by another shard entirely.
@@ -685,16 +694,19 @@ impl BlockExportReconciler {
     /// preempt at the exact moment clients are being thrown out, so no
     /// eviction/reconcile pass may ever sweep it.
     async fn desired_hosts(&self, volume: &str) -> Result<Vec<String>, String> {
-        match self.backend.block_hosts(volume).await {
-            Ok(Ok(mut hosts)) => {
+        // THE DOOR, and it is read from the witness: after a failover
+        // the target building this list has never met these clients —
+        // their admissions were earned at the volume's home shard, and
+        // a list built from this target's own record would be empty.
+        match self.witness.hosts(volume).await {
+            Ok(mut hosts) => {
                 let mds = crate::identity::block_mds_host_nqn();
                 if !hosts.contains(&mds) {
                     hosts.push(mds);
                 }
                 Ok(hosts)
             }
-            Ok(Err(e)) => Err(format!("block_hosts read refused: {e}")),
-            Err(e) => Err(format!("block_hosts read failed: {e}")),
+            Err(e) => Err(format!("allow-list read refused: {e}")),
         }
     }
 
@@ -5133,10 +5145,13 @@ pub(crate) mod tests {
         // ONE witness, and it is a THIRD store: neither shard's own
         // record, which is the entire point — a store on one of the two
         // targets is unreachable exactly when that target is.
+        // sqlite, because the block tier's admission tables are a
+        // sqlite feature (the memory backend refuses them outright) —
+        // and because a witness IS a database, which is the point.
+        let wb: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
         let witness: Arc<dyn crate::pnfs::mds::witness::CompositionWitness> =
-            Arc::new(crate::pnfs::mds::witness::BackendWitness::new(
-                crate::state_backend::memory_backend(),
-            ));
+            Arc::new(crate::pnfs::mds::witness::BackendWitness::new(wb));
         let mk = |me: &str, traddr: &str| {
             let tgt = Arc::new(FakeTgt::new());
             let r = BlockExportReconciler::new(
@@ -5182,6 +5197,16 @@ pub(crate) mod tests {
             other => panic!("a stale leg must not be electable: {other:?}"),
         }
 
+        // ── clients arrive at A: one attaches and stays, one is
+        // fenced there. Both facts are written at the COMPOSER, which
+        // is the only shard either of them ever talks to. ──
+        let live = crate::nvmeof_export::flint_host_nqn("node-live");
+        let doomed = crate::nvmeof_export::flint_host_nqn("node-doomed");
+        witness.node_attach("pvc-w", &live, "node-live", now_unix()).await.expect("attach");
+        witness.host_admit("pvc-w", 9, &doomed, now_unix()).await.expect("admit");
+        witness.fence_record("pvc-w", 9, now_unix()).await.expect("fence");
+        witness.host_evict("pvc-w", 9).await.expect("evict");
+
         // ── the rebuild earns the mark, on the composer, in the witness ──
         witness.leg_mark("pvc-w", "node-b", LEG_INSYNC, now_unix()).await.unwrap();
 
@@ -5215,6 +5240,30 @@ pub(crate) mod tests {
                 assert_eq!(deposed.as_deref(), Some("node-a"));
             }
             other => panic!("expected assembly at B: {other:?}"),
+        }
+
+        // THE DOOR, and this is FlintCompositionFenceLocal.cfg's
+        // counterexample closed in code. The clients were admitted at
+        // A — one healthy, one fenced there — and B has never heard of
+        // either: its own record holds no admission and no fence row.
+        // Because both identities ride the witness, the survivor's
+        // export opens with the live client admitted and the fenced one
+        // absent, and the fenced node's re-attach is REFUSED against a
+        // record it never wrote.
+        let hosts = tgt_b.hosts_of(&crate::identity::block_volume_export_nqn("pvc-w"));
+        assert!(hosts.contains(&live), "the live client is admitted at the survivor: {hosts:?}");
+        assert!(!hosts.contains(&doomed), "the fenced client must not return: {hosts:?}");
+        assert!(
+            hosts.contains(&crate::identity::block_mds_host_nqn()),
+            "the fence lane is present so the MDS can still preempt: {hosts:?}"
+        );
+        match witness.node_attach("pvc-w", &doomed, "node-doomed", now_unix()).await {
+            Err(e)
+                if matches!(
+                    e.refusal(),
+                    Some(crate::state_backend::extent_alloc::ExtentAllocError::FencedClient)
+                ) => {}
+            other => panic!("a fenced node must not re-attach at the survivor: {other:?}"),
         }
 
         // The record names B, the deposed leg is stale, the lease is
