@@ -2111,7 +2111,11 @@ impl NodeAgent {
             // different id. Without this, a csi-node restart broke every
             // subsequent attach on the node (identity::host_id_for_nqn).
             "-I".into(), crate::identity::host_id_for_nqn(&hostnqn),
-            "-q".into(), hostnqn,
+            // Cloned rather than moved: the failure path below needs the
+            // NQN again to name whoever else is holding this node's host
+            // identity, and that diagnosis is the difference between a
+            // bare EINVAL and an instruction.
+            "-q".into(), hostnqn.clone(),
         ];
         args.extend(policy.connect_args());
         let output = tokio::process::Command::new("nvme")
@@ -2123,7 +2127,16 @@ impl NodeAgent {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Ignore "already connected" errors
             if !stderr.contains("already connected") {
-                return Err(format!("nvme connect failed: {}", stderr).into());
+                // The same incumbent-hostid trap the block lane hit on
+                // runbr reaches here too: the kernel's rule is about the
+                // NODE's identity, so an ordinary volume attach fails
+                // exactly as opaquely once something else holds the NQN
+                // under another id. Same wording, one source.
+                return Err(match crate::pnfs_block_session::host_identity_conflict_hint(&hostnqn) {
+                    Some(hint) => format!("nvme connect failed: {}\n  {hint}", stderr),
+                    None => format!("nvme connect failed: {}", stderr),
+                }
+                .into());
             }
         }
 

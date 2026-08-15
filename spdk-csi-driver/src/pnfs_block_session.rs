@@ -669,13 +669,22 @@ async fn connect_path(
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         if !stderr.contains("already connected") {
-            return Err(format!(
+            let base = format!(
                 "nvme connect to {} at {}:{} failed: {}",
                 attach.subnqn,
                 attach.traddr,
                 attach.trsvcid,
                 stderr.trim()
-            ));
+            );
+            // TRANSLATE THE KERNEL'S BARE EINVAL. nvme-cli reports
+            // "Failed to write to /dev/nvme-fabrics: Invalid argument"
+            // and stops; the reason is in the ring buffer, where nobody
+            // is looking. Naming the incumbent turns a mystifying
+            // failure into a one-line instruction.
+            return Err(match host_identity_conflict_hint(&attach.host_nqn) {
+                Some(hint) => format!("{base}\n  {hint}"),
+                None => base,
+            });
         }
     }
     Ok(())
@@ -836,6 +845,87 @@ pub fn controllers_for_nqn(nqn: &str) -> Vec<String> {
         .collect();
     out.sort();
     out
+}
+
+/// THE INCUMBENT THAT OWNS THIS NODE'S HOST IDENTITY, if one disagrees
+/// with us about it.
+///
+/// The kernel keys a host on the PAIR (hostnqn, hostid) and refuses any
+/// connect that reuses an NQN under a different id — it says so in the
+/// ring buffer ("found same hostnqn X but different hostid Y") and then
+/// hands nvme-cli a bare EINVAL, so the operator sees `Failed to write
+/// to /dev/nvme-fabrics: Invalid argument` and nothing else.
+///
+/// MEASURED ON runbr, and it is an UPGRADE hazard rather than a bug: a
+/// pre-1.25.0 driver connected without `-I`, so nvme-cli invented an id
+/// for that session. Rolling csi-node does NOT tear the kernel
+/// controller down, so the node keeps serving the legacy pairing and
+/// every LATER block attach on it is refused — including volumes that
+/// have nothing to do with the incumbent.
+///
+/// Diagnosis only. The remedy is to drain the incumbent, and this code
+/// must not do that on its own: that controller is carrying somebody's
+/// live volume, and cutting it to make our own connect succeed trades a
+/// clear failure for a silent one.
+fn conflicting_identity_among<I>(rows: I, host_nqn: &str, want_hostid: &str) -> Option<HostIdConflict>
+where
+    I: IntoIterator<Item = (String, String, String, String)>,
+{
+    rows.into_iter().find_map(|(ctrl, hostnqn, hostid, subsysnqn)| {
+        // Same NQN, different id — compared case-insensitively because a
+        // UUID's hex case is not part of its identity, and a false
+        // positive here would name an innocent controller.
+        (hostnqn.trim() == host_nqn
+            && !hostid.trim().is_empty()
+            && !hostid.trim().eq_ignore_ascii_case(want_hostid.trim()))
+        .then(|| HostIdConflict { ctrl, hostid: hostid.trim().to_string(), subsysnqn: subsysnqn.trim().to_string() })
+    })
+}
+
+/// A controller already holding this node's host NQN under another id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostIdConflict {
+    ctrl: String,
+    hostid: String,
+    subsysnqn: String,
+}
+
+/// The operator-facing explanation, or `None` when nothing conflicts.
+///
+/// ONE wording for BOTH connect sites (the block session and the
+/// ordinary volume attach in `node_agent`): the kernel's rule is about
+/// the NODE's host identity, so either path can be the one that trips
+/// over an incumbent, and an operator should not get two different
+/// accounts of the same condition.
+pub(crate) fn host_identity_conflict_hint(host_nqn: &str) -> Option<String> {
+    let want = crate::identity::host_id_for_nqn(host_nqn);
+    let c = conflicting_host_identity(host_nqn, &want)?;
+    Some(format!(
+        "CAUSE: this node's host NQN {host_nqn} is already held by controller {} under hostid \
+         {}, and we must connect as {want}. The kernel keys a host on the (hostnqn, hostid) PAIR \
+         and refuses the second id, so EVERY nvme-of attach on this node fails until the \
+         incumbent goes away.\n  It is serving {} — pre-1.25.0 connects did not pass -I, so \
+         nvme-cli invented that id, and rolling csi-node does NOT tear down a live kernel \
+         controller.\n  REMEDY: drain that connection (restart the pod consuming it, so the \
+         volume is unstaged and re-staged by this driver), then retry. Flint will not cut it for \
+         you — it is carrying a live volume.",
+        c.ctrl, c.hostid, c.subsysnqn
+    ))
+}
+
+/// `conflicting_identity_among` over the live sysfs tree.
+fn conflicting_host_identity(host_nqn: &str, want_hostid: &str) -> Option<HostIdConflict> {
+    let entries = std::fs::read_dir("/sys/class/nvme").ok()?;
+    let rows = entries.flatten().map(|e| {
+        let read = |f: &str| std::fs::read_to_string(e.path().join(f)).unwrap_or_default();
+        (
+            e.file_name().to_string_lossy().to_string(),
+            read("hostnqn"),
+            read("hostid"),
+            read("subsysnqn"),
+        )
+    });
+    conflicting_identity_among(rows, host_nqn, want_hostid)
 }
 
 /// Has this controller finished attaching a namespace?
@@ -1395,6 +1485,58 @@ mod tests {
         // No record AND no list is empty, not a panic — the caller treats
         // that as "replay", which is the pre-redirect world.
         assert!(candidate_mds_endpoints("").is_empty());
+    }
+
+    /// THE UPGRADE HAZARD runbr MEASURED, named at the right layer.
+    ///
+    /// A pre-1.25.0 connect passed no `-I`, so nvme-cli invented a
+    /// hostid; the kernel then refuses every later connect that reuses
+    /// the NQN under our derived id, and nvme-cli reports only "Invalid
+    /// argument". This is the lookup that turns that into an
+    /// instruction, so it must find the incumbent — and must NOT
+    /// finger an innocent one.
+    #[test]
+    fn a_legacy_controller_holding_our_nqn_under_another_hostid_is_named() {
+        let nqn = "nqn.2024-11.com.flint:node:runbr-aws-3";
+        let ours = "96efd69d-b6e4-4d19-aa0e-8635b4deae5d";
+        let legacy = "ebbb7c76-8361-45b8-819d-49c8e93e9685";
+        let row = |c: &str, hn: &str, hi: &str, sn: &str| {
+            (c.to_string(), hn.to_string(), hi.to_string(), sn.to_string())
+        };
+
+        // The measured shape: an ordinary flint volume holding the NQN
+        // under the id nvme-cli invented for it.
+        let found = conflicting_identity_among(
+            vec![
+                // Local NVMe: no host identity at all, and reading its
+                // empty files must not look like a conflict.
+                row("nvme0", "", "", "nqn:2008-08.com.amazon.aws:ebs:vol0"),
+                row("nvme2", nqn, legacy, "nqn.2024-11.com.flint:volume:pvc-ea4"),
+            ],
+            nqn,
+            ours,
+        )
+        .expect("the incumbent must be found");
+        assert_eq!(found.ctrl, "nvme2");
+        assert_eq!(found.hostid, legacy);
+        // The subsystem is carried so the operator knows WHAT to drain —
+        // the remedy is useless without it.
+        assert!(found.subsysnqn.contains("pvc-ea4"), "{found:?}");
+
+        // Sysfs values arrive with trailing newlines; a match must
+        // survive that or the diagnosis never fires in production.
+        assert!(conflicting_identity_among(
+            vec![row("nvme2", &format!("{nqn}\n"), &format!("{legacy}\n"), "s")], nqn, ours
+        ).is_some());
+
+        // NOT a conflict: our own id (hex case is not identity), a
+        // different node's NQN, or an id we cannot read.
+        assert!(conflicting_identity_among(
+            vec![row("nvme2", nqn, &ours.to_uppercase(), "s")], nqn, ours).is_none());
+        assert!(conflicting_identity_among(
+            vec![row("nvme2", "nqn.2024-11.com.flint:node:other", legacy, "s")], nqn, ours).is_none());
+        assert!(conflicting_identity_among(
+            vec![row("nvme2", nqn, "", "s")], nqn, ours).is_none());
     }
 }
 
