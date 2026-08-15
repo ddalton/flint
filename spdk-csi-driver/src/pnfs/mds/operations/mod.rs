@@ -1703,11 +1703,53 @@ pub async fn attach_block_node(
     volume: &str,
     node_name: &str,
 ) -> Result<BlockAttachInfo, String> {
+    let witness = layout_manager.block_witness();
+    // THE CLASS GATE — and it cannot be answered from this shard's rows
+    // alone, which is the last of the four defects that stranded runbq's
+    // client. `volume_is_scsi` reads the geometry cache, seeded from THIS
+    // shard's sqlite; shards share nothing, so a sibling asked to
+    // re-attach a volume it did not create answers "not block-class" for
+    // a volume that is very much block-class. The redirect lane exists
+    // precisely to ask siblings — a composer death takes out the shard
+    // that holds the row — so the gate had to learn a second source.
+    //
+    // A SEAT IS PROOF OF CLASS. Seats are minted only by `seat_volume`,
+    // which only the block composition path ever calls, so a files-class
+    // volume cannot have one: no false admissions are bought with this.
+    // And everything past this gate is already witness-derived or
+    // deterministic (`node_attach`, `seat_list`, `listener_for`,
+    // `stable_ns_identity`), so the class was the ONLY shard-local fact
+    // standing between a survivor and a correct answer.
+    //
+    // Read only when the local rows come up empty: the common case — the
+    // volume's own shard answering — costs no witness round trip and
+    // stays reachable through a witness outage, exactly as before.
     if !layout_manager.volume_is_scsi(volume) {
-        return Err(format!(
-            "volume '{volume}' is not block-class — nothing to attach (files-class \
-             volumes need no nvme session)"
-        ));
+        match witness.volume_seat(volume).await {
+            Ok(Some(seat)) => info!(
+                "{}: '{}' is not in this shard's geometry, but the witness seats it at {} \
+                 (epoch {}) — block-class, answering for a volume this shard does not own",
+                context, volume, seat.composer, seat.epoch
+            ),
+            Ok(None) => {
+                return Err(format!(
+                    "volume '{volume}' is not block-class — nothing to attach (files-class \
+                     volumes need no nvme session)"
+                ))
+            }
+            // FAIL CLOSED. An unreadable witness is not evidence of
+            // anything, and §13's fail-open — a seat read that errored
+            // being taken for an answer — destroyed a live composed
+            // volume. Refusing costs a retry: NodeStageVolume is retried,
+            // and the recorded endpoint is tried before any sibling, so
+            // this arm only ever delays the failover path.
+            Err(e) => {
+                return Err(format!(
+                    "'{volume}' is not in this shard's geometry and the composition witness \
+                     is unreadable ({e}) — refusing rather than guessing its class"
+                ))
+            }
+        }
     }
     let Some(rec) = layout_manager.block_export() else {
         // Unlike the fence's rows-only degradation, attach without a
@@ -1718,7 +1760,6 @@ pub async fn attach_block_node(
         return Err("no block export attached — this MDS cannot serve block volumes".into());
     };
     let host_nqn = crate::nvmeof_export::flint_host_nqn(node_name);
-    let witness = layout_manager.block_witness();
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -3350,6 +3391,133 @@ mod fallback_tests {
             vec![crate::nvmeof_export::flint_host_nqn("node-far")],
             "the leg is offered again to the composer the record names"
         );
+    }
+
+    /// A SIBLING MUST ANSWER FOR A VOLUME IT DOES NOT OWN — the last of
+    /// the four stacked defects that stranded runbq's client.
+    ///
+    /// The redirect lane asks every shard, recorded-first, because a
+    /// composer death takes out precisely the shard the volume was
+    /// created on. But the class gate read `volume_is_scsi`, which is
+    /// the geometry cache, which is seeded from THIS shard's sqlite —
+    /// and shards share nothing. So every survivor refused with "not
+    /// block-class" for a volume that is emphatically block-class, and
+    /// the fan-out bought nothing.
+    ///
+    /// The shape here is the survivor's exactly: no geometry row (this
+    /// shard never ran the CreateVolume) and a seat naming somebody
+    /// else. The payload assertion is the ADDRESS — the answer must be
+    /// the seat holder's listener, never this shard's own, or the client
+    /// re-dials the target that just died.
+    ///
+    /// A/B: drop the witness consult from the gate and this returns
+    /// "volume 'volFar' is not block-class".
+    #[tokio::test]
+    async fn a_sibling_answers_the_attach_for_a_volume_only_the_witness_knows() {
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
+        lm.attach_block_export(Arc::new(
+            crate::pnfs::mds::block_export::BlockExportReconciler::new(
+                Arc::clone(&tgt) as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
+                Arc::clone(&backend),
+                "lvs_test".into(),
+                "10.0.0.9".into(),
+                4420,
+                "/var/tmp".into(),
+            ),
+        ));
+
+        // The volume lives at a peer: seated there, and that peer has
+        // announced where it can be dialled. This shard knows neither
+        // its geometry nor its extents — only the shared record.
+        backend.block_target_register("node-survivor", "10.9.9.9", 4421, 0).await.unwrap().unwrap();
+        backend.block_seat_volume("volFar", "node-survivor", 0, 120).await.unwrap().unwrap();
+        assert!(!lm.volume_is_scsi("volFar"), "no geometry here — that is the whole premise");
+
+        let info = attach_block_node(&lm, "test", "volFar", "node-w1").await.unwrap();
+
+        assert_eq!(
+            (info.traddr.as_str(), info.trsvcid),
+            ("10.9.9.9", 4421),
+            "the answer must be the SEAT HOLDER's listener, not this shard's"
+        );
+        assert_eq!(info.subnqn, crate::identity::block_volume_export_nqn("volFar"));
+        assert_eq!(info.host_nqn, crate::nvmeof_export::flint_host_nqn("node-w1"));
+
+        // This shard opened no door of its own: the volume is composed
+        // elsewhere, and the admission it just wrote is what the
+        // composer's own level-triggered pass builds from.
+        assert!(
+            tgt.subsystems.lock().unwrap().get(&info.subnqn).is_none(),
+            "a shard must never build an export for a volume it does not serve"
+        );
+        let (removed, _) =
+            backend.block_node_detach("volFar", &info.host_nqn).await.unwrap().unwrap();
+        assert!(removed, "the admission is durable in the shared record, not just returned");
+
+        // And the refusal still stands where it should: neither geometry
+        // nor seat is a files-class volume, and it is still turned away.
+        let err = attach_block_node(&lm, "test", "volNowhere", "node-w1").await.unwrap_err();
+        assert!(err.contains("not block-class"), "{err}");
+    }
+
+    /// AN OUTAGE IS NOT A VERDICT — the §13 lesson applied to the class
+    /// gate. `drop_leg` took an unreadable seat read for a confirmed
+    /// no-seat and destroyed a live composed volume; the same shape here
+    /// would report a block-class volume as files-class, and the csi-node
+    /// would give up on a volume that is merely temporarily unreadable.
+    ///
+    /// So the gate fails CLOSED, and the two refusals must be
+    /// distinguishable: an operator reading "not block-class" goes
+    /// looking at the StorageClass, which is the wrong drawer entirely.
+    /// Healing proves the refusal was the outage talking.
+    #[tokio::test]
+    async fn an_unreadable_witness_refuses_the_attach_rather_than_guessing_the_class() {
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let lm = LayoutManager::new(
+            Arc::new(DeviceRegistry::new()),
+            LayoutPolicy::RoundRobin,
+            8 * 1024 * 1024,
+            Arc::clone(&backend),
+        );
+        let tgt = Arc::new(crate::pnfs::mds::block_export::tests::FakeTgt::new());
+        let witness = Arc::new(crate::pnfs::mds::witness::fault::CuttableWitness::new(Arc::new(
+            crate::pnfs::mds::witness::BackendWitness::new(Arc::clone(&backend)),
+        )));
+        lm.attach_block_export(Arc::new(
+            crate::pnfs::mds::block_export::BlockExportReconciler::new(
+                Arc::clone(&tgt) as Arc<dyn crate::nvmeof_export::SpdkRpcTransport + Send + Sync>,
+                Arc::clone(&backend),
+                "lvs_test".into(),
+                "10.0.0.9".into(),
+                4420,
+                "/var/tmp".into(),
+            )
+            .with_witness(Arc::clone(&witness)
+                as Arc<dyn crate::pnfs::mds::witness::CompositionWitness>),
+        ));
+        backend.block_target_register("node-survivor", "10.9.9.9", 4421, 0).await.unwrap().unwrap();
+        backend.block_seat_volume("volFar", "node-survivor", 0, 120).await.unwrap().unwrap();
+
+        witness.cut("volume_seat");
+        let err = attach_block_node(&lm, "test", "volFar", "node-w1").await.unwrap_err();
+        assert!(err.contains("unreadable"), "the outage must be named as one: {err}");
+        assert!(
+            !err.contains("not block-class"),
+            "an outage reported as a class verdict sends the operator to the wrong drawer: {err}"
+        );
+
+        witness.heal("volume_seat");
+        let info = attach_block_node(&lm, "test", "volFar", "node-w1").await.unwrap();
+        assert_eq!(info.traddr, "10.9.9.9", "the refusal was the outage, not a standing no");
     }
 
     /// ONE TARGET'S OUTAGE IS NOT ANOTHER VOLUME'S OUTAGE.
