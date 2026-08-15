@@ -34,6 +34,24 @@ spec:
     spec:
       serviceAccountName: flint-csi-node
       hostNetwork: true
+      # MANDATORY WITH hostNetwork, and its absence is silent. A
+      # hostNetwork pod under the default `ClusterFirst` inherits the
+      # NODE's resolv.conf — on AWS that is the VPC resolver
+      # (nameserver 172.31.0.2) — so NOTHING under .svc.cluster.local
+      # resolves. Measured on runbq: `getent hosts
+      # flint-pnfs-mds-1.flint-system.svc.cluster.local` → RESOLVE_FAILED
+      # for EVERY shard, while the MDS pod's IP was directly reachable
+      # from the same container. The network was fine; only the names
+      # were unresolvable.
+      #
+      # What that broke: the block redirect lane asks an MDS where a
+      # volume lives NOW, and it addresses them by service name. Unable
+      # to resolve any of them, it fell back to replaying the recorded
+      # address forever — so after a composer death the client kept
+      # dialling the dead target until ctrl_loss_tmo (30 min) while the
+      # survivor sat there holding the promoted seat. The lane looked
+      # like it was choosing the wrong shard; it could not reach any.
+      dnsPolicy: ClusterFirstWithHostNet
       terminationGracePeriodSeconds: 30
       # CSI node plugin must never be evicted: a kubelet DiskPressure eviction
       # of this pod kills spdk-tgt under live mounts (EIO for every flint PVC
@@ -84,6 +102,23 @@ spec:
             # nfs-only mode — the volume's tgt is on the MDS's node.
             - name: FLINT_PNFS_BLOCK_LAYOUT
               value: "1"
+            # THE RE-ATTACH LANE IS AN AUTHENTICATED CALLER. csi-node
+            # asks an MDS where a volume lives NOW (AttachBlockNode) on
+            # every redirect, and that RPC is token-gated exactly like
+            # the controller's CreateVolume. Without this the MDS answers
+            # `Unauthenticated: missing or invalid control-plane token`
+            # and the lane falls back to replaying the recorded address —
+            # measured on runbq, where it was the LAST of three separate
+            # defects each of which alone made a composer-death redirect
+            # impossible (the other two: the lane asking only its own
+            # shard, and hostNetwork without ClusterFirstWithHostNet).
+            {{- if .Values.pnfs.controlToken.enabled }}
+            - name: FLINT_PNFS_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.pnfs.controlToken.existingSecret | default "flint-pnfs-control-token" }}
+                  key: token
+            {{- end }}
             # THE REDIRECT LANE NEEDS MORE THAN ITS OWN SHARD. A block
             # volume's composer and its MDS shard sit on the same node, so
             # a composer death takes out exactly the MDS the node recorded
@@ -356,6 +391,23 @@ spec:
             # volumes.
             - name: FLINT_PNFS_BLOCK_LAYOUT
               value: "1"
+            # THE RE-ATTACH LANE IS AN AUTHENTICATED CALLER. csi-node
+            # asks an MDS where a volume lives NOW (AttachBlockNode) on
+            # every redirect, and that RPC is token-gated exactly like
+            # the controller's CreateVolume. Without this the MDS answers
+            # `Unauthenticated: missing or invalid control-plane token`
+            # and the lane falls back to replaying the recorded address —
+            # measured on runbq, where it was the LAST of three separate
+            # defects each of which alone made a composer-death redirect
+            # impossible (the other two: the lane asking only its own
+            # shard, and hostNetwork without ClusterFirstWithHostNet).
+            {{- if .Values.pnfs.controlToken.enabled }}
+            - name: FLINT_PNFS_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.pnfs.controlToken.existingSecret | default "flint-pnfs-control-token" }}
+                  key: token
+            {{- end }}
             # See the note on the other container: the recorded shard is
             # the one a composer death kills, so the node needs the whole
             # set to find a live MDS.
