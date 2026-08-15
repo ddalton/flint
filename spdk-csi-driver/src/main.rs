@@ -2073,21 +2073,53 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 // Route by the pin; bare (pre-sharding) ids go to shard 0,
                 // and the MDS receives the BARE name — the suffix is a CSI
                 // routing artifact, not part of the volume's identity.
-                let (shard, shard_client, bare_id) = match pnfs.route(&volume_id) {
+                let (owner, bare_id, candidates) = match pnfs.route_with_siblings(&volume_id) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("❌ [pNFS] DeleteVolume routing failed: {}", e);
                         return Err(to_status(e));
                     }
                 };
-                println!("🗑️ [pNFS] Deleting volume {} via MDS shard {} at {}",
-                         bare_id, shard, shard_client.endpoint());
-                let legs = match shard_client.delete_volume_reporting_legs(bare_id).await {
-                    Ok(legs) => legs,
-                    Err(e) => {
-                        eprintln!("❌ [pNFS] DeleteVolume failed: {}", e);
-                        return Err(to_status(e));
+                // OWNER FIRST, THEN SIBLINGS — otherwise a composer
+                // death makes the volume UNDELETABLE FOREVER, and the
+                // lvol, the PVC and the namespace finalizer stay stuck
+                // behind a shard that is never coming back. A sibling
+                // releases what still exists (its own copy, its rows,
+                // the shared record); the dead node's copy returns with
+                // the node, or not at all — either way the cluster is
+                // no longer wedged on it.
+                println!("🗑️ [pNFS] Deleting volume {} (owner shard {})", bare_id, owner);
+                let mut legs = None;
+                let mut last: Option<PnfsError> = None;
+                for (i, (shard, client)) in candidates.iter().enumerate() {
+                    match client.delete_volume_reporting_legs(bare_id).await {
+                        Ok(l) => {
+                            if i > 0 {
+                                println!(
+                                    "🧭 [pNFS] '{}' deleted via shard {} after owner shard {} \
+                                     did not answer",
+                                    bare_id, shard, owner
+                                );
+                            }
+                            legs = Some(l);
+                            break;
+                        }
+                        // Transport only. An MDS refusal is a verdict
+                        // (and delete is idempotent, so a shard that
+                        // holds nothing says yes rather than refusing).
+                        Err(PnfsError::Transport(m)) => last = Some(PnfsError::Transport(m)),
+                        Err(e) => {
+                            eprintln!("❌ [pNFS] DeleteVolume failed: {}", e);
+                            return Err(to_status(e));
+                        }
                     }
+                }
+                let Some(legs) = legs else {
+                    let e = last.unwrap_or_else(|| {
+                        PnfsError::Transport("no shard answered".into())
+                    });
+                    eprintln!("❌ [pNFS] DeleteVolume failed on every shard: {}", e);
+                    return Err(to_status(e));
                 };
                 // Second copies die with the volume. The composer's
                 // record named them and has now swept it, so this reply
@@ -2119,7 +2151,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     }
                     println!("🧹 [pNFS] {}: leg on '{}' dropped", bare_id, target);
                 }
-                println!("✅ [pNFS] Volume {} deleted (shard {})", bare_id, shard);
+                println!("✅ [pNFS] Volume {} deleted (owner shard {})", bare_id, owner);
                 return Ok(tonic::Response::new(
                     spdk_csi_driver::csi::DeleteVolumeResponse {},
                 ));
@@ -2402,11 +2434,53 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                          (FLINT_PNFS_MDS_ENDPOINT unset)",
                     ));
                 };
-                let (shard, client, bare_id) = shards.route(&volume_id).map_err(|e| {
-                    tonic::Status::failed_precondition(format!("pNFS sharding: {e}"))
-                })?;
-                match client.attach_block_node(bare_id, &node_id).await {
-                    Ok(attach) => {
+                // ASK THE OWNER, THEN ITS SIBLINGS. A composer death
+                // takes out precisely this volume's shard (shard and
+                // target share a node), and this is the verb a
+                // RESTARTING POD calls — so without the fan-out the pod
+                // can never come back while that node is gone, even
+                // though a survivor holds the bytes and the node lane
+                // would happily redirect to it.
+                let (owner, bare_id, candidates) =
+                    shards.route_with_siblings(&volume_id).map_err(|e| {
+                        tonic::Status::failed_precondition(format!("pNFS sharding: {e}"))
+                    })?;
+                let mut attached = None;
+                let mut last_transport: Option<String> = None;
+                for (i, (shard, client)) in candidates.iter().enumerate() {
+                    match client.attach_block_node(bare_id, &node_id).await {
+                        Ok(attach) => {
+                            if i > 0 {
+                                println!(
+                                    "🧭 [pNFS-BLOCK] '{}' attach answered by shard {} after \
+                                     owner shard {} did not — the witness is shared, so any \
+                                     live shard can place this volume",
+                                    bare_id, shard, owner
+                                );
+                            }
+                            attached = Some((*shard, attach));
+                            break;
+                        }
+                        // Only an unreachable shard is worth asking the
+                        // next one about.
+                        Err(spdk_csi_driver::pnfs_csi::PnfsError::Transport(m)) => {
+                            last_transport = Some(m);
+                        }
+                        // AN MDS REFUSAL IS A VERDICT, AND IT STOPS THE
+                        // FAN-OUT. A fenced node above all: the fence
+                        // guard lives in the SHARED witness, so every
+                        // shard returns the same answer, and walking on
+                        // to ask another one could only ever launder a
+                        // refusal into an admission.
+                        Err(e) => {
+                            return Err(tonic::Status::failed_precondition(format!(
+                                "AttachBlockNode refused: {e}"
+                            )));
+                        }
+                    }
+                }
+                match attached {
+                    Some((shard, attach)) => {
                         println!(
                             "🔌 [pNFS-BLOCK] node {} admitted to '{}' (shard {}): {}:{} {}",
                             node_id, bare_id, shard, attach.traddr, attach.trsvcid,
@@ -2414,17 +2488,14 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                         );
                         attach.stamp(&mut publish_context);
                     }
-                    // Transport errors retry (the attacher re-drives);
-                    // an MDS refusal — a fenced node above all — is a
-                    // real verdict that belongs on the VolumeAttachment.
-                    Err(spdk_csi_driver::pnfs_csi::PnfsError::Transport(m)) => {
+                    // Every shard unreachable: retryable, as before —
+                    // the attacher re-drives.
+                    None => {
                         return Err(tonic::Status::unavailable(format!(
-                            "AttachBlockNode transport (retryable): {m}"
-                        )));
-                    }
-                    Err(e) => {
-                        return Err(tonic::Status::failed_precondition(format!(
-                            "AttachBlockNode refused: {e}"
+                            "AttachBlockNode transport (retryable) — none of {} shard(s) \
+                             answered; last error: {}",
+                            candidates.len(),
+                            last_transport.unwrap_or_else(|| "none tried".into())
                         )));
                     }
                 }
@@ -2727,25 +2798,47 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     // reconcile pass converges. Loud either way.
                     match self.driver.pnfs_layout_of_handle(&volume_id).await {
                         Ok(Some(layout)) if layout == "block" => {
-                            let (shard, client, bare_id) =
-                                shards.route(&volume_id).map_err(|e| {
+                            // Owner first, then siblings: the admission
+                            // being withdrawn lives in the SHARED
+                            // witness, so any live shard can drop it —
+                            // and if the owner is the node that just
+                            // died, only a sibling can.
+                            let (owner, bare_id, candidates) = shards
+                                .route_with_siblings(&volume_id)
+                                .map_err(|e| {
                                     tonic::Status::failed_precondition(format!(
                                         "pNFS sharding: {e}"
                                     ))
                                 })?;
-                            match client.detach_block_node(bare_id, &node_id).await {
-                                Ok(detail) => println!(
-                                    "🔌 [pNFS-BLOCK] shard {}: {}",
-                                    shard, detail
-                                ),
-                                // A dead MDS must not orphan the admission
-                                // silently — Unavailable makes the attacher
-                                // re-drive until the detach lands.
-                                Err(e) => {
-                                    return Err(tonic::Status::unavailable(format!(
-                                        "DetachBlockNode (retryable): {e}"
-                                    )));
+                            let mut detached = false;
+                            let mut last: Option<String> = None;
+                            for (i, (shard, client)) in candidates.iter().enumerate() {
+                                match client.detach_block_node(bare_id, &node_id).await {
+                                    Ok(detail) => {
+                                        if i > 0 {
+                                            println!(
+                                                "🧭 [pNFS-BLOCK] '{}' detach answered by \
+                                                 shard {} after owner shard {} did not",
+                                                bare_id, shard, owner
+                                            );
+                                        }
+                                        println!("🔌 [pNFS-BLOCK] shard {}: {}", shard, detail);
+                                        detached = true;
+                                        break;
+                                    }
+                                    Err(e) => last = Some(e.to_string()),
                                 }
+                            }
+                            // A dead MDS must not orphan the admission
+                            // silently — Unavailable makes the attacher
+                            // re-drive until the detach lands.
+                            if !detached {
+                                return Err(tonic::Status::unavailable(format!(
+                                    "DetachBlockNode (retryable) — none of {} shard(s) \
+                                     answered; last error: {}",
+                                    candidates.len(),
+                                    last.unwrap_or_else(|| "none tried".into())
+                                )));
                             }
                         }
                         Ok(_) => {}

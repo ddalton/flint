@@ -1343,6 +1343,38 @@ impl PnfsShards {
         Ok((shard, client, bare))
     }
 
+    /// `route`, plus every OTHER shard as a fallback, owner first.
+    ///
+    /// THE CONTROLLER TWIN OF `candidate_mds_endpoints`. The node lane
+    /// learned this in 49a7e7c/7b26cb4: a volume's owning shard is
+    /// exactly the one a composer death takes out, because the shard and
+    /// its target sit on the same node. The controller kept resolving
+    /// one shard by hash, so after that death the volume was not merely
+    /// unservable — it was UNDELETABLE, and the PVC, the lvol and the
+    /// namespace finalizer stayed stuck forever.
+    ///
+    /// Only for verbs a sibling can honestly answer: the block
+    /// attach/detach lanes (witness-derived since 7b26cb4 — a seat is
+    /// proof of class) and delete, which releases what still exists.
+    /// **NOT expand**: the arena ceiling lives in the OWNING shard's
+    /// sqlite, and a sibling raising a ceiling it cannot back is the
+    /// "promises room its array cannot serve" failure `expand_volume`
+    /// already refuses.
+    ///
+    /// Owner FIRST, so the common case costs exactly one call and the
+    /// fan-out is only ever paid on the failure path.
+    pub fn route_with_siblings<'a, 'b>(
+        &'a self,
+        volume_id: &'b str,
+    ) -> Result<(usize, &'b str, Vec<(usize, &'a PnfsCsi)>), PnfsError> {
+        let (owner, _, bare) = self.route(volume_id)?;
+        let mut order: Vec<(usize, &PnfsCsi)> = vec![(owner, &self.shards[owner])];
+        order.extend(
+            self.shards.iter().enumerate().filter(|(i, _)| *i != owner),
+        );
+        Ok((owner, bare, order))
+    }
+
     /// Endpoint string of shard `i` (logging).
     pub fn endpoint_of(&self, shard: usize) -> &str {
         self.shards[shard].endpoint()
@@ -2110,6 +2142,42 @@ mod tests {
         // handles a capability-less request; inventing one here would
         // refuse volumes for a reason this function cannot see.
         assert_eq!(block_layout_capability_refusal(&[]), None);
+    }
+
+    /// The controller's fan-out order: OWNER FIRST, then everyone else,
+    /// each shard exactly once.
+    ///
+    /// Owner-first is not cosmetic — it is what keeps the healthy path
+    /// at one call and pays the fan-out only when a shard is actually
+    /// unreachable. Missing the owner, or listing it twice, would send
+    /// every delete to a peer.
+    #[test]
+    fn the_controller_asks_the_owner_first_and_then_every_sibling_once() {
+        let shards = PnfsShards::new(vec!["h0:1".into(), "h1:1".into(), "h2:1".into()]);
+
+        let (owner, bare, order) = shards.route_with_siblings("pvc-abc~m1").unwrap();
+        assert_eq!((owner, bare), (1, "pvc-abc"));
+        assert_eq!(
+            order.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![1, 0, 2],
+            "owner first, then the rest in shard order"
+        );
+
+        // Pre-sharding ids belong to shard 0 and still get the fan-out.
+        let (owner, bare, order) = shards.route_with_siblings("pvc-legacy").unwrap();
+        assert_eq!((owner, bare), (0, "pvc-legacy"));
+        assert_eq!(order.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        // One shard: the list is just the owner — no phantom siblings.
+        let solo = PnfsShards::new(vec!["only:1".into()]);
+        let (_, _, order) = solo.route_with_siblings("pvc-x~m0").unwrap();
+        assert_eq!(order.len(), 1);
+
+        // A pin past the configured count is still a routing ERROR, not
+        // an invitation to try everyone: that means mds.count was scaled
+        // below a shard that still owns volumes, and guessing would
+        // delete the wrong volume's copy.
+        assert!(shards.route_with_siblings("pvc-orphan~m7").is_err());
     }
 
     #[test]
