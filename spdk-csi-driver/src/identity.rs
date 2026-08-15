@@ -492,6 +492,47 @@ pub fn node_host_nqn(node_name: &str) -> String {
     format!("nqn.2024-11.com.flint:node:{}", node_name)
 }
 
+/// The NVMe host ID that MUST accompany [`node_host_nqn`].
+///
+/// THE KERNEL ENFORCES A PAIRING WE WERE NOT SUPPLYING. nvme-fabrics keys
+/// a host on (hostnqn, hostid) and refuses any connect that reuses a
+/// hostnqn with a different hostid:
+///
+///   nvme_fabrics: found same hostnqn nqn.2024-11.com.flint:node:<n>
+///                 but different hostid <uuid>
+///   Failed to write to /dev/nvme-fabrics: Invalid argument
+///
+/// Both connect paths (`node_agent`'s volume attach and
+/// `pnfs_block_session`'s block session) passed `-q` with a STABLE host
+/// NQN and no `-I` at all, so nvme-cli supplied a hostid of its own —
+/// auto-generated into `/etc/nvme/hostid` INSIDE THE CONTAINER, which is
+/// ephemeral. Every csi-node restart therefore minted a new hostid while
+/// the kernel still held live controllers under the old one, and from
+/// that moment every new attach on that node failed for as long as any
+/// older connection survived. Measured on runbo: a pNFS DS held
+/// `ebbb7c76-…` from before a helm upgrade, the restarted container
+/// offered `7a2f8556-…`, and the block volume could not mount.
+///
+/// Derived from the host NQN rather than the node name so the kernel's
+/// own rule holds by construction — same NQN, same hostid, in every
+/// caller, across restarts, with nothing persisted.
+pub fn host_id_for_nqn(host_nqn: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    // Domain-separated: this hash names an NVMe host identity and must not
+    // collide with any other derived id should one ever share the input.
+    h.update(b"flint:nvme-hostid:v1:");
+    h.update(host_nqn.as_bytes());
+    let digest = h.finalize();
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&digest[..16]);
+    // RFC 4122 version/variant bits, so the result is a well-formed UUID —
+    // the kernel parses this field as one and rejects what it cannot read.
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(b).to_string()
+}
+
 /// The MDS's own NVMe host identity — the reservation fence lane
 /// (`resv_fence.rs`). Deliberately NOT under `:node:`: host eviction
 /// only ever removes `:node:` hosts, so the fence lane's admission is
@@ -1640,5 +1681,34 @@ mod tests {
         let staged = backing_handle(VOL); // "nfs-server-<pv>"
         let rwx = loopback_teardown_nqns(&sh(&staged));
         assert_eq!(rwx, vec![volume_nqn(&staged), volume_nqn(VOL)]);
+    }
+
+    /// THE HOSTID IS PART OF THE HOST IDENTITY, and the kernel says so.
+    ///
+    /// nvme-fabrics keys a host on (hostnqn, hostid). Two flint connect
+    /// paths shared the NQN and let nvme-cli invent the id per container,
+    /// so a csi-node restart made every later attach on that node fail
+    /// against any surviving controller. These assertions pin exactly the
+    /// property the kernel enforces.
+    #[test]
+    fn a_host_nqn_maps_to_one_stable_hostid() {
+        let nqn = node_host_nqn("runbo-aws-3");
+
+        // Deterministic: this is the whole point — it must survive a
+        // container restart, which is where the real id used to change.
+        assert_eq!(host_id_for_nqn(&nqn), host_id_for_nqn(&nqn));
+
+        // Distinct nodes must NOT collide, or two hosts would be one host
+        // to the target's allow-list and fencing.
+        assert_ne!(host_id_for_nqn(&nqn), host_id_for_nqn(&node_host_nqn("runbo-aws-2")));
+
+        // Well-formed UUID: the kernel parses this field and rejects what
+        // it cannot read. 8-4-4-4-12, version 4, RFC 4122 variant.
+        let id = host_id_for_nqn(&nqn);
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12], "{id}");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "{id}");
+        assert_eq!(parts[2].chars().next().unwrap(), '4', "version nibble: {id}");
+        assert!(matches!(parts[3].chars().next().unwrap(), '8' | '9' | 'a' | 'b'), "variant: {id}");
     }
 }

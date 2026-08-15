@@ -2106,6 +2106,11 @@ impl NodeAgent {
             "-a".into(), target_ip.to_string(),
             "-s".into(), target_port.to_string(),
             "-n".into(), nqn.to_string(),
+            // The hostid travels with the NQN: the kernel keys a host on the
+            // PAIR and refuses a second connect that reuses the NQN under a
+            // different id. Without this, a csi-node restart broke every
+            // subsequent attach on the node (identity::host_id_for_nqn).
+            "-I".into(), crate::identity::host_id_for_nqn(&hostnqn),
             "-q".into(), hostnqn,
         ];
         args.extend(policy.connect_args());

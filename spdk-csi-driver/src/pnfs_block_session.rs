@@ -595,6 +595,11 @@ async fn connect_path(
         // The MDS-admitted identity, verbatim — connecting as
         // anything else is refused by the default-closed allow-list.
         "-q".into(), attach.host_nqn.clone(),
+        // …and the hostid the kernel pairs with it. Omitting this let
+        // nvme-cli invent one per container instance, which the kernel
+        // then refused against any surviving controller under the same
+        // NQN (see identity::host_id_for_nqn).
+        "-I".into(), crate::identity::host_id_for_nqn(&attach.host_nqn),
     ];
     args.extend(policy.connect_args());
     let out = tokio::process::Command::new("nvme")
@@ -1292,5 +1297,64 @@ mod tests {
         // backport, and the check's job is to be skippable loudly.
         check_kernel_release("weird-vendor-string", true).unwrap();
         check_kernel_release("6.8.0-49-generic", true).unwrap();
+    }
+}
+
+/// FORCE THE BLOCK-LAYOUT DEVICE RESOLUTION IN *THIS* MOUNT NAMESPACE.
+///
+/// THE BUG THIS EXISTS FOR, measured on runbo (2026-08-15, kernel 6.18.29):
+/// the kernel resolves the device a SCSI layout names by opening
+/// `/dev/disk/by-id/{dm-uuid-mpath-0x,wwn-0x,nvme-eui.}<designator>` — and it
+/// does that path lookup in the mount namespace of **whichever process first
+/// triggers the layout**. A containerized consumer has no `/dev/disk/by-id`
+/// at all, so all three opens return `-ENOENT`, the client logs
+/// `pNFS: no device found for volume <nguid>`, and EVERY I/O silently
+/// degrades to MDS proxying — which this server refuses (NFS4ERR_IO). The
+/// files exist and stay ZERO BYTES.
+///
+/// The failure is cached per mount, so it is decided once, by whoever gets
+/// there first, and never recovers on its own. Traced with a kprobe on
+/// `bdev_file_open_by_path`:
+///
+///   path="/dev/disk/by-id/nvme-eui.<nguid>"  ret=0xfffffffffffffffe  (-ENOENT)
+///     …with the link PRESENT and openable by `dd` on the host.
+///
+/// csi-node runs in the host mount namespace with `/dev` mounted, so a single
+/// byte of I/O from HERE resolves the device correctly and the consumer's
+/// container then inherits the resolved deviceid — verified live: after this
+/// touch, a container read the host's file and wrote its own (26 bytes), where
+/// the identical container had produced only 0-byte files before.
+///
+/// Deliberately best-effort: a failure here is not worse than the status quo
+/// (the mount still works, I/O would just proxy and fail loudly), so it is
+/// logged and never fails the publish.
+pub fn warm_block_layout_device(mount_path: &str) {
+    use std::io::Write;
+    // A dotfile, created and removed inside this call: the consumer's
+    // filesystem must not gain a stray file, and the probe only needs to be
+    // real enough to force one LAYOUTGET plus the device open behind it.
+    let probe = format!("{}/.flint-blocklayout-warm", mount_path.trim_end_matches('/'));
+    let result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&probe)?;
+        f.write_all(b"warm")?;
+        // The resolution happens on the way to the device, so the write must
+        // actually be pushed rather than left in the page cache.
+        f.sync_all()?;
+        drop(f);
+        std::fs::remove_file(&probe)
+    })();
+    match result {
+        Ok(()) => tracing::info!(
+            "🔥 block-layout device warmed from the host namespace for {} — the \
+             consumer's container inherits the resolved deviceid instead of \
+             resolving it (and failing) in its own /dev",
+            mount_path
+        ),
+        Err(e) => tracing::warn!(
+            "block-layout warm-up on {} failed ({}) — if the consumer is \
+             containerized its I/O may degrade to MDS proxying (pNFS: no device \
+             found); mount itself is unaffected",
+            mount_path, e
+        ),
     }
 }

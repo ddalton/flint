@@ -4476,6 +4476,23 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             }
 
             eprintln!("✅ [pNFS] mount succeeded for {}", volume_id);
+            // BEFORE THE CONSUMER TOUCHES IT. The kernel resolves a SCSI
+            // layout's device by path under /dev/disk/by-id, in the mount
+            // namespace of whoever first triggers the layout — and a
+            // container has no such directory, so it resolves to -ENOENT and
+            // every I/O degrades to MDS proxying, permanently, for that
+            // mount. Doing one byte of I/O here (host namespace, /dev
+            // present) decides it correctly instead; the container then
+            // inherits the resolved deviceid. Only block-class volumes have
+            // a device to resolve, so this is scoped to them.
+            if req
+                .volume_context
+                .get(spdk_csi_driver::pnfs_csi::ctx_keys::LAYOUT)
+                .map(|v| v == "block")
+                .unwrap_or(false)
+            {
+                spdk_csi_driver::pnfs_block_session::warm_block_layout_device(&target_path);
+            }
             return Ok(tonic::Response::new(
                 spdk_csi_driver::csi::NodePublishVolumeResponse {},
             ));
