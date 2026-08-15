@@ -162,6 +162,48 @@ pub fn cntlid_band_for(members: &[String], me: &str) -> Option<(u16, u16)> {
     Some((min as u16, max as u16))
 }
 
+/// Deterministic UUID for a volume's COMPOSITION BDEV (the raid1), which
+/// is a different object from its namespace and needs its own stable id.
+///
+/// THE BUG THIS EXISTS FOR, measured on runbo (2026-08-15). SPDK writes
+/// the reservation's persist-through-power-loss record with the BDEV's
+/// uuid in it:
+///
+///   {"ptpl":true,…,"bdev_uuid":"7328d947-0cce-4472-b77b-f552202f39ef",…}
+///
+/// `bdev_raid_create` mints a RANDOM uuid when the caller does not supply
+/// one, and flint supplied none — so every spdk-tgt restart rebuilt the
+/// composition under a NEW bdev uuid while the ptpl file on disk still
+/// named the old one. `nvmf_subsystem_add_ns` then refused the namespace
+/// (`Code=-32602 Invalid parameters`) forever, which meant the export was
+/// never completed, which meant no listener was ever added — the target
+/// answered its RPC socket but nothing was on 4420, and every client got
+/// connection-refused at the address the MDS was handing out. A promoted
+/// survivor could not serve at all.
+///
+/// [`stable_ns_identity`] already promises the NAMESPACE is "stable
+/// across raid rebuilds and spdk-tgt restarts"; that promise was defeated
+/// one layer down, by the bdev the namespace is built on.
+///
+/// Domain-separated from the namespace identity on purpose: these are two
+/// objects, and giving them one id would make a future collision look
+/// like a coincidence rather than a bug. sha2 rather than DefaultHasher
+/// because this value must be reproducible across Rust releases — a
+/// SipHash whose output moves would strand every existing volume's
+/// reservation on the next toolchain bump.
+pub fn stable_raid_uuid(volume_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"flint:raid-bdev-uuid:v1:");
+    h.update(volume_id.as_bytes());
+    let d = h.finalize();
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&d[..16]);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC4122 variant
+    uuid::Uuid::from_bytes(b).to_string()
+}
+
 /// Deterministic (UUID, NGUID) for a volume's kernel-facing namespace,
 /// stable across raid rebuilds and spdk-tgt restarts. UUID is RFC4122-
 /// shaped; NGUID is the same 16 bytes as 32 hex chars.
@@ -1189,4 +1231,36 @@ mod tests {
         });
         assert!(!subsystem_is_local_only(&unreadable));
     }
+
+    /// THE COMPOSITION BDEV'S UUID MUST SURVIVE A TGT RESTART.
+    ///
+    /// SPDK writes this uuid into the reservation's ptpl file and then
+    /// validates it on the next `nvmf_subsystem_add_ns`. When it was left
+    /// unset, `bdev_raid_create` minted a random one per restart, the
+    /// on-disk record named a bdev that no longer existed, add_ns refused
+    /// (-32602) forever, and the export never got a listener — a promoted
+    /// survivor answered its RPC socket and nothing else.
+    #[test]
+    fn the_composition_bdev_uuid_is_deterministic_and_its_own() {
+        let a = stable_raid_uuid("pvc-1");
+
+        // The whole point: same volume, same uuid, restart after restart.
+        assert_eq!(a, stable_raid_uuid("pvc-1"));
+        assert_ne!(a, stable_raid_uuid("pvc-2"), "distinct volumes must not share one");
+
+        // NOT the namespace identity. Two objects, two ids — sharing one
+        // would make a future collision look like a coincidence.
+        let (ns_uuid, ns_nguid) = stable_ns_identity("pvc-1");
+        assert_ne!(a, ns_uuid, "the bdev id is not the namespace id");
+        assert_ne!(a.replace('-', ""), ns_nguid);
+
+        // Well-formed UUID: SPDK decodes this field and rejects what it
+        // cannot parse (spdk_json_decode_uuid).
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12], "{a}");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "{a}");
+        assert_eq!(parts[2].chars().next().unwrap(), '4', "version nibble: {a}");
+        assert!(matches!(parts[3].chars().next().unwrap(), '8' | '9' | 'a' | 'b'), "variant: {a}");
+    }
+
 }

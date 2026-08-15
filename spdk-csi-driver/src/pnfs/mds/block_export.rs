@@ -1247,6 +1247,13 @@ impl BlockExportReconciler {
                 "name": raid,
                 "raid_level": "1",
                 "base_bdevs": bases,
+                // PINNED, because SPDK stamps this uuid into the
+                // reservation's ptpl file and then validates it on the
+                // next add_ns. Without it every tgt restart minted a new
+                // one, the on-disk record named the old one, and add_ns
+                // refused (-32602) forever — no namespace, so no export,
+                // so no listener, so a promoted survivor served nothing.
+                "uuid": crate::nvmeof_export::stable_raid_uuid(volume),
                 "superblock": false,
             }
         });
@@ -3129,7 +3136,27 @@ impl BlockExportReconciler {
         };
         let nqn = crate::identity::block_volume_export_nqn(volume);
         let (uuid, nguid) = crate::nvmeof_export::stable_ns_identity(volume);
-        let ptpl = format!("{}/flint-ptpl-{}.json", self.ptpl_dir, volume);
+        // KEYED ON THE COMPOSITION BDEV'S UUID, not the volume alone.
+        //
+        // SPDK stamps the bdev's uuid INTO this file and validates it on
+        // the next `add_ns`. Before `stable_raid_uuid` the raid got a
+        // random uuid per tgt restart, so the file on disk permanently
+        // named a bdev that no longer existed and add_ns refused with
+        // -32602 forever — no namespace, no export, no listener.
+        //
+        // The uuid is deterministic now, so this path is just as stable as
+        // the volume-only one was. What it buys is the MIGRATION: a volume
+        // created BEFORE the pin still has a stale file under the old
+        // name, and it is unreachable from here (the MDS does not mount
+        // the ptpl dir — only the tgt container does, so it cannot be
+        // deleted). Keying on the uuid means the repaired composition
+        // simply uses a fresh file and the stale one is inert.
+        let ptpl = format!(
+            "{}/flint-ptpl-{}-{}.json",
+            self.ptpl_dir,
+            volume,
+            &crate::nvmeof_export::stable_raid_uuid(volume)[..8]
+        );
         // The aliases belong to the bdev being SERVED, and getting this
         // wrong is a silent-divergence bug rather than a cosmetic one:
         // `ns_matches` accepts a namespace pointing at any alias of the
@@ -4465,10 +4492,22 @@ pub(crate) mod tests {
         let (uuid, nguid) = crate::nvmeof_export::stable_ns_identity("pvc-1");
         assert_eq!(add_ns["params"]["namespace"]["nguid"], nguid.as_str());
         assert_eq!(add_ns["params"]["namespace"]["uuid"], uuid.as_str());
-        assert_eq!(
-            add_ns["params"]["namespace"]["ptpl_file"], "/var/tmp/flint-ptpl-pvc-1.json",
-            "PTPL is mandatory-by-kernel: without it the client's CPTPL=PERSIST \
-             pr_register gets INVALID_FIELD and no I/O ever leaves the client"
+        // The PROPERTY is that a ptpl_file is present and lives in the
+        // configured dir — that is what "mandatory-by-kernel" means here.
+        // The exact filename is not part of the contract and now carries
+        // the composition bdev's uuid (see `stable_raid_uuid`): SPDK
+        // stamps that uuid into the file and validates it on the next
+        // add_ns, so keying the name on it is what lets a volume created
+        // before the uuid was pinned stop tripping over its stale record.
+        let ptpl = add_ns["params"]["namespace"]["ptpl_file"]
+            .as_str()
+            .expect("PTPL is mandatory-by-kernel: without it the client's CPTPL=PERSIST \
+                     pr_register gets INVALID_FIELD and no I/O ever leaves the client");
+        assert!(ptpl.starts_with("/var/tmp/"), "in the configured ptpl dir: {ptpl}");
+        assert!(ptpl.contains("pvc-1"), "names its volume: {ptpl}");
+        assert!(
+            ptpl.contains(&crate::nvmeof_export::stable_raid_uuid("pvc-1")[..8]),
+            "and is keyed on the composition bdev uuid SPDK will validate: {ptpl}"
         );
 
         let listener =
