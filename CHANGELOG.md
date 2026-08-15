@@ -10,12 +10,74 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
-## [1.25.0-rc1] - 2026-08-05
+## [1.25.0] - 2026-08-15
 
-Release candidate. **The images this chart references do not exist yet** —
-`scripts/release.sh images` must build and push `flint-driver:1.25.0-rc1` and
-`flint-pnfs:1.25.0-rc1` before the chart can be published, and no cluster gate
-has been run against the bundle.
+### The pNFS block tier (RFC 8154/9561 SCSI layout over NVMe) — EXPERIMENTAL
+
+A block-class volume lets the client kernel (>= 6.11, `CONFIG_PNFS_BLOCK`) do
+raw NVMe/TCP extent I/O against spdk-tgt with the MDS out of the data path.
+Opt-in: `pnfs.blockLayout.enabled`, plus a StorageClass with
+`layout: pnfs-block`. `replicas` defaults to 1.
+
+**What `replicas: 2` does and does not do.** It places two copies on two
+distinct targets in one zone, mirrors writes, rebuilds a stale leg, and
+arbitrates a promotion through a shared witness (one ConfigMap per volume under
+resourceVersion CAS). On a composer death the seat moves in ~20s, the eviction
+horizon is honoured, the surviving copy holds the acked bytes, and the client
+keeps its device node.
+
+**It does NOT keep a client serving through that death, and we do not call it
+failover.** The volume's MDS shard is pinned to its target's node (lvols are
+node-local) with its state on an RWO PVC, and the client's mount targets that
+shard's Service — so a lost node takes the volume's layout class, geometry,
+extent rows and LAYOUTGET lane with it. The witness closed arbitration, not
+control-plane failover. Treat `replicas: 2` as durability for re-hydratable or
+scratch data, not availability.
+
+### Fixed — four P1s, each found only by running the block tier on hardware
+
+**Every I/O silently degraded to MDS proxying under a containerized consumer.**
+The kernel resolves a SCSI layout's device by path under `/dev/disk/by-id`, in
+the mount namespace of whichever process first triggers the layout — and a
+container has no such directory. All three lookups returned `-ENOENT`, the
+client logged `pNFS: no device found`, and files were created and stayed
+**zero bytes**. csi-node now warms the device from the host namespace at
+NodePublish, and the consumer inherits the resolved deviceid.
+
+**Any csi-node restart broke every later NVMe-oF attach on that node.** Both
+connect paths passed a stable host NQN with no `-I`, so nvme-cli supplied a
+hostid it auto-generated inside the (ephemeral) container. The kernel keys a
+host on the pair and refuses a reused NQN under a different id. **This affects
+ordinary SPDK volumes, not just the block tier.** The hostid is now derived
+from the host NQN.
+
+**A target restart permanently broke a composed volume's export.** SPDK stamps
+the bdev's uuid into the reservation's ptpl record and validates it on the next
+`add_ns`; `bdev_raid_create` was called with no uuid, so every restart rebuilt
+the composition under a new one and the namespace was refused forever — no
+namespace, so no listener, so nothing on 4420. The raid uuid is now pinned and
+the ptpl path follows the bdev.
+
+**The block redirect lane could not reach any MDS.** csi-node runs
+`hostNetwork` without `ClusterFirstWithHostNet`, so no `.svc.cluster.local`
+name resolved at all, and it was never given the control-plane token that
+`AttachBlockNode` requires. Both fixed in the chart; the lane also now asks
+sibling shards, since a composer death takes out the shard the volume was
+created on.
+
+### Also
+
+**The composition witness had an untestable failure mode, and it was hiding a
+fail-open.** `drop_leg` — a gRPC entry point reached by DeleteVolume's fan-out
+— treated an *unreadable* witness the same as a confirmed no-seat and destroyed
+a volume the target was actively composing. A per-method outage overlay now
+makes that case reachable in tests.
+
+**`replicas: 2` is installable via helm for the first time.** blockExport is
+per-node, so its config had to be per-shard (`blockExport.shards[i]`); a single
+shared ConfigMap could only ever describe one target.
+
+### Prior release-candidate content (1.25.0-rc1, 2026-08-05)
 
 The theme is data that was wrong rather than absent. Two of the three headline
 fixes produced a plausible-looking result instead of an error, which is why
