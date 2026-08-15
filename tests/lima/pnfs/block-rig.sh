@@ -1734,9 +1734,20 @@ Report: ${RESV_UNF:-<none>}"
     else
       echo "▶ TGT_RESTART: PTPL must survive a target restart (together-restart)"
     fi
-    PTPL_FILE="$RIG/flint-ptpl-$VOL.json"
+    # RESOLVED BY PATTERN, not pinned by name. The ptpl filename carries
+    # the SERVED BDEV's uuid, because SPDK stamps that uuid inside the
+    # file and refuses the namespace on the next add_ns when the two
+    # disagree ("Existing bdev UUID is not same with configuration
+    # file") — keying the path on it means a record can never describe a
+    # different bdev than the one its path is used with. The assertion
+    # here is "PTPL was persisted for this volume", which the glob states
+    # exactly; the old exact-name form also asserted a filename that is
+    # not part of any contract.
+    PTPL_FILE="$(vsh "ls -1 $RIG/flint-ptpl-$VOL*.json 2>/dev/null | head -1")"
+    [ -n "$PTPL_FILE" ] \
+      || fail "no ptpl_file matching $RIG/flint-ptpl-$VOL*.json — PTPL was never persisted; a tgt restart WOULD unfence"
     vsh "test -s $PTPL_FILE" \
-      || fail "no non-empty ptpl_file at $PTPL_FILE — PTPL was never persisted; a tgt restart WOULD unfence"
+      || fail "ptpl_file $PTPL_FILE is EMPTY — PTPL was never persisted; a tgt restart WOULD unfence"
     echo "· ptpl_file persisted: $(vsh "wc -c < $PTPL_FILE")B, rtype=$(vsh "grep -o '\"rtype\"[: ]*[0-9]*' $PTPL_FILE | head -1")"
 
     # Kill BOTH (together-restart). MDS first so it stops reconciling.

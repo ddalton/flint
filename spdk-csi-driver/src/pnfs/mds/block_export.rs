@@ -2733,7 +2733,14 @@ impl BlockExportReconciler {
             .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": name } }))
             .await
             .ok()?;
-        resp.as_array()?
+        // The envelope, not a bare array — same shape `bdev_capacity`
+        // reads. Getting this wrong is silent: the `?` yields None, the
+        // caller falls back to the derived uuid, and the path looks
+        // right while no longer following the bdev at all. The rig
+        // caught exactly that (filename keyed f283f3b8 while the file
+        // recorded bdev_uuid 9cdf52f9).
+        resp.get("result")
+            .and_then(|r| r.as_array())?
             .first()?
             .get("uuid")?
             .as_str()
@@ -4531,21 +4538,48 @@ pub(crate) mod tests {
         assert_eq!(add_ns["params"]["namespace"]["uuid"], uuid.as_str());
         // The PROPERTY is that a ptpl_file is present and lives in the
         // configured dir — that is what "mandatory-by-kernel" means here.
-        // The exact filename is not part of the contract and now carries
-        // the composition bdev's uuid (see `stable_raid_uuid`): SPDK
-        // stamps that uuid into the file and validates it on the next
-        // add_ns, so keying the name on it is what lets a volume created
-        // before the uuid was pinned stop tripping over its stale record.
+        // The exact filename is not part of the contract; it is KEYED ON
+        // THE SERVED BDEV'S UUID, because SPDK stamps that uuid inside
+        // the file and refuses the namespace on the next add_ns when the
+        // two disagree ("Existing bdev UUID is not same with
+        // configuration file"). Asserting the served bdev's uuid — the
+        // one the target actually reports — rather than the derived one
+        // is the difference between testing the contract and testing a
+        // fallback: an earlier version of this assertion passed while
+        // `bdev_uuid_of` was silently returning None, and the lima rig
+        // is what caught it.
         let ptpl = add_ns["params"]["namespace"]["ptpl_file"]
             .as_str()
             .expect("PTPL is mandatory-by-kernel: without it the client's CPTPL=PERSIST \
                      pr_register gets INVALID_FIELD and no I/O ever leaves the client");
         assert!(ptpl.starts_with("/var/tmp/"), "in the configured ptpl dir: {ptpl}");
         assert!(ptpl.contains("pvc-1"), "names its volume: {ptpl}");
-        assert!(
-            ptpl.contains(&crate::nvmeof_export::stable_raid_uuid("pvc-1")[..8]),
-            "and is keyed on the composition bdev uuid SPDK will validate: {ptpl}"
-        );
+        // Ask the target the same question the code asks, through the
+        // same transport — not by reaching into the fake's internals.
+        let served_bdev = add_ns["params"]["namespace"]["bdev_name"].as_str().unwrap();
+        let probe = tgt
+            .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": served_bdev } }))
+            .await
+            .expect("the target answers for the bdev it was just handed");
+        let served_uuid = probe
+            .get("result")
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+            .and_then(|b| b.get("uuid"))
+            .and_then(|u| u.as_str())
+            .map(|s| s.to_string());
+        match served_uuid {
+            Some(u) if u.len() >= 8 => assert!(
+                ptpl.contains(&u[..8]),
+                "keyed on the SERVED bdev's uuid ({u}), which is what SPDK validates: {ptpl}"
+            ),
+            // No uuid from the target ⇒ the derived id is the documented
+            // fallback, and the path must still be stable per volume.
+            _ => assert!(
+                ptpl.contains(&crate::nvmeof_export::stable_raid_uuid("pvc-1")[..8]),
+                "falls back to the derived uuid when the target reports none: {ptpl}"
+            ),
+        }
 
         let listener =
             tgt.call_with_method(&calls, "nvmf_subsystem_add_listener").expect("listener");
