@@ -259,30 +259,89 @@ async fn resolve_current_coordinates(attach: &BlockAttach) -> Option<BlockAttach
         return None;
     }
     let (volume, node) = (volume_of(&attach.subnqn)?, node_name_of(&attach.host_nqn)?);
-    let client = crate::pnfs_csi::PnfsCsi::new(attach.mds_control.clone())
-        .with_timeout(std::time::Duration::from_secs(
-            std::env::var("FLINT_PNFS_REATTACH_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10),
-        ));
-    match client.attach_block_node(volume, node).await {
-        Ok(fresh) => Some(fresh),
-        Err(e) => {
+    let timeout = std::time::Duration::from_secs(
+        std::env::var("FLINT_PNFS_REATTACH_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+    );
+    let candidates = candidate_mds_endpoints(&attach.mds_control);
+    let mut last_err = None;
+    for (i, endpoint) in candidates.iter().enumerate() {
+        let client = crate::pnfs_csi::PnfsCsi::new(endpoint.clone()).with_timeout(timeout);
+        match client.attach_block_node(volume, node).await {
+            Ok(fresh) => {
+                if i > 0 {
+                    // The recorded shard did not answer and a SIBLING did.
+                    // That is the composer-death case working: the shard
+                    // this volume was created on is exactly the one a
+                    // composer death takes out.
+                    tracing::info!(
+                        "🧭 re-attach for {} answered by {} after the recorded MDS {} did not \
+                         — the witness is shared, so any live shard can place this volume",
+                        attach.subnqn, endpoint, attach.mds_control
+                    );
+                }
+                return Some(fresh);
+            }
             // Includes the fenced case, which must stay loud: a fenced
             // node re-entering silently is the door the durable eviction
             // exists to close. Falling back to the record here does not
             // re-open it — the connect itself is refused at the target.
-            tracing::warn!(
-                "re-attach lane for {} could not reach the MDS at {} ({}) — replaying the \
-                 recorded address",
-                attach.subnqn,
-                attach.mds_control,
-                e
-            );
-            None
+            Err(e) => {
+                tracing::debug!("re-attach for {} via {}: {}", attach.subnqn, endpoint, e);
+                last_err = Some(e);
+            }
         }
     }
+    tracing::warn!(
+        "re-attach lane for {} could not reach ANY of {} MDS endpoint(s) — last error from \
+         the set: {} — replaying the recorded address",
+        attach.subnqn,
+        candidates.len(),
+        last_err.map(|e| e.to_string()).unwrap_or_else(|| "none tried".into())
+    );
+    None
+}
+
+/// Every MDS control endpoint worth asking, the RECORDED one first.
+///
+/// THE BUG THIS EXISTS FOR, measured on runbo (2026-08-15). The recorded
+/// endpoint is the shard the volume was CREATED on — and a volume's
+/// composer and its shard sit on the same node, so a composer death takes
+/// out precisely the MDS this lane was asking. The client then logged
+/// "could not reach the MDS at flint-pnfs-mds-0 … replaying the recorded
+/// address" every 30 s while the survivor's MDS sat alive holding the
+/// promoted seat, and the kernel burned through reconnects to the dead
+/// composer's traddr (attempt 77/360, ctrl_loss_tmo 30 min). Restoring the
+/// dead node did NOT heal it: the returned target no longer exports the
+/// composition, because it is a leg host now.
+///
+/// Asking a SIBLING is correct rather than a hack: the composition witness
+/// is shared (that is the whole point of it), so any live shard can read
+/// the seat and answer `AttachBlockNode` for a volume it does not own.
+///
+/// Ordered, recorded-first, so the common case costs exactly one call and
+/// the fan-out is only ever paid on the failure path.
+fn candidate_mds_endpoints(recorded: &str) -> Vec<String> {
+    // The recorded value carries a scheme ("http://host:port"); the chart's
+    // list does not. Compare on the bare authority so the recorded endpoint
+    // is not retried a second time under its other spelling.
+    fn bare(s: &str) -> &str {
+        s.trim_start_matches("http://").trim_start_matches("https://").trim_end_matches('/')
+    }
+    let mut out = Vec::new();
+    if !recorded.is_empty() {
+        out.push(recorded.to_string());
+    }
+    if let Ok(raw) = std::env::var("FLINT_PNFS_MDS_SHARD_ENDPOINTS") {
+        for ep in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if !out.iter().any(|have| bare(have) == bare(ep)) {
+                out.push(ep.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// THE REDIRECT ACTOR, second half: tell the MDS the session is up, so
@@ -1297,6 +1356,45 @@ mod tests {
         // backport, and the check's job is to be skippable loudly.
         check_kernel_release("weird-vendor-string", true).unwrap();
         check_kernel_release("6.8.0-49-generic", true).unwrap();
+    }
+
+    /// THE RECORDED SHARD IS THE ONE A COMPOSER DEATH KILLS.
+    ///
+    /// A block volume's composer and its MDS shard share a node, so the
+    /// endpoint recorded at stage time is exactly the one that goes away in
+    /// the failure this lane exists to handle. These assertions pin the
+    /// three properties that make the fallback correct rather than noisy:
+    /// the recorded endpoint is still tried FIRST (the common case stays one
+    /// call), siblings follow (any live shard can read the shared witness),
+    /// and the recorded one is not retried under its other spelling.
+    #[test]
+    fn the_recorded_mds_comes_first_and_siblings_follow() {
+        // Serialised via the env var, so keep the set/remove adjacent.
+        std::env::set_var(
+            "FLINT_PNFS_MDS_SHARD_ENDPOINTS",
+            "flint-pnfs-mds-0.flint-system.svc.cluster.local:50051,\
+             flint-pnfs-mds-1.flint-system.svc.cluster.local:50051",
+        );
+
+        let recorded = "http://flint-pnfs-mds-0.flint-system.svc.cluster.local:50051";
+        let got = candidate_mds_endpoints(recorded);
+
+        assert_eq!(got[0], recorded, "the recorded endpoint is tried first: {got:?}");
+        assert_eq!(
+            got.len(), 2,
+            "shard 0 must not appear twice just because the record spells it with a \
+             scheme and the chart does not: {got:?}"
+        );
+        assert!(got[1].contains("mds-1"), "the sibling is reachable: {got:?}");
+
+        // No list (older chart): the lane degrades to exactly its old
+        // behaviour rather than losing the recorded endpoint.
+        std::env::remove_var("FLINT_PNFS_MDS_SHARD_ENDPOINTS");
+        assert_eq!(candidate_mds_endpoints(recorded), vec![recorded.to_string()]);
+
+        // No record AND no list is empty, not a panic — the caller treats
+        // that as "replay", which is the pre-redirect world.
+        assert!(candidate_mds_endpoints("").is_empty());
     }
 }
 

@@ -84,6 +84,19 @@ spec:
             # nfs-only mode — the volume's tgt is on the MDS's node.
             - name: FLINT_PNFS_BLOCK_LAYOUT
               value: "1"
+            # THE REDIRECT LANE NEEDS MORE THAN ITS OWN SHARD. A block
+            # volume's composer and its MDS shard sit on the same node, so
+            # a composer death takes out exactly the MDS the node recorded
+            # at stage time — and the re-attach lane then asks a corpse
+            # where the volume moved, forever (measured on runbo: the
+            # survivor held the promoted seat while the client burned
+            # reconnects to the dead traddr). The composition witness is
+            # SHARED, so any live shard can answer; this list is what lets
+            # the node ask one. Same value the controller already gets.
+            {{- if .Values.pnfs.server.enabled }}
+            - name: FLINT_PNFS_MDS_SHARD_ENDPOINTS
+              value: {{ $eps := list }}{{ range $i := until (int (.Values.pnfs.server.mds.count | default 1)) }}{{ $eps = append $eps (printf "flint-pnfs-mds-%d.%s.svc.cluster.local:50051" $i $.Release.Namespace) }}{{ end }}{{ join "," $eps | quote }}
+            {{- end }}
             {{- end }}
           ports:
             - name: healthz
@@ -343,6 +356,13 @@ spec:
             # volumes.
             - name: FLINT_PNFS_BLOCK_LAYOUT
               value: "1"
+            # See the note on the other container: the recorded shard is
+            # the one a composer death kills, so the node needs the whole
+            # set to find a live MDS.
+            {{- if .Values.pnfs.server.enabled }}
+            - name: FLINT_PNFS_MDS_SHARD_ENDPOINTS
+              value: {{ $eps := list }}{{ range $i := until (int (.Values.pnfs.server.mds.count | default 1)) }}{{ $eps = append $eps (printf "flint-pnfs-mds-%d.%s.svc.cluster.local:50051" $i $.Release.Namespace) }}{{ end }}{{ join "," $eps | quote }}
+            {{- end }}
             {{- end }}
             # F36c last-writer-set assembly gate
             # (docs/f36c-assembly-freshness-gate.md). "disabled" restores
