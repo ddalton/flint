@@ -2719,6 +2719,27 @@ impl BlockExportReconciler {
     /// lvol sizes round up to the lvolstore's cluster size, so the
     /// device is usually BIGGER than the request, and the number the
     /// allocator's ceiling is checked against has to be the real one.
+    /// The uuid SPDK currently reports for a bdev.
+    ///
+    /// Read rather than derived because it is what SPDK writes into the
+    /// reservation's ptpl record and validates on every later `add_ns` —
+    /// the ptpl path is keyed on it so a record can never describe a
+    /// different bdev than the one it is used with. `None` when the bdev
+    /// is absent or the answer has no uuid, which the caller treats as
+    /// "fall back to the derived id".
+    async fn bdev_uuid_of(&self, name: &str) -> Option<String> {
+        let resp = self
+            .rpc
+            .rpc(&json!({ "method": "bdev_get_bdevs", "params": { "name": name } }))
+            .await
+            .ok()?;
+        resp.as_array()?
+            .first()?
+            .get("uuid")?
+            .as_str()
+            .map(|s| s.to_string())
+    }
+
     fn bdev_capacity(resp: &serde_json::Value) -> Option<u64> {
         let b = resp.get("result").and_then(|r| r.as_array())?.first()?;
         let block_size = b.get("block_size").and_then(|v| v.as_u64())?;
@@ -3136,26 +3157,42 @@ impl BlockExportReconciler {
         };
         let nqn = crate::identity::block_volume_export_nqn(volume);
         let (uuid, nguid) = crate::nvmeof_export::stable_ns_identity(volume);
-        // KEYED ON THE COMPOSITION BDEV'S UUID, not the volume alone.
+        // KEYED ON THE SERVED BDEV'S *LIVE* UUID, read from SPDK.
         //
-        // SPDK stamps the bdev's uuid INTO this file and validates it on
-        // the next `add_ns`. Before `stable_raid_uuid` the raid got a
-        // random uuid per tgt restart, so the file on disk permanently
-        // named a bdev that no longer existed and add_ns refused with
-        // -32602 forever — no namespace, no export, no listener.
+        // SPDK stamps the bdev's uuid into this file and validates it on
+        // every later `add_ns`, refusing the namespace when they differ:
         //
-        // The uuid is deterministic now, so this path is just as stable as
-        // the volume-only one was. What it buys is the MIGRATION: a volume
-        // created BEFORE the pin still has a stale file under the old
-        // name, and it is unreachable from here (the MDS does not mount
-        // the ptpl dir — only the tgt container does, so it cannot be
-        // deleted). Keying on the uuid means the repaired composition
-        // simply uses a fresh file and the stale one is inert.
+        //   nvmf_ns_reservation_restore: Existing bdev UUID is not same
+        //                                with configuration file
+        //   spdk_nvmf_subsystem_add_ns_ext: Subsystem restore reservation failed
+        //   → the RPC returns -32602, so no namespace is added, so no
+        //     LISTENER is ever added, and the target answers its RPC
+        //     socket while nothing is on 4420. Measured on runbo: a
+        //     promoted survivor could not serve at all, and neither
+        //     could the node it failed back to.
+        //
+        // `stable_raid_uuid` stops the uuid from MOVING, which is the
+        // cure going forward. It is not enough on its own: a file written
+        // while the bdev still had an old (random, or simply different)
+        // uuid keeps naming that one, and the mismatch is permanent —
+        // the MDS cannot delete the file, because only the tgt container
+        // mounts the ptpl dir.
+        //
+        // Reading the uuid SPDK reports right now closes that: the path
+        // follows the bdev, so the record a given path holds always
+        // describes the bdev that path is used with. A uuid change moves
+        // the file rather than poisoning it. Falling back to the derived
+        // uuid keeps the old behaviour when the read fails.
+        let ptpl_key = self
+            .bdev_uuid_of(&served)
+            .await
+            .filter(|u| u.len() >= 8)
+            .unwrap_or_else(|| crate::nvmeof_export::stable_raid_uuid(volume));
         let ptpl = format!(
             "{}/flint-ptpl-{}-{}.json",
             self.ptpl_dir,
             volume,
-            &crate::nvmeof_export::stable_raid_uuid(volume)[..8]
+            &ptpl_key[..8]
         );
         // The aliases belong to the bdev being SERVED, and getting this
         // wrong is a silent-divergence bug rather than a cosmetic one:
