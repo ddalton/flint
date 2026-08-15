@@ -1566,6 +1566,19 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                          pnfs.flint.io/stripe* parameters",
                     ));
                 }
+                // ONE WRITER, ONE NODE, AND A FILESYSTEM. Refused HERE
+                // because this branch returns long before the driver's
+                // own RWX/ROX handling at the bottom of this function,
+                // while the driver advertises MULTI_NODE_MULTI_WRITER
+                // fleet-wide — so without a gate the user gets an RWX
+                // block PVC that provisions cleanly and then behaves as
+                // nothing in particular. The reasoning per refusal, and
+                // the tests, are on the function.
+                if let Some(refusal) = spdk_csi_driver::pnfs_csi::block_layout_capability_refusal(
+                    &req.volume_capabilities,
+                ) {
+                    return Err(tonic::Status::invalid_argument(refusal));
+                }
                 vol_opts.layout_class = spdk_csi_driver::pnfs::mds::layout::LayoutClass::Scsi;
             } else if vol_opts.replicas >= 2 {
                 // The files class has its own replication, with its own

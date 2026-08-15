@@ -83,6 +83,59 @@ pub mod sc_params {
         &[STRIPE_SIZE, STRIPE_WIDTH, DIR_GID, DIR_MODE, REPLICAS, CROSS_ZONE];
 }
 
+/// The access shapes a `layout: pnfs-block` volume cannot serve, refused
+/// at CreateVolume. `None` = acceptable.
+///
+/// LIVES HERE, NOT IN main.rs, SO IT CAN BE TESTED. The pNFS branch of
+/// CreateVolume returns before the driver's own RWX/ROX handling ever
+/// runs, and `main.rs` has no test module — its two sibling refusals
+/// (stripe geometry, replicas-on-files) are untested by construction.
+/// A capability gate is exactly the kind of thing that gets quietly
+/// inverted, so it is a pure function over the capabilities instead.
+///
+/// WHY EACH REFUSAL:
+/// * multi-node — a block-layout client writes raw extents it was
+///   granted EXCLUSIVELY. A second node's grant excludes the first
+///   rather than sharing with it, and nothing on the LAYOUTGET path
+///   recalls a live one, so a cross-node reader can hold a writer out
+///   indefinitely. Refusing here makes that state unreachable rather
+///   than merely unhandled.
+/// * raw block — `volumeMode: Block` would hand the consumer a device
+///   with no filesystem, but the extents are minted by LAYOUTGET, which
+///   only a filesystem client issues. The name means the pNFS BLOCK
+///   LAYOUT, not a raw block PVC, and that confusion is worth one
+///   explicit sentence at provision time.
+pub fn block_layout_capability_refusal(
+    caps: &[crate::csi::VolumeCapability],
+) -> Option<String> {
+    use crate::csi::volume_capability::{access_mode::Mode, AccessType};
+    let multi_node = caps.iter().any(|c| {
+        c.access_mode.as_ref().is_some_and(|m| {
+            m.mode == Mode::MultiNodeMultiWriter as i32
+                || m.mode == Mode::MultiNodeSingleWriter as i32
+                || m.mode == Mode::MultiNodeReaderOnly as i32
+        })
+    });
+    if multi_node {
+        return Some(
+            "layout: pnfs-block is single-node (ReadWriteOnce / ReadWriteOncePod) — a \
+             block-layout client writes raw extents it was granted exclusively, so a \
+             second node's grant excludes the first rather than sharing with it. Use \
+             layout: pnfs for a shared filesystem"
+                .into(),
+        );
+    }
+    if caps.iter().any(|c| matches!(c.access_type, Some(AccessType::Block(_)))) {
+        return Some(
+            "layout: pnfs-block requires volumeMode: Filesystem — the name refers to the \
+             pNFS BLOCK LAYOUT (the client does raw NVMe extent I/O beneath a filesystem), \
+             not to a raw block PVC"
+                .into(),
+        );
+    }
+    None
+}
+
 /// A target that could hold a copy of a block volume: one MDS shard,
 /// the tgt it drives, and the failure domain that tgt is in.
 ///
@@ -1995,6 +2048,68 @@ mod tests {
             let expected = expect.map(|(h, p)| (h.to_string(), p.to_string()));
             assert_eq!(got, expected, "input: {}", input);
         }
+    }
+
+    /// The block class is single-node and filesystem-only, and the
+    /// refusal has to fire at PROVISION time.
+    ///
+    /// The driver advertises MULTI_NODE_MULTI_WRITER fleet-wide, and the
+    /// pNFS branch of CreateVolume returns before the driver's own
+    /// RWX/ROX handling — so an RWX block PVC would otherwise be created
+    /// happily and then behave as nothing in particular. Both halves are
+    /// asserted, plus the shapes that must still be ALLOWED, because a
+    /// gate that refuses everything is the easy way to pass this test.
+    #[test]
+    fn a_block_layout_volume_is_refused_unless_single_node_and_filesystem() {
+        use crate::csi::volume_capability::{access_mode::Mode, AccessMode, AccessType, MountVolume};
+        use crate::csi::VolumeCapability;
+
+        let cap = |mode: Mode, block: bool| VolumeCapability {
+            access_mode: Some(AccessMode { mode: mode as i32 }),
+            access_type: Some(if block {
+                AccessType::Block(crate::csi::volume_capability::BlockVolume {})
+            } else {
+                AccessType::Mount(MountVolume::default())
+            }),
+        };
+
+        // ALLOWED: the two single-node filesystem shapes.
+        for m in [Mode::SingleNodeWriter, Mode::SingleNodeSingleWriter] {
+            assert_eq!(
+                block_layout_capability_refusal(&[cap(m, false)]),
+                None,
+                "{m:?} is the supported shape and must provision"
+            );
+        }
+
+        // REFUSED: every multi-node mode, including the READER-only one
+        // — a live cross-node read grant excludes a writer for as long
+        // as it lives, which is the whole reason this gate exists.
+        for m in [Mode::MultiNodeMultiWriter, Mode::MultiNodeSingleWriter, Mode::MultiNodeReaderOnly]
+        {
+            let r = block_layout_capability_refusal(&[cap(m, false)])
+                .unwrap_or_else(|| panic!("{m:?} must be refused"));
+            assert!(r.contains("single-node"), "{m:?}: {r}");
+        }
+
+        // REFUSED: raw block, even single-node — extents are minted by
+        // LAYOUTGET, which only a filesystem client issues.
+        let r = block_layout_capability_refusal(&[cap(Mode::SingleNodeWriter, true)])
+            .expect("volumeMode: Block must be refused");
+        assert!(r.contains("Filesystem"), "{r}");
+
+        // A CO may send SEVERAL capabilities; one bad entry is enough.
+        let r = block_layout_capability_refusal(&[
+            cap(Mode::SingleNodeWriter, false),
+            cap(Mode::MultiNodeMultiWriter, false),
+        ])
+        .expect("a multi-node entry anywhere in the list must be refused");
+        assert!(r.contains("single-node"), "{r}");
+
+        // And an empty list is not a refusal — the driver's generic path
+        // handles a capability-less request; inventing one here would
+        // refuse volumes for a reason this function cannot see.
+        assert_eq!(block_layout_capability_refusal(&[]), None);
     }
 
     #[test]
