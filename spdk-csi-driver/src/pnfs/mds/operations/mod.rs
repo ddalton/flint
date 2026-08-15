@@ -2447,6 +2447,35 @@ pub async fn reclaim_scsi_extents(
 
     let backend = layout_manager.state_backend();
     let volume = file_key.split('/').find(|c| !c.is_empty())?.to_string();
+
+    // RECLAIM ON A BLOCK BOUNDARY, ROUNDING UP.
+    //
+    // `from` is a file size the application chose, so it lands anywhere;
+    // every other reclaim range arrives block-aligned from a client's
+    // LAYOUTGET window. The allocator is byte-granular and will happily
+    // free a range starting mid-block — and then hand that block's
+    // second half to another file, which shares a physical block with
+    // this one. The client does whole-block I/O, so the next
+    // read-modify-write of that block by either file clobbers the
+    // other's bytes.
+    //
+    // Rounding UP frees strictly less: the tail of the last partial
+    // block stays allocated to this file as slack, which is what a
+    // filesystem does anyway. Rounding DOWN would free a block this
+    // file still owns bytes in — the same corruption from the other
+    // side.
+    //
+    // 4096 is the block size flint's exports actually run (lvols over
+    // 4096-byte bdevs; a 512-byte device is covered, since 4096 is a
+    // multiple of it). A device with a LARGER logical block would need
+    // this raised — it must be a multiple of the device block, not
+    // merely close to it.
+    const RECLAIM_ALIGN: u64 = 4096;
+    let from = match from % RECLAIM_ALIGN {
+        0 => from,
+        rem => from.saturating_add(RECLAIM_ALIGN - rem),
+    };
+
     let length = (i64::MAX as u64).saturating_sub(from);
     if length == 0 {
         return None;

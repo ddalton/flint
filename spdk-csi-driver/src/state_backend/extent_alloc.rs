@@ -852,7 +852,32 @@ pub fn reclaim_complete(
            AND g.fenced = 1
          ORDER BY g.client_id",
     )?;
+    // Rows removed whole, versus rows that only lost a piece — the
+    // extent_rows counter below has to be told the difference.
+    let mut rows_removed: i64 = 0;
+    let mut rows_added: i64 = 0;
     for t in &targets {
+        // FREE THE INTERSECTION, NEVER THE ROW. `overlapping_extents`
+        // matches on PARTIAL overlap, so a target may extend past either
+        // end of [start, end) — and everything outside that window is
+        // data the caller asked to KEEP.
+        //
+        // Taking the whole row here is how a shrinking ftruncate
+        // destroyed the prefix it promised to keep: the truncate point
+        // lands mid-row, and `merge_extents_window` makes one row the
+        // normal shape of a sequentially-written file, so the whole file
+        // went. Silent — the client simply read zeros.
+        let row_start = t.logical_offset;
+        let row_end = row_start + t.length;
+        let cut_start = row_start.max(start);
+        let cut_end = row_end.min(end);
+        let cut_len = cut_end - cut_start;
+        // Physical is contiguous within a row, so the cut's physical
+        // base is its logical distance from the row's start.
+        let cut_phys = t.physical_offset + (cut_start - row_start);
+        let keeps_head = cut_start > row_start;
+        let keeps_tail = cut_end < row_end;
+
         let fenced: Vec<(i64, i64)> = fenced_stmt
             .query_map(params![volume, file_id as i64, t.logical_offset], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -860,9 +885,9 @@ pub fn reclaim_complete(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let all_delivered = fenced.iter().all(|(_, d)| *d > 0);
         if fenced.is_empty() || all_delivered {
-            free_insert_coalescing(&tx, volume, t.physical_offset, t.length, t.generation)?;
+            free_insert_coalescing(&tx, volume, cut_phys, cut_len, t.generation)?;
             out.freed_extents += 1;
-            out.freed_bytes += t.length as u64;
+            out.freed_bytes += cut_len as u64;
             if !fenced.is_empty() {
                 // Delivered-fence clean free: the grant rows go with the
                 // extent (the quarantine branch's discipline; leaving
@@ -884,21 +909,65 @@ pub fn reclaim_complete(
                 "INSERT INTO extent_quarantine
                    (volume, physical_offset, length, gen, fenced_clients, quarantined_unix)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![volume, t.physical_offset, t.length, t.generation, csv, now_unix],
+                params![volume, cut_phys, cut_len, t.generation, csv, now_unix],
             )?;
             out.quarantined_extents += 1;
-            out.quarantined_bytes += t.length as u64;
+            out.quarantined_bytes += cut_len as u64;
             tx.execute(
                 "DELETE FROM extent_grants
                  WHERE volume = ?1 AND file_id = ?2 AND logical_offset = ?3",
                 params![volume, file_id as i64, t.logical_offset],
             )?;
         }
+        // The row goes only if the cut consumed all of it. Otherwise the
+        // surviving side(s) stay mapped at their ORIGINAL physical bytes
+        // — that is the whole point: those bytes were never reclaimed,
+        // so nothing may move or re-point them.
         tx.execute(
             "DELETE FROM extents
              WHERE volume = ?1 AND file_id = ?2 AND logical_offset = ?3",
             params![volume, file_id as i64, t.logical_offset],
         )?;
+        rows_removed += 1;
+        if keeps_head {
+            // Head keeps the row's logical offset, physical base, state
+            // and generation; only its length shrinks to the cut.
+            tx.execute(
+                "INSERT INTO extents
+                   (volume, file_id, logical_offset, length, physical_offset, gen, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    volume,
+                    file_id as i64,
+                    row_start,
+                    cut_start - row_start,
+                    t.physical_offset,
+                    t.generation,
+                    t.state
+                ],
+            )?;
+            rows_added += 1;
+        }
+        if keeps_tail {
+            // Tail starts where the cut ended, at the matching physical
+            // displacement. Reached when the reclaimed range sits INSIDE
+            // a row (a mid-file hole punch), not on the truncate path.
+            tx.execute(
+                "INSERT INTO extents
+                   (volume, file_id, logical_offset, length, physical_offset, gen, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    volume,
+                    file_id as i64,
+                    cut_end,
+                    row_end - cut_end,
+                    t.physical_offset + (cut_end - row_start),
+                    t.generation,
+                    t.state
+                ],
+            )?;
+            rows_added += 1;
+        }
         // Hygiene, not safety: the extent is gone, so any commit-grace
         // record over it is dead weight. Safety is the generation check
         // in `commit_extents` — a record that outlived its extent
@@ -912,15 +981,21 @@ pub fn reclaim_complete(
     }
     drop(fenced_stmt);
 
+    // NET, not `targets.len()`: a row clipped on one side leaves one row
+    // behind, and a range reclaimed from the MIDDLE of a row leaves two.
+    // Counting every target as removed would drift the budget counter
+    // down until the full verifier's cross-check against COUNT(*) caught
+    // it — which only runs in test/debug.
     tx.execute(
         "UPDATE volume_alloc SET extent_rows = extent_rows - ?2 WHERE volume = ?1",
-        params![volume, targets.len() as i64],
+        params![volume, rows_removed - rows_added],
     )?;
-    // Windowed: this transaction only DELETED extents and INSERTED
-    // free/quarantine ranges over exactly the deleted placements — no
-    // extents row was added or reshaped, so there is no touched row to
-    // probe (deletions cannot create overlap, and the freed placements
-    // re-occupy space the deleted rows held). Tests and debug builds
+    // Windowed: this transaction DELETED extents, re-inserted the
+    // surviving side(s) of any clipped row AT THEIR ORIGINAL PLACEMENT,
+    // and INSERTED free/quarantine ranges over exactly the reclaimed
+    // piece. Coverage only ever SHRINKS here — no row claims a byte it
+    // did not already hold — so no reshape can create an overlap and
+    // there is no touched row worth probing. Tests and debug builds
     // still cross-check the whole volume (bench opt-out as in
     // verify_window_invariants_conn).
     #[cfg(any(test, debug_assertions))]
@@ -3805,6 +3880,126 @@ mod tests {
             }
             verify_volume_invariants(&conn, VOL).unwrap();
         }
+    }
+
+    /// A SHRINKING TRUNCATE MUST NOT TAKE THE BYTES IT KEEPS.
+    ///
+    /// `note_truncate` turns `ftruncate(fd, n)` into
+    /// `reclaim_complete(.., n, i64::MAX - n)`, and `overlapping_extents`
+    /// matches on PARTIAL overlap — so a row that STRADDLES `n` is a
+    /// target, and the free/DELETE below it took the whole row. The
+    /// prefix `[row_start, n)` is committed data the syscall promises to
+    /// keep, and the client read zeros back with no error anywhere.
+    ///
+    /// This is the common case, not an edge: `merge_extents_window`
+    /// collapses a sequentially-written file into ONE row, so truncating
+    /// such a file to any non-zero size dropped ALL of it.
+    ///
+    /// THE ORACLE HAS TO BE SURVIVAL. `physical_space_stays_disjoint_
+    /// under_churn` above already truncates at non-zero offsets and
+    /// passes — because it asks whether physical space stays disjoint,
+    /// and freeing a whole row satisfies that perfectly. An invariant
+    /// checker cannot see data loss; only reading the bytes back can.
+    #[test]
+    fn a_shrinking_truncate_keeps_the_prefix_it_promised_to_keep() {
+        let mut conn = setup();
+        const WHOLE: u64 = 64 * 1024;
+        const KEEP: u64 = 32 * 1024;
+
+        // One contiguous committed extent spanning the truncation point.
+        let granted = grant(&mut conn, VOL, F, C1, 0, WHOLE, true).unwrap();
+        assert!(!granted.is_empty(), "nothing granted, test would be vacuous");
+        let phys0 = granted[0].physical_offset;
+        commit_extents(&mut conn, VOL, F, C1, 0, WHOLE).unwrap();
+        // Return it, or the reclaim refuses NotQuiescent and this test
+        // would pass without ever reaching the free.
+        layout_return(&mut conn, VOL, F, C1, 0, WHOLE).unwrap();
+
+        // Exactly what note_truncate does for ftruncate(fd, KEEP).
+        reclaim_complete(&mut conn, VOL, F, KEEP, (i64::MAX as u64) - KEEP, 0).unwrap();
+
+        // THE ASSERTION: the kept prefix is still mapped, at the same
+        // physical bytes. Before the clip this comes back empty.
+        let kept = overlapping_extents(&conn, VOL, F, 0, KEEP as i64).unwrap();
+        assert!(
+            !kept.is_empty(),
+            "ftruncate to {KEEP} destroyed the prefix it was asked to keep"
+        );
+        assert_eq!(kept[0].logical_offset, 0, "prefix moved: {kept:?}");
+        assert_eq!(
+            kept[0].physical_offset, phys0 as i64,
+            "prefix repointed at different physical bytes: {kept:?}"
+        );
+        assert_eq!(
+            kept.iter().map(|r| r.length).sum::<i64>(),
+            KEEP as i64,
+            "prefix is short or long: {kept:?}"
+        );
+
+        // And the tail really went: nothing may remain at or beyond KEEP.
+        let beyond = overlapping_extents(&conn, VOL, F, KEEP as i64, i64::MAX).unwrap();
+        assert!(beyond.is_empty(), "tail survived the truncate: {beyond:?}");
+
+        verify_volume_invariants(&conn, VOL).unwrap();
+    }
+
+    /// The other two shapes of a partial cut, so the clip is not merely
+    /// "correct for truncate".
+    ///
+    /// A range reclaimed from the MIDDLE of a row must leave BOTH sides
+    /// mapped, each at its own original physical bytes. That shape is
+    /// NOT reachable from production today — `reclaim_scsi_extents` is
+    /// the only caller and always reclaims to i64::MAX — so this covers
+    /// the branch a hole-punch (DEALLOCATE) would be the first to use,
+    /// before it is the first to find it broken.
+    #[test]
+    fn reclaiming_the_middle_of_an_extent_keeps_both_sides() {
+        let mut conn = setup();
+        const WHOLE: u64 = 64 * 1024;
+        let granted = grant(&mut conn, VOL, F, C1, 0, WHOLE, true).unwrap();
+        let phys0 = granted[0].physical_offset as i64;
+        commit_extents(&mut conn, VOL, F, C1, 0, WHOLE).unwrap();
+        layout_return(&mut conn, VOL, F, C1, 0, WHOLE).unwrap();
+
+        // Punch out [16K, 48K), keeping [0,16K) and [48K,64K).
+        let out = reclaim_complete(&mut conn, VOL, F, 16 * 1024, 32 * 1024, 0).unwrap();
+        assert_eq!(out.freed_bytes, 32 * 1024, "freed the hole, not the row");
+
+        let head = overlapping_extents(&conn, VOL, F, 0, 16 * 1024).unwrap();
+        assert_eq!(head.len(), 1, "head lost: {head:?}");
+        assert_eq!((head[0].logical_offset, head[0].length), (0, 16 * 1024));
+        assert_eq!(head[0].physical_offset, phys0, "head repointed");
+
+        let tail = overlapping_extents(&conn, VOL, F, 48 * 1024, 64 * 1024).unwrap();
+        assert_eq!(tail.len(), 1, "tail lost: {tail:?}");
+        assert_eq!((tail[0].logical_offset, tail[0].length), (48 * 1024, 16 * 1024));
+        // Physical must track the LOGICAL displacement within the row,
+        // or the tail reads someone else's bytes.
+        assert_eq!(tail[0].physical_offset, phys0 + 48 * 1024, "tail repointed");
+
+        // The hole is really gone.
+        assert!(overlapping_extents(&conn, VOL, F, 16 * 1024, 48 * 1024)
+            .unwrap()
+            .is_empty());
+
+        // And the row budget counted the split (1 row became 2), not a
+        // bare removal — drift here only surfaces in the full verifier.
+        let rows: i64 = conn
+            .query_row(
+                "SELECT extent_rows FROM volume_alloc WHERE volume = ?1",
+                params![VOL],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let actual: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM extents WHERE volume = ?1",
+                params![VOL],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, actual, "extent_rows drifted from COUNT(*)");
+        verify_volume_invariants(&conn, VOL).unwrap();
     }
 
     #[test]
