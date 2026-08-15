@@ -42,6 +42,15 @@
 #   V6. THE REJOIN: tgt-B comes back, the leg is re-hosted, and the
 #       rebuild returns the volume to two copies — with the bytes
 #       written while it was away.
+#   V7. THE FAILOVER: the composer dies, B wins the seat by CAS, waits
+#       out the eviction horizon, and the CLIENT REDIRECTS ITSELF.
+#
+# MODES: FS=1 runs §V7/§V8 under a mounted ext4 with I/O in flight.
+# MDS_DEATH=1 kills MDS-A alongside tgt-A — the NODE-death shape, where
+# the re-attach must be answered by a shard that never created the
+# volume. The default (MDS-A survives) cannot see that class of defect
+# and did not: it was green throughout the runbq campaign, whose client
+# was stranded by exactly it.
 #
 # Exit 0 = every proof held.
 #
@@ -92,6 +101,18 @@ PROBE_TMO=2
 # away while it can still ack is what strands acked writes. 120s in
 # production; here it is the horizon §V7 waits out.
 LEASE_SECS=10
+# …EXCEPT WHEN NOTHING IS LEFT TO RENEW IT. The 10s above is tuned for a
+# LIVE deposed composer: A keeps renewing, so its lease is always ~10s
+# ahead and B must wait it out. Kill MDS-A and the lease stops moving —
+# it lapses ~10s after the kill, while condemning A takes strikes(2) ×
+# probe(5s) ≥ the 5s floor, so assembly finds the horizon already past,
+# never logs "assembly waits", and the drill fails an assertion about a
+# property that is not broken. Measured, first MDS_DEATH run.
+#
+# Production is the LONG side of this: a 120s lease against a ~20s
+# condemnation, so the horizon is always live at assembly. 45s here
+# reproduces that ordering rather than papering over the assertion.
+[ "${MDS_DEATH:-0}" = "1" ] && LEASE_SECS=45
 # The client's ctrl_loss_tmo, and it is deliberately LONG — this is the
 # clock §V7c proves the redirect does not wait for. When the composer
 # dies the kernel controller does not disappear; it sits in `connecting`
@@ -116,6 +137,21 @@ CTRL_LOSS=600
 # where they belong.
 FS=${FS:-0}
 MNT=/mnt/repfs
+# MDS_DEATH=1 kills MDS-A ALONGSIDE tgt-A, and it exists because the
+# default drill could not see the defect that stranded runbq's client.
+#
+# The default kills the TARGET and leaves the composer's MDS running, so
+# the client's re-attach is answered by the shard that created the
+# volume — which has its geometry, so the class gate never fires. On
+# hardware the composer and its shard sit on the SAME NODE (blockExport
+# must be colocated with the lvstore), so a composer death takes both.
+# The lane then falls back to a SIBLING, and the sibling has to answer
+# for a volume it never created.
+#
+# That is the whole difference between the green rig and the red
+# cluster, and it is one `pkill` wide. Everything else about §V7 is
+# unchanged, so the two modes are an A/B on exactly this question.
+MDS_DEATH=${MDS_DEATH:-0}
 
 RPC_A="sudo PYTHONPATH=$RIG_TOOLS/py python3 $RIG_TOOLS/scripts/rpc.py -s $SOCK_A"
 RPC_B="sudo PYTHONPATH=$RIG_TOOLS/py python3 $RIG_TOOLS/scripts/rpc.py -s $SOCK_B"
@@ -142,6 +178,7 @@ cleanup() {
   set +e
   vsudo "[ -f /tmp/rig-churn.pid ] && kill -9 -\$(cat /tmp/rig-churn.pid) >/dev/null 2>&1
          rm -f /tmp/rig-churn.pid /tmp/rig-churn.sh /tmp/rig-churn.err /tmp/rig-churn.stop /tmp/rig-churn.count /tmp/rig-reestablish.log
+         rm -f /tmp/rig-mds-$TGT_A.pid /tmp/rig-mds-$TGT_B.pid
          umount -lf $MNT >/dev/null 2>&1
          nvme disconnect -n $SUBNQN >/dev/null 2>&1
          nvme disconnect -n $LEGNQN >/dev/null 2>&1
@@ -243,7 +280,7 @@ start_mds() {
         FLINT_PNFS_WITNESS_SQLITE=$WITNESS \
         FLINT_PNFS_BLOCK_LEASE_SECS=$LEASE_SECS \
         FLINT_NFS_GRACE_SECS=5 RUST_LOG='${MDS_LOG:-info}' \
-        nohup $MDS_BIN --config $cfg >>$log 2>&1 & sleep 0.5"
+        nohup $MDS_BIN --config $cfg >>$log 2>&1 & echo \$! > /tmp/rig-mds-$node.pid; sleep 0.5"
   local i
   for i in $(seq 1 20); do
     vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/$port' 2>/dev/null" && break
@@ -567,7 +604,27 @@ CHURN_PID=$(vsudo "cat /tmp/rig-churn.pid 2>/dev/null" | tr -d ' \r')
 echo "  … a churn writer is running against the mount"
 fi
 vsudo "pkill -9 -x reactor_0"
-echo "  … tgt-A killed (MDS-A still running); waiting for B to condemn it"
+if [ "$MDS_DEATH" = "1" ]; then
+  # BY PIDFILE, never by name: `pkill -x flint-pnfs-mds` matches BOTH
+  # shards, and killing the survivor is the one thing that would make
+  # this drill unable to prove anything. The pid was captured at start.
+  MDS_A_PID=$(vsudo "cat /tmp/rig-mds-$TGT_A.pid 2>/dev/null" | tr -d ' \r')
+  [ -n "$MDS_A_PID" ] || fail "no pidfile for MDS-A — cannot kill it precisely"
+  vsudo "kill -9 $MDS_A_PID"
+  # DEAD, CONFIRMED — a redirect that "worked" because the shard was
+  # still answering would prove the opposite of what this mode claims.
+  for i in $(seq 1 20); do
+    vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null" || break
+    [ "$i" = 20 ] && fail "MDS-A still answers on :50051 after kill -9 $MDS_A_PID"
+    sleep 0.5
+  done
+  # And the SURVIVOR is untouched, asserted rather than assumed.
+  vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50052'" 2>/dev/null \
+    || fail "MDS-B is not answering on :50052 — the kill took the wrong shard"
+  echo "  … tgt-A AND MDS-A killed (the node-death shape); MDS-B alive on :50052"
+else
+  echo "  … tgt-A killed (MDS-A still running); waiting for B to condemn it"
+fi
 
 # THE CAS, observed in the witness rather than in a log line.
 for i in $(seq 1 90); do
@@ -602,6 +659,23 @@ vsh "grep -q 'assembly waits' $RIG_B/mds.log" \
 # deposed composer keeps serving until the lease it was granted runs
 # out. Suspending on the refusal alone would sever a composition that
 # was still entitled — this wait IS the horizon, from A's side.
+if [ "$MDS_DEATH" = "1" ]; then
+  # THE DEAD-MAN IS UNREACHABLE IN THIS MODE, AND THAT IS CORRECT. It is
+  # the self-exclusion of a composer that is ALIVE but deposed — a
+  # partition — and it needs a process to run in. Here MDS-A was killed,
+  # so nothing will ever write that line, and waiting for it would be
+  # waiting for a dead process to log.
+  #
+  # The PROPERTY it produces is what gets asserted instead: nothing at A
+  # can serve the composition. Death delivers that more completely than
+  # any suspension could, and unlike the log line it is checked at the
+  # WIRE. The default mode still proves the dead-man, and it is the only
+  # mode in which the dead-man is reachable at all.
+  vsh "bash -c 'exec 3<>/dev/tcp/127.0.0.1/4420'" 2>/dev/null \
+    && fail "tgt-A still accepts NVMe connections on :4420 — the deposed target can still serve"
+  echo "✓ V7a: CAS → horizon → assembly at $TGT_B; the deposed composer is GONE (:4420 refuses, \
+:50051 refuses) — exclusion by death, the dead-man's own path is the default mode's proof"
+else
 for i in $(seq 1 $((LEASE_SECS + 3 * RECON_SECS + 15))); do
   vsh "grep -q 'SUSPENDED by the dead-man' $RIG_A/mds.log" && break
   [ "$i" = $((LEASE_SECS + 3 * RECON_SECS + 15)) ] \
@@ -617,6 +691,7 @@ done
 vsh "grep -q 'SUSPENSION FAILED' $RIG_A/mds.log" \
   && fail "the dead-man decided to suspend and could not — the deposed target may still serve"
 echo "✓ V7a: CAS → horizon → assembly at $TGT_B, and the deposed composer suspended itself"
+fi
 
 # THE DOOR TRAVELLED. B builds its allow-list from the witness, so the
 # client admitted at A — a client B's own record has never heard of — is
@@ -685,7 +760,13 @@ T0=$(vsh "date +%s")
 REDIR_MAX=$((4 * RECON_SECS + 40))
 vsudo "rm -f /tmp/rig-reestablish.log"
 for i in $(seq 1 $REDIR_MAX); do
-  vsudo "$CSI_CLI reestablish >> /tmp/rig-reestablish.log 2>&1"
+  # THE SHARD LIST IS PRODUCTION'S, not a test affordance: the chart
+  # wires FLINT_PNFS_MDS_SHARD_ENDPOINTS into csi-node for exactly this
+  # (e9d7306). Recorded-first dedup means A still answers first in the
+  # default mode, so setting it always costs nothing and only ever
+  # matters when the recorded shard is gone.
+  vsudo "env FLINT_PNFS_MDS_SHARD_ENDPOINTS=127.0.0.1:50051,127.0.0.1:50052 \
+         $CSI_CLI reestablish >> /tmp/rig-reestablish.log 2>&1"
   ADDR=$(vsudo "$CTRL_ADDR" | tr -d ' \r')
   echo "$ADDR" | grep -q "trsvcid=4421" && break
   [ "$i" = "$REDIR_MAX" ] \
@@ -700,6 +781,25 @@ ELAPSED=$(( $(vsh "date +%s") - T0 ))
 PATHADD=$(vsudo "grep -c 'carrying the namespace' /tmp/rig-reestablish.log 2>/dev/null" | tr -d ' \r')
 FELLBACK=$(vsudo "grep -c 'falling back to disconnect-then-connect' /tmp/rig-reestablish.log 2>/dev/null" | tr -d ' \r')
 echo "  … redirect mechanism: path-add=${PATHADD:-0}, fallback=${FELLBACK:-0}"
+if [ "$MDS_DEATH" = "1" ]; then
+  # WHO ANSWERED, which in this mode is the whole point. The recorded
+  # shard is dead, so a redirect that happened at all must have been
+  # answered by a SIBLING — and the lane says so only on the i>0 branch,
+  # which is the fact this asserts rather than infers from the address.
+  SIBLING=$(vsudo "grep -c 'answered by' /tmp/rig-reestablish.log 2>/dev/null" | tr -d ' \r')
+  [ "${SIBLING:-0}" != "0" ] \
+    || fail "the redirect did not go through a sibling — with MDS-A dead that means the \
+lane never fanned out, and this mode proved nothing"
+  # THE DEFECT ITSELF, named. Before 7b26cb4 the sibling answered
+  # "volume '<vol>' is not block-class — nothing to attach" and the
+  # client stayed on the dead composer forever. Asserting on the ABSENCE
+  # of that string is what makes this an A/B rather than a re-run.
+  NOTBLOCK=$(vsudo "grep -c 'not block-class' /tmp/rig-reestablish.log 2>/dev/null" | tr -d ' \r')
+  [ "${NOTBLOCK:-0}" = "0" ] \
+    || fail "a sibling refused with 'not block-class' — the class gate is still shard-local"
+  echo "✓ V7c-sibling: MDS-A is DEAD and a sibling answered the re-attach ($SIBLING time(s)), \
+with no 'not block-class' refusal"
+fi
 # THE CONTROLLER INVENTORY, because a redirect is a claim about which
 # controllers exist and what they are attached to — and every wrong
 # conclusion in this leg so far came from inferring that from a single

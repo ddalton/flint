@@ -360,6 +360,10 @@ test-pnfs-replica-rig: ## Two-target composition on real spdk-tgt: placement, fr
 test-pnfs-replica-fs-rig: ## The same failover with a MOUNTED ext4 and I/O in flight (replica-rig FS=1): durability across the redirect is asserted, whether the mount rides it live is MEASURED
 	FS=1 tests/lima/pnfs/replica-rig.sh
 
+.PHONY: test-pnfs-replica-mdsdeath-rig
+test-pnfs-replica-mdsdeath-rig: ## The NODE-death shape (replica-rig MDS_DEATH=1): MDS-A dies WITH tgt-A, so the re-attach must be answered by a shard that never created the volume — the defect that stranded runbq's client
+	MDS_DEATH=1 tests/lima/pnfs/replica-rig.sh
+
 .PHONY: test-pnfs-preempt-rig
 test-pnfs-preempt-rig: ## Foreign-holder fence arm: an adversarial registered key + WE reservation is preempted away, and a second volume on the same tgt never notices (block-rig PREEMPT=1)
 	PREEMPT=1 tests/lima/pnfs/block-rig.sh
