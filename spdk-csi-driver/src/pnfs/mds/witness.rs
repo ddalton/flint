@@ -577,3 +577,175 @@ impl CompositionWitness for BackendWitness {
         flatten(self.backend.block_unfence(volume, client_id).await)
     }
 }
+
+/// FAULT INJECTION — the outage the trait's whole error split exists for.
+///
+/// [`WitnessError`] distinguishes `Unreachable` from `Refused` because
+/// the two license opposite acts: a refusal is the record answering NO
+/// and may be obeyed, while an unreachable witness has answered
+/// NOTHING and licenses nothing at all. Every caller is written against
+/// that distinction — and until this module existed, not one of them
+/// could be TESTED against it, because both implementations
+/// ([`BackendWitness`] over an in-memory sqlite, `KubeWitness` over an
+/// API server) answer reliably in a unit test. The one failure mode the
+/// design is built around was the one the suite could not reach.
+///
+/// It found a live fail-open on its first run: `drop_leg`'s
+/// "this volume is COMPOSED here" guard was written
+/// `if let Ok(Some(seat))`, which routes an unreadable witness into the
+/// same arm as a confirmed no-seat — and the two steps that follow are
+/// `bdev_lvol_delete` and a record sweep.
+#[cfg(test)]
+pub mod fault {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    /// A witness that can be CUT, per method.
+    ///
+    /// Wraps a real witness and answers `Unreachable` for the methods
+    /// named in `cut`, delegating everything else. Per-method rather
+    /// than all-or-nothing because the interesting outages are partial:
+    /// a caller that reads two records is only correct if it is correct
+    /// when the SECOND one goes dark, and a witness cut wholesale never
+    /// gets far enough to ask.
+    pub struct CuttableWitness {
+        inner: Arc<dyn CompositionWitness>,
+        cut: Mutex<HashSet<String>>,
+    }
+
+    impl CuttableWitness {
+        pub fn new(inner: Arc<dyn CompositionWitness>) -> Self {
+            Self { inner, cut: Mutex::new(HashSet::new()) }
+        }
+
+        /// Take this method dark. Named by its trait method name, so a
+        /// rename breaks the test loudly rather than silently un-cutting
+        /// it — see `cut_names_a_real_method`.
+        pub fn cut(&self, method: &str) -> &Self {
+            self.cut.lock().unwrap().insert(method.to_string());
+            self
+        }
+
+        /// Bring it back — the recovery half, so a test can prove the
+        /// refusal was the OUTAGE talking and not a permanent no.
+        pub fn heal(&self, method: &str) -> &Self {
+            self.cut.lock().unwrap().remove(method);
+            self
+        }
+
+        fn gate(&self, method: &str) -> WitnessResult<()> {
+            if self.cut.lock().unwrap().contains(method) {
+                return Err(WitnessError::Unreachable(format!("{method} is cut (test)")));
+            }
+            Ok(())
+        }
+    }
+
+    /// Delegate every trait method through [`CuttableWitness::gate`].
+    ///
+    /// A macro because the list must be EXHAUSTIVE: a hand-written impl
+    /// that forgets a method does not fail to compile (it would, but the
+    /// tempting fix is a passthrough), and a witness with an uncuttable
+    /// method is a hole exactly where the test is aimed.
+    macro_rules! cuttable {
+        ($( fn $name:ident ( $($arg:ident : $ty:ty),* $(,)? ) -> $ret:ty; )*) => {
+            #[async_trait::async_trait]
+            impl CompositionWitness for CuttableWitness {
+                $(
+                    async fn $name(&self, $($arg: $ty),*) -> WitnessResult<$ret> {
+                        self.gate(stringify!($name))?;
+                        self.inner.$name($($arg),*).await
+                    }
+                )*
+            }
+        };
+    }
+
+    cuttable! {
+        fn target_register(target_id: &str, traddr: &str, trsvcid: u16, now_unix: i64) -> ();
+        fn target_list() -> Vec<BlockTargetRow>;
+        fn seat_volume(
+            volume: &str, composer: &str, now_unix: i64, lease_expires_unix: i64,
+        ) -> BlockSeat;
+        fn volume_seat(volume: &str) -> Option<BlockSeat>;
+        fn seat_list() -> Vec<BlockSeat>;
+        fn resolve_target(volume: &str) -> (BlockSeat, BlockTargetRow);
+        fn promote(
+            volume: &str, expected_epoch: i64, expected_composer: &str, candidate: &str,
+            now_unix: i64,
+        ) -> BlockSeat;
+        fn legs(volume: &str) -> Vec<BlockLeg>;
+        fn leg_mark(volume: &str, target_id: &str, sync_state: &str, now_unix: i64) -> ();
+        fn lease(volume: &str) -> Option<BlockLease>;
+        fn lease_grant(volume: &str, epoch: i64, holder: &str, expires_unix: i64) -> BlockLease;
+        fn lease_renew(volume: &str, holder: &str, expires_unix: i64) -> BlockLease;
+        fn leases_held(holder: &str) -> Vec<BlockLease>;
+        fn lease_drop(volume: &str) -> bool;
+        fn drop_volume(volume: &str) -> ();
+        fn hosts(volume: &str) -> Vec<String>;
+        fn host_admit(volume: &str, client_id: u64, host_nqn: &str, now_unix: i64) -> Vec<String>;
+        fn host_evict(volume: &str, client_id: u64) -> (Vec<String>, Vec<String>);
+        fn node_attach(volume: &str, host_nqn: &str, node_name: &str, now_unix: i64) -> Vec<String>;
+        fn node_detach(volume: &str, host_nqn: &str) -> (bool, Vec<String>);
+        fn fence_record(volume: &str, client_id: u64, now_unix: i64) -> String;
+        fn is_fenced(volume: &str, client_id: u64) -> bool;
+        fn fenced_all() -> Vec<(String, u64)>;
+        fn unfence(volume: &str, client_id: u64) -> bool;
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn backed() -> (Arc<CuttableWitness>, Arc<dyn crate::state_backend::StateBackend>) {
+            let backend: Arc<dyn crate::state_backend::StateBackend> =
+                Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+            let inner: Arc<dyn CompositionWitness> =
+                Arc::new(BackendWitness::new(Arc::clone(&backend)));
+            (Arc::new(CuttableWitness::new(inner)), backend)
+        }
+
+        /// A cut is UNREACHABLE, not a refusal — the distinction every
+        /// caller branches on. If this overlay reported its outage as a
+        /// refusal it would be testing the opposite of the case.
+        #[tokio::test]
+        async fn a_cut_answers_unreachable_and_heals() {
+            let (w, _b) = backed();
+            w.cut("volume_seat");
+            let e = w.volume_seat("pvc-x").await.unwrap_err();
+            assert!(e.is_unreachable(), "a cut is an outage, not a no: {e}");
+            assert!(e.refusal().is_none(), "and carries no record-level refusal");
+
+            // Uncut methods still answer through the wrapper.
+            w.target_list().await.expect("an uncut method delegates");
+
+            w.heal("volume_seat");
+            assert!(
+                w.volume_seat("pvc-x").await.expect("healed").is_none(),
+                "healing restores the real answer"
+            );
+        }
+
+        /// THE CUT MUST NAME A REAL METHOD.
+        ///
+        /// `cut` takes a string, so a typo or a later rename would leave
+        /// the witness fully healthy and the test still green — passing
+        /// by not testing, which is the failure mode this whole file
+        /// exists to stop. Every name used by a cut is proven here to
+        /// actually gate its call.
+        #[tokio::test]
+        async fn cut_names_a_real_method() {
+            let (w, _b) = backed();
+            for m in ["volume_seat", "legs", "lease", "target_list", "seat_list", "hosts"] {
+                w.cut(m);
+            }
+            assert!(w.volume_seat("v").await.unwrap_err().is_unreachable());
+            assert!(w.legs("v").await.unwrap_err().is_unreachable());
+            assert!(w.lease("v").await.unwrap_err().is_unreachable());
+            assert!(w.target_list().await.unwrap_err().is_unreachable());
+            assert!(w.seat_list().await.unwrap_err().is_unreachable());
+            assert!(w.hosts("v").await.unwrap_err().is_unreachable());
+        }
+    }
+}

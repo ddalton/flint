@@ -3548,12 +3548,34 @@ impl BlockExportReconciler {
     /// record. DeleteVolume's authority, arriving second-hand.
     pub async fn drop_leg(&self, volume: &str) -> Result<(), String> {
         let me = self.me.clone();
-        if let Ok(Some(seat)) = self.witness.volume_seat(volume).await {
-            if seat.composer == me {
+        // THE GUARD MUST FAIL CLOSED. Three answers arrive here and only
+        // two of them are a licence to destroy: no seat (this really is
+        // a leg), and a seat held by somebody else (likewise). An
+        // UNREADABLE witness is neither — it is the absence of an
+        // answer, and `if let Ok(Some(..))` used to route it into the
+        // same arm as a confirmed no-seat.
+        //
+        // What follows that guard is `drop_leg_export_locked` and then
+        // `bdev_lvol_delete`. This is a gRPC entry point (DeleteVolume's
+        // fan-out, arriving second-hand at a peer), so the caller is a
+        // message about somebody else's volume — the seat read is the
+        // only thing that decides whether the bytes under this name are
+        // a spare copy or the live composition. Refusing costs an
+        // orphaned leg until the witness answers again, and DeleteVolume
+        // retries; the other direction costs a volume that was in use.
+        match self.witness.volume_seat(volume).await {
+            Ok(Some(seat)) if seat.composer == me => {
                 return Err(format!(
                     "'{volume}' is COMPOSED here — this is the volume itself, not a leg of it; \
                      deleting it is DeleteVolume's act, not a leg drop's"
-                ));
+                ))
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Err(format!(
+                    "'{volume}': the witness cannot say whether this is a leg or the volume \
+                     itself ({e}) — refusing to destroy it on an unread seat"
+                ))
             }
         }
         let lock = self.lock_for(volume);
@@ -6226,6 +6248,115 @@ pub(crate) mod tests {
         assert!(
             tgt.bdevs.lock().unwrap().contains_key(&r.bdev_name("pvc-mine")),
             "and its bytes are untouched"
+        );
+    }
+
+    /// A DARK WITNESS MUST NOT AUTHORISE A DESTROY.
+    ///
+    /// `drop_leg` is a gRPC entry point: DeleteVolume fans it out and it
+    /// arrives at a peer as a message about a volume that peer did not
+    /// create. The seat read is the ONLY thing that distinguishes "a
+    /// spare copy, delete it" from "the live composition, refuse" — and
+    /// the guard used to be `if let Ok(Some(seat))`, which put an
+    /// unreadable witness in the same arm as a confirmed no-seat and
+    /// walked straight into `bdev_lvol_delete`.
+    ///
+    /// The volume here is composed BY THIS TARGET, so under a healthy
+    /// witness the refusal is certain (the test above). Cutting the seat
+    /// read is the entire difference between the two, which is what
+    /// makes this an outage test and not a duplicate.
+    #[tokio::test]
+    async fn a_dark_witness_cannot_authorise_a_destroy() {
+        use crate::pnfs::mds::witness::fault::CuttableWitness;
+
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let witness = Arc::new(CuttableWitness::new(Arc::new(
+            crate::pnfs::mds::witness::BackendWitness::new(Arc::clone(&backend)),
+        )));
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        )
+        .with_witness(
+            Arc::clone(&witness) as Arc<dyn crate::pnfs::mds::witness::CompositionWitness>
+        );
+
+        r.ensure("pvc-live", Some(1 << 20)).await.expect("provision");
+        let bdev = r.bdev_name("pvc-live");
+        assert!(tgt.bdevs.lock().unwrap().contains_key(&bdev), "composed here");
+
+        // The witness goes dark, and the fan-out arrives anyway.
+        witness.cut("volume_seat");
+        let err = r.drop_leg("pvc-live").await.unwrap_err();
+        assert!(
+            err.contains("unread seat"),
+            "the refusal must name the unread seat, not the ordinary guard: {err}"
+        );
+        assert!(
+            tgt.bdevs.lock().unwrap().contains_key(&bdev),
+            "AND THE BYTES ARE STILL THERE — the point of the whole test"
+        );
+
+        // The refusal was the OUTAGE, not a permanent no: healed, the
+        // same call reaches the real guard and refuses for the real
+        // reason. (Still a refusal here — this target composes it.)
+        witness.heal("volume_seat");
+        let err = r.drop_leg("pvc-live").await.unwrap_err();
+        assert!(err.contains("COMPOSED here"), "{err}");
+        assert!(tgt.bdevs.lock().unwrap().contains_key(&bdev));
+    }
+
+    /// A DARK WITNESS MUST NOT INVENT A FAILOVER.
+    ///
+    /// The opposite direction, and the one that was already right:
+    /// `attempt_promotion` reads a seat and then the legs, and a
+    /// promotion built on either being unreadable would be a failover
+    /// decided by an outage rather than by the record. Cut each read in
+    /// turn — the SECOND one matters most, because a caller that
+    /// short-circuits on the first never gets far enough to mishandle
+    /// the one after it.
+    #[tokio::test]
+    async fn a_dark_witness_cannot_invent_a_failover() {
+        use crate::pnfs::mds::witness::fault::CuttableWitness;
+
+        let tgt = Arc::new(FakeTgt::new());
+        let backend: Arc<dyn crate::state_backend::StateBackend> =
+            Arc::new(crate::state_backend::SqliteBackend::open_in_memory().unwrap());
+        let witness = Arc::new(CuttableWitness::new(Arc::new(
+            crate::pnfs::mds::witness::BackendWitness::new(Arc::clone(&backend)),
+        )));
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            Arc::clone(&backend),
+            "lvs_test".into(),
+            "10.0.0.9".into(),
+            4420,
+            "/var/tmp".into(),
+        )
+        .with_identity("target-b".into())
+        .with_witness(
+            Arc::clone(&witness) as Arc<dyn crate::pnfs::mds::witness::CompositionWitness>
+        );
+
+        witness.cut("volume_seat");
+        let out = r.attempt_promotion("pvc-far").await;
+        assert!(
+            matches!(&out, PromotionOutcome::Refused(m) if m.contains("seat read refused")),
+            "an unreadable seat refuses the promotion: {out:?}"
+        );
+
+        // Seat readable, legs dark — the read AFTER the branch point.
+        witness.heal("volume_seat").cut("legs");
+        let out = r.attempt_promotion("pvc-far").await;
+        assert!(
+            matches!(&out, PromotionOutcome::Refused(_)),
+            "unreadable legs refuse too: {out:?}"
         );
     }
 
