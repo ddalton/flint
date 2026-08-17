@@ -99,7 +99,7 @@ utoipa = { version = "5.5.0", default-features = false, features = ["macros"] }
 # CRC64NVME FULL_OBJECT checksums across multipart, and
 # x-amz-copy-source-if-match on UploadPartCopy. rustls (no OpenSSL),
 # explicit BehaviorVersion in code (no behavior-version-latest feature).
-aws-config = { version = "1.10.1", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-config = { version = "1.10.1", default-features = false, features = ["rustls", "rt-tokio", "credentials-process"] }
 aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustls", "rt-tokio"] }
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
