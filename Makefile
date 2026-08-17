@@ -292,6 +292,10 @@ test-pnfs-crosscluster: build-pnfs ## Two DISTINCT NFS clients (netns+UTS = two 
 test-pnfs-lite: build-pnfs ## Flint-lite L0: ONE standalone hub (mode: standalone, no DS fleet) serves two distinct clients — coherence, locks, sqlite/git, no-LAYOUTGET oracle, MDS-lane baselines
 	tests/lima/pnfs/lite-drill.sh
 
+.PHONY: test-lite-kind-e2e
+test-lite-kind-e2e: ## Flint-lite L1 e2e: the CHART's hub on kind (default-SC PVC, NodePort) serves the Lima VM's REAL kernel client — battery + bytes-on-PVC + restart-under-mount. Builds the hub image from the working tree
+	tests/regression/lite-kind-e2e.sh
+
 .PHONY: test-pnfs-nconnect
 test-pnfs-nconnect: build-pnfs ## Single-host nconnect sweep — exposes per-TCP-serial RPC ceiling (loopback only; cross-host is a separate bench)
 	tests/lima/pnfs/nconnect.sh
