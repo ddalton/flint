@@ -1130,6 +1130,25 @@ impl IoOperationHandler {
             }
         }
 
+        // TEST-ONLY (step 9's rig gate): answer READs of a ".cold."
+        // file with NFS4ERR_DELAY until its fake hydration completes —
+        // the A5 DELAY-parking posture (slot released immediately),
+        // opposite of the in-RPC hold above. Every answer logs the
+        // per-file attempt number and elapsed time, so the server log
+        // IS the client's retry-cadence record. Inert unless set.
+        if let Some(secs) = hydration_delay_secs() {
+            if path.to_string_lossy().contains(".cold.") {
+                if let Some((n, since)) = hydration_delay_pending(&path, secs) {
+                    warn!(
+                        "TEST hydration DELAY: READ attempt {} of {:?} at +{:.3}s \
+                         (offset {}) → NFS4ERR_DELAY",
+                        n, path, since, op.offset
+                    );
+                    return ReadRes { status: Nfs4Status::Delay, eof: false, data: Bytes::new() };
+                }
+            }
+        }
+
         // Get filename for logging before moving path
         let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
 
@@ -1445,6 +1464,28 @@ impl IoOperationHandler {
             };
         }
 
+        // TEST-ONLY (step 9's rig gate): WRITEs of a ".cold." file
+        // answer NFS4ERR_DELAY while its fake hydration is pending —
+        // the hydrate-first WRITE barrier's wire shape (A5). Measures
+        // the kernel's writeback retry cadence. Inert unless set.
+        if let Some(secs) = hydration_delay_secs() {
+            if path.to_string_lossy().contains(".cold.") {
+                if let Some((n, since)) = hydration_delay_pending(&path, secs) {
+                    warn!(
+                        "TEST hydration DELAY: WRITE attempt {} of {:?} at +{:.3}s \
+                         (offset {}) → NFS4ERR_DELAY",
+                        n, path, since, op.offset
+                    );
+                    return WriteRes {
+                        status: Nfs4Status::Delay,
+                        count: 0,
+                        committed: UNSTABLE4,
+                        writeverf: 0,
+                    };
+                }
+            }
+        }
+
         let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
             use std::os::unix::fs::FileExt;
 
@@ -1684,6 +1725,53 @@ fn hydration_stall_deadline(
         .entry(path.to_path_buf())
         .or_insert_with(|| now + std::time::Duration::from_secs(stall));
     (dl > now).then_some(dl)
+}
+
+/// TEST-ONLY DELAY-parking injector (step 9's rig gate, the A5
+/// posture): with `FLINT_TEST_HYDRATION_DELAY_SECS=N`, the first
+/// touch of a ".cold." file starts a fake N-second hydration, and
+/// every READ/WRITE while it is pending is answered NFS4ERR_DELAY —
+/// the session slot is released immediately, unlike the in-RPC hold
+/// above. Unset (the default) this is one None-check per op.
+fn hydration_delay_secs() -> Option<u64> {
+    static V: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("FLINT_TEST_HYDRATION_DELAY_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n| *n > 0)
+    })
+}
+
+/// Returns `Some((attempt_no, secs_since_first_touch))` while the fake
+/// hydration is pending — the caller answers DELAY and logs both, so
+/// the server log records the client's exact retry cadence. `None`
+/// once the deadline passed: serve normally.
+fn hydration_delay_pending(path: &std::path::Path, secs: u64) -> Option<(u64, f64)> {
+    struct Fake {
+        start: std::time::Instant,
+        deadline: std::time::Instant,
+        attempts: u64,
+    }
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Fake>>,
+    > = std::sync::OnceLock::new();
+    let mut m = MAP
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap();
+    let now = std::time::Instant::now();
+    let f = m.entry(path.to_path_buf()).or_insert_with(|| Fake {
+        start: now,
+        deadline: now + std::time::Duration::from_secs(secs),
+        attempts: 0,
+    });
+    if f.deadline > now {
+        f.attempts += 1;
+        Some((f.attempts, now.duration_since(f.start).as_secs_f64()))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
