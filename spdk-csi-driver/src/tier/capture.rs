@@ -298,6 +298,11 @@ pub fn forget(dev: u64, ino: u64) {
     queued().remove(&key);
     durable().remove(&key);
     last_note_map().remove(&key);
+    // The eviction marker is part of this identity's RAM state (step
+    // 10) — and on ext4 a REUSED inode number inheriting a dead file's
+    // marker would DELAY the new file's I/O, a step worse than the
+    // pessimal-capture aliasing this function already guards.
+    crate::tier::evict::forget(dev, ino);
     HAS_PENDING.store(!queued().is_empty(), Ordering::Release);
 }
 

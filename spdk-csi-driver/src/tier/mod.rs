@@ -27,10 +27,17 @@
 //! hard-full, statvfs-backed SPACE_* gauge, eviction watermark, and
 //! the state.db ballast.
 
+//! Step 10: `evict` — the marker-before-truncate eviction state
+//! machine (A5/C2), the A4 precondition set, and the startup
+//! reconciler. The automatic (watermark-driven) trigger wires up with
+//! hydration in step 11 — an evicted file cannot be read back until
+//! then.
+
 pub mod arbitrate;
 pub mod capture;
 pub mod durable;
 pub mod epoch;
+pub mod evict;
 pub mod flush;
 pub mod gate;
 pub mod identity;

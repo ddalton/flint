@@ -810,6 +810,18 @@ impl MetadataServer {
         // and mutate on top).
         orch.startup().await;
 
+        // Step 10 (C2): finish or roll back half-evictions and load
+        // the marker consult map — BEFORE the listener binds, so the
+        // first READ of an evicted file finds its marker, never a
+        // bare 0-byte stub.
+        let er = crate::tier::evict::reconcile(&self.backend).await;
+        if er.finished > 0 || er.rolled_back > 0 {
+            warn!(
+                "🪣 tier evict reconcile: {} half-eviction(s) finished, {} rolled back",
+                er.finished, er.rolled_back
+            );
+        }
+
         let tick = Duration::from_secs(t.tick_secs.max(1));
         tokio::spawn(async move {
             let mut iv = interval(tick);

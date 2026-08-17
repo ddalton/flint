@@ -521,6 +521,31 @@ pub struct TierTombstone {
     pub created_unix: u64,
 }
 
+/// One evicted file's durable marker (L2 step 10, A5/C2). Committed
+/// BEFORE the truncate — the marker-before-truncate order is the whole
+/// point: a crash between the two leaves a full-length file with a
+/// marker (reconciler finishes the truncate), never a bare 0-byte file
+/// indistinguishable from a genuinely empty one. Identity-keyed like
+/// the generation rows; `path` tracks renames (tier_apply_rename).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierEvictedRow {
+    pub dev: u64,
+    pub ino: u64,
+    /// Where the bytes live in the bucket (the generation's key at
+    /// eviction time).
+    pub key: String,
+    pub generation: u64,
+    pub etag: String,
+    /// REQUIRED (unlike the generation row): only CRC-verified,
+    /// gate-produced generations are eviction-eligible (A4).
+    pub crc64_b64: String,
+    /// The file's logical size — what GETATTR serves while evicted.
+    pub size: u64,
+    /// Local path at eviction time (reconciler's handle to the file).
+    pub path: String,
+    pub evicted_unix: u64,
+}
+
 impl WriteOp {
     pub fn key(&self) -> WriteOpKey {
         match self {
@@ -779,12 +804,27 @@ pub trait StateBackend: Send + Sync {
     ) -> StateBackendResult<()>;
 
     /// A REMOVE's durable half, one transaction: generation row →
-    /// tombstone (if one exists), row + dirty bit deleted.
+    /// tombstone (if one exists), row + dirty bit + evicted marker
+    /// deleted.
     async fn tier_apply_remove(
         &self,
         ident: (u64, u64),
         now_unix: u64,
     ) -> StateBackendResult<()>;
+
+    // ── S3 tier eviction markers (L2 step 10 — A5/C2) ────────────────
+
+    /// Durably commit an eviction marker. MUST land before the
+    /// truncate (the C2 order).
+    async fn tier_put_evicted(&self, row: &TierEvictedRow) -> StateBackendResult<()>;
+
+    /// Every marker — the startup reconciler's work list and the
+    /// in-memory consult map's source of truth.
+    async fn tier_list_evicted(&self) -> StateBackendResult<Vec<TierEvictedRow>>;
+
+    /// Clear a marker (hydration completing — step 11 — or the
+    /// reconciler rolling back a half-eviction).
+    async fn tier_delete_evicted(&self, dev: u64, ino: u64) -> StateBackendResult<()>;
 
     /// Highest logical end covered by a file's COMMITTED extents (0 if
     /// none). The stub's length only advances at LAYOUTCOMMIT, so this

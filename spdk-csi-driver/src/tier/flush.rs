@@ -218,6 +218,10 @@ pub enum Outcome {
     /// The epoch guard is fenced (A8): publishing is forbidden. The
     /// dirty bit stays durable; a re-claimed epoch resumes the flush.
     Fenced,
+    /// The file's eviction marker is set (step 10, C2): NEVER upload
+    /// bytes from a marker-set file — its local content is the 0-byte
+    /// stub, not data.
+    SkippedEvicted,
     Failed(String),
 }
 
@@ -541,7 +545,8 @@ impl FlushOrchestrator {
                 Outcome::RetryNextCycle
                 | Outcome::ForeignDetected
                 | Outcome::PathMismatch
-                | Outcome::Fenced => {}
+                | Outcome::Fenced
+                | Outcome::SkippedEvicted => {}
                 Outcome::Failed(_) => report.failed += 1,
             }
         }
@@ -559,6 +564,18 @@ impl FlushOrchestrator {
             meter::bump(Counter::FlushesFenced);
             return Outcome::Fenced;
         };
+        // C2: a marker-set file is UNCONDITIONALLY excluded from flush
+        // — its local bytes are the evicted stub. (The bit should
+        // never be set for one; if it somehow is, it stays set and
+        // nothing uploads.)
+        if crate::tier::evict::is_evicted(dev, ino) {
+            warn!(
+                "tier flush: ({},{}) has its eviction marker set with a dirty bit — \
+                 refusing to upload the stub; the bit stays",
+                dev, ino
+            );
+            return Outcome::SkippedEvicted;
+        }
         let Some(path) = row.path.as_ref().map(PathBuf::from) else {
             // No path on the row (fd-only writer so far) — A7's
             // identity rows (step 6) own this; the bit keeps the file
@@ -1026,8 +1043,10 @@ fn stat_identity(path: &Path) -> Option<(u64, u64)> {
     }
 }
 
-/// Streaming CRC-64/NVME over the whole file (blocking pool).
-async fn file_crc(path: &Path) -> Result<u64, String> {
+/// Streaming CRC-64/NVME over the whole file (blocking pool). Shared
+/// with eviction (step 10), whose precondition set re-verifies local
+/// bytes against the published generation before destroying them.
+pub(crate) async fn file_crc(path: &Path) -> Result<u64, String> {
     let p = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
         use std::io::Read;

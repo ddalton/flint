@@ -122,10 +122,18 @@ pub async fn drain(backend: &Arc<dyn StateBackend>) -> StateBackendResult<()> {
         match res {
             Ok(()) => {
                 // The dead identity's RAM traces go with the applied
-                // event, never before (the tx could fail).
+                // event, never before (the tx could fail). Eviction
+                // markers included (step 10): the backend tx already
+                // deleted the durable row for covered/removed files.
                 match ev {
-                    Event::Renamed { covered: Some(c), .. } => capture::forget(c.0, c.1),
-                    Event::Removed { ident } => capture::forget(ident.0, ident.1),
+                    Event::Renamed { covered: Some(c), .. } => {
+                        capture::forget(c.0, c.1);
+                        crate::tier::evict::forget(c.0, c.1);
+                    }
+                    Event::Removed { ident } => {
+                        capture::forget(ident.0, ident.1);
+                        crate::tier::evict::forget(ident.0, ident.1);
+                    }
                     _ => {}
                 }
             }

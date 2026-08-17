@@ -1204,8 +1204,26 @@ impl IoOperationHandler {
 
             // Get file size to determine EOF
             let metadata = file.metadata()?;
+            // Step 10 (C2): consult the eviction marker BEFORE trusting
+            // local size — an evicted file is a 0-byte stub whose bytes
+            // live in the bucket; its size-based eof would read as
+            // empty. DELAY parks the reader (measured GO, step 9);
+            // step 11 turns this into hydrate-then-serve. Residual
+            // cached fds are safe for exactly this reason: every op
+            // re-checks.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if crate::tier::evict::is_evicted(metadata.dev(), metadata.ino()) {
+                    crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "tier: file evicted (awaiting hydration)",
+                    ));
+                }
+            }
             let file_size = metadata.len();
-            
+
             // Determine actual read count (don't read past EOF)
             let actual_count = if offset >= file_size {
                 0
@@ -1243,6 +1261,9 @@ impl IoOperationHandler {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     std::io::ErrorKind::IsADirectory => Nfs4Status::IsDir,
+                    // Step 10: evicted file — the client retries until
+                    // hydration (step 11) restores the bytes.
+                    std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
                     _ => Nfs4Status::Io,
                 };
                 ReadRes {
@@ -1500,6 +1521,28 @@ impl IoOperationHandler {
                     "tier: file excluded (evicting/hydrating)",
                 )
             })?;
+
+            // Step 10 (C6): a WRITE to an EVICTED file must never land
+            // bytes in the stub — the next flush's part-rounding would
+            // publish sparse zeros over generation data. DELAY until
+            // step 11 makes writes hydrate-first. (The gate's exclusion
+            // covers the eviction WINDOW; this marker check covers the
+            // evicted steady state after the exclusion dropped.)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if let Ok(md) = file_arc.metadata() {
+                    if crate::tier::evict::is_evicted(md.dev(), md.ino()) {
+                        crate::tier::meter::bump(
+                            crate::tier::meter::Counter::EvictedOpDelays,
+                        );
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "tier: file evicted (awaiting hydration)",
+                        ));
+                    }
+                }
+            }
 
             // Positioned I/O: pwrite(2) takes an offset and is safe to
             // call concurrently from multiple threads on the same
@@ -2054,6 +2097,73 @@ mod tests {
             !fh_mgr.get_export_path().join("nospc-new.bin").exists(),
             "a refused create must leave nothing behind"
         );
+    }
+
+    /// Step 10 (C2/C6): READ and WRITE of an EVICTED file answer
+    /// NFS4ERR_DELAY — never the stub's size-based EOF, never a byte
+    /// landed in the stub, never a capture mark.
+    #[tokio::test]
+    async fn read_and_write_answer_delay_on_an_evicted_file() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let export_fh = fh_mgr.path_to_filehandle(fh_mgr.get_export_path()).unwrap();
+        ctx.current_fh = Some(export_fh);
+        let open_res = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_BOTH,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"evicted-owner".to_vec(),
+                    openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+                    claim: OpenClaim::Null("evicted-lane.bin".to_string()),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(open_res.status, Nfs4Status::Ok);
+        let stateid = open_res.stateid.unwrap();
+        let path = fh_mgr.get_export_path().join("evicted-lane.bin");
+        std::fs::write(&path, b"real data").unwrap();
+        let md = std::fs::metadata(&path).unwrap();
+        let (dev, ino) = (md.dev(), md.ino());
+        crate::tier::capture::forget(dev, ino);
+
+        // Evict it (marker only — the truncated-stub shape).
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(0).unwrap();
+        crate::tier::evict::install_marker_for_tests(dev, ino, 9);
+
+        let r = handler
+            .handle_read(ReadOp { stateid: stateid.clone(), offset: 0, count: 9 }, &ctx)
+            .await;
+        assert_eq!(r.status, Nfs4Status::Delay, "READ of evicted must DELAY, not serve EOF");
+        assert!(r.data.is_empty());
+
+        let w = handler
+            .handle_write(
+                WriteOp {
+                    stateid: stateid.clone(),
+                    offset: 0,
+                    stable: FILE_SYNC4,
+                    data: Bytes::from_static(b"zzz"),
+                },
+                &ctx,
+            )
+            .await;
+        assert_eq!(w.status, Nfs4Status::Delay, "WRITE to evicted must DELAY (C6)");
+        assert_eq!(w.count, 0);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            0,
+            "no byte may land in the stub"
+        );
+        assert!(
+            crate::tier::capture::snapshot(dev, ino).is_none_or(|c| !c.is_dirty()),
+            "a refused WRITE must note nothing"
+        );
+        crate::tier::evict::forget(dev, ino);
     }
 
     fn create_test_handler() -> (IoOperationHandler, Arc<FileHandleManager>, TempDir) {

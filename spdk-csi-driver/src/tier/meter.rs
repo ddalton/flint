@@ -77,6 +77,20 @@ counters! {
     nospc_create_refusals,
     /// The state.db ballast was released at critical fullness.
     ballast_releases,
+    /// Eviction (step 10, A12's refusals-by-reason).
+    files_evicted,
+    bytes_evicted,
+    /// Refused: dirty in any form (captured/queued/durable bit).
+    evict_refused_dirty,
+    /// Refused: policy — no generation, not CRC-eligible, re-key
+    /// pending, open writers.
+    evict_refused_policy,
+    /// Refused: verification — object missing/foreign, or local bytes
+    /// diverge from the published CRC.
+    evict_refused_verify,
+    /// Content ops answered NFS4ERR_DELAY because the file is evicted
+    /// (step 11 turns these into hydrations).
+    evicted_op_delays,
 }
 
 #[inline]
@@ -116,6 +130,12 @@ pub enum Counter {
     NospcWriteRefusals,
     NospcCreateRefusals,
     BallastReleases,
+    FilesEvicted,
+    BytesEvicted,
+    EvictRefusedDirty,
+    EvictRefusedPolicy,
+    EvictRefusedVerify,
+    EvictedOpDelays,
 }
 
 impl Counter {
@@ -144,6 +164,12 @@ impl Counter {
             Counter::NospcWriteRefusals => &nospc_write_refusals,
             Counter::NospcCreateRefusals => &nospc_create_refusals,
             Counter::BallastReleases => &ballast_releases,
+            Counter::FilesEvicted => &files_evicted,
+            Counter::BytesEvicted => &bytes_evicted,
+            Counter::EvictRefusedDirty => &evict_refused_dirty,
+            Counter::EvictRefusedPolicy => &evict_refused_policy,
+            Counter::EvictRefusedVerify => &evict_refused_verify,
+            Counter::EvictedOpDelays => &evicted_op_delays,
         }
     }
 }

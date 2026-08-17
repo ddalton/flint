@@ -129,9 +129,20 @@ impl AttributeSnapshot {
             let ctime_secs = metadata.ctime() as u64;
             let ctime = SystemTime::UNIX_EPOCH + Duration::from_secs(ctime_secs);
 
+            // Step 10 (C2): an EVICTED file's on-disk length is 0 (the
+            // stub); GETATTR must serve the LOGICAL size from its
+            // marker or every `ls -l` reads as truncation. space_used
+            // stays physical — "0 blocks, full size" is also exactly
+            // how the marker reads in forensics.
+            let size = if ftype == 1 {
+                crate::tier::evict::logical_size(metadata.dev(), metadata.ino())
+                    .unwrap_or_else(|| metadata.len())
+            } else {
+                metadata.len()
+            };
             Ok(Self {
                 ftype,
-                size: metadata.len(),
+                size,
                 space_used: metadata.blocks() * 512, // blocks are typically 512 bytes
                 fileid: metadata.ino(),
                 fsid_major: metadata.dev(),
@@ -531,6 +542,17 @@ fn apply_settable_attrs_inner(
                 return (applied, Some(Nfs4Status::Delay));
             }
         };
+        // Step 10: size changes to an EVICTED file park like writes —
+        // a truncate against the 0-byte stub is not a truncate of the
+        // data (hydrate-first from step 11).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if crate::tier::evict::is_evicted(lmeta.dev(), lmeta.ino()) {
+                crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                return (applied, Some(Nfs4Status::Delay));
+            }
+        }
         match std::fs::OpenOptions::new().write(true).open(path).and_then(|f| f.set_len(size)) {
             Ok(()) => {
                 // A2 dirty capture, at the ONE chokepoint both size
@@ -3883,6 +3905,27 @@ mod tests {
             }
         }
         assert!(landed, "the rename's identity event never landed in our backend");
+    }
+
+    /// Step 10 (C2): GETATTR of an evicted file serves the LOGICAL
+    /// size from the marker — the 0-byte stub would read as
+    /// truncation.
+    #[test]
+    fn snapshot_serves_logical_size_for_evicted_files() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = dir.path().join("stub.bin");
+        std::fs::write(&f, b"").unwrap();
+        let md = std::fs::metadata(&f).unwrap();
+        let (dev, ino) = (md.dev(), md.ino());
+        crate::tier::capture::forget(dev, ino);
+        crate::tier::evict::install_marker_for_tests(dev, ino, 4242);
+        let snap = AttributeSnapshot::from_metadata(std::fs::metadata(&f).unwrap(), &f).unwrap();
+        assert_eq!(snap.size, 4242, "logical size from the marker");
+        crate::tier::evict::forget(dev, ino);
+        let snap = AttributeSnapshot::from_metadata(std::fs::metadata(&f).unwrap(), &f).unwrap();
+        assert_eq!(snap.size, 0, "physical size once the marker clears");
     }
 
     /// A10: with the space gauge live, the pseudo-root SPACE_* arms

@@ -1048,6 +1048,12 @@ impl StateBackend for SqliteBackend {
                     "DELETE FROM tier_dirty WHERE dev = ?1 AND ino = ?2",
                     params![cd, ci],
                 )?;
+                // A covered EVICTED file: its marker dies with the
+                // inode (the tombstone above already owns the object).
+                tx.execute(
+                    "DELETE FROM tier_evicted WHERE dev = ?1 AND ino = ?2",
+                    params![cd, ci],
+                )?;
             }
             if let Some((md, mi)) = moved {
                 // The moved file's bit: path OVERWRITES (a rename's
@@ -1065,6 +1071,12 @@ impl StateBackend for SqliteBackend {
                         u64_to_i64(now_unix),
                         u64_to_i64(mark_seq),
                     ],
+                )?;
+                // A moved EVICTED file keeps its identity-keyed marker;
+                // only the reconciler's path handle needs the new name.
+                tx.execute(
+                    "UPDATE tier_evicted SET path = ?3 WHERE dev = ?1 AND ino = ?2",
+                    params![u64_to_i64(md), u64_to_i64(mi), new_path],
                 )?;
             }
             tx.commit()
@@ -1100,10 +1112,73 @@ impl StateBackend for SqliteBackend {
                 )?;
             }
             tx.execute("DELETE FROM tier_dirty WHERE dev = ?1 AND ino = ?2", params![d, i])?;
+            tx.execute("DELETE FROM tier_evicted WHERE dev = ?1 AND ino = ?2", params![d, i])?;
             tx.commit()
         })
         .await?
         .map_err(|e| StateBackendError::Storage(e.to_string()))
+    }
+
+    async fn tier_put_evicted(&self, row: &super::TierEvictedRow) -> StateBackendResult<()> {
+        let r = row.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO tier_evicted
+                 (dev, ino, key, generation, etag, crc64_b64, size, path, evicted_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    u64_to_i64(r.dev),
+                    u64_to_i64(r.ino),
+                    r.key,
+                    u64_to_i64(r.generation),
+                    r.etag,
+                    r.crc64_b64,
+                    u64_to_i64(r.size),
+                    r.path,
+                    u64_to_i64(r.evicted_unix),
+                ],
+            )
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn tier_list_evicted(&self) -> StateBackendResult<Vec<super::TierEvictedRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT dev, ino, key, generation, etag, crc64_b64, size, path, evicted_unix
+                 FROM tier_evicted",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(super::TierEvictedRow {
+                        dev: i64_to_u64(r.get(0)?),
+                        ino: i64_to_u64(r.get(1)?),
+                        key: r.get(2)?,
+                        generation: i64_to_u64(r.get(3)?),
+                        etag: r.get(4)?,
+                        crc64_b64: r.get(5)?,
+                        size: i64_to_u64(r.get(6)?),
+                        path: r.get(7)?,
+                        evicted_unix: i64_to_u64(r.get(8)?),
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn tier_delete_evicted(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
+        let (d, i) = (u64_to_i64(dev), u64_to_i64(ino));
+        self.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM tier_evicted WHERE dev = ?1 AND ino = ?2",
+                params![d, i],
+            )
+        })
+        .await
+        .map(|_| ())
     }
 
     async fn put_client(&self, c: &ClientRecord) -> StateBackendResult<()> {
@@ -2567,6 +2642,23 @@ CREATE TABLE IF NOT EXISTS tier_tombstone (
     created_unix INTEGER NOT NULL
 );
 
+-- A5/C2 eviction markers (L2 step 10): committed BEFORE the local
+-- truncate, so a crash between the two leaves a marker+full file the
+-- startup reconciler finishes — never a bare 0-byte file. crc64_b64 is
+-- NOT NULL here: only CRC-verified generations are eviction-eligible.
+CREATE TABLE IF NOT EXISTS tier_evicted (
+    dev INTEGER NOT NULL,
+    ino INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    etag TEXT NOT NULL,
+    crc64_b64 TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    evicted_unix INTEGER NOT NULL,
+    PRIMARY KEY (dev, ino)
+);
+
 -- ---------------------------------------------------------------------------
 -- Block-layout extent allocator (pnfs-block design doc §8; FlintExtents.tla
 -- is the machine-checked spec — see state_backend/extent_alloc.rs, which owns
@@ -3497,6 +3589,48 @@ mod tests {
         assert_eq!(b.list_stateids().await.unwrap().len() as u64, n);
         drop(b);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// S3 tier (L2 step 10, A5/C2): eviction markers survive a reopen;
+    /// rename carries a moved marker (path updated) and deletes a
+    /// covered one; remove deletes the marker in the same tx.
+    #[tokio::test]
+    async fn tier_evicted_rows_roundtrip_and_identity_semantics() {
+        use crate::state_backend::TierEvictedRow;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tier-evict.db");
+        let row = |ino: u64, p: &str| TierEvictedRow {
+            dev: 7,
+            ino,
+            key: format!("t/{}", p),
+            generation: 3,
+            etag: "\"e\"".into(),
+            crc64_b64: "rosUhgp5mIg=".into(),
+            size: 1024,
+            path: p.into(),
+            evicted_unix: 11,
+        };
+        {
+            let be = SqliteBackend::open(&path).unwrap();
+            be.tier_put_evicted(&row(1, "/a/moved.bin")).await.unwrap();
+            be.tier_put_evicted(&row(2, "/a/covered.bin")).await.unwrap();
+        }
+        let be = SqliteBackend::open(&path).unwrap();
+        assert_eq!(be.tier_list_evicted().await.unwrap().len(), 2, "markers survive reopen");
+
+        // Rename: moved marker's path follows; covered marker dies.
+        be.tier_apply_rename(Some((7, 1)), "/b/renamed.bin", 5, Some((7, 2)), 12)
+            .await
+            .unwrap();
+        let rows = be.tier_list_evicted().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ino, 1);
+        assert_eq!(rows[0].path, "/b/renamed.bin");
+
+        // Remove deletes the marker.
+        be.tier_apply_remove((7, 1), 13).await.unwrap();
+        assert!(be.tier_list_evicted().await.unwrap().is_empty());
+        be.tier_delete_evicted(7, 99).await.unwrap(); // absent is fine
     }
 
     /// S3 tier (L2 step 6, A7): generation rows + tombstones survive a

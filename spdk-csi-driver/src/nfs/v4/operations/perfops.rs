@@ -676,6 +676,20 @@ impl PerfOperationHandler {
                 )
             })?;
 
+            // Step 10: BOTH ends consult the eviction marker — an
+            // evicted source would copy stub bytes as if they were
+            // data; an evicted destination is the C6 zero-publish
+            // shape. DELAY until hydration (step 11).
+            if crate::tier::evict::file_is_evicted(&src_file)
+                || crate::tier::evict::file_is_evicted(&dst_file)
+            {
+                crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "tier: COPY endpoint evicted (awaiting hydration)",
+                ));
+            }
+
             // Resolves ca_count == 0 to "through EOF" and enforces the
             // source-range rule. Because the range is now known to lie
             // inside the source, the reads below cannot come up short, so
@@ -971,6 +985,18 @@ impl PerfOperationHandler {
                 )
             })?;
 
+            // Step 10: both ends consult the eviction marker (same
+            // rationale as COPY).
+            if crate::tier::evict::file_is_evicted(&src_file)
+                || crate::tier::evict::file_is_evicted(&dst_file)
+            {
+                crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "tier: CLONE endpoint evicted (awaiting hydration)",
+                ));
+            }
+
             // Fast path. Failure here is free — nothing has been written.
             match try_reflink_range(&src_file, &dst_file, src_offset, len, dst_offset) {
                 Ok(()) => {
@@ -1140,6 +1166,15 @@ impl PerfOperationHandler {
                         "tier: file excluded (evicting/hydrating)",
                     )
                 })?;
+                // Step 10: ALLOCATE/DEALLOCATE against the evicted
+                // stub is not an operation on the data. DELAY.
+                if crate::tier::evict::file_is_evicted(&file) {
+                    crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "tier: file evicted (awaiting hydration)",
+                    ));
+                }
                 nix::fcntl::fallocate(
                     file.as_raw_fd(),
                     flags,

@@ -53,6 +53,7 @@ pub struct MemoryBackend {
     tier_flush_intents: DashMap<String, super::FlushIntentRecord>,
     tier_generations: DashMap<(u64, u64), super::TierGenerationRow>,
     tier_tombstones: DashMap<String, super::TierTombstone>,
+    tier_evicted: DashMap<(u64, u64), super::TierEvictedRow>,
 }
 
 impl MemoryBackend {
@@ -186,8 +187,12 @@ impl StateBackend for MemoryBackend {
                 );
             }
             self.tier_dirty.remove(&c);
+            self.tier_evicted.remove(&c);
         }
         if let Some(m) = moved {
+            if let Some(mut e) = self.tier_evicted.get_mut(&m) {
+                e.path = new_path.to_string();
+            }
             match self.tier_dirty.entry(m) {
                 dashmap::mapref::entry::Entry::Occupied(mut o) => {
                     let row = o.get_mut();
@@ -224,6 +229,21 @@ impl StateBackend for MemoryBackend {
             );
         }
         self.tier_dirty.remove(&ident);
+        self.tier_evicted.remove(&ident);
+        Ok(())
+    }
+
+    async fn tier_put_evicted(&self, row: &super::TierEvictedRow) -> StateBackendResult<()> {
+        self.tier_evicted.insert((row.dev, row.ino), row.clone());
+        Ok(())
+    }
+
+    async fn tier_list_evicted(&self) -> StateBackendResult<Vec<super::TierEvictedRow>> {
+        Ok(self.tier_evicted.iter().map(|e| e.value().clone()).collect())
+    }
+
+    async fn tier_delete_evicted(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
+        self.tier_evicted.remove(&(dev, ino));
         Ok(())
     }
 
