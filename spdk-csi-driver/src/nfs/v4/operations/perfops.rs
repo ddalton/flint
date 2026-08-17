@@ -724,6 +724,15 @@ impl PerfOperationHandler {
             // on the same inode landed inside the same clock tick, which
             // pinned the reported value until some unrelated op moved it.
             bump_change_counter(&dst_file);
+            // A2 dirty capture: the destination range now holds copied
+            // bytes (short copies note the honest count).
+            crate::tier::capture::note_file(
+                &dst_file,
+                crate::tier::capture::Mutation::Write {
+                    offset: dst_offset,
+                    len: total_copied,
+                },
+            );
 
             Ok::<u64, std::io::Error>(total_copied)
         }).await;
@@ -921,6 +930,11 @@ impl PerfOperationHandler {
                 Ok(()) => {
                     debug!("CLONE: reflinked {} bytes (CoW, zero-copy)", len);
                     bump_change_counter(&dst_file);
+                    // A2 dirty capture (reflink branch).
+                    crate::tier::capture::note_file(
+                        &dst_file,
+                        crate::tier::capture::Mutation::Write { offset: dst_offset, len },
+                    );
                     return Ok(len);
                 }
                 Err(e) => {
@@ -930,6 +944,11 @@ impl PerfOperationHandler {
 
             let copied = copy_range(&src_file, &dst_file, src_offset, dst_offset, len)?;
             bump_change_counter(&dst_file);
+            // A2 dirty capture (copy fallback branch).
+            crate::tier::capture::note_file(
+                &dst_file,
+                crate::tier::capture::Mutation::Write { offset: dst_offset, len: copied },
+            );
             debug!(
                 "CLONE: copied {} of {} bytes from offset {} to offset {}",
                 copied, len, src_offset, dst_offset
@@ -1076,6 +1095,23 @@ impl PerfOperationHandler {
         match res {
             Ok(Ok(())) => {
                 crate::nfs::v4::change_counter::bump_path(&path);
+                // A2 dirty capture: ALLOCATE materializes defined bytes
+                // (zeros in holes, size extension); DEALLOCATE punches
+                // zeros in place. Both dirty the range; the Zero hint
+                // distinguishes them for future flush optimization.
+                crate::tier::capture::note_path(
+                    &path,
+                    match mode {
+                        AllocMode::Allocate => crate::tier::capture::Mutation::Write {
+                            offset,
+                            len: length,
+                        },
+                        AllocMode::PunchHole => crate::tier::capture::Mutation::Zero {
+                            offset,
+                            len: length,
+                        },
+                    },
+                );
                 Nfs4Status::Ok
             }
             Ok(Err(e)) => {
@@ -1317,6 +1353,105 @@ mod tests {
     use super::*;
     use crate::nfs::v4::state::StateType;
     use tempfile::TempDir;
+
+    /// A2 census (design review C5): COPY must note its destination
+    /// range in the tier capture log.
+    #[tokio::test]
+    async fn copy_notes_tier_capture() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, _temp) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let src_path = handler.fh_mgr.get_export_path().join("source.txt");
+        let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
+        let src_len = std::fs::metadata(&src_path).unwrap().len();
+        let res = handler
+            .handle_copy(
+                CopyOp {
+                    src_stateid: open_stateid_for(&handler, &src_path),
+                    dst_stateid: open_stateid_for(&handler, &dst_path),
+                    src_offset: 0,
+                    dst_offset: 512,
+                    count: src_len,
+                    sync: true,
+                },
+                &ctx,
+            )
+            .await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        let md = std::fs::metadata(&dst_path).unwrap();
+        let cap = crate::tier::capture::snapshot(md.dev(), md.ino())
+            .expect("COPY must note the tier capture (C5)");
+        assert_eq!(cap.intervals, vec![(512, 512 + src_len)]);
+    }
+
+    /// A2 census (design review C5): CLONE must note its destination
+    /// range — via whichever branch ran (reflink on reflink-capable
+    /// filesystems, the copy fallback elsewhere, macOS included).
+    #[tokio::test]
+    async fn clone_notes_tier_capture() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, _temp) = create_test_handler();
+        let ctx = CompoundContext::new(2);
+        let src_path = handler.fh_mgr.get_export_path().join("source.txt");
+        let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
+        let res = handler
+            .handle_clone(
+                CloneOp {
+                    src_stateid: open_stateid_for(&handler, &src_path),
+                    dst_stateid: open_stateid_for(&handler, &dst_path),
+                    src_offset: 0,
+                    dst_offset: 8,
+                    count: 16,
+                },
+                &ctx,
+            )
+            .await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        let md = std::fs::metadata(&dst_path).unwrap();
+        let cap = crate::tier::capture::snapshot(md.dev(), md.ino())
+            .expect("CLONE must note the tier capture (C5)");
+        assert_eq!(cap.intervals, vec![(8, 24)]);
+    }
+
+    /// A2 census (design review C5): ALLOCATE and DEALLOCATE must note
+    /// their ranges. Linux-only like the ops themselves — the macOS
+    /// suite is NOT the suite for these lanes (cross-build memory).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn allocate_and_deallocate_note_tier_capture() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let path = temp.path().join("source.txt");
+        ctx.current_fh = Some(handler.fh_mgr.get_or_create_handle(&path).unwrap());
+        let stateid = create_test_stateid(&handler, 1);
+        let res = handler
+            .handle_allocate(
+                AllocateOp { stateid: stateid.clone(), offset: 0, length: 65536 },
+                &ctx,
+            )
+            .await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        let md = std::fs::metadata(&path).unwrap();
+        let cap = crate::tier::capture::snapshot(md.dev(), md.ino())
+            .expect("ALLOCATE must note the tier capture (C5)");
+        assert_eq!(cap.intervals, vec![(0, 65536)]);
+
+        let res = handler
+            .handle_deallocate(
+                DeallocateOp { stateid, offset: 4096, length: 8192 },
+                &ctx,
+            )
+            .await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        let cap = crate::tier::capture::snapshot(md.dev(), md.ino()).unwrap();
+        // Already inside [0, 65536) — the union is unchanged, which is
+        // itself the point: the range stays dirty.
+        assert_eq!(cap.intervals, vec![(0, 65536)]);
+    }
 
     fn create_test_handler() -> (PerfOperationHandler, TempDir) {
         let temp_dir = TempDir::new().unwrap();

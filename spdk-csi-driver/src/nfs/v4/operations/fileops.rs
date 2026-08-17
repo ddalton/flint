@@ -523,7 +523,31 @@ fn apply_settable_attrs_inner(
             return (applied, Some(Nfs4Status::IsDir));
         }
         match std::fs::OpenOptions::new().write(true).open(path).and_then(|f| f.set_len(size)) {
-            Ok(()) => applied.push(FATTR4_SIZE),
+            Ok(()) => {
+                // A2 dirty capture, at the ONE chokepoint both size
+                // lanes share (SETATTR and OPEN-createattrs both land
+                // here). Shrink is a first-class Truncate event (clips
+                // the log, pins the copy watermark); grow is the
+                // kernel's zero-fill of the gap, noted as such — the
+                // capture module cannot know the pre-op size, so the
+                // split lives here where lmeta does.
+                let old = lmeta.len();
+                if size < old {
+                    crate::tier::capture::note_path(
+                        path,
+                        crate::tier::capture::Mutation::Truncate { new_size: size },
+                    );
+                } else if size > old {
+                    crate::tier::capture::note_path(
+                        path,
+                        crate::tier::capture::Mutation::Zero {
+                            offset: old,
+                            len: size - old,
+                        },
+                    );
+                }
+                applied.push(FATTR4_SIZE)
+            }
             Err(e) => {
                 warn!("SETATTR: truncate to {} on {:?} failed: {}", size, path, e);
                 return (applied, Some(io_error_to_nfs4(&e)));
@@ -3421,6 +3445,40 @@ impl FileOperationHandler {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A2 census (design review C5): the shared size chokepoint — the
+    /// lane both SETATTR-size and OPEN-createattrs land in — must note
+    /// shrink as a first-class Truncate (watermark + clip) and grow as
+    /// the kernel's zero-fill of the gap.
+    #[test]
+    fn setattr_size_notes_tier_capture_shrink_and_grow() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("census-size.bin");
+        std::fs::write(&path, vec![9u8; 1000]).unwrap();
+        let md = std::fs::metadata(&path).unwrap();
+        let (dev, ino) = (md.dev(), md.ino());
+
+        let want = SettableAttrs { size: Some(500), ..Default::default() };
+        let (applied, err) = apply_settable_attrs(&path, &want);
+        assert!(err.is_none(), "shrink failed: {err:?}");
+        assert!(applied.contains(&FATTR4_SIZE));
+        let cap = crate::tier::capture::snapshot(dev, ino)
+            .expect("SETATTR shrink must note the tier capture (C5)");
+        assert_eq!(cap.min_size, Some(500), "shrink is a first-class Truncate event");
+
+        let want = SettableAttrs { size: Some(800), ..Default::default() };
+        let (_, err) = apply_settable_attrs(&path, &want);
+        assert!(err.is_none(), "grow failed: {err:?}");
+        let cap = crate::tier::capture::snapshot(dev, ino).unwrap();
+        assert_eq!(
+            cap.intervals,
+            vec![(500, 800)],
+            "grow must dirty the zero-filled gap"
+        );
+        assert_eq!(cap.min_size, Some(500), "the watermark survives the regrow");
+    }
 
     fn create_test_handler() -> (FileOperationHandler, TempDir) {
         let temp_dir = TempDir::new().unwrap();

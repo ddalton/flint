@@ -1445,6 +1445,16 @@ impl IoOperationHandler {
                     md.ino(),
                     crate::nfs::v4::change_counter::ctime_ns(&md),
                 );
+                // A2 dirty capture rides the same post-success point:
+                // a content bump without a note is the C5 bug class.
+                crate::tier::capture::note(
+                    md.dev(),
+                    md.ino(),
+                    crate::tier::capture::Mutation::Write {
+                        offset,
+                        len: bytes_written as u64,
+                    },
+                );
             }
 
             Ok(bytes_written)
@@ -1630,6 +1640,52 @@ mod tests {
     use crate::nfs::v4::filehandle::FileHandleManager;
     use crate::nfs::v4::state::StateType;
     use tempfile::TempDir;
+
+    /// A2 census (design review C5): a WRITE through the real handler
+    /// must land in the tier capture log with its exact byte range.
+    #[tokio::test]
+    async fn write_notes_tier_capture() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let export_fh = fh_mgr.path_to_filehandle(fh_mgr.get_export_path()).unwrap();
+        ctx.current_fh = Some(export_fh);
+        let open_res = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_BOTH,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"census-owner".to_vec(),
+                    openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+                    claim: OpenClaim::Null("census-write.bin".to_string()),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(open_res.status, Nfs4Status::Ok);
+        let stateid = open_res.stateid.unwrap();
+
+        let res = handler
+            .handle_write(
+                WriteOp {
+                    stateid,
+                    offset: 4096,
+                    stable: FILE_SYNC4,
+                    data: Bytes::from(vec![7u8; 100]),
+                },
+                &ctx,
+            )
+            .await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+
+        let md = std::fs::metadata(fh_mgr.get_export_path().join("census-write.bin")).unwrap();
+        let cap = crate::tier::capture::snapshot(md.dev(), md.ino())
+            .expect("WRITE must note the tier capture (C5: a bump without a note)");
+        assert_eq!(cap.intervals, vec![(4096, 4196)]);
+        assert!(!cap.whole);
+    }
 
     /// F17b: a renamed-over file keeps serving through its open fd —
     /// READ via the stale handle returns the ORIGINAL bytes, and the
