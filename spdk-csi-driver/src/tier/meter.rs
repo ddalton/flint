@@ -59,6 +59,17 @@ counters! {
     /// Bucket content already matched local truth (CRC) — adopted
     /// clean with zero upload (the restart clean-skip).
     flushes_clean_match,
+    /// The epoch machinery (step 7, A8).
+    epoch_renews,
+    epoch_renew_failures,
+    /// Foreign holders judged dead and superseded (NOT self-recognition
+    /// resumes — those are routine restarts).
+    epoch_takeovers,
+    /// In-flight assemblies aborted by a claim's fence sweep.
+    takeover_mpu_aborts,
+    /// Publishes refused because the guard was fenced (or re-verified
+    /// fenced mid-flush).
+    flushes_fenced,
 }
 
 #[inline]
@@ -90,6 +101,11 @@ pub enum Counter {
     FlushesSkippedQuiesce,
     FlushesSkippedInflight,
     FlushesCleanMatch,
+    EpochRenews,
+    EpochRenewFailures,
+    EpochTakeovers,
+    TakeoverMpuAborts,
+    FlushesFenced,
 }
 
 impl Counter {
@@ -110,6 +126,11 @@ impl Counter {
             Counter::FlushesSkippedQuiesce => &flushes_skipped_quiesce,
             Counter::FlushesSkippedInflight => &flushes_skipped_inflight,
             Counter::FlushesCleanMatch => &flushes_clean_match,
+            Counter::EpochRenews => &epoch_renews,
+            Counter::EpochRenewFailures => &epoch_renew_failures,
+            Counter::EpochTakeovers => &epoch_takeovers,
+            Counter::TakeoverMpuAborts => &takeover_mpu_aborts,
+            Counter::FlushesFenced => &flushes_fenced,
         }
     }
 }

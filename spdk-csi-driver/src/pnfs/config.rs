@@ -115,6 +115,93 @@ pub struct MdsConfig {
     /// it).
     #[serde(rename = "blockExport", default)]
     pub block_export: Option<BlockExportConfig>,
+
+    /// S3 tier (L2). Present + enabled ⇒ this hub captures mutations
+    /// durably, claims the volume epoch at startup (A8 — fencing
+    /// before daemon; the claim may WAIT out a dead holder's lease),
+    /// and runs the flush pipeline. v1 scope: STANDALONE (flint-lite)
+    /// posture ONLY — a pNFS MDS's flusher would publish its sparse
+    /// stubs, so serve() refuses the combination.
+    #[serde(default)]
+    pub tier: Option<TierConfig>,
+}
+
+/// S3 tier settings (design of record:
+/// docs/plans/s3-tier-l2-design-review.md; knobs per A11 are
+/// REQUIREMENTS, not tuning — the defaults are the economics gate's
+/// assumptions).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TierConfig {
+    /// Kill switch that keeps the section in the file: `enabled: false`
+    /// parses and does nothing.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Bucket name. Credentials/region come from the ambient AWS
+    /// environment (IRSA, env vars, profile).
+    pub bucket: String,
+
+    /// Key prefix under the bucket (e.g. "vol1/"). `.flint/` under it
+    /// is RESERVED for tier control objects (the epoch; manifests) —
+    /// client files there are refused tiering.
+    #[serde(rename = "keyPrefix", default)]
+    pub key_prefix: String,
+
+    /// Custom endpoint (MinIO rigs; forces path-style). None = real S3.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+
+    /// A11: per-file flush-interval floor — caps a hot file's request
+    /// bill. The economics gate priced 60 s.
+    #[serde(rename = "flushFloorSecs", default = "default_tier_flush_floor")]
+    pub flush_floor_secs: u64,
+
+    /// A11: quiescence guard — files noted more recently are skipped.
+    #[serde(rename = "quiesceSecs", default = "default_tier_quiesce")]
+    pub quiesce_secs: u64,
+
+    /// Flush loop cadence.
+    #[serde(rename = "tickSecs", default = "default_tier_tick")]
+    pub tick_secs: u64,
+
+    /// Below this, a generation publishes as ONE conditional PUT.
+    #[serde(rename = "wholePutMaxBytes", default = "default_tier_whole_put_max")]
+    pub whole_put_max_bytes: u64,
+
+    /// A11 part-grid floor (clamped up to the backend minimum).
+    #[serde(rename = "partFloorBytes", default = "default_tier_part_floor")]
+    pub part_floor_bytes: u64,
+
+    /// A8: epoch heartbeat interval.
+    #[serde(rename = "epochHeartbeatSecs", default = "default_tier_heartbeat")]
+    pub epoch_heartbeat_secs: u64,
+
+    /// A8: consecutive missed heartbeats before a successor may judge
+    /// this holder dead (lease TTL ≈ heartbeat × misses).
+    #[serde(rename = "epochLeaseMisses", default = "default_tier_lease_misses")]
+    pub epoch_lease_misses: u32,
+}
+
+fn default_tier_flush_floor() -> u64 {
+    60
+}
+fn default_tier_quiesce() -> u64 {
+    10
+}
+fn default_tier_tick() -> u64 {
+    10
+}
+fn default_tier_whole_put_max() -> u64 {
+    64 * 1024 * 1024
+}
+fn default_tier_part_floor() -> u64 {
+    16 * 1024 * 1024
+}
+fn default_tier_heartbeat() -> u64 {
+    10
+}
+fn default_tier_lease_misses() -> u32 {
+    6
 }
 
 /// Block-export reconciler settings (design doc §5, phase 1: one tgt per
@@ -817,6 +904,30 @@ mod tests {
             sharded.effective_endpoints(),
             vec!["mds-0:50051".to_string(), "mds-1:50051".to_string()],
         );
+    }
+
+    #[test]
+    fn tier_section_parses_with_defaults() {
+        let t: TierConfig = serde_yaml::from_str("bucket: my-bucket\n").unwrap();
+        assert!(t.enabled);
+        assert_eq!(t.key_prefix, "");
+        assert_eq!(t.endpoint, None);
+        assert_eq!(t.flush_floor_secs, 60);
+        assert_eq!(t.quiesce_secs, 10);
+        assert_eq!(t.tick_secs, 10);
+        assert_eq!(t.whole_put_max_bytes, 64 * 1024 * 1024);
+        assert_eq!(t.part_floor_bytes, 16 * 1024 * 1024);
+        assert_eq!(t.epoch_heartbeat_secs, 10);
+        assert_eq!(t.epoch_lease_misses, 6);
+
+        let t2: TierConfig = serde_yaml::from_str(
+            "bucket: b\nenabled: false\nkeyPrefix: vol1/\nendpoint: \"http://minio:9000\"\nepochLeaseMisses: 3\n",
+        )
+        .unwrap();
+        assert!(!t2.enabled);
+        assert_eq!(t2.key_prefix, "vol1/");
+        assert_eq!(t2.endpoint.as_deref(), Some("http://minio:9000"));
+        assert_eq!(t2.epoch_lease_misses, 3);
     }
 
     #[test]

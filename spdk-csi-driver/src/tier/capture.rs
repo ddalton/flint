@@ -373,11 +373,20 @@ pub fn enabled() -> bool {
     FORCED.load(Ordering::Relaxed) || env_enabled()
 }
 
+/// Production enable — the config-driven master switch (`serve()`
+/// flips it when the MDS config carries an enabled `tier` section,
+/// before any state restore or listener bind). Sticky for the process
+/// lifetime; there is deliberately no disable — a tier that could turn
+/// off mid-run would strand queued marks and un-gate the write lanes.
+pub fn enable() {
+    FORCED.store(true, Ordering::Relaxed);
+}
+
 /// Tests (and only tests) flip capture on process-wide. There is
 /// deliberately no `force_disable`: concurrent tests share this flag,
 /// and per-file keys keep them isolated.
 pub fn force_enable() {
-    FORCED.store(true, Ordering::Relaxed);
+    enable();
 }
 
 // Census counters — the observability seed (A12 grows this).

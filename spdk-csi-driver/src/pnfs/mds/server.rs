@@ -541,6 +541,28 @@ impl MetadataServer {
         }
         info!("");
 
+        // S3 tier (L2 step 7): the config-driven master switch, flipped
+        // BEFORE the state load so the dirty-bit restore below runs.
+        // v1 scope is the standalone (flint-lite) posture only — a pNFS
+        // MDS's flusher would publish its sparse size-only stubs
+        // (design review, the tier-inversion finding), so the
+        // combination is refused, not warned about.
+        if let Some(t) = self.config.tier.as_ref().filter(|t| t.enabled) {
+            if !self.config.standalone {
+                return Err(crate::pnfs::Error::Config(
+                    "tier: v1 requires the standalone (flint-lite) posture — a pNFS \
+                     MDS's flusher would publish sparse stubs; remove `tier` or set \
+                     `standalone: true`"
+                        .into(),
+                ));
+            }
+            crate::tier::capture::enable();
+            info!(
+                "🪣 S3 tier ENABLED — bucket {}, prefix {:?}",
+                t.bucket, t.key_prefix
+            );
+        }
+
         // Phase B.4: pull persisted state out of the backend before
         // accepting any TCP connections. Once this returns, a
         // reconnecting client whose clientid / sessionid / stateid
@@ -567,6 +589,16 @@ impl MetadataServer {
                     e
                 ),
             }
+        }
+
+        // S3 tier (L2 step 7, A8): FENCING BEFORE DAEMON. Claim the
+        // volume epoch — waiting out a dead holder's lease if one is
+        // recorded — sweep every in-flight assembly, and only then
+        // start the flush loop. A failure here refuses startup: the
+        // operator asked for a tier, and loud beats silently untiered
+        // (the A9 posture).
+        if let Some(t) = self.config.tier.clone().filter(|t| t.enabled) {
+            self.start_tier(&t).await?;
         }
 
         // pnfs-block startup replay: converge every known scsi volume's
@@ -634,6 +666,121 @@ impl MetadataServer {
         // Start TCP server (for NFS client connections)
         let addr = format!("{}:{}", self.config.bind.address, self.config.bind.port);
         self.serve_tcp(&addr).await
+    }
+
+    /// S3 tier startup (L2 step 7): store connect → bucket bootstrap →
+    /// epoch claim (A8: self-recognition makes a routine restart resume
+    /// instantly; a foreign holder is judged dead only by the store's
+    /// own evidence; every claim sweeps in-flight MPUs so a deposed
+    /// hub's Complete fails NoSuchUpload) → heartbeat → flush loop.
+    /// Runs BEFORE the TCP listener binds — an unfenced hub never
+    /// serves.
+    async fn start_tier(&self, t: &crate::pnfs::config::TierConfig) -> Result<()> {
+        use crate::tier::epoch;
+        use crate::tier::flush::{FlushConfig, FlushOrchestrator};
+        use crate::tier::store::ObjectStore;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            crate::tier::store::s3::S3Store::connect(t.bucket.clone(), t.endpoint.clone())
+                .await
+                .map_err(|e| crate::pnfs::Error::Config(format!("tier: store connect: {}", e)))?,
+        );
+
+        // A9: verify/create the bucket posture; errors refuse startup.
+        let report = store
+            .bootstrap(&t.key_prefix)
+            .await
+            .map_err(|e| crate::pnfs::Error::Config(format!("tier: bucket bootstrap: {}", e)))?;
+        for n in &report.notes {
+            info!("🪣 tier bootstrap: {}", n);
+        }
+        for w in &report.warnings {
+            warn!("🪣 tier bootstrap: {}", w);
+        }
+        if !report.ok() {
+            return Err(crate::pnfs::Error::Config(format!(
+                "tier: bucket posture refused: {}",
+                report.errors.join("; ")
+            )));
+        }
+
+        // Holder identity = the persisted server_id (the same one that
+        // keeps filehandles stable across restart) — that is what
+        // self-recognition recognizes after a pod restart.
+        let server_id = self
+            .backend
+            .get_or_init_server_id()
+            .await
+            .map_err(|e| crate::pnfs::Error::Config(format!("tier: server_id: {}", e)))?;
+        let mut ecfg = epoch::EpochConfig::new(&t.key_prefix, format!("hub-{:016x}", server_id));
+        ecfg.heartbeat = Duration::from_secs(t.epoch_heartbeat_secs.max(1));
+        ecfg.lease_misses = t.epoch_lease_misses.max(1);
+        info!(
+            "🔐 tier: claiming the volume epoch as {} (a live foreign holder is \
+             waited out: {} × {}s)",
+            ecfg.holder_id, ecfg.lease_misses, t.epoch_heartbeat_secs
+        );
+        let lease = epoch::claim(&store, &ecfg, &t.key_prefix)
+            .await
+            .map_err(|e| crate::pnfs::Error::Config(format!("tier: epoch claim: {}", e)))?;
+        info!("🔐 tier: epoch {} held", lease.epoch);
+
+        let guard = epoch::EpochGuard::held(lease.epoch);
+        // Deposed ⇒ fence + exit. The restart re-claims instantly by
+        // self-recognition if the deposition was a renewal blip — or,
+        // while a foreign holder is genuinely live, refuses to serve:
+        // the split-brain protection A8 demands ("stops serving"). Two
+        // hubs on one prefix is a misconfiguration, and runbr proved
+        // what serving on moved authority does to pinned clients.
+        epoch::spawn_heartbeat(
+            Arc::clone(&store),
+            ecfg,
+            lease,
+            Arc::clone(&guard),
+            Box::new(|| {
+                error!("tier: DEPOSED — exiting so the restart re-judges the epoch");
+                std::process::exit(70);
+            }),
+        );
+
+        let mut fcfg = FlushConfig::new(self.export_path.clone(), t.key_prefix.clone());
+        fcfg.floor = Duration::from_secs(t.flush_floor_secs);
+        fcfg.quiesce = Duration::from_secs(t.quiesce_secs);
+        fcfg.whole_put_max = t.whole_put_max_bytes;
+        fcfg.part_floor = t.part_floor_bytes.max(store.min_part_size());
+        let floor_s = t.flush_floor_secs;
+        let quiesce_s = t.quiesce_secs;
+        let orch = Arc::new(FlushOrchestrator::new(
+            store,
+            Arc::clone(&self.backend),
+            fcfg,
+            guard,
+        ));
+        // Rebuild the durable registry and arbitrate any crash-torn
+        // intents BEFORE the first tick (and before clients reconnect
+        // and mutate on top).
+        orch.startup().await;
+
+        let tick = Duration::from_secs(t.tick_secs.max(1));
+        tokio::spawn(async move {
+            let mut iv = interval(tick);
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                iv.tick().await;
+                let r = orch.tick().await;
+                if r.published > 0 || r.failed > 0 {
+                    info!(
+                        "🪣 tier flush: {} published, {} clean, {} failed ({} examined)",
+                        r.published, r.clean, r.failed, r.examined
+                    );
+                }
+            }
+        });
+        info!(
+            "🪣 tier: flush loop every {:?} (floor {}s, quiesce {}s)",
+            tick, floor_s, quiesce_s
+        );
+        Ok(())
     }
 
     /// Start gRPC control server for DS registration

@@ -127,6 +127,34 @@ impl MemoryStore {
         m
     }
 
+    /// Test surface: a DEPOSED writer's late CompleteMultipartUpload.
+    /// Assembles whatever parts exist (unconditionally — the deposed
+    /// straggler of the A8 drill carries no working guard); answers
+    /// `NoSuchUpload` if the assembly was fenced away, exactly S3's
+    /// answer after the takeover abort-sweep.
+    pub fn raw_complete_upload(&self, upload_id: &str) -> StoreResult<ObjectMeta> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(mpu) = inner.uploads.remove(upload_id) else {
+            return Err(StoreError::NoSuchUpload(format!("upload {}", upload_id)));
+        };
+        let mut bytes = Vec::new();
+        let n_parts = mpu.parts.len().max(1);
+        for part in mpu.parts.values() {
+            bytes.extend_from_slice(part);
+        }
+        let bytes = Bytes::from(bytes);
+        let obj = StoredObject {
+            etag: mpu_etag(&bytes, n_parts),
+            crc64: crc64_nvme(&bytes),
+            meta: HashMap::new(),
+            last_modified_unix: now_unix(),
+            bytes,
+        };
+        let m = obj.to_meta();
+        inner.objects.insert(mpu.key, obj);
+        Ok(m)
+    }
+
     /// Test surface: an orphan MPU (for the A9 sweep tests).
     pub fn raw_begin_upload(&self, key: &str) -> String {
         let id = format!("mpu-{}", self.upload_seq.fetch_add(1, Ordering::SeqCst));

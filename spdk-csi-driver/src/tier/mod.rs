@@ -19,9 +19,14 @@
 //! Step 6: `identity` — rename/remove events, tombstones, the A7
 //! identity-keyed generation rows (backend) and re-key flushes.
 
+//! Step 7: `epoch` — the volume epoch (A8): lease heartbeat,
+//! self-recognition, takeover MPU abort-sweep, self-fencing; the
+//! flusher re-verifies it before every publish.
+
 pub mod arbitrate;
 pub mod capture;
 pub mod durable;
+pub mod epoch;
 pub mod flush;
 pub mod gate;
 pub mod identity;

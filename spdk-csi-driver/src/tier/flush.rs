@@ -215,6 +215,9 @@ pub enum Outcome {
     /// Path no longer names this identity (rename/reuse) — A7's rows
     /// (step 6) own the repair.
     PathMismatch,
+    /// The epoch guard is fenced (A8): publishing is forbidden. The
+    /// dirty bit stays durable; a re-claimed epoch resumes the flush.
+    Fenced,
     Failed(String),
 }
 
@@ -232,6 +235,10 @@ pub struct FlushOrchestrator {
     store: Arc<dyn ObjectStore>,
     backend: Arc<dyn StateBackend>,
     cfg: FlushConfig,
+    /// A8: the epoch guard the heartbeat fences. Every flush re-checks
+    /// it at entry AND immediately before the publish; `None` from
+    /// `current()` forbids publishing.
+    epoch: Arc<crate::tier::epoch::EpochGuard>,
     generations: DashMap<(u64, u64), GenRecord>,
     last_flush: DashMap<(u64, u64), Instant>,
 }
@@ -241,11 +248,13 @@ impl FlushOrchestrator {
         store: Arc<dyn ObjectStore>,
         backend: Arc<dyn StateBackend>,
         cfg: FlushConfig,
+        epoch: Arc<crate::tier::epoch::EpochGuard>,
     ) -> Self {
         FlushOrchestrator {
             store,
             backend,
             cfg,
+            epoch,
             generations: DashMap::new(),
             last_flush: DashMap::new(),
         }
@@ -253,6 +262,21 @@ impl FlushOrchestrator {
 
     pub fn key_for(&self, path: &Path) -> Option<String> {
         let rel = path.strip_prefix(&self.cfg.export_root).ok()?;
+        // `.flint/` under the prefix is the tier's own control
+        // namespace (the epoch object; step 12's manifests). A client
+        // file there must never shadow a control object.
+        if rel
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == crate::tier::epoch::RESERVED_DIR)
+        {
+            warn!(
+                "tier flush: {} is under the reserved {}/ namespace — not tiered",
+                path.display(),
+                crate::tier::epoch::RESERVED_DIR
+            );
+            return None;
+        }
         Some(format!("{}{}", self.cfg.key_prefix, rel.to_string_lossy()))
     }
 
@@ -476,6 +500,12 @@ impl FlushOrchestrator {
     /// gone), then the durable dirty set.
     pub async fn tick(&self) -> TickReport {
         let mut report = TickReport::default();
+        if self.epoch.current().is_none() {
+            // Fenced (A8): nothing may publish. The dirty set stays
+            // durable; the fence event itself already logged loudly.
+            debug!("tier flush: tick skipped — epoch fenced/not held");
+            return report;
+        }
         self.load_generations().await;
         self.consume_tombstones().await;
         let rows = match self.backend.tier_list_dirty().await {
@@ -510,7 +540,8 @@ impl FlushOrchestrator {
                 }
                 Outcome::RetryNextCycle
                 | Outcome::ForeignDetected
-                | Outcome::PathMismatch => {}
+                | Outcome::PathMismatch
+                | Outcome::Fenced => {}
                 Outcome::Failed(_) => report.failed += 1,
             }
         }
@@ -521,6 +552,13 @@ impl FlushOrchestrator {
     /// tick's listing (path + the observed mark sequence).
     pub async fn flush_file(&self, row: &TierDirtyEntry) -> Outcome {
         let (dev, ino) = (row.dev, row.ino);
+        // A8: no epoch, no publish. Checked again right before the
+        // store mutation — this one exists so a fenced hub does not
+        // drain gates and read files for flushes it may not finish.
+        let Some(current_epoch) = self.epoch.current() else {
+            meter::bump(Counter::FlushesFenced);
+            return Outcome::Fenced;
+        };
         let Some(path) = row.path.as_ref().map(PathBuf::from) else {
             // No path on the row (fd-only writer so far) — A7's
             // identity rows (step 6) own this; the bit keeps the file
@@ -666,7 +704,7 @@ impl FlushOrchestrator {
         };
         let stamps = GenerationStamps {
             generation: to_gen,
-            epoch: 0, // pre-epoch-machinery (step 7)
+            epoch: current_epoch,
             flush_uuid: flush_uuid.clone(),
         };
 
@@ -699,6 +737,23 @@ impl FlushOrchestrator {
                 let _ = self.backend.delete_flush_intent(&flush_uuid).await;
                 return self.fail(dev, ino, Some(epoch), format!("re-key tombstone: {}", e));
             }
+        }
+
+        // A8: re-verify the epoch immediately before the publish. The
+        // heartbeat fences the guard the moment a renewal fails; past
+        // this check the residual window is one heartbeat interval,
+        // inside which the A6 If-Match guard is the second fence (and
+        // for composes, the successor's claim-time abort-sweep makes
+        // our Complete fail NoSuchUpload regardless).
+        if self.epoch.current() != Some(current_epoch) {
+            let _ = self.backend.delete_flush_intent(&flush_uuid).await;
+            capture::merge_back(dev, ino, epoch);
+            meter::bump(Counter::FlushesFenced);
+            warn!(
+                "tier flush: ({},{}) fenced between plan and publish — nothing sent",
+                dev, ino
+            );
+            return Outcome::Fenced;
         }
 
         let publish = match &plan {
@@ -1188,6 +1243,7 @@ mod tests {
         root: PathBuf,
         mem: Arc<MemoryStore>,
         backend: Arc<dyn StateBackend>,
+        guard: Arc<crate::tier::epoch::EpochGuard>,
         orch: FlushOrchestrator,
     }
 
@@ -1203,8 +1259,9 @@ mod tests {
         cfg.whole_put_max = whole_put_max;
         cfg.part_floor = part_floor;
         let store_dyn: Arc<dyn ObjectStore> = mem.clone();
-        let orch = FlushOrchestrator::new(store_dyn, backend.clone(), cfg);
-        Rig { _dir: dir, root, mem, backend, orch }
+        let guard = crate::tier::epoch::EpochGuard::held(1);
+        let orch = FlushOrchestrator::new(store_dyn, backend.clone(), cfg, guard.clone());
+        Rig { _dir: dir, root, mem, backend, guard, orch }
     }
 
     fn ident(path: &Path) -> (u64, u64) {
@@ -1363,7 +1420,12 @@ mod tests {
             quiesce: Duration::ZERO,
             ..r.orch.cfg.clone()
         };
-        let orch2 = FlushOrchestrator::new(r.mem.clone(), r.backend.clone(), cfg2);
+        let orch2 = FlushOrchestrator::new(
+            r.mem.clone(),
+            r.backend.clone(),
+            cfg2,
+            crate::tier::epoch::EpochGuard::held(1),
+        );
         r.backend
             .tier_mark_dirty(&[TierDirtyEntry {
                 dev,
@@ -1673,6 +1735,133 @@ mod tests {
             &bytes[1024..],
             vec![0u8; 3072].as_slice(),
             "the regrown gap must be zeros — never gen 1's resurrected bytes"
+        );
+    }
+
+    // ── step 7: the epoch fence at the flusher (A8) ──────────────────
+
+    #[tokio::test]
+    async fn fenced_orchestrator_publishes_nothing_and_keeps_the_bit() {
+        let r = rig(1024, 256);
+        let f = r.root.join("fenced.bin");
+        std::fs::write(&f, b"must never reach the bucket").unwrap();
+        let (dev, ino) = ident(&f);
+        note_and_land(&r, &f, Mutation::Whole).await;
+
+        r.guard.fence();
+        let report = r.orch.tick().await;
+        assert_eq!(report.examined, 0, "a fenced tick must not even walk the dirty set");
+        assert!(
+            matches!(r.mem.head("t/fenced.bin").await, Err(StoreError::NotFound(_))),
+            "nothing may publish through a fenced guard"
+        );
+        assert!(
+            our_row(&r, dev, ino).await.is_some(),
+            "the durable bit survives the fence — a re-claimed epoch resumes the flush"
+        );
+        // Direct flush_file is refused the same way.
+        let row = our_row(&r, dev, ino).await.unwrap();
+        assert!(matches!(r.orch.flush_file(&row).await, Outcome::Fenced));
+    }
+
+    #[tokio::test]
+    async fn stamps_carry_the_held_epoch() {
+        let r = rig(1024, 256);
+        r.guard.set_held(7);
+        let f = r.root.join("stamped.bin");
+        std::fs::write(&f, b"epoch-stamped").unwrap();
+        let (dev, ino) = ident(&f);
+        note_and_land(&r, &f, Mutation::Whole).await;
+        r.orch.tick().await;
+        assert_eq!(r.orch.generation_of(dev, ino).unwrap().generation, 1);
+        let meta = r.mem.head("t/stamped.bin").await.unwrap();
+        assert_eq!(
+            meta.meta.get(GenerationStamps::META_EPOCH).map(String::as_str),
+            Some("7"),
+            "every publish is stamped with the LIVE epoch (A8)"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_namespace_files_are_never_tiered() {
+        let r = rig(1024, 256);
+        let dir = r.root.join(crate::tier::epoch::RESERVED_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("epoch");
+        std::fs::write(&f, b"a client file shadowing the control object").unwrap();
+        assert_eq!(
+            r.orch.key_for(&f),
+            None,
+            "a client file under .flint/ must not shadow a tier control object"
+        );
+        assert!(r.orch.key_for(&r.root.join("normal.bin")).is_some());
+    }
+
+    /// The A8 drill, first half: kill the hub mid-flush; the restart
+    /// must resume WITHOUT operator CAS (self-recognition), its claim
+    /// sweeping the crashed flush's orphan assembly, and the re-flush
+    /// publishes under the NEW epoch.
+    #[tokio::test]
+    async fn kill_mid_flush_restart_resumes_without_operator_cas() {
+        let r = rig(256, 256);
+        let store_dyn: Arc<dyn ObjectStore> = r.mem.clone();
+        // Absurd lease so any accidental foreign-wait path would hang
+        // past the timeout instead of passing by luck.
+        let mut ecfg = crate::tier::epoch::EpochConfig::new("t/", "hub-drill7".into());
+        ecfg.heartbeat = Duration::from_secs(3600);
+        ecfg.lease_misses = 1000;
+
+        let l1 = crate::tier::epoch::claim(&store_dyn, &ecfg, "t/").await.unwrap();
+        assert_eq!(l1.epoch, 1);
+
+        let f = r.root.join("midflush.bin");
+        std::fs::write(&f, vec![0xABu8; 4096]).unwrap();
+        let (dev, ino) = ident(&f);
+        note_and_land(&r, &f, Mutation::Whole).await;
+        r.mem.inject_crash_before_complete();
+        r.orch.tick().await;
+        assert_eq!(
+            r.mem.list_uploads("t/").await.unwrap().len(),
+            1,
+            "the crashed flush must leave its in-flight assembly"
+        );
+
+        // "Crash": no release, no heartbeat. "Restart": same holder_id.
+        let l2 = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::tier::epoch::claim(&store_dyn, &ecfg, "t/"),
+        )
+        .await
+        .expect("restart must resume by self-recognition, not wait out a lease")
+        .unwrap();
+        assert_eq!(l2.epoch, 2);
+        assert!(
+            r.mem.list_uploads("t/").await.unwrap().is_empty(),
+            "the resumed claim must sweep the crashed flush's assembly"
+        );
+
+        let cfg2 = FlushConfig {
+            floor: Duration::ZERO,
+            quiesce: Duration::ZERO,
+            ..r.orch.cfg.clone()
+        };
+        let orch2 = FlushOrchestrator::new(
+            store_dyn,
+            r.backend.clone(),
+            cfg2,
+            crate::tier::epoch::EpochGuard::held(l2.epoch),
+        );
+        orch2.startup().await;
+        orch2.tick().await;
+
+        let g = orch2.generation_of(dev, ino).expect("the resumed flush must publish");
+        assert_eq!(g.generation, 1);
+        let meta = r.mem.head("t/midflush.bin").await.unwrap();
+        assert_eq!(meta.size, 4096);
+        assert_eq!(
+            meta.meta.get(GenerationStamps::META_EPOCH).map(String::as_str),
+            Some("2"),
+            "the resumed publish must carry the RESUMED epoch"
         );
     }
 }
