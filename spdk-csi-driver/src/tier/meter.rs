@@ -70,6 +70,13 @@ counters! {
     /// Publishes refused because the guard was fenced (or re-verified
     /// fenced mid-flush).
     flushes_fenced,
+    /// A10 backpressure: WRITE/ALLOCATE/COPY/CLONE refused NOSPC while
+    /// headroom-minus-reserve was exhausted.
+    nospc_write_refusals,
+    /// A10 backpressure: OPEN-create/CREATE refused NOSPC.
+    nospc_create_refusals,
+    /// The state.db ballast was released at critical fullness.
+    ballast_releases,
 }
 
 #[inline]
@@ -106,6 +113,9 @@ pub enum Counter {
     EpochTakeovers,
     TakeoverMpuAborts,
     FlushesFenced,
+    NospcWriteRefusals,
+    NospcCreateRefusals,
+    BallastReleases,
 }
 
 impl Counter {
@@ -131,6 +141,9 @@ impl Counter {
             Counter::EpochTakeovers => &epoch_takeovers,
             Counter::TakeoverMpuAborts => &takeover_mpu_aborts,
             Counter::FlushesFenced => &flushes_fenced,
+            Counter::NospcWriteRefusals => &nospc_write_refusals,
+            Counter::NospcCreateRefusals => &nospc_create_refusals,
+            Counter::BallastReleases => &ballast_releases,
         }
     }
 }

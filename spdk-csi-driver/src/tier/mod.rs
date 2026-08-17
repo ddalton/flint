@@ -23,6 +23,10 @@
 //! self-recognition, takeover MPU abort-sweep, self-fencing; the
 //! flusher re-verifies it before every publish.
 
+//! Step 8: `space` — PVC space model (A10): NOSPC admission before
+//! hard-full, statvfs-backed SPACE_* gauge, eviction watermark, and
+//! the state.db ballast.
+
 pub mod arbitrate;
 pub mod capture;
 pub mod durable;
@@ -31,4 +35,5 @@ pub mod flush;
 pub mod gate;
 pub mod identity;
 pub mod meter;
+pub mod space;
 pub mod store;

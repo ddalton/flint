@@ -683,6 +683,15 @@ impl PerfOperationHandler {
             let src_size = src_file.metadata()?.len();
             let count = resolve_range_len(src_size, src_offset, count)?;
 
+            // A10 admission with the RESOLVED length (ca_count == 0
+            // means through-EOF, unknowable before this point).
+            if crate::tier::space::admit_bytes(&dst_path, count).is_err() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "tier: PVC headroom-minus-reserve exhausted",
+                ));
+            }
+
             // Copy data in chunks using positioned I/O
             // This allows concurrent operations on the same files
             const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
@@ -771,7 +780,9 @@ impl PerfOperationHandler {
             }
             Ok(Err(e)) => {
                 warn!("COPY: I/O error during server-side copy: {}", e);
-                let status = match e.kind() {
+                // A10: errno first — a REAL ENOSPC/EDQUOT from the
+                // copy loop must not collapse into EIO.
+                let status = super::errno_status(&e).unwrap_or(match e.kind() {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     // Same-file and out-of-range rejections (RFC 7862
@@ -781,7 +792,7 @@ impl PerfOperationHandler {
                     // A4 gate refusal: destination mid-evict/hydrate.
                     std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
                     _ => Nfs4Status::Io,
-                };
+                });
                 CopyRes {
                     status,
                     sync: true,
@@ -937,6 +948,19 @@ impl PerfOperationHandler {
                 return Ok::<u64, std::io::Error>(0);
             }
 
+            // A10 admission with the RESOLVED length. The reflink
+            // branch shares blocks and may need far less — refusing it
+            // near-full is the deliberate over-refusal margin, not a
+            // bug: an unsharing rewrite of a "free" clone later is
+            // exactly the allocation the reserve exists to keep room
+            // for.
+            if crate::tier::space::admit_bytes(&dst_path, len).is_err() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "tier: PVC headroom-minus-reserve exhausted",
+                ));
+            }
+
             // A4 write gate on the destination, spanning both the
             // reflink and copy-fallback branches with their capture
             // notes. Excluded maps to WouldBlock → NFS4ERR_DELAY.
@@ -988,7 +1012,8 @@ impl PerfOperationHandler {
             }
             Ok(Err(e)) => {
                 warn!("CLONE: I/O error: {}", e);
-                let status = match e.kind() {
+                // A10: errno first — a REAL ENOSPC must not read as EIO.
+                let status = super::errno_status(&e).unwrap_or(match e.kind() {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     // Out-of-range source and overlapping same-file ranges
@@ -998,7 +1023,7 @@ impl PerfOperationHandler {
                     // A4 gate refusal: destination mid-evict/hydrate.
                     std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
                     _ => Nfs4Status::Io,
-                };
+                });
                 CloneRes {
                     status,
                 }
@@ -1084,6 +1109,14 @@ impl PerfOperationHandler {
                 offset, length
             );
             return Nfs4Status::Inval;
+        }
+        // A10 admission (Allocate only — a punch-hole FREES space and
+        // must never be refused for fullness).
+        if matches!(mode, AllocMode::Allocate)
+            && crate::tier::space::admit_bytes(&path, length).is_err()
+        {
+            warn!("ALLOCATE: refused NOSPC — PVC headroom-minus-reserve exhausted");
+            return Nfs4Status::NoSpc;
         }
         let p = path.clone();
         let res = tokio::task::spawn_blocking(move || -> std::io::Result<()> {

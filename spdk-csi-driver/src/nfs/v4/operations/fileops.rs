@@ -1121,10 +1121,43 @@ fn encode_attributes_from_snapshot(
     // Encode attributes in order from snapshot (NO I/O!)
     let mut attr_vals = BytesMut::new();
     let mut supported_attrs = BTreeSet::new();
-    
+
+    // A10: the tier's cached statvfs gauge (relaxed loads, no
+    // syscall). Some ⇒ SPACE_*/FILES_* answer with the PVC's real
+    // numbers so df reads the disk, not 8 EiB. None (tier off) keeps
+    // the historical behavior — a striped pNFS export's capacity is
+    // NOT the MDS's local filesystem, so these arms stay silent there.
+    let space_view = crate::tier::space::view();
+
     for attr_id in requested_attrs {
         let before_len = attr_vals.len();
         let encoded = match attr_id {
+            FATTR4_FILES_AVAIL if space_view.is_some() => {
+                attr_vals.put_u64(space_view.unwrap().files_avail);
+                true
+            }
+            FATTR4_FILES_FREE if space_view.is_some() => {
+                attr_vals.put_u64(space_view.unwrap().files_free);
+                true
+            }
+            FATTR4_FILES_TOTAL if space_view.is_some() => {
+                attr_vals.put_u64(space_view.unwrap().files_total);
+                true
+            }
+            FATTR4_SPACE_AVAIL if space_view.is_some() => {
+                // avail − reserve: what a client write can actually
+                // have — matches the admission gate's arithmetic.
+                attr_vals.put_u64(space_view.unwrap().avail_bytes);
+                true
+            }
+            FATTR4_SPACE_FREE if space_view.is_some() => {
+                attr_vals.put_u64(space_view.unwrap().free_bytes);
+                true
+            }
+            FATTR4_SPACE_TOTAL if space_view.is_some() => {
+                attr_vals.put_u64(space_view.unwrap().total_bytes);
+                true
+            }
             FATTR4_TYPE => {
                 attr_vals.put_u32(snapshot.ftype);
                 debug!("  Attr {}: TYPE={}", attr_id, snapshot.ftype);
@@ -1461,8 +1494,19 @@ fn encode_pseudo_root_attribute(
             true
         }
         FATTR4_SPACE_AVAIL | FATTR4_SPACE_FREE | FATTR4_SPACE_TOTAL => {
-            // Pseudo-filesystem has "infinite" space (return large value)
-            buf.put_u64(u64::MAX / 2); // Very large but not overflow
+            // A10: when the tier's space gauge is live, df must read
+            // the PVC even through the pseudo-root FH (the mount root
+            // is where statfs probes land). Tier off keeps the
+            // historical "infinite" answer.
+            match crate::tier::space::view() {
+                Some(v) => buf.put_u64(match attr_id {
+                    FATTR4_SPACE_AVAIL => v.avail_bytes,
+                    FATTR4_SPACE_FREE => v.free_bytes,
+                    _ => v.total_bytes,
+                }),
+                // Pseudo-filesystem has "infinite" space
+                None => buf.put_u64(u64::MAX / 2), // Very large but not overflow
+            }
             true
         }
         FATTR4_SUPPORTED_ATTRS => {
@@ -2803,6 +2847,13 @@ impl FileOperationHandler {
             (parent_path.join(&op.objname), None)
         };
 
+        // A10 admission: refuse new-object creation with NOSPC past
+        // the reserve (one relaxed load when the tier is off).
+        if crate::tier::space::admit_create(&obj_path).is_err() {
+            warn!("CREATE: refused NOSPC — PVC headroom-minus-reserve exhausted");
+            return CreateRes { status: Nfs4Status::NoSpc, change_info: None, attrset: vec![] };
+        }
+
         // Create the object based on type
         let create_result = match op.objtype {
             Nfs4FileType::Regular => {
@@ -3832,5 +3883,42 @@ mod tests {
             }
         }
         assert!(landed, "the rename's identity event never landed in our backend");
+    }
+
+    /// A10: with the space gauge live, the pseudo-root SPACE_* arms
+    /// (where the mount root's statfs lands) serve the PVC's real
+    /// statvfs numbers instead of the historical 8 EiB. Retry loop
+    /// absorbs a concurrent test swapping the global install.
+    #[test]
+    fn pseudo_root_space_attrs_read_the_pvc_when_the_gauge_is_live() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let scfg = crate::tier::space::SpaceConfig {
+            root: dir.path().to_path_buf(),
+            reserve_bytes: 0,
+            watermark_pct: 85,
+            ballast_path: None,
+            ballast_bytes: 0,
+        };
+        let attrs = crate::nfs::v4::pseudo::PseudoRootAttrs {
+            fsid: (0, 0),
+            fileid: 2,
+            nlink: 2,
+            size: 4096,
+            create_time: 0,
+            instance_id: 1,
+        };
+        let mut ok = false;
+        for _ in 0..50 {
+            crate::tier::space::configure(scfg.clone()).unwrap();
+            let Some(v) = crate::tier::space::view() else { continue };
+            let mut buf = BytesMut::new();
+            assert!(encode_pseudo_root_attribute(FATTR4_SPACE_TOTAL, &attrs, &mut buf, false));
+            let got = u64::from_be_bytes(buf[..8].try_into().unwrap());
+            if got == v.total_bytes && got > 0 && got != u64::MAX / 2 {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "SPACE_TOTAL must serve the real PVC size, not the 8 EiB constant");
     }
 }

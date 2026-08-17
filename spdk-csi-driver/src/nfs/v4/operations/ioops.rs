@@ -564,6 +564,20 @@ impl IoOperationHandler {
             // size=0 via createattrs (RFC 8881 §18.16.3). File::create's
             // implicit O_TRUNC would wipe it.
             let existed = tokio::fs::try_exists(&file_path).await.unwrap_or(false);
+            // A10 admission: refuse NEW-file creation with NOSPC past
+            // the reserve. Opening an EXISTING file always proceeds —
+            // reads must flow at any fullness.
+            if !existed && crate::tier::space::admit_create(&file_path).is_err() {
+                warn!("OPEN(create): refused NOSPC — PVC headroom-minus-reserve exhausted");
+                return OpenRes {
+                    status: Nfs4Status::NoSpc,
+                    stateid: None,
+                    change_info: None,
+                    result_flags: 0,
+                    delegation: OpenDelegationType::None,
+                    attrset: vec![],
+                };
+            }
             // read+write: this fd is seeded into the fd-cache below and
             // must serve BOTH directions (a write-only fd turns a later
             // READ through the cache into EBADF).
@@ -1416,7 +1430,21 @@ impl IoOperationHandler {
         // A2 capture: the durable mark wants the path. Cloned only when
         // capture is on — this is the hottest lane in the server.
         let cap_path = crate::tier::capture::enabled().then(|| path.clone());
-        
+
+        // A10 admission: NOSPC delivered BEFORE hard-full, while the
+        // reserve still holds — the errno applications handle, and the
+        // headroom the flusher/state.db need stays theirs. One relaxed
+        // load when the tier is off.
+        if crate::tier::space::admit_bytes(&path, op.data.len() as u64).is_err() {
+            warn!("WRITE: refused NOSPC — PVC headroom-minus-reserve exhausted");
+            return WriteRes {
+                status: Nfs4Status::NoSpc,
+                count: 0,
+                committed: UNSTABLE4,
+                writeverf: 0,
+            };
+        }
+
         let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
             use std::os::unix::fs::FileExt;
 
@@ -1490,7 +1518,10 @@ impl IoOperationHandler {
             }
             Ok(Err(e)) => {
                 warn!("WRITE: I/O error writing file: {}", e);
-                let status = match e.kind() {
+                // A10: errno first — ENOSPC/EDQUOT must not collapse
+                // into EIO (the mapping the DS lane has carried since
+                // the ENOSPC drill).
+                let status = super::errno_status(&e).unwrap_or(match e.kind() {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     std::io::ErrorKind::IsADirectory => Nfs4Status::IsDir,
@@ -1498,7 +1529,7 @@ impl IoOperationHandler {
                     // the client retries after a short delay.
                     std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
                     _ => Nfs4Status::Io,
-                };
+                });
                 WriteRes {
                     status,
                     count: 0,
@@ -1592,11 +1623,13 @@ impl IoOperationHandler {
             }
             Ok(Err(e)) => {
                 warn!("COMMIT: I/O error syncing file: {}", e);
-                let status = match e.kind() {
+                // A10: fsync is where delayed-allocation ENOSPC lands —
+                // exactly the reply that must NOT read as EIO.
+                let status = super::errno_status(&e).unwrap_or(match e.kind() {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     _ => Nfs4Status::Io,
-                };
+                });
                 CommitRes {
                     status,
                     writeverf: 0,
@@ -1858,6 +1891,81 @@ mod tests {
         worker.join().unwrap();
         // Every distinct stateid now maps to the shared fd.
         assert_eq!(handler.fd_cache.len(), 513);
+    }
+
+    /// A10: with the space model exhausted (reserve > any disk),
+    /// WRITE and OPEN-create under its root answer NOSPC — while
+    /// opening an EXISTING file still serves (reads must flow at any
+    /// fullness). Scoped by root, so no other test's I/O is touched;
+    /// the retry loop absorbs a concurrent test swapping the global
+    /// space install.
+    #[tokio::test]
+    async fn write_and_create_refused_nospc_when_headroom_exhausted() {
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let export_fh = fh_mgr.path_to_filehandle(fh_mgr.get_export_path()).unwrap();
+        ctx.current_fh = Some(export_fh.clone());
+        let open = |name: &str| OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_BOTH,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: b"nospc-owner".to_vec(),
+            openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+            claim: OpenClaim::Null(name.to_string()),
+        };
+
+        // Created BEFORE the exhausted model installs. OPEN moves
+        // ctx.current_fh to the file — keep both handles and re-set
+        // per op (OPEN resolves names against the DIRECTORY fh).
+        let pre = handler.handle_open(open("nospc-pre.bin"), &mut ctx).await;
+        assert_eq!(pre.status, Nfs4Status::Ok);
+        let stateid = pre.stateid.unwrap();
+        let file_fh = ctx.current_fh.clone();
+
+        let scfg = crate::tier::space::SpaceConfig {
+            root: fh_mgr.get_export_path().to_path_buf(),
+            reserve_bytes: u64::MAX, // headroom 0 on any real disk
+            watermark_pct: 85,
+            ballast_path: None,
+            ballast_bytes: 0,
+        };
+        let mut ok = false;
+        for _ in 0..50 {
+            crate::tier::space::configure(scfg.clone()).unwrap();
+            ctx.current_fh = file_fh.clone();
+            let w = handler
+                .handle_write(
+                    WriteOp {
+                        stateid: stateid.clone(),
+                        offset: 0,
+                        stable: FILE_SYNC4,
+                        data: Bytes::from_static(b"refused"),
+                    },
+                    &ctx,
+                )
+                .await;
+            ctx.current_fh = Some(export_fh.clone());
+            let c = handler.handle_open(open("nospc-new.bin"), &mut ctx).await;
+            ctx.current_fh = Some(export_fh.clone());
+            let e = handler.handle_open(open("nospc-pre.bin"), &mut ctx).await;
+            if w.status == Nfs4Status::NoSpc
+                && c.status == Nfs4Status::NoSpc
+                && e.status == Nfs4Status::Ok
+            {
+                assert_eq!(w.count, 0);
+                ok = true;
+                break;
+            }
+        }
+        assert!(
+            ok,
+            "exhausted headroom must refuse WRITE + OPEN-create with NOSPC \
+             and still open existing files"
+        );
+        assert!(
+            !fh_mgr.get_export_path().join("nospc-new.bin").exists(),
+            "a refused create must leave nothing behind"
+        );
     }
 
     fn create_test_handler() -> (IoOperationHandler, Arc<FileHandleManager>, TempDir) {

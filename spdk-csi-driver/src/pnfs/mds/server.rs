@@ -680,6 +680,55 @@ impl MetadataServer {
         use crate::tier::flush::{FlushConfig, FlushOrchestrator};
         use crate::tier::store::ObjectStore;
 
+        // A10 first — the space model is local and cheap, and admission
+        // + truthful SPACE_* should hold even while the epoch claim
+        // below waits. Ballast wants a db file to sit next to; the
+        // memory backend has none to protect.
+        let ballast_path = match self.config.state.backend {
+            crate::pnfs::config::StateBackend::Sqlite => {
+                let db = self
+                    .config
+                    .state
+                    .config
+                    .get("path")
+                    .cloned()
+                    .unwrap_or_else(|| "/var/lib/flint-pnfs/state.db".to_string());
+                std::path::Path::new(&db)
+                    .parent()
+                    .map(|p| p.join("flint-ballast.bin"))
+            }
+            _ => {
+                if t.ballast_bytes > 0 {
+                    info!("🪣 tier space: memory state backend — ballast disabled");
+                }
+                None
+            }
+        };
+        let space = crate::tier::space::configure(crate::tier::space::SpaceConfig {
+            root: self.export_path.clone(),
+            reserve_bytes: t.reserve_bytes,
+            watermark_pct: t.watermark_pct,
+            ballast_path,
+            ballast_bytes: t.ballast_bytes,
+        })
+        .map_err(|e| crate::pnfs::Error::Config(format!("tier: space model: {}", e)))?;
+        tokio::spawn(async move {
+            let mut iv = interval(Duration::from_secs(crate::tier::space::REFRESH_SECS));
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                iv.tick().await;
+                let s = Arc::clone(&space);
+                // statvfs + possible ballast I/O: off the executor.
+                let _ = tokio::task::spawn_blocking(move || s.refresh()).await;
+            }
+        });
+        info!(
+            "🪣 tier space: reserve {} MiB, watermark {}%, ballast {} MiB",
+            t.reserve_bytes / (1024 * 1024),
+            t.watermark_pct,
+            t.ballast_bytes / (1024 * 1024)
+        );
+
         let store: Arc<dyn ObjectStore> = Arc::new(
             crate::tier::store::s3::S3Store::connect(t.bucket.clone(), t.endpoint.clone())
                 .await

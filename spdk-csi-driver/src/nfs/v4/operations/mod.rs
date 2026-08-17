@@ -81,3 +81,21 @@ pub use lockops::{
     LockUOp, LockURes,
     LockType, LockRange, Lock,
 };
+
+/// A10: map raw OS errnos onto the honest NFS status — ENOSPC must
+/// surface as NOSPC and EDQUOT as DQUOT, not generic EIO (F55: EIO
+/// makes postgres PANIC; a full disk reported as EIO reads as
+/// data-path breakage rather than capacity). The DS lane has carried
+/// this mapping since the ENOSPC drill (`ds/server.rs`
+/// `io_error_to_nfs_status`); this is the MDS/standalone lane's twin.
+/// `None` = no errno-specific verdict; the caller applies its usual
+/// `ErrorKind` mapping.
+pub(crate) fn errno_status(e: &std::io::Error) -> Option<crate::nfs::v4::protocol::Nfs4Status> {
+    use crate::nfs::v4::protocol::Nfs4Status;
+    match e.raw_os_error().map(nix::errno::Errno::from_i32) {
+        Some(nix::errno::Errno::ENOSPC) => Some(Nfs4Status::NoSpc),
+        Some(nix::errno::Errno::EDQUOT) => Some(Nfs4Status::DQuot),
+        Some(nix::errno::Errno::EROFS) => Some(Nfs4Status::RoFs),
+        _ => None,
+    }
+}

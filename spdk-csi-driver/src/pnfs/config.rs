@@ -180,6 +180,24 @@ pub struct TierConfig {
     /// this holder dead (lease TTL ≈ heartbeat × misses).
     #[serde(rename = "epochLeaseMisses", default = "default_tier_lease_misses")]
     pub epoch_lease_misses: u32,
+
+    /// A10: admission headroom — WRITE/CREATE answer NFS4ERR_NOSPC
+    /// while `avail − reserve` cannot cover them (NOSPC before
+    /// hard-full; F55: EIO makes postgres PANIC).
+    #[serde(rename = "reserveBytes", default = "default_tier_reserve")]
+    pub reserve_bytes: u64,
+
+    /// A10: eviction-trigger watermark, percent used (step 10 consumes
+    /// it; today it WARNs).
+    #[serde(rename = "watermarkPct", default = "default_tier_watermark")]
+    pub watermark_pct: u8,
+
+    /// A10: preallocated ballast next to state.db, released at
+    /// critical fullness so the durable bookkeeping keeps committing.
+    /// 0 disables. Requires the sqlite backend (memory has no db file
+    /// to protect).
+    #[serde(rename = "ballastBytes", default = "default_tier_ballast")]
+    pub ballast_bytes: u64,
 }
 
 fn default_tier_flush_floor() -> u64 {
@@ -202,6 +220,15 @@ fn default_tier_heartbeat() -> u64 {
 }
 fn default_tier_lease_misses() -> u32 {
     6
+}
+fn default_tier_reserve() -> u64 {
+    256 * 1024 * 1024
+}
+fn default_tier_watermark() -> u8 {
+    85
+}
+fn default_tier_ballast() -> u64 {
+    64 * 1024 * 1024
 }
 
 /// Block-export reconciler settings (design doc §5, phase 1: one tgt per
@@ -919,6 +946,9 @@ mod tests {
         assert_eq!(t.part_floor_bytes, 16 * 1024 * 1024);
         assert_eq!(t.epoch_heartbeat_secs, 10);
         assert_eq!(t.epoch_lease_misses, 6);
+        assert_eq!(t.reserve_bytes, 256 * 1024 * 1024);
+        assert_eq!(t.watermark_pct, 85);
+        assert_eq!(t.ballast_bytes, 64 * 1024 * 1024);
 
         let t2: TierConfig = serde_yaml::from_str(
             "bucket: b\nenabled: false\nkeyPrefix: vol1/\nendpoint: \"http://minio:9000\"\nepochLeaseMisses: 3\n",
