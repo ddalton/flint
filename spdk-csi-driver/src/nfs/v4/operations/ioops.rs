@@ -1100,6 +1100,22 @@ impl IoOperationHandler {
             },
         };
 
+        // TEST-ONLY: hold READs of a ".cold." file until its fake
+        // hydration completes, to measure the client kernel's tolerance
+        // of hydration latency (see hydration_stall_deadline below;
+        // inert unless the env var is set).
+        if let Some(stall) = hydration_stall_secs() {
+            if path.to_string_lossy().contains(".cold.") {
+                if let Some(dl) = hydration_stall_deadline(&path, stall) {
+                    warn!(
+                        "TEST hydration stall: holding READ of {:?} (offset {})",
+                        path, op.offset
+                    );
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(dl)).await;
+                }
+            }
+        }
+
         // Get filename for logging before moving path
         let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
 
@@ -1566,6 +1582,46 @@ impl IoOperationHandler {
             }
         }
     }
+}
+
+/// TEST-ONLY hydration-stall injector (S3 cold-tier gate (b), the
+/// client-kernel READ-hold question): with
+/// `FLINT_TEST_HYDRATION_STALL_SECS=N`, the FIRST READ of any file
+/// whose path contains ".cold." is held N seconds before serving —
+/// the exact shape of a whole-file hydration from S3 blocking the
+/// first reader. Unset (the default) this is one None-check per READ.
+fn hydration_stall_secs() -> Option<u64> {
+    static V: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("FLINT_TEST_HYDRATION_STALL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n| *n > 0)
+    })
+}
+
+/// The injector's "hydration in progress" table. The FIRST READ of a
+/// cold path starts a fake hydration ending `stall` seconds later;
+/// EVERY READ of that path (readahead fans out many in parallel)
+/// returns the deadline while it is still in the future — real
+/// hydration blocks all readers, not just the first RPC, and the
+/// session-slot question depends on exactly that.
+fn hydration_stall_deadline(
+    path: &std::path::Path,
+    stall: u64,
+) -> Option<std::time::Instant> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    let mut m = MAP
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap();
+    let now = std::time::Instant::now();
+    let dl = *m
+        .entry(path.to_path_buf())
+        .or_insert_with(|| now + std::time::Duration::from_secs(stall));
+    (dl > now).then_some(dl)
 }
 
 #[cfg(test)]
