@@ -288,6 +288,10 @@ test-pnfs-mds-restart: build-pnfs ## MDS restart survival e2e (Phase B: kill MDS
 test-pnfs-crosscluster: build-pnfs ## Two DISTINCT NFS clients (netns+UTS = two "clusters") share one volume: close-to-open, cross-client locks, sqlite/git battery, mid-flight DS-direct census, metadata rates
 	tests/lima/pnfs/cross-cluster-drill.sh
 
+.PHONY: test-pnfs-lite
+test-pnfs-lite: build-pnfs ## Flint-lite L0: ONE standalone hub (mode: standalone, no DS fleet) serves two distinct clients — coherence, locks, sqlite/git, no-LAYOUTGET oracle, MDS-lane baselines
+	tests/lima/pnfs/lite-drill.sh
+
 .PHONY: test-pnfs-nconnect
 test-pnfs-nconnect: build-pnfs ## Single-host nconnect sweep — exposes per-TCP-serial RPC ceiling (loopback only; cross-host is a separate bench)
 	tests/lima/pnfs/nconnect.sh

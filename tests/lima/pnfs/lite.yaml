@@ -1,0 +1,56 @@
+# Flint-lite standalone config for the lite drill.
+#
+# ONE server, no DS fleet: mode `standalone` runs the same
+# flint-pnfs-mds binary with layouts off — EXCHANGE_ID advertises a
+# non-pNFS server, so clients never ask for layouts and every byte
+# serves through the MDS lane out of the export tree. This is the
+# flint-lite hub posture (one pod + one PVC in the k8s shape).
+#
+# State backend = memory (in-process); the drill wipes the export tree
+# between runs. The layout section is inert in this posture but the
+# config schema requires it.
+
+apiVersion: flint.io/v1alpha1
+kind: PnfsConfig
+mode: standalone
+
+mds:
+  bind:
+    address: "0.0.0.0"
+    port: 20490
+
+  layout:
+    type: file
+    stripeSize: 8388608
+    policy: stripe
+
+  dataServers: []
+
+  state:
+    backend: memory
+    config: {}
+
+exports:
+  - path: /tmp/flint-lite-export
+    fsid: 1
+    options: [rw, sync, no_subtree_check]
+    access:
+      - network: 0.0.0.0/0
+        permissions: rw
+
+logging:
+  level: info
+  format: text
+  components:
+    mds: info
+
+monitoring:
+  prometheus:
+    enabled: false
+    port: 0
+    path: /metrics
+  health:
+    enabled: false
+    port: 0
+    path: /health
+  metrics: []
