@@ -78,6 +78,9 @@ pub struct MemoryStore {
     /// Set by the crash injection: the failing compose must LEAVE its
     /// orphan MPU (the A9 sweep's test state) instead of aborting it.
     leave_orphan: AtomicBool,
+    /// Step-11 drill injections: one-shot get_range failure / stall.
+    fail_next_get_range: AtomicBool,
+    stall_next_get_range_ms: AtomicU64,
     pub min_part: u64,
     pub max_parts: usize,
 }
@@ -95,6 +98,8 @@ impl MemoryStore {
             upload_seq: AtomicU64::new(1),
             inject: AtomicU8::new(INJECT_NONE),
             leave_orphan: AtomicBool::new(false),
+            fail_next_get_range: AtomicBool::new(false),
+            stall_next_get_range_ms: AtomicU64::new(0),
             // Tiny granularity by default so tests compose small
             // files; S3's real limits live in the S3 backend.
             min_part: 1,
@@ -110,6 +115,19 @@ impl MemoryStore {
     /// Next compose: dies before Complete — MPU left pending.
     pub fn inject_crash_before_complete(&self) {
         self.inject.store(INJECT_CRASH_BEFORE_COMPLETE, Ordering::SeqCst);
+    }
+
+    /// Step-11 drills: the NEXT get_range fails (the ENOSPC/network
+    /// mid-restore shape — any restore error takes the same
+    /// truncate-back-and-retry path).
+    pub fn inject_get_range_failure(&self) {
+        self.fail_next_get_range.store(true, Ordering::SeqCst);
+    }
+
+    /// Step-11 drills: the NEXT get_range stalls `ms` before serving —
+    /// a slow hydration to race concurrent I/O and priority against.
+    pub fn inject_get_range_stall(&self, ms: u64) {
+        self.stall_next_get_range_ms.store(ms, Ordering::SeqCst);
     }
 
     /// Test surface: plant an object directly (foreign writers, torn
@@ -289,6 +307,37 @@ impl ObjectStore for MemoryStore {
             }
         }
         Ok((o.to_meta(), o.bytes.clone()))
+    }
+
+    async fn get_range(
+        &self,
+        key: &str,
+        offset: u64,
+        len: u64,
+        if_match: &str,
+    ) -> StoreResult<Bytes> {
+        // One-shot injections for the step-11 drills.
+        if self.fail_next_get_range.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::Other("injected get_range failure".into()));
+        }
+        let stall = self.stall_next_get_range_ms.swap(0, Ordering::SeqCst);
+        if stall > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(stall)).await;
+        }
+        let inner = self.inner.lock().unwrap();
+        let o = inner
+            .objects
+            .get(key)
+            .ok_or_else(|| StoreError::NotFound(key.into()))?;
+        if o.etag != if_match {
+            return Err(StoreError::PreconditionFailed(format!(
+                "get_range {}: etag {} != {}",
+                key, o.etag, if_match
+            )));
+        }
+        let start = offset.min(o.bytes.len() as u64) as usize;
+        let end = (offset + len).min(o.bytes.len() as u64) as usize;
+        Ok(o.bytes.slice(start..end))
     }
 
     async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>> {

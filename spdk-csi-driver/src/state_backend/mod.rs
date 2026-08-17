@@ -544,6 +544,12 @@ pub struct TierEvictedRow {
     /// Local path at eviction time (reconciler's handle to the file).
     pub path: String,
     pub evicted_unix: u64,
+    /// Step 11: set durably BEFORE hydration writes its first byte.
+    /// This is what lets the reconciler tell a crashed HYDRATION
+    /// (partial bytes = garbage, bucket is truth ⇒ truncate back to
+    /// the stub) from the C2 EVICTION crash (full original bytes ⇒
+    /// finish the truncate). `None` = not hydrating.
+    pub hydrating_unix: Option<u64>,
 }
 
 impl WriteOp {
@@ -825,6 +831,16 @@ pub trait StateBackend: Send + Sync {
     /// Clear a marker (hydration completing — step 11 — or the
     /// reconciler rolling back a half-eviction).
     async fn tier_delete_evicted(&self, dev: u64, ino: u64) -> StateBackendResult<()>;
+
+    /// Step 11: flip the marker's hydrating flag. `Some(ts)` BEFORE
+    /// the restore's first byte; `None` when a failed/crashed restore
+    /// has been truncated back to the stub.
+    async fn tier_set_hydrating(
+        &self,
+        dev: u64,
+        ino: u64,
+        hydrating_unix: Option<u64>,
+    ) -> StateBackendResult<()>;
 
     /// Highest logical end covered by a file's COMMITTED extents (0 if
     /// none). The stub's length only advances at LAYOUTCOMMIT, so this

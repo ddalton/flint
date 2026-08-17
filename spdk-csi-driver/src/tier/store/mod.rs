@@ -328,6 +328,19 @@ pub trait ObjectStore: Send + Sync {
     /// of the publish path).
     async fn get_whole(&self, key: &str, if_match: Option<&str>) -> StoreResult<(ObjectMeta, Bytes)>;
 
+    /// Ranged read (step 11's streaming restore — a multi-GiB
+    /// hydration must never buffer the whole object). ALWAYS guarded:
+    /// each chunk's If-Match pins the same object version end-to-end;
+    /// a 412 mid-restore is the S3-wins foreign-overwrite signal. The
+    /// caller never requests past the object's end.
+    async fn get_range(
+        &self,
+        key: &str,
+        offset: u64,
+        len: u64,
+        if_match: &str,
+    ) -> StoreResult<Bytes>;
+
     async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>>;
 
     async fn delete(&self, key: &str) -> StoreResult<()>;

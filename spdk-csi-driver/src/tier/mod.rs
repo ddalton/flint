@@ -33,6 +33,13 @@
 //! hydration in step 11 — an evicted file cannot be read back until
 //! then.
 
+//! Step 11: `hydrate` — in-place restore into the marker inode
+//! (A5/C6), the durable hydrating flag (crashed restores truncate
+//! back, never serve partials), write-pending priority + RPC parking
+//! (the step-9 gate findings), S3-wins foreign adopts, and the A10
+//! admission wait. The watermark-driven `evict_pass` goes live with
+//! it.
+
 pub mod arbitrate;
 pub mod capture;
 pub mod durable;
@@ -40,6 +47,7 @@ pub mod epoch;
 pub mod evict;
 pub mod flush;
 pub mod gate;
+pub mod hydrate;
 pub mod identity;
 pub mod meter;
 pub mod space;

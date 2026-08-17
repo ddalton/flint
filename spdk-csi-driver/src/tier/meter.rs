@@ -91,6 +91,15 @@ counters! {
     /// Content ops answered NFS4ERR_DELAY because the file is evicted
     /// (step 11 turns these into hydrations).
     evicted_op_delays,
+    /// Hydration (step 11).
+    hydrations_started,
+    hydrations_completed,
+    hydration_failures,
+    hydration_bytes,
+    /// A 412 on a ranged restore GET — S3-wins foreign adopts.
+    hydration_foreign_adopts,
+    /// Files evicted by the watermark pass (vs. drills/manual).
+    auto_evictions,
 }
 
 #[inline]
@@ -136,6 +145,12 @@ pub enum Counter {
     EvictRefusedPolicy,
     EvictRefusedVerify,
     EvictedOpDelays,
+    HydrationsStarted,
+    HydrationsCompleted,
+    HydrationFailures,
+    HydrationBytes,
+    HydrationForeignAdopts,
+    AutoEvictions,
 }
 
 impl Counter {
@@ -170,6 +185,12 @@ impl Counter {
             Counter::EvictRefusedPolicy => &evict_refused_policy,
             Counter::EvictRefusedVerify => &evict_refused_verify,
             Counter::EvictedOpDelays => &evicted_op_delays,
+            Counter::HydrationsStarted => &hydrations_started,
+            Counter::HydrationsCompleted => &hydrations_completed,
+            Counter::HydrationFailures => &hydration_failures,
+            Counter::HydrationBytes => &hydration_bytes,
+            Counter::HydrationForeignAdopts => &hydration_foreign_adopts,
+            Counter::AutoEvictions => &auto_evictions,
         }
     }
 }

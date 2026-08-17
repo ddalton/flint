@@ -799,6 +799,8 @@ impl MetadataServer {
         fcfg.part_floor = t.part_floor_bytes.max(store.min_part_size());
         let floor_s = t.flush_floor_secs;
         let quiesce_s = t.quiesce_secs;
+        // The hydrator and the watermark pass share the store.
+        let orch_store = Arc::clone(&store);
         let orch = Arc::new(FlushOrchestrator::new(
             store,
             Arc::clone(&self.backend),
@@ -813,13 +815,67 @@ impl MetadataServer {
         // Step 10 (C2): finish or roll back half-evictions and load
         // the marker consult map — BEFORE the listener binds, so the
         // first READ of an evicted file finds its marker, never a
-        // bare 0-byte stub.
+        // bare 0-byte stub. Step 11 extends it: crashed hydrations are
+        // truncated back to the stub (partials never serve) or, if
+        // provably complete, committed.
         let er = crate::tier::evict::reconcile(&self.backend).await;
-        if er.finished > 0 || er.rolled_back > 0 {
+        if er.finished > 0 || er.rolled_back > 0 || er.hydrations_reset > 0 {
             warn!(
-                "🪣 tier evict reconcile: {} half-eviction(s) finished, {} rolled back",
-                er.finished, er.rolled_back
+                "🪣 tier evict reconcile: {} half-eviction(s) finished, {} rolled back, \
+                 {} crashed hydration(s) reset, {} completed",
+                er.finished, er.rolled_back, er.hydrations_reset, er.hydrations_finished
             );
+        }
+
+        // Step 11: the hydrator — evicted files restore in place on
+        // first touch; WRITE-triggered restores hold a reserved
+        // concurrency slot (step-9 hung-task finding).
+        crate::tier::hydrate::install(
+            Arc::clone(&self.backend),
+            Arc::clone(&orch_store),
+            crate::tier::hydrate::HydrateConfig {
+                hold: Duration::from_secs(t.hydrate_hold_secs.max(1)),
+                concurrency: t.hydrate_concurrency.max(1),
+            },
+        );
+
+        // Step 11: the watermark-driven eviction pass goes LIVE —
+        // hydration exists, so evicted files can come back. Runs on
+        // the flush cadence; each freed file re-checks the gauge via a
+        // forced statvfs so the pass stops promptly.
+        {
+            let backend = Arc::clone(&self.backend);
+            let store = Arc::clone(&orch_store);
+            let export_root = self.export_path.clone();
+            let key_prefix = t.key_prefix.clone();
+            let probe_view = self.base_dispatcher.open_file_view();
+            let tick = Duration::from_secs(t.tick_secs.max(1));
+            tokio::spawn(async move {
+                let probe = move |_dev: u64, ino: u64| probe_view.has_writable_ino(ino);
+                let mut iv = interval(tick);
+                iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    iv.tick().await;
+                    if !crate::tier::space::above_watermark() {
+                        continue;
+                    }
+                    let n = crate::tier::evict::evict_pass(
+                        &backend,
+                        &store,
+                        &export_root,
+                        &key_prefix,
+                        &probe,
+                        &|| {
+                            crate::tier::space::refresh_now();
+                            crate::tier::space::above_watermark()
+                        },
+                    )
+                    .await;
+                    if n > 0 {
+                        info!("🪣 tier: watermark pass evicted {} file(s)", n);
+                    }
+                }
+            });
         }
 
         let tick = Duration::from_secs(t.tick_secs.max(1));

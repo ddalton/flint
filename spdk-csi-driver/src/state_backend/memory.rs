@@ -247,6 +247,18 @@ impl StateBackend for MemoryBackend {
         Ok(())
     }
 
+    async fn tier_set_hydrating(
+        &self,
+        dev: u64,
+        ino: u64,
+        hydrating_unix: Option<u64>,
+    ) -> StateBackendResult<()> {
+        if let Some(mut e) = self.tier_evicted.get_mut(&(dev, ino)) {
+            e.hydrating_unix = hydrating_unix;
+        }
+        Ok(())
+    }
+
     /// Applied inline — DashMap ops are sync and infallible, so the
     /// "queue" is the call itself. Call order = apply order trivially.
     fn enqueue_write(&self, op: WriteOp) {

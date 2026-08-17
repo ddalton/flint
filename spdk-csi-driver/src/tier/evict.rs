@@ -43,7 +43,7 @@ use dashmap::DashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Best-effort marker xattr (stub_binding's discipline: same failure
 /// domain as the file). Value: `generation:etag`. The durable row is
@@ -61,6 +61,12 @@ pub struct EvictedMeta {
     pub size: u64,
     pub key: String,
     pub generation: u64,
+    /// The object version hydration must fetch (each ranged GET pins
+    /// it with If-Match).
+    pub etag: String,
+    /// Expected content CRC (wire form) — hydration verifies the
+    /// restored stream against it.
+    pub crc64_b64: String,
 }
 
 fn markers() -> &'static DashMap<(u64, u64), EvictedMeta> {
@@ -110,11 +116,28 @@ pub fn forget(dev: u64, ino: u64) {
     markers().remove(&(dev, ino));
 }
 
+/// The full marker (hydration's work order).
+pub(crate) fn marker_meta(dev: u64, ino: u64) -> Option<EvictedMeta> {
+    markers().get(&(dev, ino)).map(|m| m.clone())
+}
+
+/// Hydration updates the marker in place on a foreign-overwrite adopt
+/// (S3-wins: the bucket's CURRENT object becomes the restore target).
+pub(crate) fn update_marker(dev: u64, ino: u64, meta: EvictedMeta) {
+    markers().insert((dev, ino), meta);
+}
+
 #[cfg(test)]
 pub(crate) fn install_marker_for_tests(dev: u64, ino: u64, size: u64) {
     markers().insert(
         (dev, ino),
-        EvictedMeta { size, key: String::new(), generation: 0 },
+        EvictedMeta {
+            size,
+            key: String::new(),
+            generation: 0,
+            etag: String::new(),
+            crc64_b64: String::new(),
+        },
     );
 }
 
@@ -167,19 +190,27 @@ pub enum EvictOutcome {
 // ── test failpoint (the C2 crash drill) ──────────────────────────────
 
 #[cfg(test)]
-static FAIL_AFTER_ROW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FAIL_AFTER_ROW: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
 
-/// Next evict_file "crashes" (returns) right after the durable marker
-/// commit, before the truncate — the exact C2 window.
+/// The next evict_file OF THIS IDENTITY "crashes" (returns) right
+/// after the durable marker commit, before the truncate — the exact
+/// C2 window. Targeted, so parallel tests' evictions never consume
+/// each other's injections.
 #[cfg(test)]
-pub(crate) fn fail_after_row_once() {
-    FAIL_AFTER_ROW.store(true, std::sync::atomic::Ordering::SeqCst);
+pub(crate) fn fail_after_row_once(dev: u64, ino: u64) {
+    *FAIL_AFTER_ROW.lock().unwrap() = Some((dev, ino));
 }
 
-fn take_fail_after_row() -> bool {
+#[allow(unused_variables)]
+fn take_fail_after_row(dev: u64, ino: u64) -> bool {
     #[cfg(test)]
     {
-        FAIL_AFTER_ROW.swap(false, std::sync::atomic::Ordering::SeqCst)
+        let mut g = FAIL_AFTER_ROW.lock().unwrap();
+        if *g == Some((dev, ino)) {
+            *g = None;
+            return true;
+        }
+        false
     }
     #[cfg(not(test))]
     {
@@ -330,6 +361,7 @@ pub async fn evict_file(
         size: gen_row.size,
         path: path.to_string_lossy().into_owned(),
         evicted_unix: now_unix(),
+        hydrating_unix: None,
     };
     if let Err(e) = backend.tier_put_evicted(&row).await {
         return EvictOutcome::Refused(Refusal::Io(format!("marker row: {}", e)));
@@ -341,7 +373,7 @@ pub async fn evict_file(
         warn!("tier evict: marker xattr on {}: {} (row is authoritative)", path.display(), e);
     }
 
-    if take_fail_after_row() {
+    if take_fail_after_row(dev, ino) {
         // TEST-ONLY simulated crash in the C2 window: marker durable,
         // bytes intact. The reconciler owns this state.
         return EvictOutcome::Refused(Refusal::Io("injected crash after marker".into()));
@@ -363,7 +395,13 @@ pub async fn evict_file(
     // Marker into the consult map BEFORE the exclusion drops.
     markers().insert(
         (dev, ino),
-        EvictedMeta { size: row.size, key: row.key.clone(), generation: row.generation },
+        EvictedMeta {
+            size: row.size,
+            key: row.key.clone(),
+            generation: row.generation,
+            etag: row.etag.clone(),
+            crc64_b64: row.crc64_b64.clone(),
+        },
     );
 
     // Capacity returns only now — after the destructive step is
@@ -401,6 +439,14 @@ pub struct ReconcileReport {
     /// Marker present but local bytes diverge from the recorded CRC —
     /// local wins: marker rolled back, file untouched.
     pub rolled_back: usize,
+    /// Step 11: a hydration crashed AFTER its restore completed but
+    /// before the marker delete — CRC-verified complete, marker
+    /// cleared, bytes kept.
+    pub hydrations_finished: usize,
+    /// Step 11: a hydration crashed mid-restore — the partial bytes
+    /// are garbage (the bucket is the truth): truncated back to the
+    /// stub, flag cleared, still evicted.
+    pub hydrations_reset: usize,
     /// Rows whose path no longer resolves to their identity — kept,
     /// warned (step 12's hygiene owns them).
     pub orphaned: usize,
@@ -418,7 +464,10 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
             return report;
         }
     };
-    markers().clear();
+    // NO map clear here: at real startup the map is empty anyway, and
+    // arms below insert/forget per row — while in the test universe a
+    // clear would wipe markers belonging to OTHER backends (the
+    // one-backend production assumption doesn't hold there).
     for row in rows {
         let path = std::path::PathBuf::from(&row.path);
         #[cfg(unix)]
@@ -428,13 +477,66 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
         });
         #[cfg(not(unix))]
         let resolved: Option<(u64, u64, u64)> = None;
+        let meta_of = |row: &TierEvictedRow| EvictedMeta {
+            size: row.size,
+            key: row.key.clone(),
+            generation: row.generation,
+            etag: row.etag.clone(),
+            crc64_b64: row.crc64_b64.clone(),
+        };
         match resolved {
+            // ── step 11: a hydration was in flight when we died ──────
+            Some((d, i, len)) if d == row.dev && i == row.ino && row.hydrating_unix.is_some() => {
+                let complete = len == row.size
+                    && matches!(
+                        crate::tier::flush::file_crc(&path).await,
+                        Ok(crc) if crc64_to_b64(crc) == row.crc64_b64
+                    );
+                if complete {
+                    // Restore finished; only the marker delete was
+                    // lost. Finish it — bytes are verified.
+                    let _ = backend.tier_delete_evicted(row.dev, row.ino).await;
+                    remove_xattr_best_effort(&path);
+                    forget(row.dev, row.ino);
+                    report.hydrations_finished += 1;
+                    info!(
+                        "tier evict reconcile: hydration of {} had completed — marker \
+                         cleared, bytes kept",
+                        path.display()
+                    );
+                } else {
+                    // Partial restore = garbage; the bucket is the
+                    // truth. Back to the stub; hydration re-runs on
+                    // demand.
+                    match truncate_in_place(&path) {
+                        Ok(()) => {
+                            let _ = backend.tier_set_hydrating(row.dev, row.ino, None).await;
+                            markers().insert((row.dev, row.ino), meta_of(&row));
+                            report.hydrations_reset += 1;
+                            warn!(
+                                "tier evict reconcile: crashed hydration of {} — partial \
+                                 bytes truncated back to the stub (bucket remains truth)",
+                                path.display()
+                            );
+                        }
+                        Err(e) => {
+                            // Cannot restore the stub shape: leave the
+                            // row + flag; ops keep parking; retried at
+                            // next startup.
+                            error!(
+                                "tier evict reconcile: cannot reset crashed hydration of {}: {}",
+                                path.display(),
+                                e
+                            );
+                            markers().insert((row.dev, row.ino), meta_of(&row));
+                            report.hydrations_reset += 1;
+                        }
+                    }
+                }
+            }
             Some((d, i, len)) if d == row.dev && i == row.ino => {
                 if len == 0 {
-                    markers().insert(
-                        (row.dev, row.ino),
-                        EvictedMeta { size: row.size, key: row.key.clone(), generation: row.generation },
-                    );
+                    markers().insert((row.dev, row.ino), meta_of(&row));
                     report.loaded += 1;
                 } else {
                     // The C2 window: marker committed, truncate never
@@ -446,14 +548,7 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
                         {
                             match truncate_in_place(&path) {
                                 Ok(()) => {
-                                    markers().insert(
-                                        (row.dev, row.ino),
-                                        EvictedMeta {
-                                            size: row.size,
-                                            key: row.key.clone(),
-                                            generation: row.generation,
-                                        },
-                                    );
+                                    markers().insert((row.dev, row.ino), meta_of(&row));
                                     report.finished += 1;
                                     info!(
                                         "tier evict reconcile: finished the half-eviction of {} \
@@ -474,6 +569,7 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
                                     );
                                     let _ = backend.tier_delete_evicted(row.dev, row.ino).await;
                                     remove_xattr_best_effort(&path);
+                                    forget(row.dev, row.ino);
                                     report.rolled_back += 1;
                                 }
                             }
@@ -489,6 +585,7 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
                             );
                             let _ = backend.tier_delete_evicted(row.dev, row.ino).await;
                             remove_xattr_best_effort(&path);
+                            forget(row.dev, row.ino);
                             report.rolled_back += 1;
                         }
                     }
@@ -555,7 +652,7 @@ fn set_xattr(_path: &Path, _name: &str, _value: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn remove_xattr_best_effort(path: &Path) {
+pub(crate) fn remove_xattr_best_effort(path: &Path) {
     use std::os::unix::ffi::OsStrExt;
     if let (Ok(p), Ok(n)) = (
         std::ffi::CString::new(path.as_os_str().as_bytes()),
@@ -566,7 +663,7 @@ fn remove_xattr_best_effort(path: &Path) {
 }
 
 #[cfg(target_os = "macos")]
-fn remove_xattr_best_effort(path: &Path) {
+pub(crate) fn remove_xattr_best_effort(path: &Path) {
     use std::os::unix::ffi::OsStrExt;
     if let (Ok(p), Ok(n)) = (
         std::ffi::CString::new(path.as_os_str().as_bytes()),
@@ -577,7 +674,62 @@ fn remove_xattr_best_effort(path: &Path) {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn remove_xattr_best_effort(_path: &Path) {}
+pub(crate) fn remove_xattr_best_effort(_path: &Path) {}
+
+// ── the watermark-driven pass (step 11 wires it into serve()) ────────
+
+/// Evict eligible clean files, oldest-published first, while `should`
+/// keeps answering true (production: `space::above_watermark()` after
+/// a forced refresh — so freed bytes stop the pass promptly).
+/// Candidate paths derive from the generation rows' keys (a clean
+/// file has no dirty row to carry its path); a row whose key no
+/// longer names its identity (rename pending) refuses inside
+/// `evict_file` and is skipped.
+pub async fn evict_pass(
+    backend: &Arc<dyn StateBackend>,
+    store: &Arc<dyn ObjectStore>,
+    export_root: &Path,
+    key_prefix: &str,
+    writable_open_probe: &(dyn Fn(u64, u64) -> bool + Sync),
+    should: &(dyn Fn() -> bool + Sync),
+) -> usize {
+    let mut rows = match backend.tier_list_generations().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("tier evict pass: cannot list generations: {}", e);
+            return 0;
+        }
+    };
+    // Oldest-published first — the closest thing to cold-first the
+    // rows can say without atime tracking.
+    rows.sort_by_key(|r| r.updated_unix);
+    let mut evicted = 0usize;
+    for row in rows {
+        if !should() {
+            break;
+        }
+        if row.crc64_b64.is_none() || is_evicted(row.dev, row.ino) {
+            continue;
+        }
+        let Some(rel) = row.key.strip_prefix(key_prefix) else { continue };
+        let path = export_root.join(rel);
+        match evict_file(backend, store, &path, &row.key, writable_open_probe).await {
+            EvictOutcome::Evicted { bytes } => {
+                evicted += 1;
+                meter::bump(Counter::AutoEvictions);
+                info!(
+                    "tier evict pass: {} evicted ({} bytes) — watermark pressure",
+                    path.display(),
+                    bytes
+                );
+            }
+            EvictOutcome::Refused(r) => {
+                debug!("tier evict pass: {} refused: {:?}", path.display(), r);
+            }
+        }
+    }
+    evicted
+}
 
 #[cfg(test)]
 mod tests {
@@ -808,7 +960,7 @@ mod tests {
         let (dev, ino, key) = published_file(&r, "c2.bin", b"the c2 window!!!").await;
         let f = r.root.join("c2.bin");
 
-        fail_after_row_once();
+        fail_after_row_once(dev, ino);
         let out = evict_file(&r.backend, &store, &f, &key, NO_WRITERS).await;
         assert!(matches!(out, EvictOutcome::Refused(Refusal::Io(_))));
         assert_eq!(
@@ -849,6 +1001,7 @@ mod tests {
                 size: 17,
                 path: f.to_string_lossy().into_owned(),
                 evicted_unix: 1,
+                hydrating_unix: None,
             })
             .await
             .unwrap();
@@ -966,5 +1119,35 @@ mod tests {
             "every stormed byte must be in the bucket — nothing lost to eviction"
         );
         forget(dev, ino);
+    }
+
+    /// Step 11: the watermark pass evicts only clean, CRC-eligible,
+    /// key-consistent files (oldest-published first) and stops the
+    /// moment `should` flips false.
+    #[tokio::test]
+    async fn evict_pass_takes_only_eligible_files_and_respects_should() {
+        let r = rig();
+        let store = store_of(&r);
+        let (_ad, _ai, _ka) = published_file(&r, "pass-a.bin", b"file a contents!").await;
+        let (_bd, _bi, _kb) = published_file(&r, "pass-b.bin", b"file b contents!").await;
+        let (cd, ci, _kc) = published_file(&r, "pass-c.bin", b"file c contents!").await;
+        // Dirty C after its publish: not eligible.
+        let c = r.root.join("pass-c.bin");
+        note_and_land(&r, &c, Mutation::Write { offset: 0, len: 4 }).await;
+
+        // should=false: nothing moves.
+        let n = evict_pass(&r.backend, &store, &r.root, "t/", NO_WRITERS, &|| false).await;
+        assert_eq!(n, 0);
+
+        let n = evict_pass(&r.backend, &store, &r.root, "t/", NO_WRITERS, &|| true).await;
+        assert_eq!(n, 2, "exactly the two clean files evict");
+        assert_eq!(std::fs::metadata(r.root.join("pass-a.bin")).unwrap().len(), 0);
+        assert_eq!(std::fs::metadata(r.root.join("pass-b.bin")).unwrap().len(), 0);
+        assert_eq!(
+            std::fs::read(&c).unwrap(),
+            b"file c contents!",
+            "the dirty file must be untouched"
+        );
+        assert!(!is_evicted(cd, ci));
     }
 }

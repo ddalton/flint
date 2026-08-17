@@ -198,6 +198,22 @@ impl SqliteBackend {
             .map_err(|e| StateBackendError::Storage(format!("tier_dirty mark_seq: {}", e)))?;
         }
 
+        // Step 11's hydrating flag on eviction markers (NULL = not
+        // hydrating). Backfill for step-10 databases.
+        let has_hydrating: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tier_evicted') WHERE name='hydrating_unix'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| StateBackendError::Storage(format!("tier_evicted introspect: {}", e)))?;
+        if has_hydrating == 0 {
+            conn.execute_batch(
+                "ALTER TABLE tier_evicted ADD COLUMN hydrating_unix INTEGER;",
+            )
+            .map_err(|e| StateBackendError::Storage(format!("tier_evicted hydrating: {}", e)))?;
+        }
+
         // Schema version: insert if first run, else verify match. This
         // is the operator-visible canary for "the DB is from an older
         // build" — better to fail open than silently misread rows.
@@ -1124,8 +1140,9 @@ impl StateBackend for SqliteBackend {
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO tier_evicted
-                 (dev, ino, key, generation, etag, crc64_b64, size, path, evicted_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (dev, ino, key, generation, etag, crc64_b64, size, path, evicted_unix,
+                  hydrating_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     u64_to_i64(r.dev),
                     u64_to_i64(r.ino),
@@ -1136,6 +1153,7 @@ impl StateBackend for SqliteBackend {
                     u64_to_i64(r.size),
                     r.path,
                     u64_to_i64(r.evicted_unix),
+                    r.hydrating_unix.map(u64_to_i64),
                 ],
             )
         })
@@ -1146,7 +1164,8 @@ impl StateBackend for SqliteBackend {
     async fn tier_list_evicted(&self) -> StateBackendResult<Vec<super::TierEvictedRow>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT dev, ino, key, generation, etag, crc64_b64, size, path, evicted_unix
+                "SELECT dev, ino, key, generation, etag, crc64_b64, size, path, evicted_unix,
+                        hydrating_unix
                  FROM tier_evicted",
             )?;
             let rows = stmt
@@ -1161,12 +1180,31 @@ impl StateBackend for SqliteBackend {
                         size: i64_to_u64(r.get(6)?),
                         path: r.get(7)?,
                         evicted_unix: i64_to_u64(r.get(8)?),
+                        hydrating_unix: r.get::<_, Option<i64>>(9)?.map(i64_to_u64),
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         })
         .await
+    }
+
+    async fn tier_set_hydrating(
+        &self,
+        dev: u64,
+        ino: u64,
+        hydrating_unix: Option<u64>,
+    ) -> StateBackendResult<()> {
+        let (d, i) = (u64_to_i64(dev), u64_to_i64(ino));
+        let h = hydrating_unix.map(u64_to_i64);
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE tier_evicted SET hydrating_unix = ?3 WHERE dev = ?1 AND ino = ?2",
+                params![d, i, h],
+            )
+        })
+        .await
+        .map(|_| ())
     }
 
     async fn tier_delete_evicted(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
@@ -2656,6 +2694,10 @@ CREATE TABLE IF NOT EXISTS tier_evicted (
     size INTEGER NOT NULL,
     path TEXT NOT NULL,
     evicted_unix INTEGER NOT NULL,
+    -- step 11: non-NULL while a hydration is restoring bytes into the
+    -- stub. Disambiguates a crashed hydration (partial bytes ⇒
+    -- truncate back) from the C2 eviction crash (full bytes ⇒ finish).
+    hydrating_unix INTEGER,
     PRIMARY KEY (dev, ino)
 );
 
@@ -3609,6 +3651,7 @@ mod tests {
             size: 1024,
             path: p.into(),
             evicted_unix: 11,
+            hydrating_unix: None,
         };
         {
             let be = SqliteBackend::open(&path).unwrap();

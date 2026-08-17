@@ -198,6 +198,16 @@ pub struct TierConfig {
     /// to protect).
     #[serde(rename = "ballastBytes", default = "default_tier_ballast")]
     pub ballast_bytes: u64,
+
+    /// A5: in-RPC park bound while a hydration runs — one DELAY per
+    /// hold instead of ten per second (well below timeo).
+    #[serde(rename = "hydrateHoldSecs", default = "default_tier_hydrate_hold")]
+    pub hydrate_hold_secs: u64,
+
+    /// Concurrent restores (a +1 slot stays reserved for
+    /// WRITE-triggered hydrations — step 9's hung-task finding).
+    #[serde(rename = "hydrateConcurrency", default = "default_tier_hydrate_concurrency")]
+    pub hydrate_concurrency: usize,
 }
 
 fn default_tier_flush_floor() -> u64 {
@@ -229,6 +239,12 @@ fn default_tier_watermark() -> u8 {
 }
 fn default_tier_ballast() -> u64 {
     64 * 1024 * 1024
+}
+fn default_tier_hydrate_hold() -> u64 {
+    15
+}
+fn default_tier_hydrate_concurrency() -> usize {
+    4
 }
 
 /// Block-export reconciler settings (design doc §5, phase 1: one tgt per
@@ -949,6 +965,8 @@ mod tests {
         assert_eq!(t.reserve_bytes, 256 * 1024 * 1024);
         assert_eq!(t.watermark_pct, 85);
         assert_eq!(t.ballast_bytes, 64 * 1024 * 1024);
+        assert_eq!(t.hydrate_hold_secs, 15);
+        assert_eq!(t.hydrate_concurrency, 4);
 
         let t2: TierConfig = serde_yaml::from_str(
             "bucket: b\nenabled: false\nkeyPrefix: vol1/\nendpoint: \"http://minio:9000\"\nepochLeaseMisses: 3\n",

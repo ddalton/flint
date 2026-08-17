@@ -90,6 +90,22 @@ fn same_file(a: &std::fs::File, b: &std::fs::File) -> std::io::Result<bool> {
     Ok(x.dev() == y.dev() && x.ino() == y.ino())
 }
 
+/// Step 11: fire a hydration request from an fd + path (the perfops
+/// closures hold files, not identities).
+fn request_by_file(f: &std::fs::File, path: &std::path::Path, t: crate::tier::hydrate::Trigger) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(md) = f.metadata() {
+            crate::tier::hydrate::request(md.dev(), md.ino(), path, t);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (f, path, t);
+    }
+}
+
 #[cfg(not(unix))]
 fn same_file(_a: &std::fs::File, _b: &std::fs::File) -> std::io::Result<bool> {
     Ok(false)
@@ -679,15 +695,25 @@ impl PerfOperationHandler {
             // Step 10: BOTH ends consult the eviction marker — an
             // evicted source would copy stub bytes as if they were
             // data; an evicted destination is the C6 zero-publish
-            // shape. DELAY until hydration (step 11).
-            if crate::tier::evict::file_is_evicted(&src_file)
-                || crate::tier::evict::file_is_evicted(&dst_file)
+            // shape. Step 11: DELAY triggers hydration (src as a read,
+            // dst with write priority).
             {
-                crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "tier: COPY endpoint evicted (awaiting hydration)",
-                ));
+                let mut parked = false;
+                if crate::tier::evict::file_is_evicted(&src_file) {
+                    request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
+                    parked = true;
+                }
+                if crate::tier::evict::file_is_evicted(&dst_file) {
+                    request_by_file(&dst_file, &dst_path, crate::tier::hydrate::Trigger::Write);
+                    parked = true;
+                }
+                if parked {
+                    crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "tier: COPY endpoint evicted (awaiting hydration)",
+                    ));
+                }
             }
 
             // Resolves ca_count == 0 to "through EOF" and enforces the
@@ -986,15 +1012,24 @@ impl PerfOperationHandler {
             })?;
 
             // Step 10: both ends consult the eviction marker (same
-            // rationale as COPY).
-            if crate::tier::evict::file_is_evicted(&src_file)
-                || crate::tier::evict::file_is_evicted(&dst_file)
+            // rationale as COPY). Step 11: DELAY triggers hydration.
             {
-                crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "tier: CLONE endpoint evicted (awaiting hydration)",
-                ));
+                let mut parked = false;
+                if crate::tier::evict::file_is_evicted(&src_file) {
+                    request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
+                    parked = true;
+                }
+                if crate::tier::evict::file_is_evicted(&dst_file) {
+                    request_by_file(&dst_file, &dst_path, crate::tier::hydrate::Trigger::Write);
+                    parked = true;
+                }
+                if parked {
+                    crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "tier: CLONE endpoint evicted (awaiting hydration)",
+                    ));
+                }
             }
 
             // Fast path. Failure here is free — nothing has been written.
@@ -1167,8 +1202,10 @@ impl PerfOperationHandler {
                     )
                 })?;
                 // Step 10: ALLOCATE/DEALLOCATE against the evicted
-                // stub is not an operation on the data. DELAY.
+                // stub is not an operation on the data. Step 11: DELAY
+                // triggers hydration with write priority.
                 if crate::tier::evict::file_is_evicted(&file) {
+                    request_by_file(&file, &p, crate::tier::hydrate::Trigger::Write);
                     crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,

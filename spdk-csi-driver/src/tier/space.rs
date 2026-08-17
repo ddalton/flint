@@ -153,6 +153,18 @@ pub fn admit_bytes(path: &Path, len: u64) -> Result<(), NoSpace> {
     Err(NoSpace)
 }
 
+/// A10 hydration admission (step 11): may an object of `len` bytes be
+/// restored right now? False = wait — the watermark pass may be
+/// freeing space. Path-scoped like the write admission; headroom
+/// already excludes the reserve.
+pub fn admit_hydration(path: &Path, len: u64) -> bool {
+    let Some(s) = current() else { return true };
+    if !path.starts_with(&s.cfg.root) {
+        return true;
+    }
+    s.headroom() >= len
+}
+
 /// A10 admission for object creation (OPEN-create / CREATE).
 pub fn admit_create(path: &Path) -> Result<(), NoSpace> {
     let Some(s) = current() else { return Ok(()) };
@@ -169,6 +181,15 @@ pub fn admit_create(path: &Path) -> Result<(), NoSpace> {
 /// Step 10's eviction trigger reads this.
 pub fn above_watermark() -> bool {
     current().is_some_and(|s| s.above_watermark.load(Ordering::Relaxed))
+}
+
+/// Synchronous statvfs refresh of the installed model (the evict pass
+/// calls this between files so freed bytes stop it promptly instead
+/// of waiting out the 2 s refresher).
+pub fn refresh_now() {
+    if let Some(s) = current() {
+        s.refresh();
+    }
 }
 
 impl Space {

@@ -544,11 +544,17 @@ fn apply_settable_attrs_inner(
         };
         // Step 10: size changes to an EVICTED file park like writes —
         // a truncate against the 0-byte stub is not a truncate of the
-        // data (hydrate-first from step 11).
+        // data. Step 11: hydrate-first, with WRITE priority.
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             if crate::tier::evict::is_evicted(lmeta.dev(), lmeta.ino()) {
+                crate::tier::hydrate::request(
+                    lmeta.dev(),
+                    lmeta.ino(),
+                    path,
+                    crate::tier::hydrate::Trigger::Write,
+                );
                 crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                 return (applied, Some(Nfs4Status::Delay));
             }

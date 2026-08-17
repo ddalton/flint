@@ -217,6 +217,15 @@ impl OpenFileView {
     pub fn entry_for_ino(&self, ino: u64) -> Option<(std::path::PathBuf, Arc<File>)> {
         self.fd_cache.find_by_ino(ino, false).map(|e| (e.path, e.file))
     }
+
+    /// Step 10/11's writable-open probe: does any cached fd hold this
+    /// inode writable? (A4: open-hot files are non-evictable. The
+    /// cache reflects live opens; the gate + marker consults are the
+    /// correctness fences — this is eviction POLICY, keeping hot files
+    /// from thrashing evict/hydrate.)
+    pub fn has_writable_ino(&self, ino: u64) -> bool {
+        self.fd_cache.find_by_ino(ino, true).is_some()
+    }
 }
 
 /// Whether an fd may be cached under this stateid. Special stateids
@@ -1151,6 +1160,9 @@ impl IoOperationHandler {
 
         // Get filename for logging before moving path
         let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
+        // Step 11: kept for the evicted-DELAY arm's RPC parking (only
+        // cloned when the tier is on; the hot path pays one branch).
+        let hyd_park_path = crate::tier::capture::enabled().then(|| path.clone());
 
         // Reuse the cached fd for this stateid when it maps to the
         // same file; otherwise open and cache. The path check guards
@@ -1215,6 +1227,13 @@ impl IoOperationHandler {
             {
                 use std::os::unix::fs::MetadataExt;
                 if crate::tier::evict::is_evicted(metadata.dev(), metadata.ino()) {
+                    // Step 11: this READ is the hydration trigger.
+                    crate::tier::hydrate::request(
+                        metadata.dev(),
+                        metadata.ino(),
+                        &path,
+                        crate::tier::hydrate::Trigger::Read,
+                    );
                     crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
@@ -1266,6 +1285,15 @@ impl IoOperationHandler {
                     std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
                     _ => Nfs4Status::Io,
                 };
+                // Step 11: park the RPC up to the hold bound before
+                // answering DELAY — one DELAY per hold instead of ten
+                // per second (step-9 finding 1), and the client's next
+                // retry serves ~0.1 s after the restore lands.
+                if status == Nfs4Status::Delay {
+                    if let Some(p) = &hyd_park_path {
+                        crate::tier::hydrate::park(p).await;
+                    }
+                }
                 ReadRes {
                     status,
                     eof: false,
@@ -1470,6 +1498,8 @@ impl IoOperationHandler {
         // A2 capture: the durable mark wants the path. Cloned only when
         // capture is on — this is the hottest lane in the server.
         let cap_path = crate::tier::capture::enabled().then(|| path.clone());
+        // Step 11: the evicted-DELAY arm's parking handle.
+        let hyd_park_path = cap_path.clone();
 
         // A10 admission: NOSPC delivered BEFORE hard-full, while the
         // reserve still holds — the errno applications handle, and the
@@ -1533,6 +1563,17 @@ impl IoOperationHandler {
                 use std::os::unix::fs::MetadataExt;
                 if let Ok(md) = file_arc.metadata() {
                     if crate::tier::evict::is_evicted(md.dev(), md.ino()) {
+                        // Step 11: hydrate-first WRITE barrier — this
+                        // write's trigger carries WRITE priority
+                        // (step-9 finding 2: bound the fsync park).
+                        if let Some(p) = cap_path.as_deref() {
+                            crate::tier::hydrate::request(
+                                md.dev(),
+                                md.ino(),
+                                p,
+                                crate::tier::hydrate::Trigger::Write,
+                            );
+                        }
                         crate::tier::meter::bump(
                             crate::tier::meter::Counter::EvictedOpDelays,
                         );
@@ -1614,6 +1655,12 @@ impl IoOperationHandler {
                     std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
                     _ => Nfs4Status::Io,
                 });
+                // Step 11: park before the DELAY (see the READ arm).
+                if status == Nfs4Status::Delay {
+                    if let Some(p) = &hyd_park_path {
+                        crate::tier::hydrate::park(p).await;
+                    }
+                }
                 WriteRes {
                     status,
                     count: 0,
@@ -2164,6 +2211,112 @@ mod tests {
             "a refused WRITE must note nothing"
         );
         crate::tier::evict::forget(dev, ino);
+    }
+
+    /// Step 11 end-to-end: a READ of an evicted file triggers
+    /// hydration through the real handler; the parked retry serves the
+    /// restored bytes. The ONLY test that installs the global
+    /// hydrator (module drills use local instances — a second global
+    /// install would race this one).
+    #[tokio::test]
+    async fn read_of_evicted_file_hydrates_and_serves() {
+        use crate::tier::{capture, evict, flush, hydrate, store::memory::MemoryStore};
+        use std::os::unix::fs::MetadataExt;
+        capture::force_enable();
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let export_fh = fh_mgr.path_to_filehandle(fh_mgr.get_export_path()).unwrap();
+        ctx.current_fh = Some(export_fh);
+        let open_res = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_BOTH,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"hydrate-owner".to_vec(),
+                    openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+                    claim: OpenClaim::Null("hydrate-e2e.bin".to_string()),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(open_res.status, Nfs4Status::Ok);
+        let stateid = open_res.stateid.unwrap();
+        let path = fh_mgr.get_export_path().join("hydrate-e2e.bin");
+        let content = b"the bytes that went to the bucket and back".to_vec();
+        std::fs::write(&path, &content).unwrap();
+        let md = std::fs::metadata(&path).unwrap();
+        let (dev, ino) = (md.dev(), md.ino());
+        capture::forget(dev, ino);
+
+        // Publish + evict through the real tier machinery.
+        let mem = std::sync::Arc::new(MemoryStore::new());
+        let store: std::sync::Arc<dyn crate::tier::store::ObjectStore> = mem.clone();
+        let backend: std::sync::Arc<dyn crate::state_backend::StateBackend> =
+            std::sync::Arc::new(crate::state_backend::memory::MemoryBackend::new());
+        let mut fcfg =
+            flush::FlushConfig::new(fh_mgr.get_export_path().to_path_buf(), "t/".into());
+        fcfg.floor = std::time::Duration::ZERO;
+        fcfg.quiesce = std::time::Duration::ZERO;
+        let orch = flush::FlushOrchestrator::new(
+            store.clone(),
+            backend.clone(),
+            fcfg,
+            crate::tier::epoch::EpochGuard::held(1),
+        );
+        capture::note_path(&path, capture::Mutation::Whole);
+        for _ in 0..50 {
+            let _ = crate::tier::durable::drain_pending(&backend).await;
+            if backend
+                .tier_list_dirty()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.dev == dev && r.ino == ino && r.path.is_some())
+            {
+                break;
+            }
+            capture::clear_durable(dev, ino);
+            capture::note_path(&path, capture::Mutation::Whole);
+        }
+        orch.tick().await;
+        let g = orch.generation_of(dev, ino).expect("must publish");
+        let out = evict::evict_file(&backend, &store, &path, &g.key, &|_, _| false).await;
+        assert!(matches!(out, evict::EvictOutcome::Evicted { .. }), "{:?}", out);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+
+        hydrate::install(
+            backend.clone(),
+            store,
+            hydrate::HydrateConfig {
+                hold: std::time::Duration::from_secs(5),
+                concurrency: 2,
+            },
+        );
+
+        // First READ: triggers hydration, parks, answers DELAY.
+        let r1 = handler
+            .handle_read(
+                ReadOp { stateid: stateid.clone(), offset: 0, count: content.len() as u32 },
+                &ctx,
+            )
+            .await;
+        assert_eq!(r1.status, Nfs4Status::Delay, "the triggering READ answers DELAY");
+        // The park should have outlived the (instant) restore; the
+        // retry — the kernel's 0.1 s clock — serves.
+        let r2 = handler
+            .handle_read(
+                ReadOp { stateid, offset: 0, count: content.len() as u32 },
+                &ctx,
+            )
+            .await;
+        assert_eq!(r2.status, Nfs4Status::Ok, "the retry must serve the restored bytes");
+        assert_eq!(r2.data.as_ref(), content.as_slice(), "byte-identical after the round trip");
+        assert!(!evict::is_evicted(dev, ino));
+        assert!(
+            capture::snapshot(dev, ino).is_none_or(|c| !c.is_dirty()),
+            "hydration must not dirty the file"
+        );
     }
 
     fn create_test_handler() -> (IoOperationHandler, Arc<FileHandleManager>, TempDir) {

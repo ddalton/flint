@@ -103,6 +103,12 @@ impl CompoundDispatcher {
     ) -> Self {
         Self::new_with_pnfs(fh_mgr, state_mgr, lock_mgr, None)
     }
+
+    /// The io handler's open-fd view — the tier's writable-open probe
+    /// (step 10/11: open-hot files are non-evictable).
+    pub fn open_file_view(&self) -> crate::nfs::v4::operations::ioops::OpenFileView {
+        self.io_handler.open_file_view()
+    }
     
     /// Create a new COMPOUND dispatcher with optional pNFS support
     pub fn new_with_pnfs(
