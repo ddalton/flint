@@ -3510,6 +3510,10 @@ mod tests {
         std::fs::write(&path, vec![9u8; 1000]).unwrap();
         let md = std::fs::metadata(&path).unwrap();
         let (dev, ino) = (md.dev(), md.ino());
+        // ext4 REUSES inode numbers: a dead test file's capture residue
+        // can alias onto this identity (safe in production — pessimal
+        // upload — but this test asserts EXACT capture state). Clear it.
+        crate::tier::capture::forget(dev, ino);
 
         let want = SettableAttrs { size: Some(500), ..Default::default() };
         let (applied, err) = apply_settable_attrs(&path, &want);

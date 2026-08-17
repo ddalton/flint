@@ -1400,6 +1400,14 @@ mod tests {
         let src_path = handler.fh_mgr.get_export_path().join("source.txt");
         let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
         let src_len = std::fs::metadata(&src_path).unwrap().len();
+        // ext4 REUSES inode numbers: a dead test file's capture residue
+        // can alias onto this identity (safe in production — pessimal
+        // upload — but this test asserts EXACT capture state). Clear it.
+        {
+            use std::os::unix::fs::MetadataExt;
+            let m = std::fs::metadata(&dst_path).unwrap();
+            crate::tier::capture::forget(m.dev(), m.ino());
+        }
         let res = handler
             .handle_copy(
                 CopyOp {
@@ -1431,6 +1439,14 @@ mod tests {
         let ctx = CompoundContext::new(2);
         let src_path = handler.fh_mgr.get_export_path().join("source.txt");
         let dst_path = handler.fh_mgr.get_export_path().join("dest.txt");
+        // ext4 REUSES inode numbers: a dead test file's capture residue
+        // can alias onto this identity (safe in production — pessimal
+        // upload — but this test asserts EXACT capture state). Clear it.
+        {
+            use std::os::unix::fs::MetadataExt;
+            let m = std::fs::metadata(&dst_path).unwrap();
+            crate::tier::capture::forget(m.dev(), m.ino());
+        }
         let res = handler
             .handle_clone(
                 CloneOp {
@@ -1462,6 +1478,13 @@ mod tests {
         let mut ctx = CompoundContext::new(0);
         let path = temp.path().join("source.txt");
         ctx.current_fh = Some(handler.fh_mgr.get_or_create_handle(&path).unwrap());
+        // ext4 REUSES inode numbers: a dead test file's capture residue
+        // can alias onto this identity (safe in production — pessimal
+        // upload — but this test asserts EXACT capture state). Clear it.
+        {
+            let m = std::fs::metadata(&path).unwrap();
+            crate::tier::capture::forget(m.dev(), m.ino());
+        }
         let stateid = create_test_stateid(&handler, 1);
         let res = handler
             .handle_allocate(

@@ -1685,6 +1685,13 @@ mod tests {
             .await;
         assert_eq!(open_res.status, Nfs4Status::Ok);
         let stateid = open_res.stateid.unwrap();
+        // ext4 REUSES inode numbers: a dead test file's capture residue
+        // can alias onto this identity (safe in production — pessimal
+        // upload — but this test asserts EXACT capture state). Clear it.
+        {
+            let m = std::fs::metadata(fh_mgr.get_export_path().join("census-write.bin")).unwrap();
+            crate::tier::capture::forget(m.dev(), m.ino());
+        }
 
         let res = handler
             .handle_write(
@@ -1742,6 +1749,10 @@ mod tests {
 
         let md = std::fs::metadata(fh_mgr.get_export_path().join("gate-write.bin")).unwrap();
         let (dev, ino) = (md.dev(), md.ino());
+        // ext4 REUSES inode numbers: a dead test file's capture residue
+        // can alias onto this identity (safe in production — pessimal
+        // upload — but this test asserts EXACT capture state). Clear it.
+        crate::tier::capture::forget(dev, ino);
         let excl = crate::tier::gate::exclude(dev, ino);
         let res = handler.handle_write(write(0), &ctx).await;
         assert_eq!(
