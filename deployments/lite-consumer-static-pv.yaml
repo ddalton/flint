@@ -1,0 +1,71 @@
+# Flint-lite consumer — static PV recipe (docs/flint-lite.md, recipe A).
+#
+# Apply this on ANY cluster that should mount the flint-lite hub.
+# Nothing else to install: the in-tree `nfs:` PV type makes the kubelet
+# mount the hub using the NFS client already in the node kernel.
+#
+# Replace 203.0.113.10 with the hub Service's routable address (its
+# LoadBalancer IP, or the ClusterIP on flat/peered pod networks).
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: flint-lite-shared
+spec:
+  # Capacity is informational for NFS PVs — quota lives on the hub.
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  # Retain: many pods across many clusters share this namespace; a
+  # deleted claim must never take the dataset with it.
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4.1
+    - proto=tcp
+    # hard (the default, stated for clarity): I/O blocks and retries
+    # across hub restarts instead of surfacing EIO to the application.
+    - hard
+  nfs:
+    server: 203.0.113.10
+    path: /
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flint-lite-shared
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany
+  # "" + volumeName pins this claim to the PV above and keeps every
+  # dynamic provisioner out of the way.
+  storageClassName: ""
+  volumeName: flint-lite-shared
+  resources:
+    requests:
+      storage: 100Gi
+---
+# Smoke-test pod: writes a line, then any pod on any cluster with the
+# same PV sees it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: flint-lite-smoke
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - echo "hello from $(hostname) at $(date)" >> /work/hello.txt && cat /work/hello.txt
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  volumes:
+    - name: work
+      persistentVolumeClaim:
+        claimName: flint-lite-shared
