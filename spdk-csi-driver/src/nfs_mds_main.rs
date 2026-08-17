@@ -83,9 +83,12 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
         PnfsConfig::from_env()?
     };
 
-    // Validate mode
-    if config.mode != PnfsMode::MetadataServer {
-        error!("❌ Configuration error: mode must be 'mds' for metadata server");
+    // Validate mode. `mds` runs the full pNFS control plane;
+    // `standalone` (flint-lite) runs the SAME server with layouts off —
+    // one pod, no DS fleet, every byte through the MDS lane.
+    let standalone = config.mode == PnfsMode::Standalone;
+    if config.mode != PnfsMode::MetadataServer && !standalone {
+        error!("❌ Configuration error: mode must be 'mds' or 'standalone'");
         error!("   Current mode: {:?}", config.mode);
         return Err("Invalid configuration mode".into());
     }
@@ -96,7 +99,12 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
         return Err(e.into());
     }
 
-    let mds_config = config.mds.expect("MDS configuration is required");
+    let mut mds_config = config
+        .mds
+        .ok_or("standalone/mds mode requires an 'mds' section (bind, state, exports)")?;
+    if standalone {
+        mds_config.standalone = true;
+    }
     let exports = config.exports;
 
     info!("📊 Configuration:");
@@ -105,9 +113,13 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
     info!("   • Layout Type: {:?}", mds_config.layout.layout_type);
     info!("   • Stripe Size: {} bytes", mds_config.layout.stripe_size);
     info!("   • Layout Policy: {:?}", mds_config.layout.policy);
-    info!("   • Data Servers: {}", mds_config.data_servers.len());
-    for ds in &mds_config.data_servers {
-        info!("     - {} @ {}", ds.device_id, ds.endpoint);
+    if mds_config.standalone {
+        info!("   • Posture: STANDALONE (flint-lite) — layouts off, all I/O MDS-lane");
+    } else {
+        info!("   • Data Servers: {}", mds_config.data_servers.len());
+        for ds in &mds_config.data_servers {
+            info!("     - {} @ {}", ds.device_id, ds.endpoint);
+        }
     }
     info!("   • Exports: {}", exports.len());
     for export in &exports {

@@ -76,6 +76,34 @@ impl MetadataServer {
             ))
         })?;
 
+        // Flint-lite standalone: a coherence authority with no fleet.
+        // The posture must be unambiguous — a config that says
+        // standalone AND lists data servers (or a block export) is two
+        // different servers at once, and whichever the operator meant,
+        // half their config is being ignored. Refuse it.
+        let standalone = config.standalone;
+        if standalone {
+            if !config.data_servers.is_empty() {
+                return Err(crate::pnfs::Error::Config(format!(
+                    "standalone refuses dataServers ({} configured) — drop them or drop \
+                     standalone; layouts are off in this posture and the fleet would \
+                     never be used",
+                    config.data_servers.len()
+                )));
+            }
+            if config.block_export.is_some() {
+                return Err(crate::pnfs::Error::Config(
+                    "standalone refuses blockExport — the block tier needs spdk-tgt and \
+                     layouts, neither of which exists in this posture"
+                        .to_string(),
+                ));
+            }
+            info!(
+                "🪶 STANDALONE posture (flint-lite): layouts OFF — every byte serves \
+                 through the MDS lane; no DS fleet, no block export"
+            );
+        }
+
         // Initialize state manager. The backend kind comes from
         // `config.state.backend` — `memory` for tests / dev work (no
         // restart survival), `sqlite` for production. The shared
@@ -123,7 +151,16 @@ impl MetadataServer {
         // zeros" configuration and must not boot quietly.
         let xattr_ok =
             crate::pnfs::mds::stub_binding::XattrStubBinding::probe(&export_path);
-        if !xattr_ok {
+        if !xattr_ok && standalone {
+            // No layouts ⇒ no striped placements ⇒ no bindings to
+            // mirror. The F67 failure shape cannot occur here, so an
+            // xattr-less export filesystem is not a boot refusal.
+            info!(
+                "export filesystem at {:?} lacks user xattrs — irrelevant in standalone: \
+                 no striped placements exist to bind (F67 machinery idle)",
+                export_path
+            );
+        } else if !xattr_ok {
             let memory_backend = matches!(
                 config.state.backend,
                 crate::pnfs::config::StateBackend::Memory
@@ -169,13 +206,23 @@ impl MetadataServer {
             export_path.to_string_lossy().into_owned(),
         ));
 
-        // Initialize NFSv4 dispatcher WITH pNFS support
-        // This handles ALL NFS and pNFS operations (LAYOUTGET, GETDEVICEINFO, etc.)
+        // Initialize NFSv4 dispatcher. With a pNFS handler it serves
+        // the full op set (LAYOUTGET, GETDEVICEINFO, ...). Standalone
+        // passes None — the DS-proven no-handler path: EXCHANGE_ID
+        // advertises a non-pNFS server, LAYOUTGET answers NotSupp, the
+        // F68a meter never arms (all-MDS I/O is the norm here, not the
+        // F68 pathology), and every READ/WRITE serves from the export
+        // tree through the MDS lane.
+        let pnfs_ops: Option<Arc<dyn crate::pnfs::PnfsOperations>> = if standalone {
+            None
+        } else {
+            Some(operation_handler.clone() as Arc<dyn crate::pnfs::PnfsOperations>)
+        };
         let base_dispatcher = Arc::new(CompoundDispatcher::new_with_pnfs(
             Arc::clone(&fh_manager),
             Arc::clone(&state_mgr),
             lock_mgr,
-            Some(operation_handler.clone() as Arc<dyn crate::pnfs::PnfsOperations>),
+            pnfs_ops,
         ));
 
         // Build the callback fan-out manager once we know the
@@ -484,10 +531,14 @@ impl MetadataServer {
         info!("╚════════════════════════════════════════════════════╝");
         info!("");
         info!("Listening on: {}:{}", self.config.bind.address, self.config.bind.port);
-        info!("Layout Type: {:?}", self.config.layout.layout_type);
-        info!("Stripe Size: {} bytes", self.config.layout.stripe_size);
-        info!("Layout Policy: {:?}", self.config.layout.policy);
-        info!("Registered Data Servers: {}", self.device_registry.count());
+        if self.config.standalone {
+            info!("Posture: STANDALONE (flint-lite) — layouts off, all I/O MDS-lane");
+        } else {
+            info!("Layout Type: {:?}", self.config.layout.layout_type);
+            info!("Stripe Size: {} bytes", self.config.layout.stripe_size);
+            info!("Layout Policy: {:?}", self.config.layout.policy);
+            info!("Registered Data Servers: {}", self.device_registry.count());
+        }
         info!("");
 
         // Phase B.4: pull persisted state out of the backend before
@@ -524,9 +575,16 @@ impl MetadataServer {
         }
         self.start_export_reconcile();
 
-        // Start heartbeat monitor in the background
-        let heartbeat_timeout = Duration::from_secs(self.config.failover.heartbeat_timeout);
-        self.start_heartbeat_monitor(heartbeat_timeout);
+        // Start heartbeat monitor in the background. Standalone has no
+        // fleet to watch — the monitor would only ever report an empty
+        // registry, so it does not start at all.
+        if self.config.standalone {
+            info!("🪶 standalone: heartbeat monitor not started (no DS fleet)");
+        } else {
+            let heartbeat_timeout =
+                Duration::from_secs(self.config.failover.heartbeat_timeout);
+            self.start_heartbeat_monitor(heartbeat_timeout);
+        }
 
         // The lease sweep: the reaper for clients that die holding
         // layouts/grant rows. Client expiry is otherwise LAZY (checked

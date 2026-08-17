@@ -96,6 +96,16 @@ pub struct MdsConfig {
     #[serde(rename = "verifyDsReachability", default)]
     pub verify_ds_reachability: bool,
 
+    /// Flint-lite: run this MDS as a STANDALONE NFSv4.2 server — the
+    /// same binary and state machinery with layouts off. The dispatcher
+    /// gets no pNFS handler, so EXCHANGE_ID advertises a non-pNFS
+    /// server, LAYOUTGET is refused NotSupp, and every byte serves
+    /// through the MDS lane (the DS-proven no-handler path). Set from
+    /// YAML directly or implied by top-level `mode: standalone`.
+    /// Refuses to coexist with `dataServers` or `blockExport`.
+    #[serde(default)]
+    pub standalone: bool,
+
     /// pnfs-block (scsi layout): where this MDS reaches the spdk-tgt
     /// that serves block-class volumes, and the export coordinates it
     /// converges. Absent = this MDS refuses block-class CreateVolume
@@ -832,6 +842,40 @@ mode: mds
 "#;
         let config: PnfsConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.mode, PnfsMode::MetadataServer);
+    }
+
+    /// Flint-lite: `mode: standalone` parses, an mds section with no
+    /// `standalone:` key defaults the flag OFF (existing configs keep
+    /// their meaning), and the flag parses when set explicitly.
+    #[test]
+    fn standalone_mode_and_flag_parse() {
+        let yaml = r#"
+mode: standalone
+"#;
+        let config: PnfsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.mode, PnfsMode::Standalone);
+        assert!(config.validate().is_ok());
+
+        let mds_yaml = r#"
+bind:
+  address: "0.0.0.0"
+  port: 20490
+layout:
+  type: file
+  stripeSize: 8388608
+  policy: stripe
+dataServers: []
+state:
+  backend: memory
+  config: {}
+"#;
+        let mds: MdsConfig = serde_yaml::from_str(mds_yaml).unwrap();
+        assert!(!mds.standalone, "absent key must default to the full MDS posture");
+
+        let lite: MdsConfig =
+            serde_yaml::from_str(&format!("{}standalone: true\n", mds_yaml)).unwrap();
+        assert!(lite.standalone);
+        assert!(lite.data_servers.is_empty());
     }
 
     /// Phase B.4: the new `sqlite` variant of `state.backend`
