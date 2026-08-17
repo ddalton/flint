@@ -444,6 +444,37 @@ pub enum WriteOpKey {
     DeviceNotify(String, Option<u64>),
 }
 
+// ── S3 tier records (L2 step 2 — design review A3 + A6) ─────────────
+
+/// One durable dirty BIT (A3): "this file has content mutations that
+/// generation `g` in the bucket does not have." Keyed by file identity
+/// (dev, ino) like the change counter; `path` is the last known path,
+/// best-effort until the identity-keyed rows of step 6 (A7).
+/// `dirtied_unix` is the FIRST dirtying mutation of the cycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierDirtyEntry {
+    pub dev: u64,
+    pub ino: u64,
+    pub path: Option<String>,
+    pub dirtied_unix: u64,
+}
+
+/// One durable flush intent (A6): committed BEFORE
+/// CreateMultipartUpload/PUT so a crashed flush is arbitrable by HEAD
+/// (own stamp at g+1 ⇒ adopt; ETag == base ⇒ abort + re-flush).
+/// `from_gen`/`base_etag` are None for a new object's first flush;
+/// `mpu_id` is filled in once CreateMultipartUpload returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlushIntentRecord {
+    pub flush_uuid: String,
+    pub path: String,
+    pub from_gen: Option<u64>,
+    pub to_gen: u64,
+    pub mpu_id: Option<String>,
+    pub base_etag: Option<String>,
+    pub created_unix: u64,
+}
+
 impl WriteOp {
     pub fn key(&self) -> WriteOpKey {
         match self {
@@ -617,6 +648,37 @@ pub trait StateBackend: Send + Sync {
         &self,
         volume: &str,
     ) -> StateBackendResult<Result<u64, extent_alloc::ExtentAllocError>>;
+
+    // ── S3 tier (L2 step 2 — A3 dirty bit + A6 flush intents) ────────
+    //
+    // These bypass the ordered `enqueue_write` queue on purpose: the
+    // tier tables are disjoint from every other table (no cross-table
+    // ordering to preserve), and A3's contract is that the caller
+    // AWAITS durability before acking the client — the fire-and-forget
+    // lane is exactly what these must not use.
+
+    /// Upsert dirty bits, one transaction. An existing row keeps its
+    /// original `dirtied_unix` (first-dirty time) and gains a path if
+    /// it had none (`COALESCE` semantics).
+    async fn tier_mark_dirty(&self, entries: &[TierDirtyEntry]) -> StateBackendResult<()>;
+
+    /// Every file whose bit is set — the crash fallback's work list.
+    async fn tier_list_dirty(&self) -> StateBackendResult<Vec<TierDirtyEntry>>;
+
+    /// Clear one file's bit — ONLY in the same logical step that
+    /// commits generation g+1 (the flusher, step 5). Eviction requires
+    /// the bit clear (A4/A5).
+    async fn tier_clear_dirty(&self, dev: u64, ino: u64) -> StateBackendResult<()>;
+
+    /// Create or update (mpu_id backfill) a flush intent.
+    async fn put_flush_intent(&self, i: &FlushIntentRecord) -> StateBackendResult<()>;
+
+    /// All open intents — the startup arbitration sweep's work list
+    /// (steps 4/7).
+    async fn list_flush_intents(&self) -> StateBackendResult<Vec<FlushIntentRecord>>;
+
+    /// Close an intent (flush published, aborted, or adopted).
+    async fn delete_flush_intent(&self, flush_uuid: &str) -> StateBackendResult<()>;
 
     /// Highest logical end covered by a file's COMMITTED extents (0 if
     /// none). The stub's length only advances at LAYOUTCOMMIT, so this

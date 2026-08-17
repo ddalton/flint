@@ -24,7 +24,7 @@ use crate::nfs::v4::filehandle::FileHandleManager;
 use crate::nfs::v4::operations::*;
 use bytes::Bytes;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// COMPOUND dispatcher - processes COMPOUND requests
 /// The MDS-local stub a fallback op resolved to (F66): `file_key` is the
@@ -635,8 +635,57 @@ impl CompoundDispatcher {
         }
     }
 
-    /// Dispatch a single operation to the appropriate handler
+    /// Dispatch a single operation, then honor the tier's pre-ack
+    /// contract (L2 step 2, design review A3 / finding C1): if the op
+    /// queued dirty marks, they must be DURABLE before its reply
+    /// exists. On a failed durable write the successful result is
+    /// doctored to an error — a stable ack whose dirty bit could
+    /// vanish in a crash is exactly the data-loss path C1 confirmed.
+    ///
+    /// The drain runs even when the op itself failed (SETATTR applies
+    /// attrs partially: the size may have landed before a later attr
+    /// errored) — only the doctoring is conditional on success.
     async fn dispatch_operation(
+        &self,
+        operation: Operation,
+        context: &mut CompoundContext,
+    ) -> OperationResult {
+        let result = self.dispatch_operation_inner(operation, context).await;
+        if crate::tier::capture::enabled() && crate::tier::capture::has_pending() {
+            if let Err(e) =
+                crate::tier::durable::drain_pending(&self.state_mgr.backend()).await
+            {
+                if result.status() == Nfs4Status::Ok {
+                    error!(
+                        "tier: durable dirty mark FAILED — refusing the ack (A3): {}",
+                        e
+                    );
+                    return Self::tier_unacked(result);
+                }
+                warn!("tier: durable dirty mark failed on an already-failed op (retries next op): {}", e);
+            }
+        }
+        result
+    }
+
+    /// The error form of each content-mutating result — the only
+    /// variants that can have queued marks. Anything else passes
+    /// through untouched (the queue only fills from the arms below).
+    fn tier_unacked(result: OperationResult) -> OperationResult {
+        match result {
+            OperationResult::Write(..) => OperationResult::Write(Nfs4Status::Io, None),
+            OperationResult::SetAttr(..) => OperationResult::SetAttr(Nfs4Status::Io, vec![]),
+            OperationResult::Open(..) => OperationResult::Open(Nfs4Status::Io, None),
+            OperationResult::Allocate(_) => OperationResult::Allocate(Nfs4Status::Io),
+            OperationResult::Deallocate(_) => OperationResult::Deallocate(Nfs4Status::Io),
+            OperationResult::Copy(..) => OperationResult::Copy(Nfs4Status::Io, None),
+            OperationResult::Clone(_) => OperationResult::Clone(Nfs4Status::Io),
+            other => other,
+        }
+    }
+
+    /// Dispatch a single operation to the appropriate handler
+    async fn dispatch_operation_inner(
         &self,
         operation: Operation,
         context: &mut CompoundContext,
@@ -4227,6 +4276,92 @@ mod tests {
 
     /// Set `current_fh` to a real file in the export and return an Open
     /// stateid bound to it.
+    /// L2 step 2 (A3): a mutating op's reply must not exist before the
+    /// file's durable dirty bit does. Drive a WRITE through the real
+    /// dispatch path and assert the bit reached the backend — then that
+    /// a cleared ROW with an intact durable memo does NOT re-mark (one
+    /// sqlite write per file per cycle).
+    ///
+    /// Parallel lib tests share capture's process-global queue: another
+    /// test's dispatch can drain OUR mark into ITS backend between the
+    /// note and our drain (production has ONE backend). The bounded
+    /// repair loop below re-notes and re-drains into OUR backend; the
+    /// pre-ack PROPERTY is asserted via the durable memo, which any
+    /// successful drain sets regardless of destination.
+    #[tokio::test]
+    async fn write_ack_requires_durable_dirty_bit() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (d, temp) = create_test_dispatcher();
+        let mut ctx = CompoundContext::new(2);
+        let sid = pin_current_fh(&d, &mut ctx, &temp, "durable.bin", &vec![0u8; 4096]);
+        let path = temp.path().canonicalize().unwrap().join("durable.bin");
+        let md = std::fs::metadata(&path).unwrap();
+        let (dev, ino) = (md.dev(), md.ino());
+        let be = d.state_mgr.backend();
+
+        let res = d
+            .dispatch_operation(
+                crate::nfs::v4::compound::Operation::Write {
+                    stateid: sid,
+                    offset: 0,
+                    stable: 2, // FILE_SYNC4 — the ack A3 is about
+                    data: Bytes::from(vec![9u8; 512]),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(res.status(), Nfs4Status::Ok);
+        assert!(
+            crate::tier::capture::is_durable(dev, ino),
+            "the reply exists but the durable memo is unset — the pre-ack drain \
+             did not run"
+        );
+        // Land the row in OUR backend (theft repair; see doc comment).
+        let mut landed = false;
+        for _ in 0..50 {
+            if be.tier_list_dirty().await.unwrap().iter().any(|r| r.dev == dev && r.ino == ino) {
+                landed = true;
+                break;
+            }
+            crate::tier::capture::clear_durable(dev, ino);
+            crate::tier::capture::note(
+                dev,
+                ino,
+                crate::tier::capture::Mutation::Write { offset: 0, len: 1 },
+            );
+            let _ = crate::tier::durable::drain_pending(&be).await;
+        }
+        assert!(landed, "the dirty row never reached the backend");
+
+        // Mark-once: clear the ROW but keep the memo; a second WRITE
+        // must not re-create it.
+        be.tier_clear_dirty(dev, ino).await.unwrap();
+        let sid2 = d.state_mgr.stateids.allocate(
+            crate::nfs::v4::state::StateType::Open,
+            1,
+            ctx.current_fh.as_ref().map(|fh| fh.data.clone()),
+        );
+        let res = d
+            .dispatch_operation(
+                crate::nfs::v4::compound::Operation::Write {
+                    stateid: sid2,
+                    offset: 4096,
+                    stable: 2,
+                    data: Bytes::from(vec![8u8; 512]),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(res.status(), Nfs4Status::Ok);
+        let _ = crate::tier::durable::drain_pending(&be).await;
+        assert!(
+            !be.tier_list_dirty().await.unwrap().iter().any(|r| r.dev == dev && r.ino == ino),
+            "durable memo intact ⇒ the second WRITE must not re-mark (one write \
+             per file per cycle)"
+        );
+    }
+
     fn pin_current_fh(
         d: &CompoundDispatcher,
         ctx: &mut CompoundContext,

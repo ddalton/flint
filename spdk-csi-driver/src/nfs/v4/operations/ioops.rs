@@ -1413,6 +1413,9 @@ impl IoOperationHandler {
         let data_clone = op.data.clone(); // Cheap: just Arc increment
         let stable = op.stable;
         let write_verifier = self.write_verifier;
+        // A2 capture: the durable mark wants the path. Cloned only when
+        // capture is on — this is the hottest lane in the server.
+        let cap_path = crate::tier::capture::enabled().then(|| path.clone());
         
         let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
             use std::os::unix::fs::FileExt;
@@ -1447,9 +1450,10 @@ impl IoOperationHandler {
                 );
                 // A2 dirty capture rides the same post-success point:
                 // a content bump without a note is the C5 bug class.
-                crate::tier::capture::note(
+                crate::tier::capture::note_at(
                     md.dev(),
                     md.ino(),
+                    cap_path.as_deref(),
                     crate::tier::capture::Mutation::Write {
                         offset,
                         len: bytes_written as u64,

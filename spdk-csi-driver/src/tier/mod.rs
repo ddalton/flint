@@ -4,7 +4,9 @@
 //! ultracode-reviewed, reshaped design. Build order and invariants live
 //! there; nothing in this tree may contradict it.
 //!
-//! Step 1 (this module's first tenant): `capture` — mutation-complete
-//! dirty capture, amendment A2.
+//! Step 1: `capture` — mutation-complete dirty capture (A2).
+//! Step 2: `durable` — the durable dirty bit's marshalling (A3), with
+//! the schema and flush-intent rows (A6) in the state backend.
 
 pub mod capture;
+pub mod durable;

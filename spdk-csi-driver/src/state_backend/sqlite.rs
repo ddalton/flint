@@ -739,6 +739,133 @@ impl StateBackend for SqliteBackend {
         }
     }
 
+    // ── S3 tier (L2 step 2) ──────────────────────────────────────────
+    // Awaited, transactional, and OUTSIDE the ordered write queue on
+    // purpose: the tier tables are disjoint from every other table,
+    // and A3's contract is durability BEFORE the client's ack — the
+    // fire-and-forget lane is exactly what these must not use.
+
+    async fn tier_mark_dirty(
+        &self,
+        entries: &[super::TierDirtyEntry],
+    ) -> StateBackendResult<()> {
+        let entries = entries.to_vec();
+        self.with_conn_mut(move |conn| {
+            let tx = conn.transaction()?;
+            for e in &entries {
+                tx.execute(
+                    "INSERT INTO tier_dirty (dev, ino, path, dirtied_unix)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(dev, ino) DO UPDATE SET
+                       path = COALESCE(excluded.path, tier_dirty.path)",
+                    params![
+                        u64_to_i64(e.dev),
+                        u64_to_i64(e.ino),
+                        e.path,
+                        u64_to_i64(e.dirtied_unix),
+                    ],
+                )?;
+            }
+            tx.commit()
+        })
+        .await?
+        .map_err(|e| StateBackendError::Storage(e.to_string()))
+    }
+
+    async fn tier_list_dirty(&self) -> StateBackendResult<Vec<super::TierDirtyEntry>> {
+        self.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT dev, ino, path, dirtied_unix FROM tier_dirty")?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(super::TierDirtyEntry {
+                        dev: i64_to_u64(r.get(0)?),
+                        ino: i64_to_u64(r.get(1)?),
+                        path: r.get(2)?,
+                        dirtied_unix: i64_to_u64(r.get(3)?),
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn tier_clear_dirty(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
+        let (d, i) = (u64_to_i64(dev), u64_to_i64(ino));
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM tier_dirty WHERE dev = ?1 AND ino = ?2", params![d, i])
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn put_flush_intent(
+        &self,
+        i: &super::FlushIntentRecord,
+    ) -> StateBackendResult<()> {
+        let i = i.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO tier_flush_intent
+                 (flush_uuid, path, from_gen, to_gen, mpu_id, base_etag, created_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    i.flush_uuid,
+                    i.path,
+                    i.from_gen.map(u64_to_i64).unwrap_or(-1),
+                    u64_to_i64(i.to_gen),
+                    i.mpu_id,
+                    i.base_etag,
+                    u64_to_i64(i.created_unix),
+                ],
+            )
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn list_flush_intents(
+        &self,
+    ) -> StateBackendResult<Vec<super::FlushIntentRecord>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT flush_uuid, path, from_gen, to_gen, mpu_id, base_etag,
+                        created_unix
+                 FROM tier_flush_intent",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    let from_gen: i64 = r.get(2)?;
+                    Ok(super::FlushIntentRecord {
+                        flush_uuid: r.get(0)?,
+                        path: r.get(1)?,
+                        from_gen: if from_gen < 0 {
+                            None
+                        } else {
+                            Some(i64_to_u64(from_gen))
+                        },
+                        to_gen: i64_to_u64(r.get(3)?),
+                        mpu_id: r.get(4)?,
+                        base_etag: r.get(5)?,
+                        created_unix: i64_to_u64(r.get(6)?),
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn delete_flush_intent(&self, flush_uuid: &str) -> StateBackendResult<()> {
+        let u = flush_uuid.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM tier_flush_intent WHERE flush_uuid = ?1", params![u])
+        })
+        .await
+        .map(|_| ())
+    }
+
     async fn put_client(&self, c: &ClientRecord) -> StateBackendResult<()> {
         self.write(WriteOp::PutClient(c.clone())).await
     }
@@ -2133,6 +2260,40 @@ CREATE TABLE IF NOT EXISTS server_identity (
     server_id INTEGER NOT NULL
 );
 
+-- S3 tier (L2 step 2, design review A3): the durable per-file dirty
+-- BIT. A row = "this file has content mutations the bucket's current
+-- generation does not". Set (awaited) before any mutating op is acked;
+-- cleared only in the step that commits generation g+1. After a crash,
+-- exactly these rows degrade to whole-file upload — the fallback the
+-- in-memory interval log cannot anchor on its own (finding C1).
+-- Keyed by file identity like the change counter; path is best-effort
+-- until A7's identity rows (step 6). dirtied_unix = FIRST dirtying
+-- mutation of the cycle.
+CREATE TABLE IF NOT EXISTS tier_dirty (
+    dev INTEGER NOT NULL,
+    ino INTEGER NOT NULL,
+    path TEXT,
+    dirtied_unix INTEGER NOT NULL,
+    PRIMARY KEY (dev, ino)
+);
+
+-- S3 tier (L2 step 2, design review A6): durable flush intents.
+-- Committed BEFORE CreateMultipartUpload/PUT so a crashed flush is
+-- HEAD-arbitrable instead of masquerading as a foreign overwrite
+-- (adopt own stamp at g+1 / abort+re-flush when ETag == base / only
+-- anything else is genuinely foreign). from_gen = -1 and NULL
+-- base_etag = a new object's first flush; mpu_id backfills when
+-- CreateMultipartUpload returns.
+CREATE TABLE IF NOT EXISTS tier_flush_intent (
+    flush_uuid TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    from_gen INTEGER NOT NULL DEFAULT -1,
+    to_gen INTEGER NOT NULL,
+    mpu_id TEXT,
+    base_etag TEXT,
+    created_unix INTEGER NOT NULL
+);
+
 -- ---------------------------------------------------------------------------
 -- Block-layout extent allocator (pnfs-block design doc §8; FlintExtents.tla
 -- is the machine-checked spec — see state_backend/extent_alloc.rs, which owns
@@ -2423,6 +2584,89 @@ mod tests {
         server_id_stable_and_nonzero,
     };
     use std::sync::Arc;
+
+    /// S3 tier (L2 step 2): the dirty bit and flush intents round-trip
+    /// and — the whole point of A3 — SURVIVE A REOPEN of the same db
+    /// (the crash-restart shape). New tables need no schema-version
+    /// bump: SCHEMA_SQL runs before the version check and every table
+    /// is CREATE TABLE IF NOT EXISTS.
+    #[tokio::test]
+    async fn tier_dirty_and_intents_roundtrip_and_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tier.db");
+        {
+            let b = SqliteBackend::open(&path).unwrap();
+            b.tier_mark_dirty(&[
+                crate::state_backend::TierDirtyEntry {
+                    dev: 7,
+                    ino: 42,
+                    path: None,
+                    dirtied_unix: 1_700_000_000,
+                },
+                crate::state_backend::TierDirtyEntry {
+                    dev: 7,
+                    ino: 43,
+                    path: Some("/exports/b.bin".into()),
+                    dirtied_unix: 1_700_000_001,
+                },
+            ])
+            .await
+            .unwrap();
+            // Re-mark: keeps first-dirty time, gains the path (COALESCE).
+            b.tier_mark_dirty(&[crate::state_backend::TierDirtyEntry {
+                dev: 7,
+                ino: 42,
+                path: Some("/exports/a.bin".into()),
+                dirtied_unix: 1_800_000_000,
+            }])
+            .await
+            .unwrap();
+            b.put_flush_intent(&crate::state_backend::FlushIntentRecord {
+                flush_uuid: "u-1".into(),
+                path: "/exports/a.bin".into(),
+                from_gen: None,
+                to_gen: 1,
+                mpu_id: None,
+                base_etag: None,
+                created_unix: 1_700_000_002,
+            })
+            .await
+            .unwrap();
+            // mpu_id backfill via INSERT OR REPLACE.
+            b.put_flush_intent(&crate::state_backend::FlushIntentRecord {
+                flush_uuid: "u-1".into(),
+                path: "/exports/a.bin".into(),
+                from_gen: None,
+                to_gen: 1,
+                mpu_id: Some("mpu-abc".into()),
+                base_etag: None,
+                created_unix: 1_700_000_002,
+            })
+            .await
+            .unwrap();
+        }
+        // THE REOPEN — everything must still be there.
+        let b = SqliteBackend::open(&path).unwrap();
+        let mut dirty = b.tier_list_dirty().await.unwrap();
+        dirty.sort_by_key(|e| e.ino);
+        assert_eq!(dirty.len(), 2);
+        assert_eq!(dirty[0].ino, 42);
+        assert_eq!(dirty[0].path.as_deref(), Some("/exports/a.bin"));
+        assert_eq!(
+            dirty[0].dirtied_unix, 1_700_000_000,
+            "re-mark must keep the FIRST dirty time"
+        );
+        let intents = b.list_flush_intents().await.unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].mpu_id.as_deref(), Some("mpu-abc"));
+        assert_eq!(intents[0].from_gen, None);
+
+        // Clears delete.
+        b.tier_clear_dirty(7, 42).await.unwrap();
+        assert_eq!(b.tier_list_dirty().await.unwrap().len(), 1);
+        b.delete_flush_intent("u-1").await.unwrap();
+        assert!(b.list_flush_intents().await.unwrap().is_empty());
+    }
 
     /// flint has no migrations, so the ONE thing the version number has
     /// to do is make a database from a different build fail loudly.

@@ -46,6 +46,11 @@ pub struct MemoryBackend {
     /// the first call atomic (no two threads observe different values)
     /// without paying for a mutex on every read.
     server_id: OnceLock<u64>,
+    /// S3 tier (L2 step 2): dirty bits and flush intents. No restart
+    /// survival here by definition — the memory backend documents that
+    /// A3's crash fallback only exists on sqlite.
+    tier_dirty: DashMap<(u64, u64), super::TierDirtyEntry>,
+    tier_flush_intents: DashMap<String, super::FlushIntentRecord>,
 }
 
 impl MemoryBackend {
@@ -56,6 +61,56 @@ impl MemoryBackend {
 
 #[async_trait]
 impl StateBackend for MemoryBackend {
+    // ── S3 tier (L2 step 2) ──────────────────────────────────────────
+
+    async fn tier_mark_dirty(
+        &self,
+        entries: &[super::TierDirtyEntry],
+    ) -> StateBackendResult<()> {
+        for e in entries {
+            match self.tier_dirty.entry((e.dev, e.ino)) {
+                dashmap::mapref::entry::Entry::Occupied(mut o) => {
+                    // Keep first-dirty time; gain a path if absent.
+                    if o.get().path.is_none() && e.path.is_some() {
+                        o.get_mut().path = e.path.clone();
+                    }
+                }
+                dashmap::mapref::entry::Entry::Vacant(v) => {
+                    v.insert(e.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn tier_list_dirty(&self) -> StateBackendResult<Vec<super::TierDirtyEntry>> {
+        Ok(self.tier_dirty.iter().map(|e| e.value().clone()).collect())
+    }
+
+    async fn tier_clear_dirty(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
+        self.tier_dirty.remove(&(dev, ino));
+        Ok(())
+    }
+
+    async fn put_flush_intent(
+        &self,
+        i: &super::FlushIntentRecord,
+    ) -> StateBackendResult<()> {
+        self.tier_flush_intents.insert(i.flush_uuid.clone(), i.clone());
+        Ok(())
+    }
+
+    async fn list_flush_intents(
+        &self,
+    ) -> StateBackendResult<Vec<super::FlushIntentRecord>> {
+        Ok(self.tier_flush_intents.iter().map(|e| e.value().clone()).collect())
+    }
+
+    async fn delete_flush_intent(&self, flush_uuid: &str) -> StateBackendResult<()> {
+        self.tier_flush_intents.remove(flush_uuid);
+        Ok(())
+    }
+
     /// Applied inline — DashMap ops are sync and infallible, so the
     /// "queue" is the call itself. Call order = apply order trivially.
     fn enqueue_write(&self, op: WriteOp) {

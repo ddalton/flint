@@ -184,6 +184,114 @@ impl FileCapture {
 static MAP: OnceLock<DashMap<(u64, u64), FileCapture>> = OnceLock::new();
 static FORCED: AtomicBool = AtomicBool::new(false);
 
+// ── the durable-bit marshalling layer (L2 step 2, A3) ────────────────
+//
+// The durable BIT itself lives in the state backend; this layer is the
+// bridge between the sync note sites and the async backend write. A
+// note on a file whose bit is not yet known-durable QUEUES a mark; the
+// dispatcher drains the queue to the backend BEFORE any mutating op's
+// reply exists (the pre-ack guarantee). DURABLE remembers which files
+// already paid — one sqlite write per file per flush cycle.
+
+/// Marks awaiting their durable write. Path upserts: a later note that
+/// knows the path fills in an earlier None.
+static QUEUED: OnceLock<DashMap<(u64, u64), Option<std::path::PathBuf>>> = OnceLock::new();
+/// Files whose bit is known-durable this cycle (skip queueing).
+static DURABLE: OnceLock<dashmap::DashSet<(u64, u64)>> = OnceLock::new();
+/// Fast-path flag: the dispatcher checks this per op result.
+static HAS_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn queued() -> &'static DashMap<(u64, u64), Option<std::path::PathBuf>> {
+    QUEUED.get_or_init(DashMap::new)
+}
+fn durable() -> &'static dashmap::DashSet<(u64, u64)> {
+    DURABLE.get_or_init(dashmap::DashSet::new)
+}
+
+/// One queued durable mark (capture-side twin of TierDirtyEntry —
+/// capture must not depend on the state backend's types).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMark {
+    pub dev: u64,
+    pub ino: u64,
+    pub path: Option<std::path::PathBuf>,
+}
+
+fn queue_mark(dev: u64, ino: u64, path: Option<&std::path::Path>) {
+    let key = (dev, ino);
+    if durable().contains(&key) {
+        return;
+    }
+    match queued().entry(key) {
+        dashmap::mapref::entry::Entry::Occupied(mut o) => {
+            if o.get().is_none() {
+                if let Some(p) = path {
+                    *o.get_mut() = Some(p.to_path_buf());
+                }
+            }
+        }
+        dashmap::mapref::entry::Entry::Vacant(v) => {
+            v.insert(path.map(|p| p.to_path_buf()));
+        }
+    }
+    HAS_PENDING.store(true, Ordering::Release);
+}
+
+/// Cheap per-op check for the dispatcher.
+#[inline]
+pub fn has_pending() -> bool {
+    HAS_PENDING.load(Ordering::Acquire)
+}
+
+/// Drain the queue for a backend write. Entries not confirmed (or
+/// requeued) are LOST to the durable layer — callers must do one of
+/// the two.
+pub fn take_pending() -> Vec<PendingMark> {
+    let q = queued();
+    let keys: Vec<(u64, u64)> = q.iter().map(|e| *e.key()).collect();
+    let mut out = Vec::with_capacity(keys.len());
+    for k in keys {
+        if let Some((_, path)) = q.remove(&k) {
+            out.push(PendingMark { dev: k.0, ino: k.1, path });
+        }
+    }
+    HAS_PENDING.store(!q.is_empty(), Ordering::Release);
+    out
+}
+
+/// The backend write committed: these files' bits are durable.
+pub fn confirm_durable(marks: &[PendingMark]) {
+    for m in marks {
+        durable().insert((m.dev, m.ino));
+    }
+}
+
+/// The backend write failed: nothing is durable — put the marks back
+/// so the next mutating op retries.
+pub fn requeue(marks: Vec<PendingMark>) {
+    for m in marks {
+        queue_mark(m.dev, m.ino, m.path.as_deref());
+    }
+}
+
+/// Startup restore: the row exists in the backend, so the bit is
+/// already durable. MUST be called BEFORE any note for the file, or
+/// the note queues a redundant (harmless) re-mark.
+pub fn prime_durable(dev: u64, ino: u64) {
+    durable().insert((dev, ino));
+}
+
+/// The flusher (step 5) clears the durable memo in the same logical
+/// step that clears the backend row — the NEXT mutation then re-marks.
+pub fn clear_durable(dev: u64, ino: u64) {
+    durable().remove(&(dev, ino));
+}
+
+/// Is this file's dirty bit known-durable this cycle?
+pub fn is_durable(dev: u64, ino: u64) -> bool {
+    durable().contains(&(dev, ino))
+}
+
 fn map() -> &'static DashMap<(u64, u64), FileCapture> {
     MAP.get_or_init(DashMap::new)
 }
@@ -239,7 +347,9 @@ pub fn census() -> Census {
 }
 
 /// The chokepoint. Every content-mutating dispatch site funnels here.
-pub fn note(dev: u64, ino: u64, m: Mutation) {
+/// `path`, when the site has one, rides into the durable mark so the
+/// backend row can name the file (best-effort until A7).
+pub fn note_at(dev: u64, ino: u64, path: Option<&std::path::Path>, m: Mutation) {
     if !enabled() {
         return;
     }
@@ -251,6 +361,12 @@ pub fn note(dev: u64, ino: u64, m: Mutation) {
     };
     NOTES[idx].fetch_add(1, Ordering::Relaxed);
     map().entry((dev, ino)).or_default().note(m);
+    queue_mark(dev, ino, path);
+}
+
+/// `note_at` without a path (sites that only hold an fd or identity).
+pub fn note(dev: u64, ino: u64, m: Mutation) {
+    note_at(dev, ino, None, m);
 }
 
 /// Note via an open fd — rename-proof, the preferred form (mirrors
@@ -281,7 +397,7 @@ pub fn note_path(path: &std::path::Path, m: Mutation) {
     {
         use std::os::unix::fs::MetadataExt;
         if let Ok(md) = path.symlink_metadata() {
-            note(md.dev(), md.ino(), m);
+            note_at(md.dev(), md.ino(), Some(path), m);
         }
     }
     #[cfg(not(unix))]
@@ -426,6 +542,40 @@ mod tests {
             note(0xD15A, 0xB1ED, W(0, 10));
             assert!(snapshot(0xD15A, 0xB1ED).is_none());
         }
+    }
+
+    #[test]
+    fn durable_memo_suppresses_queueing_and_paths_upsert() {
+        force_enable();
+        // Primed-durable (the startup-restore shape): notes must not
+        // re-queue, but the in-memory capture still records.
+        let k = (0xD0B1_u64, 0x1_u64);
+        prime_durable(k.0, k.1);
+        note(k.0, k.1, W(0, 4));
+        assert!(!queued().contains_key(&k), "primed-durable file must not queue");
+        assert!(snapshot(k.0, k.1).unwrap().is_dirty());
+
+        // Fresh file: queues once; a later note that knows the path
+        // fills it in; once confirmed durable, no re-queue.
+        let k2 = (0xD0B1_u64, 0x2_u64);
+        note(k2.0, k2.1, W(0, 4));
+        assert!(queued().contains_key(&k2));
+        note_at(k2.0, k2.1, Some(std::path::Path::new("/x/f")), W(4, 4));
+        assert_eq!(
+            queued().get(&k2).unwrap().as_deref(),
+            Some(std::path::Path::new("/x/f")),
+            "a later note with a path must upsert an earlier None"
+        );
+        let taken = queued().remove(&k2).map(|(_, p)| p).unwrap();
+        confirm_durable(&[PendingMark { dev: k2.0, ino: k2.1, path: taken }]);
+        note(k2.0, k2.1, W(8, 4));
+        assert!(!queued().contains_key(&k2), "confirmed-durable file must not re-queue");
+
+        // requeue puts a failed drain's marks back.
+        let k3 = (0xD0B1_u64, 0x3_u64);
+        requeue(vec![PendingMark { dev: k3.0, ino: k3.1, path: None }]);
+        assert!(queued().contains_key(&k3));
+        assert!(has_pending());
     }
 
     #[test]

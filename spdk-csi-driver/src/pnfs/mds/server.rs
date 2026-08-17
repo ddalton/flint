@@ -550,6 +550,25 @@ impl MetadataServer {
         // the pNFS layer, outside `state::StateManager`.
         self.load_persisted_state().await?;
 
+        // S3 tier (L2 step 2, A3): restore the durable dirty bits —
+        // after a crash, exactly the bit-set files are whole-dirty in
+        // memory, which is the "pessimal upload, never wrong data"
+        // fallback. Before any TCP accept, like the state load above:
+        // a client's first WRITE must find the durable-marked set
+        // primed, not race it.
+        if crate::tier::capture::enabled() {
+            match crate::tier::durable::restore_from_backend(&self.state_mgr.backend()).await
+            {
+                Ok(_) => {}
+                Err(e) => tracing::error!(
+                    "tier: dirty-bit restore failed: {} — bits remain set in the \
+                     backend (eviction stays blocked); files re-mark on their next \
+                     mutation",
+                    e
+                ),
+            }
+        }
+
         // pnfs-block startup replay: converge every known scsi volume's
         // export chain (the geometry cache was just seeded above) and
         // re-establish active fences from the durable record — the
