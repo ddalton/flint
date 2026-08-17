@@ -240,6 +240,29 @@ OUT="$RENDER"
 has "flint-pnfs-block" "$OUT" && fail "the block StorageClass rendered without storageClass.create=true"
 pass "the block StorageClass is opt-in separately from the class itself"
 
+# ── 7. the flint-lite profile: four objects, nothing else, refuses pnfs ─
+#
+# lite.enabled is a PROFILE: it must render exactly the hub's four
+# objects (ConfigMap, PVC, Service, Deployment) and SUPPRESS the whole
+# CSI/SPDK stack — a hub cluster gets one pod, not a DaemonSet. And it
+# must refuse to coexist with pnfs.enabled, mirroring the server's own
+# boot refusal of standalone + dataServers.
+render_ok "lite-profile" --set lite.enabled=true || fail "the lite profile did not validate"
+OUT="$RENDER"
+LITE_KINDS=$(printf '%s\n' "$OUT" | grep -c '^kind:')
+[ "$LITE_KINDS" = "4" ] \
+  || fail "lite profile rendered $LITE_KINDS objects, expected exactly 4 (the CSI stack leaked in)"
+has "mode: standalone" "$OUT" || fail "lite hub config is not mode: standalone"
+has "flint-csi-node" "$OUT" && fail "the csi-node DaemonSet leaked into the lite profile"
+has "kind: StorageClass" "$OUT" && fail "a StorageClass leaked into the lite profile"
+pass "lite profile: exactly 4 objects, standalone config, no CSI stack — API server accepts"
+
+render_must_fail "lite-plus-pnfs" --set lite.enabled=true --set pnfs.enabled=true || exit 1
+ERR="$RENDER"
+has "two servers in one release" "$ERR" \
+  || fail "lite + pnfs did not refuse with the reason: $ERR"
+pass "lite + pnfs refuses at render, and says why"
+
 echo
 echo "✅ kind chart pass — the pnfs-block chart surface renders, refuses what it must,"
 echo "   and is accepted by a real Kubernetes API server ($SRV). The data path is NOT"

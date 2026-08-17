@@ -4,6 +4,19 @@ operators read this once at install time, so it should highlight
 follow-up steps they actually need to take, not restate what the chart
 already did.
 */ -}}
+{{- if .Values.lite.enabled }}
+Flint-lite hub installed in namespace "{{ .Release.Namespace }}".
+
+One pod, four objects, no CSI stack. Watch it come up:
+  kubectl get pods,pvc,svc -n {{ .Release.Namespace }} -l app.kubernetes.io/component=lite
+
+The hub is ready when the Deployment reports Available and the PVC is
+Bound (backed by {{ .Values.lite.persistence.storageClassName | default "the cluster's default StorageClass" }}).
+
+Consumers mount it as plain NFS — no flint software needed on their
+clusters. Recipes (static PV and dynamic PVC-per-workspace):
+  docs/flint-lite.md
+{{- else }}
 Flint CSI driver installed in namespace "{{ .Release.Namespace }}".
 
 Verify the controller and node pods are running:
@@ -36,3 +49,4 @@ Snapshot support notes:
 
 See the full README for prerequisites, disk-init, and StorageClass
 examples: https://github.com/cloudera/flint
+{{- end }}

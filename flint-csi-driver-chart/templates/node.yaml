@@ -1,3 +1,4 @@
+{{- if not .Values.lite.enabled }}{{- /* suppressed by the flint-lite profile — see templates/lite.yaml */}}
 # This YAML file defines the resources that run on each node in the cluster.
 # These resources are responsible for managing Flint volumes on the node.
 
@@ -724,3 +725,4 @@ spec:
             path: /etc/udev/rules.d
             type: Directory
         {{- end }}
+{{- end }}{{- /* end lite-profile guard */}}

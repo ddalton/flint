@@ -1,3 +1,4 @@
+{{- if not .Values.lite.enabled }}{{- /* suppressed by the flint-lite profile — see templates/lite.yaml */}}
 {{- if .Values.storageClass.create }}
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -19,3 +20,4 @@ parameters:
   thinProvision: "{{ .Values.storageClass.parameters.thinProvision }}"
   nfsEmptyDir: "{{ .Values.storageClass.parameters.nfsEmptyDir | default "false" }}"
 {{- end }}
+{{- end }}{{- /* end lite-profile guard */}}

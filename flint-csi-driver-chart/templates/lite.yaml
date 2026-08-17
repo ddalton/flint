@@ -1,0 +1,178 @@
+{{- /*
+Flint-lite — the standalone hub profile (docs/flint-lite.md).
+
+Four objects and nothing else: ConfigMap, RWO PVC, Service, and a
+single-replica Deployment running flint-pnfs-mds in `mode: standalone`
+(layouts off; EXCHANGE_ID advertises a plain NFS server, so clients
+never ask; every byte serves through the MDS lane out of /data/exports
+on the PVC). Every other template in this chart is suppressed while
+lite.enabled — this is a PROFILE, not a component.
+
+Deployment + strategy Recreate + RWO PVC, not a StatefulSet: the same
+single-writer fencing logic as pnfs-mds.yaml — the sqlite state.db is
+single-writer and the RWO attach is the fence; two hub pods must never
+run concurrently.
+
+State backend is sqlite ON THE PVC: the persistent server id keeps
+client filehandles valid across pod restarts (no BADHANDLE storm), and
+locks/sessions reload on the way up.
+*/}}
+{{- if .Values.lite.enabled }}
+{{- if .Values.pnfs.enabled }}
+{{- fail "lite.enabled and pnfs.enabled are two servers in one release — the hub cluster installs the lite profile alone; a full pNFS cluster is its own release (the server likewise refuses standalone + dataServers at boot)" }}
+{{- end }}
+{{- $img := .Values.lite.image.ref }}
+{{- if not $img }}
+{{- $repo := .Values.lite.image.repository | default .Values.images.repository }}
+{{- $tag := .Values.lite.image.tag | default .Values.pnfs.server.image.tag }}
+{{- $img = printf "%s/%s:%s" $repo .Values.lite.image.name $tag }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flint-lite-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lite
+data:
+  mds.yaml: |
+    apiVersion: flint.io/v1alpha1
+    kind: PnfsConfig
+    mode: standalone
+    mds:
+      bind:
+        address: "0.0.0.0"
+        port: 2049
+      # Inert in standalone (no layouts are ever granted) but part of
+      # the config schema.
+      layout:
+        type: file
+        stripeSize: 8388608
+        policy: stripe
+      dataServers: []
+      state:
+        backend: sqlite
+        config:
+          path: /data/state/state.db
+    exports:
+      - path: /data/exports
+        fsid: 1
+        options: [rw, sync, no_subtree_check]
+        access:
+          - network: 0.0.0.0/0
+            permissions: rw
+    logging:
+      level: {{ .Values.lite.logLevel | default "info" }}
+      format: text
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flint-lite-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lite
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.lite.persistence.storageClassName }}
+  # Set = a chosen class; ABSENT (the default) = the cluster's default
+  # StorageClass — any CSI driver's RWO volume backs the hub.
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.lite.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flint-lite
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lite
+  {{- with .Values.lite.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.lite.service.type }}
+  selector:
+    app: flint-lite
+  ports:
+    - name: nfs
+      port: {{ .Values.lite.service.port }}
+      targetPort: 2049
+      protocol: TCP
+      {{- if and (eq .Values.lite.service.type "NodePort") .Values.lite.service.nodePort }}
+      nodePort: {{ .Values.lite.service.nodePort }}
+      {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flint-lite
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: lite
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flint-lite
+  template:
+    metadata:
+      labels:
+        app: flint-lite
+        flint.io/role: lite
+        {{- include "flint-csi-driver-chart.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.lite.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: hub
+          image: {{ $img | quote }}
+          imagePullPolicy: {{ .Values.lite.image.pullPolicy }}
+          command: ["/usr/local/bin/flint-pnfs-mds"]
+          args: ["--config", "/etc/flint/mds.yaml"]
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.lite.logLevel | default "info" | quote }}
+          ports:
+            - containerPort: 2049
+              name: nfs
+          readinessProbe:
+            tcpSocket:
+              port: 2049
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 2049
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          volumeMounts:
+            - name: config
+              mountPath: /etc/flint
+            - name: data
+              mountPath: /data
+          {{- with .Values.lite.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: flint-lite-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: flint-lite-data
+{{- end }}

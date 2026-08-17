@@ -1,3 +1,4 @@
+{{- if not .Values.lite.enabled }}{{- /* suppressed by the flint-lite profile — see templates/lite.yaml */}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -30,3 +31,4 @@ data:
   # Optional: Human-readable annotations for each device
   device-annotations: |
 {{ .Values.reservedDevices.annotations | default "" | indent 4 }}
+{{- end }}{{- /* end lite-profile guard */}}
