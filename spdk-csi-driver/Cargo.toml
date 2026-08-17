@@ -93,6 +93,14 @@ filetime = "0.2.26"
 # for atomic instance-counter increments.
 rusqlite = { version = "0.31", features = ["bundled"] }
 utoipa = { version = "5.5.0", default-features = false, features = ["macros"] }
+# S3 cold tier (tier::store::s3, design A6/A9/A13): the official SDK is
+# the only client with the full conditional-write surface the design
+# requires — If-Match on CompleteMultipartUpload, If-None-Match:* creates,
+# CRC64NVME FULL_OBJECT checksums across multipart, and
+# x-amz-copy-source-if-match on UploadPartCopy. rustls (no OpenSSL),
+# explicit BehaviorVersion in code (no behavior-version-latest feature).
+aws-config = { version = "1.10.1", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustls", "rt-tokio"] }
 
 # SPDK Integration - Custom bindings generated for Flint's specific needs
 # No external dependencies - bindings generated from your SPDK v25.05 installation
