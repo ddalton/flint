@@ -193,16 +193,38 @@ static FORCED: AtomicBool = AtomicBool::new(false);
 // reply exists (the pre-ack guarantee). DURABLE remembers which files
 // already paid — one sqlite write per file per flush cycle.
 
+/// One queued (not yet durable) mark.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Queued {
+    path: Option<std::path::PathBuf>,
+    /// Monotonic mark sequence (see [`PendingMark::seq`]).
+    seq: u64,
+}
+
 /// Marks awaiting their durable write. Path upserts: a later note that
-/// knows the path fills in an earlier None.
-static QUEUED: OnceLock<DashMap<(u64, u64), Option<std::path::PathBuf>>> = OnceLock::new();
+/// knows the path fills in an earlier None; every touch refreshes the
+/// sequence.
+static QUEUED: OnceLock<DashMap<(u64, u64), Queued>> = OnceLock::new();
 /// Files whose bit is known-durable this cycle (skip queueing).
 static DURABLE: OnceLock<dashmap::DashSet<(u64, u64)>> = OnceLock::new();
 /// Fast-path flag: the dispatcher checks this per op result.
 static HAS_PENDING: AtomicBool = AtomicBool::new(false);
+/// Process-monotonic mark sequence. The flusher's clean-clear deletes
+/// the durable row ONLY at the sequence it observed (step 5's A3-safe
+/// clear): a drain that re-marks the row after the observation bumps
+/// the stored sequence and the conditional delete no-ops — an acked
+/// mutation's bit can never be deleted by a racing clear.
+static MARK_SEQ: AtomicU64 = AtomicU64::new(1);
+/// Last note instant per file — the flusher's quiescence clock (A11:
+/// never flush a file whose write stream is still advancing).
+static LAST_NOTE: OnceLock<DashMap<(u64, u64), std::time::Instant>> = OnceLock::new();
 
-fn queued() -> &'static DashMap<(u64, u64), Option<std::path::PathBuf>> {
+fn queued() -> &'static DashMap<(u64, u64), Queued> {
     QUEUED.get_or_init(DashMap::new)
+}
+
+fn last_note_map() -> &'static DashMap<(u64, u64), std::time::Instant> {
+    LAST_NOTE.get_or_init(DashMap::new)
 }
 fn durable() -> &'static dashmap::DashSet<(u64, u64)> {
     DURABLE.get_or_init(dashmap::DashSet::new)
@@ -215,6 +237,9 @@ pub struct PendingMark {
     pub dev: u64,
     pub ino: u64,
     pub path: Option<std::path::PathBuf>,
+    /// The mark sequence that rides into the durable row's `mark_seq`
+    /// (see [`MARK_SEQ`]).
+    pub seq: u64,
 }
 
 fn queue_mark(dev: u64, ino: u64, path: Option<&std::path::Path>) {
@@ -222,19 +247,39 @@ fn queue_mark(dev: u64, ino: u64, path: Option<&std::path::Path>) {
     if durable().contains(&key) {
         return;
     }
+    let seq = MARK_SEQ.fetch_add(1, Ordering::Relaxed);
     match queued().entry(key) {
         dashmap::mapref::entry::Entry::Occupied(mut o) => {
-            if o.get().is_none() {
+            let q = o.get_mut();
+            q.seq = seq;
+            if q.path.is_none() {
                 if let Some(p) = path {
-                    *o.get_mut() = Some(p.to_path_buf());
+                    q.path = Some(p.to_path_buf());
                 }
             }
         }
         dashmap::mapref::entry::Entry::Vacant(v) => {
-            v.insert(path.map(|p| p.to_path_buf()));
+            v.insert(Queued { path: path.map(|p| p.to_path_buf()), seq });
         }
     }
     HAS_PENDING.store(true, Ordering::Release);
+}
+
+/// Is a (not yet durable) mark queued for this file? The flusher's
+/// clean-clear refuses to delete the row while one is.
+pub fn is_queued(dev: u64, ino: u64) -> bool {
+    queued().contains_key(&(dev, ino))
+}
+
+/// When was this file last mutated (noted)? None = never this process.
+/// The flusher's quiescence clock.
+pub fn last_note(dev: u64, ino: u64) -> Option<std::time::Instant> {
+    last_note_map().get(&(dev, ino)).map(|e| *e)
+}
+
+/// Forget the quiescence clock entry (flusher, after a full clean).
+pub fn clear_quiet(dev: u64, ino: u64) {
+    last_note_map().remove(&(dev, ino));
 }
 
 /// Cheap per-op check for the dispatcher.
@@ -251,8 +296,8 @@ pub fn take_pending() -> Vec<PendingMark> {
     let keys: Vec<(u64, u64)> = q.iter().map(|e| *e.key()).collect();
     let mut out = Vec::with_capacity(keys.len());
     for k in keys {
-        if let Some((_, path)) = q.remove(&k) {
-            out.push(PendingMark { dev: k.0, ino: k.1, path });
+        if let Some((_, m)) = q.remove(&k) {
+            out.push(PendingMark { dev: k.0, ino: k.1, path: m.path, seq: m.seq });
         }
     }
     HAS_PENDING.store(!q.is_empty(), Ordering::Release);
@@ -361,6 +406,7 @@ pub fn note_at(dev: u64, ino: u64, path: Option<&std::path::Path>, m: Mutation) 
     };
     NOTES[idx].fetch_add(1, Ordering::Relaxed);
     map().entry((dev, ino)).or_default().note(m);
+    last_note_map().insert((dev, ino), std::time::Instant::now());
     queue_mark(dev, ino, path);
 }
 
@@ -565,22 +611,26 @@ mod tests {
         let k2 = (0xD0B1_u64, 0x2_u64);
         note(k2.0, k2.1, W(0, 4));
         assert!(queued().contains_key(&k2));
+        let seq_before = queued().get(&k2).unwrap().seq;
         note_at(k2.0, k2.1, Some(std::path::Path::new("/x/f")), W(4, 4));
+        let q = queued().get(&k2).unwrap().clone();
         assert_eq!(
-            queued().get(&k2).unwrap().as_deref(),
+            q.path.as_deref(),
             Some(std::path::Path::new("/x/f")),
             "a later note with a path must upsert an earlier None"
         );
-        let taken = queued().remove(&k2).map(|(_, p)| p).unwrap();
-        confirm_durable(&[PendingMark { dev: k2.0, ino: k2.1, path: taken }]);
+        assert!(q.seq > seq_before, "every queue touch must advance the mark sequence");
+        let taken = queued().remove(&k2).map(|(_, q)| q).unwrap();
+        confirm_durable(&[PendingMark { dev: k2.0, ino: k2.1, path: taken.path, seq: taken.seq }]);
         note(k2.0, k2.1, W(8, 4));
         assert!(!queued().contains_key(&k2), "confirmed-durable file must not re-queue");
 
         // requeue puts a failed drain's marks back.
         let k3 = (0xD0B1_u64, 0x3_u64);
-        requeue(vec![PendingMark { dev: k3.0, ino: k3.1, path: None }]);
+        requeue(vec![PendingMark { dev: k3.0, ino: k3.1, path: None, seq: 0 }]);
         assert!(queued().contains_key(&k3));
         assert!(has_pending());
+        assert!(is_queued(k3.0, k3.1));
     }
 
     #[test]

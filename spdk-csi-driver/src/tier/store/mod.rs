@@ -162,6 +162,19 @@ pub struct ObjectMeta {
     /// `flint-gen`).
     pub meta: HashMap<String, String>,
     pub last_modified_unix: Option<u64>,
+    /// Backend storage class (S3: None ≡ STANDARD). The A11 IA
+    /// copy-source guard reads this: a non-Standard base pays
+    /// retrieval on every CLEAN byte copied, silently inverting the
+    /// tier's saving — the flusher refuses BaseCopy from it.
+    pub storage_class: Option<String>,
+}
+
+impl ObjectMeta {
+    /// May this object serve as a server-side copy source without
+    /// per-byte retrieval charges? (A11's IA copy-source guard.)
+    pub fn copy_source_allowed(&self) -> bool {
+        matches!(self.storage_class.as_deref(), None | Some("STANDARD"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

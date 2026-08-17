@@ -13,9 +13,13 @@
 //! plus in-memory test double); `arbitrate` — A6's HEAD-based 412
 //! arbitration; `meter` — the A12 counter skeleton.
 
+//! Step 5: `flush` — the pipeline (A11 knobs as requirements): part
+//! planner, flush floor + quiescence, intents, arbitration wiring.
+
 pub mod arbitrate;
 pub mod capture;
 pub mod durable;
+pub mod flush;
 pub mod gate;
 pub mod meter;
 pub mod store;

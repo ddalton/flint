@@ -38,6 +38,7 @@ pub async fn drain_pending(backend: &Arc<dyn StateBackend>) -> StateBackendResul
             ino: m.ino,
             path: m.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
             dirtied_unix: ts,
+            mark_seq: m.seq,
         })
         .collect();
     match backend.tier_mark_dirty(&entries).await {
@@ -151,6 +152,7 @@ mod tests {
             ino,
             path: Some("/gone/file".into()),
             dirtied_unix: 1,
+            mark_seq: 1,
         }])
         .await
         .unwrap();

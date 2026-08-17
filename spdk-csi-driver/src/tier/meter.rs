@@ -51,6 +51,14 @@ counters! {
     bytes_uploaded,
     bytes_copied,
     mpu_aborts,
+    /// Flush scheduling (step 5, the A11 knobs at work). The skips are
+    /// the economics gate's request-cost model made observable.
+    flushes_skipped_floor,
+    flushes_skipped_quiesce,
+    flushes_skipped_inflight,
+    /// Bucket content already matched local truth (CRC) — adopted
+    /// clean with zero upload (the restart clean-skip).
+    flushes_clean_match,
 }
 
 #[inline]
@@ -78,6 +86,10 @@ pub enum Counter {
     BytesUploaded,
     BytesCopied,
     MpuAborts,
+    FlushesSkippedFloor,
+    FlushesSkippedQuiesce,
+    FlushesSkippedInflight,
+    FlushesCleanMatch,
 }
 
 impl Counter {
@@ -94,6 +106,10 @@ impl Counter {
             Counter::BytesUploaded => &bytes_uploaded,
             Counter::BytesCopied => &bytes_copied,
             Counter::MpuAborts => &mpu_aborts,
+            Counter::FlushesSkippedFloor => &flushes_skipped_floor,
+            Counter::FlushesSkippedQuiesce => &flushes_skipped_quiesce,
+            Counter::FlushesSkippedInflight => &flushes_skipped_inflight,
+            Counter::FlushesCleanMatch => &flushes_clean_match,
         }
     }
 }

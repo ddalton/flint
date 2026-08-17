@@ -457,6 +457,13 @@ pub struct TierDirtyEntry {
     pub ino: u64,
     pub path: Option<String>,
     pub dirtied_unix: u64,
+    /// Sequence of the newest mark folded into this row (capture's
+    /// process-monotonic counter). The flusher's clean-clear deletes
+    /// ONLY at the sequence it observed (`tier_clear_dirty_if_seq`):
+    /// a drain that re-marks after the observation bumps this and the
+    /// delete no-ops — an acked mutation's bit can never be lost to a
+    /// racing clear (A3).
+    pub mark_seq: u64,
 }
 
 /// One durable flush intent (A6): committed BEFORE
@@ -669,6 +676,18 @@ pub trait StateBackend: Send + Sync {
     /// commits generation g+1 (the flusher, step 5). Eviction requires
     /// the bit clear (A4/A5).
     async fn tier_clear_dirty(&self, dev: u64, ino: u64) -> StateBackendResult<()>;
+
+    /// The A3-safe clear: delete the bit row only if its `mark_seq`
+    /// still equals `mark_seq` (what the flusher observed before
+    /// publishing). Returns whether a row was deleted; false means a
+    /// newer mark landed and the bit must survive. The flusher's
+    /// clean-clear protocol (step 5) is the only caller.
+    async fn tier_clear_dirty_if_seq(
+        &self,
+        dev: u64,
+        ino: u64,
+        mark_seq: u64,
+    ) -> StateBackendResult<bool>;
 
     /// Create or update (mpu_id backfill) a flush intent.
     async fn put_flush_intent(&self, i: &FlushIntentRecord) -> StateBackendResult<()>;

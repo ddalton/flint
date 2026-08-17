@@ -175,6 +175,7 @@ impl ObjectStore for S3Store {
             crc64_b64: Some(resp.checksum_crc64_nvme().unwrap_or(crc_b64.as_str()).to_string()),
             meta: Self::stamps_meta(stamps),
             last_modified_unix: None,
+            storage_class: None, // this tier publishes STANDARD
         })
     }
 
@@ -239,6 +240,7 @@ impl ObjectStore for S3Store {
             crc64_b64: resp.checksum_crc64_nvme().map(|s| s.to_string()),
             meta: resp.metadata().cloned().unwrap_or_default(),
             last_modified_unix: dt_unix(resp.last_modified()),
+            storage_class: resp.storage_class().map(|c| c.as_str().to_string()),
         })
     }
 
@@ -263,6 +265,7 @@ impl ObjectStore for S3Store {
             crc64_b64: resp.checksum_crc64_nvme().map(|s| s.to_string()),
             meta: resp.metadata().cloned().unwrap_or_default(),
             last_modified_unix: dt_unix(resp.last_modified()),
+            storage_class: resp.storage_class().map(|c| c.as_str().to_string()),
         };
         let bytes = resp
             .body
@@ -644,6 +647,7 @@ impl S3Store {
             ),
             meta: Self::stamps_meta(&spec.stamps),
             last_modified_unix: None,
+            storage_class: None, // this tier publishes STANDARD
         })
     }
 

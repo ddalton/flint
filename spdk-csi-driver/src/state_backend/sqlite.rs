@@ -180,6 +180,24 @@ impl SqliteBackend {
         conn.execute_batch(SCHEMA_SQL)
             .map_err(|e| StateBackendError::Storage(format!("schema: {}", e)))?;
 
+        // In-place column backfill: a step-2-era tier_dirty lacks
+        // mark_seq (CREATE IF NOT EXISTS cannot add columns). DEFAULT 0
+        // is safe — 0 predates every live mark, so a conditional clear
+        // against a fresher observation simply no-ops.
+        let has_mark_seq: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tier_dirty') WHERE name='mark_seq'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| StateBackendError::Storage(format!("tier_dirty introspect: {}", e)))?;
+        if has_mark_seq == 0 {
+            conn.execute_batch(
+                "ALTER TABLE tier_dirty ADD COLUMN mark_seq INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| StateBackendError::Storage(format!("tier_dirty mark_seq: {}", e)))?;
+        }
+
         // Schema version: insert if first run, else verify match. This
         // is the operator-visible canary for "the DB is from an older
         // build" — better to fail open than silently misread rows.
@@ -754,15 +772,17 @@ impl StateBackend for SqliteBackend {
             let tx = conn.transaction()?;
             for e in &entries {
                 tx.execute(
-                    "INSERT INTO tier_dirty (dev, ino, path, dirtied_unix)
-                     VALUES (?1, ?2, ?3, ?4)
+                    "INSERT INTO tier_dirty (dev, ino, path, dirtied_unix, mark_seq)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(dev, ino) DO UPDATE SET
-                       path = COALESCE(excluded.path, tier_dirty.path)",
+                       path = COALESCE(excluded.path, tier_dirty.path),
+                       mark_seq = excluded.mark_seq",
                     params![
                         u64_to_i64(e.dev),
                         u64_to_i64(e.ino),
                         e.path,
                         u64_to_i64(e.dirtied_unix),
+                        u64_to_i64(e.mark_seq),
                     ],
                 )?;
             }
@@ -775,7 +795,7 @@ impl StateBackend for SqliteBackend {
     async fn tier_list_dirty(&self) -> StateBackendResult<Vec<super::TierDirtyEntry>> {
         self.with_conn(|conn| {
             let mut stmt =
-                conn.prepare("SELECT dev, ino, path, dirtied_unix FROM tier_dirty")?;
+                conn.prepare("SELECT dev, ino, path, dirtied_unix, mark_seq FROM tier_dirty")?;
             let rows = stmt
                 .query_map([], |r| {
                     Ok(super::TierDirtyEntry {
@@ -783,6 +803,7 @@ impl StateBackend for SqliteBackend {
                         ino: i64_to_u64(r.get(1)?),
                         path: r.get(2)?,
                         dirtied_unix: i64_to_u64(r.get(3)?),
+                        mark_seq: i64_to_u64(r.get(4)?),
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -798,6 +819,24 @@ impl StateBackend for SqliteBackend {
         })
         .await
         .map(|_| ())
+    }
+
+    async fn tier_clear_dirty_if_seq(
+        &self,
+        dev: u64,
+        ino: u64,
+        mark_seq: u64,
+    ) -> StateBackendResult<bool> {
+        let (d, i, s) = (u64_to_i64(dev), u64_to_i64(ino), u64_to_i64(mark_seq));
+        self.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM tier_dirty
+                 WHERE dev = ?1 AND ino = ?2 AND mark_seq = ?3",
+                params![d, i, s],
+            )
+        })
+        .await
+        .map(|n| n > 0)
     }
 
     async fn put_flush_intent(
@@ -2269,11 +2308,17 @@ CREATE TABLE IF NOT EXISTS server_identity (
 -- Keyed by file identity like the change counter; path is best-effort
 -- until A7's identity rows (step 6). dirtied_unix = FIRST dirtying
 -- mutation of the cycle.
+-- mark_seq: capture's process-monotonic sequence of the NEWEST mark
+-- folded into the row. The flusher's clean-clear deletes only at the
+-- sequence it observed — a racing re-mark bumps it and the delete
+-- no-ops (step 5's A3-safe clear). Added in step 5; init() backfills
+-- the column into step-2-era databases.
 CREATE TABLE IF NOT EXISTS tier_dirty (
     dev INTEGER NOT NULL,
     ino INTEGER NOT NULL,
     path TEXT,
     dirtied_unix INTEGER NOT NULL,
+    mark_seq INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (dev, ino)
 );
 
@@ -2602,22 +2647,43 @@ mod tests {
                     ino: 42,
                     path: None,
                     dirtied_unix: 1_700_000_000,
+                    mark_seq: 10,
                 },
                 crate::state_backend::TierDirtyEntry {
                     dev: 7,
                     ino: 43,
                     path: Some("/exports/b.bin".into()),
                     dirtied_unix: 1_700_000_001,
+                    mark_seq: 11,
                 },
             ])
             .await
             .unwrap();
-            // Re-mark: keeps first-dirty time, gains the path (COALESCE).
+            // Re-mark: keeps first-dirty time, gains the path
+            // (COALESCE), advances mark_seq to the newest.
             b.tier_mark_dirty(&[crate::state_backend::TierDirtyEntry {
                 dev: 7,
                 ino: 42,
                 path: Some("/exports/a.bin".into()),
                 dirtied_unix: 1_800_000_000,
+                mark_seq: 12,
+            }])
+            .await
+            .unwrap();
+            // The A3-safe clear: a stale observation must no-op; the
+            // current one deletes.
+            assert!(
+                !b.tier_clear_dirty_if_seq(7, 42, 10).await.unwrap(),
+                "clear at a superseded mark_seq must refuse"
+            );
+            assert!(b.tier_clear_dirty_if_seq(7, 42, 12).await.unwrap());
+            // Restore the row for the reopen half of the test.
+            b.tier_mark_dirty(&[crate::state_backend::TierDirtyEntry {
+                dev: 7,
+                ino: 42,
+                path: Some("/exports/a.bin".into()),
+                dirtied_unix: 1_700_000_000,
+                mark_seq: 12,
             }])
             .await
             .unwrap();

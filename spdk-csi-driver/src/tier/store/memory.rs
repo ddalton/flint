@@ -47,6 +47,9 @@ impl StoredObject {
             crc64_b64: Some(crc64_to_b64(self.crc64)),
             meta: self.meta.clone(),
             last_modified_unix: Some(self.last_modified_unix),
+            // The fake models STANDARD only; the IA guard's unit tests
+            // exercise copy_allowed=false at the planner level.
+            storage_class: None,
         }
     }
 }

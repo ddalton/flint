@@ -70,10 +70,13 @@ impl StateBackend for MemoryBackend {
         for e in entries {
             match self.tier_dirty.entry((e.dev, e.ino)) {
                 dashmap::mapref::entry::Entry::Occupied(mut o) => {
-                    // Keep first-dirty time; gain a path if absent.
-                    if o.get().path.is_none() && e.path.is_some() {
-                        o.get_mut().path = e.path.clone();
+                    // Keep first-dirty time; gain a path if absent;
+                    // mark_seq advances to the newest mark.
+                    let row = o.get_mut();
+                    if row.path.is_none() && e.path.is_some() {
+                        row.path = e.path.clone();
                     }
+                    row.mark_seq = e.mark_seq;
                 }
                 dashmap::mapref::entry::Entry::Vacant(v) => {
                     v.insert(e.clone());
@@ -90,6 +93,23 @@ impl StateBackend for MemoryBackend {
     async fn tier_clear_dirty(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
         self.tier_dirty.remove(&(dev, ino));
         Ok(())
+    }
+
+    async fn tier_clear_dirty_if_seq(
+        &self,
+        dev: u64,
+        ino: u64,
+        mark_seq: u64,
+    ) -> StateBackendResult<bool> {
+        // Entry API: check-and-delete under one shard guard, same
+        // atomicity as sqlite's conditional DELETE.
+        match self.tier_dirty.entry((dev, ino)) {
+            dashmap::mapref::entry::Entry::Occupied(o) if o.get().mark_seq == mark_seq => {
+                o.remove();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     async fn put_flush_intent(
