@@ -535,11 +535,16 @@ mod tests {
 
     #[test]
     fn disabled_is_a_no_op() {
-        // Cannot force-disable (shared flag), but a fresh key with the
-        // env unset and FORCED possibly set by other tests — so this
-        // test only asserts the enabled()==false path when it can.
+        // Cannot force-disable (shared flag), and a PARALLEL test may
+        // force_enable at any instant — so assert only when the flag
+        // was off across the whole window. The flag is monotonic
+        // (no force_disable exists), so "off after" implies "off
+        // throughout": the note cannot have recorded.
+        if enabled() {
+            return;
+        }
+        note(0xD15A, 0xB1ED, W(0, 10));
         if !enabled() {
-            note(0xD15A, 0xB1ED, W(0, 10));
             assert!(snapshot(0xD15A, 0xB1ED).is_none());
         }
     }

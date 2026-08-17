@@ -7,6 +7,9 @@
 //! Step 1: `capture` — mutation-complete dirty capture (A2).
 //! Step 2: `durable` — the durable dirty bit's marshalling (A3), with
 //! the schema and flush-intent rows (A6) in the state backend.
+//! Step 3: `gate` — the per-file write gate, exclusion, and flush
+//! single-flight (A4, A5's cache primitive).
 
 pub mod capture;
 pub mod durable;
+pub mod gate;

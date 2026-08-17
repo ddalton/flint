@@ -192,6 +192,57 @@ impl FdCache {
         self.by_stateid.len()
     }
 
+    /// A4/A5 (tier): purge every cached fd whose entry names `path`,
+    /// returning the count. Eviction must call BOTH this and
+    /// [`evict_ino`] — an fd cached before a rename-over is reachable
+    /// only by its OPEN-time ino, one opened after only by path; the
+    /// design review pinned "by path AND by ino" for exactly that
+    /// aliasing (open-state enumeration alone is not sufficient).
+    /// In-flight ops holding their own `Arc<File>` clones finish
+    /// safely — same contract as the DS's `evict_path`. Candidates
+    /// come from the index and are re-checked against the
+    /// authoritative entry; a racing re-insert can at worst cost a
+    /// later cache miss, never yield a wrong fd.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn evict_by_path(&self, path: &Path) -> usize {
+        let candidates: Vec<[u8; 12]> = self
+            .by_path
+            .get(path)
+            .map(|ids| ids.clone())
+            .unwrap_or_default();
+        let mut evicted = 0;
+        for id in candidates {
+            let matches = self.get(&id).is_some_and(|e| e.path == *path);
+            if matches && self.remove(&id).is_some() {
+                evicted += 1;
+            }
+        }
+        evicted
+    }
+
+    /// A4/A5 (tier): purge every cached fd whose OPEN-time inode is
+    /// `ino` — the other half of eviction's purge (see
+    /// [`evict_by_path`]).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn evict_by_ino(&self, ino: u64) -> usize {
+        if ino == 0 {
+            return 0;
+        }
+        let candidates: Vec<[u8; 12]> = self
+            .by_ino
+            .get(&ino)
+            .map(|ids| ids.clone())
+            .unwrap_or_default();
+        let mut evicted = 0;
+        for id in candidates {
+            let matches = self.get(&id).is_some_and(|e| e.ino == ino);
+            if matches && self.remove(&id).is_some() {
+                evicted += 1;
+            }
+        }
+        evicted
+    }
+
     /// Drop `other` from `path`'s candidate list. Uses the Entry API:
     /// one write guard on one shard of one map for the whole
     /// retain-and-maybe-remove — no second acquisition anywhere.
@@ -278,6 +329,43 @@ mod tests {
         assert_eq!(cache.find_by_path(&new.path, false).unwrap().path, new.path);
         assert_eq!(cache.by_path.len(), 1, "old index entry must be reaped");
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn evict_by_path_removes_all_entries_and_reaps_indexes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = FdCache::new();
+        let a = entry(dir.path(), "a", true);
+        let b = entry(dir.path(), "b", false);
+        cache.insert([1; 12], a.clone());
+        cache.insert([2; 12], a.clone()); // second open of the same file
+        cache.insert([3; 12], b.clone());
+
+        assert_eq!(cache.evict_by_path(&a.path), 2);
+        assert_eq!(cache.len(), 1, "unrelated entry must survive");
+        assert!(cache.find_by_path(&a.path, false).is_none());
+        assert!(cache.find_by_ino(a.ino, false).is_none(), "ino index must be reaped too");
+        assert_eq!(cache.evict_by_path(&a.path), 0, "second evict finds nothing");
+    }
+
+    /// The aliasing that pinned "by path AND by ino" in the design
+    /// review: an fd cached before a rename keeps its OPEN-time path,
+    /// so evicting the file at its CURRENT path misses it — only the
+    /// ino reaches it.
+    #[test]
+    fn evict_by_ino_catches_the_renamed_over_fd() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = FdCache::new();
+        let old = entry(dir.path(), "old-name", true);
+        cache.insert([1; 12], old.clone());
+
+        let new_path = dir.path().join("new-name");
+        std::fs::rename(&old.path, &new_path).unwrap();
+
+        assert_eq!(cache.evict_by_path(&new_path), 0, "OPEN-time path is stale");
+        assert_eq!(cache.evict_by_ino(old.ino), 1, "the ino still names the fd");
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.evict_by_ino(0), 0, "ino 0 (unknown) must never match");
     }
 
     /// The F24 shape cannot recur here by construction, but keep the

@@ -666,6 +666,16 @@ impl PerfOperationHandler {
                 ));
             }
 
+            // A4 write gate on the DESTINATION, held across the copy
+            // loop, the sync, and the capture note. Excluded maps to
+            // WouldBlock → NFS4ERR_DELAY in the caller.
+            let _gate = crate::tier::gate::enter_file(&dst_file).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "tier: COPY destination excluded (evicting/hydrating)",
+                )
+            })?;
+
             // Resolves ca_count == 0 to "through EOF" and enforces the
             // source-range rule. Because the range is now known to lie
             // inside the source, the reads below cannot come up short, so
@@ -768,6 +778,8 @@ impl PerfOperationHandler {
                     // §15.2.3), both raised above as InvalidInput.
                     std::io::ErrorKind::InvalidInput => Nfs4Status::Inval,
                     std::io::ErrorKind::StorageFull => Nfs4Status::NoSpc,
+                    // A4 gate refusal: destination mid-evict/hydrate.
+                    std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
                     _ => Nfs4Status::Io,
                 };
                 CopyRes {
@@ -925,6 +937,16 @@ impl PerfOperationHandler {
                 return Ok::<u64, std::io::Error>(0);
             }
 
+            // A4 write gate on the destination, spanning both the
+            // reflink and copy-fallback branches with their capture
+            // notes. Excluded maps to WouldBlock → NFS4ERR_DELAY.
+            let _gate = crate::tier::gate::enter_file(&dst_file).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "tier: CLONE destination excluded (evicting/hydrating)",
+                )
+            })?;
+
             // Fast path. Failure here is free — nothing has been written.
             match try_reflink_range(&src_file, &dst_file, src_offset, len, dst_offset) {
                 Ok(()) => {
@@ -973,6 +995,8 @@ impl PerfOperationHandler {
                     // (RFC 7862 §15.13.3), both raised as InvalidInput.
                     std::io::ErrorKind::InvalidInput => Nfs4Status::Inval,
                     std::io::ErrorKind::StorageFull => Nfs4Status::NoSpc,
+                    // A4 gate refusal: destination mid-evict/hydrate.
+                    std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
                     _ => Nfs4Status::Io,
                 };
                 CloneRes {
@@ -1074,6 +1098,15 @@ impl PerfOperationHandler {
                     }
                 };
                 let file = std::fs::OpenOptions::new().write(true).open(&p)?;
+                // A4 write gate, spanning the fallocate AND its capture
+                // note (which therefore lives in this closure, not at
+                // the async caller). Excluded → WouldBlock → DELAY.
+                let _gate = crate::tier::gate::enter_file(&file).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "tier: file excluded (evicting/hydrating)",
+                    )
+                })?;
                 nix::fcntl::fallocate(
                     file.as_raw_fd(),
                     flags,
@@ -1081,6 +1114,23 @@ impl PerfOperationHandler {
                     length as nix::libc::off_t,
                 )
                 .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                // A2 dirty capture: ALLOCATE materializes defined bytes
+                // (zeros in holes, size extension); DEALLOCATE punches
+                // zeros in place. Both dirty the range; the Zero hint
+                // distinguishes them for future flush optimization.
+                crate::tier::capture::note_path(
+                    &p,
+                    match mode {
+                        AllocMode::Allocate => crate::tier::capture::Mutation::Write {
+                            offset,
+                            len: length,
+                        },
+                        AllocMode::PunchHole => crate::tier::capture::Mutation::Zero {
+                            offset,
+                            len: length,
+                        },
+                    },
+                );
                 Ok(())
             }
             #[cfg(not(target_os = "linux"))]
@@ -1095,25 +1145,10 @@ impl PerfOperationHandler {
         match res {
             Ok(Ok(())) => {
                 crate::nfs::v4::change_counter::bump_path(&path);
-                // A2 dirty capture: ALLOCATE materializes defined bytes
-                // (zeros in holes, size extension); DEALLOCATE punches
-                // zeros in place. Both dirty the range; the Zero hint
-                // distinguishes them for future flush optimization.
-                crate::tier::capture::note_path(
-                    &path,
-                    match mode {
-                        AllocMode::Allocate => crate::tier::capture::Mutation::Write {
-                            offset,
-                            len: length,
-                        },
-                        AllocMode::PunchHole => crate::tier::capture::Mutation::Zero {
-                            offset,
-                            len: length,
-                        },
-                    },
-                );
                 Nfs4Status::Ok
             }
+            // A4 gate refusal: the file is mid-evict/hydrate.
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
             Ok(Err(e)) => {
                 warn!("ALLOCATE/DEALLOCATE on {:?} failed: {}", path, e);
                 match e.raw_os_error() {

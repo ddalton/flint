@@ -1420,6 +1420,18 @@ impl IoOperationHandler {
         let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<usize> {
             use std::os::unix::fs::FileExt;
 
+            // A4 write gate: held across the pwrite AND the capture
+            // note below, so a gate drain never swaps an epoch between
+            // them and an excluded (evicting/hydrating) file refuses
+            // the write before any byte moves. No-op when the tier is
+            // off. WouldBlock maps to NFS4ERR_DELAY in the caller.
+            let _gate = crate::tier::gate::enter_file(&file_arc).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "tier: file excluded (evicting/hydrating)",
+                )
+            })?;
+
             // Positioned I/O: pwrite(2) takes an offset and is safe to
             // call concurrently from multiple threads on the same
             // file descriptor (no seek pointer is mutated). No mutex
@@ -1482,6 +1494,9 @@ impl IoOperationHandler {
                     std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
                     std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
                     std::io::ErrorKind::IsADirectory => Nfs4Status::IsDir,
+                    // A4 gate refusal: the file is mid-evict/hydrate;
+                    // the client retries after a short delay.
+                    std::io::ErrorKind::WouldBlock => Nfs4Status::Delay,
                     _ => Nfs4Status::Io,
                 };
                 WriteRes {
@@ -1689,6 +1704,62 @@ mod tests {
             .expect("WRITE must note the tier capture (C5: a bump without a note)");
         assert_eq!(cap.intervals, vec![(4096, 4196)]);
         assert!(!cap.whole);
+    }
+
+    /// A4 write gate at the WRITE site: an excluded (evicting/
+    /// hydrating) file refuses with NFS4ERR_DELAY before any byte
+    /// moves, notes nothing, and serves normally once the exclusion
+    /// drops.
+    #[tokio::test]
+    async fn write_refused_with_delay_while_excluded() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let export_fh = fh_mgr.path_to_filehandle(fh_mgr.get_export_path()).unwrap();
+        ctx.current_fh = Some(export_fh);
+        let open_res = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_BOTH,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"gate-owner".to_vec(),
+                    openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+                    claim: OpenClaim::Null("gate-write.bin".to_string()),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(open_res.status, Nfs4Status::Ok);
+        let stateid = open_res.stateid.unwrap();
+        let write = |off: u64| WriteOp {
+            stateid: stateid.clone(),
+            offset: off,
+            stable: FILE_SYNC4,
+            data: Bytes::from(vec![9u8; 8]),
+        };
+
+        let md = std::fs::metadata(fh_mgr.get_export_path().join("gate-write.bin")).unwrap();
+        let (dev, ino) = (md.dev(), md.ino());
+        let excl = crate::tier::gate::exclude(dev, ino);
+        let res = handler.handle_write(write(0), &ctx).await;
+        assert_eq!(
+            res.status,
+            Nfs4Status::Delay,
+            "an excluded file must refuse WRITE with DELAY"
+        );
+        assert_eq!(res.count, 0);
+        assert!(
+            crate::tier::capture::snapshot(dev, ino).is_none_or(|c| !c.is_dirty()),
+            "a refused WRITE must note nothing"
+        );
+
+        drop(excl);
+        let res = handler.handle_write(write(16), &ctx).await;
+        assert_eq!(res.status, Nfs4Status::Ok, "WRITE must serve once the exclusion drops");
+        let cap = crate::tier::capture::snapshot(dev, ino).expect("the retry must note");
+        assert_eq!(cap.intervals, vec![(16, 24)]);
     }
 
     /// F17b: a renamed-over file keeps serving through its open fd —

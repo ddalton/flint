@@ -522,6 +522,15 @@ fn apply_settable_attrs_inner(
         if lmeta.is_dir() {
             return (applied, Some(Nfs4Status::IsDir));
         }
+        // A4 write gate, spanning the truncate AND its capture notes
+        // (both size lanes — SETATTR and OPEN-createattrs — pass this
+        // one chokepoint). An excluded file refuses with DELAY.
+        let _gate = match crate::tier::gate::enter_path(path) {
+            Ok(t) => t,
+            Err(crate::tier::gate::Excluded) => {
+                return (applied, Some(Nfs4Status::Delay));
+            }
+        };
         match std::fs::OpenOptions::new().write(true).open(path).and_then(|f| f.set_len(size)) {
             Ok(()) => {
                 // A2 dirty capture, at the ONE chokepoint both size
