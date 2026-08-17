@@ -16,10 +16,14 @@
 //! Step 5: `flush` — the pipeline (A11 knobs as requirements): part
 //! planner, flush floor + quiescence, intents, arbitration wiring.
 
+//! Step 6: `identity` — rename/remove events, tombstones, the A7
+//! identity-keyed generation rows (backend) and re-key flushes.
+
 pub mod arbitrate;
 pub mod capture;
 pub mod durable;
 pub mod flush;
 pub mod gate;
+pub mod identity;
 pub mod meter;
 pub mod store;

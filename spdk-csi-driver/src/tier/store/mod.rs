@@ -236,6 +236,10 @@ pub struct ComposeSpec<'a> {
     /// Contiguous from offset 0, sizes within the backend's part
     /// granularity (the A11 part-size grid upstream owns that).
     pub parts: Vec<PartSource>,
+    /// Where the base generation LIVES, when it is not `key` — the A7
+    /// re-key flush publishes a renamed file under its new key while
+    /// clean ranges still copy from the old one. None = same as `key`.
+    pub base_key: Option<&'a str>,
     /// Base generation's ETag — required iff any part is `BaseCopy`.
     pub base_etag: Option<String>,
     pub condition: PutCondition,

@@ -451,7 +451,8 @@ impl MemoryStore {
                         StoreError::Other("compose: BaseCopy without base_etag".into())
                     })?;
                     let inner = self.inner.lock().unwrap();
-                    let base = inner.objects.get(spec.key).ok_or_else(|| {
+                    let base_key = spec.base_key.unwrap_or(spec.key);
+                    let base = inner.objects.get(base_key).ok_or_else(|| {
                         StoreError::PreconditionFailed("copy-source: no base object".into())
                     })?;
                     if base.etag != want {
@@ -664,6 +665,7 @@ mod tests {
                 PartSource::Local { offset: 0, len: 4 },
                 PartSource::BaseCopy { offset: 4, len: 4 },
             ],
+            base_key: None,
             base_etag: Some(base.etag.clone()),
             condition: PutCondition::IfMatch(base.etag.clone()),
             stamps: stamps(2),

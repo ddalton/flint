@@ -482,6 +482,45 @@ pub struct FlushIntentRecord {
     pub created_unix: u64,
 }
 
+/// One durable generation row (A7, L2 step 6): keyed by FILE IDENTITY
+/// (dev, ino) — the F67 binding — with the S3 object key as a MUTABLE
+/// attribute. A rename changes the desired key; the row's stored `key`
+/// says where the current generation actually lives until the flusher
+/// performs the guarded bucket re-key. Restart loads these instead of
+/// HEAD-rediscovering every file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierGenerationRow {
+    pub dev: u64,
+    pub ino: u64,
+    /// Where the current generation LIVES in the bucket.
+    pub key: String,
+    pub generation: u64,
+    pub etag: String,
+    pub crc64_b64: Option<String>,
+    pub size: u64,
+    /// A11 IA guard + foreign-recovery: may this object serve as a
+    /// clean-copy source?
+    pub copy_allowed: bool,
+    pub updated_unix: u64,
+}
+
+/// One durable tombstone (A7): "this bucket key's object must be
+/// deleted at the next flush barrier." Written by REMOVE, by
+/// rename-over (the covered file's generation, atomically with the
+/// rename's other row changes), and by the re-key flush for the old
+/// key BEFORE publishing under the new one. Import-refresh (step 12)
+/// must never re-ingest a tombstoned key until the delete has flushed
+/// — otherwise every import resurrects deleted/renamed-away files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierTombstone {
+    pub key: String,
+    /// The generation ETag we believe is there — a mismatch at delete
+    /// time is logged as foreign interference (S3 has no conditional
+    /// DELETE; the local tree remains the authority).
+    pub etag: Option<String>,
+    pub created_unix: u64,
+}
+
 impl WriteOp {
     pub fn key(&self) -> WriteOpKey {
         match self {
@@ -698,6 +737,54 @@ pub trait StateBackend: Send + Sync {
 
     /// Close an intent (flush published, aborted, or adopted).
     async fn delete_flush_intent(&self, flush_uuid: &str) -> StateBackendResult<()>;
+
+    // ── S3 tier identity rows (L2 step 6 — A7) ───────────────────────
+
+    /// Write-through upsert of one generation row (flusher, on every
+    /// publish/adopt/foreign-discovery).
+    async fn tier_upsert_generation(&self, row: &TierGenerationRow) -> StateBackendResult<()>;
+
+    /// Every generation row — the flusher's startup registry load.
+    async fn tier_list_generations(&self) -> StateBackendResult<Vec<TierGenerationRow>>;
+
+    async fn tier_delete_generation(&self, dev: u64, ino: u64) -> StateBackendResult<()>;
+
+    async fn tier_put_tombstone(&self, t: &TierTombstone) -> StateBackendResult<()>;
+
+    /// The flush barrier's delete work list.
+    async fn tier_list_tombstones(&self) -> StateBackendResult<Vec<TierTombstone>>;
+
+    async fn tier_delete_tombstone(&self, key: &str) -> StateBackendResult<()>;
+
+    /// A RENAME's durable half, ONE transaction (A7: "rename-over
+    /// tombstones the covered file's generation atomically"):
+    /// - `covered` (the replaced dst file, if any): its generation row
+    ///   becomes a tombstone for the key it lives at, the row and its
+    ///   dirty bit are deleted (the inode is unlinked — nothing of it
+    ///   remains flushable).
+    /// - `moved`: its dirty bit is set/updated with `new_path`
+    ///   OVERWRITING the stale path (unlike tier_mark_dirty's
+    ///   COALESCE) and `mark_seq`, so the flusher re-publishes (and
+    ///   re-keys, via its generation row's stored key) under the new
+    ///   name. The generation row itself is identity-keyed and needs
+    ///   no change here.
+    /// Runs pre-ack via the dispatcher drain, like every dirty mark.
+    async fn tier_apply_rename(
+        &self,
+        moved: Option<(u64, u64)>,
+        new_path: &str,
+        mark_seq: u64,
+        covered: Option<(u64, u64)>,
+        now_unix: u64,
+    ) -> StateBackendResult<()>;
+
+    /// A REMOVE's durable half, one transaction: generation row →
+    /// tombstone (if one exists), row + dirty bit deleted.
+    async fn tier_apply_remove(
+        &self,
+        ident: (u64, u64),
+        now_unix: u64,
+    ) -> StateBackendResult<()>;
 
     /// Highest logical end covered by a file's COMMITTED extents (0 if
     /// none). The stub's length only advances at LAYOUTCOMMIT, so this

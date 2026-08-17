@@ -651,7 +651,9 @@ impl CompoundDispatcher {
         context: &mut CompoundContext,
     ) -> OperationResult {
         let result = self.dispatch_operation_inner(operation, context).await;
-        if crate::tier::capture::enabled() && crate::tier::capture::has_pending() {
+        if crate::tier::capture::enabled()
+            && (crate::tier::capture::has_pending() || crate::tier::identity::has_pending())
+        {
             if let Err(e) =
                 crate::tier::durable::drain_pending(&self.state_mgr.backend()).await
             {
@@ -2007,6 +2009,19 @@ impl CompoundDispatcher {
 
             Operation::Link(newname) => {
                 use crate::nfs::v4::operations::fileops::LinkOp;
+                // A7 (v1): the S3 tier keys objects by single-path
+                // identity — a hard link gives one inode two names,
+                // and eviction/hydration through the second name would
+                // corrupt. Refused while the tier is on (same posture
+                // as the striped-file refusal below).
+                if crate::tier::capture::enabled() {
+                    warn!(
+                        "⛔ LINK '{}' refused: the S3 tier does not round-trip hard \
+                         links (A7, v1)",
+                        newname
+                    );
+                    return OperationResult::Link(Nfs4Status::NotSupp, None);
+                }
                 // LINK target = SAVED FH (the existing file). A hard
                 // link to a striped file would give it a second,
                 // UNPINNED name — reads via the link would serve the
@@ -5485,5 +5500,28 @@ mod tests {
         assert_eq!(segs.len(), 1);
         assert_eq!((segs[0].file_offset, segs[0].length, segs[0].state), (0, 4096, 3));
     }
-}
 
+    /// A7 (v1): LINK is refused while the tier is on — the tier keys
+    /// objects by single-path identity, and a second hard link would
+    /// let eviction/hydration corrupt through the other name.
+    #[tokio::test]
+    async fn link_refused_while_tier_enabled() {
+        crate::tier::capture::force_enable();
+        let (d, _temp) = create_test_dispatcher();
+        let mut ctx = CompoundContext::new(2);
+        let res = d
+            .dispatch_operation(
+                crate::nfs::v4::compound::Operation::Link("second-name".to_string()),
+                &mut ctx,
+            )
+            .await;
+        match res {
+            OperationResult::Link(status, _) => assert_eq!(
+                status,
+                Nfs4Status::NotSupp,
+                "LINK must refuse before touching any filehandle"
+            ),
+            other => panic!("expected a Link result, got {:?}", other),
+        }
+    }
+}

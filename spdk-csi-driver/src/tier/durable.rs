@@ -22,35 +22,35 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Push every queued mark into the backend, one transaction. On error
-/// the marks are requeued (nothing is silently dropped) and the error
-/// surfaces so the dispatcher can refuse the ack.
+/// Push every queued mark AND identity event into the backend. On
+/// error the unapplied work is requeued (nothing is silently dropped)
+/// and the error surfaces so the dispatcher can refuse the ack.
 pub async fn drain_pending(backend: &Arc<dyn StateBackend>) -> StateBackendResult<()> {
     let marks = capture::take_pending();
-    if marks.is_empty() {
-        return Ok(());
-    }
-    let ts = now_unix();
-    let entries: Vec<TierDirtyEntry> = marks
-        .iter()
-        .map(|m| TierDirtyEntry {
-            dev: m.dev,
-            ino: m.ino,
-            path: m.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            dirtied_unix: ts,
-            mark_seq: m.seq,
-        })
-        .collect();
-    match backend.tier_mark_dirty(&entries).await {
-        Ok(()) => {
-            capture::confirm_durable(&marks);
-            Ok(())
-        }
-        Err(e) => {
-            capture::requeue(marks);
-            Err(e)
+    if !marks.is_empty() {
+        let ts = now_unix();
+        let entries: Vec<TierDirtyEntry> = marks
+            .iter()
+            .map(|m| TierDirtyEntry {
+                dev: m.dev,
+                ino: m.ino,
+                path: m.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                dirtied_unix: ts,
+                mark_seq: m.seq,
+            })
+            .collect();
+        match backend.tier_mark_dirty(&entries).await {
+            Ok(()) => capture::confirm_durable(&marks),
+            Err(e) => {
+                capture::requeue(marks);
+                return Err(e);
+            }
         }
     }
+    // Identity events after marks: a rename's dirty-mark for the moved
+    // file may still be in the marks batch above; the event's path
+    // overwrite then lands second and wins (correct — it is newer).
+    crate::tier::identity::drain(backend).await
 }
 
 /// Startup: every bit-set row becomes whole-dirty in memory, and its

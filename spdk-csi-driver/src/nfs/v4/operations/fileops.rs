@@ -2993,6 +2993,15 @@ impl FileOperationHandler {
         // entry undeletable over NFS.
         match tokio::fs::symlink_metadata(&target_path).await {
             Ok(metadata) => {
+                // A7: the victim's identity, resolved BEFORE the
+                // unlink (unrecoverable after). Regular files only —
+                // directories and symlinks carry no tier rows.
+                #[cfg(unix)]
+                let tier_ident = (crate::tier::capture::enabled() && metadata.is_file())
+                    .then(|| {
+                        use std::os::unix::fs::MetadataExt;
+                        (metadata.dev(), metadata.ino())
+                    });
                 let result = if metadata.is_dir() {
                     tokio::fs::remove_dir(&target_path).await
                 } else {
@@ -3004,6 +3013,12 @@ impl FileOperationHandler {
                         self.fh_mgr.note_fs_remove(&target_path);
                         // F14: removed dirent mutates the parent.
                         crate::nfs::v4::change_counter::bump_path(&parent_path);
+                        // A7: tombstone the removed file's generation
+                        // (durable pre-ack via the dispatcher drain).
+                        #[cfg(unix)]
+                        if let Some(id) = tier_ident {
+                            crate::tier::identity::note_remove(id);
+                        }
                         RemoveRes {
                             status: Nfs4Status::Ok,
                             change_info: Some(ChangeInfo {
@@ -3153,8 +3168,18 @@ impl FileOperationHandler {
         //   - source dir, dest dir empty → atomic replace, OK.
         // Emulate the typed errors here; the underlying tokio::fs::rename
         // would otherwise just return ErrorKind::Other on these.
+        // A7: the covered destination's identity, resolved BEFORE the
+        // rename destroys its last name — rename-over must tombstone
+        // its generation atomically with the rename's durable half.
+        #[cfg(unix)]
+        let mut tier_covered: Option<(u64, u64)> = None;
         if !is_self_rename {
             if let Ok(dest_meta) = dest_path.symlink_metadata() {
+                #[cfg(unix)]
+                if crate::tier::capture::enabled() && dest_meta.is_file() {
+                    use std::os::unix::fs::MetadataExt;
+                    tier_covered = Some((dest_meta.dev(), dest_meta.ino()));
+                }
                 let src_is_dir = source_path
                     .symlink_metadata()
                     .map(|m| m.is_dir())
@@ -3193,6 +3218,23 @@ impl FileOperationHandler {
                     crate::nfs::v4::change_counter::bump_path(p);
                 }
                 crate::nfs::v4::change_counter::bump_path(&dest_path);
+                // A7: queue the identity event — the moved file's bit
+                // re-points at the new path (the flusher re-keys), the
+                // covered file's generation tombstones atomically.
+                // Durable pre-ack via the dispatcher drain. Regular
+                // files only; self-renames change nothing.
+                #[cfg(unix)]
+                if crate::tier::capture::enabled() && !is_self_rename {
+                    use std::os::unix::fs::MetadataExt;
+                    let moved = dest_path
+                        .symlink_metadata()
+                        .ok()
+                        .filter(|m| m.is_file())
+                        .map(|m| (m.dev(), m.ino()));
+                    if moved.is_some() || tier_covered.is_some() {
+                        crate::tier::identity::note_rename(moved, &dest_path, tier_covered);
+                    }
+                }
                 let cinfo = if is_self_rename {
                     // No actual change to the directory.
                     ChangeInfo { atomic: true, before: 1, after: 1 }
@@ -3715,5 +3757,76 @@ mod tests {
             attr_numbers_to_bitmap(&[FATTR4_SIZE, FATTR4_MODE, FATTR4_TIME_MODIFY_SET]),
             vec![1 << 4, (1 << 1) | (1 << 22)]
         );
+    }
+
+    /// A7 wiring: a rename-over through the REAL handler queues the
+    /// identity event — the covered file's generation tombstones, the
+    /// moved file's bit re-points at the new path. The event queue is
+    /// process-global (parallel tests can steal a drain), so each
+    /// retry re-runs a real rename in the alternating direction and
+    /// re-seeds the covered row until OUR backend shows the result.
+    #[tokio::test]
+    async fn rename_over_tombstones_covered_generation() {
+        use crate::state_backend::{StateBackend, TierGenerationRow};
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, temp) = create_test_handler();
+        let be: std::sync::Arc<dyn StateBackend> =
+            std::sync::Arc::new(crate::state_backend::memory::MemoryBackend::new());
+        let mut ctx = CompoundContext::new(0);
+        assert_eq!(handler.handle_putrootfh(PutRootFhOp, &mut ctx).status, Nfs4Status::Ok);
+        ctx.saved_fh = ctx.current_fh.clone();
+
+        let names = ["ren-a.bin", "ren-b.bin"];
+        let mut landed = false;
+        for round in 0..50 {
+            let (src, dst) = (names[round % 2], names[(round + 1) % 2]);
+            std::fs::write(temp.path().join(src), format!("gen {}", round)).unwrap();
+            if !temp.path().join(dst).exists() {
+                std::fs::write(temp.path().join(dst), b"covered").unwrap();
+            }
+            let cov_md = std::fs::metadata(temp.path().join(dst)).unwrap();
+            let cov = (cov_md.dev(), cov_md.ino());
+            let cov_key = format!("t/{}", dst);
+            be.tier_upsert_generation(&TierGenerationRow {
+                dev: cov.0,
+                ino: cov.1,
+                key: cov_key.clone(),
+                generation: 1,
+                etag: "\"cov-etag\"".into(),
+                crc64_b64: None,
+                size: 7,
+                copy_allowed: true,
+                updated_unix: 1,
+            })
+            .await
+            .unwrap();
+
+            let res = handler
+                .handle_rename(
+                    RenameOp { oldname: src.to_string(), newname: dst.to_string() },
+                    &ctx,
+                )
+                .await;
+            assert_eq!(res.status, Nfs4Status::Ok);
+            let _ = crate::tier::durable::drain_pending(&be).await;
+
+            let tombstoned = be
+                .tier_list_tombstones()
+                .await
+                .unwrap()
+                .iter()
+                .any(|t| t.key == cov_key && t.etag.as_deref() == Some("\"cov-etag\""));
+            let moved_repointed = be.tier_list_dirty().await.unwrap().iter().any(|r| {
+                r.path
+                    .as_deref()
+                    .is_some_and(|pth| pth.ends_with(dst))
+            });
+            if tombstoned && moved_repointed {
+                landed = true;
+                break;
+            }
+        }
+        assert!(landed, "the rename's identity event never landed in our backend");
     }
 }

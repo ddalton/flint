@@ -594,7 +594,7 @@ impl S3Store {
                         .key(spec.key)
                         .upload_id(upload_id)
                         .part_number(part_number)
-                        .copy_source(self.copy_source(spec.key))
+                        .copy_source(self.copy_source(spec.base_key.unwrap_or(spec.key)))
                         .copy_source_if_match(base_etag)
                         .copy_source_range(format!("bytes={}-{}", offset, offset + len - 1))
                         .send()
@@ -878,6 +878,7 @@ mod tests {
                 PartSource::Local { offset: 0, len: 6 * MB },
                 PartSource::BaseCopy { offset: 6 * MB, len: 6 * MB },
             ],
+            base_key: None,
             base_etag: Some(gen1.etag.clone()),
             condition: PutCondition::IfMatch(gen1.etag.clone()),
             stamps: stamps2.clone(),

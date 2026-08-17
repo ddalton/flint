@@ -905,6 +905,207 @@ impl StateBackend for SqliteBackend {
         .map(|_| ())
     }
 
+    async fn tier_upsert_generation(
+        &self,
+        row: &super::TierGenerationRow,
+    ) -> StateBackendResult<()> {
+        let r = row.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO tier_generation
+                 (dev, ino, key, generation, etag, crc64_b64, size, copy_allowed, updated_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    u64_to_i64(r.dev),
+                    u64_to_i64(r.ino),
+                    r.key,
+                    u64_to_i64(r.generation),
+                    r.etag,
+                    r.crc64_b64,
+                    u64_to_i64(r.size),
+                    r.copy_allowed,
+                    u64_to_i64(r.updated_unix),
+                ],
+            )
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn tier_list_generations(
+        &self,
+    ) -> StateBackendResult<Vec<super::TierGenerationRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT dev, ino, key, generation, etag, crc64_b64, size, copy_allowed,
+                        updated_unix
+                 FROM tier_generation",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(super::TierGenerationRow {
+                        dev: i64_to_u64(r.get(0)?),
+                        ino: i64_to_u64(r.get(1)?),
+                        key: r.get(2)?,
+                        generation: i64_to_u64(r.get(3)?),
+                        etag: r.get(4)?,
+                        crc64_b64: r.get(5)?,
+                        size: i64_to_u64(r.get(6)?),
+                        copy_allowed: r.get(7)?,
+                        updated_unix: i64_to_u64(r.get(8)?),
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn tier_delete_generation(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
+        let (d, i) = (u64_to_i64(dev), u64_to_i64(ino));
+        self.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM tier_generation WHERE dev = ?1 AND ino = ?2",
+                params![d, i],
+            )
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn tier_put_tombstone(&self, t: &super::TierTombstone) -> StateBackendResult<()> {
+        let t = t.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO tier_tombstone (key, etag, created_unix)
+                 VALUES (?1, ?2, ?3)",
+                params![t.key, t.etag, u64_to_i64(t.created_unix)],
+            )
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn tier_list_tombstones(&self) -> StateBackendResult<Vec<super::TierTombstone>> {
+        self.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT key, etag, created_unix FROM tier_tombstone")?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(super::TierTombstone {
+                        key: r.get(0)?,
+                        etag: r.get(1)?,
+                        created_unix: i64_to_u64(r.get(2)?),
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn tier_delete_tombstone(&self, key: &str) -> StateBackendResult<()> {
+        let k = key.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM tier_tombstone WHERE key = ?1", params![k])
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn tier_apply_rename(
+        &self,
+        moved: Option<(u64, u64)>,
+        new_path: &str,
+        mark_seq: u64,
+        covered: Option<(u64, u64)>,
+        now_unix: u64,
+    ) -> StateBackendResult<()> {
+        let new_path = new_path.to_string();
+        self.with_conn_mut(move |conn| {
+            let tx = conn.transaction()?;
+            if let Some((cd, ci)) = covered {
+                let (cd, ci) = (u64_to_i64(cd), u64_to_i64(ci));
+                let gen_row: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT key, etag FROM tier_generation WHERE dev = ?1 AND ino = ?2",
+                        params![cd, ci],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((key, etag)) = gen_row {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO tier_tombstone (key, etag, created_unix)
+                         VALUES (?1, ?2, ?3)",
+                        params![key, etag, u64_to_i64(now_unix)],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM tier_generation WHERE dev = ?1 AND ino = ?2",
+                        params![cd, ci],
+                    )?;
+                }
+                tx.execute(
+                    "DELETE FROM tier_dirty WHERE dev = ?1 AND ino = ?2",
+                    params![cd, ci],
+                )?;
+            }
+            if let Some((md, mi)) = moved {
+                // The moved file's bit: path OVERWRITES (a rename's
+                // whole point), unlike tier_mark_dirty's COALESCE.
+                tx.execute(
+                    "INSERT INTO tier_dirty (dev, ino, path, dirtied_unix, mark_seq)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(dev, ino) DO UPDATE SET
+                       path = excluded.path,
+                       mark_seq = excluded.mark_seq",
+                    params![
+                        u64_to_i64(md),
+                        u64_to_i64(mi),
+                        new_path,
+                        u64_to_i64(now_unix),
+                        u64_to_i64(mark_seq),
+                    ],
+                )?;
+            }
+            tx.commit()
+        })
+        .await?
+        .map_err(|e| StateBackendError::Storage(e.to_string()))
+    }
+
+    async fn tier_apply_remove(
+        &self,
+        ident: (u64, u64),
+        now_unix: u64,
+    ) -> StateBackendResult<()> {
+        let (d, i) = (u64_to_i64(ident.0), u64_to_i64(ident.1));
+        self.with_conn_mut(move |conn| {
+            let tx = conn.transaction()?;
+            let gen_row: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT key, etag FROM tier_generation WHERE dev = ?1 AND ino = ?2",
+                    params![d, i],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((key, etag)) = gen_row {
+                tx.execute(
+                    "INSERT OR REPLACE INTO tier_tombstone (key, etag, created_unix)
+                     VALUES (?1, ?2, ?3)",
+                    params![key, etag, u64_to_i64(now_unix)],
+                )?;
+                tx.execute(
+                    "DELETE FROM tier_generation WHERE dev = ?1 AND ino = ?2",
+                    params![d, i],
+                )?;
+            }
+            tx.execute("DELETE FROM tier_dirty WHERE dev = ?1 AND ino = ?2", params![d, i])?;
+            tx.commit()
+        })
+        .await?
+        .map_err(|e| StateBackendError::Storage(e.to_string()))
+    }
+
     async fn put_client(&self, c: &ClientRecord) -> StateBackendResult<()> {
         self.write(WriteOp::PutClient(c.clone())).await
     }
@@ -2339,6 +2540,33 @@ CREATE TABLE IF NOT EXISTS tier_flush_intent (
     created_unix INTEGER NOT NULL
 );
 
+-- S3 tier (L2 step 6, design review A7): generation rows keyed by FILE
+-- IDENTITY (the F67 binding); the bucket key is a MUTABLE attribute —
+-- a renamed file's row keeps saying where the current generation
+-- LIVES until the flusher's guarded re-key. Restart loads these
+-- instead of HEAD-rediscovering the resident set.
+CREATE TABLE IF NOT EXISTS tier_generation (
+    dev INTEGER NOT NULL,
+    ino INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    etag TEXT NOT NULL,
+    crc64_b64 TEXT,
+    size INTEGER NOT NULL,
+    copy_allowed INTEGER NOT NULL,
+    updated_unix INTEGER NOT NULL,
+    PRIMARY KEY (dev, ino)
+);
+
+-- A7 tombstones: bucket keys whose objects must be DELETED at the next
+-- flush barrier (REMOVE, rename-over's covered file, re-key's old
+-- key). Import-refresh must never re-ingest a tombstoned key.
+CREATE TABLE IF NOT EXISTS tier_tombstone (
+    key TEXT PRIMARY KEY,
+    etag TEXT,
+    created_unix INTEGER NOT NULL
+);
+
 -- ---------------------------------------------------------------------------
 -- Block-layout extent allocator (pnfs-block design doc §8; FlintExtents.tla
 -- is the machine-checked spec — see state_backend/extent_alloc.rs, which owns
@@ -3269,5 +3497,66 @@ mod tests {
         assert_eq!(b.list_stateids().await.unwrap().len() as u64, n);
         drop(b);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// S3 tier (L2 step 6, A7): generation rows + tombstones survive a
+    /// reopen, and the transactional rename/remove semantics hold —
+    /// covered generation → tombstone atomically, moved bit re-pointed
+    /// with the path OVERWRITTEN.
+    #[tokio::test]
+    async fn tier_identity_rows_roundtrip_and_apply_semantics() {
+        use crate::state_backend::{TierGenerationRow, TierTombstone};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tier-a7.db");
+        let row = |ino: u64, key: &str| TierGenerationRow {
+            dev: 9,
+            ino,
+            key: key.into(),
+            generation: 4,
+            etag: format!("\"e-{}\"", ino),
+            crc64_b64: Some("abc=".into()),
+            size: 1234,
+            copy_allowed: true,
+            updated_unix: 7,
+        };
+        {
+            let b = SqliteBackend::open(&path).unwrap();
+            b.tier_upsert_generation(&row(50, "t/x")).await.unwrap();
+            b.tier_upsert_generation(&row(51, "t/y")).await.unwrap();
+            // Rename-over: (9,50) moves onto the file (9,51) occupied.
+            b.tier_apply_rename(Some((9, 50)), "/exp/y", 42, Some((9, 51)), 99)
+                .await
+                .unwrap();
+        }
+        let b = SqliteBackend::open(&path).unwrap();
+        let gens = b.tier_list_generations().await.unwrap();
+        assert_eq!(gens.len(), 1, "the covered generation row must be gone");
+        assert_eq!(gens[0].ino, 50);
+        assert_eq!(gens[0].key, "t/x", "the moved row's key changes only at re-key flush");
+        assert_eq!(gens[0].crc64_b64.as_deref(), Some("abc="));
+        let tombs = b.tier_list_tombstones().await.unwrap();
+        assert_eq!(tombs.len(), 1);
+        assert_eq!(tombs[0].key, "t/y");
+        assert_eq!(tombs[0].etag.as_deref(), Some("\"e-51\""));
+        let dirty = b.tier_list_dirty().await.unwrap();
+        let m = dirty.iter().find(|r| r.dev == 9 && r.ino == 50).unwrap();
+        assert_eq!(m.path.as_deref(), Some("/exp/y"));
+        assert_eq!(m.mark_seq, 42);
+
+        // Remove: generation → tombstone, row + bit die together.
+        b.tier_apply_remove((9, 50), 100).await.unwrap();
+        assert!(b.tier_list_generations().await.unwrap().is_empty());
+        assert!(b
+            .tier_list_tombstones()
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.key == "t/x"));
+        assert!(b.tier_list_dirty().await.unwrap().iter().all(|r| r.ino != 50));
+        b.tier_delete_tombstone("t/x").await.unwrap();
+        b.tier_put_tombstone(&TierTombstone { key: "t/z".into(), etag: None, created_unix: 1 })
+            .await
+            .unwrap();
+        assert_eq!(b.tier_list_tombstones().await.unwrap().len(), 2);
     }
 }

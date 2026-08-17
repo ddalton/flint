@@ -282,6 +282,25 @@ pub fn clear_quiet(dev: u64, ino: u64) {
     last_note_map().remove(&(dev, ino));
 }
 
+/// Allocate a mark sequence for a caller OUTSIDE the note path (the
+/// identity events' rename mark rides the same monotonic counter).
+pub fn next_mark_seq() -> u64 {
+    MARK_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Forget every in-memory trace of a dead identity (unlinked by REMOVE
+/// or covered by a rename-over) — capture entry, queued mark, durable
+/// memo, quiescence clock. The durable rows are the backend
+/// transaction's job (tier_apply_remove/rename); this is the RAM half.
+pub fn forget(dev: u64, ino: u64) {
+    let key = (dev, ino);
+    map().remove(&key);
+    queued().remove(&key);
+    durable().remove(&key);
+    last_note_map().remove(&key);
+    HAS_PENDING.store(!queued().is_empty(), Ordering::Release);
+}
+
 /// Cheap per-op check for the dispatcher.
 #[inline]
 pub fn has_pending() -> bool {

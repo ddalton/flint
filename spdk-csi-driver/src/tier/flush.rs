@@ -85,9 +85,15 @@ impl FlushConfig {
     }
 }
 
-/// The in-memory generation registry entry (durable in step 6).
+/// The generation registry entry — a write-through cache of the A7
+/// durable rows (`tier_generation`), identity-keyed with the bucket
+/// key as a mutable attribute.
 #[derive(Debug, Clone)]
 pub struct GenRecord {
+    /// Where the current generation LIVES in the bucket. When this
+    /// differs from the path-derived desired key, the file was renamed
+    /// and the next flush performs the guarded bucket re-key.
+    pub key: String,
     pub generation: u64,
     pub etag: String,
     pub crc64_b64: Option<String>,
@@ -255,6 +261,135 @@ impl FlushOrchestrator {
         self.generations.get(&(dev, ino)).map(|e| e.clone())
     }
 
+    /// Startup: durable registry first, then intent arbitration.
+    pub async fn startup(&self) {
+        let n = self.load_generations().await;
+        let i = self.reconcile_intents().await;
+        if n > 0 || i > 0 {
+            info!("tier flush: startup loaded {} generation row(s), reconciled {} intent(s)", n, i);
+        }
+    }
+
+    /// Rebuild the registry from the A7 rows — the rows are the truth
+    /// (identity events delete/re-point them OUTSIDE the orchestrator,
+    /// so the cache must be replaced, not merged: a stale entry for a
+    /// covered file would keep its key "live", defer its tombstone,
+    /// and manufacture exactly the false 412 this step exists to
+    /// kill). Runs at startup and at every tick start.
+    pub async fn load_generations(&self) -> usize {
+        match self.backend.tier_list_generations().await {
+            Ok(rows) => {
+                let n = rows.len();
+                self.generations.clear();
+                for r in rows {
+                    self.generations.insert(
+                        (r.dev, r.ino),
+                        GenRecord {
+                            key: r.key,
+                            generation: r.generation,
+                            etag: r.etag,
+                            crc64_b64: r.crc64_b64,
+                            size: r.size,
+                            copy_allowed: r.copy_allowed,
+                        },
+                    );
+                }
+                n
+            }
+            Err(e) => {
+                warn!("tier flush: cannot load generation rows: {}", e);
+                0
+            }
+        }
+    }
+
+    /// Write-through: registry + durable row together.
+    async fn record_generation(&self, dev: u64, ino: u64, rec: GenRecord) {
+        let row = crate::state_backend::TierGenerationRow {
+            dev,
+            ino,
+            key: rec.key.clone(),
+            generation: rec.generation,
+            etag: rec.etag.clone(),
+            crc64_b64: rec.crc64_b64.clone(),
+            size: rec.size,
+            copy_allowed: rec.copy_allowed,
+            updated_unix: now_unix(),
+        };
+        if let Err(e) = self.backend.tier_upsert_generation(&row).await {
+            // The registry still advances — worst case a restart
+            // rediscovers by HEAD (the pre-A7 posture), never corrupt.
+            warn!("tier flush: generation row upsert ({},{}): {}", dev, ino, e);
+        }
+        self.generations.insert((dev, ino), rec);
+    }
+
+    async fn drop_generation(&self, dev: u64, ino: u64) {
+        let _ = self.backend.tier_delete_generation(dev, ino).await;
+        self.generations.remove(&(dev, ino));
+    }
+
+    /// The flush barrier's first act: delete every tombstoned key
+    /// (REMOVE victims, rename-over's covered files, re-key leftovers)
+    /// BEFORE any publish — a renamed file's create-flavor publish at
+    /// its new key depends on the covered object being gone.
+    pub async fn consume_tombstones(&self) -> usize {
+        let tombs = match self.backend.tier_list_tombstones().await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("tier flush: cannot list tombstones: {}", e);
+                return 0;
+            }
+        };
+        // NEVER delete a key some generation row still lives at: a
+        // re-key writes its old-key tombstone BEFORE publishing under
+        // the new key, and until that publish lands (crash, 412 retry)
+        // the old object is the generation's only bucket copy. The row
+        // re-points at publish; the tombstone becomes consumable then.
+        // (A tombstone superseded by a legitimate re-publish at the
+        // same key also parks here — harmless; step 12's import logic
+        // owns tidying those.)
+        let live: std::collections::HashSet<String> =
+            self.generations.iter().map(|e| e.key.clone()).collect();
+        let mut consumed = 0;
+        for t in tombs {
+            if live.contains(&t.key) {
+                debug!("tier flush: tombstone {} deferred (key still live)", t.key);
+                continue;
+            }
+            match self.store.head(&t.key).await {
+                Ok(meta) => {
+                    if let Some(want) = &t.etag {
+                        if want != &meta.etag {
+                            warn!(
+                                "tier flush: tombstoned {} carries etag {} (expected {}) — \
+                                 foreign interference; deleting anyway (the local tree is \
+                                 the authority and the path is gone)",
+                                t.key, meta.etag, want
+                            );
+                        }
+                    }
+                    if let Err(e) = self.store.delete(&t.key).await {
+                        warn!("tier flush: tombstone delete {} failed: {}", t.key, e);
+                        continue; // keep the tombstone; retry next tick
+                    }
+                }
+                Err(StoreError::NotFound(_)) => {} // already gone
+                Err(e) => {
+                    warn!("tier flush: tombstone HEAD {} failed: {}", t.key, e);
+                    continue;
+                }
+            }
+            if let Err(e) = self.backend.tier_delete_tombstone(&t.key).await {
+                warn!("tier flush: cannot close tombstone {}: {}", t.key, e);
+            } else {
+                consumed += 1;
+                debug!("tier flush: tombstone consumed: {}", t.key);
+            }
+        }
+        consumed
+    }
+
     /// Startup: arbitrate every interrupted flush intent by HEAD (A6 —
     /// a crashed flush is adopt/retry/foreign, never a runbook page).
     /// Runs BEFORE the first tick.
@@ -290,16 +425,19 @@ impl FlushOrchestrator {
                     // identity; the whole-dirty restore re-flushes on
                     // top of the adopted generation.
                     if let Some((dev, ino)) = stat_identity(Path::new(&intent.path)) {
-                        self.generations.insert(
-                            (dev, ino),
+                        self.record_generation(
+                            dev,
+                            ino,
                             GenRecord {
+                                key: key.clone(),
                                 generation: intent.to_gen,
                                 etag: meta.etag.clone(),
                                 crc64_b64: meta.crc64_b64.clone(),
                                 size: meta.size,
                                 copy_allowed: meta.copy_source_allowed(),
                             },
-                        );
+                        )
+                        .await;
                     }
                 }
                 Ok(Verdict::RetryFromBase) => {
@@ -333,9 +471,13 @@ impl FlushOrchestrator {
         handled
     }
 
-    /// One scheduling pass over the durable dirty set.
+    /// One scheduling pass: tombstones first (A7 — a renamed file's
+    /// publish at its new key depends on the covered object being
+    /// gone), then the durable dirty set.
     pub async fn tick(&self) -> TickReport {
         let mut report = TickReport::default();
+        self.load_generations().await;
+        self.consume_tombstones().await;
         let rows = match self.backend.tier_list_dirty().await {
             Ok(r) => r,
             Err(e) => {
@@ -416,6 +558,7 @@ impl FlushOrchestrator {
                         .unwrap_or(1);
                     discovered_crc = meta.crc64_b64.clone();
                     base = Some(GenRecord {
+                        key: key.clone(),
                         generation,
                         etag: meta.etag.clone(),
                         crc64_b64: meta.crc64_b64,
@@ -451,10 +594,27 @@ impl FlushOrchestrator {
             _ => return self.fail(dev, ino, Some(epoch), format!("stat {}", path.display())),
         };
 
-        // Restart clean-skip: discovered bucket CRC equals local truth
-        // ⇒ adopt clean, upload nothing. (Worth a full local read;
-        // never worth a full upload.)
-        if let Some(bucket_crc) = &discovered_crc {
+        // A7 re-key: the generation lives under a key the path no
+        // longer derives — the file was renamed since its publish.
+        let rekey_from: Option<String> = base
+            .as_ref()
+            .filter(|b| b.key != key)
+            .map(|b| b.key.clone());
+
+        // Restart clean-skip: when the bucket's CRC provably equals
+        // local truth, adopt clean and upload nothing. Two sources:
+        // HEAD discovery (unknown file), or — for a WHOLE-dirty epoch,
+        // the restart shape — the durable row's stored CRC (a full
+        // local read is always worth avoiding a full upload). Never
+        // while a re-key is pending: clean content still has to MOVE.
+        let clean_check_crc = discovered_crc.clone().or_else(|| {
+            if epoch.whole {
+                base.as_ref().and_then(|b| b.crc64_b64.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(bucket_crc) = clean_check_crc.as_ref().filter(|_| rekey_from.is_none()) {
             match file_crc(&path).await {
                 Ok(local_crc) if &crc64_to_b64(local_crc) == bucket_crc => {
                     meter::bump(Counter::FlushesCleanMatch);
@@ -465,7 +625,7 @@ impl FlushOrchestrator {
                             key, b.generation
                         );
                     }
-                    self.generations.insert((dev, ino), base.clone().unwrap());
+                    self.record_generation(dev, ino, base.clone().unwrap()).await;
                     self.try_clear_clean(dev, ino, row.mark_seq).await;
                     self.last_flush.insert((dev, ino), Instant::now());
                     return Outcome::CleanMatch;
@@ -475,9 +635,10 @@ impl FlushOrchestrator {
             }
         }
 
-        if !epoch.is_dirty() && base.is_some() {
-            // Bit set but nothing captured (leftover row): try to
-            // release it; the conditional clear keeps it on any race.
+        if !epoch.is_dirty() && base.is_some() && rekey_from.is_none() {
+            // Bit set but nothing captured and no re-key pending
+            // (leftover row): try to release it; the conditional clear
+            // keeps it on any race.
             self.try_clear_clean(dev, ino, row.mark_seq).await;
             return Outcome::NothingToFlush;
         }
@@ -495,9 +656,13 @@ impl FlushOrchestrator {
 
         let to_gen = base.as_ref().map_or(1, |b| b.generation + 1);
         let flush_uuid = uuid::Uuid::new_v4().to_string();
-        let condition = match &base {
-            Some(b) => PutCondition::IfMatch(b.etag.clone()),
-            None => PutCondition::IfNoneMatchAny,
+        // Re-key publishes CREATE at the new key (the covered object,
+        // if any, was tombstone-consumed at the top of this tick);
+        // clean ranges still copy from the OLD key, guarded on the
+        // base's etag. In-place publishes guard If-Match as before.
+        let condition = match (&base, &rekey_from) {
+            (Some(b), None) => PutCondition::IfMatch(b.etag.clone()),
+            _ => PutCondition::IfNoneMatchAny,
         };
         let stamps = GenerationStamps {
             generation: to_gen,
@@ -505,18 +670,35 @@ impl FlushOrchestrator {
             flush_uuid: flush_uuid.clone(),
         };
 
-        // Durable intent BEFORE any store mutation (A6).
+        // Durable intent BEFORE any store mutation (A6); for a re-key,
+        // ALSO the old key's tombstone — a crash after the new-key
+        // publish must still delete the old object (never an orphan
+        // the next import would resurrect).
         let intent = FlushIntentRecord {
             flush_uuid: flush_uuid.clone(),
             path: path.to_string_lossy().into_owned(),
             from_gen: base.as_ref().map(|b| b.generation),
             to_gen,
             mpu_id: None,
-            base_etag: base.as_ref().map(|b| b.etag.clone()),
+            base_etag: match (&base, &rekey_from) {
+                (Some(b), None) => Some(b.etag.clone()),
+                _ => None,
+            },
             created_unix: now_unix(),
         };
         if let Err(e) = self.backend.put_flush_intent(&intent).await {
             return self.fail(dev, ino, Some(epoch), format!("intent: {}", e));
+        }
+        if let Some(old_key) = &rekey_from {
+            let t = crate::state_backend::TierTombstone {
+                key: old_key.clone(),
+                etag: base.as_ref().map(|b| b.etag.clone()),
+                created_unix: now_unix(),
+            };
+            if let Err(e) = self.backend.tier_put_tombstone(&t).await {
+                let _ = self.backend.delete_flush_intent(&flush_uuid).await;
+                return self.fail(dev, ino, Some(epoch), format!("re-key tombstone: {}", e));
+            }
         }
 
         let publish = match &plan {
@@ -550,6 +732,7 @@ impl FlushOrchestrator {
                             key: &key,
                             local_path: &path,
                             parts: parts.clone(),
+                            base_key: rekey_from.as_deref(),
                             base_etag: base.as_ref().map(|b| b.etag.clone()),
                             condition: condition.clone(),
                             stamps: stamps.clone(),
@@ -585,16 +768,20 @@ impl FlushOrchestrator {
         match publish {
             Ok(meta) => {
                 meter::bump(Counter::Publishes);
-                self.generations.insert(
-                    (dev, ino),
+                self.record_generation(
+                    dev,
+                    ino,
                     GenRecord {
+                        key: key.clone(),
                         generation: to_gen,
                         etag: meta.etag.clone(),
                         crc64_b64: meta.crc64_b64.clone(),
                         size,
                         copy_allowed: true,
                     },
-                );
+                )
+                .await;
+                self.finish_rekey(&rekey_from).await;
                 let _ = self.backend.delete_flush_intent(&flush_uuid).await;
                 self.last_flush.insert((dev, ino), Instant::now());
                 self.try_clear_clean(dev, ino, row.mark_seq).await;
@@ -614,16 +801,20 @@ impl FlushOrchestrator {
                         meter::bump(Counter::ArbitrateAdoptOwn);
                         // Our own Complete landed; the epoch's bytes
                         // are in the object — consume it like success.
-                        self.generations.insert(
-                            (dev, ino),
+                        self.record_generation(
+                            dev,
+                            ino,
                             GenRecord {
+                                key: key.clone(),
                                 generation: to_gen,
                                 etag: meta.etag.clone(),
                                 crc64_b64: meta.crc64_b64.clone(),
                                 size,
                                 copy_allowed: true,
                             },
-                        );
+                        )
+                        .await;
+                        self.finish_rekey(&rekey_from).await;
                         let _ = self.backend.delete_flush_intent(&flush_uuid).await;
                         self.last_flush.insert((dev, ino), Instant::now());
                         self.try_clear_clean(dev, ino, row.mark_seq).await;
@@ -651,9 +842,11 @@ impl FlushOrchestrator {
                                      outside writes belong to import-refresh, step 12)",
                                     key, m.etag
                                 );
-                                self.generations.insert(
-                                    (dev, ino),
+                                self.record_generation(
+                                    dev,
+                                    ino,
                                     GenRecord {
+                                        key: key.clone(),
                                         generation,
                                         etag: m.etag.clone(),
                                         crc64_b64: m.crc64_b64.clone(),
@@ -662,7 +855,8 @@ impl FlushOrchestrator {
                                         // copy source for local truth.
                                         copy_allowed: false,
                                     },
-                                );
+                                )
+                                .await;
                             }
                             None => {
                                 warn!(
@@ -670,7 +864,7 @@ impl FlushOrchestrator {
                                      re-creates it next cycle",
                                     key
                                 );
-                                self.generations.remove(&(dev, ino));
+                                self.drop_generation(dev, ino).await;
                             }
                         }
                         let _ = self.backend.delete_flush_intent(&flush_uuid).await;
@@ -690,6 +884,26 @@ impl FlushOrchestrator {
                 meter::bump(Counter::PublishFailures);
                 warn!("tier flush: publish {} failed: {}", key, e);
                 Outcome::Failed(e.to_string())
+            }
+        }
+    }
+
+    /// A successful re-key publish's tail: delete the old key's object
+    /// and close its tombstone. Failures keep the tombstone — the next
+    /// tick's sweep finishes the job (same posture as a crash here).
+    async fn finish_rekey(&self, rekey_from: &Option<String>) {
+        let Some(old_key) = rekey_from else { return };
+        match self.store.delete(old_key).await {
+            Ok(()) => {
+                let _ = self.backend.tier_delete_tombstone(old_key).await;
+                debug!("tier flush: re-key complete, old object {} deleted", old_key);
+            }
+            Err(e) => {
+                warn!(
+                    "tier flush: old-key delete {} failed ({}); its tombstone stays for \
+                     the next sweep",
+                    old_key, e
+                );
             }
         }
     }
@@ -1249,6 +1463,185 @@ mod tests {
         assert_eq!(g2.generation, 2);
         let (_, bytes) = r.mem.get_whole("t/torn.bin", Some(&g2.etag)).await.unwrap();
         assert_eq!(bytes.as_ref(), b"post-crash update!!!!");
+    }
+
+    /// Land an identity event in OUR backend (the event queue is
+    /// process-global like capture's — theft-repair by re-noting; a
+    /// double-apply is idempotent, the covered row being already gone).
+    async fn rename_and_land(
+        rigg: &Rig,
+        moved: (u64, u64),
+        new_path: &Path,
+        covered: Option<(u64, u64)>,
+    ) {
+        for _ in 0..50 {
+            crate::tier::identity::note_rename(Some(moved), new_path, covered);
+            let _ = crate::tier::durable::drain_pending(&rigg.backend).await;
+            let moved_ok = rigg
+                .backend
+                .tier_list_dirty()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| {
+                    r.dev == moved.0
+                        && r.ino == moved.1
+                        && r.path.as_deref() == Some(&*new_path.to_string_lossy())
+                });
+            let covered_ok = match covered {
+                None => true,
+                Some(c) => {
+                    // Either the covered row was tombstoned by our
+                    // apply, or it never had a generation row.
+                    rigg.backend
+                        .tier_list_generations()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .all(|g| !(g.dev == c.0 && g.ino == c.1))
+                }
+            };
+            if moved_ok && covered_ok {
+                return;
+            }
+        }
+        panic!("identity event never landed (theft-repair exhausted)");
+    }
+
+    /// THE STEP-6 DRILL: git's tmp-write+rename idiom, the tier's
+    /// proof workload. Every finalize must publish cleanly — zero
+    /// false 412s, zero Foreign verdicts, no orphan tmp objects, no
+    /// resurrection of covered files. (Pre-A7 this wedged on EVERY
+    /// iteration: the covered object at the final key made the fresh
+    /// file's create-flavor publish 412 into a Foreign verdict.)
+    #[tokio::test]
+    async fn git_storm_tmp_write_rename_never_false_412s() {
+        let r = rig(1024, 256);
+        let final_path = r.root.join("obj.pack");
+        let mut prev_ident: Option<(u64, u64)> = None;
+        let mut last_content = Vec::new();
+        let mut last_ident = (0, 0);
+        for i in 0..12u32 {
+            let tmp = r.root.join(format!("obj.pack.tmp{}", i));
+            let content = format!("packfile generation {} payload", i).into_bytes();
+            std::fs::write(&tmp, &content).unwrap();
+            note_and_land(&r, &tmp, Mutation::Whole).await;
+            std::fs::rename(&tmp, &final_path).unwrap();
+            let moved = ident(&final_path);
+            rename_and_land(&r, moved, &final_path, prev_ident).await;
+
+            // The tick sequence, run deterministically so the OUTCOME
+            // is assertable per iteration.
+            r.orch.load_generations().await;
+            r.orch.consume_tombstones().await;
+            let row = our_row(&r, moved.0, moved.1).await.expect("moved bit must be set");
+            let out = r.orch.flush_file(&row).await;
+            assert!(
+                matches!(out, Outcome::Published { .. } | Outcome::CleanMatch),
+                "iteration {}: {:?} — the false-412 wedge A7 exists to kill",
+                i, out
+            );
+            prev_ident = Some(moved);
+            last_ident = moved;
+            last_content = content;
+        }
+        // End state: exactly ONE object, the final content, no
+        // tombstones, no orphan tmp keys.
+        let listed = r.mem.list("t/").await.unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "orphan objects after the storm: {:?}",
+            listed.iter().map(|o| &o.key).collect::<Vec<_>>()
+        );
+        assert_eq!(listed[0].key, "t/obj.pack");
+        let g = r.orch.generation_of(last_ident.0, last_ident.1).unwrap();
+        let (_, bytes) = r.mem.get_whole("t/obj.pack", Some(&g.etag)).await.unwrap();
+        assert_eq!(bytes.as_ref(), last_content.as_slice());
+        assert!(
+            r.backend.tier_list_tombstones().await.unwrap().is_empty(),
+            "every tombstone must be consumed"
+        );
+    }
+
+    /// Rename AFTER publish: the flusher re-keys — the new key gets
+    /// the generation via server-side copy (no re-upload of clean
+    /// bytes), the old object is deleted, and nothing 412s.
+    #[tokio::test]
+    async fn rename_after_publish_rekeys_the_object() {
+        let r = rig(256, 256);
+        let a = r.root.join("a.bin");
+        let content = vec![0xCDu8; 4096];
+        std::fs::write(&a, &content).unwrap();
+        let idn = ident(&a);
+        note_and_land(&r, &a, Mutation::Whole).await;
+        r.orch.tick().await;
+        let g1 = r.orch.generation_of(idn.0, idn.1).unwrap();
+        assert_eq!((g1.generation, g1.key.as_str()), (1, "t/a.bin"));
+
+        let b = r.root.join("b.bin");
+        std::fs::rename(&a, &b).unwrap();
+        rename_and_land(&r, idn, &b, None).await;
+
+        r.orch.tick().await;
+        let g2 = r.orch.generation_of(idn.0, idn.1).unwrap();
+        assert_eq!(
+            (g2.generation, g2.key.as_str()),
+            (2, "t/b.bin"),
+            "the row must re-point at the new key"
+        );
+        let (m, bytes) = r.mem.get_whole("t/b.bin", Some(&g2.etag)).await.unwrap();
+        assert_eq!(bytes.as_ref(), content.as_slice());
+        assert!(
+            m.etag.contains('-'),
+            "a clean re-key must move by server-side copy (multipart), not re-upload: {}",
+            m.etag
+        );
+        assert!(
+            matches!(r.mem.head("t/a.bin").await, Err(StoreError::NotFound(_))),
+            "the old key's object must be deleted"
+        );
+        assert!(r.backend.tier_list_tombstones().await.unwrap().is_empty());
+    }
+
+    /// REMOVE after publish: the tombstone flows through the barrier
+    /// and the bucket object is deleted — never resurrected.
+    #[tokio::test]
+    async fn remove_after_publish_deletes_the_bucket_object() {
+        let r = rig(1024, 256);
+        let f = r.root.join("victim.bin");
+        std::fs::write(&f, b"soon to be deleted").unwrap();
+        let idn = ident(&f);
+        note_and_land(&r, &f, Mutation::Whole).await;
+        r.orch.tick().await;
+        assert!(r.mem.head("t/victim.bin").await.is_ok());
+
+        std::fs::remove_file(&f).unwrap();
+        for _ in 0..50 {
+            crate::tier::identity::note_remove(idn);
+            let _ = crate::tier::durable::drain_pending(&r.backend).await;
+            if r.backend
+                .tier_list_tombstones()
+                .await
+                .unwrap()
+                .iter()
+                .any(|t| t.key == "t/victim.bin")
+            {
+                break;
+            }
+        }
+        assert!(
+            r.backend.tier_list_generations().await.unwrap().iter().all(|g| g.ino != idn.1),
+            "the generation row must die with the file"
+        );
+
+        r.orch.tick().await;
+        assert!(
+            matches!(r.mem.head("t/victim.bin").await, Err(StoreError::NotFound(_))),
+            "the bucket object must be deleted at the barrier"
+        );
+        assert!(r.backend.tier_list_tombstones().await.unwrap().is_empty());
+        assert!(our_row(&r, idn.0, idn.1).await.is_none());
     }
 
     #[tokio::test]

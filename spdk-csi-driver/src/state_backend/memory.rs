@@ -51,6 +51,8 @@ pub struct MemoryBackend {
     /// A3's crash fallback only exists on sqlite.
     tier_dirty: DashMap<(u64, u64), super::TierDirtyEntry>,
     tier_flush_intents: DashMap<String, super::FlushIntentRecord>,
+    tier_generations: DashMap<(u64, u64), super::TierGenerationRow>,
+    tier_tombstones: DashMap<String, super::TierTombstone>,
 }
 
 impl MemoryBackend {
@@ -128,6 +130,100 @@ impl StateBackend for MemoryBackend {
 
     async fn delete_flush_intent(&self, flush_uuid: &str) -> StateBackendResult<()> {
         self.tier_flush_intents.remove(flush_uuid);
+        Ok(())
+    }
+
+    async fn tier_upsert_generation(
+        &self,
+        row: &super::TierGenerationRow,
+    ) -> StateBackendResult<()> {
+        self.tier_generations.insert((row.dev, row.ino), row.clone());
+        Ok(())
+    }
+
+    async fn tier_list_generations(
+        &self,
+    ) -> StateBackendResult<Vec<super::TierGenerationRow>> {
+        Ok(self.tier_generations.iter().map(|e| e.value().clone()).collect())
+    }
+
+    async fn tier_delete_generation(&self, dev: u64, ino: u64) -> StateBackendResult<()> {
+        self.tier_generations.remove(&(dev, ino));
+        Ok(())
+    }
+
+    async fn tier_put_tombstone(&self, t: &super::TierTombstone) -> StateBackendResult<()> {
+        self.tier_tombstones.insert(t.key.clone(), t.clone());
+        Ok(())
+    }
+
+    async fn tier_list_tombstones(&self) -> StateBackendResult<Vec<super::TierTombstone>> {
+        Ok(self.tier_tombstones.iter().map(|e| e.value().clone()).collect())
+    }
+
+    async fn tier_delete_tombstone(&self, key: &str) -> StateBackendResult<()> {
+        self.tier_tombstones.remove(key);
+        Ok(())
+    }
+
+    async fn tier_apply_rename(
+        &self,
+        moved: Option<(u64, u64)>,
+        new_path: &str,
+        mark_seq: u64,
+        covered: Option<(u64, u64)>,
+        now_unix: u64,
+    ) -> StateBackendResult<()> {
+        if let Some(c) = covered {
+            if let Some((_, row)) = self.tier_generations.remove(&c) {
+                self.tier_tombstones.insert(
+                    row.key.clone(),
+                    super::TierTombstone {
+                        key: row.key,
+                        etag: Some(row.etag),
+                        created_unix: now_unix,
+                    },
+                );
+            }
+            self.tier_dirty.remove(&c);
+        }
+        if let Some(m) = moved {
+            match self.tier_dirty.entry(m) {
+                dashmap::mapref::entry::Entry::Occupied(mut o) => {
+                    let row = o.get_mut();
+                    row.path = Some(new_path.to_string());
+                    row.mark_seq = mark_seq;
+                }
+                dashmap::mapref::entry::Entry::Vacant(v) => {
+                    v.insert(super::TierDirtyEntry {
+                        dev: m.0,
+                        ino: m.1,
+                        path: Some(new_path.to_string()),
+                        dirtied_unix: now_unix,
+                        mark_seq,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn tier_apply_remove(
+        &self,
+        ident: (u64, u64),
+        now_unix: u64,
+    ) -> StateBackendResult<()> {
+        if let Some((_, row)) = self.tier_generations.remove(&ident) {
+            self.tier_tombstones.insert(
+                row.key.clone(),
+                super::TierTombstone {
+                    key: row.key,
+                    etag: Some(row.etag),
+                    created_unix: now_unix,
+                },
+            );
+        }
+        self.tier_dirty.remove(&ident);
         Ok(())
     }
 
