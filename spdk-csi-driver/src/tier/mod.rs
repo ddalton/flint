@@ -40,6 +40,14 @@
 //! admission wait. The watermark-driven `evict_pass` goes live with
 //! it.
 
+//! Step 12: `manifest` — the A12 DR manifest at every flush barrier
+//! (metadata checkpoint + RPO record + restore driver, with the
+//! declined round-trips enumerated); `import` — the A7-consuming
+//! import-refresh verb: manifest-driven tree restore + bucket sweep,
+//! materializing evicted stubs that hydrate on first touch, never
+//! resurrecting a tombstoned key. DR = CAS + manifest-driven restore
+//! + consumer remount.
+
 pub mod arbitrate;
 pub mod capture;
 pub mod durable;
@@ -49,6 +57,8 @@ pub mod flush;
 pub mod gate;
 pub mod hydrate;
 pub mod identity;
+pub mod import;
+pub mod manifest;
 pub mod meter;
 pub mod space;
 pub mod store;

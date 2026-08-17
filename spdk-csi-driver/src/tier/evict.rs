@@ -623,7 +623,7 @@ fn now_unix() -> u64 {
 // ── xattr helpers (stub_binding's libc pattern) ──────────────────────
 
 #[cfg(target_os = "linux")]
-fn set_xattr(path: &Path, name: &str, value: &[u8]) -> std::io::Result<()> {
+pub(crate) fn set_xattr(path: &Path, name: &str, value: &[u8]) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let p = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in path"))?;
@@ -635,7 +635,7 @@ fn set_xattr(path: &Path, name: &str, value: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn set_xattr(path: &Path, name: &str, value: &[u8]) -> std::io::Result<()> {
+pub(crate) fn set_xattr(path: &Path, name: &str, value: &[u8]) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let p = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in path"))?;
@@ -647,7 +647,7 @@ fn set_xattr(path: &Path, name: &str, value: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn set_xattr(_path: &Path, _name: &str, _value: &[u8]) -> std::io::Result<()> {
+pub(crate) fn set_xattr(_path: &Path, _name: &str, _value: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 

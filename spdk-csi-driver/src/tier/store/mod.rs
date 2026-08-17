@@ -123,6 +123,57 @@ pub struct GenerationStamps {
     pub generation: u64,
     pub epoch: u64,
     pub flush_uuid: String,
+    /// A12: POSIX metadata riding on the object, so a bucket reader —
+    /// and the DR import — can restore mode/ownership/mtime without
+    /// the manifest. OPTIONAL both ways: absence never makes an object
+    /// foreign (steps 4–11 published without it).
+    pub posix: Option<PosixStamps>,
+}
+
+/// The A12 per-object POSIX stamps (`flint-mode` is octal; times are
+/// unix seconds). Enumerated NON-goals of the round-trip: hard-link
+/// structure, sockets/FIFOs/devices, and sparseness — see
+/// `tier::manifest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PosixStamps {
+    /// Full st_mode (type bits included; restore applies the 07777).
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub mtime_unix: i64,
+}
+
+impl PosixStamps {
+    pub const META_MODE: &'static str = "flint-mode";
+    pub const META_UID: &'static str = "flint-uid";
+    pub const META_GID: &'static str = "flint-gid";
+    pub const META_MTIME: &'static str = "flint-mtime";
+
+    #[cfg(unix)]
+    pub fn from_metadata(m: &std::fs::Metadata) -> PosixStamps {
+        use std::os::unix::fs::MetadataExt;
+        PosixStamps { mode: m.mode(), uid: m.uid(), gid: m.gid(), mtime_unix: m.mtime() }
+    }
+
+    fn to_meta(self) -> Vec<(String, String)> {
+        vec![
+            (Self::META_MODE.into(), format!("{:o}", self.mode)),
+            (Self::META_UID.into(), self.uid.to_string()),
+            (Self::META_GID.into(), self.gid.to_string()),
+            (Self::META_MTIME.into(), self.mtime_unix.to_string()),
+        ]
+    }
+
+    /// Lenient: any stamp absent/malformed ⇒ None as a set (never a
+    /// foreignness signal).
+    pub fn from_meta(meta: &HashMap<String, String>) -> Option<PosixStamps> {
+        Some(PosixStamps {
+            mode: u32::from_str_radix(meta.get(Self::META_MODE)?, 8).ok()?,
+            uid: meta.get(Self::META_UID)?.parse().ok()?,
+            gid: meta.get(Self::META_GID)?.parse().ok()?,
+            mtime_unix: meta.get(Self::META_MTIME)?.parse().ok()?,
+        })
+    }
 }
 
 impl GenerationStamps {
@@ -131,21 +182,26 @@ impl GenerationStamps {
     pub const META_FLUSH_UUID: &'static str = "flint-flush-uuid";
 
     pub fn to_meta(&self) -> Vec<(String, String)> {
-        vec![
+        let mut v = vec![
             (Self::META_GEN.into(), self.generation.to_string()),
             (Self::META_EPOCH.into(), self.epoch.to_string()),
             (Self::META_FLUSH_UUID.into(), self.flush_uuid.clone()),
-        ]
+        ];
+        if let Some(p) = self.posix {
+            v.extend(p.to_meta());
+        }
+        v
     }
 
-    /// Parse stamps back out of object metadata; None if any stamp is
-    /// absent or malformed (an unstamped object is by definition
-    /// foreign).
+    /// Parse stamps back out of object metadata; None if any IDENTITY
+    /// stamp is absent or malformed (an unstamped object is by
+    /// definition foreign). The posix set parses leniently.
     pub fn from_meta(meta: &HashMap<String, String>) -> Option<GenerationStamps> {
         Some(GenerationStamps {
             generation: meta.get(Self::META_GEN)?.parse().ok()?,
             epoch: meta.get(Self::META_EPOCH)?.parse().ok()?,
             flush_uuid: meta.get(Self::META_FLUSH_UUID)?.clone(),
+            posix: PosixStamps::from_meta(meta),
         })
     }
 }
@@ -424,7 +480,7 @@ mod tests {
 
     #[test]
     fn stamps_roundtrip_and_reject_partial() {
-        let s = GenerationStamps { generation: 7, epoch: 3, flush_uuid: "u-1".into() };
+        let s = GenerationStamps { generation: 7, epoch: 3, flush_uuid: "u-1".into(), posix: None };
         let m: HashMap<String, String> = s.to_meta().into_iter().collect();
         assert_eq!(GenerationStamps::from_meta(&m), Some(s));
         let mut partial = m.clone();
@@ -434,5 +490,25 @@ mod tests {
             None,
             "an unstamped/partially-stamped object is foreign by definition"
         );
+    }
+
+    #[test]
+    fn posix_stamps_roundtrip_and_stay_lenient() {
+        let p = PosixStamps { mode: 0o100644, uid: 501, gid: 20, mtime_unix: 1_723_000_000 };
+        let s = GenerationStamps {
+            generation: 2,
+            epoch: 1,
+            flush_uuid: "u-2".into(),
+            posix: Some(p),
+        };
+        let m: HashMap<String, String> = s.to_meta().into_iter().collect();
+        assert_eq!(m.get(PosixStamps::META_MODE).map(String::as_str), Some("100644"));
+        assert_eq!(GenerationStamps::from_meta(&m), Some(s));
+        // A pre-step-12 object (identity stamps only) parses with
+        // posix: None — NEVER foreign.
+        let mut old = m.clone();
+        old.remove(PosixStamps::META_UID);
+        let parsed = GenerationStamps::from_meta(&old).expect("identity stamps intact");
+        assert_eq!(parsed.posix, None);
     }
 }

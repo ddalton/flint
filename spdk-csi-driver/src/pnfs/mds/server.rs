@@ -812,6 +812,52 @@ impl MetadataServer {
         // and mutate on top).
         orch.startup().await;
 
+        // Step 12: import-refresh — resume a crashed import, or (on
+        // FRESH state with bucket content) rebuild/adopt the tree from
+        // the bucket: dirs and symlinks from the manifest, files as
+        // evicted stubs that hydrate on first touch. BEFORE the marker
+        // reconcile (which loads the imported stubs' markers) and
+        // BEFORE the listener binds. Tombstoned keys are never
+        // resurrected (A7).
+        if t.import_on_start {
+            let intent_path = match self.config.state.backend {
+                crate::pnfs::config::StateBackend::Sqlite => {
+                    let db = self
+                        .config
+                        .state
+                        .config
+                        .get("path")
+                        .cloned()
+                        .unwrap_or_else(|| "/var/lib/flint-pnfs/state.db".to_string());
+                    std::path::Path::new(&db)
+                        .parent()
+                        .map(|p| p.join("flint-import-intent"))
+                }
+                _ => None,
+            };
+            if let Some(rep) = crate::tier::import::maybe_import_on_start(
+                &self.backend,
+                &orch_store,
+                crate::tier::import::ImportConfig {
+                    export_root: &self.export_path,
+                    key_prefix: &t.key_prefix,
+                    intent_path: intent_path.as_deref(),
+                },
+            )
+            .await
+            {
+                info!(
+                    "🪣 tier import: {} dir(s), {} symlink(s), {} stub(s) restored \
+                     ({} tombstoned skipped, {} failed)",
+                    rep.dirs_restored,
+                    rep.symlinks_restored,
+                    rep.stubs_created,
+                    rep.skipped_tombstoned,
+                    rep.failed
+                );
+            }
+        }
+
         // Step 10 (C2): finish or roll back half-evictions and load
         // the marker consult map — BEFORE the listener binds, so the
         // first READ of an evicted file finds its marker, never a

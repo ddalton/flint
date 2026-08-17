@@ -245,6 +245,10 @@ pub struct FlushOrchestrator {
     epoch: Arc<crate::tier::epoch::EpochGuard>,
     generations: DashMap<(u64, u64), GenRecord>,
     last_flush: DashMap<(u64, u64), Instant>,
+    /// Step 12 (A12): the DR manifest writer's guard/seq state; the
+    /// manifest itself is written at the end of every tick (the flush
+    /// barrier) when its content changed.
+    manifest: tokio::sync::Mutex<crate::tier::manifest::WriterState>,
 }
 
 impl FlushOrchestrator {
@@ -261,6 +265,7 @@ impl FlushOrchestrator {
             epoch,
             generations: DashMap::new(),
             last_flush: DashMap::new(),
+            manifest: tokio::sync::Mutex::new(crate::tier::manifest::WriterState::default()),
         }
     }
 
@@ -289,10 +294,14 @@ impl FlushOrchestrator {
         self.generations.get(&(dev, ino)).map(|e| e.clone())
     }
 
-    /// Startup: durable registry first, then intent arbitration.
+    /// Startup: durable registry first, then intent arbitration, then
+    /// the manifest seq/guard seed (step 12 — the manifest's own seq
+    /// is bucket data, so it survives even total local state loss).
     pub async fn startup(&self) {
         let n = self.load_generations().await;
         let i = self.reconcile_intents().await;
+        *self.manifest.lock().await =
+            crate::tier::manifest::seed(self.store.as_ref(), &self.cfg.key_prefix).await;
         if n > 0 || i > 0 {
             info!("tier flush: startup loaded {} generation row(s), reconciled {} intent(s)", n, i);
         }
@@ -374,15 +383,27 @@ impl FlushOrchestrator {
         // the new key, and until that publish lands (crash, 412 retry)
         // the old object is the generation's only bucket copy. The row
         // re-points at publish; the tombstone becomes consumable then.
-        // (A tombstone superseded by a legitimate re-publish at the
-        // same key also parks here — harmless; step 12's import logic
-        // owns tidying those.)
-        let live: std::collections::HashSet<String> =
-            self.generations.iter().map(|e| e.key.clone()).collect();
+        let live: std::collections::HashMap<String, String> =
+            self.generations.iter().map(|e| (e.key.clone(), e.etag.clone())).collect();
         let mut consumed = 0;
         for t in tombs {
-            if live.contains(&t.key) {
-                debug!("tier flush: tombstone {} deferred (key still live)", t.key);
+            if let Some(live_etag) = live.get(&t.key) {
+                // Step 12's tidy: a tombstone SUPERSEDED by a
+                // legitimate later publish at the same key (the live
+                // row carries a different etag) names an object that
+                // no longer exists — close it WITHOUT deleting
+                // anything. Etag-less or same-etag tombstones keep
+                // deferring (the re-key crash window).
+                if t.etag.as_ref().is_some_and(|e| e != live_etag) {
+                    if let Err(e) = self.backend.tier_delete_tombstone(&t.key).await {
+                        warn!("tier flush: cannot close superseded tombstone {}: {}", t.key, e);
+                    } else {
+                        consumed += 1;
+                        debug!("tier flush: superseded tombstone {} closed", t.key);
+                    }
+                } else {
+                    debug!("tier flush: tombstone {} deferred (key still live)", t.key);
+                }
                 continue;
             }
             match self.store.head(&t.key).await {
@@ -550,7 +571,44 @@ impl FlushOrchestrator {
                 Outcome::Failed(_) => report.failed += 1,
             }
         }
+        self.write_manifest_barrier().await;
         report
+    }
+
+    /// Step 12 (A12): the flush barrier's closing act — rewrite the DR
+    /// manifest when the tree/RPO changed. Failure is non-fatal (the
+    /// previous manifest stays the RPO record one barrier longer).
+    pub async fn write_manifest_barrier(&self) {
+        // Fenced mid-tick ⇒ no barrier: a deposed hub must not
+        // describe a bucket it no longer owns.
+        let Some(epoch) = self.epoch.current() else { return };
+        let gens: std::collections::HashMap<(u64, u64), GenRecord> =
+            self.generations.iter().map(|e| (*e.key(), e.value().clone())).collect();
+        let root = self.cfg.export_root.clone();
+        let built = match tokio::task::spawn_blocking(move || {
+            crate::tier::manifest::build(&root, &gens)
+        })
+        .await
+        {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
+                warn!("tier manifest: tree walk failed: {} — barrier skipped", e);
+                return;
+            }
+            Err(e) => {
+                warn!("tier manifest: walk task failed: {} — barrier skipped", e);
+                return;
+            }
+        };
+        let mut st = self.manifest.lock().await;
+        crate::tier::manifest::write_at_barrier(
+            self.store.as_ref(),
+            &self.cfg.key_prefix,
+            epoch,
+            &mut st,
+            built,
+        )
+        .await;
     }
 
     /// Flush one file. `row` is its durable dirty entry from this
@@ -639,9 +697,17 @@ impl FlushOrchestrator {
                 .unwrap_or_default()
         };
 
-        let size = match tokio::task::spawn_blocking({
+        let (size, posix) = match tokio::task::spawn_blocking({
             let p = path.clone();
-            move || std::fs::metadata(&p).map(|m| m.len())
+            move || {
+                std::fs::metadata(&p).map(|m| {
+                    #[cfg(unix)]
+                    let posix = Some(crate::tier::store::PosixStamps::from_metadata(&m));
+                    #[cfg(not(unix))]
+                    let posix = None;
+                    (m.len(), posix)
+                })
+            }
         })
         .await
         {
@@ -723,6 +789,10 @@ impl FlushOrchestrator {
             generation: to_gen,
             epoch: current_epoch,
             flush_uuid: flush_uuid.clone(),
+            // A12: mode/uid/gid/mtime ride on the object — a bucket
+            // reader (and the DR import) can restore metadata without
+            // the manifest.
+            posix,
         };
 
         // Durable intent BEFORE any store mutation (A6); for a re-key,
@@ -1528,7 +1598,7 @@ mod tests {
         r.mem.raw_put(
             "t/torn.bin",
             Bytes::from_static(b"torn publish contents"),
-            GenerationStamps { generation: 1, epoch: 0, flush_uuid: uuid.into() }.to_meta(),
+            GenerationStamps { generation: 1, epoch: 0, flush_uuid: uuid.into(), posix: None }.to_meta(),
         );
 
         assert_eq!(r.orch.reconcile_intents().await, 1);
@@ -1683,6 +1753,59 @@ mod tests {
             "the old key's object must be deleted"
         );
         assert!(r.backend.tier_list_tombstones().await.unwrap().is_empty());
+    }
+
+    /// Step 12's tidy: a tombstone whose key was legitimately
+    /// re-published (live row, DIFFERENT etag) names an object that no
+    /// longer exists — it closes WITHOUT deleting anything. A
+    /// same-etag tombstone (the re-key crash window) keeps deferring.
+    #[tokio::test]
+    async fn superseded_tombstone_closes_without_deleting_the_live_object() {
+        let r = rig(1024, 256);
+        let f = r.root.join("reborn.bin");
+        std::fs::write(&f, b"the second life").unwrap();
+        let idn = ident(&f);
+        note_and_land(&r, &f, Mutation::Whole).await;
+        r.orch.tick().await;
+        let g = r.orch.generation_of(idn.0, idn.1).unwrap();
+
+        // A stale tombstone from a superseded life of this key.
+        r.backend
+            .tier_put_tombstone(&crate::state_backend::TierTombstone {
+                key: g.key.clone(),
+                etag: Some("stale-superseded-etag".into()),
+                created_unix: 1,
+            })
+            .await
+            .unwrap();
+        // And one that still matches the LIVE etag — the re-key crash
+        // window shape; it must keep deferring.
+        r.backend
+            .tier_put_tombstone(&crate::state_backend::TierTombstone {
+                key: "t/other-live.bin".into(),
+                etag: Some("held".into()),
+                created_unix: 1,
+            })
+            .await
+            .unwrap();
+        r.orch.generations.insert(
+            (999_999, 777_777),
+            GenRecord {
+                key: "t/other-live.bin".into(),
+                generation: 1,
+                etag: "held".into(),
+                crc64_b64: None,
+                size: 1,
+                copy_allowed: false,
+            },
+        );
+
+        r.orch.consume_tombstones().await;
+        let left = r.backend.tier_list_tombstones().await.unwrap();
+        assert_eq!(left.len(), 1, "{:?}", left);
+        assert_eq!(left[0].key, "t/other-live.bin", "same-etag tombstone defers");
+        assert!(r.mem.head(&g.key).await.is_ok(), "the live object is untouched");
+        r.orch.generations.remove(&(999_999, 777_777));
     }
 
     /// REMOVE after publish: the tombstone flows through the barrier

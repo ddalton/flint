@@ -131,6 +131,25 @@ pub fn install(
     h
 }
 
+/// A LOCAL hydrator for cross-module drills (step 12's DR drill runs
+/// restore_once directly) — deliberately NOT installed globally.
+#[cfg(test)]
+pub(crate) fn local_for_tests(
+    backend: Arc<dyn StateBackend>,
+    store: Arc<dyn ObjectStore>,
+    concurrency: usize,
+) -> Arc<Hydrator> {
+    Arc::new(Hydrator {
+        backend,
+        store,
+        cfg: HydrateConfig { hold: Duration::from_secs(2), concurrency },
+        handle: tokio::runtime::Handle::current(),
+        shared: Arc::new(tokio::sync::Semaphore::new(concurrency.max(1))),
+        write_reserved: Arc::new(tokio::sync::Semaphore::new(1)),
+        inflight: DashMap::new(),
+    })
+}
+
 /// Request hydration of an evicted file. Sync and cheap — callable
 /// from the blocking closures at the marker-consult sites. Idempotent:
 /// an in-flight restore absorbs the request (a WRITE trigger upgrades
@@ -282,6 +301,7 @@ pub(crate) async fn restore_once(
     let mut meta = evict::marker_meta(dev, ino).ok_or("marker vanished")?;
 
     // Identity check: the path must still name the marker inode.
+    let stub_mtime;
     {
         use std::os::unix::fs::MetadataExt;
         let md = path
@@ -290,6 +310,10 @@ pub(crate) async fn restore_once(
         if (md.dev(), md.ino()) != (dev, ino) {
             return Err("path no longer names the marker inode".into());
         }
+        // Hydration is NOT a modification (step 12's POSIX-fidelity
+        // posture): the stub's mtime — which eviction/import gave it —
+        // is re-applied after the restore's writes.
+        stub_mtime = filetime::FileTime::from_last_modification_time(&md);
         if md.len() != 0 {
             // A failed earlier attempt (or an adopt restart) left
             // bytes; back to the stub first.
@@ -324,6 +348,7 @@ pub(crate) async fn restore_once(
             if let Err(e) = h.backend.tier_upsert_generation(&gen_row).await {
                 warn!("tier hydrate: generation row upsert: {} (HEAD rediscovers)", e);
             }
+            let _ = filetime::set_file_mtime(path, stub_mtime);
             h.backend
                 .tier_delete_evicted(dev, ino)
                 .await

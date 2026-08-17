@@ -100,6 +100,18 @@ counters! {
     hydration_foreign_adopts,
     /// Files evicted by the watermark pass (vs. drills/manual).
     auto_evictions,
+    /// Step 12 (A12): DR manifests written at flush barriers (unchanged
+    /// content skips — a write here means the RPO advanced).
+    manifest_writes,
+    /// Manifest barrier writes that failed (the RPO record is stale by
+    /// one barrier; retried next tick).
+    manifest_failures,
+    /// Step 12 (A7): import-refresh — evicted stubs materialized from
+    /// bucket objects.
+    import_stubs,
+    /// Keys the import REFUSED to re-ingest because their tombstone has
+    /// not flushed (the resurrection guard).
+    import_skipped_tombstoned,
 }
 
 #[inline]
@@ -151,6 +163,10 @@ pub enum Counter {
     HydrationBytes,
     HydrationForeignAdopts,
     AutoEvictions,
+    ManifestWrites,
+    ManifestFailures,
+    ImportStubs,
+    ImportSkippedTombstoned,
 }
 
 impl Counter {
@@ -191,6 +207,10 @@ impl Counter {
             Counter::HydrationBytes => &hydration_bytes,
             Counter::HydrationForeignAdopts => &hydration_foreign_adopts,
             Counter::AutoEvictions => &auto_evictions,
+            Counter::ManifestWrites => &manifest_writes,
+            Counter::ManifestFailures => &manifest_failures,
+            Counter::ImportStubs => &import_stubs,
+            Counter::ImportSkippedTombstoned => &import_skipped_tombstoned,
         }
     }
 }

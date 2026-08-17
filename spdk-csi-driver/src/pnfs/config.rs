@@ -208,6 +208,13 @@ pub struct TierConfig {
     /// WRITE-triggered hydrations — step 9's hung-task finding).
     #[serde(rename = "hydrateConcurrency", default = "default_tier_hydrate_concurrency")]
     pub hydrate_concurrency: usize,
+
+    /// Step 12: run import-refresh at startup when the tier state is
+    /// FRESH and the bucket holds content (the DR restore / bucket
+    /// adopt path), and always to resume a crashed import. `false`
+    /// leaves the bucket unimported (flush-only posture).
+    #[serde(rename = "importOnStart", default = "default_true")]
+    pub import_on_start: bool,
 }
 
 fn default_tier_flush_floor() -> u64 {

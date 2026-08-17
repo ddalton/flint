@@ -843,7 +843,7 @@ mod tests {
         let key = format!("{}file.bin", prefix);
         let gen1_body = Bytes::from(vec![0xA5u8; 12 * 1024 * 1024]);
         let gen1_crc = crc64_nvme(&gen1_body);
-        let stamps1 = GenerationStamps { generation: 1, epoch: 1, flush_uuid: "uuid-g1".into() };
+        let stamps1 = GenerationStamps { generation: 1, epoch: 1, flush_uuid: "uuid-g1".into(), posix: None };
         let gen1 = store
             .put_whole(&key, gen1_body.clone(), &PutCondition::IfNoneMatchAny, &stamps1, gen1_crc)
             .await
@@ -898,7 +898,7 @@ mod tests {
         gen2_content[..(6 * MB) as usize].fill(0x5A); // first 6 MiB dirty
         std::fs::write(&local, &gen2_content).unwrap();
         let gen2_crc = crc64_nvme(&gen2_content);
-        let stamps2 = GenerationStamps { generation: 2, epoch: 1, flush_uuid: "uuid-g2".into() };
+        let stamps2 = GenerationStamps { generation: 2, epoch: 1, flush_uuid: "uuid-g2".into(), posix: None };
         let spec = ComposeSpec {
             key: &key,
             local_path: &local,
@@ -954,7 +954,7 @@ mod tests {
         let err = store.compose_generation(&ComposeSpec {
             condition: PutCondition::IfMatch(gen2.etag.clone()),
             base_etag: Some(gen2.etag.clone()),
-            stamps: GenerationStamps { generation: 3, epoch: 1, flush_uuid: "uuid-g3".into() },
+            stamps: GenerationStamps { generation: 3, epoch: 1, flush_uuid: "uuid-g3".into(), posix: None },
             ..spec.clone()
         }).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)),

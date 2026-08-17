@@ -639,7 +639,7 @@ mod tests {
     use super::*;
 
     fn stamps(generation: u64) -> GenerationStamps {
-        GenerationStamps { generation, epoch: 1, flush_uuid: format!("u-{}", generation) }
+        GenerationStamps { generation, epoch: 1, flush_uuid: format!("u-{}", generation), posix: None }
     }
 
     #[tokio::test]
