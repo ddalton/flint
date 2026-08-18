@@ -1,58 +1,64 @@
 # Multi-volume hubs + fork-from-barrier — the agentic-harness topology
 
-Status: **design sketch** (2026-08-18). Step 0 — the two-level-lease TLA+
-module (`formal/FlintTierSession.tla`, 7 gate runs) — is DONE; no code
-exists yet. Design of record for the tier machinery this builds on:
-`docs/plans/s3-tier-l2-design-review.md` (L2) and the flint-lite chart
-(`flint-lite-chart/`).
+Status: **design sketch v2 — RESHAPED after ultracode review** (2026-08-18).
+Step 0 — the two-level-lease TLA+ module (`formal/FlintTierSession.tla`,
+7 gate runs, gate 165→172) — is DONE; no code exists yet. The ultracode
+review (14 agents, 8/8 findings adversarially CONFIRMED, all critical)
+validated the lease protocol and the topology and **refuted the v1 reuse
+claims** — the shipped tier code is owner-only / etag-only /
+process-scoped / single-db in exactly the places v1 said "reused
+untouched". Every confirmed finding is folded in below and marked
+**[Fn]**. Design of record for the tier machinery this builds on:
+`docs/plans/s3-tier-l2-design-review.md` (L2).
 
 ## 1. The workload, and what it changes
 
 The target is an **agentic harness**: fleets of agents on multiple k8s
-clusters, each running ordinary tools (git, build systems, sqlite-embedding
-tools, grep) against workspace files whose durable home is S3, through a
-real POSIX interface. Three workload facts drive everything here:
+clusters, each running ordinary tools (git, build systems,
+sqlite-embedding tools, grep) against workspace files whose durable home
+is S3, through a real POSIX interface. Three workload facts drive
+everything here:
 
 - **Tool workloads are metadata storms.** `git status` / builds / test
   runs are thousands of `stat`/`readdir`/`open` per second over small
-  files. This is the regime that makes S3-passthrough mounts unusable and
-  is served sub-millisecond from a hub's local namespace (sqlite).
+  files — served sub-millisecond from a hub's local namespace, unusable
+  over S3-passthrough mounts.
 - **Agents run arbitrary tools, so the POSIX surface must be genuine.**
   sqlite transactions, fcntl locks, atomic rename — the multicluster
-  campaign's canaries (934ae78). No harness can audit every tool for
-  S3-mount compatibility; "real NFSv4.2" is the only durable answer.
+  campaign's canaries (934ae78).
 - **Writes are naturally partitioned.** Each agent writes its own
-  workspace; sharing is read-mostly (repo bases, toolchains, weights) plus
-  published results. The harness has a scheduler — the one component that
-  can enforce write affinity for free.
+  workspace; sharing is read-mostly plus published results. The harness
+  scheduler enforces write affinity for free.
 
-The drawbacks this design answers, from the same conversation: the MDS is
-a per-volume bottleneck (answer: many hubs, many volumes, sharded);
-cross-cluster traffic (answer: **S3 is the only inter-cluster channel**);
-cold reads (answer: §7 — required work, not an option); volume lifecycle
-at session rate (answer: volumes become registry rows, not helm releases).
+Drawbacks answered: MDS-per-volume bottleneck (many hubs, many volumes,
+sharded); cross-cluster traffic (**S3 is the only inter-cluster
+channel**); cold reads (§7 — required work); volume lifecycle at session
+rate (volumes become registry rows, not helm releases).
 
 ## 2. The semantics contract (what is and is not weakened)
 
 **Within a volume: nothing changes.** Every writer of a volume goes
-through the volume's owning hub. Two agents writing the same file
-concurrently — same pod, same cluster, or different clusters mounted to
-the owning hub — get exactly today's flint-lite semantics: enforced
-byte-range locks, close-to-open coherence, atomic rename, full NFSv4.2.
-The concurrency domain is the volume, served by one hub, unchanged.
+through the volume's owning hub. Concurrent writers to one file — same
+pod or different clusters mounted to the owner — get exactly today's
+flint-lite semantics: enforced byte-range locks, close-to-open
+coherence, atomic rename, full NFSv4.2.
 
-**Across the volume boundary, concurrency is refused, not relaxed:**
+**Across the volume boundary, concurrency is refused, not relaxed:** a
+second would-be writer is fenced at claim time, loudly; forks are
+divergent copies by construction; satellites are read-only.
 
-- A **satellite** is a read-only snapshot at barrier granularity
-  (staleness ≤ owner flush floor + refresh interval; cross-file
-  consistent — it refreshes manifest-to-manifest, never a torn mix).
-- A **fork** is a divergent copy by construction; it never merges back.
-- A second would-be *writer* of a volume is **fenced at claim time** —
-  loudly, by the epoch machinery — never silently given weaker semantics.
-
-This matches how the harness already wants to work: the scheduler places
-write workloads on the owning cluster; truly-concurrent cross-cluster
-writers to one volume were never in the workload.
+**The satellite consistency contract, stated honestly [F8]:** a
+satellite advances **barrier-to-barrier** — its *namespace* is always
+some manifest's consistent cut, never a mix of cut N and cut N+1 across
+*newly opened* files. But NFS gives no snapshot isolation over a live
+mount: a refresh applies per-file rename-over updates, so a reader
+holding an fd across a refresh keeps the OLD bytes for that file
+(pin-until-close — the shipped F17b/c OPEN-anchored fd machinery already
+provides this) while a fresh `open()` of a neighbor sees the NEW cut. A
+read *window* spanning a refresh therefore sees old-through-held-fds and
+new-through-new-lookups. That is close-to-open coherence, the same
+promise NFS makes everywhere else — the v1 phrase "never a torn mix" is
+kept only in the namespace/new-opens sense above.
 
 ## 3. Topology invariant
 
@@ -60,235 +66,307 @@ One hub (or several — §8) per cluster. Consumers mount their **local**
 hub over in-cluster NFS: stock kernel clients, zero footprint, zero
 credentials. Hubs talk to S3 in-region. **No hub ever addresses another
 hub.** The complete inter-cluster channel inventory: volume cells, hub
-session cells, DR manifests, fork markers, data objects — all in the
-bucket. Owner death interrupts no satellite's reads (they degrade to
-"frozen at last barrier", not "down"), and no consumer mount ever changes
-across an ownership migration — the epoch moves, not the endpoints.
+session cells, DR manifests, per-volume identity objects (§4), fork
+markers, data objects — all in the bucket. Owner death interrupts no
+satellite's reads (frozen at last refreshed cut, not down), and no
+consumer mount ever changes across an ownership migration.
+*(Survived review unpierced.)*
 
 ## 4. The multi-volume hub
 
-A volume stops being "a hub" and becomes **a row in a hub's registry**:
-*(bucket prefix, local subtree, epoch/volume cell, state partition, role ∈
-{owner, satellite, frozen})*.
+A volume is **a row in a hub's registry**: *(bucket prefix, local
+subtree, volume cell, state partition, class, role ∈ {owner, satellite,
+frozen})*.
 
-- **Namespace**: one NFSv4 pseudo-root, `hub:/volumes/<name>` per volume;
-  kernel clients mount subtrees natively.
-- **Control plane**: a small admin API on the hub (separate port,
-  Secret-token auth): `POST /volumes` (create / fork / claim),
-  `POST /volumes/X/barrier`, `POST /volumes/X/release`,
-  `DELETE /volumes/X`, `GET /volumes`. Volumes are created at session
-  rate; they cannot be helm values. Durable registry = `registry.db`; on
-  restart the hub re-claims owned volumes and re-imports satellites.
-- **State partitioning**: **one sqlite per volume** (`state/<vol>.db`) +
-  the registry — not volume_id columns in one db. Drop-volume is a file
-  delete, capture WALs don't contend across volumes, crash corruption is
-  isolated, and it mirrors the per-prefix partition on the S3 side. Keep
-  an LRU of open handles; ~1k live volumes is a measurement gate (fd,
-  WAL, memory), not a design assumption.
-- **Shared machinery, per-volume accounting**: capture/planner/flush/
-  hydrate/evict become worker pools over per-volume queues. Knobs go
-  two-tier: per-volume-class settings (a *transcripts* class gets a long
-  `flushFloorSecs` — the econ gate's billing firewall, now per class; a
-  *code workspace* class a short one) + hub-global resource caps. Disk is
-  shared: one NOSPC reserve, one watermark, eviction picks victims
-  coldest-first **across** volumes.
-- **Reserved namespace**: `.flint/` per prefix as today; plus
-  `.flint-hubs/<hub-id>` at bucket scope (§5) and
+- **Namespace**: one NFSv4 pseudo-root, `hub:/volumes/<name>`; kernel
+  clients mount subtrees natively.
+- **Control plane**: an admin API on the hub (separate port,
+  Secret-token auth): `POST /volumes` (create/fork/claim),
+  `/barrier`, `/release`, `DELETE`, `GET /volumes`. **The API's claim/
+  release verbs are step-1 scope, not step 6 [F5]** — the session
+  lifecycle (§9) is unusable without them.
+- **State partitioning — decided against the shipped code, not asserted
+  [F4].** The shipped tier speaks to ONE `StateBackend` (state.db)
+  carrying NFS state (clients/sessions/stateids/locks) *and* every tier
+  durable verb, threaded as a single Arc through flush/evict/hydrate/
+  import/reporter; the pre-ack capture guarantee is one batched
+  transaction to that backend; capture marks are `(dev, ino)` and the
+  disk is shared, so ino cannot select a database. v1's
+  "one sqlite per volume" contradicted all of that. **Decision: option
+  (a) — one state.db, tier rows gain a `volume_id` column and every
+  tier verb becomes volume-scoped.** This preserves the
+  single-transaction pre-ack drain (the L2 A3 property v1 silently
+  reversed), needs no ino→db routing, and keeps NFS-state cohabitation
+  coherent. Costs accepted: drop-volume is a scoped delete lane (tier
+  rows + NFS-state purge for the subtree), not a file unlink; capture's
+  path-less lanes resolve volume_id from the mount-subtree map at mark
+  time. Per-volume dbs (option b) stay recorded as the fallback if the
+  single WAL measurably serializes capture at fleet scale — with the
+  pre-ack guarantee re-derived over N commits before any such move.
+- **Registry durability — the bucket stays sufficient [F7].** v1 made
+  `registry.db` the sole authority for prefix binding, role, and class,
+  silently dropping the shipped "bucket alone is restorable" DR
+  property. Fixed: (1) every create/claim mirrors the registry row into
+  `<prefix>/.flint/volume` (name, class, created-by, fork base); (2)
+  the volume's prefix is stamped into its own durable tier rows; (3)
+  hub identity comes from **configuration** (helm value/Secret), never
+  from PVC-persisted `server_id` — after PVC loss the sweep must be
+  able to say "owner == me"; (4) DR = claim-time bucket sweep rebuilds
+  the registry from `.flint/volume` objects (the multi-prefix runbook
+  is step-1 scope); (5) satellite rows are harness-re-issued by
+  declaration — they exist in no bucket and that is documented, not
+  accidental. A **never-yet-flushed workspace** has no prefix binding
+  in the bucket by definition: the identity object is written at
+  volume *creation* (before first mount), so the binding exists from
+  minute zero even though no data has flushed.
+- **Shared machinery, per-volume accounting**: worker pools over
+  per-volume queues; knobs two-tier (per-volume-class settings + hub
+  global caps); one NOSPC reserve, one watermark, eviction coldest-first
+  across volumes.
+- **Reserved namespace**: `.flint/` per prefix (now incl. `volume`
+  identity object); `.flint-hubs/<hub-id>` at bucket scope (§5);
   `<prefix>/.flint/forks/<fork-id>` markers (§6).
 
 ## 5. The two-level lease (modeled: `FlintTierSession.tla`)
 
-The one piece of today's design that does NOT scale to thousands of
-volumes is per-volume heartbeats: 1,000 volumes × one PUT/10s ≈ 8.6M
-requests/day ≈ **$1,300/month of pure heartbeat**. The fix is the
-Chubby/ZooKeeper move — leases attach to *sessions*:
+Per-volume heartbeats do not scale (1,000 volumes × one PUT/10s ≈ 8.6M
+req/day ≈ **$1,300/month**). The Chubby/ZooKeeper move:
 
-- **Hub session cell** `s3://bucket/.flint-hubs/<hub-id>`: ONE heartbeat
-  per hub, token-rotating (the real-S3-gate-bug-1 lesson, inherited).
-- **Volume cell** (per prefix, where the epoch cell lives today):
-  `{owner hub-id, session generation, claim generation}`. Claim/release
-  are per-session CAS events, not timer traffic. Heartbeats are O(hubs).
-- A volume's liveness = its owner's **session** quiet-time, judged by the
-  store's tokens (never wall clocks — the cross-cluster skew posture we
-  already drilled).
+- **Hub session cell** `.flint-hubs/<hub-id>`: ONE token-rotating
+  heartbeat per hub.
+- **Volume cell** per prefix: `{owner hub-id, session generation,
+  claim generation}`. Claims/releases are per-session CAS events;
+  heartbeats are O(hubs); idle volumes cost zero requests.
+- Liveness = the owner's **session** quiet-time, judged by store tokens.
 
-**The subtlety the model exists for**: S3 CAS conditions apply to ONE
-object. A takeover cannot atomically bind "the session is quiet" to "the
-volume cell is mine" — different keys. The naive protocol (claim the
-volume cell straight off the quiet count) leaves the loser's session cell
-untouched: its heartbeats keep SUCCEEDING, the beat-fail fence never
-fires, and it believes — and publishes — forever. **The immortal
-multi-volume zombie.** The protocol therefore **deposes first**: the
-watcher CAS-writes a `deposed` flag into the owner's session cell
-(If-Match the quiet-observed token), converting its flaky local evidence
-into *stable store state*, and only then claims volume cells naming that
-session. The loser's next beat is a CAS mismatch ⇒ fence ⇒ `exit(70)`,
-hub-scoped: one failed beat forfeits ALL its volumes at once (correct,
-because the quiet evidence indicts the hub, not one volume).
+**Depose-first, machine-checked.** S3 CAS conditions one object; nothing
+binds "the session is quiet" to "the volume cell is mine". The naive
+protocol (claim the volume cell off the quiet count) leaves the loser's
+session cell untouched — its heartbeats keep succeeding and it publishes
+forever. The `NoDepose` mutation finds exactly this **immortal
+multi-volume zombie** lasso: the protocol must first CAS the
+quiet-observed token into a `deposed` flag on the owner's SESSION cell
+(flaky watcher evidence → stable store state), then claim volume cells.
+The loser's next beat 412s ⇒ fence, **hub-scoped** in evidence terms.
 
-Model results (7 runs, wired into `scripts/check-tla.sh` — gate now 172):
+**The publish stamp is CLAIM GENERATION — bound explicitly [F1].** The
+residual stale-publish window (ProbeStale) is arbitrated by the data
+plane's stamps, and v1 left *which* stamp undefined. The volume cell
+carries two numbers; **session generation is per-hub and NOT monotonic
+across owners** (a fresh hub deposing a long-lived one claims at sgen 1
+vs the loser's 7) — stamping it would resurrect BUG 7 through the
+shipped `stamps.epoch <= ours ⇒ ForeignHand ⇒ local-wins re-publish`
+compare (flush.rs:1150) as silent data loss. **Claim generation is
+per-volume CAS-monotonic by construction** (`ClaimCell` bumps it on
+every acquire) and is the one lawful comparand. All three reused fence
+legs are specified against it: `successor_check`'s filter and
+store-verify compare **claim-gen ordering against the volume cell**;
+the fence-on-stamp arbitration arm likewise; per-volume startup
+re-verify refuses past a cell claim-gen ahead of the hub's claim.
+**Owed in the gate (step 0b): extend FlintTierSession (or a small joint
+module) with claim-gen-stamped publishes and port the `NoStampCheck`
+mutation, so the wrong binding reproduces the BUG 7 counterexample in
+the gate rather than in production.**
 
-- Strict theorems: a beating session is never deposed (rotation's teeth);
-  a clean release is a publish barrier (drain's teeth).
-- Strict liveness: a hub that lost a volume eventually stops believing
-  it owns it; a dead session's volumes are eventually claimed.
-- **`NoDepose` mutation finds the immortal-zombie lasso** — the naive
-  two-level lease is machine-checked unsound; `NoFence` finds the same
-  lasso through the swallowed-412 door; `NoRotate` re-finds real-S3 gate
-  bug 1 one layer up; `NoDrain` lands a release straggler under the next
-  owner's reign.
-- One required-fail probe (`ProbeStale`): the plan/land window exists at
-  this layer exactly as `FlintTierEpochProbeStale` states it one layer
-  down — bounded by the fence, arbitrated by the data plane's epoch
-  stamps (`Inv_NoSuccessorOverwrite` stays the data plane's theorem;
-  this module deliberately does not re-model publishes' CAS arbitration).
+**Fencing is per-volume in mechanism [F5].** The shipped fence is
+`exit(70)` and the shipped heartbeat treats NotFound as deposed —
+correct for one volume per process, fatal for N: a `DELETE /volumes/X`
+purging X's cell must not kill the hub, and one volume's deposition
+must not forfeit the other N−1 *mechanically* (session-deposition
+does forfeit all — that's the evidence semantics — but a per-VOLUME
+cell dispute quarantines that subtree only). Re-scoped invariant: **"an
+unfenced VOLUME is never served"** — per-volume guards, per-volume
+quarantine, listener binding decoupled from any one contested claim
+(a contested claim parks that volume as "contested", it does not block
+the hub). The startupProbe posture re-derives from this.
 
-**Ownership lifecycle**:
+Model results (7 runs, in the gate): strict (beating sessions never
+deposed; clean release is a publish barrier — the drain is what makes
+release's no-lease-wait handoff safe), liveness (lost ownership
+resolves via the fence; dead sessions' volumes get claimed), and the
+required-fail ProbeStale residual. The review attacked the protocol,
+the hub-scoped-evidence rationale, and the economics; all held.
 
-- *Clean handoff*: owner drains the volume's flush, writes a final
-  barrier + manifest, CAS-writes a **release token** into the volume
-  cell. Any hub claims a released cell instantly — no lease wait
-  (that's what makes session migration between clusters cheap; the
-  drain is what makes it safe — modeled).
-- *Crash takeover*: judge the session quiet (store tokens), **depose the
-  session**, then claim its volume cells at leisure; MPU abort-sweep per
-  claimed prefix as today. RPO = flush floor, unchanged from single-hub
-  DR.
-- *Zombie owner*: depose ⇒ beat-fail ⇒ `exit(70)`; the restarted hub
-  comes back with a fresh session and **re-claims through the ordinary
-  claim path** (self-recognition at both layers) — a deposed hub's pod
-  restarts as a claimant, not an owner, and should rejoin as satellite
-  for volumes it lost.
-- *Idle volumes cost zero requests* — no per-volume timer exists at all.
+**Ownership lifecycle**: clean handoff = drain → final barrier +
+manifest → release token in the cell → any hub claims instantly. Crash
+takeover = judge session quiet → **depose the session** → claim cells →
+MPU abort-sweep per claimed prefix. Zombie = depose ⇒ beat-fail ⇒
+hub-wide forfeit ⇒ restart re-claims through the ordinary path
+(self-recognition at both layers) and rejoins as satellite for volumes
+it lost. **The release/drain/teardown orchestration is NEW CODE** — the
+shipped `epoch_release` has no caller and claim() has no contested
+return arm [F5]; FlintTierSession models the drain, nothing implements
+it yet.
 
 ## 6. Fork-from-barrier
 
-Create workspace W from base B at barrier N in O(metadata), zero copy:
+Fork W from base B at barrier N in O(metadata), zero copy: claim W's
+fresh prefix; write `.flint/base = {prefix_B, barrier N}` under W and a
+fork marker under `prefix_B/.flint/forks/<W-id>`; import-as-stubs from
+M_N with hydration source = **B's objects at the versionIds recorded in
+M_N**; writes publish under W's prefix and flip provenance base→own;
+W's manifests carry flat per-file provenance (chains never deepen).
 
-1. `POST /volumes {name: W, from: B@N}`: claim W's fresh prefix, write
-   `.flint/base = {prefix_B, barrier N, manifest etag}` under W, and drop
-   a **fork marker** at `prefix_B/.flint/forks/<W-id>` (so deleting B can
-   refuse while forks exist — coordination via S3, never via a registry
-   that would need cross-cluster chatter; leaked markers reconcile
-   against the fork's cell).
-2. Import-as-stubs from B's manifest M_N (existing machinery), except
-   each stub's hydration source is **B's object at the versionId recorded
-   in M_N**. This is where bucket versioning finally becomes
-   load-bearing: forks pin versionIds, so B's later publishes never
-   disturb a fork and no reference counting is needed for correctness.
-3. Reads of untouched files hydrate from B's pinned versions; writes
-   capture and publish under W's prefix, flipping that file's provenance
-   base→own. Renames/deletes are W-local metadata + tombstones.
-4. W's manifests carry **per-file provenance** (own key, or base
-   key+versionId) and stay FLAT: forking a fork copies provenance
-   entries, so chains never deepen and reads never walk an overlay.
+**versionId is a first-class field end-to-end — this is the step's real
+scope [F6].** The shipped `ObjectStore` has no versionId anywhere
+(get/head/copy pin by If-Match etag only), manifests record etags only,
+and S3 evaluates If-Match against the CURRENT version — so on the
+shipped code, the moment B republishes a key, every fork stub's guarded
+GET 412s into the adopt-current arm and **silently adopts B's newer
+bytes: the inversion of this section's headline promise.** Required:
+versionId on the trait surface (both backends + the memory double, with
+`GetObjectVersion` probed at bootstrap alongside the versioning check),
+versionId in manifest entries and evicted-file metadata, and
+version-aware COPY for `materialize`.
 
-The one real knot: **noncurrent-version lifecycle vs fork lifetime**.
-Rule for v1: the bucket's noncurrent retention floor ≥ max fork age,
-plus a `materialize` operation (server-side COPY of base-referenced
-objects into W's prefix) to detach any fork that must outlive the floor.
-Fork destroy = delete W's prefix + remove the marker; B is never touched.
+**The 412/404 arbitration contract forks by provenance [F2][F6].** The
+shipped hydrator's S3-wins adopt-current arm remains correct for
+exactly one provenance: **an owner hydrating its own live object**. For
+*pinned* provenances — a fork reading its base version, a satellite
+reading its manifest's version — adopt-current is the corruption path:
+a 412 must be structurally impossible (the GET names a versionId), and
+NotFound (lifecycle expired the pinned version) is a **loud park**: the
+reader parks, the A12 reporter WARNs with the true cause (retention
+breach), nothing adopts. This is new arbitration code, not reuse.
 
-Scale expectations from the existing drills: a 10k-file base imports in
-14s (tier-scale.sh) — a fork lands in seconds materializing nothing.
-Very large trees may need lazy dentry materialization (stub files created
-on first lookup); that's the escape hatch, not the v1.
+**Retention economics and the corrected bound [F3].** Versioning
+becomes correctness-load-bearing here, and the noncurrent tail is a
+first-class cost the L2 design of record already mandates pricing:
+every barrier publishes a full-size new version, so one 100MiB
+full-rewrite-churn file at the default 60s floor accretes ≈4.1TiB of
+noncurrent bytes/month ≈ **~$97/mo — one file against the whole
+$148–166/mo bill the econ GO was derived on.** Consequences: (1)
+noncurrent-bytes-rate is measured in the L2 workload replays **before
+step 5 builds**, and the econ gate re-runs with it; (2) per-class
+`flushFloorSecs` is re-derived as a storage-tail lever, not only a
+request firewall; (3) long retention floors are confined to
+explicitly-forkable **base volumes** — scratch workspace prefixes get
+short noncurrent expiry (the floor cannot be prefix-scoped at fleet
+scale: 1,000 lifecycle rules/bucket); (4) the v1 rule "floor ≥ max fork
+age" is **wrong** — S3's NoncurrentDays clock runs from *supersession*,
+not fork creation, so forking an old barrier needs floor ≥
+barrier-lookback + fork lifetime; fork creation **refuses** when any
+pinned version's remaining life is under margin, and the reporter WARNs
+as pinned versions approach expiry; (5) `DELETE /volumes` is a
+version-enumerating hard delete (DELETE requests are free; the purge
+kills the tail); (6) `materialize` (version-aware server-side COPY into
+W's prefix) detaches any fork that must outlive the floor.
+
+Fork destroy = delete W's prefix + remove the marker; B is never
+touched. Scale: a 10k-file base imports in 14s (tier-scale.sh); lazy
+dentry materialization is the escape hatch for very large trees.
 
 ## 7. Cold reads — required work, staged by what agents actually touch
 
-Cold-reads-after-fork/refresh are this topology's **steady state**, so
-the L4-measured posture (72.5s/GiB: whole-file, sequential 8MiB ranged
-GETs) is not shippable here. Two stages, ordered by the workload:
-
-1. **Parallel small-object hydration** (first, mandatory): agent
-   workspaces are source trees — thousands of KB-scale files. Pipeline
-   the hydration queue, raise `hydrateConcurrency` well past 4, prefetch
-   siblings on readdir-then-open patterns. No correctness surface
-   changes: whole-file hydration per file stays as-is.
-2. **Range-serve for large artifacts** (second): commit chunks
-   individually, wake a parked reader when *its range* is present —
-   first-byte-cold drops from ~72s to ~one chunk fetch for the
-   weights/artifacts volumes. This changes the hydrating flag into a
-   present-ranges bitmap and touches the partial-restore truncate-back
-   reasoning, so **`FlintTierMarker` must be extended in the same change**
-   (the whole-file flag is load-bearing in that model). Pinned to this
-   step, deliberately not before.
+1. **Parallel small-object hydration** (first, mandatory): pipeline the
+   hydration queue, raise `hydrateConcurrency` well past 4, prefetch
+   siblings on readdir-then-open. No correctness surface changes.
+2. **Range-serve for large artifacts** (second): chunk-level commit +
+   wake-on-range; converts the hydrating flag into a present-ranges
+   bitmap ⇒ **`FlintTierMarker` extended in the same change**, along
+   with the pinned-provenance hydration arm from §6 [F6].
 
 Upload already parallelizes (13.3s/GiB measured); nothing owed there.
 
-## 8. Scaling shape
+## 8. Scaling shape + satellite refresh as a protocol
 
-- **Reads** scale per cluster (each hub is an edge cache; a changed
-  object crosses cluster↔S3 once per cluster per version, then serves at
-  NFS speed from PVC + page cache).
-- **Metadata** scales per hub (full namespace local to every satellite).
-- **Writes** scale per volume — one owner hub per volume, deliberately
-  (that IS the consistency point; see §2). The write-scaling dimension
-  is volume count, and the harness's workspace-per-agent model supplies
-  it naturally.
-- **Intra-cluster**: volumes share nothing but disk and S3, so run K
-  hubs per cluster and let the harness map workspace→hub. That plus
-  per-cluster hubs is the full answer to "the single MDS bottleneck".
-- **Satellite refresh signaling**: poll the manifest key with a
-  conditional GET (`If-None-Match` last etag). 10s poll × 100 satellites
-  ≈ 10 req/s ≈ pennies/month; the interval is the staleness knob. No
-  EventBridge/SQS, no cross-cluster channel.
-- **Multi-region** (recorded for later): S3 CRR can make satellite data
-  reads region-local, but CAS is not coherent across replicated buckets —
-  the session cells, volume cells, and manifest authority live in exactly
-  ONE home bucket; only data reads may come from replicas.
+Reads scale per cluster (hub = edge cache: one fetch per cluster per
+version); metadata per hub (full local namespace); writes per volume
+(deliberately — that IS the consistency point; volume count is the
+write-scaling dimension); intra-cluster by running K hubs and mapping
+workspace→hub.
+
+**Satellite refresh is a coherence protocol, not a re-run of import
+[F8].** The shipped `import_refresh` is local-wins in every lane and
+has **no delete lane** — reused as-is, a satellite would freeze every
+already-imported file forever and never remove an owner-deleted one.
+Build item 4 is therefore: manifest-poll (conditional GET on the
+manifest key — 10s × 100 satellites ≈ 10 req/s, pennies) + an **update
+lane** (etag/generation change ⇒ per-file rename-over to the new
+version, held fds keep old bytes until close via the shipped F17b/c fd
+anchoring) + a **delete lane** (manifest omission ⇒ tombstone-respecting
+unlink) + versionId-pinned hydration (§6) + live-mount concurrency with
+capture/evict/hydrate rows + the FlintTierMarker extension for the
+overwrite-in-place lane. Enforcement of "sessions end before volume
+delete" lives in the **harness/CSI contract**, not NFS (v4 has no
+MOUNT protocol to police).
+
+Multi-region: CRR can make satellite data reads region-local, but CAS
+is not coherent across replicated buckets — session cells, volume
+cells, and manifest authority live in exactly ONE home bucket.
 
 ## 9. The session lifecycle, end to end
 
-1. Harness: `POST /volumes {name: ws-agent42, from: base-repo@latest}` →
-   ready in seconds.
-2. Pod mounts `hub:/volumes/ws-agent42` (in-tree NFS PV). Full POSIX.
+1. `POST /volumes {name: ws-agent42, from: base-repo@latest}` → ready in
+   seconds (identity object written at create — §4).
+2. Pod mounts `hub:/volumes/ws-agent42`. Full POSIX.
 3. Tools run: metadata local; cold reads hydrate in parallel; writes
-   flush on the volume class's floor. Turn boundaries may force barriers
-   (durable, resumable checkpoints with consistent manifests — also the
-   eval-reproducibility pin: any cluster can mount the identical tree).
+   flush on the class floor; turn barriers = durable resumable
+   checkpoints (and the eval-reproducibility pin).
 4. Session end: `release` (drain + final barrier + release token) or
-   `DELETE` (purge; retention policy decides audit copies).
-5. Resume anywhere: any cluster's hub claims instantly off the clean
-   release; only files the agent touches move.
+   `DELETE` (version-enumerating purge).
+5. Resume anywhere: any hub claims instantly off the clean release;
+   only touched files move.
 
-## 10. Build order
+## 10. Build order (re-cut after review [F5])
 
-0. ~~`FlintTierSession.tla` + 7 gate runs~~ — **done** (this document's
-   §5; the gate grows 165 → 172).
-1. Volume registry + admin API + multi-volume namespace/serving (the
-   biggest single piece; includes per-volume sqlite partitioning and
-   cross-volume evict/NOSPC accounting).
-2. Two-level lease in code: session cell + depose + hub-scoped fence +
-   clean-release token; `successor_check` verifies volume cell + session;
-   startup re-verify per volume. (The TLA module is the spec; its
-   mutations name the regressions.)
+0. ~~FlintTierSession + 7 runs~~ **done** (gate 172).
+   **0b (owed before step 2 code): claim-gen-stamped publishes in the
+   model + the ported NoStampCheck mutation [F1].**
+1. **Multi-volume core + ownership lifecycle, merged**: registry +
+   admin API (all five verbs incl. claim/release), volume-scoped state
+   rows in the one state.db (+ scoped delete lane incl. NFS-state
+   purge), per-volume guards/quarantine (listener decoupled from any
+   contested claim; NotFound-on-cell ≠ hub death), session cell +
+   depose + clean-release drain, claim-gen stamps in all three fence
+   legs, registry mirroring to `.flint/volume` + config-stable hub
+   identity + the multi-prefix DR sweep/runbook [F4][F5][F7].
+2. *(folded into 1 — kept as the review/drill boundary: the two-cluster
+   handoff drill — clean, crash, zombie — at the session layer.)*
 3. Parallel small-object hydration (§7 stage 1).
-4. Satellite role: no claim, read-only export (`NFS4ERR_ROFS` on
-   mutating ops), manifest-poll + import-refresh loop.
-5. Fork-from-barrier: provenance manifests, versionId pinning, fork
-   markers, `materialize`; fork/DR drill (fork under churn; base delete
-   refused; retention-floor breach surfaced loudly).
-6. Ownership migration UX (release/claim API arms, restart-as-satellite)
-   + a two-cluster handoff drill (clean, crash, zombie — the chaos-H
-   pattern at the session layer).
-7. Range-serve + `FlintTierMarker` extension (§7 stage 2).
+4. Satellite role as the coherence protocol of §8 (update/delete lanes,
+   versionId-pinned hydration, honest §2 contract) [F2][F8].
+5. Fork-from-barrier: versionId end-to-end, provenance-forked
+   arbitration, retention bound + refusal + reporter WARN, priced
+   noncurrent tail + econ re-run, `materialize`; fork/DR drill [F3][F6].
+6. Ownership-migration UX polish (restart-as-satellite, min-hold rate
+   limit) — the mechanism itself ships in step 1.
+7. Range-serve + FlintTierMarker extension (§7 stage 2 + §6 arm).
 
 Not in scope until demand: cross-cluster concurrent writers to one
-volume (refused by design), automatic claim-on-first-write (invites
-ping-pong; migrations stay API-triggered with a minimum-hold rate limit).
+volume (refused by design); automatic claim-on-first-write.
 
-## 11. Open risks (carried honestly)
+## 11. Open risks (carried honestly; review-adds marked)
 
-- sqlite-per-volume ceilings at ~1k live volumes — measure before
-  building past the LRU.
-- Fork retention vs lifecycle rules — the one correctness-economics knot
-  (§6); v1 rule is a floor + `materialize`, and the reporter should WARN
-  when a fork's pinned versions approach the floor.
-- Stale filehandles on volume delete under a live mount — the API must
-  enforce sessions-end-before-delete.
-- Fork markers are advisory (crash between marker and cell leaves a
-  leak) — reconciliation sweep needed, claim-time, like the MPU sweep.
-- The admin API is a new attack surface on the hub — token auth +
-  NetworkPolicy at minimum; it never holds bucket credentials beyond
-  what the hub already has.
+- Single-WAL capture serialization at fleet scale — the trigger for
+  partitioning option (b); measure before ~1k live volumes [F4].
+- **Noncurrent-tail vs churn shape**: whether the econ GO inverts is
+  conditional on real per-file rewrite churn — settle by measuring
+  version-bytes/day in the L2 workload replays before step 5 [F3].
+- **Residual ESTALE corners across refresh rename-over**: special
+  stateids, lease-recovery CLAIM_FH, LOCK across a refresh — settle
+  with a lima rig test holding a lock across a rename-over [F8].
+- Fork markers are advisory (crash between marker and cell) —
+  claim-time reconciliation sweep, like the MPU sweep.
+- `registry.db` is now a **cache** of bucket + config truth — the DR
+  sweep is the recovery path and must be drilled [F7].
+- The admin API is a new attack surface — token auth + NetworkPolicy;
+  it holds no credentials beyond the hub's own.
+- Sessions-end-before-delete is enforced harness/CSI-side; the hub can
+  only make delete-under-mount safe (ESTALE), not polite [F8].
+
+## 12. Review record
+
+Ultracode review 2026-08-18 (workflow wf_9c23d111-84c: 5 dimension
+reviewers → 8 top findings → 8 adversarial verifiers → synthesis; ~1.1M
+tokens): **8/8 findings CONFIRMED, all critical, all folded in above**
+— F1 stamp binding (§5), F2 satellite tear via adopt-current (§6/§8),
+F3 noncurrent-tail economics + wrong retention bound (§6), F4
+state-partitioning vs the single StateBackend (§4), F5 build-order
+inversion / process-scoped fencing (§4/§5/§10), F6 versionId absent
+end-to-end (§6), F7 registry as dropped DR property (§4), F8 satellite
+refresh coherence + honest §2 contract (§2/§8). **Held under attack:**
+the depose-first lease protocol and all four mutations, claim-gen
+monotonicity, the heartbeat/poll economics, the topology invariant,
+within-volume semantics, and the F17b/c fd-anchor layer (which defeats
+the ESTALE-storm objection and makes the refresh fix cheaper).
