@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and sixty-five runs, ALL required.
+# One hundred and seventy-two runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -18,9 +18,9 @@
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
 #   71 FlintReplication   33 FlintComposition   15 FlintExtents
-#   11 FlintExtentsProbe   7 FlintTierEpoch      7 FlintTruncate
-#    6 FlintTierMarker     5 FlintAdmission      4 FlintSnapshots
-#    3 FlintClaims         3 FlintA2Probe)
+#   11 FlintExtentsProbe   7 FlintTruncate      7 FlintTierSession
+#    7 FlintTierEpoch      6 FlintTierMarker    5 FlintAdmission
+#    4 FlintSnapshots      3 FlintClaims        3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -43,6 +43,12 @@
 # FlintTierMarker.tla — the flint-lite eviction-marker visibility
 # protocol (evict/hydrate/read/crash over one file; chaos bugs 3+4 as
 # mutations); documented at the bottom of this file, next to its runs.
+#
+# FlintTierSession.tla — the multi-volume hub's TWO-LEVEL LEASE (one
+# session cell per hub, volume cells naming {hub, session generation};
+# model BEFORE code — step 0 of docs/plans/multi-volume-hub-design.md,
+# the FlintExtents posture); documented at the bottom of this file,
+# next to its runs.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -1075,5 +1081,40 @@ mutation_run FlintTierMarker FlintTierMarkerNoRecheck.cfg "tier-marker re-consul
 mutation_run FlintTierMarker FlintTierMarkerRowLate.cfg "tier-marker C2 mutation (rowlate: truncate before the durable row — a crash strands an evidence-free stub)" "Inv_(NoStubServed|TruthfulAttrs)"
 mutation_run FlintTierMarker FlintTierMarkerNoFlag.cfg "tier-marker flag mutation (no hydrating flag: a crashed restore's partial rolls back as local-wins and serves)" "Inv_(NoStubServed|TruthfulAttrs)"
 mutation_run FlintTierMarker FlintTierMarkerCycleBlind.cfg "tier-marker cycle mutation (CycleCheck=FALSE = the pre-fix shipped code: a complete evict+hydrate cycle inside the read window serves the pread's stale capture — campaign bug 8, kept as the regression test)" "Inv_NoStubServed"
+
+# ── FlintTierSession.tla — the multi-volume hub's two-level lease ──────
+# MODEL BEFORE CODE (the FlintExtents posture): step 0 of
+# docs/plans/multi-volume-hub-design.md, written before any multi-volume
+# code exists.  One hub serving N volumes cannot heartbeat N epoch cells
+# (1k volumes x one PUT/10s ~ $1,300/mo), so liveness moves to ONE
+# session cell per hub and each volume cell records {owner, session
+# generation} — and the claimant no longer rewrites the cell the loser's
+# HEARTBEAT watches.  S3 has no cross-object CAS to close that, so the
+# protocol DEPOSES FIRST: CAS the quiet-observed token into a deposed
+# flag on the owner's SESSION cell (flaky watcher evidence becomes
+# STABLE STORE STATE), and only then claim volume cells naming that
+# session; the loser's next beat 412s => fence => exit(70), hub-scoped.
+# The NoDepose mutation is the naive two-level lease and must find the
+# IMMORTAL MULTI-VOLUME ZOMBIE lasso (the loser's beats keep succeeding
+# against its untouched session cell — no fence ever fires); machine-
+# checked unsound, which is this tranche's reason to exist.  NoRotate
+# rediscovers real-S3 gate bug 1's shape one layer up (a beating
+# session deposed); NoFence finds the zombie through the swallowed-412
+# door; NoDrain lands a clean-release straggler under the next owner's
+# reign (the drain is what makes release's no-wait handoff safe).  The
+# ProbeStale run is the required-fail RESIDUAL: plan and land are
+# separate store steps, the window is bounded by the fence (liveness)
+# and arbitrated by the data plane's epoch stamps — FlintTierEpoch's
+# Inv_NoSuccessorOverwrite, whose machinery this module deliberately
+# does NOT re-model (one volume's flush-vs-cell pipeline IS that module
+# with "epoch cell" read as "volume cell").  Liveness runs at one
+# volume (invariants at breadth, liveness at depth).
+strict_run FlintTierSession FlintTierSession.cfg "tier-session strict breadth (depose+rotation+fence+drain ON: beating sessions never deposed, clean release is a publish barrier)"
+strict_run FlintTierSession FlintTierSessionLive.cfg "tier-session liveness depth (a hub that lost a volume eventually stops believing; a dead session's volumes get claimed)"
+liveness_mutation_run FlintTierSession FlintTierSessionNoDepose.cfg "tier-session depose mutation (Depose=FALSE = the naive two-level lease: takeover off the quiet count leaves the loser's session alive — the immortal multi-volume zombie beats forever)"
+liveness_mutation_run FlintTierSession FlintTierSessionNoFence.cfg "tier-session fence mutation (FenceOnFail=FALSE: the deposed hub's beat CAS mismatch is swallowed — the zombie through the other door)"
+mutation_run FlintTierSession FlintTierSessionNoRotate.cfg "tier-session rotation mutation (SessRotate=FALSE: real-S3 gate bug 1 one layer up — a beating session judged quiet and deposed)" "Inv_NoBeatingSessionDeposed"
+mutation_run FlintTierSession FlintTierSessionNoDrain.cfg "tier-session drain mutation (DrainOnRelease=FALSE: the release straggler lands under the next owner's reign — clean release skips the lease wait, so the successor can already be holding)" "Inv_NoStragglerLand"
+mutation_run FlintTierSession FlintTierSessionProbeStale.cfg "tier-session stale-land probe (RESIDUAL required-fail: depose+takeover interleaves between plan and land — bounded by the fence, arbitrated by the data plane's stamps)" "Inv_NoStaleLand"
 
 echo "TLA GATE PASSED"

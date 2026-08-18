@@ -1,4 +1,4 @@
-# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, the S3-tier volume epoch, and the S3-tier eviction marker
+# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, the S3-tier volume epoch, the S3-tier eviction marker, and the multi-volume hub's session lease
 
 Nine spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
@@ -373,6 +373,46 @@ the marker at serve; wired at READ, COPY-source, and CLONE-source),
 modeled as `CycleCheck`; the `CycleBlind` mutation preserves the
 pre-fix counterexample as the regression test.
 
+`FlintTierSession.tla` (2026-08-18) models the **multi-volume hub's
+two-level lease** — MODEL BEFORE CODE (the FlintExtents posture): step 0
+of `docs/plans/multi-volume-hub-design.md`, written before any
+multi-volume code exists.  One hub serving N volumes cannot heartbeat N
+epoch cells (1k volumes × one PUT/10s ≈ $1,300/mo of heartbeats), so
+liveness moves to ONE session cell per hub (`.flint-hubs/<hub-id>`) and
+each volume cell records `{owner hub, session generation, claim
+generation}` — which breaks the single-cell design's central mechanism:
+the volume claimant no longer rewrites the cell the loser's HEARTBEAT
+watches.  S3 CAS conditions one object; nothing binds "the session is
+quiet" to "the volume cell is mine".  The protocol therefore DEPOSES
+FIRST — CAS the quiet-observed token into a `deposed` flag on the
+owner's SESSION cell, converting the watcher's flaky local evidence
+into STABLE STORE STATE, then claim volume cells naming that session at
+leisure; the loser's next beat 412s ⇒ fence ⇒ exit(70), HUB-SCOPED
+(one failed beat forfeits every volume at once, correct because the
+quiet evidence indicts the hub).  THE MARQUEE MUTATION IS `NoDepose` —
+the naive two-level lease, takeover straight off the watcher's quiet
+count: TLC must find the IMMORTAL MULTI-VOLUME ZOMBIE lasso
+(`ZombieOwnershipResolves` violated — the loser's beats keep SUCCEEDING
+against its untouched session cell, so the beat-fail fence never fires
+and it believes, and publishes, forever).  Machine-checked unsound
+before a line of code was written, which is the tranche's reason to
+exist.  `NoRotate` rediscovers real-S3 gate bug 1's shape one layer up
+(a beating session deposed — the epoch cell's token-rotation lesson
+applies to the session cell verbatim); `NoFence` finds the zombie
+through the swallowed-412 door; `NoDrain` lands a clean-release
+straggler under the NEXT owner's reign (`Inv_NoStragglerLand` — the
+drain is what makes release's no-lease-wait handoff safe).  One
+required-fail probe (`ProbeStale`): plan and land are separate store
+steps, so a depose+takeover interleaves between them —
+FlintTierEpochProbeStale's window at the session layer, bounded by the
+fence (strict liveness) and arbitrated by the data plane's epoch stamps.
+The DATA PLANE IS DELIBERATELY OUT OF SCOPE: one volume's flush-vs-cell
+pipeline is FlintTierEpoch with "epoch cell" read as "volume cell", so
+its theorems (`Inv_NoSuccessorOverwrite`, the sweep, StampCheck) carry
+per volume; what this module owns is the INDIRECTION — liveness judged
+in one object, ownership recorded in another.  Liveness runs at one
+volume (invariants at breadth, liveness at depth).
+
 Verification of snapshots is layered deliberately:
 
 1. **SPDK blobstore internals** — not modeled; audited by citation (the
@@ -385,7 +425,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs one hundred and sixty-five configs, ALL required:
+on first use).  It runs one hundred and seventy-two configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
