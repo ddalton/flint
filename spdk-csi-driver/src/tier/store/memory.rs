@@ -78,8 +78,8 @@ pub struct MemoryStore {
     /// Set by the crash injection: the failing compose must LEAVE its
     /// orphan MPU (the A9 sweep's test state) instead of aborting it.
     leave_orphan: AtomicBool,
-    /// Step-11 drill injections: one-shot get_range failure / stall.
-    fail_next_get_range: AtomicBool,
+    /// Step-11 drill injections: counted get_range failures / stall.
+    fail_get_range_count: AtomicU64,
     stall_next_get_range_ms: AtomicU64,
     pub min_part: u64,
     pub max_parts: usize,
@@ -98,7 +98,7 @@ impl MemoryStore {
             upload_seq: AtomicU64::new(1),
             inject: AtomicU8::new(INJECT_NONE),
             leave_orphan: AtomicBool::new(false),
-            fail_next_get_range: AtomicBool::new(false),
+            fail_get_range_count: AtomicU64::new(0),
             stall_next_get_range_ms: AtomicU64::new(0),
             // Tiny granularity by default so tests compose small
             // files; S3's real limits live in the S3 backend.
@@ -117,11 +117,16 @@ impl MemoryStore {
         self.inject.store(INJECT_CRASH_BEFORE_COMPLETE, Ordering::SeqCst);
     }
 
-    /// Step-11 drills: the NEXT get_range fails (the ENOSPC/network
-    /// mid-restore shape — any restore error takes the same
-    /// truncate-back-and-retry path).
+    /// Step-11 drills: the NEXT get_range fails with a transport
+    /// error — a single failure is absorbed by the chunk-retry loop.
     pub fn inject_get_range_failure(&self) {
-        self.fail_next_get_range.store(true, Ordering::SeqCst);
+        self.inject_get_range_failures(1);
+    }
+
+    /// The next `n` get_range calls fail with a transport error —
+    /// exceed the chunk-retry budget to force the truncate-back path.
+    pub fn inject_get_range_failures(&self, n: u64) {
+        self.fail_get_range_count.store(n, Ordering::SeqCst);
     }
 
     /// Step-11 drills: the NEXT get_range stalls `ms` before serving —
@@ -316,8 +321,12 @@ impl ObjectStore for MemoryStore {
         len: u64,
         if_match: &str,
     ) -> StoreResult<Bytes> {
-        // One-shot injections for the step-11 drills.
-        if self.fail_next_get_range.swap(false, Ordering::SeqCst) {
+        // Counted injections for the step-11 drills.
+        if self
+            .fail_get_range_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| c.checked_sub(1))
+            .is_ok()
+        {
             return Err(StoreError::Other("injected get_range failure".into()));
         }
         let stall = self.stall_next_get_range_ms.swap(0, Ordering::SeqCst);

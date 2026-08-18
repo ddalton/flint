@@ -63,10 +63,16 @@
 #                       partial bytes on disk): the reconciler must
 #                       disambiguate via the durable hydrating flag,
 #                       truncate back, and the parked reader completes.
+#   L  degraded network — S3 fails SOFT through toxiproxy (brew install
+#                       toxiproxy): publishes under 60% mid-stream
+#                       connection cuts, hydration with EVERY
+#                       connection cut after 16 MiB, 750 ms latency
+#                       both ways (no spurious self-fence), and a full
+#                       25 s stall that must lift without a wedge.
 #
 # Knobs: CRASH_ITERS (default 5), ENDURE_SECS (default 60),
-# PHASES ("a b c d e f g h i j k"), KEEP=1 leaves the rig standing on
-# failure. Runtime ≈ 13 minutes with defaults.
+# PHASES ("a b c d e f g h i j k l"), KEEP=1 leaves the rig standing on
+# failure. Runtime ≈ 17 minutes with defaults.
 
 set -uo pipefail
 
@@ -76,7 +82,7 @@ LIMA_VM="${LIMA_VM:-flint-nfs-client}"
 
 CRASH_ITERS="${CRASH_ITERS:-5}"
 ENDURE_SECS="${ENDURE_SECS:-60}"
-PHASES="${PHASES:-a b c d e f g h i j k}"
+PHASES="${PHASES:-a b c d e f g h i j k l}"
 
 PORT=20492
 PORT_B=20493
@@ -103,9 +109,10 @@ s3() {
     aws --endpoint-url "http://127.0.0.1:$MINIO_PORT" "$@"
 }
 
-# gen_cfg OUT PORT EXPORT STATEDIR BUCKET WATERMARK HB MISSES WHOLEMAX FLOOR TICK [KEYPREFIX]
+# gen_cfg OUT PORT EXPORT STATEDIR BUCKET WATERMARK HB MISSES WHOLEMAX FLOOR TICK [KEYPREFIX] [ENDPOINT]
 gen_cfg() {
   local PFX="${12:-$PREFIX}"
+  local EP="${13:-http://127.0.0.1:$MINIO_PORT}"
   cat > "$1" <<EOF
 apiVersion: flint.io/v1alpha1
 kind: PnfsConfig
@@ -121,7 +128,7 @@ mds:
     enabled: true
     bucket: $5
     keyPrefix: "$PFX"
-    endpoint: "http://127.0.0.1:$MINIO_PORT"
+    endpoint: "$EP"
     flushFloorSecs: ${10}
     quiesceSecs: 1
     tickSecs: ${11}
@@ -225,6 +232,7 @@ cleanup() {
   vm "umount -lf /mnt/chaos-b 2>/dev/null; ip netns del chaosb 2>/dev/null; \
       ip link del chaosb0 2>/dev/null; true" 2>/dev/null
   pkill -9 -f "flint-pnfs-mds --config /tmp/flint-chaos" 2>/dev/null
+  pkill -9 -f toxiproxy-server 2>/dev/null
   rm -f /tmp/flint-chaos-*.pid
   docker rm -f "$MINIO_NAME" >/dev/null 2>&1
   hdiutil detach "$VOL" -force >/dev/null 2>&1
@@ -1086,11 +1094,172 @@ sys.exit(0 if m['beyond_rpo']==0 else 1)" 2>/dev/null && break
   sweep_log /tmp/flint-chaos-k3.log "phase K"; sweep_log /tmp/flint-chaos-k4.log "phase K"
 }
 
+# ══════════════════════════════════════════════════════════════════════
+TOXI_API=http://127.0.0.1:8474
+TOXI_PORT=29002
+toxic_add() { # $1=json
+  curl -s -X POST "$TOXI_API/proxies/s3deg/toxics" -d "$1" | grep -q '"name"' \
+    || fail "toxic creation failed: $1"
+}
+toxic_del() { curl -s -X DELETE "$TOXI_API/proxies/s3deg/toxics/$1" >/dev/null; }
+
+phase_l() {
+  say "phase L: degraded network — cuts, latency, and a full stall"
+  command -v toxiproxy-server >/dev/null \
+    || fail "toxiproxy-server not found (brew install toxiproxy)"
+  local BK=flint-chaos-l E=/tmp/chaos-l-exp S=/tmp/chaos-l-st
+  s3 s3 mb "s3://$BK" >/dev/null
+  fresh_world $E $S
+
+  pkill -9 -f toxiproxy-server 2>/dev/null; sleep 0.3
+  nohup toxiproxy-server >/tmp/flint-chaos-toxi.log 2>&1 &
+  disown
+  local i
+  for i in $(seq 1 20); do curl -sf "$TOXI_API/version" >/dev/null && break; sleep 0.5; done
+  curl -sf "$TOXI_API/version" >/dev/null || fail "toxiproxy API never came up"
+  curl -s -X DELETE "$TOXI_API/proxies/s3deg" >/dev/null 2>&1
+  curl -s -X POST "$TOXI_API/proxies" \
+    -d "{\"name\":\"s3deg\",\"listen\":\"127.0.0.1:$TOXI_PORT\",\"upstream\":\"127.0.0.1:$MINIO_PORT\"}" \
+    | grep -q '"name"' || fail "toxiproxy proxy creation failed"
+
+  gen_cfg /tmp/flint-chaos-l.yaml $PORT $E $S $BK 99 2 5 4194304 1 1 \
+    "$PREFIX" "http://127.0.0.1:$TOXI_PORT"
+  launch_hub l /tmp/flint-chaos-l.yaml
+  wait_bound $PORT 30 l
+  mount_client
+  vm "dd if=/dev/urandom of=$MNT/pre.bin bs=1M count=2 conv=fsync 2>/dev/null"
+  wait_key $BK "${PREFIX}pre.bin" 40 || fail "baseline through the proxy never published"
+  pass "baseline publish through the clean proxy"
+
+  # L1 — multipart publishes while 60% of upstream connections DIE
+  # after 4 MiB: parts fail mid-body, the SDK and the outer tick both
+  # retry, everything must still land byte-identical.
+  toxic_add '{"name":"cut_up","type":"limit_data","stream":"upstream","toxicity":0.6,"attributes":{"bytes":4194304}}'
+  vm "for i in 1 2 3 4 5 6; do \
+        dd if=/dev/urandom of=$MNT/cut_\$i.bin bs=1M count=8 conv=fsync 2>/dev/null || exit 1; \
+      done; sync" || fail "writes under cuts failed on the CLIENT side (S3 faults must not surface)"
+  local d=$((SECONDS + 240)) n want got
+  while :; do
+    n=0
+    for i in 1 2 3 4 5 6; do
+      s3 s3api head-object --bucket $BK --key "${PREFIX}cut_$i.bin" >/dev/null 2>&1 && n=$((n+1))
+    done
+    [ "$n" = "6" ] && break
+    [ $SECONDS -gt $d ] && { tail -20 /tmp/flint-chaos-l.log; fail "only $n/6 files landed under mid-stream cuts"; }
+    sleep 3
+  done
+  toxic_del cut_up
+  for i in 2 5; do
+    s3 s3 cp "s3://$BK/${PREFIX}cut_$i.bin" /tmp/chaos-l-got.bin >/dev/null 2>&1
+    want=$(md5 -q "$E/cut_$i.bin"); got=$(md5 -q /tmp/chaos-l-got.bin)
+    [ "$want" = "$got" ] || fail "cut_$i.bin landed CORRUPT under cuts: $got ≠ $want"
+  done
+  grep -q "DEPOSED" /tmp/flint-chaos-l.log && fail "connection cuts deposed the epoch"
+  pass "L1: 6×8 MiB multiparts converged byte-identical through 60% mid-stream cuts"
+
+  # L2 — hydration with EVERY downstream connection cut after 16 MiB:
+  # the ranged-GET loop must reconnect its way through 128 MiB.
+  vm "dd if=/dev/urandom of=$MNT/hyd.bin bs=1M count=128 conv=fsync 2>/dev/null"
+  local HMD5; HMD5=$(md5 -q "$E/hyd.bin")
+  d=$((SECONDS + 180))
+  while :; do
+    s3 s3 cp "s3://$BK/${PREFIX}.flint/manifest" /tmp/chaos-l-manifest.json >/dev/null 2>&1
+    python3 -c "
+import json,sys
+m=json.load(open('/tmp/chaos-l-manifest.json'))
+sys.exit(0 if m['beyond_rpo']==0 else 1)" 2>/dev/null && break
+    [ $SECONDS -gt $d ] && fail "hyd.bin never settled pre-eviction"
+    sleep 3
+  done
+  stop_hub l
+  gen_cfg /tmp/flint-chaos-l50.yaml $PORT $E $S $BK 50 2 5 4194304 1 1 \
+    "$PREFIX" "http://127.0.0.1:$TOXI_PORT"
+  launch_hub lw /tmp/flint-chaos-l50.yaml
+  wait_bound $PORT 30 lw
+  d=$((SECONDS + 120))
+  until [ "$(stat -f %z "$E/hyd.bin" 2>/dev/null)" = "0" ]; do
+    [ $SECONDS -gt $d ] && fail "hyd.bin never evicted"
+    sleep 2
+  done
+  stop_hub lw
+  launch_hub lr /tmp/flint-chaos-l.yaml
+  wait_bound $PORT 30 lr
+  toxic_add '{"name":"cut_down","type":"limit_data","stream":"downstream","toxicity":1.0,"attributes":{"bytes":16777216}}'
+  vm "sync; echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null
+  local CMD5
+  CMD5=$(vm "timeout 240 md5sum $MNT/hyd.bin | awk '{print \$1}'" | tr -d '\r')
+  toxic_del cut_down
+  [ "$CMD5" = "$HMD5" ] \
+    || { tail -20 /tmp/flint-chaos-lr.log; fail "hydration under cuts served '$CMD5', wanted $HMD5"; }
+  local RETRIES
+  RETRIES=$(grep -c "retrying the chunk" /tmp/flint-chaos-lr.log)
+  [ "$RETRIES" -ge 1 ] \
+    || fail "hydration succeeded but the chunk-retry path never fired — the fault didn't bite"
+  pass "L2: 128 MiB hydrated byte-identical with EVERY connection cut at 16 MiB ($RETRIES chunk retries)"
+
+  # L3 — 750 ms latency each way: everything slows, nothing fences.
+  toxic_add '{"name":"lat_up","type":"latency","stream":"upstream","toxicity":1.0,"attributes":{"latency":750,"jitter":250}}'
+  toxic_add '{"name":"lat_down","type":"latency","stream":"downstream","toxicity":1.0,"attributes":{"latency":750,"jitter":250}}'
+  vm "echo slow-but-alive > $MNT/lat.txt && sync"
+  wait_key $BK "${PREFIX}lat.txt" 120 || fail "publish never landed under 750 ms latency"
+  grep -qE "DEPOSED|self-fencing" /tmp/flint-chaos-lr.log \
+    && fail "LATENCY deposed the epoch — renew treats slow as dead"
+  toxic_del lat_up; toxic_del lat_down
+  pass "L3: 750 ms RTT inflation: publishes land, the epoch holds"
+
+  # L4 — a FULL stall (data stopped, connections held open), then
+  # lifted. The wildcard leg: whichever way the hub rides it (blocked
+  # calls resume, or a lease-window self-fence + restart), the backlog
+  # must converge after the network returns — a permanent wedge is the
+  # only failure.
+  toxic_add '{"name":"stall_up","type":"timeout","stream":"upstream","toxicity":1.0,"attributes":{"timeout":0}}'
+  toxic_add '{"name":"stall_down","type":"timeout","stream":"downstream","toxicity":1.0,"attributes":{"timeout":0}}'
+  vm "echo survived-the-stall > $MNT/stall.txt && sync" \
+    || fail "a write FAILED during the stall — a stalled store must not take the filesystem down"
+  sleep 25
+  toxic_del stall_up; toxic_del stall_down
+  local OUTCOME
+  if hub_alive lr; then
+    if wait_key $BK "${PREFIX}stall.txt" 120; then
+      OUTCOME="hub rode out the stall in place"
+    elif hub_alive lr; then
+      fail "hub alive but the backlog never converged after the stall lifted — WEDGED"
+    else
+      OUTCOME=""
+    fi
+  fi
+  if [ -z "${OUTCOME:-}" ]; then
+    grep -qE "DEPOSED|self-fencing" /tmp/flint-chaos-lr.log \
+      || fail "hub died during the stall without a fence log"
+    launch_hub l2 /tmp/flint-chaos-l.yaml
+    wait_bound $PORT 40 l2
+    wait_key $BK "${PREFIX}stall.txt" 120 \
+      || fail "backlog never converged after the post-stall restart"
+    OUTCOME="hub self-fenced (a stall IS a dead store); restart flushed the backlog"
+  fi
+  pass "L4: 25 s full stall lifted — $OUTCOME"
+
+  d=$((SECONDS + 60))
+  until [ "$(mpu_count $BK "$PREFIX")" = "0" ]; do
+    [ $SECONDS -gt $d ] && fail "MPU orphans persisted after the degraded-network run"
+    sleep 3
+  done
+  umount_client
+  if hub_alive lr; then stop_hub lr; fi
+  if [ -f /tmp/flint-chaos-l2.pid ]; then stop_hub l2; fi
+  curl -s -X DELETE "$TOXI_API/proxies/s3deg" >/dev/null 2>&1
+  pkill -9 -f toxiproxy-server 2>/dev/null
+  sweep_log /tmp/flint-chaos-l.log "phase L"; sweep_log /tmp/flint-chaos-lw.log "phase L"
+  sweep_log /tmp/flint-chaos-lr.log "phase L"
+  if [ -f /tmp/flint-chaos-l2.log ]; then sweep_log /tmp/flint-chaos-l2.log "phase L"; fi
+}
+
 for ph in $PHASES; do
   case "$ph" in
     a) phase_a;; b) phase_b;; c) phase_c;;
     d) phase_d;; e) phase_e;; f) phase_f;; g) phase_g;;
     h) phase_h;; i) phase_i;; j) phase_j;; k) phase_k;;
+    l) phase_l;;
     *) fail "unknown phase '$ph'";;
   esac
 done
@@ -1099,5 +1268,6 @@ echo
 echo "══════════════════════════════════════════════════════════════════"
 echo " PASS — split-brain, outage, foreign hands, space pressure,"
 echo " crash loops, endurance, two writers, the zombie hub, neighbor"
-echo " prefixes, versioned recovery, and the restart storm all held"
+echo " prefixes, versioned recovery, restart storms, and the degraded"
+echo " network all held"
 echo "══════════════════════════════════════════════════════════════════"

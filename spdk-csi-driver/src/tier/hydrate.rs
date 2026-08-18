@@ -53,6 +53,10 @@ use tracing::{error, info, warn};
 /// Ranged-GET chunk size: big enough to amortize request overhead,
 /// small enough that a multi-GiB restore never buffers meaningfully.
 const CHUNK: u64 = 8 * 1024 * 1024;
+/// Transport-error retries per chunk before the restore attempt is
+/// abandoned (truncate-back + outer backoff). Identity failures (412)
+/// never retry — they adopt.
+const CHUNK_RETRIES: u32 = 5;
 /// Marker-poll cadence while parking an RPC.
 const PARK_POLL_MS: u64 = 50;
 /// Retry backoff cap for failed restores.
@@ -403,18 +407,38 @@ async fn stream_restore(
     let mut off = 0u64;
     while off < meta.size {
         let len = CHUNK.min(meta.size - off);
-        let chunk = match h.store.get_range(&meta.key, off, len, &meta.etag).await {
-            Ok(b) => b,
-            Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
-                // A6: hydration-GET 412 (or a deleted-and-replaced
-                // key) is S3-WINS. Adopt the bucket's CURRENT object
-                // and restart the restore on it.
-                return match adopt_foreign(h, dev, ino, meta).await {
-                    Ok(()) => Err("foreign overwrite adopted — restarting restore".into()),
-                    Err(e) => Err(e),
-                };
+        // Transport errors retry the CHUNK, not the restore: a
+        // connection cut at chunk N of a multi-GiB file must not
+        // throw away N chunks of progress (a flaky network would
+        // otherwise starve large hydrations forever — chaos phase L's
+        // finding). The If-Match guard keeps every retry pinned to
+        // the same object; identity failures still adopt immediately.
+        let mut attempt: u32 = 0;
+        let chunk = loop {
+            match h.store.get_range(&meta.key, off, len, &meta.etag).await {
+                Ok(b) => break b,
+                Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
+                    // A6: hydration-GET 412 (or a deleted-and-replaced
+                    // key) is S3-WINS. Adopt the bucket's CURRENT
+                    // object and restart the restore on it.
+                    return match adopt_foreign(h, dev, ino, meta).await {
+                        Ok(()) => Err("foreign overwrite adopted — restarting restore".into()),
+                        Err(e) => Err(e),
+                    };
+                }
+                Err(e) if attempt < CHUNK_RETRIES => {
+                    attempt += 1;
+                    warn!(
+                        "tier hydrate: {} range {}+{} attempt {} failed: {} — retrying the \
+                         chunk (restore keeps its {} restored bytes)",
+                        meta.key, off, len, attempt, e, off
+                    );
+                    tokio::time::sleep(Duration::from_millis(300 * u64::from(attempt))).await;
+                }
+                Err(e) => {
+                    return Err(format!("get_range after {} chunk retries: {}", CHUNK_RETRIES, e))
+                }
             }
-            Err(e) => return Err(format!("get_range: {}", e)),
         };
         if chunk.is_empty() {
             return Err("short object: empty range before expected end".into());
@@ -684,16 +708,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_restore_truncates_back_and_retry_succeeds() {
+    async fn transient_chunk_failures_are_absorbed_without_losing_progress() {
+        // Chaos phase L's finding: a mid-stream connection cut used to
+        // fail the WHOLE restore back to the stub — a flaky network
+        // starved large hydrations forever. Transport errors now retry
+        // the chunk in place.
         let r = rig();
         let content = vec![0x5Au8; 1500];
         let (dev, ino, _key) = evicted_file(&r, "h2.bin", content.clone()).await;
         let f = r.root.join("h2.bin");
 
         let h = local_hydrator(&r, 2);
-        r.mem.inject_get_range_failure();
+        r.mem.inject_get_range_failures(2);
+        let bytes = restore_once(&h, dev, ino, &f)
+            .await
+            .expect("two transient chunk failures must be absorbed in-attempt");
+        assert_eq!(bytes, 1500);
+        assert_eq!(std::fs::read(&f).unwrap(), content);
+        assert!(!evict::is_evicted(dev, ino), "restore committed");
+    }
+
+    #[tokio::test]
+    async fn exhausted_chunk_retries_truncate_back_and_retry_succeeds() {
+        let r = rig();
+        let content = vec![0x6Bu8; 1500];
+        let (dev, ino, _key) = evicted_file(&r, "h2x.bin", content.clone()).await;
+        let f = r.root.join("h2x.bin");
+
+        let h = local_hydrator(&r, 2);
+        // One more failure than the per-chunk budget: the attempt must
+        // give up into the truncate-back path.
+        r.mem
+            .inject_get_range_failures(u64::from(super::CHUNK_RETRIES) + 1);
         let err = restore_once(&h, dev, ino, &f).await.unwrap_err();
-        assert!(err.contains("injected"), "{}", err);
+        assert!(err.contains("chunk retries"), "{}", err);
         assert_eq!(
             std::fs::metadata(&f).unwrap().len(),
             0,
