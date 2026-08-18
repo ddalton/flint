@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and fifty-two runs, ALL required.
+# One hundred and fifty-nine runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -18,8 +18,9 @@
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
 #   71 FlintReplication   33 FlintComposition   15 FlintExtents
-#   11 FlintExtentsProbe   7 FlintTruncate       5 FlintAdmission
-#    4 FlintSnapshots      3 FlintClaims         3 FlintA2Probe)
+#   11 FlintExtentsProbe   7 FlintTierEpoch      7 FlintTruncate
+#    5 FlintAdmission      4 FlintSnapshots      3 FlintClaims
+#    3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -33,6 +34,11 @@
 # (replication failover: serving-target record + epoch, model-before-code
 # like FlintExtents was); documented at the bottom of this file, next to
 # its runs.
+#
+# FlintTierEpoch.tla — the flint-lite S3-tier volume epoch (A8 fencing:
+# claim/sweep/heartbeat/publish over the bucket's CAS cell; model AFTER
+# code AFTER the chaos drills); documented at the bottom of this file,
+# next to its runs.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -1001,5 +1007,44 @@ mutation_run FlintComposition FlintCompositionProbeMarkFirst.cfg "composition ma
 mutation_run FlintComposition FlintCompositionProbeBill.cfg "composition witness bill probe (the etcd decision's availability cost COLLECTED by TLC at MaxCrashes=0: a healthy composer suspended because only its path to the witness failed — the WaitsPrice pattern in probe form; the TTL is the knob, replicas=1 never pays)" "ProbeHealthySuspend"
 strict_run   FlintComposition FlintCompositionLiveWitness.cfg "composition tranche-4 liveness strict (SpecLiveW = SpecLive + cuts HEAL: all four progress theorems hold with a cut in the world — promotions, rebuilds, fences and redirects all complete after the control plane returns; the run whose first execution forced ResumeServing)"
 liveness_mutation_run FlintComposition FlintCompositionNoWitness.cfg "no-witness mutation (SpecLive withholding exactly the heal obligation = the shipped two-sqlite world, where a witness that never heals is a witness that never existed: the survivor is healthy, in-sync, client-reachable and witnessless, and promotion parks forever — the 9fcdd05 finding as a lasso, the NoActor pattern)"
+
+# ── FlintTierEpoch.tla — the flint-lite S3-tier volume epoch (A8) ──────
+# Model-after-code-after-drill: L2 step 7 shipped (f9bc737), chaos phases
+# A/B/H drilled it live, THEN this module enumerated what the drills
+# sample.  The store CAS semantics come from store/memory.rs, which the
+# real-S3 acceptance gate holds equal to S3.  Theorems: the claim-time
+# MPU abort-sweep fences every assembly that exists when the sweep RUNS
+# (its first strict counterexample corrected the module itself: the
+# acquire and the sweep are separate store requests, so the guarantee
+# starts when the sweep returns, not at the CAS); token rotation makes a
+# renewing holder undeposable (real-S3 gate bug 1 as a mutation); the
+# heartbeat's 412 fence bounds every stale-publish window (liveness).
+# The ProbeStale run is a required-fail RESIDUAL of the shipped protocol
+# (the phase-H wake-up window stated exactly: a deposed create has no
+# base etag for CAS to fence).  The successor-overwrite class BEGAN as
+# the second probe and FORCED A CODE FIX the same day: TLC found two
+# routes sharper than the drill intuition — the 412 rediscovery arm
+# adopting the successor's etag, and a FRESH-world hub frozen mid-claim
+# whose wake-up import ingests the successor's etag so its first flush
+# lands with a SUCCEEDING condition (no 412 ever fires).  The fix is
+# two-legged (flush.rs successor_check: a stamp above ours store-
+# verifies then fences, and a FABRICATED stamp — store still ours —
+# keeps local-wins so outside writers cannot crash-loop a healthy hub;
+# epoch.rs startup_reverify: serve() refuses to proceed past a store
+# epoch ahead of the claim).  Inv_NoSuccessorOverwrite is now a STRICT
+# THEOREM and the NoStampCheck mutation preserves the pre-fix
+# counterexample as the regression test.  Two documented non-runs, per
+# the dropped-5q rule (a mutation that cannot lose proves nothing): the
+# pre-publish guard consult (its necessity is timing — ProbeStale shows
+# the window open with it on) and the quiet-wait seize (the takeover
+# CAS structurally subsumes it for RENEWING holders; what the wait buys
+# a live-but-stalled holder is time, a quantitative axiom).
+strict_run FlintTierEpoch FlintTierEpoch.cfg "tier-epoch strict breadth (sweep+rotation+fence ON: pre-sweep assemblies never land, renewing holders never deposed)"
+strict_run FlintTierEpoch FlintTierEpochLive.cfg "tier-epoch liveness depth (deposed incarnations eventually stop believing; dead-holder watches resolve)"
+mutation_run FlintTierEpoch FlintTierEpochNoSweep.cfg "tier-epoch sweep mutation (Sweep=FALSE: a deposed Complete lands — chaos phase E's orphan class)" "Inv_NoPreSweepMpuLand"
+mutation_run FlintTierEpoch FlintTierEpochNoRotate.cfg "tier-epoch rotation mutation (TokenRotate=FALSE: real-S3 gate bug 1 — a renewing holder judged quiet and deposed)" "Inv_NoRenewingHolderDeposed"
+liveness_mutation_run FlintTierEpoch FlintTierEpochNoFence.cfg "tier-epoch fence mutation (FenceOn412=FALSE: the immortal zombie — a deposed incarnation believes forever)"
+mutation_run FlintTierEpoch FlintTierEpochProbeStale.cfg "tier-epoch stale-publish probe (RESIDUAL required-fail: the phase-H wake-up window — a deposed create lands before the first heartbeat CAS)" "Inv_NoStalePublishLand"
+mutation_run FlintTierEpoch FlintTierEpochNoStampCheck.cfg "tier-epoch stamp-check mutation (StampCheck=FALSE = the pre-fix world: the zombie's If-Match lands over the live successor — the probe that forced successor_check + startup_reverify, kept as the regression test)" "Inv_NoSuccessorOverwrite"
 
 echo "TLA GATE PASSED"

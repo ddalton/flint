@@ -804,6 +804,16 @@ impl MetadataServer {
             }),
         );
 
+        // FlintTierEpoch's import-route fence: a hub frozen between its
+        // claim CAS and here wakes into a successor's world — verify
+        // the store's epoch object still carries OUR reign before the
+        // registry rebuild / import / flush machinery can act on it.
+        epoch::startup_reverify(&store, &epoch::epoch_key(&t.key_prefix), &guard)
+            .await
+            .map_err(|e| {
+                crate::pnfs::Error::Config(format!("tier: startup epoch re-verify: {}", e))
+            })?;
+
         let mut fcfg = FlushConfig::new(export_root.clone(), t.key_prefix.clone());
         fcfg.floor = Duration::from_secs(t.flush_floor_secs);
         fcfg.quiesce = Duration::from_secs(t.quiesce_secs);

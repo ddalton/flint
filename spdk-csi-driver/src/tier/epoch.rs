@@ -243,6 +243,43 @@ pub async fn claim(
     }
 }
 
+/// Startup re-verify — FlintTierEpoch's import-route fence. After the
+/// claim and before the import/flush machinery acts, confirm the
+/// store's epoch object still carries OUR reign: a hub frozen between
+/// its claim CAS and this point wakes into a successor's world — the
+/// import would ingest the successor's objects (their etags become our
+/// rows) and the first flush would If-Match-land OVER the live
+/// successor. An epoch ahead of our guard is machine-readable
+/// deposition: fence and refuse startup; the restart re-judges and
+/// waits behind the live holder. A MISSING epoch object is not
+/// deposition (the heartbeat's NotFound arm owns that); a fenced
+/// guard refuses outright.
+pub async fn startup_reverify(
+    store: &Arc<dyn ObjectStore>,
+    key: &str,
+    guard: &Arc<EpochGuard>,
+) -> StoreResult<()> {
+    let state = store.epoch_read(key).await?;
+    match (state, guard.current()) {
+        (Some(s), Some(ours)) if s.epoch > ours => {
+            error!(
+                "tier epoch: DEPOSED during startup — the store's epoch object is at \
+                 {} (holder {}), past our {}; fencing and refusing to serve",
+                s.epoch, s.holder_id, ours
+            );
+            guard.fence();
+            Err(StoreError::PreconditionFailed(format!(
+                "deposed during startup: store epoch {} (holder {}) is past ours ({})",
+                s.epoch, s.holder_id, ours
+            )))
+        }
+        (_, None) => Err(StoreError::PreconditionFailed(
+            "guard already fenced at startup re-verify".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Abort every in-flight multipart assembly under the prefix. After
 /// this, a dead/deposed holder's CompleteMultipartUpload fails
 /// `NoSuchUpload` — the data-plane teeth of the epoch. An error here
@@ -356,6 +393,41 @@ mod tests {
             mem.raw_complete_upload(&u1),
             Err(StoreError::NoSuchUpload(_))
         ));
+    }
+
+    /// FlintTierEpoch's import-route fence: a claim that completed into
+    /// a superseded world (frozen between the CAS and startup) must be
+    /// caught by the re-verify — fence + refuse; a store still carrying
+    /// our reign (or no epoch object at all) passes.
+    #[tokio::test]
+    async fn startup_reverify_fences_a_superseded_claim_and_passes_our_reign() {
+        let (_mem, store) = stores();
+        let key = epoch_key("vol/");
+        let lease = claim(&store, &cfg("hub-a", 10, 3), "vol/").await.unwrap();
+        let guard = EpochGuard::held(lease.epoch);
+
+        // Our reign intact: passes.
+        startup_reverify(&store, &key, &guard).await.expect("own reign passes");
+
+        // A successor supersedes while we were frozen.
+        let state = store.epoch_read(&key).await.unwrap().unwrap();
+        store.epoch_acquire(&key, "hub-b", Some(&state)).await.unwrap();
+        let err = startup_reverify(&store, &key, &guard).await.unwrap_err();
+        assert!(matches!(err, StoreError::PreconditionFailed(_)), "{}", err);
+        assert!(guard.is_fenced(), "the re-verify must fence the guard");
+        assert!(guard.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_reverify_tolerates_a_missing_epoch_object() {
+        let (_mem, store) = stores();
+        let guard = EpochGuard::held(1);
+        // No epoch object at all (foreign deletion): NOT deposition —
+        // the heartbeat's NotFound arm owns that lane.
+        startup_reverify(&store, &epoch_key("vol/"), &guard)
+            .await
+            .expect("missing epoch object passes");
+        assert!(!guard.is_fenced());
     }
 
     #[tokio::test]

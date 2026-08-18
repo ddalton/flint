@@ -38,15 +38,15 @@ use crate::tier::capture::{self, FileCapture};
 use crate::tier::gate;
 use crate::tier::meter::{self, Counter};
 use crate::tier::store::{
-    crc64_to_b64, ComposeSpec, Crc64Nvme, GenerationStamps, ObjectStore, PartSource,
-    PutCondition, StoreError,
+    crc64_to_b64, ComposeSpec, Crc64Nvme, GenerationStamps, ObjectMeta, ObjectStore,
+    PartSource, PutCondition, StoreError,
 };
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// 5 TiB — S3's object ceiling, enforced with a clear error (A11).
 pub const MAX_OBJECT_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
@@ -500,6 +500,9 @@ impl FlushOrchestrator {
                     }
                 }
                 Ok(Verdict::Foreign(_)) => {
+                    // No successor_check here: reconcile runs right
+                    // after a fresh claim, when OUR epoch is maximal by
+                    // construction — no object can carry a higher stamp.
                     meter::bump(Counter::ArbitrateForeign);
                     warn!(
                         "tier flush: intent {} for {} found FOREIGN bucket state; local \
@@ -986,6 +989,27 @@ impl FlushOrchestrator {
                         meter::bump(Counter::ArbitrateForeign);
                         capture::merge_back(dev, ino, epoch);
                         capture::note(dev, ino, capture::Mutation::Whole);
+                        match self.successor_check(meta.as_ref()).await {
+                            SuccessorCheck::Successor => {
+                                // Deposed: rows and intent stay as the
+                                // durable record; nothing re-publishes
+                                // under a successor's reign.
+                                return self.fail_keep_intent(
+                                    dev,
+                                    ino,
+                                    "deposed: a successor's epoch stamp observed"
+                                        .into(),
+                                );
+                            }
+                            SuccessorCheck::Unverified => {
+                                return self.fail_keep_intent(
+                                    dev,
+                                    ino,
+                                    "successor check unverified; retrying".into(),
+                                );
+                            }
+                            SuccessorCheck::ForeignHand => {}
+                        }
                         match meta {
                             Some(m) => {
                                 let generation = GenerationStamps::from_meta(&m.meta)
@@ -1105,6 +1129,70 @@ impl FlushOrchestrator {
         warn!("tier flush: ({},{}) {}", dev, ino, msg);
         Outcome::Failed(msg)
     }
+
+    /// A Foreign verdict whose stamps carry an epoch ABOVE ours is
+    /// machine-readable evidence of a SUCCESSOR, not a foreign hand
+    /// (FlintTierEpoch's ProbeOverwrite counterexample: a deposed-but-
+    /// unfenced zombie's local-wins re-publish would land OVER the live
+    /// successor's object before the first heartbeat 412 fences it).
+    /// Verified against the store's epoch object before acting — a
+    /// forged stamp from an outside writer must not be able to fence a
+    /// healthy hub into a crash loop.
+    async fn successor_check(&self, meta: Option<&ObjectMeta>) -> SuccessorCheck {
+        let Some(m) = meta else { return SuccessorCheck::ForeignHand };
+        let Some(stamps) = GenerationStamps::from_meta(&m.meta) else {
+            return SuccessorCheck::ForeignHand;
+        };
+        let Some(ours) = self.epoch.current() else {
+            // Already fenced: the caller must not publish anyway.
+            return SuccessorCheck::Successor;
+        };
+        if stamps.epoch <= ours {
+            return SuccessorCheck::ForeignHand;
+        }
+        let ekey = crate::tier::epoch::epoch_key(&self.cfg.key_prefix);
+        match self.store.epoch_read(&ekey).await {
+            Ok(Some(state)) if state.epoch > ours => {
+                error!(
+                    "tier flush: object stamped epoch {} > ours {}, and the store's \
+                     epoch object confirms it (epoch {} held by {}) — a SUCCESSOR \
+                     owns this prefix; fencing all publishes. The durable backlog \
+                     stays local; the heartbeat exits on its next renew",
+                    stamps.epoch, ours, state.epoch, state.holder_id
+                );
+                self.epoch.fence();
+                meter::bump(Counter::FlushesFenced);
+                SuccessorCheck::Successor
+            }
+            Ok(_) => {
+                warn!(
+                    "tier flush: object stamped epoch {} > ours {} but the store \
+                     still shows our reign — a fabricated stamp from an outside \
+                     writer; A6 local-wins proceeds",
+                    stamps.epoch, ours
+                );
+                SuccessorCheck::ForeignHand
+            }
+            Err(e) => {
+                // Cannot verify: neither fence on no evidence nor
+                // overwrite what may be a successor's object — retry
+                // the whole flush next cycle.
+                warn!("tier flush: successor-check epoch read failed: {}", e);
+                SuccessorCheck::Unverified
+            }
+        }
+    }
+}
+
+/// Outcome of [`FlushOrchestrator::successor_check`].
+enum SuccessorCheck {
+    /// Store-confirmed successor reign: the guard is now fenced; do
+    /// NOT touch rows or re-publish.
+    Successor,
+    /// A genuine foreign hand (or no stamp evidence): A6 local-wins.
+    ForeignHand,
+    /// The verifying read failed; retry next cycle.
+    Unverified,
 }
 
 fn now_unix() -> u64 {
@@ -1373,9 +1461,13 @@ mod tests {
 
     /// Note + land the durable row, repairing parallel-test theft
     /// (process-global capture queue — the step-2 lesson): re-note the
-    /// SAME mutation until the row exists in OUR backend.
+    /// SAME mutation until the row exists in OUR backend.  No flush
+    /// test evicts, so ANY eviction marker on this identity is another
+    /// test's residue via ext4 inode reuse (the Linux-census lesson —
+    /// a stale marker fails the flush as SkippedEvicted): drop it.
     async fn note_and_land(rigg: &Rig, path: &Path, m: Mutation) {
         let (dev, ino) = ident(path);
+        crate::tier::evict::forget(dev, ino);
         capture::note_path(path, m);
         for _ in 0..50 {
             let _ = crate::tier::durable::drain_pending(&rigg.backend).await;
@@ -1798,6 +1890,117 @@ mod tests {
             .expect("the file must re-publish after a foreign delete");
         let (_, bytes) = r.mem.get_whole("t/phoenix.bin", Some(&g.etag)).await.unwrap();
         assert_eq!(bytes.as_ref(), b"local truth v1 + v2", "local truth re-created");
+    }
+
+    /// FlintTierEpoch's ProbeOverwrite counterexample, closed: a
+    /// deposed-but-unfenced hub (guard still at epoch 1, store epoch
+    /// object superseded to 2) 412s against the successor's object and
+    /// must FENCE on the epoch stamp — never local-wins over the live
+    /// successor.
+    #[tokio::test]
+    async fn foreign_object_with_successor_epoch_stamp_fences_not_republishes() {
+        let r = rig(1024, 256);
+        let f = r.root.join("contested.bin");
+        std::fs::write(&f, b"zombie truth v1").unwrap();
+        let idn = ident(&f);
+        note_and_land(&r, &f, Mutation::Whole).await;
+        r.orch.tick().await;
+
+        // The store's epoch object: our reign (1), then a successor's (2).
+        let ekey = crate::tier::epoch::epoch_key("t/");
+        r.mem.epoch_acquire(&ekey, "zombie", None).await.unwrap();
+        let state = r.mem.epoch_read(&ekey).await.unwrap().unwrap();
+        r.mem.epoch_acquire(&ekey, "successor", Some(&state)).await.unwrap();
+
+        // The successor re-publishes the key, stamped with ITS epoch.
+        let cur = r.mem.head("t/contested.bin").await.unwrap();
+        let body = Bytes::from_static(b"the successor's truth");
+        let stamps = GenerationStamps {
+            generation: 2,
+            epoch: 2,
+            flush_uuid: "succ-uuid".into(),
+            posix: None,
+        };
+        r.mem
+            .put_whole(
+                "t/contested.bin",
+                body.clone(),
+                &PutCondition::IfMatch(cur.etag),
+                &stamps,
+                crate::tier::store::crc64_nvme(&body),
+            )
+            .await
+            .unwrap();
+
+        // The zombie's next flush 412s, sees the higher stamp, verifies
+        // against the epoch object, and FENCES.
+        std::fs::write(&f, b"zombie truth v2 (must never land)").unwrap();
+        note_and_land(&r, &f, Mutation::Whole).await;
+        r.orch.tick().await;
+        assert!(r.guard.current().is_none(), "the guard must be fenced");
+        let (_, bytes) = r.mem.get_whole("t/contested.bin", None).await.unwrap();
+        assert_eq!(
+            bytes.as_ref(),
+            b"the successor's truth",
+            "the successor's object must survive untouched"
+        );
+        assert!(
+            our_row(&r, idn.0, idn.1).await.is_some(),
+            "the durable backlog stays for recovery"
+        );
+        // Fenced ticks publish nothing.
+        r.orch.tick().await;
+        let (_, bytes) = r.mem.get_whole("t/contested.bin", None).await.unwrap();
+        assert_eq!(bytes.as_ref(), b"the successor's truth");
+    }
+
+    /// The forged-stamp guard: an outside writer stamping an absurd
+    /// epoch must NOT fence a healthy hub (the store still shows our
+    /// reign) — A6 local-wins re-publishes as ever.
+    #[tokio::test]
+    async fn fabricated_epoch_stamp_does_not_fence_a_healthy_hub() {
+        let r = rig(1024, 256);
+        let f = r.root.join("forged.bin");
+        std::fs::write(&f, b"local truth v1").unwrap();
+        let idn = ident(&f);
+        note_and_land(&r, &f, Mutation::Whole).await;
+        r.orch.tick().await;
+
+        // Epoch object: ours, epoch 1 — matching the guard.
+        let ekey = crate::tier::epoch::epoch_key("t/");
+        r.mem.epoch_acquire(&ekey, "us", None).await.unwrap();
+
+        // A foreign hand overwrites with a fabricated epoch-99 stamp.
+        let cur = r.mem.head("t/forged.bin").await.unwrap();
+        let body = Bytes::from_static(b"impostor bytes");
+        let stamps = GenerationStamps {
+            generation: 9,
+            epoch: 99,
+            flush_uuid: "forged-uuid".into(),
+            posix: None,
+        };
+        r.mem
+            .put_whole(
+                "t/forged.bin",
+                body.clone(),
+                &PutCondition::IfMatch(cur.etag),
+                &stamps,
+                crate::tier::store::crc64_nvme(&body),
+            )
+            .await
+            .unwrap();
+
+        std::fs::write(&f, b"local truth v2").unwrap();
+        note_and_land(&r, &f, Mutation::Whole).await;
+        // Cycle 1: 412 ⇒ Foreign ⇒ stamp 99 > 1 but the store shows our
+        // reign ⇒ fabrication ⇒ foreign state recorded.  Cycle 2:
+        // local-wins re-publish guarded on the impostor's etag.
+        r.orch.tick().await;
+        assert!(r.guard.current().is_some(), "a forged stamp must not fence us");
+        r.orch.tick().await;
+        let g = r.orch.generation_of(idn.0, idn.1).expect("re-published");
+        let (_, bytes) = r.mem.get_whole("t/forged.bin", Some(&g.etag)).await.unwrap();
+        assert_eq!(bytes.as_ref(), b"local truth v2", "local truth re-won the key");
     }
 
     /// Step 12's tidy: a tombstone whose key was legitimately

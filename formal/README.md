@@ -1,8 +1,8 @@
-# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, and the block serving-composition machine
+# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, and the S3-tier volume epoch
 
-Seven spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
+Eight spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
-(`scripts/check-tla.sh`, **one hundred and fifty-two** TLC runs).
+(`scripts/check-tla.sh`, **one hundred and fifty-nine** TLC runs).
 
 Both counts here have drifted before, in both files, because nothing
 regenerated them. They do now:
@@ -303,6 +303,52 @@ shipped two-sqlite world's parked-promotion lasso.
 Still owed: crash *inside* the rebuild copy (sim-harness territory, the
 esnap-window precedent).
 
+`FlintTierEpoch.tla` (2026-08-17) models the **flint-lite S3-tier volume
+epoch** — L2 step 7's A8 fencing (`src/tier/epoch.rs`, the publish steps
+of `flush.rs`, the CAS semantics of `store/memory.rs` which the real-S3
+acceptance gate holds equal to S3).  Model-after-code-after-drill —
+chaos phases A/B/H sampled these interleavings live; the module
+enumerates them.  Two hubs, one data key, one epoch cell; read-then-CAS
+pairs collapse to single actions because the CAS revalidates the read,
+while the quiet-poll COUNT stays honestly decomposed; publishes are
+decomposed at store-request granularity (plan / put-land / mpu-init /
+mpu-complete) so depositions interleave where they really can.
+Theorems: the claim-time MPU abort-sweep fences every assembly that
+exists when the sweep RUNS (`Inv_NoPreSweepMpuLand` — the strict run's
+FIRST counterexample corrected the module's own overstatement: acquire
+and sweep are separate store requests, so a pre-takeover Complete can
+land between them and the guarantee starts when the sweep returns —
+`sweptEp` encodes exactly that; the same trace shows a zombie's own
+late sweep can abort the live successor's in-flight assembly — one
+failed flush cycle, disruption never loss); token rotation makes a
+renewing holder undeposable (`Inv_NoRenewingHolderDeposed` — the
+NoRotate mutation rediscovers real-S3 gate bug 1 verbatim); the
+heartbeat's 412 fence bounds every stale-publish window
+(`DeposedEventuallyFenced`; the NoFence mutation finds the immortal
+zombie).  ONE REQUIRED-FAIL PROBE states the shipped
+protocol's residual exactly: `ProbeStale` is chaos phase H's wake-up
+window (a deposed create has no base etag for CAS to fence and lands
+before the first heartbeat).  THE MODULE'S FIRST YIELD WAS A CODE FIX,
+same-day: the successor-overwrite class began as a second required-fail
+probe, and TLC found two routes sharper than the drill intuition — the
+412 rediscovery arm adopting the successor's etag, and a FRESH-world
+hub frozen mid-claim whose wake-up import ingests the successor's etag
+so its first flush lands with a SUCCEEDING condition (no 412 fires; A6
+local-wins cannot tell a foreign hand from a successor hub).  The fix
+is two-legged: `flush.rs successor_check` (a Foreign stamp above our
+epoch store-verifies against the epoch object, then FENCES — never
+re-publishes; a FABRICATED stamp, store still showing our reign, keeps
+local-wins so an outside writer cannot crash-loop a healthy hub) and
+`epoch.rs startup_reverify` (serve() refuses to proceed past a store
+epoch ahead of the claim).  `Inv_NoSuccessorOverwrite` is now a strict
+THEOREM; the `NoStampCheck` mutation preserves the pre-fix
+counterexample as the regression test.  Two documented NON-runs per
+the dropped-5q rule: the pre-publish guard consult (timing, not logic —
+the probes show the window open with it on) and the quiet-wait seize
+(the takeover CAS structurally subsumes it for renewing holders; what
+the wait buys a live-but-stalled holder is TIME — a quantitative axiom,
+FlintClaims'-grace-shaped).
+
 Verification of snapshots is layered deliberately:
 
 1. **SPDK blobstore internals** — not modeled; audited by citation (the
@@ -315,7 +361,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs one hundred and fifty-two configs, ALL required:
+on first use).  It runs one hundred and fifty-nine configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus
