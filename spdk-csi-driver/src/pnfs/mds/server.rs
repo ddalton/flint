@@ -680,6 +680,18 @@ impl MetadataServer {
         use crate::tier::flush::{FlushConfig, FlushOrchestrator};
         use crate::tier::store::ObjectStore;
 
+        // The dispatcher speaks CANONICAL paths (filehandle.rs
+        // canonicalizes the export at startup — /tmp is a symlink to
+        // /private/tmp on macOS, and k8s mount paths can be symlinked
+        // too). Every tier component must use the same representation,
+        // or key_for/admission/eviction judge every dispatcher path
+        // "outside the export root" (the MinIO drill caught exactly
+        // that).
+        let export_root = self
+            .export_path
+            .canonicalize()
+            .unwrap_or_else(|_| self.export_path.clone());
+
         // A10 first — the space model is local and cheap, and admission
         // + truthful SPACE_* should hold even while the epoch claim
         // below waits. Ballast wants a db file to sit next to; the
@@ -705,7 +717,7 @@ impl MetadataServer {
             }
         };
         let space = crate::tier::space::configure(crate::tier::space::SpaceConfig {
-            root: self.export_path.clone(),
+            root: export_root.clone(),
             reserve_bytes: t.reserve_bytes,
             watermark_pct: t.watermark_pct,
             ballast_path,
@@ -792,7 +804,7 @@ impl MetadataServer {
             }),
         );
 
-        let mut fcfg = FlushConfig::new(self.export_path.clone(), t.key_prefix.clone());
+        let mut fcfg = FlushConfig::new(export_root.clone(), t.key_prefix.clone());
         fcfg.floor = Duration::from_secs(t.flush_floor_secs);
         fcfg.quiesce = Duration::from_secs(t.quiesce_secs);
         fcfg.whole_put_max = t.whole_put_max_bytes;
@@ -841,7 +853,7 @@ impl MetadataServer {
                 &self.backend,
                 &orch_store,
                 crate::tier::import::ImportConfig {
-                    export_root: &self.export_path,
+                    export_root: &export_root,
                     key_prefix: &t.key_prefix,
                     intent_path: intent_path.as_deref(),
                 },
@@ -894,7 +906,7 @@ impl MetadataServer {
         {
             let backend = Arc::clone(&self.backend);
             let store = Arc::clone(&orch_store);
-            let export_root = self.export_path.clone();
+            let export_root = export_root.clone();
             let key_prefix = t.key_prefix.clone();
             let probe_view = self.base_dispatcher.open_file_view();
             let tick = Duration::from_secs(t.tick_secs.max(1));

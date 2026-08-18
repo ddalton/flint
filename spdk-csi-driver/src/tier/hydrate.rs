@@ -394,10 +394,10 @@ async fn stream_restore(
     path: &Path,
     meta: &mut EvictedMeta,
 ) -> Result<u64, String> {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("open stub: {}", e))?;
+    // Internal-write open: a read-only stub (0444 git objects) must
+    // still restore — DAC applies to clients, not to the tier's own
+    // maintenance I/O.
+    let file = evict::open_for_internal_write(path).map_err(|e| format!("open stub: {}", e))?;
     let file = Arc::new(file);
     let mut crc = Crc64Nvme::new();
     let mut off = 0u64;
@@ -503,9 +503,7 @@ async fn adopt_foreign(
 }
 
 fn truncate_stub(path: &Path) -> Result<(), String> {
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
+    let f = evict::open_for_internal_write(path)
         .map_err(|e| format!("open for stub reset: {}", e))?;
     f.set_len(0).map_err(|e| format!("truncate: {}", e))?;
     f.sync_all().map_err(|e| format!("fsync: {}", e))
@@ -612,6 +610,44 @@ mod tests {
         let out = evict_file(&r.backend, &store, &f, &g.key, NO_WRITERS).await;
         assert!(matches!(out, EvictOutcome::Evicted { .. }), "{:?}", out);
         (dev, ino, g.key)
+    }
+
+    #[tokio::test]
+    async fn read_only_file_evicts_and_hydrates_mode_kept() {
+        // The MinIO drill's find: git object files are 0444 — the
+        // owner cannot open them O_WRONLY, yet evicting and restoring
+        // them is the tier's job. DAC applies to clients, not to the
+        // tier's internal maintenance I/O; the mode must survive.
+        use std::os::unix::fs::PermissionsExt;
+        let r = rig();
+        let content: Vec<u8> = (0..1024u32).map(|i| (i % 199) as u8).collect();
+        let f = r.root.join("obj444.bin");
+        std::fs::write(&f, &content).unwrap();
+        let (dev, ino) = ident(&f);
+        capture::forget(dev, ino);
+        note_and_land(&r, &f, Mutation::Whole).await;
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
+        r.orch.tick().await;
+        let g = r.orch.generation_of(dev, ino).expect("must publish");
+        let store: Arc<dyn ObjectStore> = r.mem.clone();
+        let out = evict_file(&r.backend, &store, &f, &g.key, NO_WRITERS).await;
+        assert!(matches!(out, EvictOutcome::Evicted { .. }), "{:?}", out);
+        assert_eq!(std::fs::metadata(&f).unwrap().len(), 0);
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o7777,
+            0o444,
+            "the borrowed write bit must be returned after the truncate"
+        );
+
+        let h = local_hydrator(&r, 2);
+        let n = restore_once(&h, dev, ino, &f).await.expect("restore must succeed");
+        assert_eq!(n, 1024);
+        assert_eq!(std::fs::read(&f).unwrap(), content);
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o7777,
+            0o444,
+            "mode survives the restore"
+        );
     }
 
     #[tokio::test]

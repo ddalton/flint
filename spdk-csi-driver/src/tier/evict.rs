@@ -425,11 +425,42 @@ pub async fn evict_file(
     EvictOutcome::Evicted { bytes: row.size }
 }
 
+/// Open a file for the tier's own maintenance writes (evict truncate,
+/// hydration restore). This is NOT client I/O — DAC on the file's mode
+/// must not apply (a 0444 git object is the proof workload: the owner
+/// cannot open it O_WRONLY, yet evicting and restoring it is exactly
+/// the tier's job; the MinIO drill caught hydration wedged forever on
+/// one). On EACCES: grant owner-write for the instant of the open and
+/// restore the mode immediately — the open fd keeps its write
+/// permission regardless of the file's mode.
+pub(crate) fn open_for_internal_write(path: &Path) -> std::io::Result<std::fs::File> {
+    match std::fs::OpenOptions::new().write(true).open(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = path.symlink_metadata()?.permissions().mode() & 0o7777;
+                std::fs::set_permissions(
+                    path,
+                    std::fs::Permissions::from_mode(mode | 0o200),
+                )?;
+                let r = std::fs::OpenOptions::new().write(true).open(path);
+                // Restore UNCONDITIONALLY — the mode was only borrowed.
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+                r
+            }
+            #[cfg(not(unix))]
+            Err(e)
+        }
+        r => r,
+    }
+}
+
 /// In-place: open WITHOUT create (an absent file must never
 /// materialize — C6), set_len(0), fsync. The inode survives, so every
 /// cached fd stays a valid handle whose ops re-check the marker.
 fn truncate_in_place(path: &Path) -> std::io::Result<()> {
-    let f = std::fs::OpenOptions::new().write(true).open(path)?;
+    let f = open_for_internal_write(path)?;
     f.set_len(0)?;
     f.sync_all()
 }

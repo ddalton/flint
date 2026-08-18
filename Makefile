@@ -292,6 +292,10 @@ test-pnfs-crosscluster: build-pnfs ## Two DISTINCT NFS clients (netns+UTS = two 
 test-pnfs-lite: build-pnfs ## Flint-lite L0: ONE standalone hub (mode: standalone, no DS fleet) serves two distinct clients — coherence, locks, sqlite/git, no-LAYOUTGET oracle, MDS-lane baselines
 	tests/lima/pnfs/lite-drill.sh
 
+.PHONY: test-tier-drill
+test-tier-drill: build-pnfs ## S3-tier e2e vs MinIO (docker): capture→flush→manifest, tombstones, restart, evict, hydrate under a kernel client, DR-from-bucket
+	tests/lima/pnfs/tier-drill.sh
+
 .PHONY: test-lite-kind-e2e
 test-lite-kind-e2e: ## Flint-lite L1 e2e: the CHART's hub on kind (default-SC PVC, NodePort) serves the Lima VM's REAL kernel client — battery + bytes-on-PVC + restart-under-mount. Builds the hub image from the working tree
 	tests/regression/lite-kind-e2e.sh
