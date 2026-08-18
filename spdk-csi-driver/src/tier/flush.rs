@@ -930,8 +930,22 @@ impl FlushOrchestrator {
                 debug!("tier flush: published {} gen {}", key, to_gen);
                 Outcome::Published { to_gen }
             }
-            Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
-                meter::bump(Counter::Publish412s);
+            // NotFound routes to arbitration too: a guarded publish
+            // over a base the bucket no longer has answers 404, not
+            // 412 (a foreign DELETE under a published file — the
+            // chaos drill's C3 leg wedged here forever: every tick
+            // retried If-Match against a missing key and failed).
+            // Arbitration's HEAD then sees NotFound + a recorded base
+            // ⇒ Foreign(None) ⇒ the row drops and the next cycle
+            // re-CREATES local truth.
+            Err(
+                e @ (StoreError::PreconditionFailed(_)
+                | StoreError::Conflict(_)
+                | StoreError::NotFound(_)),
+            ) => {
+                if !matches!(e, StoreError::NotFound(_)) {
+                    meter::bump(Counter::Publish412s);
+                }
                 let probe = IntentProbe {
                     key: &key,
                     to_gen,
@@ -1753,6 +1767,37 @@ mod tests {
             "the old key's object must be deleted"
         );
         assert!(r.backend.tier_list_tombstones().await.unwrap().is_empty());
+    }
+
+    /// Chaos C3's find: a foreign DELETE of a published file's object
+    /// makes the guarded re-publish answer 404 (not 412) — that must
+    /// route to arbitration (Foreign(None) ⇒ drop the row) and the
+    /// next cycle re-CREATES local truth, never wedge forever.
+    #[tokio::test]
+    async fn foreign_delete_of_published_object_recreates_next_cycle() {
+        let r = rig(1024, 256);
+        let f = r.root.join("phoenix.bin");
+        std::fs::write(&f, b"local truth v1").unwrap();
+        let idn = ident(&f);
+        note_and_land(&r, &f, Mutation::Whole).await;
+        r.orch.tick().await;
+        assert!(r.mem.head("t/phoenix.bin").await.is_ok());
+
+        // The foreign hand deletes the object; local appends.
+        r.mem.delete("t/phoenix.bin").await.unwrap();
+        std::fs::write(&f, b"local truth v1 + v2").unwrap();
+        note_and_land(&r, &f, Mutation::Whole).await;
+
+        // First cycle: 404 ⇒ arbitrated Foreign(None) ⇒ row dropped.
+        // Second cycle: no base ⇒ create-flavor publish wins.
+        r.orch.tick().await;
+        r.orch.tick().await;
+        let g = r
+            .orch
+            .generation_of(idn.0, idn.1)
+            .expect("the file must re-publish after a foreign delete");
+        let (_, bytes) = r.mem.get_whole("t/phoenix.bin", Some(&g.etag)).await.unwrap();
+        assert_eq!(bytes.as_ref(), b"local truth v1 + v2", "local truth re-created");
     }
 
     /// Step 12's tidy: a tombstone whose key was legitimately

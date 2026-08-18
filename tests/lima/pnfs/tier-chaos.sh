@@ -31,6 +31,10 @@
 #                       restart, the world must settle to
 #                       beyond_rpo=0 with ZERO leftover MPUs, and a
 #                       final DR rebuild must be byte-identical.
+#   G  two writers   — a second netns client (own co_ownerid): concurrent
+#                       writer batteries + close-to-open handoffs both
+#                       ways + cross-client verification, all under
+#                       constant evict/hydrate churn.
 #   F  endurance      — sqlite+git battery under CONSTANT
 #                       evict/hydrate churn (watermark always
 #                       exceeded); ends with git fsck --strict,
@@ -49,7 +53,7 @@ LIMA_VM="${LIMA_VM:-flint-nfs-client}"
 
 CRASH_ITERS="${CRASH_ITERS:-5}"
 ENDURE_SECS="${ENDURE_SECS:-60}"
-PHASES="${PHASES:-a b c d e f}"
+PHASES="${PHASES:-a b c d e f g}"
 
 PORT=20492
 PORT_B=20493
@@ -181,6 +185,8 @@ cleanup() {
     return
   fi
   umount_client 2>/dev/null
+  vm "umount -lf /mnt/chaos-b 2>/dev/null; ip netns del chaosb 2>/dev/null; \
+      ip link del chaosb0 2>/dev/null; true" 2>/dev/null
   pkill -9 -f "flint-pnfs-mds --config /tmp/flint-chaos" 2>/dev/null
   rm -f /tmp/flint-chaos-*.pid
   docker rm -f "$MINIO_NAME" >/dev/null 2>&1
@@ -348,6 +354,26 @@ phase_c() {
   done
   pass "C1 publish lane: foreign overwrite of a LIVE file lost to local truth (guarded re-publish)"
 
+  # C3 — foreign DELETE of a LIVE file's object: the next local
+  # mutation re-publishes local truth (create-flavor; the base is
+  # gone and arbitration says retry-from-base). MUST run on this
+  # no-eviction hub: under churn the file would evict first, and a
+  # foreign delete under an EVICTED file is the C4 park-forever
+  # posture — an append would (correctly) hang the drill.
+  vm "echo 'phoenix v1' > $MNT/phoenix.txt && sync"
+  wait_key $BK "${PREFIX}phoenix.txt" 40 || fail "phoenix.txt never published"
+  s3 s3 rm "s3://$BK/${PREFIX}phoenix.txt" >/dev/null
+  vm "echo 'phoenix v2' >> $MNT/phoenix.txt && sync"
+  local d15=$((SECONDS + 60)) pwant pgot
+  pwant=$(md5 -q "$E/phoenix.txt")
+  while :; do
+    s3 s3 cp "s3://$BK/${PREFIX}phoenix.txt" /tmp/chaos-phx.txt >/dev/null 2>&1 \
+      && pgot=$(md5 -q /tmp/chaos-phx.txt 2>/dev/null) && [ "$pgot" = "$pwant" ] && break
+    [ $SECONDS -gt $d15 ] && { tail -20 /tmp/flint-chaos-c.log; fail "object never re-published after a foreign DELETE"; }
+    sleep 2
+  done
+  pass "C3 publish lane: foreign DELETE of a live file's object ⇒ local truth re-published"
+
   # C2 — hydration lane, S3 WINS on an evicted file's object.
   vm "dd if=/dev/urandom of=$MNT/adopted.bin bs=1M count=1 conv=fsync 2>/dev/null"
   wait_key $BK "${PREFIX}adopted.bin" 40 || fail "adopted.bin never published"
@@ -360,6 +386,7 @@ phase_c() {
     [ $SECONDS -gt $d ] && { tail -20 /tmp/flint-chaos-c2.log; fail "adopted.bin never evicted"; }
     sleep 2
   done
+
   dd if=/dev/urandom of=/tmp/chaos-adopt-src.bin bs=1k count=700 2>/dev/null
   local FMD5; FMD5=$(md5 -q /tmp/chaos-adopt-src.bin)
   s3 s3 cp /tmp/chaos-adopt-src.bin "s3://$BK/${PREFIX}adopted.bin" >/dev/null
@@ -380,6 +407,28 @@ phase_c() {
   [ "$CMD5" = "$FMD5" ] \
     || fail "a fresh client open served $CMD5, wanted the FOREIGN $FMD5 (S3-wins)"
   pass "C2 hydration lane: 412 mid-restore ⇒ the bucket's CURRENT object adopted and served (S3-wins)"
+
+  # C4 — foreign DELETE under an EVICTED file: the bytes exist
+  # NOWHERE. The honest posture is refusal-never-loss: reads PARK
+  # (DELAY-retry) rather than serving zeros; recovery is bucket
+  # versioning (A9's recommendation) or operator action.
+  vm "dd if=/dev/urandom of=$MNT/orphaned.bin bs=1k count=600 conv=fsync 2>/dev/null"
+  wait_key $BK "${PREFIX}orphaned.bin" 40 || fail "orphaned.bin never published"
+  local d16=$((SECONDS + 60))
+  until [ "$(stat -f %z "$E/orphaned.bin" 2>/dev/null)" = "0" ]; do
+    [ $SECONDS -gt $d16 ] && fail "orphaned.bin never evicted"
+    sleep 2
+  done
+  s3 s3 rm "s3://$BK/${PREFIX}orphaned.bin" >/dev/null
+  vm "sync; echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null
+  vm "timeout 8 cat $MNT/orphaned.bin > /tmp/chaos-orphan-read.out 2>/dev/null"
+  local RC=$?
+  [ $RC -eq 124 ] || fail "read of the orphaned stub returned rc=$RC — it must PARK, never serve"
+  vm "[ ! -s /tmp/chaos-orphan-read.out ]" \
+    || fail "the orphaned stub served BYTES — refusal-never-loss violated"
+  hub_alive c2 || fail "hub died on the orphaned stub"
+  pass "C4: foreign DELETE under an evicted file ⇒ reads park forever, ZERO wrong bytes served"
+
   umount_client; stop_hub c2
   sweep_log /tmp/flint-chaos-c.log "phase C"; sweep_log /tmp/flint-chaos-c2.log "phase C"
 }
@@ -555,10 +604,104 @@ phase_f() {
   sweep_log /tmp/flint-chaos-f.log "phase F"
 }
 
+# ══════════════════════════════════════════════════════════════════════
+phase_g() {
+  say "phase G: concurrent writers — TWO distinct clients under churn"
+  local BK=flint-chaos-g E=/tmp/chaos-g-exp S=/tmp/chaos-g-st
+  local NETNS=chaosb VH=chaosb0 VN=chaosb1
+  local NS_NET=10.99.79.0/30 NS_GW=10.99.79.1 NS_IP=10.99.79.2
+  local MNT_B=/mnt/chaos-b ITERS=20
+  s3 s3 mb "s3://$BK" >/dev/null
+  fresh_world $E $S
+  gen_cfg /tmp/flint-chaos-g.yaml $PORT $E $S $BK 50 2 3 67108864 1 1
+  launch_hub g /tmp/flint-chaos-g.yaml
+  wait_bound $PORT 30 g
+  mount_client
+
+  # Client B = separate netns + UTS hostname (its own nfs_net and
+  # co_ownerid — the lite-drill harness; the only honest second
+  # client one VM allows).
+  local HOST_IP
+  HOST_IP=$(vm "getent hosts host.lima.internal | awk '{print \$1}'" | tr -d '\r')
+  vm "ip netns del $NETNS 2>/dev/null; ip link del $VH 2>/dev/null; true"
+  vm "ip netns add $NETNS && \
+      ip link add $VH type veth peer name $VN && \
+      ip link set $VN netns $NETNS && \
+      ip addr add $NS_GW/30 dev $VH && ip link set $VH up && \
+      ip netns exec $NETNS ip addr add $NS_IP/30 dev $VN && \
+      ip netns exec $NETNS ip link set $VN up && \
+      ip netns exec $NETNS ip link set lo up && \
+      ip netns exec $NETNS ip route add default via $NS_GW && \
+      sysctl -qw net.ipv4.ip_forward=1 && \
+      { iptables -C FORWARD -s $NS_NET -j ACCEPT 2>/dev/null || iptables -I FORWARD -s $NS_NET -j ACCEPT; } && \
+      { iptables -C FORWARD -d $NS_NET -j ACCEPT 2>/dev/null || iptables -I FORWARD -d $NS_NET -j ACCEPT; } && \
+      { iptables -t nat -C POSTROUTING -s $NS_NET -j MASQUERADE 2>/dev/null || \
+        iptables -t nat -A POSTROUTING -s $NS_NET -j MASQUERADE; }" \
+    || fail "netns plumbing failed"
+  vm "mkdir -p $MNT_B"
+  vm "nsenter --net=/var/run/netns/$NETNS unshare --uts sh -c ' \
+        hostname chaos-cluster-b && \
+        timeout 30 mount -t nfs4 -o minorversion=1,proto=tcp,port=$PORT \
+          $HOST_IP:/ $MNT_B'" || fail "client B mount failed"
+  pass "two distinct kernel clients mounted (root netns + $NETNS)"
+
+  # Both write CONCURRENTLY for $ITERS iterations while the watermark
+  # pass evicts everything clean behind them.
+  vm "cd $MNT && i=0; while [ \$i -lt $ITERS ]; do i=\$((i+1)); \
+        sqlite3 a.db 'create table if not exists t(i integer); insert into t values ('\$i');' || exit 1; \
+        dd if=/dev/urandom of=blob-a.bin bs=1M count=1 conv=fsync 2>/dev/null || exit 1; \
+      done" >/tmp/chaos-ga.out 2>&1 &
+  local GA=$!
+  vm "nsenter --net=/var/run/netns/$NETNS sh -c 'cd $MNT_B && \
+        mkdir -p repo-b && cd repo-b && git init -q 2>/dev/null; \
+        git config user.email b@b; git config user.name b; \
+        i=0; while [ \$i -lt $ITERS ]; do i=\$((i+1)); \
+          echo rev-\$i > g.txt && git add g.txt && git commit -qm c\$i || exit 1; \
+          dd if=/dev/urandom of=../blob-b.bin bs=1M count=1 conv=fsync 2>/dev/null || exit 1; \
+        done'" >/tmp/chaos-gb.out 2>&1 &
+  local GB=$!
+  wait $GA; local RA=$?
+  wait $GB; local RB=$?
+  [ $RA -eq 0 ] || { cat /tmp/chaos-ga.out; fail "writer A aborted"; }
+  [ $RB -eq 0 ] || { cat /tmp/chaos-gb.out; fail "writer B aborted"; }
+  pass "both writers completed $ITERS iterations each, concurrently, under churn"
+
+  # Close-to-open handoffs A→B and B→A under churn.
+  local i tok
+  for i in 1 2 3; do
+    vm "echo handoff-a\$RANDOM-$i > $MNT/token.txt && sync" >/dev/null
+    tok=$(vm "cat $MNT/token.txt" | tr -d '\r')
+    got=$(vm "nsenter --net=/var/run/netns/$NETNS cat $MNT_B/token.txt" | tr -d '\r')
+    [ "$tok" = "$got" ] || fail "A→B handoff $i: B read '$got', wanted '$tok'"
+    vm "nsenter --net=/var/run/netns/$NETNS sh -c 'echo handoff-b-$i > $MNT_B/token.txt && sync'" >/dev/null
+    tok=$(vm "nsenter --net=/var/run/netns/$NETNS cat $MNT_B/token.txt" | tr -d '\r')
+    got=$(vm "cat $MNT/token.txt" | tr -d '\r')
+    [ "$tok" = "$got" ] || fail "B→A handoff $i: A read '$got', wanted '$tok'"
+  done
+  pass "close-to-open held in BOTH directions ×3 under churn"
+
+  # Cross-client integrity: each side verifies the OTHER's work.
+  vm "nsenter --net=/var/run/netns/$NETNS sh -c 'cd $MNT_B && sqlite3 a.db \"select count(*) from t;\"'" \
+    | tr -d '\r' | grep -qx "$ITERS" || fail "B's view of A's sqlite rows wrong"
+  vm "cd $MNT/repo-b && git log --oneline | wc -l" | tr -d '\r' | grep -qx "$ITERS" \
+    || fail "A's view of B's git history wrong"
+  local BA BB
+  BA=$(vm "md5sum $MNT/blob-b.bin | awk '{print \$1}'" | tr -d '\r')
+  BB=$(vm "nsenter --net=/var/run/netns/$NETNS md5sum $MNT_B/blob-b.bin | awk '{print \$1}'" | tr -d '\r')
+  [ "$BA" = "$BB" ] || fail "blob-b differs across clients: $BA ≠ $BB"
+  local EV; EV=$(grep -c "watermark pass evicted" /tmp/flint-chaos-g.log)
+  pass "cross-client verification clean ($EV evict passes ran underneath)"
+
+  vm "umount -lf $MNT_B 2>/dev/null; ip netns del $NETNS 2>/dev/null; \
+      ip link del $VH 2>/dev/null; true"
+  umount_client; stop_hub g
+  sweep_log /tmp/flint-chaos-g.log "phase G"
+}
+
 for ph in $PHASES; do
   case "$ph" in
     a) phase_a;; b) phase_b;; c) phase_c;;
-    d) phase_d;; e) phase_e;; f) phase_f;;
+    d) phase_d;; e) phase_e;; f) phase_f;; g) phase_g;;
     *) fail "unknown phase '$ph'";;
   esac
 done
