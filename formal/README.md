@@ -1,8 +1,8 @@
-# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, and the S3-tier volume epoch
+# Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, the S3-tier volume epoch, and the S3-tier eviction marker
 
-Eight spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
+Nine spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
-(`scripts/check-tla.sh`, **one hundred and fifty-nine** TLC runs).
+(`scripts/check-tla.sh`, **one hundred and sixty-five** TLC runs).
 
 Both counts here have drifted before, in both files, because nothing
 regenerated them. They do now:
@@ -349,6 +349,30 @@ the probes show the window open with it on) and the quiet-wait seize
 the wait buys a live-but-stalled holder is TIME — a quantitative axiom,
 FlintClaims'-grace-shaped).
 
+`FlintTierMarker.tla` (2026-08-17) models the **eviction-marker
+visibility protocol** — L2 steps 10/11's un-gated consult lanes (READ
+and GETATTR take no gate ticket; the marker's visibility is their only
+protection).  Two of the chaos campaign's six drill-found bugs were
+interleaving violations of the ONE invariant here (no reader observes
+stub or partial bytes as content): bug 3, the mid-read evict race, and
+bug 4, the marker-after-truncate window that was the root cause of
+every git-under-churn failure.  Both are mutations that must
+rediscover their counterexamples forever, beside the C2 durable-first
+order (a crash strands an evidence-free stub) and the hydrating-flag
+disambiguation (a flagless partial rolls back as "local wins" and
+serves).  THE STRICT RUN'S FIRST EXECUTION FOUND CAMPAIGN BUG 8 (the
+second found by a model, hours after the first): the bug-3 post-read
+re-consult is BLIND to a COMPLETE evict+hydrate cycle landing inside
+the read window — the finished hydration clears the marker before the
+re-consult looks, and the pread's mid-cycle stub/partial capture is
+served as content (same unbounded-deschedule premise as the zombie;
+GETATTR is immune — no read window; writes are gate-ticketed).  The
+fix is the marker CYCLE counter (`evict.rs marker_cycle` /
+`read_window_intact`, sampled before the consult and re-verified with
+the marker at serve; wired at READ, COPY-source, and CLONE-source),
+modeled as `CycleCheck`; the `CycleBlind` mutation preserves the
+pre-fix counterexample as the regression test.
+
 Verification of snapshots is layered deliberately:
 
 1. **SPDK blobstore internals** — not modeled; audited by citation (the
@@ -361,7 +385,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs one hundred and fifty-nine configs, ALL required:
+on first use).  It runs one hundred and sixty-five configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus

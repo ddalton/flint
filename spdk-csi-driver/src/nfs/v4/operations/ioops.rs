@@ -1223,6 +1223,13 @@ impl IoOperationHandler {
             // step 11 turns this into hydrate-then-serve. Residual
             // cached fds are safe for exactly this reason: every op
             // re-checks.
+            // Sampled BEFORE the consult: the post-read guard requires
+            // the marker cycle unchanged across the whole read window
+            // (FlintTierMarker's CycleBlind counterexample — a COMPLETE
+            // evict+hydrate cycle inside the window clears the marker
+            // before the re-consult looks).
+            #[cfg(unix)]
+            let marker_cycle_began = crate::tier::evict::marker_cycle();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
@@ -1265,13 +1272,20 @@ impl IoOperationHandler {
             // above and the pread — the pread then sees the truncated
             // stub and would serve a short/empty result as if it were
             // file content. C2's marker-BEFORE-truncate order makes
-            // this re-check airtight: if the truncate could have
-            // clipped this read, the marker was already set when the
-            // pread returned — answer DELAY; the retry hydrates.
+            // this re-check airtight against the eviction; the CYCLE
+            // half of the guard covers what the marker alone cannot —
+            // a complete evict+hydrate cycle inside the window whose
+            // completed hydration already CLEARED the marker
+            // (FlintTierMarker's find) — answer DELAY; the retry
+            // serves the restored bytes.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                if crate::tier::evict::is_evicted(metadata.dev(), metadata.ino()) {
+                if !crate::tier::evict::read_window_intact(
+                    metadata.dev(),
+                    metadata.ino(),
+                    marker_cycle_began,
+                ) {
                     crate::tier::hydrate::request(
                         metadata.dev(),
                         metadata.ino(),

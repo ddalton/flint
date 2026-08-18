@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and fifty-nine runs, ALL required.
+# One hundred and sixty-five runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -19,8 +19,8 @@
 #
 #   71 FlintReplication   33 FlintComposition   15 FlintExtents
 #   11 FlintExtentsProbe   7 FlintTierEpoch      7 FlintTruncate
-#    5 FlintAdmission      4 FlintSnapshots      3 FlintClaims
-#    3 FlintA2Probe)
+#    6 FlintTierMarker     5 FlintAdmission      4 FlintSnapshots
+#    3 FlintClaims         3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -39,6 +39,10 @@
 # claim/sweep/heartbeat/publish over the bucket's CAS cell; model AFTER
 # code AFTER the chaos drills); documented at the bottom of this file,
 # next to its runs.
+#
+# FlintTierMarker.tla — the flint-lite eviction-marker visibility
+# protocol (evict/hydrate/read/crash over one file; chaos bugs 3+4 as
+# mutations); documented at the bottom of this file, next to its runs.
 #
 # FlintReplication:
 #   1. FlintReplication.cfg       strict 3-leg breadth — every invariant and
@@ -1046,5 +1050,30 @@ mutation_run FlintTierEpoch FlintTierEpochNoRotate.cfg "tier-epoch rotation muta
 liveness_mutation_run FlintTierEpoch FlintTierEpochNoFence.cfg "tier-epoch fence mutation (FenceOn412=FALSE: the immortal zombie — a deposed incarnation believes forever)"
 mutation_run FlintTierEpoch FlintTierEpochProbeStale.cfg "tier-epoch stale-publish probe (RESIDUAL required-fail: the phase-H wake-up window — a deposed create lands before the first heartbeat CAS)" "Inv_NoStalePublishLand"
 mutation_run FlintTierEpoch FlintTierEpochNoStampCheck.cfg "tier-epoch stamp-check mutation (StampCheck=FALSE = the pre-fix world: the zombie's If-Match lands over the live successor — the probe that forced successor_check + startup_reverify, kept as the regression test)" "Inv_NoSuccessorOverwrite"
+
+# ── FlintTierMarker.tla — the eviction-marker visibility protocol ──────
+# Two of the chaos campaign's six drill-found bugs were interleaving
+# violations of ONE invariant (no reader observes stub/partial bytes as
+# content): bug 3 (mid-read evict race; the post-read re-consult) and
+# bug 4 (RAM marker inserted after truncate — the root cause of every
+# git-under-churn failure).  Both are mutations here and must
+# rediscover their counterexamples forever, alongside the C2
+# durable-first order and the hydrating-flag disambiguation.  THE
+# STRICT RUN'S FIRST EXECUTION FOUND A NEW BUG (campaign bug 8, the
+# second found by a model): the bug-3 re-consult is BLIND to a
+# COMPLETE evict+hydrate cycle landing inside the read window — the
+# finished hydration clears the marker before the re-consult looks,
+# and the pread's stub/partial capture is served as content.  The fix
+# is the marker CYCLE counter (evict.rs marker_cycle /
+# read_window_intact: sampled before the consult, re-verified with the
+# marker at serve; READ + COPY-src + CLONE-src wired), modeled as
+# CycleCheck; the CycleBlind mutation preserves the pre-fix
+# counterexample as the regression test.
+strict_run FlintTierMarker FlintTierMarker.cfg "tier-marker strict (safe order + re-consult + cycle guard + hydrating flag: no stub/partial ever served, GETATTR truthful, restores converge)"
+mutation_run FlintTierMarker FlintTierMarkerMarkLate.cfg "tier-marker order mutation (marklate = chaos BUG 4: marker after truncate — the bare-stub window)" "Inv_(NoStubServed|TruthfulAttrs)"
+mutation_run FlintTierMarker FlintTierMarkerNoRecheck.cfg "tier-marker re-consult mutation (no post-read check = chaos BUG 3: the mid-read evict race)" "Inv_NoStubServed"
+mutation_run FlintTierMarker FlintTierMarkerRowLate.cfg "tier-marker C2 mutation (rowlate: truncate before the durable row — a crash strands an evidence-free stub)" "Inv_(NoStubServed|TruthfulAttrs)"
+mutation_run FlintTierMarker FlintTierMarkerNoFlag.cfg "tier-marker flag mutation (no hydrating flag: a crashed restore's partial rolls back as local-wins and serves)" "Inv_(NoStubServed|TruthfulAttrs)"
+mutation_run FlintTierMarker FlintTierMarkerCycleBlind.cfg "tier-marker cycle mutation (CycleCheck=FALSE = the pre-fix shipped code: a complete evict+hydrate cycle inside the read window serves the pread's stale capture — campaign bug 8, kept as the regression test)" "Inv_NoStubServed"
 
 echo "TLA GATE PASSED"

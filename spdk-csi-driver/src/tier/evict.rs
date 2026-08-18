@@ -74,6 +74,41 @@ fn markers() -> &'static DashMap<(u64, u64), EvictedMeta> {
     M.get_or_init(DashMap::new)
 }
 
+/// Marker CYCLE counter — bumped on every marker presence transition
+/// (insert of a new marker, removal of one).  The un-gated read lanes'
+/// post-I/O re-consult is blind to a COMPLETE evict+hydrate cycle that
+/// lands inside the read window (the hydration clears the marker
+/// before the re-consult looks — FlintTierMarker's CycleBlind
+/// counterexample); this counter is the only evidence such a cycle
+/// happened.  Global rather than per-identity: "unchanged" proves no
+/// cycle anywhere, and a false positive from an unrelated file's cycle
+/// costs one DELAY retry.
+static MARKER_CYCLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn bump_cycle() {
+    MARKER_CYCLE.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+/// Sample the cycle counter BEFORE a read lane's pre-I/O consult; pass
+/// it to [`read_window_intact`] after the I/O.
+pub fn marker_cycle() -> u64 {
+    MARKER_CYCLE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The read-window guard: a pread's bytes may be served only if no
+/// marker is visible AND no marker cycle completed since `began` (a
+/// cycle inside the window means the bytes may be the stub or a
+/// partial restore, whatever the marker says NOW).
+pub fn read_window_intact(dev: u64, ino: u64, began: u64) -> bool {
+    !is_evicted(dev, ino) && marker_cycle() == began
+}
+
+/// [`read_window_intact`] through an open fd (the COPY/CLONE closures
+/// hold files, not identities).
+pub fn file_read_window_intact(f: &std::fs::File, began: u64) -> bool {
+    !file_is_evicted(f) && marker_cycle() == began
+}
+
 /// Is this file evicted? Consulted by every content lane BEFORE
 /// trusting local size or moving a byte (C2's fix).
 #[inline]
@@ -113,7 +148,9 @@ pub fn logical_size(dev: u64, ino: u64) -> Option<u64> {
 /// Drop a marker from the consult map (identity events: the inode was
 /// removed or renamed-over; step 11's hydration completion).
 pub fn forget(dev: u64, ino: u64) {
-    markers().remove(&(dev, ino));
+    if markers().remove(&(dev, ino)).is_some() {
+        bump_cycle();
+    }
 }
 
 /// A12 reporter gauge: currently-evicted (files, logical bytes).
@@ -146,6 +183,7 @@ pub(crate) fn install_marker_for_tests(dev: u64, ino: u64, size: u64) {
             crc64_b64: String::new(),
         },
     );
+    bump_cycle();
 }
 
 // ── refusals ─────────────────────────────────────────────────────────
@@ -402,6 +440,7 @@ pub async fn evict_file(
             crc64_b64: row.crc64_b64.clone(),
         },
     );
+    bump_cycle();
 
     if take_fail_after_row(dev, ino) {
         // TEST-ONLY simulated crash in the C2 window: marker durable,
@@ -562,6 +601,7 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
                         Ok(()) => {
                             let _ = backend.tier_set_hydrating(row.dev, row.ino, None).await;
                             markers().insert((row.dev, row.ino), meta_of(&row));
+                    bump_cycle();
                             report.hydrations_reset += 1;
                             warn!(
                                 "tier evict reconcile: crashed hydration of {} — partial \
@@ -579,6 +619,7 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
                                 e
                             );
                             markers().insert((row.dev, row.ino), meta_of(&row));
+                    bump_cycle();
                             report.hydrations_reset += 1;
                         }
                     }
@@ -587,6 +628,7 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
             Some((d, i, len)) if d == row.dev && i == row.ino => {
                 if len == 0 {
                     markers().insert((row.dev, row.ino), meta_of(&row));
+                    bump_cycle();
                     report.loaded += 1;
                 } else {
                     // The C2 window: marker committed, truncate never
@@ -599,6 +641,7 @@ pub async fn reconcile(backend: &Arc<dyn StateBackend>) -> ReconcileReport {
                             match truncate_in_place(&path) {
                                 Ok(()) => {
                                     markers().insert((row.dev, row.ino), meta_of(&row));
+                    bump_cycle();
                                     report.finished += 1;
                                     info!(
                                         "tier evict reconcile: finished the half-eviction of {} \
@@ -793,6 +836,44 @@ mod tests {
     use std::time::Duration;
 
     const NO_WRITERS: &(dyn Fn(u64, u64) -> bool + Sync) = &|_, _| false;
+
+    /// FlintTierMarker's CycleBlind counterexample, at helper level: a
+    /// COMPLETE marker cycle (evict then hydrate) inside a read window
+    /// leaves NO marker for the post-read re-consult to see — only the
+    /// cycle counter betrays it.  (The counter is process-global, so
+    /// asserts here are monotone-safe under parallel tests: the false
+    /// direction is certain, the true direction retries.)
+    #[test]
+    fn read_window_guard_detects_a_complete_marker_cycle() {
+        capture::force_enable();
+        let (dev, ino) = (0xF11A7_u64, 0xC1C1E_u64); // synthetic identity
+        let began = marker_cycle();
+
+        install_marker_for_tests(dev, ino, 10);
+        forget(dev, ino); // the cycle completes: marker gone again
+
+        assert!(!is_evicted(dev, ino), "the naive re-consult would pass");
+        assert!(
+            marker_cycle() > began,
+            "the cycle counter is the only evidence the cycle happened"
+        );
+        assert!(
+            !read_window_intact(dev, ino, began),
+            "the guard must refuse a window a full cycle passed through"
+        );
+
+        // Positive direction: a quiet window serves (retry absorbs
+        // unrelated parallel tests' cycles).
+        let mut served = false;
+        for _ in 0..200 {
+            let fresh = marker_cycle();
+            if read_window_intact(dev, ino, fresh) {
+                served = true;
+                break;
+            }
+        }
+        assert!(served, "a quiet window must serve");
+    }
 
     struct Rig {
         _dir: tempfile::TempDir,

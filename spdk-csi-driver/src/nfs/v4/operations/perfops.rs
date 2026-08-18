@@ -692,6 +692,10 @@ impl PerfOperationHandler {
                 )
             })?;
 
+            // Sampled BEFORE the consults: the post-copy source guard
+            // requires the marker cycle unchanged across the copy
+            // window (FlintTierMarker's CycleBlind counterexample).
+            let marker_cycle_began = crate::tier::evict::marker_cycle();
             // Step 10: BOTH ends consult the eviction marker — an
             // evicted source would copy stub bytes as if they were
             // data; an evicted destination is the C6 zero-publish
@@ -771,10 +775,12 @@ impl PerfOperationHandler {
             // Re-consult the SOURCE after the copy loop (review
             // finding (b) — same shape as READ's mid-read race): an
             // eviction landing mid-loop clips the source reads to stub
-            // bytes. C2's marker-before-truncate makes this airtight;
-            // DELAY discards the partial copy and the retry re-copies
-            // hydrated bytes over it.
-            if crate::tier::evict::file_is_evicted(&src_file) {
+            // bytes. C2's marker-before-truncate covers the eviction;
+            // the CYCLE half covers a complete evict+hydrate cycle
+            // whose finished hydration already cleared the marker
+            // (FlintTierMarker's find). DELAY discards the partial
+            // copy and the retry re-copies hydrated bytes over it.
+            if !crate::tier::evict::file_read_window_intact(&src_file, marker_cycle_began) {
                 request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
                 crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                 return Err(std::io::Error::new(
@@ -1026,6 +1032,9 @@ impl PerfOperationHandler {
                 )
             })?;
 
+            // Sampled BEFORE the consults (FlintTierMarker's
+            // CycleBlind guard, as in COPY).
+            let marker_cycle_began = crate::tier::evict::marker_cycle();
             // Step 10: both ends consult the eviction marker (same
             // rationale as COPY). Step 11: DELAY triggers hydration.
             {
@@ -1067,8 +1076,9 @@ impl PerfOperationHandler {
             let copied = copy_range(&src_file, &dst_file, src_offset, dst_offset, len)?;
             // Re-consult the SOURCE after the copy (review finding (b)
             // — an eviction mid-copy clips the source to stub bytes;
-            // C2's order makes the post-check airtight).
-            if crate::tier::evict::file_is_evicted(&src_file) {
+            // C2's order covers the eviction, the cycle guard the
+            // completed evict+hydrate cycle — FlintTierMarker's find).
+            if !crate::tier::evict::file_read_window_intact(&src_file, marker_cycle_began) {
                 request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
                 crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
                 return Err(std::io::Error::new(
