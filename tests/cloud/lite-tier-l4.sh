@@ -54,7 +54,7 @@ REGION="${REGION:-us-west-1}"
 NS=flint-lite
 PREFIX=vol1/
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CHART="$REPO_ROOT/flint-csi-driver-chart"
+CHART="$REPO_ROOT/flint-lite-chart"
 RUNLOG=/tmp/lite-l4-run.log
 
 say()  { echo; echo "── $*"; }
@@ -96,20 +96,19 @@ kubectl -n "$NS" create secret generic flint-tier-s3 "${SECRET_ARGS[@]}" >/dev/n
 
 helm_install() {
   helm install flint-lite "$CHART" --namespace "$NS" \
-    --set lite.enabled=true \
-    --set lite.image.ref="$IMG" \
-    --set lite.persistence.storageClassName="$SC" \
-    --set lite.persistence.size=20Gi \
-    --set lite.tier.enabled=true \
-    --set lite.tier.bucket="$BUCKET" \
-    --set lite.tier.keyPrefix="$PREFIX" \
-    --set lite.tier.region="$REGION" \
-    --set lite.tier.credentialsSecret=flint-tier-s3 \
-    --set lite.tier.settings.flushFloorSecs=5 \
-    --set lite.tier.settings.quiesceSecs=2 \
-    --set lite.tier.settings.tickSecs=3 \
-    --set lite.tier.settings.epochHeartbeatSecs=5 \
-    --set lite.tier.settings.epochLeaseMisses=3 \
+      --set image.ref="$IMG" \
+    --set persistence.storageClassName="$SC" \
+    --set persistence.size=20Gi \
+    --set tier.enabled=true \
+    --set tier.bucket="$BUCKET" \
+    --set tier.keyPrefix="$PREFIX" \
+    --set tier.region="$REGION" \
+    --set tier.credentialsSecret=flint-tier-s3 \
+    --set tier.settings.flushFloorSecs=5 \
+    --set tier.settings.quiesceSecs=2 \
+    --set tier.settings.tickSecs=3 \
+    --set tier.settings.epochHeartbeatSecs=5 \
+    --set tier.settings.epochLeaseMisses=3 \
     >>"$RUNLOG" 2>&1
 }
 helm_install || { tail -5 "$RUNLOG"; fail "helm install failed"; }

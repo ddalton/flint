@@ -993,7 +993,7 @@ mod tests {
         // hand-written list in the template, and hand-written schema
         // copies drift; this test derives the knob set from TierConfig
         // itself, so adding a field here fails until the chart learns it.
-        let tpl = include_str!("../../../flint-csi-driver-chart/templates/lite.yaml");
+        let tpl = include_str!("../../../flint-lite-chart/templates/hub.yaml");
         let known_line = tpl
             .lines()
             .find(|l| l.contains("$known := list"))

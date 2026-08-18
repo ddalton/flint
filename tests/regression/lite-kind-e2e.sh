@@ -30,7 +30,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CHART="$REPO_ROOT/flint-csi-driver-chart"
+CHART="$REPO_ROOT/flint-lite-chart"
 CARGO_DIR="$REPO_ROOT/spdk-csi-driver"
 
 CLUSTER="${CLUSTER:-flint-lite-e2e}"
@@ -123,11 +123,10 @@ pass "cluster up, image loaded"
 # ── 3. install the lite profile; leg 1 assertions ────────────────────
 say "leg 1: helm install (lite profile) — Ready hub, Bound default-SC PVC"
 helm install flint-lite "$CHART" --namespace "$NS" --create-namespace \
-  --set lite.enabled=true \
-  --set lite.image.ref="$IMG" \
-  --set lite.service.type=NodePort \
-  --set lite.service.nodePort=$NODEPORT \
-  --set lite.persistence.size=2Gi \
+  --set image.ref="$IMG" \
+  --set service.type=NodePort \
+  --set service.nodePort=$NODEPORT \
+  --set persistence.size=2Gi \
   >/tmp/lite-e2e-helm.log 2>&1 || { tail -5 /tmp/lite-e2e-helm.log; fail "helm install failed"; }
 kubectl -n "$NS" rollout status deployment/flint-lite --timeout=120s >/dev/null 2>&1 \
   || { kubectl -n "$NS" get pods; kubectl -n "$NS" describe pod -l app=flint-lite | tail -15; \

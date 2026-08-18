@@ -858,124 +858,12 @@ reservedDevices:
   #   0000:03:00.0: Reserved for ML training
   annotations: ""
 
-# ── Flint-lite: the standalone hub profile ─────────────────────────────
-# ONE pod, real POSIX, zero consumer footprint. `lite.enabled: true`
-# renders EXACTLY four objects — a ConfigMap, an RWO PVC, a Service and
-# a single-replica Deployment running flint-pnfs-mds in
-# `mode: standalone` (layouts off, every byte through the MDS lane) —
-# and SUPPRESSES the entire CSI/SPDK stack: no DaemonSet, no
-# controller, no StorageClasses, no dashboard, no RBAC. It is a
-# PROFILE, not a component: a hub cluster gets this release, and
-# nothing else from this chart. Wanting both on one cluster means two
-# releases. `pnfs.enabled` alongside it refuses at render (mirroring
-# the server, which refuses standalone + dataServers at boot).
-#
-# Consumers need NOTHING from flint installed: any cluster mounts the
-# hub with the in-tree `nfs:` PV type (kubelet + the node kernel's NFS
-# client do the work), or dynamically via nfs-subdir-external-
-# provisioner. See docs/flint-lite.md.
+# ── Flint-lite: MOVED to its own chart ────────────────────────────────
+# The standalone hub now ships as the `flint-lite` chart (repo dir
+# flint-lite-chart/ — four objects, no CSI stack, no CRDs; see
+# docs/flint-lite.md). Setting lite.enabled here refuses to render.
 lite:
   enabled: false
-
-  image:
-    # Composed as {repository|images.repository}/{name}:{tag|pnfs tag}.
-    # `ref` overrides the whole reference verbatim when set (e.g. a
-    # kind-loaded local image "flint-lite-dev:local").
-    # NOTE: `mode: standalone` needs an image NEWER than 1.25.2 — the
-    # first tag carrying commit 870c884. Older MDS binaries refuse the
-    # mode at boot.
-    repository: ""
-    name: flint-pnfs
-    tag: ""
-    ref: ""
-    pullPolicy: IfNotPresent
-
-  service:
-    # ClusterIP serves same-cluster consumers and flat/peered pod
-    # networks. Cross-cluster over a cloud LB: LoadBalancer — NFS is
-    # one long-lived TCP flow, so mind LB idle timeouts and prefer
-    # peered/flat networks where you have them (and keep hub and
-    # consumers same-AZ: inter-AZ bytes are billed both ways).
-    type: ClusterIP
-    port: 2049
-    # Fixed NodePort when type: NodePort ("" lets k8s pick).
-    nodePort: ""
-    annotations: {}
-
-  persistence:
-    # "" = the CLUSTER DEFAULT StorageClass — any CSI driver's RWO
-    # volume works (EBS gp3, GCE PD, local-path, Ceph): the hub writes
-    # plain files. NVMe is a performance choice, never a requirement.
-    # This PVC holds the hot tier + namespace + sqlite state; with
-    # tier.enabled, durably flushed data lives in S3, so size for the
-    # WORKING SET, not the dataset.
-    storageClassName: ""
-    size: 20Gi
-
-  # S3 cold tier (design of record: docs/plans/s3-tier-l2-design-review.md).
-  # Enabled ⇒ the hub captures every mutation durably, claims the volume
-  # epoch at startup (fencing BEFORE the listener — a second hub on the
-  # same prefix is fenced, never split-brained), publishes closed
-  # generations to the bucket, evicts cold files at the disk watermark,
-  # and hydrates them back on first touch (readers park on
-  # NFS4ERR_DELAY; kernel clients retry silently).
-  # Needs an image carrying the L2 tier (NEWER than 1.25.2).
-  tier:
-    enabled: false
-
-    # REQUIRED when enabled. Must already exist — the hub never creates
-    # buckets. Enable VERSIONING on it: delete-marker recovery (the DR
-    # drills' phase J) assumes it.
-    bucket: ""
-
-    # Prefix under the bucket, e.g. "vol1/". ONE PREFIX = ONE VOLUME =
-    # ONE HUB — two releases sharing a prefix will fence each other in
-    # turn, forever. ".flint/" under the prefix is RESERVED for tier
-    # control objects (the epoch cell, DR manifests).
-    keyPrefix: ""
-
-    # Custom S3 endpoint (MinIO rigs; forces path-style addressing).
-    # "" = real S3.
-    endpoint: ""
-
-    # AWS_REGION for the SDK. "" = ambient (env / IRSA / IMDS).
-    region: ""
-
-    # Name of an EXISTING Secret in the release namespace, injected
-    # wholesale as env vars — the standard keys are AWS_ACCESS_KEY_ID /
-    # AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN if temporary). "" =
-    # ambient credentials (IRSA / instance role) — prefer that on EKS.
-    credentialsSecret: ""
-
-    # DR / bucket adoption: when the tier state is FRESH and the bucket
-    # holds content, import the namespace before serving (and always
-    # resume a crashed import). false = flush-only posture.
-    importOnStart: true
-
-    # Tuning knobs, rendered VERBATIM into the config's tier: section
-    # (schema: TierConfig, spdk-csi-driver/src/pnfs/config.rs). Absent
-    # keys take the server defaults, which are the ECONOMICS GATE'S
-    # ASSUMPTIONS, not neutral tuning — flushFloorSecs 60 caps a hot
-    # file's request bill (uncapped fsync churn priced at $6,480/mo);
-    # quiesceSecs 10, tickSecs 10, wholePutMaxBytes 64Mi, partFloorBytes
-    # 16Mi, epochHeartbeatSecs 10, epochLeaseMisses 6, reserveBytes
-    # 256Mi, watermarkPct 85, ballastBytes 64Mi, hydrateHoldSecs 15,
-    # hydrateConcurrency 4. Example: {watermarkPct: 90}.
-    settings: {}
-
-    # With the tier on, startup legitimately runs a long time before the
-    # socket opens: the epoch claim WAITS out a dead prior holder's
-    # lease (epochHeartbeatSecs × epochLeaseMisses ≈ 60s default), and a
-    # DR-restore import walks the whole bucket — all BEFORE the listener
-    # binds, because an unfenced hub must never serve. The startupProbe
-    # allows failureThreshold × 10s for this; liveness only starts once
-    # it succeeds.
-    startupFailureThreshold: 60
-
-  # RUST_LOG for the hub.
-  logLevel: info
-  resources: {}
-  nodeSelector: {}
 
 # Pod priority (campaign finding F2 — see docs/attach-detach-campaign-2026-07.md):
 # the csi-node pod hosts spdk-tgt; a kubelet eviction (e.g. DiskPressure) kills

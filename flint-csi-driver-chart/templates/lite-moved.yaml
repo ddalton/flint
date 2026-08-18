@@ -1,0 +1,10 @@
+{{- /*
+The lite profile MOVED to the standalone `flint-lite` chart
+(flint-lite-chart/ in the repo; four objects, no CSI stack, and — the
+part this chart structurally cannot offer — no snapshot CRDs, because
+Helm installs a chart's crds/ unconditionally). This tombstone refuses
+the old flag loudly instead of silently rendering the full CSI stack.
+*/}}
+{{- if (.Values.lite).enabled }}
+{{- fail "the lite profile moved to the `flint-lite` chart (flint-lite-chart/) — install that chart instead; its values are the old lite.* keys without the lite. prefix (docs/flint-lite.md)" }}
+{{- end }}

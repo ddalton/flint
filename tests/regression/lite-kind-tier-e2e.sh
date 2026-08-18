@@ -4,11 +4,11 @@
 # lite-kind-e2e.sh proves the L1 packaging (chart hub, default-SC PVC,
 # real kernel client). This drill proves what L3 added on top: the
 # chart-rendered tier config drives the whole S3 loop against an
-# IN-CLUSTER MinIO — the shape an operator's `lite.tier.endpoint`
-# actually points at — with credentials riding the operator Secret via
-# envFrom, exactly as the chart wires them.
+# IN-CLUSTER MinIO — the shape an operator's `tier.endpoint` actually
+# points at — with credentials riding the operator Secret via envFrom,
+# exactly as the chart wires them.
 #
-#   helm (lite profile + lite.tier.*) → hub Deployment on kind →
+#   helm (the flint-lite chart, tier.*) → hub Deployment on kind →
 #   MinIO Deployment+Service in the same cluster → NodePort → docker
 #   port-map → Lima VM kernel mount.
 #
@@ -41,7 +41,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CHART="$REPO_ROOT/flint-csi-driver-chart"
+CHART="$REPO_ROOT/flint-lite-chart"
 CARGO_DIR="$REPO_ROOT/spdk-csi-driver"
 
 CLUSTER="${CLUSTER:-flint-lite-tier-e2e}"
@@ -197,22 +197,21 @@ pass "MinIO Ready, bucket created, Secret in place"
 # ── 3. leg 1: helm install with the tier ON ──────────────────────────
 say "leg 1: helm install (lite + tier) — Ready hub, epoch claimed, epoch object in the bucket"
 helm install flint-lite "$CHART" --namespace "$NS" \
-  --set lite.enabled=true \
-  --set lite.image.ref="$IMG" \
-  --set lite.service.type=NodePort \
-  --set lite.service.nodePort=$NODEPORT \
-  --set lite.persistence.size=2Gi \
-  --set lite.tier.enabled=true \
-  --set lite.tier.bucket=$BUCKET \
-  --set lite.tier.keyPrefix=$PREFIX \
-  --set lite.tier.endpoint=http://minio.$NS.svc:9000 \
-  --set lite.tier.region=us-east-1 \
-  --set lite.tier.credentialsSecret=flint-tier-s3 \
-  --set lite.tier.settings.flushFloorSecs=3 \
-  --set lite.tier.settings.quiesceSecs=1 \
-  --set lite.tier.settings.tickSecs=2 \
-  --set lite.tier.settings.epochHeartbeatSecs=2 \
-  --set lite.tier.settings.epochLeaseMisses=3 \
+  --set image.ref="$IMG" \
+  --set service.type=NodePort \
+  --set service.nodePort=$NODEPORT \
+  --set persistence.size=2Gi \
+  --set tier.enabled=true \
+  --set tier.bucket=$BUCKET \
+  --set tier.keyPrefix=$PREFIX \
+  --set tier.endpoint=http://minio.$NS.svc:9000 \
+  --set tier.region=us-east-1 \
+  --set tier.credentialsSecret=flint-tier-s3 \
+  --set tier.settings.flushFloorSecs=3 \
+  --set tier.settings.quiesceSecs=1 \
+  --set tier.settings.tickSecs=2 \
+  --set tier.settings.epochHeartbeatSecs=2 \
+  --set tier.settings.epochLeaseMisses=3 \
   >/tmp/lite-tier-helm.log 2>&1 || { tail -5 /tmp/lite-tier-helm.log; fail "helm install failed"; }
 kubectl -n "$NS" rollout status deployment/flint-lite --timeout=180s >/dev/null 2>&1 \
   || { kubectl -n "$NS" get pods; kubectl -n "$NS" describe pod -l app=flint-lite | tail -15; \
@@ -279,22 +278,21 @@ done
 kubectl -n "$NS" get pvc flint-lite-data >/dev/null 2>&1 \
   && fail "chart PVC survived uninstall — DR premise not met"
 helm install flint-lite "$CHART" --namespace "$NS" \
-  --set lite.enabled=true \
-  --set lite.image.ref="$IMG" \
-  --set lite.service.type=NodePort \
-  --set lite.service.nodePort=$NODEPORT \
-  --set lite.persistence.size=2Gi \
-  --set lite.tier.enabled=true \
-  --set lite.tier.bucket=$BUCKET \
-  --set lite.tier.keyPrefix=$PREFIX \
-  --set lite.tier.endpoint=http://minio.$NS.svc:9000 \
-  --set lite.tier.region=us-east-1 \
-  --set lite.tier.credentialsSecret=flint-tier-s3 \
-  --set lite.tier.settings.flushFloorSecs=3 \
-  --set lite.tier.settings.quiesceSecs=1 \
-  --set lite.tier.settings.tickSecs=2 \
-  --set lite.tier.settings.epochHeartbeatSecs=2 \
-  --set lite.tier.settings.epochLeaseMisses=3 \
+  --set image.ref="$IMG" \
+  --set service.type=NodePort \
+  --set service.nodePort=$NODEPORT \
+  --set persistence.size=2Gi \
+  --set tier.enabled=true \
+  --set tier.bucket=$BUCKET \
+  --set tier.keyPrefix=$PREFIX \
+  --set tier.endpoint=http://minio.$NS.svc:9000 \
+  --set tier.region=us-east-1 \
+  --set tier.credentialsSecret=flint-tier-s3 \
+  --set tier.settings.flushFloorSecs=3 \
+  --set tier.settings.quiesceSecs=1 \
+  --set tier.settings.tickSecs=2 \
+  --set tier.settings.epochHeartbeatSecs=2 \
+  --set tier.settings.epochLeaseMisses=3 \
   >/tmp/lite-tier-helm2.log 2>&1 || { tail -5 /tmp/lite-tier-helm2.log; fail "DR reinstall failed"; }
 # The fresh hub has NO prior state: it must wait out the dead holder's
 # lease (2s × 3 misses), take the epoch over, and import the namespace

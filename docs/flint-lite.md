@@ -19,23 +19,22 @@ turning layouts on, not a migration.
 ## The hub
 
 ```bash
-helm install flint-lite ./flint-csi-driver-chart \
-  --namespace flint-lite --create-namespace \
-  --set lite.enabled=true
+helm install flint-lite ./flint-lite-chart \
+  --namespace flint-lite --create-namespace
 ```
 
-`lite.enabled` is a **profile**, not a component: it renders exactly
-four objects (ConfigMap, RWO PVC, Service, single-replica Deployment)
-and suppresses everything else in the chart. It refuses to render
-alongside `pnfs.enabled` — a hub cluster gets this release and nothing
-else from this chart. Requires an image newer than 1.25.2 (the first
-tag carrying `mode: standalone`).
+`flint-lite` is its **own chart** — four objects (ConfigMap, RWO PVC,
+Service, single-replica Deployment) and nothing else: no CSI stack, no
+SPDK, no CRDs (the full chart's snapshot CRDs are cluster-scoped and a
+lite hub never needs them). A full pNFS cluster is the
+`flint-csi-driver-chart`'s job, in its own release. Requires an image
+newer than 1.25.2 (the first tag carrying `mode: standalone`).
 
 Storage: the PVC uses the **cluster's default StorageClass** unless
-`lite.persistence.storageClassName` says otherwise. Any CSI driver's
+`persistence.storageClassName` says otherwise. Any CSI driver's
 RWO volume works — EBS gp3, GCE PD, Ceph, local-path — the hub writes
 plain files; NVMe is a performance choice, never a requirement. Size
-for the working set (`lite.persistence.size`, default 20Gi).
+for the working set (`persistence.size`, default 20Gi).
 
 Restart semantics: strategy `Recreate` plus the RWO attach fence means
 two hub pods never run concurrently, and the sqlite state on the PVC
@@ -49,8 +48,8 @@ works.
 
 - **Same cluster / flat or peered pod networks**: the default
   `ClusterIP` Service is enough.
-- **Across clusters over a cloud LB**: `--set lite.service.type=LoadBalancer`
-  (use `lite.service.annotations` for internal-LB annotations). Mind LB
+- **Across clusters over a cloud LB**: `--set service.type=LoadBalancer`
+  (use `service.annotations` for internal-LB annotations). Mind LB
   idle timeouts — NFS connections are long-lived and quiet periods are
   normal; prefer peered/flat networks where available.
 - **Keep hub and consumers in one AZ** where you can: inter-AZ bytes
@@ -109,7 +108,7 @@ node kernel's NFS client straight to the hub.
 
 ## The S3 tier
 
-With `lite.tier.enabled` the hub adds a cold tier over one S3 bucket
+With `tier.enabled` the hub adds a cold tier over one S3 bucket
 prefix: every mutation is captured durably, closed generations publish
 to the bucket on a flush cadence, cold files evict from the PVC at a
 disk watermark, and evicted files hydrate back on first touch. The PVC
@@ -117,22 +116,20 @@ becomes the working set; the bucket becomes the durability story.
 
 ```yaml
 # values-tier.yaml
-lite:
+tier:
   enabled: true
-  tier:
-    enabled: true
-    bucket: my-team-flint         # must already exist, versioning ON
-    keyPrefix: vol1/              # one prefix = one volume = one hub
-    credentialsSecret: flint-tier-s3   # "" = ambient (IRSA / node role)
-    # endpoint: http://minio.minio.svc:9000   # non-AWS stores
-    # settings: { watermarkPct: 90 }          # knobs, schema-checked
+  bucket: my-team-flint         # must already exist, versioning ON
+  keyPrefix: vol1/              # one prefix = one volume = one hub
+  credentialsSecret: flint-tier-s3   # "" = ambient (IRSA / node role)
+  # endpoint: http://minio.minio.svc:9000   # non-AWS stores
+  # settings: { watermarkPct: 90 }          # knobs, schema-checked
 ```
 
 ```bash
 kubectl -n flint-lite create secret generic flint-tier-s3 \
   --from-literal=AWS_ACCESS_KEY_ID=... \
   --from-literal=AWS_SECRET_ACCESS_KEY=...
-helm install flint-lite ./flint-csi-driver-chart \
+helm install flint-lite ./flint-lite-chart \
   --namespace flint-lite --create-namespace -f values-tier.yaml
 ```
 
@@ -159,7 +156,7 @@ your values file — don't rely on `--reuse-values`.)
 **What to expect in operation:**
 
 - **RPO is the flush cadence.** The per-file flush floor defaults to
-  60s (`settings.flushFloorSecs`) — that floor is what caps a hot
+  60s (`tier.settings.flushFloorSecs`) — that floor is what caps a hot
   file's S3 request bill, so lower it deliberately, not casually. A DR
   manifest rides every publish barrier, so the bucket alone is always
   restorable to the last barrier.
@@ -180,7 +177,7 @@ your values file — don't rely on `--reuse-values`.)
   (same PVC state); replacing a hub whose predecessor died waits out
   the dead holder's lease (~60s at default heartbeat knobs); a fresh
   PVC over a non-empty bucket imports the namespace first. The chart's
-  startupProbe budgets for all of this (`lite.tier.startupFailureThreshold`,
+  startupProbe budgets for all of this (`tier.startupFailureThreshold`,
   default 60 × 10s) — a pod in Running/not-Ready is working, not stuck:
   `kubectl logs` shows the claim and import progress.
 - **Watch one log line.** The tier reporter prints at most one line
@@ -199,7 +196,7 @@ demand; everything flushed before the last barrier comes back
 byte-identical. This exact loop — uninstall with the PVC destroyed,
 reinstall, hydrate-on-read — is `make test-lite-kind-tier-e2e` leg 4.
 
-Tuning beyond the identity fields goes through `lite.tier.settings`
+Tuning beyond the identity fields goes through `tier.settings`
 (rendered verbatim into the server config; unknown keys are refused at
 render so a typo'd knob can't silently take its default). The defaults
 are the economics model's assumptions — treat them as a contract, not

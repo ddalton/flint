@@ -4,29 +4,6 @@ operators read this once at install time, so it should highlight
 follow-up steps they actually need to take, not restate what the chart
 already did.
 */ -}}
-{{- if .Values.lite.enabled }}
-Flint-lite hub installed in namespace "{{ .Release.Namespace }}".
-
-One pod, four objects, no CSI stack. Watch it come up:
-  kubectl get pods,pvc,svc -n {{ .Release.Namespace }} -l app.kubernetes.io/component=lite
-
-The hub is ready when the Deployment reports Available and the PVC is
-Bound (backed by {{ .Values.lite.persistence.storageClassName | default "the cluster's default StorageClass" }}).
-
-Consumers mount it as plain NFS — no flint software needed on their
-clusters. Recipes (static PV and dynamic PVC-per-workspace):
-  docs/flint-lite.md
-{{- if .Values.lite.tier.enabled }}
-
-S3 tier ON: bucket "{{ .Values.lite.tier.bucket }}"{{ with .Values.lite.tier.keyPrefix }}, prefix "{{ . }}"{{ end }}.
-First startup may take a while BEFORE the NFS port opens: the hub
-claims the volume epoch (waiting out a dead prior holder's lease,
-~60s default) and, on a fresh PVC over a non-empty bucket, imports the
-namespace (the DR-restore path). The startupProbe budgets for this —
-a pod in Running/not-Ready is working, not stuck. Watch progress:
-  kubectl logs -n {{ .Release.Namespace }} deploy/flint-lite -f
-{{- end }}
-{{- else }}
 Flint CSI driver installed in namespace "{{ .Release.Namespace }}".
 
 Verify the controller and node pods are running:
@@ -59,4 +36,6 @@ Snapshot support notes:
 
 See the full README for prerequisites, disk-init, and StorageClass
 examples: https://github.com/cloudera/flint
-{{- end }}
+
+(Looking for the standalone flint-lite hub? It moved to its own chart:
+flint-lite-chart/ — see docs/flint-lite.md.)
