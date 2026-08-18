@@ -9,7 +9,9 @@ they mount the hub with the NFS client already in every node's kernel.
 
 Choose lite when the workload is agent fleets / shared workspaces whose
 tools need POSIX (git, sqlite, compilers) across one or many clusters,
-and one hub's throughput is enough. Choose the full pNFS profile when a
+and one hub's throughput is enough. With [the S3 tier](#the-s3-tier)
+on, the PVC is just the working set: durability lives in a bucket, and
+a lost PVC is a rebuild, not a loss. Choose the full pNFS profile when a
 single pod's NIC is the bottleneck — the hub speaks the same protocol
 and stores the same volume format, so graduation is adding DSes and
 turning layouts on, not a migration.
@@ -105,13 +107,113 @@ Then `storageClassName: flint-lite` on any PVC mints a workspace. The
 provisioner is a single small Deployment; the data path is still the
 node kernel's NFS client straight to the hub.
 
+## The S3 tier
+
+With `lite.tier.enabled` the hub adds a cold tier over one S3 bucket
+prefix: every mutation is captured durably, closed generations publish
+to the bucket on a flush cadence, cold files evict from the PVC at a
+disk watermark, and evicted files hydrate back on first touch. The PVC
+becomes the working set; the bucket becomes the durability story.
+
+```yaml
+# values-tier.yaml
+lite:
+  enabled: true
+  tier:
+    enabled: true
+    bucket: my-team-flint         # must already exist, versioning ON
+    keyPrefix: vol1/              # one prefix = one volume = one hub
+    credentialsSecret: flint-tier-s3   # "" = ambient (IRSA / node role)
+    # endpoint: http://minio.minio.svc:9000   # non-AWS stores
+    # settings: { watermarkPct: 90 }          # knobs, schema-checked
+```
+
+```bash
+kubectl -n flint-lite create secret generic flint-tier-s3 \
+  --from-literal=AWS_ACCESS_KEY_ID=... \
+  --from-literal=AWS_SECRET_ACCESS_KEY=...
+helm install flint-lite ./flint-csi-driver-chart \
+  --namespace flint-lite --create-namespace -f values-tier.yaml
+```
+
+(On EKS prefer IRSA: leave `credentialsSecret` empty and annotate a
+ServiceAccount instead. When upgrading an existing release, re-supply
+your values file — don't rely on `--reuse-values`.)
+
+**Before enabling:**
+
+- **The bucket must exist** — the hub never creates buckets — and
+  should have **versioning on**: the recovery paths for accidental
+  deletes lean on delete markers.
+- **One prefix = one volume = one hub.** The hub claims a volume epoch
+  in the bucket at startup and heartbeats it; a second release on the
+  same prefix doesn't corrupt anything — the epoch guard makes the two
+  hubs fence each other in turn, which is an availability outage on
+  purpose. Give each volume its own prefix (or bucket).
+- **`.flint/` under the prefix is reserved** for tier control objects
+  (the epoch cell, DR manifests). Don't write, delete, or lifecycle
+  them away.
+- **Consumers never get bucket credentials.** They mount NFS; the
+  bucket trusts exactly one principal — the hub.
+
+**What to expect in operation:**
+
+- **RPO is the flush cadence.** The per-file flush floor defaults to
+  60s (`settings.flushFloorSecs`) — that floor is what caps a hot
+  file's S3 request bill, so lower it deliberately, not casually. A DR
+  manifest rides every publish barrier, so the bucket alone is always
+  restorable to the last barrier.
+- **Evicted files read back transparently but not instantly.** At the
+  disk watermark (default 85%) cold files are truncated to stubs;
+  metadata stays truthful (`ls -l`/`df` show logical sizes). The first
+  read of an evicted file parks the client (NFS4ERR_DELAY — kernel
+  clients retry silently, applications just see a slow open) until the
+  **whole file** restores; writes get a reserved hydration slot so a
+  writer is never starved by readers.
+- **Full disks degrade politely.** Admission answers NOSPC while
+  `avail − reserve` can't cover a write (databases see NOSPC, never
+  EIO), and a preallocated ballast next to the state db releases at
+  critical fullness so bookkeeping keeps committing.
+- **Startup can legitimately run minutes before the NFS port opens** —
+  fencing and import run *before* the listener, because an unfenced
+  hub must never serve. A routine pod restart re-claims instantly
+  (same PVC state); replacing a hub whose predecessor died waits out
+  the dead holder's lease (~60s at default heartbeat knobs); a fresh
+  PVC over a non-empty bucket imports the namespace first. The chart's
+  startupProbe budgets for all of this (`lite.tier.startupFailureThreshold`,
+  default 60 × 10s) — a pod in Running/not-Ready is working, not stuck:
+  `kubectl logs` shows the claim and import progress.
+- **Watch one log line.** The tier reporter prints at most one line
+  per interval (`📊 🪣 tier last 60s: …`, `FLINT_TIER_REPORT_SECS`) and
+  is silent when idle — silence with a clean install is health. It
+  escalates to `🚨` WARNs for the two states worth paging on:
+  time-to-full below threshold, and oldest-unflushed age beyond
+  threshold (a wedged flush is *never* silent — its signature is zero
+  activity plus a growing backlog age).
+
+**Disaster recovery** — losing the PVC (or the whole cluster) is a
+rebuild, not a loss: reinstall the chart with the **same bucket and
+keyPrefix**. The new hub takes over the epoch, restores the namespace
+from the bucket manifest as evicted stubs, and hydrates content on
+demand; everything flushed before the last barrier comes back
+byte-identical. This exact loop — uninstall with the PVC destroyed,
+reinstall, hydrate-on-read — is `make test-lite-kind-tier-e2e` leg 4.
+
+Tuning beyond the identity fields goes through `lite.tier.settings`
+(rendered verbatim into the server config; unknown keys are refused at
+render so a typo'd knob can't silently take its default). The defaults
+are the economics model's assumptions — treat them as a contract, not
+a starting point.
+
 ## Operational notes
 
 - **One hub per dataset.** The hub is the coherence authority; two hubs
-  over one tree is split-brain. (When the S3 tier ships this becomes
-  "one hub per bucket", enforced by a bucket epoch guard.)
-- **Backup today is the PVC** (snapshot it with its CSI driver's
-  tooling). The S3 cold tier will move durability into the bucket.
+  over one tree is split-brain. With the tier on this is "one hub per
+  bucket prefix", enforced live by the epoch guard.
+- **Backup**: with the tier on, durability lives in the bucket (RPO =
+  the flush cadence) and the PVC is a rebuildable working set. Without
+  the tier, the PVC *is* the data — snapshot it with its CSI driver's
+  tooling.
 - **Ceiling**: one pod — every byte through one NIC and one process.
   Measured on the dev rig: hundreds of MiB/s sequential, a few hundred
   metadata ops/s per client. When that's the bottleneck, graduate to
