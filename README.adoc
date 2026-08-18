@@ -4,6 +4,14 @@
 
 Kubernetes CSI driver providing high-performance local storage using SPDK (Storage Performance Development Kit) with multi-replica support, snapshots, and volume cloning.
 
+TIP: Looking for a shared POSIX filesystem without any of this machinery?
+**Flint-lite** is a separate, minimal chart (`flint-lite-chart/`): one pod
+on any CSI driver's RWO PVC serving real NFSv4.2 (locks, close-to-open
+coherence), an optional S3 cold tier, and nothing to install on consumer
+clusters — no SPDK, no dedicated hardware, no CRDs. See
+`flint-lite-chart/README.md` and `docs/flint-lite.md`. Everything below
+this line concerns the full CSI driver.
+
 == Prerequisites
 
 === Hardware Requirements
