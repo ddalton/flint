@@ -308,6 +308,10 @@ test-tier-scale: build-pnfs ## S3-tier SCALE drill vs MinIO: 10k files through f
 test-lite-kind-e2e: ## Flint-lite L1 e2e: the CHART's hub on kind (default-SC PVC, NodePort) serves the Lima VM's REAL kernel client — battery + bytes-on-PVC + restart-under-mount. Builds the hub image from the working tree
 	tests/regression/lite-kind-e2e.sh
 
+.PHONY: test-lite-kind-tier-e2e
+test-lite-kind-tier-e2e: ## Flint-lite L3 e2e: the CHART's tier config live — in-cluster MinIO, Secret creds via envFrom, epoch claim, flush-to-bucket, restart re-claim, DR-from-bucket with hydrate-on-read (~10 min)
+	tests/regression/lite-kind-tier-e2e.sh
+
 .PHONY: test-pnfs-nconnect
 test-pnfs-nconnect: build-pnfs ## Single-host nconnect sweep — exposes per-TCP-serial RPC ceiling (loopback only; cross-host is a separate bench)
 	tests/lima/pnfs/nconnect.sh

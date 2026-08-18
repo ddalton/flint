@@ -76,6 +76,28 @@ data:
         backend: sqlite
         config:
           path: /data/state/state.db
+      {{- if .Values.lite.tier.enabled }}
+      # S3 cold tier (a field of the mds: section — the parser IGNORES
+      # unknown top-level keys, so misplacing this renders a silently
+      # tierless hub; the kind tier e2e's leg 1 pins the placement).
+      # The volume epoch is claimed BEFORE the listener binds (an
+      # unfenced hub never serves); ".flint/" under the prefix is
+      # reserved for tier control objects. Unset knobs take the server
+      # defaults — the economics gate's assumptions.
+      tier:
+        enabled: true
+        bucket: {{ .Values.lite.tier.bucket | quote }}
+        {{- with .Values.lite.tier.keyPrefix }}
+        keyPrefix: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.lite.tier.endpoint }}
+        endpoint: {{ . | quote }}
+        {{- end }}
+        importOnStart: {{ .Values.lite.tier.importOnStart }}
+        {{- with .Values.lite.tier.settings }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
     exports:
       - path: /data/exports
         fsid: 1
@@ -83,25 +105,6 @@ data:
         access:
           - network: 0.0.0.0/0
             permissions: rw
-    {{- if .Values.lite.tier.enabled }}
-    # S3 cold tier. The volume epoch is claimed BEFORE the listener
-    # binds (an unfenced hub never serves); ".flint/" under the prefix
-    # is reserved for tier control objects. Unset knobs take the
-    # server defaults — the economics gate's assumptions.
-    tier:
-      enabled: true
-      bucket: {{ .Values.lite.tier.bucket | quote }}
-      {{- with .Values.lite.tier.keyPrefix }}
-      keyPrefix: {{ . | quote }}
-      {{- end }}
-      {{- with .Values.lite.tier.endpoint }}
-      endpoint: {{ . | quote }}
-      {{- end }}
-      importOnStart: {{ .Values.lite.tier.importOnStart }}
-      {{- with .Values.lite.tier.settings }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
-    {{- end }}
     logging:
       level: {{ .Values.lite.logLevel | default "info" }}
       format: text
