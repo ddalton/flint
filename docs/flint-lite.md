@@ -167,7 +167,12 @@ your values file — don't rely on `--reuse-values`.)
   read of an evicted file parks the client (NFS4ERR_DELAY — kernel
   clients retry silently, applications just see a slow open) until the
   **whole file** restores; writes get a reserved hydration slot so a
-  writer is never starved by readers.
+  writer is never starved by readers. Restores fetch up to
+  `tier.settings.hydrateFetchParallel` (default 6) ranged GETs
+  concurrently — one S3 stream is ~80–200 MB/s, so the fan-out divides
+  a large file's cold-read time; raise it (with
+  `hydrateConcurrency`) on fat-NIC hubs, mindful that peak restore
+  buffering ≈ `hydrateConcurrency × hydrateFetchParallel × 8 MiB`.
 - **Full disks degrade politely.** Admission answers NOSPC while
   `avail − reserve` can't cover a write (databases see NOSPC, never
   EIO), and a preallocated ballast next to the state db releases at

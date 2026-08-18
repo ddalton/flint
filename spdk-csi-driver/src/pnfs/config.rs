@@ -209,6 +209,13 @@ pub struct TierConfig {
     #[serde(rename = "hydrateConcurrency", default = "default_tier_hydrate_concurrency")]
     pub hydrate_concurrency: usize,
 
+    /// Concurrent ranged GETs per restore (the cold-read fan-out: one
+    /// S3 GET stream delivers ~80-200 MB/s, so the sequential posture
+    /// measured 72.5 s/GiB on the L4 gate — N streams divide it).
+    /// Peak restore buffering ~ hydrateConcurrency x this x 8 MiB.
+    #[serde(rename = "hydrateFetchParallel", default = "default_tier_hydrate_fetch_parallel")]
+    pub hydrate_fetch_parallel: usize,
+
     /// Step 12: run import-refresh at startup when the tier state is
     /// FRESH and the bucket holds content (the DR restore / bucket
     /// adopt path), and always to resume a crashed import. `false`
@@ -252,6 +259,9 @@ fn default_tier_hydrate_hold() -> u64 {
 }
 fn default_tier_hydrate_concurrency() -> usize {
     4
+}
+fn default_tier_hydrate_fetch_parallel() -> usize {
+    6
 }
 
 /// Block-export reconciler settings (design doc §5, phase 1: one tgt per
@@ -974,6 +984,7 @@ mod tests {
         assert_eq!(t.ballast_bytes, 64 * 1024 * 1024);
         assert_eq!(t.hydrate_hold_secs, 15);
         assert_eq!(t.hydrate_concurrency, 4);
+        assert_eq!(t.hydrate_fetch_parallel, 6);
 
         let t2: TierConfig = serde_yaml::from_str(
             "bucket: b\nenabled: false\nkeyPrefix: vol1/\nendpoint: \"http://minio:9000\"\nepochLeaseMisses: 3\n",

@@ -2333,6 +2333,7 @@ mod tests {
             hydrate::HydrateConfig {
                 hold: std::time::Duration::from_secs(5),
                 concurrency: 2,
+                ..Default::default()
             },
         );
 

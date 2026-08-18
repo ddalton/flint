@@ -906,6 +906,8 @@ impl MetadataServer {
             crate::tier::hydrate::HydrateConfig {
                 hold: Duration::from_secs(t.hydrate_hold_secs.max(1)),
                 concurrency: t.hydrate_concurrency.max(1),
+                fetch_parallel: t.hydrate_fetch_parallel.max(1),
+                ..Default::default()
             },
         );
 

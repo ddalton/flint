@@ -37,6 +37,13 @@
 //! on the marker's ETag. A 412 here is the S3-WINS posture — the
 //! bucket's CURRENT object is adopted (marker + rows updated) and the
 //! restore starts over on the new version.
+//!
+//! Cold-read fan-out: chunks fetch with up to `fetch_parallel`
+//! concurrent ranged GETs (one S3 stream is ~80-200 MB/s — the L4
+//! gate measured the sequential posture at 72.5 s/GiB). Completions
+//! are consumed in OFFSET ORDER (`buffered`), so the CRC still runs
+//! over the byte stream, writes land sequentially, and every crash /
+//! retry / adopt contract is unchanged — only the network is parallel.
 
 use crate::state_backend::StateBackend;
 use crate::tier::evict::{self, EvictedMeta};
@@ -52,6 +59,8 @@ use tracing::{error, info, warn};
 
 /// Ranged-GET chunk size: big enough to amortize request overhead,
 /// small enough that a multi-GiB restore never buffers meaningfully.
+/// (Configurable via HydrateConfig.chunk so tests exercise multi-chunk
+/// restores without multi-MiB fixtures; not an operator knob.)
 const CHUNK: u64 = 8 * 1024 * 1024;
 /// Transport-error retries per chunk before the restore attempt is
 /// abandoned (truncate-back + outer backoff). Identity failures (412)
@@ -75,11 +84,23 @@ pub struct HydrateConfig {
     /// Concurrent restores (shared pool; +1 reserved for
     /// write-triggered).
     pub concurrency: usize,
+    /// Concurrent ranged GETs per restore — the COLD-READ FAN-OUT. One
+    /// S3 GET stream delivers ~80-200 MB/s, so the sequential posture
+    /// measured 72.5 s/GiB on the L4 gate; N streams divide it. Peak
+    /// buffering ~ concurrency x fetch_parallel x chunk.
+    pub fetch_parallel: usize,
+    /// Ranged-GET chunk size (tests shrink it; not an operator knob).
+    pub chunk: u64,
 }
 
 impl Default for HydrateConfig {
     fn default() -> Self {
-        HydrateConfig { hold: Duration::from_secs(15), concurrency: 4 }
+        HydrateConfig {
+            hold: Duration::from_secs(15),
+            concurrency: 4,
+            fetch_parallel: 6,
+            chunk: CHUNK,
+        }
     }
 }
 
@@ -152,7 +173,11 @@ pub(crate) fn local_for_tests(
     Arc::new(Hydrator {
         backend,
         store,
-        cfg: HydrateConfig { hold: Duration::from_secs(2), concurrency },
+        cfg: HydrateConfig {
+            hold: Duration::from_secs(2),
+            concurrency,
+            ..Default::default()
+        },
         handle: tokio::runtime::Handle::current(),
         shared: Arc::new(tokio::sync::Semaphore::new(concurrency.max(1))),
         write_reserved: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -388,9 +413,21 @@ pub(crate) async fn restore_once(
     }
 }
 
-/// Ranged, If-Match-guarded streaming restore into the stub inode.
-/// Handles the S3-wins adopt on 412 by updating `meta` + the durable
-/// marker and signalling a retry (the caller loop restarts).
+/// What a single chunk fetch can come back with. Identity failures
+/// (412 / vanished key) are not retryable — they demand the adopt.
+enum ChunkFail {
+    Adopt,
+    Fatal(String),
+}
+
+/// Ranged, If-Match-guarded restore into the stub inode, fetching up
+/// to `fetch_parallel` chunks CONCURRENTLY (the cold-read fix: one GET
+/// stream is ~80-200 MB/s against S3 — the L4 gate measured the
+/// sequential posture at 72.5 s/GiB). `buffered` yields completions in
+/// OFFSET ORDER, so the CRC still runs over the byte stream and writes
+/// land sequentially; only the network fan-out is parallel. Handles
+/// the S3-wins adopt on 412 by updating `meta` + the durable marker
+/// and signalling a retry (the caller loop restarts).
 async fn stream_restore(
     h: &Arc<Hydrator>,
     dev: u64,
@@ -398,62 +435,114 @@ async fn stream_restore(
     path: &Path,
     meta: &mut EvictedMeta,
 ) -> Result<u64, String> {
+    use futures::StreamExt;
     // Internal-write open: a read-only stub (0444 git objects) must
     // still restore — DAC applies to clients, not to the tier's own
     // maintenance I/O.
     let file = evict::open_for_internal_write(path).map_err(|e| format!("open stub: {}", e))?;
     let file = Arc::new(file);
     let mut crc = Crc64Nvme::new();
-    let mut off = 0u64;
-    while off < meta.size {
-        let len = CHUNK.min(meta.size - off);
-        // Transport errors retry the CHUNK, not the restore: a
-        // connection cut at chunk N of a multi-GiB file must not
-        // throw away N chunks of progress (a flaky network would
-        // otherwise starve large hydrations forever — chaos phase L's
-        // finding). The If-Match guard keeps every retry pinned to
-        // the same object; identity failures still adopt immediately.
-        let mut attempt: u32 = 0;
-        let chunk = loop {
-            match h.store.get_range(&meta.key, off, len, &meta.etag).await {
-                Ok(b) => break b,
-                Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
-                    // A6: hydration-GET 412 (or a deleted-and-replaced
-                    // key) is S3-WINS. Adopt the bucket's CURRENT
-                    // object and restart the restore on it.
-                    return match adopt_foreign(h, dev, ino, meta).await {
-                        Ok(()) => Err("foreign overwrite adopted — restarting restore".into()),
-                        Err(e) => Err(e),
-                    };
-                }
-                Err(e) if attempt < CHUNK_RETRIES => {
-                    attempt += 1;
-                    warn!(
-                        "tier hydrate: {} range {}+{} attempt {} failed: {} — retrying the \
-                         chunk (restore keeps its {} restored bytes)",
-                        meta.key, off, len, attempt, e, off
-                    );
-                    tokio::time::sleep(Duration::from_millis(300 * u64::from(attempt))).await;
-                }
-                Err(e) => {
-                    return Err(format!("get_range after {} chunk retries: {}", CHUNK_RETRIES, e))
+
+    let chunk_bytes = h.cfg.chunk.max(1);
+    let fanout = h.cfg.fetch_parallel.max(1);
+    let mut parts: Vec<(u64, u64)> = Vec::new();
+    let mut at = 0u64;
+    while at < meta.size {
+        let len = chunk_bytes.min(meta.size - at);
+        parts.push((at, len));
+        at += len;
+    }
+
+    // Each chunk future owns clones of key/etag (no borrow of `meta`
+    // crosses the stream — the adopt below rewrites it) and carries
+    // its own retry budget: transport errors retry the CHUNK, not the
+    // restore — a connection cut at chunk N of a multi-GiB file must
+    // not throw away N chunks of progress (a flaky network would
+    // otherwise starve large hydrations forever — chaos phase L's
+    // finding). The If-Match guard keeps every retry pinned to the
+    // same object; identity failures still adopt immediately.
+    let store = Arc::clone(&h.store);
+    let key = meta.key.clone();
+    let etag = meta.etag.clone();
+    let mut chunks = futures::stream::iter(parts.into_iter().map(move |(off, len)| {
+        let store = Arc::clone(&store);
+        let key = key.clone();
+        let etag = etag.clone();
+        async move {
+            let mut attempt: u32 = 0;
+            loop {
+                match store.get_range(&key, off, len, &etag).await {
+                    Ok(b) => return Ok((off, b)),
+                    Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
+                        // A6: hydration-GET 412 (or a deleted-and-
+                        // replaced key) is S3-WINS — surfaced to the
+                        // caller, which adopts the bucket's CURRENT
+                        // object and restarts the restore on it.
+                        return Err(ChunkFail::Adopt);
+                    }
+                    Err(e) if attempt < CHUNK_RETRIES => {
+                        attempt += 1;
+                        warn!(
+                            "tier hydrate: {} range {}+{} attempt {} failed: {} — retrying the \
+                             chunk (parallel siblings keep their progress)",
+                            key, off, len, attempt, e
+                        );
+                        tokio::time::sleep(Duration::from_millis(300 * u64::from(attempt))).await;
+                    }
+                    Err(e) => {
+                        return Err(ChunkFail::Fatal(format!(
+                            "get_range after {} chunk retries: {}",
+                            CHUNK_RETRIES, e
+                        )))
+                    }
                 }
             }
-        };
-        if chunk.is_empty() {
-            return Err("short object: empty range before expected end".into());
         }
-        crc.update(&chunk);
-        let f = Arc::clone(&file);
-        let at = off;
-        tokio::task::spawn_blocking(move || {
-            use std::os::unix::fs::FileExt;
-            f.write_all_at(&chunk, at)
-        })
-        .await
-        .map_err(|e| format!("pwrite join: {}", e))?
-        .map_err(|e| format!("pwrite: {}", e))?;
-        off += len;
+    }))
+    .buffered(fanout);
+
+    let mut failed: Option<ChunkFail> = None;
+    while let Some(next) = chunks.next().await {
+        match next {
+            Ok((at, chunk)) => {
+                if chunk.is_empty() {
+                    failed = Some(ChunkFail::Fatal(
+                        "short object: empty range before expected end".into(),
+                    ));
+                    break;
+                }
+                crc.update(&chunk);
+                let f = Arc::clone(&file);
+                let wrote = tokio::task::spawn_blocking(move || {
+                    use std::os::unix::fs::FileExt;
+                    f.write_all_at(&chunk, at)
+                })
+                .await
+                .map_err(|e| format!("pwrite join: {}", e))
+                .and_then(|r| r.map_err(|e| format!("pwrite: {}", e)));
+                if let Err(e) = wrote {
+                    failed = Some(ChunkFail::Fatal(e));
+                    break;
+                }
+            }
+            Err(f) => {
+                failed = Some(f);
+                break;
+            }
+        }
+    }
+    // Dropping the stream cancels every in-flight sibling fetch BEFORE
+    // any adopt rewrites the marker underneath them.
+    drop(chunks);
+    match failed {
+        Some(ChunkFail::Adopt) => {
+            return match adopt_foreign(h, dev, ino, meta).await {
+                Ok(()) => Err("foreign overwrite adopted — restarting restore".into()),
+                Err(e) => Err(e),
+            };
+        }
+        Some(ChunkFail::Fatal(e)) => return Err(e),
+        None => {}
     }
     let f = Arc::clone(&file);
     let size = meta.size;
@@ -583,10 +672,24 @@ mod tests {
     /// A LOCAL hydrator, deliberately NOT installed — module drills
     /// must not race other tests' global installs.
     fn local_hydrator(r: &Rig, concurrency: usize) -> Arc<Hydrator> {
+        local_hydrator_cfg(
+            r,
+            HydrateConfig {
+                hold: Duration::from_secs(2),
+                concurrency,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Same, with full config control (the parallel-fetch drills shrink
+    /// the chunk so small fixtures span many chunks).
+    fn local_hydrator_cfg(r: &Rig, cfg: HydrateConfig) -> Arc<Hydrator> {
+        let concurrency = cfg.concurrency;
         Arc::new(Hydrator {
             backend: r.backend.clone(),
             store: r.mem.clone(),
-            cfg: HydrateConfig { hold: Duration::from_secs(2), concurrency },
+            cfg,
             handle: tokio::runtime::Handle::current(),
             shared: Arc::new(tokio::sync::Semaphore::new(concurrency.max(1))),
             write_reserved: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -831,6 +934,92 @@ mod tests {
             .unwrap();
         let head = r.mem.head(&key).await.unwrap();
         assert_eq!(g.etag, head.etag);
+    }
+
+    /// The cold-read fan-out restores a multi-chunk file byte-identical:
+    /// chunks fetch in parallel but land at their own offsets, and the
+    /// stream-order CRC still verifies.
+    #[tokio::test]
+    async fn parallel_multi_chunk_restore_is_byte_identical() {
+        let r = rig();
+        // Offset-dependent bytes: any chunk landing at the wrong offset
+        // (or dropped) breaks both the equality AND the CRC.
+        let content: Vec<u8> = (0..1500u32).map(|i| (i.wrapping_mul(31) % 251) as u8).collect();
+        let (dev, ino, _key) = evicted_file(&r, "hp1.bin", content.clone()).await;
+        let f = r.root.join("hp1.bin");
+
+        let h = local_hydrator_cfg(
+            &r,
+            HydrateConfig {
+                hold: Duration::from_secs(2),
+                concurrency: 2,
+                fetch_parallel: 4,
+                chunk: 256, // 1500 bytes => 6 chunks, 4 in flight
+            },
+        );
+        let bytes = restore_once(&h, dev, ino, &f).await.expect("parallel restore");
+        assert_eq!(bytes, 1500);
+        assert_eq!(std::fs::read(&f).unwrap(), content, "chunks landed at their offsets");
+        assert!(!evict::is_evicted(dev, ino));
+    }
+
+    /// A 412 on ANY chunk of a parallel fetch adopts exactly once and
+    /// restarts the restore on the bucket's current object.
+    #[tokio::test]
+    async fn foreign_overwrite_adopts_under_parallel_chunks() {
+        let r = rig();
+        let (dev, ino, key) = evicted_file(&r, "hp2.bin", vec![0xABu8; 1500]).await;
+        let f = r.root.join("hp2.bin");
+
+        let foreign: Vec<u8> = (0..900u32).map(|i| (i % 197) as u8).collect();
+        r.mem.raw_put(&key, bytes::Bytes::from(foreign.clone()), vec![]);
+
+        let h = local_hydrator_cfg(
+            &r,
+            HydrateConfig {
+                hold: Duration::from_secs(2),
+                concurrency: 2,
+                fetch_parallel: 4,
+                chunk: 256,
+            },
+        );
+        let err = restore_once(&h, dev, ino, &f).await.unwrap_err();
+        assert!(err.contains("adopted"), "{}", err);
+        let bytes = restore_once(&h, dev, ino, &f).await.expect("adopted restore");
+        assert_eq!(bytes as usize, foreign.len());
+        assert_eq!(std::fs::read(&f).unwrap(), foreign, "S3-wins under parallel fetch");
+    }
+
+    /// Exhausting one chunk's retry budget under parallel fetch fails
+    /// the ATTEMPT (truncate-back, stub, marker kept) — and the next
+    /// attempt succeeds. Injection is a global counter, so saturating
+    /// every chunk's budget (+1) guarantees some chunk exhausts.
+    #[tokio::test]
+    async fn parallel_chunk_exhaustion_truncates_back_and_retry_succeeds() {
+        let r = rig();
+        let content = vec![0x3Cu8; 1500];
+        let (dev, ino, _key) = evicted_file(&r, "hp3.bin", content.clone()).await;
+        let f = r.root.join("hp3.bin");
+
+        let h = local_hydrator_cfg(
+            &r,
+            HydrateConfig {
+                hold: Duration::from_secs(2),
+                concurrency: 2,
+                fetch_parallel: 4,
+                chunk: 256, // 6 chunks x CHUNK_RETRIES budget = 30 absorbable
+            },
+        );
+        r.mem
+            .inject_get_range_failures(6 * u64::from(super::CHUNK_RETRIES) + 1);
+        let err = restore_once(&h, dev, ino, &f).await.unwrap_err();
+        assert!(err.contains("chunk retries"), "{}", err);
+        assert_eq!(std::fs::metadata(&f).unwrap().len(), 0, "stub, never partial bytes");
+        assert!(evict::is_evicted(dev, ino));
+
+        let bytes = restore_once(&h, dev, ino, &f).await.expect("retry succeeds");
+        assert_eq!(bytes, 1500);
+        assert_eq!(std::fs::read(&f).unwrap(), content);
     }
 
     /// Step-9 finding 2: a WRITE-triggered hydration must not queue
