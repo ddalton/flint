@@ -27,8 +27,9 @@ CSI driver's RWO volume — EBS, GCE PD, Ceph, local-path); set
 `persistence.storageClassName` to choose one, `persistence.size`
 (default 20Gi) for the working set.
 
-> **Image note:** `mode: standalone` needs a hub image newer than
-> 1.25.2. Until such a tag is published, set `image.tag` or `image.ref`.
+> **Image note:** `mode: standalone` and the S3 tier need hub image
+> **1.26.0 or newer** (multi-arch: amd64 + arm64) — the chart's
+> appVersion default. Older MDS binaries refuse the mode at boot.
 
 ## With the S3 cold tier
 

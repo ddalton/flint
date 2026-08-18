@@ -4,7 +4,6 @@ description: Flint-lite — the standalone POSIX hub. One pod on any CSI driver'
 type: application
 # Chart version — independent of the full flint-csi-driver-chart.
 version: 0.1.0
-# The hub image tag this chart defaults to. NOTE: `mode: standalone`
-# needs an image NEWER than 1.25.2 (the first tag carrying commit
-# 870c884); until such a release exists, set image.tag or image.ref.
-appVersion: "1.25.2"
+# The hub image tag this chart defaults to — 1.26.0 is the first
+# release carrying `mode: standalone` and the S3 tier.
+appVersion: "1.26.0"

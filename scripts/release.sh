@@ -145,4 +145,20 @@ EOF
     echo "── pushing $(basename "$pkg") to oci://registry-1.docker.io/$hub_ns"
     helm push "$pkg" "oci://registry-1.docker.io/$hub_ns"
     echo "chart $chart_version released."
+
+    # The flint-lite chart ships alongside as its OWN OCI artifact
+    # (independent version; its appVersion pins the flint-pnfs tag, which
+    # the gate above already verified via the pnfs image row).
+    lite_dir="$repo_root/flint-lite-chart"
+    lite_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$repo_root/flint-lite-chart/Chart.yaml'))['version'])")
+    lite_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$repo_root/flint-lite-chart/Chart.yaml'))['appVersion'])")
+    if ! tag_exists flint-pnfs "$lite_app"; then
+        echo "REFUSING to push flint-lite $lite_version:"              "$hub_ns/flint-pnfs:$lite_app (its appVersion default) is not on Docker Hub." >&2
+        exit 1
+    fi
+    helm package "$lite_dir" --destination "$pkg_dir" >/dev/null
+    lite_pkg="$pkg_dir/flint-lite-$lite_version.tgz"
+    echo "── pushing $(basename "$lite_pkg") to oci://registry-1.docker.io/$hub_ns"
+    helm push "$lite_pkg" "oci://registry-1.docker.io/$hub_ns"
+    echo "chart flint-lite $lite_version released."
 fi

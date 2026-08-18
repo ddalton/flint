@@ -15,8 +15,8 @@ image:
   # Composed as {repository}/{name}:{tag|Chart.appVersion}. `ref`
   # overrides the whole reference verbatim when set (e.g. a
   # kind-loaded local image "flint-lite-dev:local").
-  # NOTE: `mode: standalone` needs an image NEWER than 1.25.2 — the
-  # first tag carrying commit 870c884. Older MDS binaries refuse the
+  # NOTE: `mode: standalone` and the S3 tier need image 1.26.0 or
+  # newer (multi-arch: amd64 + arm64). Older MDS binaries refuse the
   # mode at boot.
   repository: dilipdalton
   name: flint-pnfs

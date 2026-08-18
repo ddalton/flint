@@ -27,8 +27,9 @@ helm install flint-lite ./flint-lite-chart \
 Service, single-replica Deployment) and nothing else: no CSI stack, no
 SPDK, no CRDs (the full chart's snapshot CRDs are cluster-scoped and a
 lite hub never needs them). A full pNFS cluster is the
-`flint-csi-driver-chart`'s job, in its own release. Requires an image
-newer than 1.25.2 (the first tag carrying `mode: standalone`).
+`flint-csi-driver-chart`'s job, in its own release. Requires image 1.26.0 or
+newer (the first release carrying `mode: standalone` and the tier;
+multi-arch amd64 + arm64).
 
 Storage: the PVC uses the **cluster's default StorageClass** unless
 `persistence.storageClassName` says otherwise. Any CSI driver's
