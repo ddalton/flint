@@ -51,10 +51,22 @@
 #                       never the neighbor's in-flight upload (the
 #                       bucket-wide-list + code-filter blast radius);
 #                       DR import must stay inside the tenant's prefix.
+#   J  versioned recovery — C4's park-forever posture is RECOVERABLE
+#                       when A9's advice was taken: on a versioned
+#                       bucket, removing the foreign DELETE's marker
+#                       unparks the SAME blocked reader with the
+#                       original bytes — the operator runbook, drilled.
+#   K  restart storm  — incarnations killed at 0.05–1.5 s lifetimes
+#                       (some die before the claim completes) must
+#                       still converge the durable backlog; then a
+#                       kill -9 landed MID-HYDRATION (caught by size,
+#                       partial bytes on disk): the reconciler must
+#                       disambiguate via the durable hydrating flag,
+#                       truncate back, and the parked reader completes.
 #
 # Knobs: CRASH_ITERS (default 5), ENDURE_SECS (default 60),
-# PHASES ("a b c d e f g h i"), KEEP=1 leaves the rig standing on failure.
-# Runtime ≈ 10 minutes with defaults.
+# PHASES ("a b c d e f g h i j k"), KEEP=1 leaves the rig standing on
+# failure. Runtime ≈ 13 minutes with defaults.
 
 set -uo pipefail
 
@@ -64,7 +76,7 @@ LIMA_VM="${LIMA_VM:-flint-nfs-client}"
 
 CRASH_ITERS="${CRASH_ITERS:-5}"
 ENDURE_SECS="${ENDURE_SECS:-60}"
-PHASES="${PHASES:-a b c d e f g h i}"
+PHASES="${PHASES:-a b c d e f g h i j k}"
 
 PORT=20492
 PORT_B=20493
@@ -893,11 +905,192 @@ phase_i() {
   sweep_log /tmp/flint-chaos-i2.log "phase I"
 }
 
+# ══════════════════════════════════════════════════════════════════════
+phase_j() {
+  say "phase J: versioned bucket — the C4 orphan is RECOVERABLE"
+  local BK=flint-chaos-j E=/tmp/chaos-j-exp S=/tmp/chaos-j-st
+  s3 s3 mb "s3://$BK" >/dev/null
+  s3 s3api put-bucket-versioning --bucket $BK \
+    --versioning-configuration Status=Enabled >/dev/null \
+    || fail "put-bucket-versioning failed"
+  s3 s3api get-bucket-versioning --bucket $BK | grep -q Enabled \
+    || fail "MinIO did not enable versioning"
+  fresh_world $E $S
+  gen_cfg /tmp/flint-chaos-j.yaml $PORT $E $S $BK 50 2 3 67108864 1 1
+  launch_hub j /tmp/flint-chaos-j.yaml
+  wait_bound $PORT 30 j
+  mount_client
+
+  vm "dd if=/dev/urandom of=/tmp/chaos-j-src.bin bs=1k count=900 2>/dev/null"
+  local VMD5; VMD5=$(vm "md5sum /tmp/chaos-j-src.bin | awk '{print \$1}'" | tr -d '\r')
+  vm "cp /tmp/chaos-j-src.bin $MNT/victim.bin && sync"
+  wait_key $BK "${PREFIX}victim.bin" 40 || fail "victim.bin never published"
+  local d=$((SECONDS + 90))
+  until [ "$(stat -f %z "$E/victim.bin" 2>/dev/null)" = "0" ]; do
+    [ $SECONDS -gt $d ] && fail "victim.bin never evicted"
+    sleep 2
+  done
+
+  # The C4 wound: a foreign DELETE under the evicted file. On a
+  # versioned bucket this writes a DELETE MARKER — the bytes still
+  # exist one version down.
+  s3 s3 rm "s3://$BK/${PREFIX}victim.bin" >/dev/null
+  vm "sync; echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null
+  vm "rm -f /tmp/chaos-j-rc /tmp/chaos-j-read.out; \
+      nohup sh -c 'cat $MNT/victim.bin > /tmp/chaos-j-read.out 2>/dev/null; \
+                   echo \$? > /tmp/chaos-j-rc' >/dev/null 2>&1 &"
+  sleep 6
+  vm "[ ! -f /tmp/chaos-j-rc ]" \
+    || fail "the read COMPLETED against a deleted object (rc=$(vm "cat /tmp/chaos-j-rc"))"
+  vm "[ ! -s /tmp/chaos-j-read.out ]" \
+    || fail "bytes served from a deleted object — refusal-never-loss violated"
+  pass "reader parked on the orphaned stub: no bytes, no error, still waiting"
+
+  # The operator runbook (A9): remove the delete marker; the prior
+  # version — same etag the row recorded — becomes current again.
+  local MARKER
+  MARKER=$(s3 s3api list-object-versions --bucket $BK \
+             --prefix "${PREFIX}victim.bin" --output json 2>/dev/null \
+           | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+ms = [m["VersionId"] for m in d.get("DeleteMarkers") or [] if m.get("IsLatest")]
+print(ms[0] if ms else "")')
+  [ -n "$MARKER" ] || fail "no delete marker found on the versioned bucket"
+  s3 s3api delete-object --bucket $BK --key "${PREFIX}victim.bin" \
+    --version-id "$MARKER" >/dev/null || fail "delete-marker removal failed"
+
+  # The SAME parked reader must now unpark (hydration retry backoff
+  # caps at 30 s) and deliver the ORIGINAL bytes.
+  d=$((SECONDS + 90))
+  until vm "[ -f /tmp/chaos-j-rc ]"; do
+    [ $SECONDS -gt $d ] && { tail -20 /tmp/flint-chaos-j.log; fail "reader never unparked after the marker removal"; }
+    sleep 3
+  done
+  [ "$(vm "cat /tmp/chaos-j-rc" | tr -d '\r')" = "0" ] || fail "unparked read failed"
+  local RMD5; RMD5=$(vm "md5sum /tmp/chaos-j-read.out | awk '{print \$1}'" | tr -d '\r')
+  [ "$RMD5" = "$VMD5" ] || fail "unparked reader got $RMD5, wanted $VMD5"
+  hub_alive j || fail "hub died during the recovery"
+  pass "delete-marker removal unparked the SAME reader with the original bytes"
+  umount_client; stop_hub j
+  sweep_log /tmp/flint-chaos-j.log "phase J"
+}
+
+# ══════════════════════════════════════════════════════════════════════
+phase_k() {
+  say "phase K: restart storm + a kill landed MID-HYDRATION"
+  local BK=flint-chaos-k E=/tmp/chaos-k-exp S=/tmp/chaos-k-st
+  s3 s3 mb "s3://$BK" >/dev/null
+  fresh_world $E $S
+  gen_cfg /tmp/flint-chaos-k.yaml $PORT $E $S $BK 99 2 5 4194304 1 1
+  launch_hub k /tmp/flint-chaos-k.yaml
+  wait_bound $PORT 30 k
+  mount_client
+
+  # A dirty backlog (multipart-sized + small), then a storm of
+  # incarnations too short-lived to finish anything: some die before
+  # the claim completes, some mid-reconcile, some mid-flush.
+  vm "for i in 1 2 3; do dd if=/dev/urandom of=$MNT/storm_\$i.bin bs=1M count=8 conv=fsync 2>/dev/null || exit 1; done; \
+      for i in \$(seq 1 12); do echo storm-\$i > $MNT/s\$i.txt || exit 1; done; sync; \
+      cd $MNT && find . -type f -exec md5sum {} + > /tmp/chaos-k-expect.txt" \
+    || fail "backlog batch failed"
+  kill_hub k
+  local L
+  for L in 0.05 0.3 0.9 1.5 0.05 0.6 1.2 0.1; do
+    launch_hub k /tmp/flint-chaos-k.yaml
+    sleep "$L"
+    kill_hub k
+  done
+  launch_hub k /tmp/flint-chaos-k.yaml
+  wait_bound $PORT 40 k
+  vm "cd $MNT && md5sum --quiet -c /tmp/chaos-k-expect.txt" \
+    || fail "ACKed content diverged after the restart storm"
+  local d=$((SECONDS + 120))
+  while :; do
+    s3 s3 cp "s3://$BK/${PREFIX}.flint/manifest" /tmp/chaos-k-manifest.json >/dev/null 2>&1
+    python3 -c "
+import json,sys
+m=json.load(open('/tmp/chaos-k-manifest.json'))
+sys.exit(0 if m['beyond_rpo']==0 else 1)" 2>/dev/null && break
+    [ $SECONDS -gt $d ] && { tail -20 /tmp/flint-chaos-k.log; fail "storm world never settled to beyond_rpo=0"; }
+    sleep 3
+  done
+  d=$((SECONDS + 45))
+  until [ "$(mpu_count $BK "$PREFIX")" = "0" ]; do
+    [ $SECONDS -gt $d ] && fail "orphaned MPU(s) persisted after the storm"
+    sleep 3
+  done
+  pass "8 sub-2s incarnations: backlog converged to RPO 0, zero orphans"
+
+  # Kill -9 landed MID-HYDRATION, caught by watching the stub GROW:
+  # the in-place restore fills the file from 0, so 0 < size < full IS
+  # the restore window. The durable hydrating flag must disambiguate
+  # at the next startup (partial ⇒ truncate back to the stub).
+  local HYD_MB=512 HYD_BYTES=$((512 * 1048576))
+  vm "dd if=/dev/urandom of=$MNT/hyd.bin bs=1M count=$HYD_MB conv=fsync 2>/dev/null" \
+    || fail "hydration-target write failed"
+  local HMD5; HMD5=$(md5 -q "$E/hyd.bin")
+  d=$((SECONDS + 180))
+  while :; do
+    s3 s3 cp "s3://$BK/${PREFIX}.flint/manifest" /tmp/chaos-k-manifest.json >/dev/null 2>&1
+    python3 -c "
+import json,sys
+m=json.load(open('/tmp/chaos-k-manifest.json'))
+sys.exit(0 if m['beyond_rpo']==0 else 1)" 2>/dev/null && break
+    [ $SECONDS -gt $d ] && fail "hyd.bin never settled to RPO 0"
+    sleep 3
+  done
+  stop_hub k
+  gen_cfg /tmp/flint-chaos-k50.yaml $PORT $E $S $BK 50 2 5 4194304 1 1
+  launch_hub k2 /tmp/flint-chaos-k50.yaml
+  wait_bound $PORT 30 k2
+  d=$((SECONDS + 120))
+  until [ "$(stat -f %z "$E/hyd.bin" 2>/dev/null)" = "0" ]; do
+    [ $SECONDS -gt $d ] && { tail -20 /tmp/flint-chaos-k2.log; fail "hyd.bin never evicted"; }
+    sleep 2
+  done
+  stop_hub k2
+  launch_hub k3 /tmp/flint-chaos-k.yaml
+  wait_bound $PORT 30 k3
+  vm "sync; echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null
+  vm "rm -f /tmp/chaos-k-rc; \
+      nohup sh -c 'cat $MNT/hyd.bin > /dev/null 2>&1; \
+                   echo \$? > /tmp/chaos-k-rc' >/dev/null 2>&1 &"
+  d=$((SECONDS + 30))
+  local SZ=0
+  while :; do
+    SZ=$(stat -f %z "$E/hyd.bin" 2>/dev/null || echo 0)
+    [ "$SZ" -gt 0 ] && [ "$SZ" -lt "$HYD_BYTES" ] && break
+    [ $SECONDS -gt $d ] && fail "never observed the restore window (size stayed $SZ)"
+    sleep 0.02
+  done
+  kill -9 "$(hub_pid k3)"; rm -f /tmp/flint-chaos-k3.pid
+  pass "kill -9 landed mid-restore ($SZ of $HYD_BYTES bytes on disk)"
+
+  launch_hub k4 /tmp/flint-chaos-k.yaml
+  wait_bound $PORT 40 k4
+  grep -q "crashed hydration of .*hyd.bin" /tmp/flint-chaos-k4.log \
+    || { tail -20 /tmp/flint-chaos-k4.log; fail "reconciler never disambiguated the crashed restore"; }
+  d=$((SECONDS + 120))
+  until vm "[ -f /tmp/chaos-k-rc ]"; do
+    [ $SECONDS -gt $d ] && { tail -20 /tmp/flint-chaos-k4.log; fail "parked reader never completed after the crash"; }
+    sleep 3
+  done
+  [ "$(vm "cat /tmp/chaos-k-rc" | tr -d '\r')" = "0" ] || fail "post-crash read failed"
+  vm "sync; echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null
+  local CMD5; CMD5=$(vm "md5sum $MNT/hyd.bin | awk '{print \$1}'" | tr -d '\r')
+  [ "$CMD5" = "$HMD5" ] || fail "post-crash hydration diverged: $CMD5 ≠ $HMD5"
+  pass "reconciler truncated the partial back; re-hydration served the exact bytes"
+  umount_client; stop_hub k4
+  sweep_log /tmp/flint-chaos-k.log "phase K"; sweep_log /tmp/flint-chaos-k2.log "phase K"
+  sweep_log /tmp/flint-chaos-k3.log "phase K"; sweep_log /tmp/flint-chaos-k4.log "phase K"
+}
+
 for ph in $PHASES; do
   case "$ph" in
     a) phase_a;; b) phase_b;; c) phase_c;;
     d) phase_d;; e) phase_e;; f) phase_f;; g) phase_g;;
-    h) phase_h;; i) phase_i;;
+    h) phase_h;; i) phase_i;; j) phase_j;; k) phase_k;;
     *) fail "unknown phase '$ph'";;
   esac
 done
@@ -905,6 +1098,6 @@ done
 echo
 echo "══════════════════════════════════════════════════════════════════"
 echo " PASS — split-brain, outage, foreign hands, space pressure,"
-echo " kill -9 crash loops, endurance churn, the zombie hub, and the"
-echo " neighbor-prefix sweep all held"
+echo " crash loops, endurance, two writers, the zombie hub, neighbor"
+echo " prefixes, versioned recovery, and the restart storm all held"
 echo "══════════════════════════════════════════════════════════════════"

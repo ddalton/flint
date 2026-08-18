@@ -297,8 +297,12 @@ test-tier-drill: build-pnfs ## S3-tier e2e vs MinIO (docker): capture→flush→
 	tests/lima/pnfs/tier-drill.sh
 
 .PHONY: test-tier-chaos
-test-tier-chaos: build-pnfs ## S3-tier CHAOS drill vs MinIO: split-brain, store outage, foreign interference, real space pressure, kill -9 crash loops, endurance churn (~8 min; CRASH_ITERS/ENDURE_SECS/PHASES tunable)
+test-tier-chaos: build-pnfs ## S3-tier CHAOS drill vs MinIO: split-brain, outage, foreign hands, space pressure, crash loops, endurance, two writers, zombie hub, neighbor prefixes, versioned recovery, restart storms (~13 min; CRASH_ITERS/ENDURE_SECS/PHASES tunable)
 	tests/lima/pnfs/tier-chaos.sh
+
+.PHONY: test-tier-scale
+test-tier-scale: build-pnfs ## S3-tier SCALE drill vs MinIO: 10k files through flush/manifest/DR-import + one 2 GiB file through multipart/evict/hydrate, wall-times and peak-RSS record (FILES/BIGMB tunable)
+	tests/lima/pnfs/tier-scale.sh
 
 .PHONY: test-lite-kind-e2e
 test-lite-kind-e2e: ## Flint-lite L1 e2e: the CHART's hub on kind (default-SC PVC, NodePort) serves the Lima VM's REAL kernel client — battery + bytes-on-PVC + restart-under-mount. Builds the hub image from the working tree
