@@ -40,10 +40,21 @@
 #                       exceeded); ends with git fsck --strict,
 #                       sqlite integrity_check, and a zero-tolerance
 #                       log sweep.
+#   H  zombie hub     — SIGSTOP the holder past its lease (the GC-pause
+#                       split brain): a successor takes over while the
+#                       incumbent is UNCONSCIOUS; on SIGCONT the zombie
+#                       wakes with a dirty backlog and a stale epoch —
+#                       it must self-fence and exit with NOTHING of its
+#                       backlog leaking into the bucket.
+#   I  neighbor prefix — two tenants (prefixes) on ONE bucket: a claim's
+#                       MPU abort-sweep must fence its OWN prefix and
+#                       never the neighbor's in-flight upload (the
+#                       bucket-wide-list + code-filter blast radius);
+#                       DR import must stay inside the tenant's prefix.
 #
 # Knobs: CRASH_ITERS (default 5), ENDURE_SECS (default 60),
-# PHASES ("a b c d e f"), KEEP=1 leaves the rig standing on failure.
-# Runtime ≈ 8 minutes with defaults.
+# PHASES ("a b c d e f g h i"), KEEP=1 leaves the rig standing on failure.
+# Runtime ≈ 10 minutes with defaults.
 
 set -uo pipefail
 
@@ -53,7 +64,7 @@ LIMA_VM="${LIMA_VM:-flint-nfs-client}"
 
 CRASH_ITERS="${CRASH_ITERS:-5}"
 ENDURE_SECS="${ENDURE_SECS:-60}"
-PHASES="${PHASES:-a b c d e f g}"
+PHASES="${PHASES:-a b c d e f g h i}"
 
 PORT=20492
 PORT_B=20493
@@ -80,8 +91,9 @@ s3() {
     aws --endpoint-url "http://127.0.0.1:$MINIO_PORT" "$@"
 }
 
-# gen_cfg OUT PORT EXPORT STATEDIR BUCKET WATERMARK HB MISSES WHOLEMAX FLOOR TICK
+# gen_cfg OUT PORT EXPORT STATEDIR BUCKET WATERMARK HB MISSES WHOLEMAX FLOOR TICK [KEYPREFIX]
 gen_cfg() {
+  local PFX="${12:-$PREFIX}"
   cat > "$1" <<EOF
 apiVersion: flint.io/v1alpha1
 kind: PnfsConfig
@@ -96,7 +108,7 @@ mds:
   tier:
     enabled: true
     bucket: $5
-    keyPrefix: "$PREFIX"
+    keyPrefix: "$PFX"
     endpoint: "http://127.0.0.1:$MINIO_PORT"
     flushFloorSecs: ${10}
     quiesceSecs: 1
@@ -159,13 +171,26 @@ wait_key() { # $1=bucket $2=key $3=deadline-secs
   done
 }
 
-mount_client() {
+mount_client() { # [port] — defaults to $PORT
+  local P="${1:-$PORT}"
   vm "mountpoint -q $MNT && umount -lf $MNT; mkdir -p $MNT; \
-      timeout 30 mount -t nfs4 -o minorversion=1,proto=tcp,port=$PORT \
+      timeout 30 mount -t nfs4 -o minorversion=1,proto=tcp,port=$P \
         \$(getent hosts host.lima.internal | awk '{print \$1}'):/ $MNT" \
     || fail "client mount failed"
 }
 umount_client() { vm "umount -lf $MNT 2>/dev/null; true"; }
+
+mpu_count() { # $1=bucket $2=key-prefix filter (client-side: MinIO's
+              # server-side MPU prefix filter is blind — the very bug
+              # phase I guards)
+  local OUT
+  OUT=$(s3 s3api list-multipart-uploads --bucket "$1" --output json 2>/dev/null)
+  [ -z "$OUT" ] && { echo 0; return; }
+  printf '%s' "$OUT" | KEYPFX="$2" python3 -c '
+import json, os, sys
+ups = json.load(sys.stdin).get("Uploads") or []
+print(len([u for u in ups if u["Key"].startswith(os.environ["KEYPFX"])]))'
+}
 
 # Integrity sweep: patterns that must NEVER appear, phase-agnostic.
 sweep_log() { # $1=log $2=phase-name
@@ -698,10 +723,181 @@ phase_g() {
   sweep_log /tmp/flint-chaos-g.log "phase G"
 }
 
+# ══════════════════════════════════════════════════════════════════════
+phase_h() {
+  say "phase H: zombie hub — SIGSTOP past the lease, takeover, SIGCONT"
+  local BK=flint-chaos-h EA=/tmp/chaos-h-exp-a SA=/tmp/chaos-h-st-a
+  local EB=/tmp/chaos-h-exp-b SB=/tmp/chaos-h-st-b
+  s3 s3 mb "s3://$BK" >/dev/null
+  fresh_world $EA $SA; fresh_world $EB $SB
+
+  # 4 MiB whole-put ceiling: the zombie's 8 MiB backlog file would take
+  # the MULTIPART path if its stale publish ever ran. Flush floor 3 s:
+  # the freeze must land inside it, and an umount sits between the
+  # backlog write and the SIGSTOP.
+  gen_cfg /tmp/flint-chaos-h1.yaml $PORT $EA $SA $BK 99 2 3 4194304 3 1
+  launch_hub h1 /tmp/flint-chaos-h1.yaml
+  wait_bound $PORT 30 h1
+  mount_client
+  vm "dd if=/dev/urandom of=$MNT/baseline.bin bs=1M count=2 conv=fsync 2>/dev/null"
+  wait_key $BK "${PREFIX}baseline.bin" 40 || fail "baseline never published"
+  local BMD5; BMD5=$(vm "md5sum $MNT/baseline.bin | awk '{print \$1}'" | tr -d '\r')
+
+  # ACK a dirty backlog, then freeze INSIDE the flush floor (3 s):
+  # the zombie sleeps holding durable dirty bits it never published.
+  # Umount BEFORE the freeze — a client umount against a hub that will
+  # die without a successor on its port wedges in D-state forever (the
+  # kernel retries the dead port), and the client has no role in the
+  # freeze/wake drama.
+  vm "dd if=/dev/urandom of=$MNT/sting.bin bs=1M count=8 conv=fsync 2>/dev/null && \
+      echo zombie > $MNT/zsmall.txt && sync"
+  umount_client
+  kill -STOP "$(hub_pid h1)" || fail "SIGSTOP failed"
+  ps -o state= -p "$(hub_pid h1)" | grep -q '^ *T' \
+    || fail "hub h1 is not in stopped state after SIGSTOP"
+  s3 s3api head-object --bucket $BK --key "${PREFIX}sting.bin" >/dev/null 2>&1 \
+    && fail "sting.bin reached the bucket BEFORE the freeze — timing lost the flush-floor race"
+  pass "holder frozen with an unpublished 8 MiB backlog (T state)"
+
+  # A successor on a FRESH world judges the frozen holder by the
+  # store's clock, takes epoch 2, imports the bucket, and serves.
+  gen_cfg /tmp/flint-chaos-h2.yaml $PORT_B $EB $SB $BK 99 2 3 4194304 2 2
+  launch_hub h2 /tmp/flint-chaos-h2.yaml
+  local d=$((SECONDS + 40))
+  until grep -q "tier epoch: TAKEOVER" /tmp/flint-chaos-h2.log; do
+    [ $SECONDS -gt $d ] && { tail -20 /tmp/flint-chaos-h2.log; fail "successor never took over the frozen holder"; }
+    sleep 1
+  done
+  grep -q "watching its lease" /tmp/flint-chaos-h2.log \
+    || fail "successor skipped the lease watch — it must judge, not seize"
+  wait_bound $PORT_B 30 h2
+  pass "successor judged the unconscious holder dead and took epoch 2"
+
+  # The moment of truth: the zombie wakes believing it holds the epoch,
+  # with a flush tick and a heartbeat both overdue. The heartbeat's
+  # single CAS must fence the guard before the flusher's multi-step
+  # publish reaches the store — NOTHING of the backlog may land.
+  kill -CONT "$(hub_pid h1)" || fail "SIGCONT failed"
+  d=$((SECONDS + 25))
+  while hub_alive h1; do
+    [ $SECONDS -gt $d ] && { tail -20 /tmp/flint-chaos-h1.log; fail "the zombie survived waking with a stale epoch"; }
+    sleep 1
+  done
+  grep -q "DEPOSED" /tmp/flint-chaos-h1.log \
+    || fail "the zombie exited without logging DEPOSED"
+  s3 s3api head-object --bucket $BK --key "${PREFIX}sting.bin" >/dev/null 2>&1 \
+    && fail "the ZOMBIE'S stale publish reached the bucket — fencing lost the wake-up race"
+  s3 s3api head-object --bucket $BK --key "${PREFIX}zsmall.txt" >/dev/null 2>&1 \
+    && fail "the zombie's small-file publish reached the bucket"
+  [ "$(mpu_count $BK "$PREFIX")" = "0" ] \
+    || fail "the zombie left a multipart upload behind"
+  rm -f /tmp/flint-chaos-h1.pid
+  pass "woken zombie: DEPOSED ⇒ exit; ZERO stale bytes reached the bucket"
+  # (sting.bin is ACKed-but-unflushed at the freeze: it survives on the
+  #  OLD holder's disk only — that is the documented failover RPO, and
+  #  leaking it into the successor's bucket would be the actual bug.)
+
+  mount_client $PORT_B
+  vm "sync; echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null
+  local CMD5; CMD5=$(vm "md5sum $MNT/baseline.bin | awk '{print \$1}'" | tr -d '\r')
+  [ "$CMD5" = "$BMD5" ] || fail "successor served $CMD5 for baseline, wanted $BMD5"
+  vm "echo after-takeover > $MNT/after.txt && sync"
+  wait_key $BK "${PREFIX}after.txt" 40 || fail "successor never published a new write"
+  pass "successor serves the imported world and publishes fresh writes"
+  umount_client; stop_hub h2
+  sweep_log /tmp/flint-chaos-h1.log "phase H"; sweep_log /tmp/flint-chaos-h2.log "phase H"
+}
+
+# ══════════════════════════════════════════════════════════════════════
+phase_i() {
+  say "phase I: neighbor prefix — the sweep's blast radius on a shared bucket"
+  local BK=flint-chaos-i EA=/tmp/chaos-i-exp-a SA=/tmp/chaos-i-st-a
+  local EB=/tmp/chaos-i-exp-b SB=/tmp/chaos-i-st-b
+  local PA=teama/ PB=teamb/
+  s3 s3 mb "s3://$BK" >/dev/null
+  fresh_world $EA $SA; fresh_world $EB $SB
+
+  gen_cfg /tmp/flint-chaos-i1.yaml $PORT   $EA $SA $BK 99 2 3 4194304 1 1 $PA
+  gen_cfg /tmp/flint-chaos-i2.yaml $PORT_B $EB $SB $BK 99 2 3 4194304 1 1 $PB
+  launch_hub i1 /tmp/flint-chaos-i1.yaml
+  launch_hub i2 /tmp/flint-chaos-i2.yaml
+  wait_bound $PORT 30 i1; wait_bound $PORT_B 30 i2
+  pass "two tenants hold independent epochs on ONE bucket"
+
+  mount_client
+  vm "echo tenant-a-anchor > $MNT/anchor-a.txt && sync"
+  wait_key $BK "${PA}anchor-a.txt" 40 || fail "tenant A's anchor never published"
+  umount_client
+
+  # Plant two in-flight assemblies: an ORPHAN under A's prefix (a dead
+  # incarnation's leftover — the sweep's rightful prey) and a LIVE one
+  # under B's prefix (the neighbor mid-flush). The bug-2 fix lists the
+  # bucket WIDE and filters in code — this is the blast-radius test.
+  local UPA UPB
+  UPA=$(s3 s3api create-multipart-upload --bucket $BK --key "${PA}orphan-a.bin" \
+          --query UploadId --output text) || fail "create-multipart A failed"
+  UPB=$(s3 s3api create-multipart-upload --bucket $BK --key "${PB}inflight-b.bin" \
+          --query UploadId --output text) || fail "create-multipart B failed"
+  [ -n "$UPA" ] && [ -n "$UPB" ] || fail "empty UploadId from create-multipart"
+
+  kill_hub i1
+  launch_hub i1r /tmp/flint-chaos-i1.yaml
+  wait_bound $PORT 40 i1r
+  local d=$((SECONDS + 30))
+  until [ "$(mpu_count $BK $PA)" = "0" ]; do
+    [ $SECONDS -gt $d ] && { tail -20 /tmp/flint-chaos-i1r.log; fail "the claim sweep never aborted tenant A's own orphan"; }
+    sleep 1
+  done
+  [ "$(mpu_count $BK $PB)" = "1" ] \
+    || fail "the sweep CROSSED the prefix boundary and killed the neighbor's in-flight upload"
+  grep -q "fenced in-flight assembly .* on ${PA}orphan-a.bin" /tmp/flint-chaos-i1r.log \
+    || fail "no fence log for tenant A's orphan"
+  grep -q "${PB}inflight-b.bin" /tmp/flint-chaos-i1r.log \
+    && fail "the neighbor's upload appears in tenant A's fence log"
+  pass "claim sweep fenced its OWN orphan and spared the neighbor's upload"
+
+  # Live variant: tenant B flushes a real multipart while tenant A
+  # restarts (its sweep may run mid-flight); B's flush must land
+  # byte-identical with no NoSuchUpload and no epoch disturbance.
+  mount_client $PORT_B
+  vm "dd if=/dev/urandom of=$MNT/live.bin bs=1M count=8 conv=fsync 2>/dev/null"
+  kill_hub i1r
+  launch_hub i1s /tmp/flint-chaos-i1.yaml
+  wait_bound $PORT 40 i1s
+  wait_key $BK "${PB}live.bin" 60 || fail "tenant B's live flush never landed"
+  s3 s3 cp "s3://$BK/${PB}live.bin" /tmp/chaos-i-live.bin >/dev/null 2>&1
+  [ "$(md5 -q /tmp/chaos-i-live.bin)" = "$(md5 -q "$EB/live.bin")" ] \
+    || fail "tenant B's published bytes diverged across A's restart"
+  grep -q "NoSuchUpload" /tmp/flint-chaos-i2.log \
+    && fail "tenant B hit NoSuchUpload — its assembly was fenced by the neighbor"
+  grep -qE "DEPOSED|self-fencing" /tmp/flint-chaos-i2.log \
+    && fail "tenant B's epoch was disturbed by the neighbor's restart"
+  umount_client
+  pass "neighbor's live flush landed byte-identical across A's restart"
+
+  # DR import must stay inside the tenant's prefix: rebuild A from the
+  # shared bucket and assert it materializes ONLY teama/ content.
+  stop_hub i1s
+  fresh_world $EA $SA
+  launch_hub i1d /tmp/flint-chaos-i1.yaml
+  wait_bound $PORT 40 i1d
+  [ -e "$EA/anchor-a.txt" ] || fail "DR import lost the tenant's own file"
+  [ ! -e "$EA/live.bin" ] || fail "DR import swallowed the NEIGHBOR's object"
+  pass "DR import rebuilt tenant A without crossing into the neighbor's prefix"
+
+  s3 s3api abort-multipart-upload --bucket $BK --key "${PB}inflight-b.bin" \
+    --upload-id "$UPB" >/dev/null 2>&1
+  stop_hub i1d; stop_hub i2
+  sweep_log /tmp/flint-chaos-i1.log "phase I"; sweep_log /tmp/flint-chaos-i1r.log "phase I"
+  sweep_log /tmp/flint-chaos-i1s.log "phase I"; sweep_log /tmp/flint-chaos-i1d.log "phase I"
+  sweep_log /tmp/flint-chaos-i2.log "phase I"
+}
+
 for ph in $PHASES; do
   case "$ph" in
     a) phase_a;; b) phase_b;; c) phase_c;;
     d) phase_d;; e) phase_e;; f) phase_f;; g) phase_g;;
+    h) phase_h;; i) phase_i;;
     *) fail "unknown phase '$ph'";;
   esac
 done
@@ -709,5 +905,6 @@ done
 echo
 echo "══════════════════════════════════════════════════════════════════"
 echo " PASS — split-brain, outage, foreign hands, space pressure,"
-echo " kill -9 crash loops, and endurance churn all held"
+echo " kill -9 crash loops, endurance churn, the zombie hub, and the"
+echo " neighbor-prefix sweep all held"
 echo "══════════════════════════════════════════════════════════════════"
