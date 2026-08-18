@@ -380,6 +380,29 @@ pub async fn evict_file(
         warn!("tier evict: marker xattr on {}: {} (row is authoritative)", path.display(), e);
     }
 
+    // Consult-map marker BEFORE the truncate — the RAM mirror of C2's
+    // durable order. The truncate below includes an fsync (multi-ms):
+    // inserting the marker after it would leave a window where the
+    // file is already a 0-byte stub but no consult can see a marker —
+    // GETATTR serves size 0 and READs serve the empty stub as content
+    // (the chaos drill's endurance phase caught git reading empty
+    // objects/refs in exactly that window; READs and GETATTRs
+    // deliberately take no gate ticket, so the marker's visibility is
+    // their ONLY protection). Between insert and truncate the marker
+    // merely answers DELAY on a still-intact file — a hydrator racing
+    // in bounces off this eviction's gate exclusion and retries after
+    // the stub is real.
+    markers().insert(
+        (dev, ino),
+        EvictedMeta {
+            size: row.size,
+            key: row.key.clone(),
+            generation: row.generation,
+            etag: row.etag.clone(),
+            crc64_b64: row.crc64_b64.clone(),
+        },
+    );
+
     if take_fail_after_row(dev, ino) {
         // TEST-ONLY simulated crash in the C2 window: marker durable,
         // bytes intact. The reconciler owns this state.
@@ -393,23 +416,12 @@ pub async fn evict_file(
             // Marker is durable but bytes remain — exactly the state
             // the reconciler repairs at next startup; repair it now.
             warn!("tier evict: truncate {} failed: {} — rolling the marker back", path.display(), e);
+            forget(dev, ino);
             let _ = backend.tier_delete_evicted(dev, ino).await;
             remove_xattr_best_effort(path);
             return EvictOutcome::Refused(Refusal::Io(format!("truncate: {}", e)));
         }
     }
-
-    // Marker into the consult map BEFORE the exclusion drops.
-    markers().insert(
-        (dev, ino),
-        EvictedMeta {
-            size: row.size,
-            key: row.key.clone(),
-            generation: row.generation,
-            etag: row.etag.clone(),
-            crc64_b64: row.crc64_b64.clone(),
-        },
-    );
 
     // Capacity returns only now — after the destructive step is
     // confirmed complete.
@@ -1007,7 +1019,12 @@ mod tests {
             "the crash window leaves bytes INTACT (marker-before-truncate)"
         );
         assert_eq!(r.backend.tier_list_evicted().await.unwrap().len(), 1, "marker durable");
-        assert!(!is_evicted(dev, ino), "no in-memory marker — the process 'died'");
+        // The consult marker goes in BEFORE the truncate (the chaos
+        // drill's find: the truncate fsync is a multi-ms window in
+        // which un-gated READs/GETATTRs would otherwise see a bare
+        // 0-byte stub) — so at the crash point it IS visible.
+        assert!(is_evicted(dev, ino), "marker visible before any destruction");
+        forget(dev, ino); // process death wipes RAM
 
         // "Restart": reconcile from the durable rows.
         let report = reconcile(&r.backend).await;

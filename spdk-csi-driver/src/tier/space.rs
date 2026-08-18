@@ -138,6 +138,17 @@ pub fn view() -> Option<View> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoSpace;
 
+/// A refusal is the expensive-if-wrong branch: before answering
+/// NOSPC off the CACHED gauge (2 s refresher), force one statvfs and
+/// re-check — a client that just deleted a big file must not spend
+/// the refresher's window being refused on stale numbers (the chaos
+/// drill caught exactly that: rm 200 MB, then every create for ~1 s
+/// refused). Admits never pay this; statvfs is a µs-scale read.
+fn headroom_for_refusal(s: &Arc<Space>) -> u64 {
+    s.refresh();
+    s.headroom()
+}
+
 /// A10 admission for byte-extending mutations (WRITE/ALLOCATE/COPY/
 /// CLONE). `Err` ⇒ answer `NFS4ERR_NOSPC`. `len` is the upper bound of
 /// new allocation; paths outside the configured root always pass.
@@ -147,6 +158,9 @@ pub fn admit_bytes(path: &Path, len: u64) -> Result<(), NoSpace> {
         return Ok(());
     }
     if s.headroom() >= len.max(4096) {
+        return Ok(());
+    }
+    if headroom_for_refusal(&s) >= len.max(4096) {
         return Ok(());
     }
     meter::bump(Counter::NospcWriteRefusals);
@@ -162,7 +176,7 @@ pub fn admit_hydration(path: &Path, len: u64) -> bool {
     if !path.starts_with(&s.cfg.root) {
         return true;
     }
-    s.headroom() >= len
+    s.headroom() >= len || headroom_for_refusal(&s) >= len
 }
 
 /// A10 admission for object creation (OPEN-create / CREATE).
@@ -172,6 +186,9 @@ pub fn admit_create(path: &Path) -> Result<(), NoSpace> {
         return Ok(());
     }
     if s.headroom() >= CREATE_COST {
+        return Ok(());
+    }
+    if headroom_for_refusal(&s) >= CREATE_COST {
         return Ok(());
     }
     meter::bump(Counter::NospcCreateRefusals);

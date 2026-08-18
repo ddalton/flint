@@ -343,19 +343,30 @@ impl ObjectStore for S3Store {
         let mut key_marker: Option<String> = None;
         let mut id_marker: Option<String> = None;
         loop {
+            // NO server-side Prefix: MinIO's ListMultipartUploads
+            // returns an upload for its EXACT key as prefix but NOT
+            // for a directory-style prefix (the chaos drill caught
+            // the A8 abort-sweep silently seeing nothing there, so
+            // kill -9 orphans survived every restart). Real S3
+            // honors both — list bucket-wide and filter in code,
+            // correct on either store. Buckets are per-volume, so
+            // bucket-wide is the prefix's world plus control objects.
             let resp = self
                 .client
                 .list_multipart_uploads()
                 .bucket(&self.bucket)
-                .prefix(prefix)
                 .set_key_marker(key_marker.take())
                 .set_upload_id_marker(id_marker.take())
                 .send()
                 .await
                 .map_err(|e| map_err("list_multipart_uploads", e))?;
             for u in resp.uploads() {
+                let key = u.key().unwrap_or_default();
+                if !key.starts_with(prefix) {
+                    continue;
+                }
                 out.push(PendingUpload {
-                    key: u.key().unwrap_or_default().to_string(),
+                    key: key.to_string(),
                     upload_id: u.upload_id().unwrap_or_default().to_string(),
                     initiated_unix: dt_unix(u.initiated()),
                 });

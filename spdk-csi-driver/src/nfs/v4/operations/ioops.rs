@@ -1257,10 +1257,38 @@ impl IoOperationHandler {
             // Read data using positioned I/O (no seek needed - concurrent safe!)
             let mut buffer = vec![0u8; actual_count];
             let bytes_read = file.read_at(&mut buffer, offset)?;
-            
+
+            // Re-consult AFTER the read (review finding (b), caught
+            // live by the chaos drill's evict/hydrate churn: git once
+            // read an empty .git/config). READs are deliberately
+            // lock-free, so an eviction can land between the consult
+            // above and the pread — the pread then sees the truncated
+            // stub and would serve a short/empty result as if it were
+            // file content. C2's marker-BEFORE-truncate order makes
+            // this re-check airtight: if the truncate could have
+            // clipped this read, the marker was already set when the
+            // pread returned — answer DELAY; the retry hydrates.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if crate::tier::evict::is_evicted(metadata.dev(), metadata.ino()) {
+                    crate::tier::hydrate::request(
+                        metadata.dev(),
+                        metadata.ino(),
+                        &path,
+                        crate::tier::hydrate::Trigger::Read,
+                    );
+                    crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "tier: file evicted mid-read (awaiting hydration)",
+                    ));
+                }
+            }
+
             buffer.truncate(bytes_read);
             let eof = offset + bytes_read as u64 >= file_size;
-            
+
             Ok((Bytes::from(buffer), eof))
         }).await;
 

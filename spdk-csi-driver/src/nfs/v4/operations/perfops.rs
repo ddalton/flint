@@ -768,6 +768,21 @@ impl PerfOperationHandler {
                 }
             }
 
+            // Re-consult the SOURCE after the copy loop (review
+            // finding (b) — same shape as READ's mid-read race): an
+            // eviction landing mid-loop clips the source reads to stub
+            // bytes. C2's marker-before-truncate makes this airtight;
+            // DELAY discards the partial copy and the retry re-copies
+            // hydrated bytes over it.
+            if crate::tier::evict::file_is_evicted(&src_file) {
+                request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
+                crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "tier: COPY source evicted mid-copy (awaiting hydration)",
+                ));
+            }
+
             // Unconditional, and NOT `if sync`. The reply hardcodes
             // wr_committed = FILE_SYNC4, so the durability claim was true
             // only when the client happened to ask for a synchronous copy.
@@ -1050,6 +1065,17 @@ impl PerfOperationHandler {
             }
 
             let copied = copy_range(&src_file, &dst_file, src_offset, dst_offset, len)?;
+            // Re-consult the SOURCE after the copy (review finding (b)
+            // — an eviction mid-copy clips the source to stub bytes;
+            // C2's order makes the post-check airtight).
+            if crate::tier::evict::file_is_evicted(&src_file) {
+                request_by_file(&src_file, &src_path, crate::tier::hydrate::Trigger::Read);
+                crate::tier::meter::bump(crate::tier::meter::Counter::EvictedOpDelays);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "tier: CLONE source evicted mid-copy (awaiting hydration)",
+                ));
+            }
             bump_change_counter(&dst_file);
             // A2 dirty capture (copy fallback branch).
             crate::tier::capture::note_file(
