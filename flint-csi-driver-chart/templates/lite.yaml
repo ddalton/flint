@@ -16,10 +16,30 @@ run concurrently.
 State backend is sqlite ON THE PVC: the persistent server id keeps
 client filehandles valid across pod restarts (no BADHANDLE storm), and
 locks/sessions reload on the way up.
+
+The S3 tier (lite.tier.enabled) adds NO objects — it renders into the
+ConfigMap's tier: section plus credentials env on the Deployment (the
+Secret is operator-supplied, never created here) and a startupProbe
+sized for the pre-listener epoch claim / DR import.
 */}}
 {{- if .Values.lite.enabled }}
 {{- if .Values.pnfs.enabled }}
 {{- fail "lite.enabled and pnfs.enabled are two servers in one release — the hub cluster installs the lite profile alone; a full pNFS cluster is its own release (the server likewise refuses standalone + dataServers at boot)" }}
+{{- end }}
+{{- if and .Values.lite.tier.enabled (not .Values.lite.tier.bucket) }}
+{{- fail "lite.tier.enabled needs lite.tier.bucket — the hub has no bucket to publish to (the server refuses the same at boot); set lite.tier.bucket or disable the tier" }}
+{{- end }}
+{{- if .Values.lite.tier.enabled }}
+{{- /* The server's YAML parser IGNORES unknown keys, so a typo'd knob
+would silently take the default — and the knobs are the economics
+gate's REQUIREMENTS. Refuse at render instead. Keep this list in sync
+with TierConfig (spdk-csi-driver/src/pnfs/config.rs). */}}
+{{- $known := list "flushFloorSecs" "quiesceSecs" "tickSecs" "wholePutMaxBytes" "partFloorBytes" "epochHeartbeatSecs" "epochLeaseMisses" "reserveBytes" "watermarkPct" "ballastBytes" "hydrateHoldSecs" "hydrateConcurrency" }}
+{{- range $k, $_ := .Values.lite.tier.settings }}
+{{- if not (has $k $known) }}
+{{- fail (printf "lite.tier.settings.%s is not a TierConfig knob (the server would silently ignore it — see spdk-csi-driver/src/pnfs/config.rs). Valid keys: %s. Identity fields (bucket, keyPrefix, endpoint, importOnStart) have first-class values under lite.tier" $k (join ", " $known)) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- $img := .Values.lite.image.ref }}
 {{- if not $img }}
@@ -63,6 +83,25 @@ data:
         access:
           - network: 0.0.0.0/0
             permissions: rw
+    {{- if .Values.lite.tier.enabled }}
+    # S3 cold tier. The volume epoch is claimed BEFORE the listener
+    # binds (an unfenced hub never serves); ".flint/" under the prefix
+    # is reserved for tier control objects. Unset knobs take the
+    # server defaults — the economics gate's assumptions.
+    tier:
+      enabled: true
+      bucket: {{ .Values.lite.tier.bucket | quote }}
+      {{- with .Values.lite.tier.keyPrefix }}
+      keyPrefix: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.lite.tier.endpoint }}
+      endpoint: {{ . | quote }}
+      {{- end }}
+      importOnStart: {{ .Values.lite.tier.importOnStart }}
+      {{- with .Values.lite.tier.settings }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+    {{- end }}
     logging:
       level: {{ .Values.lite.logLevel | default "info" }}
       format: text
@@ -146,6 +185,18 @@ spec:
           env:
             - name: RUST_LOG
               value: {{ .Values.lite.logLevel | default "info" | quote }}
+            {{- if and .Values.lite.tier.enabled .Values.lite.tier.region }}
+            - name: AWS_REGION
+              value: {{ .Values.lite.tier.region | quote }}
+            {{- end }}
+          {{- if and .Values.lite.tier.enabled .Values.lite.tier.credentialsSecret }}
+          # S3 credentials ride an operator-supplied Secret verbatim
+          # (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY [+ AWS_SESSION_TOKEN]).
+          # Absent = the SDK's ambient chain (IRSA / instance role).
+          envFrom:
+            - secretRef:
+                name: {{ .Values.lite.tier.credentialsSecret }}
+          {{- end }}
           ports:
             - containerPort: 2049
               name: nfs
@@ -159,6 +210,18 @@ spec:
               port: 2049
             initialDelaySeconds: 10
             periodSeconds: 15
+          {{- if .Values.lite.tier.enabled }}
+          # Tier startup runs BEFORE the socket opens: the epoch claim
+          # may wait out a dead prior holder's lease (~60s default) and
+          # a DR-restore import walks the whole bucket. Liveness and
+          # readiness only begin once this succeeds — without it the
+          # liveness probe would kill a takeover or import at ~55s.
+          startupProbe:
+            tcpSocket:
+              port: 2049
+            periodSeconds: 10
+            failureThreshold: {{ .Values.lite.tier.startupFailureThreshold }}
+          {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/flint

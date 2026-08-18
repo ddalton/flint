@@ -16,6 +16,16 @@ Bound (backed by {{ .Values.lite.persistence.storageClassName | default "the clu
 Consumers mount it as plain NFS — no flint software needed on their
 clusters. Recipes (static PV and dynamic PVC-per-workspace):
   docs/flint-lite.md
+{{- if .Values.lite.tier.enabled }}
+
+S3 tier ON: bucket "{{ .Values.lite.tier.bucket }}"{{ with .Values.lite.tier.keyPrefix }}, prefix "{{ . }}"{{ end }}.
+First startup may take a while BEFORE the NFS port opens: the hub
+claims the volume epoch (waiting out a dead prior holder's lease,
+~60s default) and, on a fresh PVC over a non-empty bucket, imports the
+namespace (the DR-restore path). The startupProbe budgets for this —
+a pod in Running/not-Ready is working, not stuck. Watch progress:
+  kubectl logs -n {{ .Release.Namespace }} deploy/flint-lite -f
+{{- end }}
 {{- else }}
 Flint CSI driver installed in namespace "{{ .Release.Namespace }}".
 

@@ -986,6 +986,43 @@ mod tests {
     }
 
     #[test]
+    fn chart_tier_knob_list_matches_tier_config() {
+        // The lite chart refuses unknown `lite.tier.settings` keys at
+        // render, because this parser IGNORES unknown fields and a
+        // typo'd knob would silently take its default. That guard is a
+        // hand-written list in the template, and hand-written schema
+        // copies drift; this test derives the knob set from TierConfig
+        // itself, so adding a field here fails until the chart learns it.
+        let tpl = include_str!("../../../flint-csi-driver-chart/templates/lite.yaml");
+        let known_line = tpl
+            .lines()
+            .find(|l| l.contains("$known := list"))
+            .expect("lite.yaml lost its $known knob list");
+        let chart: std::collections::BTreeSet<String> = known_line
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect();
+
+        let t: TierConfig = serde_yaml::from_str("bucket: b\n").unwrap();
+        let ser = serde_yaml::to_value(&t).unwrap();
+        let identity = ["enabled", "bucket", "keyPrefix", "endpoint", "importOnStart"];
+        let schema: std::collections::BTreeSet<String> = ser
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap().to_string())
+            .filter(|k| !identity.contains(&k.as_str()))
+            .collect();
+
+        assert_eq!(
+            chart, schema,
+            "the chart's $known settings list drifted from TierConfig"
+        );
+    }
+
+    #[test]
     fn test_default_config() {
         let config = PnfsConfig {
             mode: PnfsMode::Standalone,
