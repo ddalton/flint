@@ -80,15 +80,40 @@ impl EpochConfig {
 /// The fencing flag shared between the heartbeat and the flusher. The
 /// flusher re-verifies through this before EVERY publish; the
 /// heartbeat fences it the moment a renewal fails.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub struct EpochGuard {
     epoch: AtomicU64,
     fenced: AtomicBool,
+    /// Unix time of the last successful renew (the claim counts as
+    /// one) — the A12 reporter's lease-age gauge. Telemetry only;
+    /// liveness decisions stay with the heartbeat/fence machinery.
+    last_renew_unix: AtomicU64,
 }
 
 impl EpochGuard {
     /// Held at `epoch` (the claim's result).
     pub fn held(epoch: u64) -> Arc<Self> {
-        Arc::new(EpochGuard { epoch: AtomicU64::new(epoch), fenced: AtomicBool::new(false) })
+        Arc::new(EpochGuard {
+            epoch: AtomicU64::new(epoch),
+            fenced: AtomicBool::new(false),
+            last_renew_unix: AtomicU64::new(now_unix()),
+        })
+    }
+
+    /// The heartbeat notes each successful CAS renew here.
+    pub fn note_renew(&self) {
+        self.last_renew_unix.store(now_unix(), Ordering::Relaxed);
+    }
+
+    /// Seconds since the last successful renew (telemetry).
+    pub fn renew_age_secs(&self) -> u64 {
+        now_unix().saturating_sub(self.last_renew_unix.load(Ordering::Relaxed))
     }
 
     /// The current epoch if still held; `None` once fenced. Publishing
@@ -256,6 +281,7 @@ pub fn spawn_heartbeat(
                 Ok(next) => {
                     lease = next;
                     consecutive_failures = 0;
+                    guard.note_renew();
                     meter::bump(Counter::EpochRenews);
                 }
                 Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {

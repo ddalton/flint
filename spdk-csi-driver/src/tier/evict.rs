@@ -116,6 +116,13 @@ pub fn forget(dev: u64, ino: u64) {
     markers().remove(&(dev, ino));
 }
 
+/// A12 reporter gauge: currently-evicted (files, logical bytes).
+/// Process-global like the map itself.
+pub fn marker_stats() -> (usize, u64) {
+    let m = markers();
+    (m.len(), m.iter().map(|e| e.size).sum())
+}
+
 /// The full marker (hydration's work order).
 pub(crate) fn marker_meta(dev: u64, ino: u64) -> Option<EvictedMeta> {
     markers().get(&(dev, ino)).map(|m| m.clone())

@@ -30,6 +30,21 @@ macro_rules! counters {
                 $( $name: $name.load(Ordering::Relaxed), )+
             }
         }
+
+        impl MeterSnapshot {
+            /// Counter deltas since `prev` (monotonic counters;
+            /// saturating_sub only papers over restarts). The A12
+            /// reporter keys its silence on this.
+            pub fn delta_since(&self, prev: &MeterSnapshot) -> MeterSnapshot {
+                MeterSnapshot {
+                    $( $name: self.$name.saturating_sub(prev.$name), )+
+                }
+            }
+
+            pub fn is_zero(&self) -> bool {
+                *self == MeterSnapshot::default()
+            }
+        }
     };
 }
 
@@ -112,6 +127,9 @@ counters! {
     /// Keys the import REFUSED to re-ingest because their tombstone has
     /// not flushed (the resurrection guard).
     import_skipped_tombstoned,
+    /// Wall-clock milliseconds of COMPLETED restores (A12 reporter:
+    /// delta ÷ hydrations_completed delta = average restore latency).
+    hydration_millis,
 }
 
 #[inline]
@@ -167,6 +185,7 @@ pub enum Counter {
     ManifestFailures,
     ImportStubs,
     ImportSkippedTombstoned,
+    HydrationMillis,
 }
 
 impl Counter {
@@ -211,6 +230,7 @@ impl Counter {
             Counter::ManifestFailures => &manifest_failures,
             Counter::ImportStubs => &import_stubs,
             Counter::ImportSkippedTombstoned => &import_skipped_tombstoned,
+            Counter::HydrationMillis => &hydration_millis,
         }
     }
 }

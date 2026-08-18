@@ -131,6 +131,12 @@ pub fn install(
     h
 }
 
+/// Restores in flight right now (A12 reporter gauge). 0 when no
+/// hydrator is installed.
+pub fn inflight_count() -> usize {
+    current().map(|h| h.inflight.len()).unwrap_or(0)
+}
+
 /// A LOCAL hydrator for cross-module drills (step 12's DR drill runs
 /// restore_once directly) — deliberately NOT installed globally.
 #[cfg(test)]
@@ -253,10 +259,12 @@ pub(crate) async fn run(
             }
         }
 
+        let began = std::time::Instant::now();
         match restore_once(&h, dev, ino, &path).await {
             Ok(bytes) => {
                 meter::bump(Counter::HydrationsCompleted);
                 meter::add(Counter::HydrationBytes, bytes);
+                meter::add(Counter::HydrationMillis, began.elapsed().as_millis() as u64);
                 info!("tier hydrate: {} restored ({} bytes)", path.display(), bytes);
                 break;
             }

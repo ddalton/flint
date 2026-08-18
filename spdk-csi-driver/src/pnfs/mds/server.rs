@@ -799,8 +799,10 @@ impl MetadataServer {
         fcfg.part_floor = t.part_floor_bytes.max(store.min_part_size());
         let floor_s = t.flush_floor_secs;
         let quiesce_s = t.quiesce_secs;
-        // The hydrator and the watermark pass share the store.
+        // The hydrator, the watermark pass, and the A12 reporter share
+        // the store; the reporter also reads the guard.
         let orch_store = Arc::clone(&store);
+        let reporter_guard = Arc::clone(&guard);
         let orch = Arc::new(FlushOrchestrator::new(
             store,
             Arc::clone(&self.backend),
@@ -939,6 +941,17 @@ impl MetadataServer {
                 }
             }
         });
+
+        // A12: the tier reporter — silent when idle; one line per
+        // interval while active; WARNs on time-to-full and a wedged
+        // (stale-dirty) flush.
+        crate::tier::reporter::spawn(
+            Arc::clone(&self.backend),
+            Arc::clone(&orch_store),
+            t.key_prefix.clone(),
+            reporter_guard,
+        );
+
         info!(
             "🪣 tier: flush loop every {:?} (floor {}s, quiesce {}s)",
             tick, floor_s, quiesce_s
