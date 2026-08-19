@@ -72,42 +72,57 @@ for this plan; the findings change what is runnable and when.
   post-install, needs no disk-init. `flint-spdk` is the performance
   class and is gated on disk-init — leg D8 wants that one specifically.
 
-**Blocked — Phase C cannot run on trove as it stands:**
+**Phase C: unblocked by a trove patch (`f40588d`), NOT yet validated.**
 
-- **Two AWS clusters cannot run concurrently.** All clusters share one
-  Mac-side WireGuard utun, and `set_device_key` no-ops when a device
-  already exists, so cluster B inherits cluster A's Mac identity while
-  B's nodes were cloud-inited to expect B's key. B's nodes reject the
-  Mac's packets and kubectl for B never connects. Stated in trove's own
-  source as a known limit.
-- **Even if it could**, both clusters get an identical hardcoded pod
-  CIDR (`10.244.0.0/16`) and the kubeadm default service CIDR, and pod
-  traffic is VXLAN-encapsulated so pod networks never enter the VPC
-  route table. The plan's preferred routing shape — peered VPC with
-  routable pods — is unreachable.
-- **No AWS cloud-controller-manager is installed**, so a
-  `type: LoadBalancer` Service stays `Pending` forever. The internal-L4
-  and per-project-LB shapes are both unavailable.
-- **The security group admits only its own group** plus the operator's
-  Mac, and trove has no API to widen it.
+The obstacle was never the network — it was kubectl. Trove's Mac-side
+WireGuard device is a SINGLE shared utun, and `set_device_key` no-ops
+when a device already exists, so a second concurrent cluster inherits
+the first's Mac identity while its own nodes expect a different key.
+B's nodes reject the Mac and kubectl for B never connects.
 
-**The substitute for Phase C: a foreign consumer that is not a cluster.**
-Stand up one or two plain EC2 instances in the same VPC and AZ, running
-a kernel NFS client, and let them reach the hub through NodePort plus a
-hand-added SG rule, with `advertiseAddress` set to
-`<node-private-ip>:<nodePort>`. That is a genuinely foreign client — its
-own kernel, its own NFS client identity, no shared API server — and it
-exercises the address contract, trunking, read amplification, partition
-behaviour and wake-from-behind-the-boundary. **State the limit in the
-report: it proves the mount path and the address contract, not two
-Kubernetes control planes.** Only C6 (suspend under a *kubelet-driven*
-consumer) genuinely needs a kubelet, and it can run from a second node
-inside cluster A that reaches the hub only via the advertised address.
+Node bootstrap never needed WireGuard at all — `admin.conf` and the join
+command are read over **SSM** — so the dependency was only the operator's
+own kubectl. `TROVE_AWS_PUBLIC_KUBECTL=1` now: adds the instance's
+public IPv4 (from IMDS) to the API server's cert SANs, opens 6443 in the
+cluster SG to this Mac's `/32`, and points the kubeconfig at the public
+IP. No shared-utun coupling, so two clusters coexist.
 
-**Cut the partition with a Cilium policy, not an SG revoke.** The
-`rolesanywhere` identity's IAM policy has no
-`ec2:RevokeSecurityGroupIngress`, so the SG cannot be narrowed back
-once widened. A NetworkPolicy on the hub denying the consumer's CIDR is
+**This patch compiles and unit-tests, but has never provisioned
+anything. The first create is its test** — if cluster A does not come up
+clean on it, fall back to the substitute rig below rather than debugging
+trove on the drill's budget.
+
+Know what the flag costs: it puts an API server on the internet —
+`/32`-restricted, but on the internet — and the `rolesanywhere` identity
+has no `ec2:RevokeSecurityGroupIngress`, so the rule cannot be narrowed
+back and lives until the SG is deleted with the cluster. If this Mac's
+egress IP changes mid-run, kubectl stops working.
+
+**Still true regardless of the patch**, and it shapes Phase C:
+
+- Both clusters get an identical hardcoded pod CIDR (`10.244.0.0/16`)
+  and the kubeadm default service CIDR, and pod traffic is VXLAN, so pod
+  networks never enter the VPC route table. **Cross-cluster pod-to-pod
+  routing is impossible.** It is also not needed: the drill mounts
+  through a NodePort on cluster A's node IP, which is unique per
+  instance in the shared VPC.
+- **No AWS cloud-controller-manager**, so `type: LoadBalancer` stays
+  `Pending` forever. NodePort is the only shape, and
+  `advertiseAddress` is set to `<A-node-private-ip>:<nodePort>`.
+- The SG admits only its own group plus the Mac, so cluster B's nodes
+  need a hand-added ingress rule on A's SG.
+
+**Fallback if the patch misbehaves:** one cluster plus one or two plain
+EC2 instances in the same VPC and AZ running a kernel NFS client,
+reaching the hub the same way. That is still a genuinely foreign client
+— own kernel, own NFS client identity, no shared API server — and it
+covers every Phase C leg except C6, which needs a real kubelet. Say so
+in the report: it would prove the mount path and the address contract,
+not two Kubernetes control planes.
+
+**Cut the partition with a Cilium policy, not an SG revoke** — no
+`ec2:RevokeSecurityGroupIngress` means a widened SG cannot be narrowed
+back. A NetworkPolicy on the hub denying the consumer's CIDR is
 in-cluster, needs no AWS permission, and Cilium enforces it.
 
 **Manual work trove will not do:**
@@ -228,8 +243,13 @@ chooser only accepts an AZ quoting **every** requested type.
 |---|---|---|---|
 | Cluster A control plane | 1 | i4i.large spot | ~0.044 |
 | Cluster A workers | 2 | i4i.large spot | ~0.088 |
-| Foreign consumers (plain EC2) | 2 | i4i.large spot | ~0.088 |
+| Cluster B control plane | 1 | i4i.large spot | ~0.044 |
+| Cluster B worker | 1 | i4i.large spot | ~0.044 |
 | **Total** | **5** | | **~$0.22/hr** |
+
+Cluster B exists only to mount, so one worker is enough. If the
+public-kubectl patch misbehaves, the same two instances become plain EC2
+consumers instead and the cost is unchanged.
 
 At ~16 h of drill wall clock that is **≈ $3.50 of compute**. Transfer is
 ≈ $0: S3 is in-region (free both ways) and everything is pinned to one
@@ -453,14 +473,16 @@ patch annotations → 200; read `status.address` → 200; read the operator's Le
 *Anti-vacuity:* the allowed calls must succeed in the same session as the denied
 ones — a bad kubeconfig denies everything and would otherwise "pass".
 
-### Phase C — the foreign consumer (requires the substitute rig, see §2)
+### Phase C — cross-cluster (two clusters, via the public-kubectl patch)
 
-**Not two clusters.** Trove cannot run two AWS clusters concurrently, and
-even sequentially their pod and service CIDRs collide. These legs run
-against plain EC2 instances in the same VPC and AZ, mounting through
-NodePort with `advertiseAddress` set to `<node-private-ip>:<nodePort>`.
-That proves the mount path and the address contract; it does not prove
-two Kubernetes control planes, and the report must say so.
+Two trove clusters, same VPC and AZ, both created with
+`TROVE_AWS_PUBLIC_KUBECTL=1`. Cluster B mounts cluster A's hub through a
+NodePort on A's node private IP, with `advertiseAddress` set to
+`<A-node-private-ip>:<nodePort>` and a hand-added ingress rule on A's SG
+admitting B's. Pod-to-pod routing across the boundary is impossible
+(identical pod CIDRs, VXLAN) and is not used. If the patch misbehaves,
+run these against the EC2 substitute rig instead and label the report
+accordingly — see §2.
 
 | Leg | Claim | Time | Bytes |
 |---|---|---|---|
