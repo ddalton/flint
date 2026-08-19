@@ -1373,6 +1373,38 @@ impl PerfOperationHandler {
         let what = op.what;
         let start = op.offset;
         let res = tokio::task::spawn_blocking(move || -> std::io::Result<(bool, u64)> {
+            // An EVICTED file is a 0-byte stub on disk; its logical
+            // extent lives in the marker. Answering from the stub's
+            // length tells a sparse-aware reader (cp --sparse, tar)
+            // the file is empty — the same class of corruption the
+            // F15 audit above fixed for the fake-OK stub. A restore is
+            // dense (the manifest does not preserve sparseness), so
+            // [0, logical) is all data and the only hole is the
+            // virtual one at EOF. Decided BEFORE any lseek, and
+            // deliberately without hydrating: SEEK moves no bytes, so
+            // parking it behind a DELAY would force a full restore for
+            // what is a metadata question. No marker_cycle guard for
+            // the same reason — nothing is served from the file, so a
+            // stale answer is bounded by ordinary GETATTR staleness.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let lmeta = std::fs::metadata(&path)?;
+                if let Some(logical) = crate::tier::evict::logical_size(lmeta.dev(), lmeta.ino()) {
+                    // RFC 7862 §15.11.3, as for the dense case below.
+                    if start > logical {
+                        return Err(std::io::Error::from_raw_os_error(nix::libc::ENXIO));
+                    }
+                    return Ok(match what {
+                        // Dense: data begins exactly where asked,
+                        // unless the ask is the EOF boundary itself.
+                        SeekType::Data => (start >= logical, start),
+                        // "All files MUST have a virtual hole at the
+                        // end of the file."
+                        SeekType::Hole => (true, logical),
+                    });
+                }
+            }
             #[cfg(target_os = "linux")]
             {
                 use std::os::fd::AsRawFd;
@@ -2459,6 +2491,53 @@ mod tests {
             .await;
         assert_eq!(res.status, Nfs4Status::Ok);
         assert!(res.offset >= len, "implicit hole at EOF");
+    }
+
+    /// An evicted stub is 0 bytes locally with its real extent in the
+    /// marker. Before this, SEEK answered from the stub: SEEK_DATA at 0
+    /// hit lseek's ENXIO and reported "eof at 0" — an empty file to
+    /// `cp --sparse=always` and tar, which then wrote a hole-only copy
+    /// of a file that has real bytes in the bucket.
+    #[tokio::test]
+    async fn seek_serves_the_logical_extent_of_an_evicted_stub() {
+        use std::os::unix::fs::MetadataExt;
+        const LOGICAL: u64 = 4242;
+        let (handler, temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        let path = temp.path().join("evicted.bin");
+        std::fs::write(&path, b"").unwrap();
+        let md = std::fs::metadata(&path).unwrap();
+        let (dev, ino) = (md.dev(), md.ino());
+        crate::tier::capture::force_enable();
+        crate::tier::capture::forget(dev, ino);
+        crate::tier::evict::install_marker_for_tests(dev, ino, LOGICAL);
+        ctx.current_fh = Some(handler.fh_mgr.get_or_create_handle(&path).unwrap());
+        let seek = |offset, what| {
+            let op = SeekOp { stateid: create_test_stateid(&handler, 1), offset, what };
+            handler.handle_seek(op, &ctx)
+        };
+
+        // Dense restore: data begins exactly where asked.
+        let res = seek(0, SeekType::Data).await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+        assert_eq!((res.eof, res.offset), (false, 0), "the stub is not an empty file");
+
+        let res = seek(LOGICAL / 2, SeekType::Data).await;
+        assert_eq!((res.eof, res.offset), (false, LOGICAL / 2));
+
+        // The only hole is the virtual one at EOF.
+        let res = seek(0, SeekType::Hole).await;
+        assert_eq!((res.eof, res.offset), (true, LOGICAL));
+
+        // At the EOF boundary there is no more data.
+        let res = seek(LOGICAL, SeekType::Data).await;
+        assert_eq!((res.eof, res.offset), (true, LOGICAL));
+
+        // Past EOF is NXIO, measured against the LOGICAL size.
+        let res = seek(LOGICAL + 1, SeekType::Data).await;
+        assert_eq!(res.status, Nfs4Status::NxIo);
+
+        crate::tier::evict::forget(dev, ino);
     }
 
     #[tokio::test]

@@ -2951,6 +2951,45 @@ impl FileOperationHandler {
                     crate::nfs::v4::change_counter::bump_path(parent);
                 }
 
+                // A newly created REGULAR file (including the special-file
+                // stand-ins, which are regular files on disk) needs a
+                // capture note or it never becomes a bucket object: no
+                // note means no dirty row, no generation row, and nothing
+                // for the manifest to record as restorable, so the file
+                // exists locally and is absent from every restore. Dirs
+                // and symlinks are exempt — they carry no S3 object and
+                // the manifest reconstructs them from the tree walk.
+                // Inside a write ticket, per gate.rs's straggler
+                // invariant; see the matching note in OPEN(create).
+                let creates_regular_file = matches!(
+                    op.objtype,
+                    Nfs4FileType::Regular
+                        | Nfs4FileType::Socket
+                        | Nfs4FileType::Fifo
+                        | Nfs4FileType::BlockDevice
+                        | Nfs4FileType::CharDevice
+                );
+                if creates_regular_file {
+                    if let Err(crate::tier::gate::Excluded) =
+                        crate::tier::gate::enter_path(&obj_path).map(|_ticket| {
+                            crate::tier::capture::note_path(
+                                &obj_path,
+                                crate::tier::capture::Mutation::Whole,
+                            )
+                        })
+                    {
+                        warn!(
+                            "CREATE: write gate excluded a fresh file at {:?} — noting \
+                             dirty outside the ticket",
+                            obj_path
+                        );
+                        crate::tier::capture::note_path(
+                            &obj_path,
+                            crate::tier::capture::Mutation::Whole,
+                        );
+                    }
+                }
+
                 // Stamp the caller's AUTH_SYS identity on the new object
                 // (dirs/symlinks/stand-ins) — client-side permission checks
                 // compare mode bits against st_uid, so a root-owned 0700
@@ -3914,6 +3953,38 @@ mod tests {
     }
 
     /// Step 10 (C2): GETATTR of an evicted file serves the LOGICAL
+    /// A file created and never written must still be dirty, or it
+    /// never becomes a bucket object: the flush has nothing to publish,
+    /// the manifest cannot list it as restorable, and `rpoClean` reads
+    /// true while the file exists only on the PVC. Hibernate then
+    /// deletes the PVC and `touch .gitkeep` is gone for good.
+    #[tokio::test]
+    async fn a_created_but_never_written_file_is_dirty() {
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, temp) = create_test_handler();
+        let mut ctx = CompoundContext::new(0);
+        ctx.current_fh = Some(handler.fh_mgr.get_or_create_handle(temp.path()).unwrap());
+
+        let res = handler
+            .handle_create(
+                CreateOp {
+                    objtype: Nfs4FileType::Regular,
+                    objname: "gitkeep".to_string(),
+                    linkdata: None,
+                    createattrs: Fattr4 { attrmask: vec![], attr_vals: vec![] },
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(res.status, Nfs4Status::Ok);
+
+        let md = std::fs::metadata(temp.path().join("gitkeep")).unwrap();
+        let cap = crate::tier::capture::snapshot(md.dev(), md.ino())
+            .expect("a fresh create must leave a capture entry");
+        assert!(cap.is_dirty(), "the birth of a file is a mutation the tier must publish");
+    }
+
     /// size from the marker — the 0-byte stub would read as
     /// truncation.
     #[test]

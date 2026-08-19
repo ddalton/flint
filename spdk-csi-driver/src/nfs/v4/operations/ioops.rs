@@ -632,6 +632,36 @@ impl IoOperationHandler {
                         if let Some(parent) = file_path.parent() {
                             crate::nfs::v4::change_counter::bump_path(parent);
                         }
+                        // The birth is itself a mutation the tier must
+                        // see. Without this note a file that is created
+                        // and never written has no capture note, no
+                        // dirty row and no generation row, so it is
+                        // absent from the manifest — `touch .gitkeep`
+                        // survives locally but does not exist in the
+                        // bucket, and any restore silently loses it.
+                        // Noted inside a write ticket so it cannot land
+                        // in a swapped-out epoch (gate.rs's straggler
+                        // invariant). A fresh inode cannot be under
+                        // eviction, so the refusal arm is unreachable
+                        // in practice — but if it ever fires, note
+                        // anyway: a pessimal Whole beats a lost file.
+                        match crate::tier::gate::enter_path(&file_path) {
+                            Ok(_ticket) => crate::tier::capture::note_path(
+                                &file_path,
+                                crate::tier::capture::Mutation::Whole,
+                            ),
+                            Err(crate::tier::gate::Excluded) => {
+                                warn!(
+                                    "OPEN(create): write gate excluded a fresh file at {:?} — \
+                                     noting dirty outside the ticket",
+                                    file_path
+                                );
+                                crate::tier::capture::note_path(
+                                    &file_path,
+                                    crate::tier::capture::Mutation::Whole,
+                                );
+                            }
+                        }
                     }
 
                     // Fresh create without an explicit createattrs owner:

@@ -50,7 +50,8 @@ pub struct ImportConfig<'a> {
     pub intent_path: Option<&'a Path>,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportReport {
     pub dirs_restored: usize,
     pub symlinks_restored: usize,
@@ -493,6 +494,103 @@ async fn ingest_file(
     debug!("tier import: {} ← {} ({} bytes, gen {})", local.display(), stub.key, stub.size, stub.generation);
 }
 
+/// Adopt an existing local tree that predates the tier.
+///
+/// The dangerous boot shape: a PVC that already holds files, bound to a
+/// bucket that has never seen them. Nothing marks those files dirty —
+/// capture only notes mutations, and these happened before the tier
+/// existed — so the flusher publishes nothing, the manifest lists
+/// nothing, and the RPO predicate reports a perfectly clean volume
+/// whose every byte exists only on the PVC. Hibernating that share
+/// deletes the entire project.
+///
+/// The fix is to treat pre-existing files as what they are: unpublished
+/// work. One walk at startup, whole-dirty for every regular file with
+/// no generation row, and the ordinary flush cycle uploads them.
+///
+/// Deliberately NOT run on every tier enable. The caller gates this on
+/// the one shape that can produce it — fresh tier state, no manifest in
+/// the bucket, non-empty export root — because marking a large tree
+/// whole-dirty is expensive and, anywhere else, wrong.
+pub async fn adopt_local_tree(
+    backend: &Arc<dyn StateBackend>,
+    export_root: &Path,
+) -> AdoptReport {
+    let mut rep = AdoptReport::default();
+
+    fn walk(dir: &Path, rep: &mut AdoptReport, marked: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            rep.unreadable_dirs += 1;
+            return;
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            let Ok(md) = p.symlink_metadata() else { continue };
+            if md.is_dir() {
+                // The tier's own control namespace is never client data.
+                if ent.file_name() == crate::tier::epoch::RESERVED_DIR {
+                    continue;
+                }
+                walk(&p, rep, marked);
+            } else if md.is_file() {
+                // Symlinks and specials carry no bucket object; the
+                // manifest reconstructs them from the tree walk.
+                marked.push(p);
+            }
+        }
+    }
+
+    let root = export_root.to_path_buf();
+    let (mut marked, walked) = match tokio::task::spawn_blocking(move || {
+        let mut r = AdoptReport::default();
+        let mut marked = Vec::new();
+        walk(&root, &mut r, &mut marked);
+        (marked, r)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("tier adopt: tree walk task failed: {} — nothing marked", e);
+            return rep;
+        }
+    };
+    rep.unreadable_dirs = walked.unreadable_dirs;
+
+    for path in marked.drain(..) {
+        // Inside a write ticket, so the note cannot land in an epoch
+        // the flusher has already taken (gate.rs's straggler rule).
+        match crate::tier::gate::enter_path(&path) {
+            Ok(_ticket) => {
+                crate::tier::capture::note_path(&path, crate::tier::capture::Mutation::Whole);
+                rep.marked_dirty += 1;
+            }
+            Err(crate::tier::gate::Excluded) => rep.skipped_excluded += 1,
+        }
+    }
+
+    // Push the RAM marks into the durable dirty set immediately: an
+    // adopt that only lived in memory would be undone by a crash
+    // before the first flush, silently restoring the original hazard.
+    if let Err(e) = crate::tier::durable::drain_pending(backend).await {
+        warn!(
+            "tier adopt: durable dirty-bit write failed: {} — {} file(s) are dirty in \
+             RAM only and would be lost to a crash before the first flush",
+            e, rep.marked_dirty
+        );
+    }
+    rep
+}
+
+/// What [`adopt_local_tree`] did.
+#[derive(Debug, Default, PartialEq, Eq, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptReport {
+    pub marked_dirty: usize,
+    pub skipped_excluded: usize,
+    pub unreadable_dirs: usize,
+}
+
 /// Resume hygiene: delete stray `.flint-import.*` temps, then rows
 /// whose path never materialized (identity no longer resolves) — the
 /// crashed-import residue the reconciler's orphan arm defers to us.
@@ -656,6 +754,39 @@ mod tests {
             crate::tier::epoch::EpochGuard::held(1),
         );
         Rig { _dir: dir, root, mem, backend, orch }
+    }
+
+    /// The PVC-predates-its-bucket hazard. Files that existed before
+    /// the tier was switched on are invisible to capture, so nothing
+    /// publishes them, the manifest cannot list them, and the RPO
+    /// predicate reports a volume the bucket cannot actually rebuild.
+    /// A hibernate on that verdict deletes the whole project.
+    #[tokio::test]
+    async fn adopting_a_pre_tier_tree_marks_it_for_publication() {
+        let r = rig();
+        std::fs::create_dir_all(r.root.join("src/nested")).unwrap();
+        std::fs::write(r.root.join("README.md"), b"docs").unwrap();
+        std::fs::write(r.root.join("src/nested/main.rs"), b"fn main() {}").unwrap();
+        std::fs::write(r.root.join("empty.txt"), b"").unwrap();
+        // The tier's own control namespace is not client data.
+        std::fs::create_dir_all(r.root.join(crate::tier::epoch::RESERVED_DIR)).unwrap();
+        std::fs::write(r.root.join(crate::tier::epoch::RESERVED_DIR).join("epoch"), b"x").unwrap();
+
+        // Precondition: this is exactly the shape the caller gates on.
+        assert!(state_is_fresh(&r.backend).await, "no rows yet — a fresh tier over an old PVC");
+
+        let rep = adopt_local_tree(&r.backend, &r.root).await;
+        assert_eq!(rep.marked_dirty, 3, "every regular file, including the empty one");
+
+        let dirty = r.backend.tier_list_dirty().await.unwrap();
+        assert_eq!(dirty.len(), 3, "and the marks are DURABLE, not RAM-only");
+        assert!(
+            !dirty
+                .iter()
+                .filter_map(|d| d.path.as_deref())
+                .any(|p| p.contains(crate::tier::epoch::RESERVED_DIR)),
+            "the reserved control namespace must never be published as client data"
+        );
     }
 
     fn ident(path: &Path) -> (u64, u64) {
