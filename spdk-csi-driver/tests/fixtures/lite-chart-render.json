@@ -30,7 +30,7 @@
           "template": {
             "metadata": {
               "annotations": {
-                "checksum/config": "f85d2e494c7837d138f9f631474c9b79ff10221b9110d87ac52785207259666d"
+                "checksum/config": "3ee32713338ff76d3868934de789722c042d10e00856d55d24f2252cfbd9e1ac"
               },
               "labels": {
                 "app": "flint-lite",
@@ -73,6 +73,10 @@
                     {
                       "containerPort": 2049,
                       "name": "nfs"
+                    },
+                    {
+                      "containerPort": 8080,
+                      "name": "http"
                     }
                   ],
                   "readinessProbe": {
@@ -106,6 +110,11 @@
                     {
                       "mountPath": "/data",
                       "name": "data"
+                    },
+                    {
+                      "mountPath": "/etc/flint/api-token",
+                      "name": "api-token",
+                      "readOnly": true
                     }
                   ]
                 }
@@ -126,13 +135,19 @@
                   "persistentVolumeClaim": {
                     "claimName": "flint-lite-data"
                   }
+                },
+                {
+                  "name": "api-token",
+                  "secret": {
+                    "secretName": "flint-api-token"
+                  }
                 }
               ]
             }
           }
         }
       },
-      "mdsYaml": "apiVersion: flint.io/v1alpha1\nkind: PnfsConfig\nmode: standalone\nmds:\n  bind:\n    address: \"0.0.0.0\"\n    port: 2049\n  # Inert in standalone (no layouts are ever granted) but part of the\n  # config schema.\n  layout:\n    type: file\n    stripeSize: 8388608\n    policy: stripe\n  dataServers: []\n  state:\n    backend: sqlite\n    config:\n      path: /data/state/state.db\n  # S3 cold tier (a field of the mds: section \u2014 the parser IGNORES\n  # unknown top-level keys, so misplacing this renders a silently\n  # tierless hub; the kind tier e2e's leg 1 pins the placement).\n  # The volume epoch is claimed BEFORE the listener binds (an\n  # unfenced hub never serves); \".flint/\" under the prefix is\n  # reserved for tier control objects. Unset knobs take the server\n  # defaults \u2014 the economics gate's assumptions.\n  tier:\n    enabled: true\n    bucket: \"my-team-flint\"\n    keyPrefix: \"tenant-c/\"\n    importOnStart: true\n    flushFloorSecs: 120\n    hydrateWarmAfterImport: true\n    hydrateWarmConcurrency: 24\n    reserveBytes: 536870912\n    watermarkPct: 90\nexports:\n  - path: /data/exports\n    fsid: 1\n    options: [rw, sync, no_subtree_check]\n    access:\n      - network: 0.0.0.0/0\n        permissions: rw\nlogging:\n  level: debug\n  format: text\n",
+      "mdsYaml": "apiVersion: flint.io/v1alpha1\nkind: PnfsConfig\nmode: standalone\nmds:\n  bind:\n    address: \"0.0.0.0\"\n    port: 2049\n  # Inert in standalone (no layouts are ever granted) but part of the\n  # config schema.\n  layout:\n    type: file\n    stripeSize: 8388608\n    policy: stripe\n  dataServers: []\n  state:\n    backend: sqlite\n    config:\n      path: /data/state/state.db\n  # S3 cold tier (a field of the mds: section \u2014 the parser IGNORES\n  # unknown top-level keys, so misplacing this renders a silently\n  # tierless hub; the kind tier e2e's leg 1 pins the placement).\n  # The volume epoch is claimed BEFORE the listener binds (an\n  # unfenced hub never serves); \".flint/\" under the prefix is\n  # reserved for tier control objects. Unset knobs take the server\n  # defaults \u2014 the economics gate's assumptions.\n  tier:\n    enabled: true\n    bucket: \"my-team-flint\"\n    keyPrefix: \"tenant-c/\"\n    importOnStart: true\n    flushFloorSecs: 120\n    hydrateWarmAfterImport: true\n    hydrateWarmConcurrency: 24\n    reserveBytes: 536870912\n    watermarkPct: 90\nexports:\n  - path: /data/exports\n    fsid: 1\n    options: [rw, sync, no_subtree_check]\n    access:\n      - network: 0.0.0.0/0\n        permissions: rw\nlogging:\n  level: debug\n  format: text\n# The hub's own HTTP surface, ClusterIP-only and NEVER on the\n# consumer-facing Service \u2014 that Service carries NFS and can be made a\n# LoadBalancer, which would publish the file API to the internet.\n#\n# /health and /status bind BEFORE the tier and before the NFS listener:\n# the epoch claim can wait out a dead holder's lease and a DR import\n# walks the whole bucket, and that whole window is invisible to anything\n# watching only port 2049.\nmonitoring:\n  health:\n    enabled: true\n    port: 8080\n    path: \"/health\"\n  # Browse and edit without mounting. Shares the health listener, and\n  # refuses every request with 503 until the hub reaches phase Serving \u2014\n  # a listing taken mid-import would show a partial tree as though it\n  # were the whole one.\n  fileApi:\n    enabled: true\n    tokenFile: \"/etc/flint/api-token/token\"\n    maxUploadBytes: 1073741824\n    maxDownloadBytes: 268435456\n    hydrateWaitSecs: 45\n",
       "pvc": {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
@@ -198,6 +213,17 @@
         "importOnStart": true,
         "keyPrefix": "tenant-c/",
         "logLevel": "debug",
+        "monitoring": {
+          "enabled": true,
+          "fileApi": {
+            "enabled": true,
+            "hydrateWaitSecs": 45,
+            "maxDownloadBytes": 268435456,
+            "maxUploadBytes": 1073741824,
+            "tokenSecretRef": "flint-api-token"
+          },
+          "port": 8080
+        },
         "nodeSelector": {
           "topology.kubernetes.io/zone": "us-east-1a"
         },
@@ -231,7 +257,7 @@
         },
         "startupFailureThreshold": 90
       },
-      "values": "logLevel: debug\npersistence:\n  storageClassName: gp3\n  size: 100Gi\nservice:\n  type: LoadBalancer\n  port: 2049\n  annotations:\n    service.beta.kubernetes.io/aws-load-balancer-internal: \"true\"\nresources:\n  requests:\n    cpu: 500m\n    memory: 1Gi\n  limits:\n    memory: 4Gi\nnodeSelector:\n  topology.kubernetes.io/zone: us-east-1a\ntier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-c/\n  region: us-east-1\n  importOnStart: true\n  startupFailureThreshold: 90\n  settings:\n    watermarkPct: 90\n    hydrateWarmAfterImport: true\n    hydrateWarmConcurrency: 24\n    flushFloorSecs: 120\n    reserveBytes: 536870912\n"
+      "values": "logLevel: debug\npersistence:\n  storageClassName: gp3\n  size: 100Gi\nservice:\n  type: LoadBalancer\n  port: 2049\n  annotations:\n    service.beta.kubernetes.io/aws-load-balancer-internal: \"true\"\nresources:\n  requests:\n    cpu: 500m\n    memory: 1Gi\n  limits:\n    memory: 4Gi\nnodeSelector:\n  topology.kubernetes.io/zone: us-east-1a\ntier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-c/\n  region: us-east-1\n  importOnStart: true\n  startupFailureThreshold: 90\n  settings:\n    watermarkPct: 90\n    hydrateWarmAfterImport: true\n    hydrateWarmConcurrency: 24\n    flushFloorSecs: 120\n    reserveBytes: 536870912\nmonitoring:\n  enabled: true\n  port: 8080\n  fileApi:\n    enabled: true\n    tokenSecret: flint-api-token\n    maxUploadBytes: 1073741824\n    maxDownloadBytes: 268435456\n    hydrateWaitSecs: 45\n"
     },
     "minimal": {
       "deployment": {
@@ -787,5 +813,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "f194864fb1fc3b71a074724d9be5816e1f7570ce7e0c5de785ccf2df400897f6"
+  "chartSha256": "06e68d04a1802570a9464cc8a2e3c0e5a3c61a70c6bf5908f9b4a112bc808a0a"
 }

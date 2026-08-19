@@ -748,6 +748,17 @@ pub struct MonitoringConfig {
 
     #[serde(default)]
     pub health: HealthConfig,
+
+    /// The HTTP file API, served beside /status on the health port.
+    ///
+    /// Renamed explicitly, as every other camelCase key in this schema
+    /// is: the parser IGNORES unknown keys, so a field whose Rust name
+    /// and YAML name disagree does not fail — it silently takes the
+    /// default. A config that says `fileApi: {enabled: true}` and a hub
+    /// that serves nothing is the resulting bug, and `kubectl get cm`
+    /// shows the setting present the whole time.
+    #[serde(rename = "fileApi", default)]
+    pub file_api: FileApiConfig,
 }
 
 impl Default for MonitoringConfig {
@@ -755,9 +766,108 @@ impl Default for MonitoringConfig {
         Self {
             prometheus: PrometheusConfig::default(),
             health: HealthConfig::default(),
+            file_api: FileApiConfig::default(),
         }
     }
 }
+
+/// The hub's HTTP file API (`pnfs::mds::fileapi`).
+///
+/// Off unless a token source is configured, and there is no
+/// token-optional mode: the surface can rewrite any file in the
+/// project, so serving it unauthenticated is not a degraded mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileApiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// File holding the bearer token — a projected Secret, so rotating
+    /// it does not mean rebuilding the pod spec. Read once at startup.
+    #[serde(rename = "tokenFile", default)]
+    pub token_file: Option<String>,
+
+    /// Environment variable holding the bearer token. Checked only if
+    /// `token_file` is unset.
+    #[serde(rename = "tokenEnv", default = "default_file_api_token_env")]
+    pub token_env: String,
+
+    /// Largest single upload, in bytes.
+    #[serde(rename = "maxUploadBytes", default = "default_file_api_max_upload")]
+    pub max_upload_bytes: u64,
+
+    /// Largest single download, in bytes. Browse-driven hydration is
+    /// real, billed S3 egress; this is the cap that keeps one careless
+    /// click from spending a lot of it.
+    #[serde(rename = "maxDownloadBytes", default = "default_file_api_max_download")]
+    pub max_download_bytes: u64,
+
+    /// How long a download waits for an evicted file to hydrate before
+    /// answering 503 with a Retry-After.
+    #[serde(rename = "hydrateWaitSecs", default = "default_file_api_hydrate_wait")]
+    pub hydrate_wait_secs: u64,
+}
+
+impl Default for FileApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            token_file: None,
+            token_env: default_file_api_token_env(),
+            max_upload_bytes: default_file_api_max_upload(),
+            max_download_bytes: default_file_api_max_download(),
+            hydrate_wait_secs: default_file_api_hydrate_wait(),
+        }
+    }
+}
+
+impl FileApiConfig {
+    /// Resolve the bearer token from its configured source.
+    ///
+    /// Returns `None` when the API is disabled or no token is
+    /// available — and the caller must then not serve the routes at
+    /// all. A missing token is never "serve it open".
+    pub fn resolve_token(&self) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        if let Some(path) = &self.token_file {
+            match std::fs::read_to_string(path) {
+                Ok(t) if !t.trim().is_empty() => return Some(t.trim().to_string()),
+                Ok(_) => {
+                    tracing::error!(
+                        "file API token file {} is empty — the API will NOT be served",
+                        path
+                    );
+                    return None;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "file API token file {} unreadable: {} — the API will NOT be served",
+                        path,
+                        e
+                    );
+                    return None;
+                }
+            }
+        }
+        match std::env::var(&self.token_env) {
+            Ok(t) if !t.trim().is_empty() => Some(t.trim().to_string()),
+            _ => {
+                tracing::error!(
+                    "file API is enabled but neither monitoring.fileApi.tokenFile nor ${}                      supplies a token — the API will NOT be served",
+                    self.token_env
+                );
+                None
+            }
+        }
+    }
+}
+
+fn default_file_api_token_env() -> String { "FLINT_FILE_API_TOKEN".to_string() }
+fn default_file_api_max_upload() -> u64 { 5 * 1024 * 1024 * 1024 }
+fn default_file_api_max_download() -> u64 { 5 * 1024 * 1024 * 1024 }
+fn default_file_api_hydrate_wait() -> u64 { 30 }
 
 /// Prometheus configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1109,6 +1219,94 @@ mod tests {
             chart, schema,
             "the chart's $known settings list drifted from TierConfig"
         );
+    }
+
+    /// The chart's `monitoring:` block must PARSE, not merely render.
+    ///
+    /// This parser ignores unknown keys, so a YAML key whose spelling
+    /// disagrees with its serde name does not fail — it silently takes
+    /// the default. The failure mode is a hub that logs nothing, serves
+    /// nothing, and whose ConfigMap says `fileApi: {enabled: true}` the
+    /// entire time. The chart's own tier knobs are guarded by a
+    /// hand-written render-time list for exactly this reason; this test
+    /// takes the stronger route and feeds the rendered block through
+    /// the real deserializer.
+    #[test]
+    fn the_charts_monitoring_block_parses_into_the_real_config() {
+        // Written in the shape the helper template emits, camelCase and
+        // all. If a field is renamed on either side, this stops
+        // agreeing.
+        let yaml = r#"
+monitoring:
+  health:
+    enabled: true
+    port: 8080
+    path: "/health"
+  fileApi:
+    enabled: true
+    tokenFile: "/etc/flint/api-token/token"
+    maxUploadBytes: 5368709120
+    maxDownloadBytes: 1073741824
+    hydrateWaitSecs: 45
+"#;
+        let cfg: PnfsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.monitoring.health.enabled);
+        assert_eq!(cfg.monitoring.health.port, 8080);
+
+        let api = &cfg.monitoring.file_api;
+        assert!(api.enabled, "the chart's fileApi block did not reach FileApiConfig");
+        assert_eq!(api.token_file.as_deref(), Some("/etc/flint/api-token/token"));
+        assert_eq!(api.max_upload_bytes, 5_368_709_120);
+        assert_eq!(api.max_download_bytes, 1_073_741_824);
+        assert_eq!(api.hydrate_wait_secs, 45);
+
+        // And a misspelled knob is REFUSED rather than ignored. This
+        // surface is new, so nothing depends on the lenient behaviour
+        // and it can afford to be strict.
+        let typo = serde_yaml::from_str::<PnfsConfig>(
+            "monitoring:
+  fileApi:
+    enabled: true
+    maxUploadByte: 5
+",
+        );
+        assert!(typo.is_err(), "a typo'd fileApi key must fail the parse, not default");
+    }
+
+    /// Enabled with no token source ⇒ NOT served. There is no
+    /// token-optional mode for a surface that can rewrite every file in
+    /// the project, and "enabled" must never be enough on its own.
+    #[test]
+    fn the_file_api_is_never_served_without_a_token() {
+        let mut api = FileApiConfig { enabled: true, ..Default::default() };
+        // Neither a token file nor the env var.
+        api.token_env = "FLINT_FILE_API_TOKEN_ABSENT_IN_TESTS".to_string();
+        assert!(api.resolve_token().is_none());
+
+        // A token file that does not exist is a refusal, not a fallback
+        // to open.
+        api.token_file = Some("/nonexistent/flint/token".to_string());
+        assert!(api.resolve_token().is_none());
+
+        // An EMPTY token file is the dangerous one: it exists, it reads
+        // successfully, and an empty bearer token would match an empty
+        // Authorization header.
+        let dir = tempfile::TempDir::new().unwrap();
+        let empty = dir.path().join("token");
+        std::fs::write(&empty, "   \n").unwrap();
+        api.token_file = Some(empty.display().to_string());
+        assert!(api.resolve_token().is_none());
+
+        // A real token resolves, whitespace trimmed — a Secret written
+        // with `echo` carries a trailing newline.
+        let good = dir.path().join("good");
+        std::fs::write(&good, "s3cr3t\n").unwrap();
+        api.token_file = Some(good.display().to_string());
+        assert_eq!(api.resolve_token().as_deref(), Some("s3cr3t"));
+
+        // Disabled always wins, token or not.
+        api.enabled = false;
+        assert!(api.resolve_token().is_none());
     }
 
     #[test]

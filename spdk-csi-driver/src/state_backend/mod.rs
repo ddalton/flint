@@ -88,66 +88,139 @@ pub fn declare_private_state() {
 pub fn hold_single_occupancy(dir: &std::path::Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        use std::os::unix::io::AsRawFd;
         static HELD: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
         if HELD.get().is_some() {
             return Ok(());
         }
         SINGLE_OCCUPANCY.store(false, std::sync::atomic::Ordering::Relaxed);
-        let path = dir.join("flint-hub.lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| format!("open {}: {}", path.display(), e))?;
-
         // ~grace + slack: long enough for a draining incumbent to
         // finish its final flush and exit, short enough that a truly
         // wedged one fails the pod rather than hanging forever.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(150);
-        let mut waited = false;
-        loop {
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if rc == 0 {
-                if waited {
-                    tracing::info!(
-                        "🔒 state dir {} released by the previous hub — proceeding",
-                        dir.display()
-                    );
-                }
-                let _ = HELD.set(file);
-                SINGLE_OCCUPANCY.store(true, std::sync::atomic::Ordering::Relaxed);
-                return Ok(());
-            }
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                return Err(format!("flock {}: {}", path.display(), err));
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "another flint hub still holds {} — refusing to start a second \
-                     writer on this volume (two processes here share one server_id, \
-                     which the epoch protocol cannot fence)",
-                    path.display()
-                ));
-            }
-            if !waited {
-                tracing::warn!(
-                    "🔒 state dir {} is held by another hub process — waiting for it \
-                     to finish draining",
-                    dir.display()
-                );
-                waited = true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
+        let file = acquire_occupancy(dir, std::time::Duration::from_secs(150))?;
+        let _ = HELD.set(file);
+        SINGLE_OCCUPANCY.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
     #[cfg(not(unix))]
     {
         let _ = dir;
         Ok(())
+    }
+}
+
+/// The lock acquisition itself, with the wait budget as a parameter.
+///
+/// Split out from [`hold_single_occupancy`] so the refusal can be
+/// tested: the public entry point holds the lock in a process-global
+/// `OnceLock` for the life of the hub, which makes a second call in the
+/// same process return `Ok` from the cache and tests nothing. Note that
+/// `flock` is per open-file-description, not per process — so a second
+/// `open` of the same path conflicts with the first even from one
+/// process, which is exactly what lets the contended case be exercised.
+///
+/// The returned `File` IS the lock: dropping it releases.
+#[cfg(unix)]
+fn acquire_occupancy(
+    dir: &std::path::Path,
+    wait: std::time::Duration,
+) -> Result<std::fs::File, String> {
+    use std::os::unix::io::AsRawFd;
+    let path = dir.join("flint-hub.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("open {}: {}", path.display(), e))?;
+
+    let deadline = std::time::Instant::now() + wait;
+    let mut waited = false;
+    loop {
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            if waited {
+                tracing::info!(
+                    "🔒 state dir {} released by the previous hub — proceeding",
+                    dir.display()
+                );
+            }
+            return Ok(file);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+            return Err(format!("flock {}: {}", path.display(), err));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "another flint hub still holds {} — refusing to start a second \
+                 writer on this volume (two processes here share one server_id, \
+                 which the epoch protocol cannot fence)",
+                path.display()
+            ));
+        }
+        if !waited {
+            tracing::warn!(
+                "🔒 state dir {} is held by another hub process — waiting for it \
+                 to finish draining",
+                dir.display()
+            );
+            waited = true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50).min(wait));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod occupancy_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// The split-brain the epoch protocol cannot arbitrate.
+    ///
+    /// Two hub processes on one state directory share a `server_id`,
+    /// because that id is durable and lives in the database between
+    /// them. The epoch's self-recognition arm then lets the newcomer
+    /// depose the incumbent on sight — it looks like its own restarted
+    /// incarnation — and the incumbent, mid-drain, aborts its final
+    /// flush. Kubernetes reaches this state by ordinary means: a wake
+    /// during a graceful shutdown creates the second pod immediately,
+    /// because a ReplicaSet does not count a terminating pod as active.
+    ///
+    /// So the second holder must be REFUSED, not admitted.
+    #[test]
+    fn a_second_hub_on_one_state_dir_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let incumbent = acquire_occupancy(dir.path(), Duration::from_millis(0))
+            .expect("the first hub takes the lock");
+
+        let err = acquire_occupancy(dir.path(), Duration::from_millis(150))
+            .expect_err("a second hub on the same state dir must be refused");
+        assert!(
+            err.contains("refusing to start a second writer"),
+            "the refusal must say why, for whoever reads the pod log: {err}"
+        );
+
+        // And the handoff works: once the incumbent exits — which the
+        // kernel models by releasing the flock when its fd closes, crash
+        // included — the successor proceeds. A dead hub must never block
+        // its own replacement.
+        drop(incumbent);
+        acquire_occupancy(dir.path(), Duration::from_millis(0))
+            .expect("the successor takes the lock once the incumbent is gone");
+    }
+
+    /// Distinct volumes are independent: the lock is per state
+    /// directory, so one project suspending or wedging must not keep any
+    /// other project's hub from starting.
+    #[test]
+    fn the_lock_is_scoped_to_one_state_directory() {
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        let _held_a = acquire_occupancy(a.path(), Duration::from_millis(0)).unwrap();
+        acquire_occupancy(b.path(), Duration::from_millis(0))
+            .expect("a different volume's hub is unaffected");
     }
 }
 

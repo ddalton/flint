@@ -224,6 +224,46 @@ render so a typo'd knob can't silently take its default). The defaults
 are the economics model's assumptions — treat them as a contract, not
 a starting point.
 
+## Status, and files without a mount
+
+`monitoring.enabled` adds a second listener to the hub — off by
+default, on its own port, and deliberately **not** on the Service. Two
+things live there.
+
+`GET /status` reports the hub's phase, its epoch, tier gauges, client
+activity, and `rpoClean` — "can the bucket rebuild this volume right
+now?", which is the question to answer before deleting a PVC. It binds
+*before* the tier starts, so a slow epoch claim or a long DR import is
+visible as progress rather than as a wedge.
+
+`monitoring.fileApi` adds an HTTP file API: list, download, upload,
+delete, mkdir, move. It exists so a browser or a control plane can work
+with a share without mounting it — useful when the consumer is a web
+service rather than a pod, and necessary at fleet scale, where holding
+hundreds of kernel mounts is not an option.
+
+```yaml
+monitoring:
+  enabled: true
+  port: 8080
+  fileApi:
+    enabled: true
+    tokenSecret: flint-api-token    # Secret with key `token`
+```
+
+Every request needs `Authorization: Bearer <token>`; there is no
+token-optional mode, because the surface can rewrite any file in the
+share. Do not add this port to the Service — the Service carries NFS
+and may become a LoadBalancer.
+
+Under the hood each endpoint is an NFS compound dispatched in-process,
+not a second reader of the export directory, so it inherits everything
+the NFS path already does: a cold file hydrates from S3 and the caller
+gets 503 + `Retry-After` instead of a body of zeros; symlinks are
+listed but never followed; uploads take the write gate and produce the
+capture notes the tier publishes from. The full endpoint table is in
+[the operator guide](flint-lite-operator.md#the-hubs-http-surface-status-and-files-without-a-mount).
+
 ## Many shares: the operator
 
 This chart is one release per hub, which is the right shape at one to

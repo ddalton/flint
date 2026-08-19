@@ -39,7 +39,8 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvFromSource, EnvVar,
     PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PodSpec,
     PodTemplateSpec, Probe, ResourceRequirements, SecretEnvSource, Service, ServicePort,
-    ServiceSpec as K8sServiceSpec, TCPSocketAction, Volume, VolumeMount, VolumeResourceRequirements,
+    SecretVolumeSource, ServiceSpec as K8sServiceSpec, TCPSocketAction, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -251,8 +252,59 @@ pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
     let _ = writeln!(y, "logging:");
     let _ = writeln!(y, "  level: {}", yaml_str(&log));
     let _ = writeln!(y, "  format: text");
+
+    // The hub's HTTP surface. Rendered to match the chart's helper
+    // template byte for byte (minus its comments) — the render-parity
+    // golden test compares the two, because two hand-written emitters
+    // of one schema drift, and the drift is silent: this parser ignores
+    // keys it does not recognise.
+    if let Some(m) = s.monitoring.as_ref().filter(|m| m.enabled.unwrap_or(false)) {
+        let _ = writeln!(y, "monitoring:");
+        let _ = writeln!(y, "  health:");
+        let _ = writeln!(y, "    enabled: true");
+        let _ = writeln!(y, "    port: {}", m.port.unwrap_or(HEALTH_PORT));
+        let _ = writeln!(y, "    path: {}", yaml_str(HEALTH_PATH));
+        if let Some(api) = m.file_api.as_ref().filter(|a| a.enabled.unwrap_or(false)) {
+            let _ = writeln!(y, "  fileApi:");
+            let _ = writeln!(y, "    enabled: true");
+            // The path the Secret is projected at, below. The server
+            // knows only about files; the CRD knows only about Secrets;
+            // this is the one place the two meet.
+            if api.token_secret_ref.as_deref().is_some_and(|r| !r.is_empty()) {
+                let _ = writeln!(
+                    y,
+                    "    tokenFile: {}",
+                    yaml_str(&format!("{FILE_API_TOKEN_MOUNT}/token"))
+                );
+            }
+            let _ = writeln!(
+                y,
+                "    maxUploadBytes: {}",
+                api.max_upload_bytes.unwrap_or(FILE_API_MAX_BYTES)
+            );
+            let _ = writeln!(
+                y,
+                "    maxDownloadBytes: {}",
+                api.max_download_bytes.unwrap_or(FILE_API_MAX_BYTES)
+            );
+            let _ = writeln!(
+                y,
+                "    hydrateWaitSecs: {}",
+                api.hydrate_wait_secs.unwrap_or(FILE_API_HYDRATE_WAIT_SECS)
+            );
+        }
+    }
     y
 }
+
+/// Defaults mirrored from the chart's values.yaml. They live here as
+/// named constants so the parity test's failure names the drift.
+const HEALTH_PORT: i32 = 8080;
+const HEALTH_PATH: &str = "/health";
+/// Where a file-API token Secret is projected in the hub container.
+pub const FILE_API_TOKEN_MOUNT: &str = "/etc/flint/api-token";
+const FILE_API_MAX_BYTES: i64 = 5 * 1024 * 1024 * 1024;
+const FILE_API_HYDRATE_WAIT_SECS: i64 = 30;
 
 /// Quote a scalar the way YAML wants it. Bucket names and prefixes are
 /// user input; an unquoted `endpoint: http://x` is a comment waiting to
@@ -438,6 +490,80 @@ pub fn deployment(
         ..tcp()
     });
 
+    // The monitoring listener. Declared as a containerPort for
+    // legibility only — it is deliberately NOT added to the Service,
+    // which carries NFS and may be a LoadBalancer. The lifecycle
+    // controller reaches /status by POD IP.
+    let monitoring = s.monitoring.as_ref().filter(|m| m.enabled.unwrap_or(false));
+    let mut ports = vec![ContainerPort {
+        container_port: NFS_PORT,
+        name: Some("nfs".to_string()),
+        ..Default::default()
+    }];
+    if let Some(m) = monitoring {
+        ports.push(ContainerPort {
+            container_port: m.port.unwrap_or(HEALTH_PORT),
+            name: Some("http".to_string()),
+            ..Default::default()
+        });
+    }
+
+    let mut volume_mounts = vec![
+        VolumeMount {
+            name: "config".to_string(),
+            mount_path: CONFIG_MOUNT.to_string(),
+            ..Default::default()
+        },
+        VolumeMount {
+            name: "data".to_string(),
+            mount_path: DATA_MOUNT.to_string(),
+            ..Default::default()
+        },
+    ];
+    let mut volumes = vec![
+        Volume {
+            name: "config".to_string(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: n.config_map.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        Volume {
+            name: "data".to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: n.claim.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ];
+    // The file API's bearer token, projected read-only. Mounting the
+    // Secret rather than passing it as env means rotating the token is
+    // a Secret edit; the kubelet refreshes the projection and the next
+    // hub start picks it up.
+    if let Some(secret) = monitoring
+        .and_then(|m| m.file_api.as_ref())
+        .filter(|a| a.enabled.unwrap_or(false))
+        .and_then(|a| a.token_secret_ref.as_deref())
+        .filter(|r| !r.is_empty())
+    {
+        volume_mounts.push(VolumeMount {
+            name: "api-token".to_string(),
+            mount_path: FILE_API_TOKEN_MOUNT.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        volumes.push(Volume {
+            name: "api-token".to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(secret.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+
     let resources = s.resources.as_ref().map(|r| ResourceRequirements {
         requests: r.requests.clone().map(quantities),
         limits: r.limits.clone().map(quantities),
@@ -507,11 +633,7 @@ pub fn deployment(
                         ]),
                         env: Some(env),
                         env_from,
-                        ports: Some(vec![ContainerPort {
-                            container_port: NFS_PORT,
-                            name: Some("nfs".to_string()),
-                            ..Default::default()
-                        }]),
+                        ports: Some(ports),
                         readiness_probe: Some(Probe {
                             initial_delay_seconds: Some(3),
                             period_seconds: Some(5),
@@ -523,39 +645,11 @@ pub fn deployment(
                             ..tcp()
                         }),
                         startup_probe,
-                        volume_mounts: Some(vec![
-                            VolumeMount {
-                                name: "config".to_string(),
-                                mount_path: CONFIG_MOUNT.to_string(),
-                                ..Default::default()
-                            },
-                            VolumeMount {
-                                name: "data".to_string(),
-                                mount_path: DATA_MOUNT.to_string(),
-                                ..Default::default()
-                            },
-                        ]),
+                        volume_mounts: Some(volume_mounts),
                         resources,
                         ..Default::default()
                     }],
-                    volumes: Some(vec![
-                        Volume {
-                            name: "config".to_string(),
-                            config_map: Some(ConfigMapVolumeSource {
-                                name: n.config_map.clone(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        },
-                        Volume {
-                            name: "data".to_string(),
-                            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                                claim_name: n.claim.clone(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        },
-                    ]),
+                    volumes: Some(volumes),
                     ..Default::default()
                 }),
             },
@@ -627,6 +721,7 @@ mod tests {
             restart_policy: None,
             startup_failure_threshold: None,
             termination_grace_period_seconds: None,
+            monitoring: None,
         }
     }
 

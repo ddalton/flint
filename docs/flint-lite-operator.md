@@ -117,6 +117,110 @@ Killing a `Starting` hub kills a takeover or an import.
 Conditions carry the detail: `Ready`, `ConfigCurrent`, `Conflict`,
 `AdoptionBlocked`, `CredentialsFound`, `PersistenceCurrent`.
 
+## The hub's HTTP surface: status, and files without a mount
+
+`spec.monitoring` turns on a second listener in the hub — off by
+default, on its own port, **ClusterIP-only and never added to the
+Service**. That Service carries NFS and may be a LoadBalancer; the file
+API below can rewrite every file in the share, so the two must not share
+a door. The port is declared as a `containerPort` for legibility only.
+
+```yaml
+spec:
+  monitoring:
+    enabled: true          # /health and /status
+    port: 8080
+```
+
+`GET /status` answers with the phase, the epoch, import and warm-fill
+reports, tier gauges, client activity, and the RPO predicate:
+
+```json
+{
+  "phase": "serving",
+  "epoch": { "held": true, "number": 7 },
+  "activity": { "idleSecs": 412, "browseOps": 91, "dataOps": 3308 },
+  "rpoClean": true,
+  "rpo": { "dirtyFiles": 0, "tombstones": 0, "manifestCurrent": true, "beyondRpo": 0 }
+}
+```
+
+Two things about it are load-bearing:
+
+- **It binds BEFORE the tier and before the NFS listener.** The epoch
+  claim can wait out a dead holder's lease and a DR import walks the
+  whole bucket; that whole window is invisible to anything watching only
+  port 2049, and it is exactly when you most want to tell "importing"
+  from "wedged". Poll `phase`.
+- **`rpoClean` is `null`, never `true`, when the tier is off.** It means
+  "the bucket can rebuild this volume right now" — the question you must
+  answer YES to before deleting a PVC. A share with no bucket has no
+  answer, and reading absence as `true` would delete the only copy of
+  the data. `rpo.why()` explains every `false`.
+
+### The file API
+
+```yaml
+spec:
+  monitoring:
+    enabled: true
+    fileApi:
+      enabled: true
+      tokenSecretRef: flint-api-token   # Secret with key `token`
+      maxDownloadBytes: 268435456
+```
+
+Six endpoints, all requiring `Authorization: Bearer <token>`:
+
+| Method | Path |
+|---|---|
+| GET | `/files?path=&recursive=&limit=&cursor=` |
+| GET | `/files/content?path=` (Range supported) |
+| PUT | `/files/content?path=` (`application/octet-stream`) |
+| DELETE | `/files/content?path=` |
+| POST | `/files/folder` — `{"path": "/a/b"}` |
+| POST | `/files/move` — `{"from": "/a", "to": "/b"}` |
+
+This exists so a project service can browse and edit a share **without
+mounting it**. It cannot hold kernel mounts at fleet scale: pod-spec
+volumes are fixed at creation, a runtime `mount(2)` needs privilege,
+and a suspended hub puts every mount holder into uninterruptible sleep.
+
+Each endpoint is a translation of an NFS compound, dispatched
+**in-process through the hub's own compound dispatcher** — not by
+reading the export directory. That is what makes it safe rather than a
+second, worse filesystem: it inherits eviction handling (a cold file
+hydrates and the caller gets 503 + `Retry-After`, never a body of
+zeros), export confinement and the symlink rules, locking, the write
+gate, the space reserve, and the tier's capture notes. A direct write
+would be a write the bucket never hears about.
+
+Things worth knowing before you wire it up:
+
+- **There is no token-optional mode.** With neither `tokenSecretRef` nor
+  `FLINT_FILE_API_TOKEN` in the environment, the routes are not mounted
+  at all and the hub logs why.
+- **It refuses with 503 until the phase reaches `Serving`.** A listing
+  taken mid-import would show a partial tree as though it were the whole
+  one.
+- **Browse-driven hydration is real, billed S3 egress.** A click on a
+  cold file pulls it out of the bucket. `maxDownloadBytes` (default 5Gi)
+  is the per-request cap; larger files are fetched with `Range`.
+- **Every call counts as activity**, which is what keeps a project a
+  user is looking at from being suspended under them. Poll `/status`
+  for liveness — it deliberately does NOT count — or an automated
+  refresh will pin every share in the fleet awake forever.
+- **Uploads are temp-plus-rename.** A concurrent reader sees the old
+  file or the new one, never a mixture, and a crashed upload leaves a
+  recognisable `.flint-upload.*` temp rather than a corrupt file under
+  the real name.
+- **Symlinks are data, not paths to follow.** They appear in listings
+  with their target; `GET /files/content` on one answers 409. The server
+  does not dereference a link on a caller's behalf — in NFS that is the
+  client's job, and doing it server-side would resolve the target in the
+  *hub's* namespace, which holds its state database and its cloud
+  credentials.
+
 ## Changing settings, and what actually restarts the hub
 
 The hub parses its config **once, at boot**, and has no reload path;
@@ -217,8 +321,17 @@ accept the pruning.
 - No admission webhook: what CEL can express is in the CRD
   (identity immutability, prefix syntax), the rest is reconcile-time.
 - `Hibernated` (delete the PVC, wake via DR import + warm fill) is not
-  implemented: it needs a verified final flush on SIGTERM, since
+  implemented. The pieces it needs now exist — the hub drains and
+  flushes on SIGTERM, releases the epoch cleanly, and reports `rpoClean`
+  — but the operator does not yet drive verify-then-delete, and
   hibernating an unflushed hub loses the RPO window permanently.
+- **Idle auto-suspend is not implemented.** The hub reports
+  `activity.idleSecs` on `/status`, and the operator does not yet act on
+  it; `spec.lifecycle: Suspended` is still a manual decision.
+- The file API is single-shot: no chunked or resumable upload, no
+  byte-range PATCH. Large uploads that fail are retried whole.
+- A recursive listing is bounded (50k entries, depth 32) and reports
+  `truncated: true` rather than silently returning a short list.
 - Two SPELLINGS of one endpoint are not recognized as the same store by
   the uniqueness check (the epoch still fences them).
 - PVC expansion is passed to the StorageClass; a size SMALLER than the

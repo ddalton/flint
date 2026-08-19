@@ -216,6 +216,70 @@ pub struct FlintShareSpec {
     /// wake with its last writes unpublished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub termination_grace_period_seconds: Option<i64>,
+
+    /// The hub's own HTTP surface: `/health`, `/status`, and optionally
+    /// the file API. Absent = off, which is the shipped posture for
+    /// every share that has not opted in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitoring: Option<MonitoringSpec>,
+}
+
+/// The hub's HTTP surface.
+///
+/// Served on its own port, ClusterIP-only, and NEVER added to the
+/// consumer-facing Service — that Service carries NFS and may be a
+/// LoadBalancer, which would put a read-write file API on the internet.
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitoringSpec {
+    /// Absent = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
+    /// Absent = 8080.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<i32>,
+
+    /// Browse and edit files over HTTP without mounting the share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_api: Option<FileApiSpec>,
+}
+
+/// The HTTP file API.
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileApiSpec {
+    /// Absent = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
+    /// Name of an EXISTING Secret in this namespace holding the bearer
+    /// token under key `token`. The operator projects it into the hub
+    /// at a fixed path, so rotating the token is a Secret edit rather
+    /// than a pod-spec change.
+    ///
+    /// Absent = the hub falls back to `FLINT_FILE_API_TOKEN` in its
+    /// environment. With NEITHER source the hub logs why and does not
+    /// serve the routes at all — there is no token-optional mode for a
+    /// surface that can rewrite every file in the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret_ref: Option<String>,
+
+    /// Largest single upload, in bytes. Absent = 5Gi.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_upload_bytes: Option<i64>,
+
+    /// Largest single download, in bytes. Absent = 5Gi. A browse click
+    /// on a cold file pulls it out of S3 — real, billed egress — so
+    /// this is the cap that bounds one careless click. Larger files are
+    /// fetched with Range requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_download_bytes: Option<i64>,
+
+    /// Seconds a download waits for an evicted file to hydrate before
+    /// answering 503 with a Retry-After. Absent = 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hydrate_wait_secs: Option<i64>,
 }
 
 /// The hub's disk.
@@ -656,6 +720,7 @@ mod tests {
             restart_policy: None,
             startup_failure_threshold: None,
             termination_grace_period_seconds: None,
+            monitoring: None,
         }
     }
 

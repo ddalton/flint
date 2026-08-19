@@ -210,31 +210,65 @@ fn now_unix() -> u64 {
 pub fn routes(
     health_path: &str,
     status: Arc<HubStatus>,
-) -> impl warp::Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    use warp::Filter;
+) -> impl warp::Filter<Extract = (warp::reply::Response,), Error = warp::Rejection> + Clone {
+    use warp::{Filter, Reply};
     let health_path = health_path.trim_start_matches('/').to_string();
-    let health = warp::path(health_path).and(warp::get()).map(|| "OK");
+    let health = warp::path(health_path)
+        .and(warp::get())
+        .map(|| "OK".into_response());
     let status_route = warp::path("status").and(warp::get()).then(move || {
         let status = status.clone();
-        async move { warp::reply::json(&status.render().await) }
+        async move { warp::reply::json(&status.render().await).into_response() }
     });
-    health.or(status_route)
+    health.or(status_route).unify()
 }
 
-/// Serve `/health` and `/status` on the configured port.
+/// Serve `/health`, `/status` and — when configured — the file API on
+/// the health port.
+///
+/// One listener for both, because they share an audience and a security
+/// posture: ClusterIP-only, never the consumer-facing Service. Putting
+/// a read-write file API on the Service that carries NFS would publish
+/// the whole volume the first time someone made that Service a
+/// LoadBalancer.
 ///
 /// Failure to bind is logged and swallowed: status is telemetry, and
 /// refusing to serve NFS because a diagnostic port is taken would
-/// invert the priorities.
+/// invert the priorities. The file API is a casualty of that choice —
+/// noted loudly, because unlike status it is a surface someone is
+/// waiting on.
 pub fn spawn(
     cfg: &crate::pnfs::config::HealthConfig,
     status: Arc<HubStatus>,
+    file_api: Option<(
+        Arc<crate::pnfs::mds::fileapi::hubfs::HubFs>,
+        crate::pnfs::mds::fileapi::ApiConfig,
+    )>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !cfg.enabled {
+        if file_api.is_some() {
+            tracing::error!(
+                "the file API is configured but monitoring.health is disabled — they \
+                 share one listener, so the API will NOT be served"
+            );
+        }
         return None;
     }
+    use warp::Filter;
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], cfg.port).into();
-    match warp::serve(routes(&cfg.path, status)).try_bind_ephemeral(addr) {
+    // Both tables are normalised to a concrete Response so the two
+    // branches can be unified into one server.
+    let base = routes(&cfg.path, status.clone()).boxed();
+    let combined = match file_api {
+        Some((fs, api_cfg)) => {
+            tracing::info!("📂 hub file API enabled on the health port");
+            base.or(crate::pnfs::mds::fileapi::routes_gated(fs, api_cfg, status))
+                .unify()
+                .boxed()
+        }
+        None => base,
+    };
+    match warp::serve(combined).try_bind_ephemeral(addr) {
         Ok((bound, server)) => {
             tracing::info!("🩺 hub status endpoint listening on {}", bound);
             Some(tokio::spawn(server))

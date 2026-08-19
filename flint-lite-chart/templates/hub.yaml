@@ -168,6 +168,15 @@ spec:
           ports:
             - containerPort: 2049
               name: nfs
+            {{- if .Values.monitoring.enabled }}
+            # Declared for legibility only. This port is deliberately
+            # NOT on the Service above: that Service carries NFS and may
+            # be a LoadBalancer, and the file API can rewrite every file
+            # in the share. The lifecycle controller reaches /status by
+            # POD IP.
+            - containerPort: {{ .Values.monitoring.port }}
+              name: http
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: 2049
@@ -195,6 +204,11 @@ spec:
               mountPath: /etc/flint
             - name: data
               mountPath: /data
+            {{- if and .Values.monitoring.enabled .Values.monitoring.fileApi.enabled .Values.monitoring.fileApi.tokenSecret }}
+            - name: api-token
+              mountPath: /etc/flint/api-token
+              readOnly: true
+            {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -206,3 +220,8 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: flint-lite-data
+        {{- if and .Values.monitoring.enabled .Values.monitoring.fileApi.enabled .Values.monitoring.fileApi.tokenSecret }}
+        - name: api-token
+          secret:
+            secretName: {{ .Values.monitoring.fileApi.tokenSecret }}
+        {{- end }}

@@ -86,4 +86,33 @@ exports:
 logging:
   level: {{ .Values.logLevel | default "info" }}
   format: text
+{{- if .Values.monitoring.enabled }}
+# The hub's own HTTP surface, ClusterIP-only and NEVER on the
+# consumer-facing Service — that Service carries NFS and can be made a
+# LoadBalancer, which would publish the file API to the internet.
+#
+# /health and /status bind BEFORE the tier and before the NFS listener:
+# the epoch claim can wait out a dead holder's lease and a DR import
+# walks the whole bucket, and that whole window is invisible to anything
+# watching only port 2049.
+monitoring:
+  health:
+    enabled: true
+    port: {{ .Values.monitoring.port }}
+    path: {{ .Values.monitoring.healthPath | quote }}
+  {{- if .Values.monitoring.fileApi.enabled }}
+  # Browse and edit without mounting. Shares the health listener, and
+  # refuses every request with 503 until the hub reaches phase Serving —
+  # a listing taken mid-import would show a partial tree as though it
+  # were the whole one.
+  fileApi:
+    enabled: true
+    {{- if .Values.monitoring.fileApi.tokenSecret }}
+    tokenFile: "/etc/flint/api-token/token"
+    {{- end }}
+    maxUploadBytes: {{ int64 .Values.monitoring.fileApi.maxUploadBytes }}
+    maxDownloadBytes: {{ int64 .Values.monitoring.fileApi.maxDownloadBytes }}
+    hydrateWaitSecs: {{ .Values.monitoring.fileApi.hydrateWaitSecs }}
+  {{- end }}
+{{- end }}
 {{- end }}

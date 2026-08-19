@@ -849,6 +849,7 @@ mod tests {
                 restart_policy: None,
                 startup_failure_threshold: None,
             termination_grace_period_seconds: None,
+            monitoring: None,
             },
         );
         s.metadata.namespace = Some("ws".into());

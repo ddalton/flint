@@ -82,6 +82,10 @@ pub struct LeaseManager {
 
     /// Grace period duration
     grace_period: Duration,
+
+    /// Set when the grace period has been ended early — see
+    /// [`LeaseManager::end_grace`].
+    grace_ended: std::sync::atomic::AtomicBool,
 }
 
 impl LeaseManager {
@@ -103,6 +107,31 @@ impl LeaseManager {
             leases: DashMap::new(),
             server_start,
             grace_period,
+            grace_ended: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// End the grace period now.
+    ///
+    /// Grace exists so a client holding state from before a restart can
+    /// reclaim it before any conflicting new OPEN is granted. When
+    /// NOBODY could reclaim — no client records survived into this
+    /// incarnation — it protects nothing and costs everything: 90
+    /// seconds during which every OPEN answers NFS4ERR_GRACE.
+    ///
+    /// On a flint-lite hub that is not an edge case, it is every wake.
+    /// A suspended project restarts with the state it had, but a
+    /// HIBERNATED one comes back on a fresh PVC with an empty state
+    /// database, so its first minute and a half would refuse every
+    /// write — for reclaims that cannot arrive. Reads are unaffected
+    /// either way (they take the anonymous stateid and need no OPEN),
+    /// which is what makes the asymmetry so confusing to diagnose from
+    /// outside: browsing works, saving does not.
+    ///
+    /// One-way and idempotent.
+    pub fn end_grace(&self) {
+        if !self.grace_ended.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            info!("grace period ended early — no client state to reclaim");
         }
     }
 
@@ -218,11 +247,17 @@ impl LeaseManager {
 
     /// Check if server is in grace period
     pub fn in_grace_period(&self) -> bool {
+        if self.grace_ended.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
         self.server_start.elapsed() < self.grace_period
     }
 
     /// Get time remaining in grace period
     pub fn grace_remaining(&self) -> Duration {
+        if self.grace_ended.load(std::sync::atomic::Ordering::Relaxed) {
+            return Duration::ZERO;
+        }
         self.grace_period.saturating_sub(self.server_start.elapsed())
     }
 

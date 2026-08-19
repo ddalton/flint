@@ -615,7 +615,26 @@ impl MetadataServer {
         // makes the whole startup observable.
         self.status.attach_backend(self.backend.clone());
         self.status.attach_leases(self.state_mgr.leases.clone());
-        let _status_server = super::status::spawn(&self.monitoring.health, self.status.clone());
+        // The file API rides the same listener. It resolves its token
+        // BEFORE binding and is simply not mounted without one — there
+        // is no token-optional mode for a surface that can rewrite
+        // every file in the project. Its routes refuse with 503 until
+        // the phase reaches Serving, so binding this early exposes
+        // startup without exposing a half-built namespace.
+        let file_api = self.monitoring.file_api.resolve_token().map(|token| {
+            let fs = Arc::new(super::fileapi::hubfs::HubFs::new(
+                self.base_dispatcher.clone(),
+            ));
+            let cfg = super::fileapi::ApiConfig {
+                token: Some(token),
+                max_upload_bytes: self.monitoring.file_api.max_upload_bytes,
+                max_download_bytes: self.monitoring.file_api.max_download_bytes,
+                hydrate_wait_secs: self.monitoring.file_api.hydrate_wait_secs,
+            };
+            (fs, cfg)
+        });
+        let _status_server =
+            super::status::spawn(&self.monitoring.health, self.status.clone(), file_api);
 
         // Phase B.4: pull persisted state out of the backend before
         // accepting any TCP connections. Once this returns, a

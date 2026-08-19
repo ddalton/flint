@@ -101,6 +101,16 @@ impl StateManager {
             n_s,
             n_st,
         );
+        // Nothing survived into this incarnation, so nothing can be
+        // reclaimed, so the grace period guards nothing. Sitting in it
+        // anyway costs 90 seconds of NFS4ERR_GRACE on every OPEN —
+        // which on a hub woken from hibernation (fresh PVC, empty state
+        // database) is every single wake. Reads still serve throughout,
+        // so the symptom is the confusing one: browsing works and
+        // saving does not.
+        if n_c == 0 && n_s == 0 && n_st == 0 {
+            self.leases.end_grace();
+        }
         Ok(())
     }
 

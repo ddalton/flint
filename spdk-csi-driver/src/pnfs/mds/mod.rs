@@ -48,6 +48,9 @@ pub mod f68a_meter;
 /// Read-only status surface (health port JSON).
 pub mod status;
 
+/// The HTTP file API — browse and edit without mounting.
+pub mod fileapi;
+
 /// pnfs-block (scsi) NVMe export reconciler — lvol, subsystem-per-volume,
 /// pinned NGUID, grant-driven host admission (design doc §5).
 pub mod block_export;

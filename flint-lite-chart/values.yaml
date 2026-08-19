@@ -118,6 +118,46 @@ tier:
 # set: the flush is bounded by unpublished bytes, not by a constant.
 terminationGracePeriodSeconds: 120
 
+# The hub's HTTP surface: /health, /status, and optionally the file API.
+#
+# ClusterIP only — this port is NEVER added to the NFS Service. The
+# lifecycle controller polls /status here (phase, epoch, and the RPO
+# predicate that gates hibernation), and the project front door uses the
+# file API to browse without holding a kernel mount.
+monitoring:
+  enabled: false
+  port: 8080
+  healthPath: /health
+
+  # Browse and edit files over HTTP, served through the hub's own NFS
+  # dispatcher — so it inherits eviction handling, export confinement,
+  # locking, the write gate and the tier's capture notes rather than
+  # reimplementing any of them.
+  #
+  # There is NO token-optional mode: this surface can rewrite any file
+  # in the project. Point tokenFile at a projected Secret (rotating it
+  # then needs no pod-spec change), or leave it unset and supply
+  # FLINT_FILE_API_TOKEN in the environment. Neither ⇒ the routes are
+  # not mounted and the hub logs why.
+  fileApi:
+    enabled: false
+    # Name of an EXISTING Secret in this namespace holding the bearer
+    # token under key `token`. Projected read-only at
+    # /etc/flint/api-token, so rotating the token is a Secret edit
+    # rather than a pod-spec change. Absent ⇒ the hub falls back to
+    # FLINT_FILE_API_TOKEN in its environment; with neither, the routes
+    # are not mounted and the hub logs why.
+    tokenSecret: ""
+    # Caps on a single request. A browse click on a cold file pulls it
+    # out of S3 — real, billed egress — so the download cap is what
+    # keeps one careless click from spending a lot of it. Callers fetch
+    # larger files with Range requests.
+    maxUploadBytes: 5368709120
+    maxDownloadBytes: 5368709120
+    # How long a download waits for an evicted file to hydrate before
+    # answering 503 with a Retry-After.
+    hydrateWaitSecs: 30
+
 logLevel: info
 resources: {}
 nodeSelector: {}
