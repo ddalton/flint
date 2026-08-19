@@ -1,0 +1,18 @@
+{{- if gt (int .Values.replicas) 1 }}
+# Only with more than one replica. A PDB with minAvailable: 1 over a
+# single-replica Deployment does not protect the operator — it blocks
+# every voluntary node drain until someone deletes the PDB, which is a
+# worse outage than the one it was meant to prevent.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "flint-lite-operator.selectorLabels" . | nindent 6 }}
+{{- end }}

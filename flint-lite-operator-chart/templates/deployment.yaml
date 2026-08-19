@@ -1,14 +1,30 @@
 {{- /*
-The operator itself: one replica, strategy Recreate.
+The operator: two replicas by default, one of them a warm standby.
 
-Recreate rather than RollingUpdate because two operators writing from
-two differently-stale caches can disagree about which share owns a
-bucket subtree. The lease makes that safe in the partition case; the
-strategy keeps the ordinary case from needing it.
+WHY TWO. Wake is level-triggered and only the operator writes the idle
+annotation the render derives replicas from, so while no operator is
+reconciling, NO share in this cluster can be woken — an IdleSuspended
+one never scales back up, and a Hibernated one has no PVC to return
+to. "Fails safe, only a delete hangs" is wrong. With one replica the
+whole cluster's wake path rides on one pod's node.
+
+WHY IT IS SAFE. Leader election gates the reconcile itself: a
+non-leader keeps its caches warm and its watches open and does not
+write (`gated_reconcile`). So the standby costs a lease renewal and
+gives back a failover that does not have to cold-start a reflector.
+That is also why RollingUpdate is fine here and Recreate is not: with
+the lease doing the mutual exclusion, the strategy no longer has to.
+
+Set `replicas: 1` to go back to the old posture — it renders Recreate
+and no PDB, because a PDB over a single replica blocks node drains
+outright rather than protecting anything.
 
 No PVC, no state: everything the operator knows lives in the cluster.
 A restart re-lists and converges.
 */}}
+{{- if and (gt (int .Values.replicas) 1) (not .Values.leaderElection) }}
+{{- fail "replicas > 1 with leaderElection: false would run two operators writing from two differently-stale caches. Set leaderElection: true, or replicas: 1." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,9 +33,16 @@ metadata:
   labels:
     {{- include "flint-lite-operator.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ int .Values.replicas }}
   strategy:
+    {{- if gt (int .Values.replicas) 1 }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+    {{- else }}
     type: Recreate
+    {{- end }}
   selector:
     matchLabels:
       {{- include "flint-lite-operator.selectorLabels" . | nindent 6 }}
@@ -33,6 +56,21 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "flint-lite-operator.serviceAccountName" . }}
+      {{- if gt (int .Values.replicas) 1 }}
+      # Two replicas on one node protect against nothing that matters
+      # here — the failure this exists for is losing the node. Soft, so
+      # a single-node cluster still schedules both rather than leaving
+      # one Pending forever.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "flint-lite-operator.selectorLabels" . | nindent 20 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
