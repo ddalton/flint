@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    flint.io/crd-schema-version: '1'
+    flint.io/crd-schema-version: '2'
   name: flintshares.flint.io
 spec:
   group: flint.io
@@ -27,6 +27,10 @@ spec:
       type: string
     - jsonPath: .spec.keyPrefix
       name: PREFIX
+      type: string
+    - jsonPath: .metadata.labels['flint.io/project-id']
+      name: PROJECT
+      priority: 1
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: AGE
@@ -580,6 +584,23 @@ spec:
                 - IdleSuspended
                 - Hibernated
                 - Failed
+                nullable: true
+                type: string
+              serverId:
+                description: |-
+                  The hub's persisted NFS server identity, as last observed.
+
+                  **A change here means every existing mount is stale.** The id is
+                  stable across ordinary restarts, because it lives on the PVC
+                  with the rest of the NFS state — but a hibernate deletes that
+                  PVC, so a woken share comes back with a new one and the
+                  stateids clients still hold refer to a server generation that
+                  no longer exists. A front door that records this value alongside
+                  a brokered mount can tell the difference between "the hub
+                  bounced, carry on" and "remount before you trust that handle",
+                  without polling the hub itself.
+
+                  `None` = not observed yet, or a hub too old to report it.
                 nullable: true
                 type: string
             type: object

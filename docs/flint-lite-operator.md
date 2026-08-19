@@ -184,6 +184,108 @@ Three things worth knowing:
 NFS is one long-lived TCP flow, so prefer a flat or peered network to a
 cloud load balancer, and mind LB idle timeouts if you use one.
 
+## The front-door contract
+
+The "front door" is whatever service owns projects — it decides a
+project exists, brokers access to it, and is the only thing that knows
+a person is about to use one. This section is the contract between it
+and the operator. Everything here is deliberately boring: the front
+door speaks plain Kubernetes, and the operator does the rest.
+
+### One project, one name, one prefix
+
+Derive the share's name from the project id — `fs-<project-id>` — and
+label it `flint.io/project-id`. The derived name is what makes
+ensure-live idempotent: two front-door replicas racing a first touch
+issue the same `create`, one gets `409 AlreadyExists`, and both
+proceed. Allocating names any other way lets that race create two
+shares on one bucket prefix, and conflict arbitration then permanently
+`Failed`s one of them.
+
+The label is the index in the other direction (`kubectl get flintshares
+-o wide` prints it as PROJECT). **Uniqueness of the prefix itself is
+not something this cluster can enforce** — see the section above.
+
+### ensure-live
+
+```
+GET  flintshares/fs-<id>          → 404? create it
+PATCH metadata.annotations         → flint.io/requested-at: <now, RFC3339>
+                                     flint.io/wake-intent: warm   (optional)
+poll GET until .status.phase == Ready
+read .status.address               → mount it, or call the file API
+```
+
+Four things about that loop:
+
+- **The wake is explicit and the annotation is the whole mechanism.**
+  An NFS operation against a suspended hub does not wake it — it hangs,
+  because there is nothing listening to notice. The file API is the
+  opposite: it fails fast with 503 rather than hanging. Either way,
+  something must write `requested-at` or the share stays down.
+- **Phase distinguishes the waits, and they are very different.**
+  `Pending` is objects being applied, `Starting` is a pod booting — and
+  for a tiered share, `Starting` also covers claiming the volume epoch
+  (which can wait out a dead holder's lease) and importing the bucket.
+  Surface those as distinct states or the UI will look hung.
+- **`wake-intent: warm`** tells the hub to pull the working set back
+  during import rather than hydrating on first touch. Use it when a
+  person is opening the project; omit it for a background poll. The
+  operator consumes it once the hub is serving, and clearing it does
+  not restart anything.
+- **Read `status.serverId` and keep it with the mount.** If it changes,
+  the share came back on a fresh PVC and every stateid a client still
+  holds is stale. A change means remount; an unchanged id across a
+  restart means carry on.
+
+### Keepalive is mandatory, not optional
+
+Re-touch `requested-at` on a timer shorter than `suspendAfterSecs`, for
+as long as any session is live. This is not belt-and-braces — it is
+half of the suspend decision. The hub's own activity clock is the other
+half, and it cannot see an agent that spent twenty minutes thinking
+without touching the filesystem. That agent looks idle to the hub and
+is kept alive by the heartbeat alone.
+
+Two failure modes to design against:
+
+- **Do not keepalive from a liveness poller.** `/status` is
+  deliberately not activity, and the file API deliberately is. A UI
+  that refreshes a listing on a timer pins that project awake forever
+  and the ladder never fires. Poll `/status`; do not walk `/files`.
+- **Do not let a wrong clock look like demand.** A `requested-at` more
+  than one `suspendAfterSecs` in the future is discarded, and the share
+  reports an `ImplausibleRequest` event. That is a guard, not a
+  feature — stamp it from a sane clock.
+
+### Is the operator alive?
+
+Wake only happens while an operator is reconciling, so "waking" and
+"nothing will ever happen" look identical from the CR. They are
+distinguishable exactly one way: read the operator's leader-election
+Lease (`flint-lite-operator`, in the operator's namespace) and check
+that `renewTime` is recent. The `frontDoor` role grants that read and
+nothing else.
+
+Do **not** try to infer it from the share. `observedGeneration` does
+not lag after an annotation-only patch (metadata changes do not bump
+`metadata.generation`), and `lastTransitionTime` only moves when a
+condition actually changes — so "nothing has changed in 60s" is true of
+every healthy, settled share in the fleet.
+
+### Why did my project suspend?
+
+In order of what to look at:
+
+1. `kubectl describe flintshare fs-<id>` — the `IdleEligible`
+   condition carries the reason it was held or the fact that it was
+   not, in words.
+2. Events: `IdleSuspended`, `Woken`, `HibernateStarted`,
+   `SuspendedWithActiveSessions`, `ImplausibleRequest`.
+3. `.status.phase` — `IdleSuspended` (the ladder did it, a wake
+   request will bring it back) versus `Suspended` (an admin set
+   `spec.lifecycle`, and a wake request will NOT override it).
+
 ## Locking down the network
 
 Once shares are reachable across clusters, "8080 is never on the

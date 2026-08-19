@@ -14,6 +14,39 @@ covered by the stability guarantee.
 
 ### Added
 
+- **The front-door contract** (`docs/flint-lite-operator.md`): the
+  deterministic share name (`fs-<project-id>`) that makes ensure-live
+  idempotent across racing replicas, the `flint.io/project-id` label
+  and its PROJECT printer column, the ensure-live loop, mandatory
+  keepalive, and how to answer "why did my project suspend". Plus a
+  narrow `frontDoor` ClusterRole (off by default): get/list/watch/
+  create/patch on flintshares and nothing else — no delete, no pods,
+  no PVCs, no secrets — with read-only access to the operator's
+  leader-election Lease, which is the only way to tell "this share is
+  waking" from "no operator is running, so nothing will ever happen".
+- **`status.serverId`**, mirrored from the hub's `/status` (which now
+  publishes `serverId` and `podName`). A change means the share came
+  back on a fresh PVC and every stateid a client still holds is stale:
+  a front door that records it with a brokered mount can tell "the hub
+  bounced, carry on" from "remount before trusting that handle". The
+  operator carries the last known value forward rather than blanking it
+  on a pass that made no round trip.
+- **`flint.io/wake-intent: warm|cold` is now wired**, having been a
+  parsed-but-inert annotation a front door might reasonably have
+  started writing. It overrides `hydrateWarmAfterImport` for exactly
+  one boot — what the front door knows and the operator cannot, namely
+  whether a person is about to open the project — and is consumed once
+  the hub is serving. An unrecognised value reads as no intent rather
+  than as `cold`; guessing "do less" on a typo would surface only as a
+  slow project.
+- **Operator high availability**: two replicas by default, one a warm
+  standby, with a PodDisruptionBudget and soft anti-affinity. Wake is
+  level-triggered and only the operator writes the annotation the
+  render keys on, so while no operator reconciles, no share in the
+  cluster can be woken — the whole wake path used to ride on one pod's
+  node. Leader election already gated the reconcile itself, so the
+  standby costs a lease renewal. `replicas: 1` restores the old
+  posture; the chart refuses `replicas > 1` with leader election off.
 - **`spec.service.advertiseAddress` on FlintShare**: what `status.address`
   should say, verbatim. It is the only way a consumer OUTSIDE the
   cluster gets a mountable address — every derived value is
@@ -36,6 +69,27 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **A boot-only setting no longer forces a rollout.** The pod-template
+  checksum is computed over the config with `hydrateWarmAfterImport`
+  stripped: the warm fill runs during import and never again, so a hub
+  that is already serving gains nothing from a restart that changes it
+  — while the restart costs mounted clients a ~90s grace window. Without
+  this, consuming `wake-intent` would roll the hub minutes after it
+  woke, hanging the agent the wake was for.
+- **The Secret watch is label-selected** (`flint.io/credentials`).
+  Unselected, it held every Secret in the cluster in the operator's
+  memory — service-account tokens, other tenants' credentials — to
+  notice changes in the few a FlintShare names. A missing label is not
+  a correctness problem: the checksum comes from a direct `get` during
+  reconcile, so a rotation still rolls the hub on the next periodic
+  pass. Shares report `CredentialsWatched: false` and say how to fix it.
+- **`poll_hub` no longer lists every pod in the namespace.** It runs
+  once per poll per share, so at fleet scale it is the dominant
+  API-server term, and in a namespace holding many shares each poll
+  paged in every other share's pods to discard them client-side. The
+  selector comes from the Deployment rather than from the share's
+  labels, because those differ for an adopted share and a Deployment's
+  selector is immutable.
 - **The MDS gRPC control plane no longer starts in `mode: standalone`.**
   It binds `0.0.0.0:50051`, carries `DeleteVolume`, and is
   unauthenticated unless `FLINT_PNFS_CONTROL_TOKEN` is set — which
@@ -49,6 +103,17 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **`reclaim: Delete` no longer destroys an adopted PVC.**
+  `spec.existingClaim` and `reclaim: Delete` are both the user's words
+  and they contradict each other. Hibernation has always resolved that
+  by refusing — "the operator did not create it and does not get to
+  delete it" — while CR deletion resolved it by deleting and logging
+  `adopted=true`, so one field meant two different things depending on
+  the route that reached it. Adoption is the documented migration path
+  off a helm release, so an adopted claim is evidence something else
+  still believes it owns that data; refusing leaks a PVC, which is
+  visible and removable with one command. Now refused in both paths,
+  with a `ReclaimRefused` event.
 - **A request stamp from the far future no longer pins a share awake.**
   `flint.io/requested-at` is clamped to "wanted right now" when it is
   in the future, which is the right reading of ordinary clock skew and

@@ -41,10 +41,22 @@ hubStartupFailureThreshold: 60
 # fleet genuinely lives in one namespace.
 watchNamespace: ""
 
-# Leader election. The operator is a single replica with strategy
-# Recreate, but a partitioned node can leave an old pod running while
-# the replacement starts: the lease is what keeps exactly one of them
-# writing. `false` disables it (dev only).
+# Two replicas: one leader, one warm standby. Wake is level-triggered
+# and only the operator writes the annotation it keys on, so while no
+# operator reconciles, NO share in this cluster can be woken — the
+# whole wake path would otherwise ride on one pod's node. The standby
+# holds open watches and warm caches without writing, so failover does
+# not pay for a cold reflector.
+#
+# `1` restores the old posture (strategy Recreate, no PDB). More than
+# one REQUIRES leaderElection; the chart refuses the combination.
+replicas: 2
+
+# Leader election. The lease is what makes the second replica a standby
+# rather than a second writer: a non-leader keeps its caches warm and
+# does not write. It also covers the partition case a partitioned node
+# can create, where an old pod is still running as its replacement
+# starts. `false` disables it (dev only, and then run exactly one).
 leaderElection: true
 
 # The operator applies its own compiled-in CRD at startup. Leave this
@@ -86,6 +98,24 @@ networkPolicy:
   # the file API can rewrite any file in the project.
   apiClientCIDRs: []
   apiClientSelectors: []
+
+# The FRONT DOOR's own identity — the projects service that ensures a
+# share exists and keeps it awake. Off by default: most installs drive
+# FlintShares with kubectl and need none of this.
+#
+# It is a separate ServiceAccount from the operator's, with a much
+# smaller role: get/list/watch/create/patch on flintshares and nothing
+# else. No delete (project deletion is a decision, and this role is
+# held by a web service handling untrusted input), no pods, no PVCs,
+# no secrets. Plus read-only access to the operator's leader-election
+# Lease, which is how it tells "waking" from "no operator is running,
+# so nothing will ever happen".
+frontDoor:
+  create: false
+  serviceAccountName: flint-frontdoor
+  # Defaults to the release namespace. Set it to wherever the projects
+  # service actually runs.
+  namespace: ""
 
 rbac:
   # Create the ClusterRole/Binding. The operator needs cluster scope:

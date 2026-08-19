@@ -1,0 +1,92 @@
+{{- if .Values.frontDoor.create }}
+{{- /*
+RBAC for the FRONT DOOR — the projects service, not the operator.
+
+A separate ServiceAccount and a separate role on purpose. The front
+door's job is narrow: make sure a project's share exists, keep it
+awake while someone is using it, and read back where to mount it. It
+never renders a hub, never touches a PVC, and must not be able to.
+
+What it deliberately CANNOT do:
+  * delete a FlintShare — project deletion is a decision, and this
+    role is held by a web service handling untrusted input
+  * touch pods, deployments, PVCs or secrets at all
+  * read `flintshares/status` as a separate subresource grant — `get`
+    on the share already returns status, and nothing here writes it
+
+The one non-obvious grant is `leases`, read-only, in the operator's
+namespace: it is how the front door tells "this share is waking" from
+"no operator is running, so nothing will ever happen". Wake is
+level-triggered, so a share only comes back while an operator is
+reconciling; without this the UI spins on `waking` forever with no way
+to know the difference.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.frontDoor.serviceAccountName }}
+  namespace: {{ .Values.frontDoor.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}-frontdoor
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+rules:
+  # Ensure-live: look up by deterministic name, create if absent, then
+  # touch the wake annotation. `patch` covers the annotation write;
+  # there is no `update`, so the front door cannot rewrite a spec
+  # wholesale, and no `delete`.
+  - apiGroups: ["flint.io"]
+    resources: ["flintshares"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}-frontdoor
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-lite-operator.name" . }}-frontdoor
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.frontDoor.serviceAccountName }}
+    namespace: {{ .Values.frontDoor.namespace | default .Release.Namespace }}
+---
+# Operator liveness, read-only, and scoped to the one namespace holding
+# the lease rather than granted cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}-frontdoor-liveness
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["flint-lite-operator"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}-frontdoor-liveness
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "flint-lite-operator.name" . }}-frontdoor-liveness
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.frontDoor.serviceAccountName }}
+    namespace: {{ .Values.frontDoor.namespace | default .Release.Namespace }}
+{{- end }}

@@ -45,7 +45,7 @@
 #      is fenced with AdoptionBlocked instead of double-mounting
 #
 # Legs 9-11 run BEFORE reclaim on purpose: they all drive tenant-a and
-# its live kernel mount, and leg 12 is the leg that deletes them.
+# its live kernel mount, and leg 13 is the leg that deletes them.
 #
 # Images are built from the WORKING TREE, so this always tests the code
 # you are sitting on. KEEP=1 leaves the cluster standing.
@@ -109,7 +109,7 @@ case "$DARCH" in
   *) fail "unrecognized docker VM arch: $DARCH" ;;
 esac
 
-# ── 0. build both images from the working tree ───────────────────────
+# ── 1. build both images from the working tree ───────────────────────
 say "building flint-pnfs-mds + flint-lite-operator ($TRIPLE)"
 (cd "$CARGO_DIR" && cargo zigbuild --release --target "$TRIPLE" \
    --bin flint-pnfs-mds --bin flint-lite-operator >/tmp/op-e2e-build.log 2>&1) \
@@ -161,7 +161,7 @@ for i in "$HUBIMG" "$OPIMG"; do
 done
 pass "cluster up, images loaded"
 
-# ── 1. the operator installs and its CRD is served ───────────────────
+# ── 2. the operator installs and its CRD is served ───────────────────
 say "leg 1: helm install the operator; CRD Established and stamped"
 helm install flint-lite-operator "$OP_CHART" -n "$OPNS" --create-namespace \
   --set image.ref="$OPIMG" --set hubImage="$HUBIMG" \
@@ -193,7 +193,7 @@ case " $(managers) " in
 esac
 pass "operator Ready; CRD established at schema version $STAMP, applied by the operator"
 
-# ── 2. a share, end to end ───────────────────────────────────────────
+# ── 3. a share, end to end ───────────────────────────────────────────
 say "leg 2: a FlintShare becomes Ready; ownership is right; a kernel client mounts it"
 kubectl create namespace "$NS" >/dev/null
 kubectl apply -f - >/dev/null <<EOF || fail "applying the FlintShare failed"
@@ -252,7 +252,7 @@ if vm "command -v git >/dev/null"; then
 fi
 pass "kernel client mounted an operator-created share; 8 MiB byte-identical; git ok"
 
-# ── 3. the trunking the mount asked for ──────────────────────────────
+# ── 4. the trunking the mount asked for ──────────────────────────────
 say "leg 3: nconnect actually opened more than one connection"
 # The scar this exists for: a mount WITHOUT nconnect>=2 gets exactly one
 # TCP connection, every trunk is silently refused, and nothing logs it —
@@ -286,7 +286,7 @@ echo "$OPTS" | grep -q "nconnect=$NCONNECT" \
   || fail "the mount does not carry nconnect=$NCONNECT (options: $OPTS)"
 pass "nconnect=$NCONNECT is on the mount and $CONNS connections are established"
 
-# ── 4. the schema does its job ───────────────────────────────────────
+# ── 5. the schema does its job ───────────────────────────────────────
 say "leg 4: the API server refuses an identity change and an unknown knob"
 if kubectl -n "$NS" patch flintshare tenant-a --type=merge \
      -p '{"spec":{"keyPrefix":"somewhere-else/"}}' >/tmp/op-e2e-cel.log 2>&1; then
@@ -337,7 +337,7 @@ spec:
 EOF
 pass "identity is immutable and a misspelled knob is refused, both by the API server"
 
-# ── 5. the advertised address ────────────────────────────────────────
+# ── 6. the advertised address ────────────────────────────────────────
 say "leg 5: advertiseAddress is what status.address reports, verbatim"
 # The ONLY way a consumer in another cluster gets a mountable address.
 # Everything the operator can derive is in-cluster-only except a
@@ -396,7 +396,7 @@ done
   || fail "clearing advertiseAddress left status.address at '$A'"
 pass "clearing it reverts to the derived in-cluster address"
 
-# ── 6. a settings edit reaches the running hub ───────────────────────
+# ── 7. a settings edit reaches the running hub ───────────────────────
 say "leg 6: an edit rolls the hub exactly once and the new config is live"
 GEN_BEFORE=$(kubectl -n "$NS" get deployment tenant-a -o jsonpath='{.metadata.generation}')
 kubectl -n "$NS" patch flintshare tenant-a --type=merge -p '{"spec":{"logLevel":"debug"}}' >/dev/null
@@ -414,7 +414,7 @@ POD_CFG=$(kubectl -n "$NS" exec deployment/tenant-a -- sh -c "grep -c 'level: de
 [ "${POD_CFG:-0}" -ge 1 ] || fail "the RUNNING pod does not have the new config"
 pass "edit → ConfigMap → one roll → live in the pod (generation $GEN_BEFORE → $GEN_AFTER)"
 
-# ── 7. fleet uniqueness ──────────────────────────────────────────────
+# ── 8. fleet uniqueness ──────────────────────────────────────────────
 say "leg 7: a second share on the same bucket subtree is refused, across namespaces"
 kubectl create namespace "$NS2" >/dev/null
 kubectl apply -f - >/dev/null <<EOF || fail "applying the winner failed"
@@ -460,7 +460,7 @@ done
 kubectl -n "$NS2" delete flintshare intruder --wait=true >/dev/null 2>&1
 pass "deleting the winner promoted the survivor"
 
-# ── 8. the operator repairs its own CRD ──────────────────────────────
+# ── 9. the operator repairs its own CRD ──────────────────────────────
 say "leg 8: a hand-mangled CRD schema is repaired on operator restart"
 # `logLevel`, not `settings`: the API server REFUSES to remove a
 # property a CEL rule references ("undefined field 'settings'" — the
@@ -484,7 +484,7 @@ done
   || fail "the operator did NOT restore the stripped schema — that field would be pruned on every apply, silently"
 pass "stripped property (spec.logLevel) restored by the operator at startup"
 
-# ── 9. the hub's HTTP surface: status, and files without a mount ─────
+# ── 10. the hub's HTTP surface: status, and files without a mount ─────
 say "leg 9: /status answers, and the file API round-trips without any mount"
 TOKEN=$(head -c 24 /dev/urandom | base64 | tr -d '=+/' | head -c 24)
 kubectl -n "$NS" create secret generic api-token --from-literal=token="$TOKEN" >/dev/null
@@ -645,7 +645,7 @@ echo "$OUT" | grep -q "level:" \
   || fail "reading the symlink returned content the client should not have got: $OUT"
 pass "file API: 401 unauthenticated, HTTP↔NFS round trip both ways, symlink refused 409 and never dereferenced server-side"
 
-# ── 10. the sessions guard ───────────────────────────────────────────
+# ── 11. the sessions guard ───────────────────────────────────────────
 say "leg 10: a mounted-but-idle share is held awake by suspendWithSessions"
 # The partition case: agents hold mounts and go quiet. The hub's own
 # activity clock DELIBERATELY ignores bare SEQUENCE, GETATTR and ACCESS
@@ -705,7 +705,7 @@ pass "held awake by the lease guard, and the condition says so: $HELD"
 kubectl -n "$NS" patch flintshare tenant-a --type=merge -p '{"spec":{"idle":null}}' >/dev/null \
   || fail "could not disarm the ladder"
 
-# ── 11. the idle ladder ──────────────────────────────────────────────
+# ── 12. the idle ladder ──────────────────────────────────────────────
 say "leg 11: an idle share suspends, an annotation wakes it, an admin suspend outranks it"
 # UNMOUNT BEFORE ARMING. The leg above leaves the hub idle well past
 # this threshold, so arming the ladder while the mount is still up
@@ -796,8 +796,126 @@ REPL=$(kubectl -n "$NS" get deployment tenant-a -o jsonpath='{.spec.replicas}')
 [ "$REPL" = "0" ] || fail "an admin-suspended share was scaled back up by a wake request"
 pass "spec.lifecycle: Suspended outranks the ladder; a wake request does not override it"
 
-# ── 12. reclaim ──────────────────────────────────────────────────────
-say "leg 12: reclaim Retain keeps the PVC; Delete removes it"
+# ── the front-door contract ──────────────────────────────────────────
+say "leg 12: the front-door contract — ensure-live, idempotently, from zero"
+# Everything here is what the projects service does, with kubectl
+# standing in for its client. The share is named DETERMINISTICALLY from
+# a project id, which is what makes ensure-live safe to run from two
+# replicas at once.
+PROJ=p-7f31
+FS="fs-$PROJ"
+cat >/tmp/fs-ensure.yaml <<EOF
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata:
+  name: $FS
+  namespace: $NS
+  labels:
+    flint.io/project-id: $PROJ
+spec:
+  persistence: { size: 1Gi }
+  monitoring:
+    enabled: true
+    port: 8080
+  idle:
+    suspendAfterSecs: 20
+EOF
+# Two replicas racing a first touch. `create` (not apply) is the point:
+# one wins, the other gets AlreadyExists and carries on. Anything that
+# allocated a name per-replica would make two shares on one prefix, and
+# arbitration would permanently Fail one of them.
+kubectl create -f /tmp/fs-ensure.yaml >/tmp/ensure-a.log 2>&1 &
+E1=$!
+kubectl create -f /tmp/fs-ensure.yaml >/tmp/ensure-b.log 2>&1 &
+E2=$!
+wait $E1; RC1=$?
+wait $E2; RC2=$?
+[ $((RC1 + RC2)) -eq 1 ] \
+  || fail "concurrent ensure: expected exactly one success (rc $RC1/$RC2)"
+grep -qi "already exists" /tmp/ensure-a.log /tmp/ensure-b.log \
+  || fail "the losing ensure did not fail with AlreadyExists"
+COUNT=$(kubectl -n "$NS" get flintshares -l "flint.io/project-id=$PROJ" -o name | wc -l | tr -d ' ')
+[ "$COUNT" = "1" ] || fail "$COUNT shares for one project — the deterministic name did not hold"
+pass "concurrent double-ensure yielded exactly ONE share; the loser saw AlreadyExists"
+
+# The phase progression has to be legible, or the UI cannot tell a slow
+# start from a wedge.
+SEEN=""
+for i in $(seq 1 90); do
+  P=$(kubectl -n "$NS" get flintshare "$FS" -o jsonpath='{.status.phase}' 2>/dev/null)
+  case "$SEEN" in *"|$P|"*) ;; *) SEEN="$SEEN|$P|" ;; esac
+  [ "$P" = "Ready" ] && break
+  sleep 2
+done
+[ "$P" = "Ready" ] || fail "ensure-live never reached Ready (phase ${P:-<none>}, saw $SEEN)"
+echo "$SEEN" | grep -q "|Pending|\||Starting|" \
+  || fail "phase jumped straight to Ready — a front door cannot distinguish the waits (saw $SEEN)"
+ADDR=$(kubectl -n "$NS" get flintshare "$FS" -o jsonpath='{.status.address}')
+[ -n "$ADDR" ] || fail "Ready with no status.address — nothing to mount"
+pass "ensure-live from zero: distinguishable progression ($SEEN) and an address to mount"
+
+# status.serverId is the "your mounts are stale" signal, and it must
+# agree with the hub's own answer.
+FSPOD=$(kubectl -n "$NS" get pods -l "flint.io/share=$FS" \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+[ -n "$FSPOD" ] || fail "no running pod for $FS"
+HUB_SID=$(kubectl -n "$NS" exec "$FSPOD" -- sh -c \
+  'curl -sS --max-time 10 http://127.0.0.1:8080/status' 2>/dev/null \
+  | tr -d '\r' | sed -n 's/.*"serverId":"\([^"]*\)".*/\1/p')
+[ -n "$HUB_SID" ] || fail "the hub does not publish serverId on /status"
+for i in $(seq 1 30); do
+  CR_SID=$(kubectl -n "$NS" get flintshare "$FS" -o jsonpath='{.status.serverId}' 2>/dev/null)
+  [ -n "$CR_SID" ] && break
+  sleep 2
+done
+[ "$CR_SID" = "$HUB_SID" ] \
+  || fail "status.serverId is '$CR_SID' but the hub says '$HUB_SID'"
+pass "serverId agrees between the hub and the CR ($HUB_SID)"
+
+# Now the wake half. Unmounted, so the ladder is free to fire — and
+# NOTHING is mounted here, which is what makes this safe (a suspend
+# under a live mount D-states the umount).
+for i in $(seq 1 60); do
+  P=$(kubectl -n "$NS" get flintshare "$FS" -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$P" = "IdleSuspended" ] && break
+  sleep 2
+done
+[ "$P" = "IdleSuspended" ] || fail "the share never idle-suspended (phase ${P:-<none>})"
+
+# The front door's wake: requested-at, plus an intent for this one boot.
+kubectl -n "$NS" annotate flintshare "$FS" --overwrite \
+  "flint.io/requested-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "flint.io/wake-intent=warm" >/dev/null
+for i in $(seq 1 90); do
+  P=$(kubectl -n "$NS" get flintshare "$FS" -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$P" = "Ready" ] && break
+  sleep 2
+done
+[ "$P" = "Ready" ] || fail "the front door's wake never took (phase ${P:-<none>})"
+
+# The intent is consumed once — left set, one front-door hint would be
+# permanent. Clearing it must NOT roll the hub: it is a boot-only knob,
+# excluded from the rollout checksum, and a restart minutes after a
+# wake would hang the very agent the wake was for.
+WOKEN_POD=$(kubectl -n "$NS" get pods -l "flint.io/share=$FS" \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+for i in $(seq 1 45); do
+  INTENT=$(kubectl -n "$NS" get flintshare "$FS" \
+    -o jsonpath='{.metadata.annotations.flint\.io/wake-intent}' 2>/dev/null)
+  [ -z "$INTENT" ] && break
+  sleep 2
+done
+[ -z "${INTENT:-}" ] || fail "wake-intent was never consumed (still '$INTENT')"
+sleep 8
+STILL=$(kubectl -n "$NS" get pods -l "flint.io/share=$FS" \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+[ "$STILL" = "$WOKEN_POD" ] \
+  || fail "consuming wake-intent ROLLED the hub ($WOKEN_POD → $STILL) — a boot-only knob reached the rollout checksum"
+pass "wake-intent consumed exactly once, and clearing it did not roll the hub"
+kubectl -n "$NS" delete flintshare "$FS" --wait=true >/dev/null 2>&1
+
+# ── 13. reclaim ──────────────────────────────────────────────────────
+say "leg 13: reclaim Retain keeps the PVC; Delete removes it"
 # tenant-a arrives here admin-suspended at replicas 0, left that way by
 # leg 11. That is deliberate: cleanup must not need a running hub to
 # reach — a share you suspended BECAUSE it was misbehaving is exactly
@@ -839,8 +957,45 @@ kubectl -n "$NS" get pvc ephemeral-data >/dev/null 2>&1 \
   && fail "reclaim: Delete left the PVC behind"
 pass "reclaim: Delete removed the claim"
 
-# ── 13. adoption ─────────────────────────────────────────────────────
-say "leg 13: adopting a live helm release in place"
+# ...but an ADOPTED claim is the user's, and reclaim does not reach it.
+# `spec.existingClaim` and `reclaim: Delete` are both the user's words
+# and they contradict each other; hibernate has always resolved that by
+# refusing, and CR deletion used to resolve it by deleting. A helm
+# release adopted for migration and later un-adopted must still have
+# its data.
+kubectl -n "$NS" apply -f - >/dev/null <<'EOF' || fail "creating the pre-existing claim failed"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: not-ours }
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: { requests: { storage: 1Gi } }
+EOF
+kubectl apply -f - >/dev/null <<EOF || fail "applying the adopting share failed"
+apiVersion: flint.io/v1alpha1
+kind: FlintShare
+metadata: { name: borrower, namespace: $NS }
+spec:
+  reclaim: Delete
+  existingClaim: not-ours
+  persistence: { size: 1Gi }
+EOF
+for i in $(seq 1 45); do
+  P=$(kubectl -n "$NS" get flintshare borrower -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$P" = "Ready" ] || [ "$P" = "Starting" ] && break
+  sleep 2
+done
+kubectl -n "$NS" delete flintshare borrower --wait=true >/dev/null 2>&1 \
+  || fail "deleting the adopting share hung"
+sleep 5
+CLAIM_PHASE=$(kubectl -n "$NS" get pvc not-ours -o jsonpath='{.status.phase}' 2>/dev/null)
+[ -n "$CLAIM_PHASE" ] || fail "reclaim: Delete DESTROYED an adopted claim — the operator deleted a volume it never created"
+kubectl -n "$NS" get pvc not-ours -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null | grep -q . \
+  && fail "the adopted claim is Terminating — reclaim: Delete reached it after all"
+pass "an adopted claim survived reclaim: Delete, as hibernation has always required"
+
+# ── 14. adoption ─────────────────────────────────────────────────────
+say "leg 14: adopting a live helm release in place"
 helm install flint-lite "$LITE_CHART" -n "$CHARTNS" --create-namespace \
   --set image.ref="$HUBIMG" --set persistence.size=1Gi \
   >/tmp/op-e2e-lite.log 2>&1 || { tail -10 /tmp/op-e2e-lite.log; fail "lite chart install failed"; }
@@ -936,6 +1091,8 @@ echo " duplicate bucket subtree across namespaces, repaired a mangled"
 echo " schema, served files over HTTP to the same tree a kernel client"
 echo " had mounted, held a mounted share awake through its own idle"
 echo " window, suspended an unmounted one and woke it with a single"
-echo " annotation, kept a Retain PVC through deletion, and adopted a"
-echo " live helm release without ever double-mounting its claim."
+echo " annotation, served the front door's ensure-live loop idempotently"
+echo " from zero, consumed a wake-intent without rolling the hub, kept"
+echo " a Retain PVC through deletion, refused to delete an adopted one,"
+echo " and adopted a live helm release without double-mounting a claim."
 echo "══════════════════════════════════════════════════════════════════"
