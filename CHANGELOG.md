@@ -10,7 +10,45 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
-## [Unreleased]
+## [1.28.0] - 2026-08-19
+
+### Added — the idle lifecycle and the hub's HTTP surface
+
+- **`/status` on the hub**: the operator's answer to questions
+  Kubernetes cannot answer — is anyone using this share, are its bytes
+  safely in the bucket, is a DR import halfway through. Served on its
+  own port, ClusterIP-only and deliberately NOT on the consumer-facing
+  Service, which carries NFS and may be a LoadBalancer. **`rpoClean` is
+  `null` for a share with no bucket, never `true`**: absence means "the
+  question does not apply", and a controller reading it as "clean"
+  would delete the only copy of the data.
+- **The file API** (`spec.monitoring.fileApi`): browse and edit a
+  share over HTTP without mounting it, dispatching NFS compounds
+  in-process so the bytes are the same filesystem a kernel client sees.
+  Bearer-token auth against an existing Secret; there is no
+  token-optional mode for a surface that can rewrite every file. A
+  symlink is returned as DATA and never followed (409), and writes
+  during the post-restart grace window answer 503 with a `Retry-After`
+  rather than failing opaquely.
+- **The idle ladder** (`spec.idle`): a quiet share scales to zero and
+  keeps its PVC (`IdleSuspended`); stamping `flint.io/requested-at`
+  brings it back. Hibernation additionally deletes the PVC and is
+  refused at admission without `spec.bucket`, because that PVC is then
+  the only copy. **Suspending requires two independent signals to
+  agree** — the front door's heartbeat is stale AND the hub's own
+  activity clock says idle — and an unreachable hub is never treated as
+  idle. State lives in CR *annotations*, not spec and not status: the
+  reconciler is level-triggered and re-renders `replicas` on every
+  pass, so a suspend recorded where the renderer does not read it is
+  undone seconds later, forever.
+- **`spec.idle.suspendWithSessions`**: refuse to suspend while a client
+  still holds a lease. Off by default — an idle NFSv4 mount renews its
+  lease forever, so defaulting it on would pin every mounted share
+  awake, which is the state the ladder exists to end.
+- **Manifest-first tier import**: a bucket whose manifest the hub
+  cannot read is now REFUSED rather than imported as a flattened tree
+  and then published back over the real one. Only the manifest carries
+  directories, symlinks, modes and owners.
 
 ### Added — the flint-lite operator (`FlintShare`)
 
@@ -52,6 +90,48 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **⚠ The NFS server followed symlinks — a shipped credential-theft
+  hole.** `ln -s /data/state/state.db s && cat s` through any mount
+  read the hub's entire state database, and the IRSA token was equally
+  reachable; the export root (`/data/exports`) and the server's own
+  state (`/data/state`) are siblings, so a link out of the export
+  landed on both. `CREATE` also truncated the link TARGET. Path
+  resolution is now beneath the export root, and a symlink is data.
+- **SEEK lied about evicted stubs**, so `cp --sparse` and `tar` copied
+  a cold tiered file as zeros and reported success — wrong data, not an
+  error.
+- **A created-never-written file was invisible to the tier.** `touch
+  .gitkeep` produced no capture note and no dirty row, so `rpoClean`
+  read true with the file existing nowhere but the PVC. Hibernation
+  would have deleted it permanently.
+- **The idle ladder was evaluated every 300s regardless of
+  `suspendAfterSecs`.** `Decision::Hold` fell through to the settled
+  requeue, so a share set to suspend after 20s was recorded `Held` at
+  "activity 0s ago" and not looked at again for five minutes. The
+  decision function was pure and correct throughout — the defect was
+  entirely in when it got called, which is why the unit suite could not
+  see it and a real API server found it immediately. Each rung is now
+  re-checked on its own knob, floored so a small threshold cannot
+  become a poll per second and capped so arming the ladder never costs
+  more than leaving it off.
+- **Hibernation could act on another pod's answer.** `hibernatable()`
+  authorised the PVC delete on `rpoClean` alone while `epoch.held` was
+  parsed and unused. `rpoClean` describes A volume; it is an answer
+  about THIS pod's volume only if this pod holds the tier epoch, and
+  self-recognition is gated on the state directory's occupancy lock, so
+  a second live process on the same PVC genuinely does not hold it.
+- **`spec.idle.suspendWithSessions` was a knob nothing honoured**: the
+  CRD advertised it and the decision implemented it, but the reconciler
+  passed a hardcoded `None` for the session signal, so it could never
+  fire. The hub had published `nfs.activeLeases` all along.
+- **The foreign-key sweep moved out from behind the NFS listener**, so
+  a large bucket no longer holds the export closed while it folds
+  keys in. The eviction marker is now placed BEFORE the name is linked
+  — a stub with rows but no marker reads as a 0-byte file, and its
+  first small write publishes over the real S3 object under an
+  `If-Match` that succeeds — placement is no-replace so a client's
+  fresh bytes cannot be swapped for a stub, and the marker cycle is not
+  bumped, which would storm every concurrent reader on a large bucket.
 - **⚠ The CSI driver could not start in 1.26.0 or 1.27.0.**
   `csi-driver` panics on its second statement —
   `Client::try_default()` — with "Could not automatically determine the
