@@ -4,9 +4,14 @@ Status: **BUILT (steps 0–4, 2a, 2b, 8) — 2026-08-18, post-v1.27.0.**
 Code: `spdk-csi-driver/src/lite_operator/` (crd, render, conflict,
 reconcile, bootstrap), bins `flint-lite-operator` + `crdgen`, chart
 `flint-lite-operator-chart/`, docs `docs/flint-lite-operator.md`.
-Outstanding: step 5 (hub status endpoint feeding the deep conditions),
-step 6's `Hibernated` (blocked on verifying final-flush-on-SIGTERM;
-`Suspended` shipped), step 7 (kind e2e lane). Two deviations from the
+Step 7's kind e2e lane is IN (`tests/regression/operator-kind-e2e.sh`,
+8 legs, all green: CRD accepted by a real API server, kernel client
+mount, CEL + undeclared-knob refusals, one-roll settings edit,
+cross-namespace nested-prefix conflict, schema self-repair, reclaim
+Retain/Delete, in-place adoption with the AdoptionBlocked fence).
+Outstanding: step 5 (hub status endpoint feeding the deep conditions)
+and step 6's `Hibernated` (blocked on verifying final-flush-on-SIGTERM;
+`Suspended` shipped). Two deviations from the
 plan below, both recorded in place: the CRD needed a structural-schema
 pass (schemars emits `anyOf` junctors that the API server refuses), and
 the operator re-applies its CRD on every start (not only on a version
