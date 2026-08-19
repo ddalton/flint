@@ -49,14 +49,16 @@ spec:
       app.kubernetes.io/name: flint-lite
   policyTypes: ["Ingress"]
   ingress:
+{{- if or $.Values.networkPolicy.nfsClientCIDRs $.Values.networkPolicy.nfsClientSelectors }}
     # NFS. Kubelet-driven mounts arrive from the NODE ip, so a pod
     # selector cannot express that client set.
+    #
+    # AN INGRESS RULE WITH NO PEERS ADMITS EVERYONE — per the
+    # NetworkPolicy API, `from` empty or missing matches ALL sources.
+    # So this rule is omitted entirely rather than rendered empty: a
+    # policy with no rules denies everything, which is the honest
+    # failure direction for an unconfigured security control.
     - from:
-        {{- if not (or $.Values.networkPolicy.nfsClientCIDRs $.Values.networkPolicy.nfsClientSelectors) }}
-        # Admits NOTHING on 2049 — deliberate. A policy that falls open
-        # when unconfigured reads as protection and is not.
-        []
-        {{- end }}
         {{- range $.Values.networkPolicy.nfsClientCIDRs }}
         - ipBlock:
             cidr: {{ . | quote }}
@@ -67,6 +69,7 @@ spec:
       ports:
         - protocol: TCP
           port: 2049
+{{- end }}
     # The hub's HTTP surface: /status, /health, the file API. The
     # OPERATOR must reach it — it polls the pod ip directly for
     # rpoClean, idleness and lease counts, and a hub it cannot poll is

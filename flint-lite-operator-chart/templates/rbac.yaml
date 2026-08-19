@@ -75,6 +75,15 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch"]
+  # Events. BOTH api groups, and events.k8s.io is the one that matters:
+  # kube-runtime's Recorder publishes events.k8s.io/v1 (its own docs say
+  # so), so granting only the core group means EVERY event the operator
+  # emits is refused 403 — silently, because publishing is best-effort
+  # by design and a lost event must never fail a reconcile. The core
+  # grant stays for anything reading the legacy resource.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]

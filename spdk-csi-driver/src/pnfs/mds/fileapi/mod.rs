@@ -555,6 +555,30 @@ async fn handle_download(
 /// recognisable — and so the tier's own reserved names are not shadowed.
 const UPLOAD_TMP_PREFIX: &str = ".flint-upload.";
 
+/// Makes each upload's temp name unique WITHIN this process.
+///
+/// The pid alone is not enough and the bug it hid was real: two
+/// concurrent PUTs to the same path from the same hub derived the SAME
+/// temp name, wrote into one file interleaved, and each renamed it over
+/// the target. The result is a file holding a mix of both bodies,
+/// reported to both callers as 201 Created. One hub serves every
+/// request for a share, so "same process" is the common case, not the
+/// exotic one — and a UI that retries a slow upload is enough to
+/// trigger it.
+static UPLOAD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The temp name one upload writes into before renaming it over the
+/// target. pid AND a per-process counter: the pid keeps a crashed
+/// upload attributable to an incarnation, the counter is what actually
+/// makes two concurrent uploads to one path distinct.
+fn upload_tmp_name(leaf: &str) -> String {
+    format!(
+        "{UPLOAD_TMP_PREFIX}{leaf}.{}.{}",
+        std::process::id(),
+        UPLOAD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 async fn handle_upload(fs: Arc<HubFs>, q: PathQuery, body: Bytes) -> warp::reply::Response {
     let path = match FsPath::parse(&q.path) {
         Ok(p) => p,
@@ -577,7 +601,7 @@ async fn handle_upload(fs: Arc<HubFs>, q: PathQuery, body: Bytes) -> warp::reply
     // rename-over tombstones the covered generation, so the old S3
     // object is retired rather than orphaned.
     let mut tmp = parent.clone();
-    let tmp_name = format!("{UPLOAD_TMP_PREFIX}{leaf}.{}", std::process::id());
+    let tmp_name = upload_tmp_name(&leaf);
     tmp.push_component(tmp_name);
 
     let stateid = match fs.create_open(&tmp).await {
@@ -695,6 +719,35 @@ pub async fn recover(err: warp::Rejection) -> Result<warp::reply::Response, warp
 
 #[cfg(test)]
 mod tests {
+
+    /// Two concurrent PUTs to ONE path must not share a temp file.
+    ///
+    /// They did: the name was keyed on the process id alone, and one
+    /// hub serves every request for a share, so "same process" is the
+    /// ordinary case rather than the exotic one. Both uploads opened
+    /// the same temp, wrote into it interleaved, and each renamed it
+    /// over the target — leaving a file holding a mix of two bodies and
+    /// reporting 201 Created to both callers. A UI retrying a slow
+    /// upload is enough to trigger it.
+    #[test]
+    fn concurrent_uploads_to_one_path_get_distinct_temp_files() {
+        let names: std::collections::HashSet<String> =
+            (0..64).map(|_| upload_tmp_name("report.pdf")).collect();
+        assert_eq!(names.len(), 64, "temp names collided: {names:?}");
+
+        // Still recognisable as ours, so startup reaping keeps working.
+        for n in &names {
+            assert!(n.starts_with(UPLOAD_TMP_PREFIX), "{n} lost the reserved prefix");
+            assert!(n.contains("report.pdf"), "{n} lost the leaf name");
+        }
+
+        // Distinct leaves stay distinct too.
+        assert_ne!(
+            upload_tmp_name("a").split('.').nth(2),
+            None,
+            "the name shape changed; startup reaping and this guard both key on it"
+        );
+    }
     use super::*;
     use crate::nfs::v4::filehandle::FileHandleManager;
     use crate::nfs::v4::state::StateManager;

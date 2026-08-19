@@ -294,12 +294,25 @@ pub struct IdleSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibernate_after_secs: Option<u64>,
 
-    /// Refuse to suspend while any NFS client still holds a lease, even
-    /// if it has been quiet. Absent = false: an idle mount renews its
-    /// lease forever, so "has sessions" would pin every mounted share
-    /// awake permanently — which is exactly the state this ladder
-    /// exists to end. Set it for shares whose consumers cannot tolerate
-    /// a reconnect.
+    /// May the ladder suspend this share while an NFS client still
+    /// holds a lease?
+    ///
+    /// **Read the name literally, and note that the protective value is
+    /// `false`.** `suspendWithSessions: false` REFUSES to suspend while
+    /// any client holds a lease, even a quiet one — set it for shares
+    /// whose consumers cannot tolerate a reconnect, and for any share
+    /// mounted from another cluster, where a partition makes live
+    /// agents look idle.
+    ///
+    /// Absent (and `true`) means the ladder suspends on quiet
+    /// regardless of leases. That is the default because an idle NFSv4
+    /// mount renews its lease forever, so refusing by default would pin
+    /// every mounted share awake permanently — which is the state this
+    /// ladder exists to end.
+    ///
+    /// The residual is worth knowing: leases EXPIRE, so a long enough
+    /// partition drops the count to zero on its own and the guard stops
+    /// guarding. It narrows the window; it does not close it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspend_with_sessions: Option<bool>,
 }

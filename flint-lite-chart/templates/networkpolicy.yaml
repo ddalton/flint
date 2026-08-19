@@ -6,8 +6,14 @@
 # admits. That is what closes 50051 — the MDS gRPC control plane, which
 # binds 0.0.0.0, carries DeleteVolume, and is unauthenticated unless
 # FLINT_PNFS_CONTROL_TOKEN is set. A standalone hub no longer starts it
-# at all (it has no data servers to register and no CSI driver in front
-# of it), but the policy is what makes that true for an OLD image too.
+# at all, but the policy is what makes that true for an OLD image too.
+#
+# AN INGRESS RULE WITH NO PEERS ADMITS EVERYONE. Per the NetworkPolicy
+# API, `from` empty or missing matches ALL sources — so a rule rendered
+# with an empty peer list is not a closed door, it is an open one that
+# reads like a closed one. Each rule below is therefore omitted
+# ENTIRELY unless it has at least one peer, and a policy with no rules
+# at all denies everything, which is the honest failure direction.
 #
 # Requires a CNI that enforces NetworkPolicy — Cilium, Calico, and
 # friends do; a plain kubenet cluster silently ignores every rule here.
@@ -24,20 +30,13 @@ spec:
       {{- include "flint-lite.selectorLabels" . | nindent 6 }}
   policyTypes: ["Ingress"]
   ingress:
+{{- if or .Values.networkPolicy.nfsClientCIDRs .Values.networkPolicy.nfsClientSelectors }}
     # NFS. Kernel clients connect FROM THE NODE IP when kubelet does the
     # mount (an `nfs:` PV, or nfs-subdir-external-provisioner), so a pod
     # selector cannot express that client set — hence the CIDR list.
-    # In-pod mounts (a privileged sidecar mounting for itself) come from
-    # the pod IP and want the selector list instead. Cross-cluster
-    # consumers are always CIDRs.
+    # In-pod mounts come from the pod IP and want the selector list.
+    # Cross-cluster consumers are always CIDRs.
     - from:
-        {{- if not (or .Values.networkPolicy.nfsClientCIDRs .Values.networkPolicy.nfsClientSelectors) }}
-        # Both lists empty: this admits NOTHING on 2049, which will
-        # break every mount. Deliberate — a policy that silently falls
-        # open is worse than no policy, because it reads as protection.
-        # Set networkPolicy.nfsClientCIDRs to your node CIDRs.
-        []
-        {{- end }}
         {{- range .Values.networkPolicy.nfsClientCIDRs }}
         - ipBlock:
             cidr: {{ . | quote }}
@@ -48,16 +47,12 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.service.port }}
-{{- if .Values.monitoring.enabled }}
+{{- end }}
+{{- if and .Values.monitoring.enabled (or .Values.networkPolicy.apiClientCIDRs .Values.networkPolicy.apiClientSelectors) }}
     # /status, /health and the file API. This surface can rewrite any
     # file in the project, so it is never on the consumer-facing
-    # Service and never open to the NFS client set. Empty ⇒ nothing
-    # reaches it, which is the right default: with the file API off,
-    # only a monitoring scraper wants this port at all.
+    # Service and never open to the NFS client set.
     - from:
-        {{- if not (or .Values.networkPolicy.apiClientCIDRs .Values.networkPolicy.apiClientSelectors) }}
-        []
-        {{- end }}
         {{- range .Values.networkPolicy.apiClientCIDRs }}
         - ipBlock:
             cidr: {{ . | quote }}
