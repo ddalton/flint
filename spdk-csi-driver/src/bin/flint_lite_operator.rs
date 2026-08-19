@@ -180,9 +180,19 @@ async fn main() -> anyhow::Result<()> {
         .owns(Api::<Service>::all(client.clone()), watcher::Config::default())
         .owns(Api::<ConfigMap>::all(client.clone()), watcher::Config::default())
         // Credentials rotate without any CR changing.
+        //
+        // LABEL-SELECTED, and that is the whole point: unselected, this
+        // watch held every Secret in the cluster in the operator's
+        // memory — service-account tokens, other tenants' credentials,
+        // all of it — to notice changes in the few a FlintShare names.
+        // A Secret without the label is not a correctness problem: the
+        // checksum comes from a direct `get` during reconcile, so the
+        // rotation still rolls the hub on the next periodic pass. The
+        // share reports `CredentialsWatched: false` when that is the
+        // case.
         .watches(
             Api::<Secret>::all(client.clone()),
-            watcher::Config::default(),
+            watcher::Config::default().labels(reconcile::LABEL_CREDENTIALS),
             move |s: Secret| {
                 let ns = s.namespace().unwrap_or_default();
                 let name = s.name_any();
