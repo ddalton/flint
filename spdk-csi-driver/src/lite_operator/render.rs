@@ -976,6 +976,7 @@ mod tests {
                 r#type: Some(ServiceType::NodePort),
                 port: Some(2050),
                 node_port: Some(30049),
+                advertise_address: None,
                 annotations: Some(BTreeMap::from([("a".into(), "b".into())])),
             }),
             ..base_spec()
@@ -995,6 +996,7 @@ mod tests {
                 r#type: Some(ServiceType::ClusterIP),
                 port: None,
                 node_port: Some(30049),
+                advertise_address: None,
                 annotations: None,
             }),
             ..base_spec()

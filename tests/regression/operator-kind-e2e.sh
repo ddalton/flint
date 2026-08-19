@@ -17,32 +17,35 @@
 #      the option is on the mount rather than silently dropped
 #   4  identity immutability is refused BY THE API SERVER (CEL), and an
 #      unknown settings key is refused too (the whole point of a schema)
-#   5  a settings edit rolls the hub exactly once and the new config is
+#   5  advertiseAddress: a bare host and unbracketed IPv6 are refused at
+#      admission; a valid one lands in status.address VERBATIM without
+#      touching the Service or the live mount; clearing it reverts
+#   6  a settings edit rolls the hub exactly once and the new config is
 #      live in the pod
-#   6  conflict: a second share on a nested prefix, in another
+#   7  conflict: a second share on a nested prefix, in another
 #      namespace, is Failed with a Conflict condition and NO Deployment;
 #      deleting the winner promotes it
-#   7  the operator repairs a hand-mangled CRD schema on restart
-#   8  the hub's own HTTP surface: /status answers on the pod IP and
+#   8  the operator repairs a hand-mangled CRD schema on restart
+#   9  the hub's own HTTP surface: /status answers on the pod IP and
 #      reports rpoClean as null (never true) with no bucket, and the
 #      file API round-trips bytes with the kernel mount in BOTH
 #      directions while refusing an unauthenticated caller and a
 #      symlink out of the export
-#   9  suspendWithSessions holds a share awake while a client is
+#  10  suspendWithSessions holds a share awake while a client is
 #      mounted, even after the hub's own clock says idle — the signal
 #      that tells "everyone went home" from "everyone is blocked"
-#  10  the idle ladder: a quiet share suspends to replicas 0 while
+#  11  the idle ladder: a quiet share suspends to replicas 0 while
 #      KEEPING its PVC, the suspend survives later reconciles (the
 #      annotation carrier), stamping the ladder's wake input brings it
 #      back, and an admin's spec.lifecycle: Suspended outranks it
-#  11  reclaim: Retain keeps the PVC when the share is deleted, and the
+#  12  reclaim: Retain keeps the PVC when the share is deleted, and the
 #      three owned children are garbage collected; Delete removes it
-#  12  adoption: a share adopts a live helm release IN PLACE (one
+#  13  adoption: a share adopts a live helm release IN PLACE (one
 #      Deployment, same PVC, same data), and a differently-named share
 #      is fenced with AdoptionBlocked instead of double-mounting
 #
-# Legs 8-10 run BEFORE reclaim on purpose: they all drive tenant-a and
-# its live kernel mount, and leg 11 is the leg that deletes them.
+# Legs 9-11 run BEFORE reclaim on purpose: they all drive tenant-a and
+# its live kernel mount, and leg 12 is the leg that deletes them.
 #
 # Images are built from the WORKING TREE, so this always tests the code
 # you are sitting on. KEEP=1 leaves the cluster standing.
@@ -116,7 +119,7 @@ cp "$CARGO_DIR/target/$TRIPLE/release/flint-pnfs-mds" "$IMGDIR/"
 cp "$CARGO_DIR/target/$TRIPLE/release/flint-lite-operator" "$IMGDIR/"
 cat >"$IMGDIR/Dockerfile.hub" <<'EOF'
 FROM alpine:3.20
-# curl is for the TEST, not the product: leg 8 drives the file API from
+# curl is for the TEST, not the product: leg 9 drives the file API from
 # inside the pod, and alpine's wget is BusyBox's — it cannot issue PUT
 # or DELETE at all. The shipped hub image has no curl and needs none.
 RUN apk add --no-cache curl
@@ -334,8 +337,67 @@ spec:
 EOF
 pass "identity is immutable and a misspelled knob is refused, both by the API server"
 
-# ── 5. a settings edit reaches the running hub ───────────────────────
-say "leg 5: an edit rolls the hub exactly once and the new config is live"
+# ── 5. the advertised address ────────────────────────────────────────
+say "leg 5: advertiseAddress is what status.address reports, verbatim"
+# The ONLY way a consumer in another cluster gets a mountable address.
+# Everything the operator can derive is in-cluster-only except a
+# LoadBalancer's ingress, and NodePort is the trap: it resolves to the
+# .svc DNS name, so a foreign client reads status.address, mounts it,
+# and fails on a name it cannot resolve.
+
+# Malformed is refused BY THE API SERVER, not discovered as a failed
+# mount in somebody else's cluster. A bare host is the dangerous shape:
+# an NFS client given one silently uses 2049, which is exactly wrong
+# for the port-per-project layout this exists to serve.
+if kubectl -n "$NS" patch flintshare tenant-a --type=merge \
+     -p '{"spec":{"service":{"advertiseAddress":"hub.example.internal"}}}' \
+     >/tmp/op-e2e-adv.log 2>&1; then
+  fail "advertiseAddress without a port was ACCEPTED — a client would silently use 2049"
+fi
+grep -qi "host:port" /tmp/op-e2e-adv.log \
+  || { cat /tmp/op-e2e-adv.log; fail "the refusal did not say what shape is wanted"; }
+# Unbracketed IPv6 is refused too: its colons make the port ambiguous.
+if kubectl -n "$NS" patch flintshare tenant-a --type=merge \
+     -p '{"spec":{"service":{"advertiseAddress":"2001:db8::1:2049"}}}' >/dev/null 2>&1; then
+  fail "unbracketed IPv6 was accepted — host and port are not separable"
+fi
+pass "a bare host and unbracketed IPv6 are both refused at admission"
+
+# The positive case: verbatim into status.address.
+ADV="hub-a.corp.internal:2149"
+kubectl -n "$NS" patch flintshare tenant-a --type=merge \
+  -p "{\"spec\":{\"service\":{\"advertiseAddress\":\"$ADV\"}}}" >/dev/null \
+  || fail "a valid advertiseAddress was refused"
+for i in $(seq 1 30); do
+  A=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.status.address}' 2>/dev/null)
+  [ "$A" = "$ADV" ] && break
+  sleep 2
+done
+[ "$A" = "$ADV" ] || fail "status.address is '$A', not the advertised '$ADV'"
+# The Service itself must be untouched — this changes what is
+# ADVERTISED, not what is created, so the in-cluster path keeps working.
+SVC_TYPE=$(kubectl -n "$NS" get svc tenant-a -o jsonpath='{.spec.type}')
+[ "$SVC_TYPE" = "NodePort" ] || fail "the Service changed type to '$SVC_TYPE' — advertising is not provisioning"
+vm "timeout 30 stat $MNT/shared.bin" >/dev/null 2>&1 \
+  || fail "the existing in-cluster mount broke when the advertised address changed"
+pass "status.address is '$ADV' verbatim; Service and live mount untouched"
+
+# And it reverts, so a share that moves back in-cluster is not stranded
+# advertising an address nobody serves any more.
+kubectl -n "$NS" patch flintshare tenant-a --type=json \
+  -p '[{"op":"remove","path":"/spec/service/advertiseAddress"}]' >/dev/null \
+  || fail "could not clear advertiseAddress"
+for i in $(seq 1 30); do
+  A=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.status.address}' 2>/dev/null)
+  [ "$A" = "tenant-a.$NS.svc.cluster.local:2049" ] && break
+  sleep 2
+done
+[ "$A" = "tenant-a.$NS.svc.cluster.local:2049" ] \
+  || fail "clearing advertiseAddress left status.address at '$A'"
+pass "clearing it reverts to the derived in-cluster address"
+
+# ── 6. a settings edit reaches the running hub ───────────────────────
+say "leg 6: an edit rolls the hub exactly once and the new config is live"
 GEN_BEFORE=$(kubectl -n "$NS" get deployment tenant-a -o jsonpath='{.metadata.generation}')
 kubectl -n "$NS" patch flintshare tenant-a --type=merge -p '{"spec":{"logLevel":"debug"}}' >/dev/null
 for i in $(seq 1 45); do
@@ -352,8 +414,8 @@ POD_CFG=$(kubectl -n "$NS" exec deployment/tenant-a -- sh -c "grep -c 'level: de
 [ "${POD_CFG:-0}" -ge 1 ] || fail "the RUNNING pod does not have the new config"
 pass "edit → ConfigMap → one roll → live in the pod (generation $GEN_BEFORE → $GEN_AFTER)"
 
-# ── 6. fleet uniqueness ──────────────────────────────────────────────
-say "leg 6: a second share on the same bucket subtree is refused, across namespaces"
+# ── 7. fleet uniqueness ──────────────────────────────────────────────
+say "leg 7: a second share on the same bucket subtree is refused, across namespaces"
 kubectl create namespace "$NS2" >/dev/null
 kubectl apply -f - >/dev/null <<EOF || fail "applying the winner failed"
 apiVersion: flint.io/v1alpha1
@@ -398,8 +460,8 @@ done
 kubectl -n "$NS2" delete flintshare intruder --wait=true >/dev/null 2>&1
 pass "deleting the winner promoted the survivor"
 
-# ── 7. the operator repairs its own CRD ──────────────────────────────
-say "leg 7: a hand-mangled CRD schema is repaired on operator restart"
+# ── 8. the operator repairs its own CRD ──────────────────────────────
+say "leg 8: a hand-mangled CRD schema is repaired on operator restart"
 # `logLevel`, not `settings`: the API server REFUSES to remove a
 # property a CEL rule references ("undefined field 'settings'" — the
 # rules pin their own fields, which is a good property and an
@@ -422,8 +484,8 @@ done
   || fail "the operator did NOT restore the stripped schema — that field would be pruned on every apply, silently"
 pass "stripped property (spec.logLevel) restored by the operator at startup"
 
-# ── 8. the hub's HTTP surface: status, and files without a mount ─────
-say "leg 8: /status answers, and the file API round-trips without any mount"
+# ── 9. the hub's HTTP surface: status, and files without a mount ─────
+say "leg 9: /status answers, and the file API round-trips without any mount"
 TOKEN=$(head -c 24 /dev/urandom | base64 | tr -d '=+/' | head -c 24)
 kubectl -n "$NS" create secret generic api-token --from-literal=token="$TOKEN" >/dev/null
 kubectl -n "$NS" patch flintshare tenant-a --type=merge -p "{
@@ -556,8 +618,8 @@ echo "$OUT" | grep -q "level:" \
   || fail "reading the symlink returned content the client should not have got: $OUT"
 pass "file API: 401 unauthenticated, HTTP↔NFS round trip both ways, symlink refused 409 and never dereferenced server-side"
 
-# ── 9. the sessions guard ────────────────────────────────────────────
-say "leg 9: a mounted-but-idle share is held awake by suspendWithSessions"
+# ── 10. the sessions guard ───────────────────────────────────────────
+say "leg 10: a mounted-but-idle share is held awake by suspendWithSessions"
 # The partition case: agents hold mounts and go quiet. The hub's own
 # activity clock DELIBERATELY ignores bare SEQUENCE, GETATTR and ACCESS
 # (see nfs/activity.rs) so that a mounted hub CAN idle — which means the
@@ -616,8 +678,8 @@ pass "held awake by the lease guard, and the condition says so: $HELD"
 kubectl -n "$NS" patch flintshare tenant-a --type=merge -p '{"spec":{"idle":null}}' >/dev/null \
   || fail "could not disarm the ladder"
 
-# ── 10. the idle ladder ──────────────────────────────────────────────
-say "leg 10: an idle share suspends, an annotation wakes it, an admin suspend outranks it"
+# ── 11. the idle ladder ──────────────────────────────────────────────
+say "leg 11: an idle share suspends, an annotation wakes it, an admin suspend outranks it"
 # UNMOUNT BEFORE ARMING. The leg above leaves the hub idle well past
 # this threshold, so arming the ladder while the mount is still up
 # suspends the share on the very next reconcile — and a hard NFS mount
@@ -707,10 +769,10 @@ REPL=$(kubectl -n "$NS" get deployment tenant-a -o jsonpath='{.spec.replicas}')
 [ "$REPL" = "0" ] || fail "an admin-suspended share was scaled back up by a wake request"
 pass "spec.lifecycle: Suspended outranks the ladder; a wake request does not override it"
 
-# ── 11. reclaim ──────────────────────────────────────────────────────
-say "leg 11: reclaim Retain keeps the PVC; Delete removes it"
+# ── 12. reclaim ──────────────────────────────────────────────────────
+say "leg 12: reclaim Retain keeps the PVC; Delete removes it"
 # tenant-a arrives here admin-suspended at replicas 0, left that way by
-# leg 10. That is deliberate: cleanup must not need a running hub to
+# leg 11. That is deliberate: cleanup must not need a running hub to
 # reach — a share you suspended BECAUSE it was misbehaving is exactly
 # the one you then delete, and a finalizer that waits on a pod that is
 # never coming back wedges the namespace.
@@ -750,8 +812,8 @@ kubectl -n "$NS" get pvc ephemeral-data >/dev/null 2>&1 \
   && fail "reclaim: Delete left the PVC behind"
 pass "reclaim: Delete removed the claim"
 
-# ── 12. adoption ─────────────────────────────────────────────────────
-say "leg 12: adopting a live helm release in place"
+# ── 13. adoption ─────────────────────────────────────────────────────
+say "leg 13: adopting a live helm release in place"
 helm install flint-lite "$LITE_CHART" -n "$CHARTNS" --create-namespace \
   --set image.ref="$HUBIMG" --set persistence.size=1Gi \
   >/tmp/op-e2e-lite.log 2>&1 || { tail -10 /tmp/op-e2e-lite.log; fail "lite chart install failed"; }

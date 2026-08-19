@@ -300,6 +300,34 @@ spec:
                 description: How consumers reach the hub.
                 nullable: true
                 properties:
+                  advertiseAddress:
+                    description: |-
+                      What `status.address` should say, verbatim, as `host:port`.
+
+                      **This is the only way a consumer OUTSIDE this cluster gets a
+                      mountable address.** Derived addresses do not travel: a
+                      ClusterIP is not routable from another cluster, and a NodePort
+                      Service still resolves to the in-cluster DNS name — so a
+                      workload-cluster client that reads `status.address` and mounts
+                      it gets a name it cannot resolve. Only `type: LoadBalancer`
+                      derives something routable on its own, and NFS is one
+                      long-lived TCP flow, so a flat or peered network beats a cloud
+                      LB and its idle timeouts.
+
+                      Set this to whatever the consumer should actually dial — a
+                      peered-VPC address, an internal L4 endpoint's `host:port`, a
+                      DNS name that resolves on both sides. The operator does NOT
+                      change the Service it creates; this changes only what it
+                      ADVERTISES, so the in-cluster path keeps working unchanged.
+
+                      IPv6 goes in brackets: `[2001:db8::1]:2049`.
+
+                      Deliberately MUTABLE — unlike `bucket`/`keyPrefix`, an endpoint
+                      can legitimately move. It is not part of the share's identity.
+                      Clients already mounted keep pointing at the old address until
+                      they remount; nothing recalls them.
+                    nullable: true
+                    type: string
                   annotations:
                     additionalProperties:
                       type: string
@@ -480,6 +508,8 @@ spec:
               rule: '!has(self.credentialsSecretRef) || has(self.bucket)'
             - message: spec.idle.hibernateAfterSecs needs spec.bucket — hibernation deletes the PVC, and without a bucket that PVC is the only copy of the data
               rule: '!has(self.idle) || !has(self.idle.hibernateAfterSecs) || has(self.bucket)'
+            - message: spec.service.advertiseAddress must be host:port — e.g. hub.example.internal:2049, 10.0.4.7:2049, or [2001:db8::1]:2049 for IPv6
+              rule: '!has(self.service) || !has(self.service.advertiseAddress) || self.service.advertiseAddress.matches(''^[^:]+:[0-9]+$'') || (self.service.advertiseAddress.startsWith(''['') && self.service.advertiseAddress.matches(''^.+]:[0-9]+$''))'
           status:
             description: |-
               Observed state. Everything here is derived — the operator never

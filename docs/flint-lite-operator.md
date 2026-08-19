@@ -117,6 +117,56 @@ Killing a `Starting` hub kills a takeover or an import.
 Conditions carry the detail: `Ready`, `ConfigCurrent`, `Conflict`,
 `AdoptionBlocked`, `CredentialsFound`, `PersistenceCurrent`.
 
+## Reaching a share from another cluster
+
+`status.address` is what a consumer mounts, and by default the operator
+derives it from the Service it created. **Every derived answer except a
+LoadBalancer's ingress is in-cluster-only:**
+
+| `spec.service.type` | derived `status.address` | routable from another cluster? |
+|---|---|---|
+| `ClusterIP` (default) | `<name>.<ns>.svc.cluster.local:<port>` | no |
+| `NodePort` | `<name>.<ns>.svc.cluster.local:<port>` | **no — and this one is a trap** |
+| `LoadBalancer` | the ingress hostname/IP | yes, once the LB is up |
+
+The NodePort row is the trap: the Service really does open a node port,
+but the address the operator advertises is still the in-cluster DNS
+name. A workload-cluster client reads `status.address`, tries to mount
+it, and fails on a name it cannot resolve — the port it needed was
+never in the string.
+
+`spec.service.advertiseAddress` is the answer. Set it to whatever the
+consumer should actually dial and the operator copies it into
+`status.address` verbatim:
+
+```yaml
+spec:
+  service:
+    type: NodePort
+    nodePort: 32049
+    advertiseAddress: "10.0.4.7:32049"     # a peered-VPC node address
+    # advertiseAddress: "hub-a.corp.internal:2149"
+    # advertiseAddress: "[2001:db8::1]:2049"    # IPv6 needs brackets
+```
+
+Three things worth knowing:
+
+- **It advertises, it does not provision.** The operator still creates
+  exactly the Service you asked for; only what it *reports* changes. The
+  in-cluster path keeps working untouched, so co-located consumers are
+  unaffected.
+- **The port is mandatory.** A bare host is refused at admission,
+  because an NFS client handed one silently uses 2049 — precisely wrong
+  for a port-per-project layout. Unbracketed IPv6 is refused for the
+  same reason: its colons make the port unrecoverable.
+- **It is mutable, and nothing recalls existing mounts.** Unlike
+  `bucket`/`keyPrefix` this is not identity — an endpoint can legitimately
+  move. Clients already mounted keep using the old address until they
+  remount.
+
+NFS is one long-lived TCP flow, so prefer a flat or peered network to a
+cloud load balancer, and mind LB idle timeouts if you use one.
+
 ## The hub's HTTP surface: status, and files without a mount
 
 `spec.monitoring` turns on a second listener in the hub — off by

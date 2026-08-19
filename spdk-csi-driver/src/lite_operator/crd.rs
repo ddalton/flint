@@ -97,6 +97,23 @@ use serde::{Deserialize, Serialize};
 #[x_kube(validation = Rule::new(
     "!has(self.idle) || !has(self.idle.hibernateAfterSecs) || has(self.bucket)")
     .message("spec.idle.hibernateAfterSecs needs spec.bucket — hibernation deletes the PVC, and without a bucket that PVC is the only copy of the data"))]
+// `advertiseAddress` is copied into `status.address` verbatim and
+// mounted by consumers, so a malformed one is a mount failure in
+// somebody else's cluster with nothing local to look at. Require the
+// port explicitly: an NFS client given a bare host silently uses 2049,
+// which is exactly wrong for the port-per-project shape this exists to
+// serve. IPv6 must be bracketed, so the last colon always separates
+// host from port.
+//
+// NO BACKSLASHES IN THE PATTERNS. `\[` is not a valid escape in a CEL
+// STRING LITERAL, so a regex-escaped bracket fails to parse before RE2
+// ever sees it — and the API server then refuses the WHOLE CRD, taking
+// every other rule with it. The opening bracket is checked with
+// startsWith instead; a closing bracket needs no escape in RE2 outside
+// a character class.
+#[x_kube(validation = Rule::new(
+    "!has(self.service) || !has(self.service.advertiseAddress) || self.service.advertiseAddress.matches('^[^:]+:[0-9]+$') || (self.service.advertiseAddress.startsWith('[') && self.service.advertiseAddress.matches('^.+]:[0-9]+$'))")
+    .message("spec.service.advertiseAddress must be host:port — e.g. hub.example.internal:2049, 10.0.4.7:2049, or [2001:db8::1]:2049 for IPv6"))]
 pub struct FlintShareSpec {
     /// Bucket this share publishes to. Must already exist, with
     /// VERSIONING ON (delete-marker recovery assumes it) — the hub
@@ -375,6 +392,33 @@ pub struct ServiceSpec {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<BTreeMap<String, String>>,
+
+    /// What `status.address` should say, verbatim, as `host:port`.
+    ///
+    /// **This is the only way a consumer OUTSIDE this cluster gets a
+    /// mountable address.** Derived addresses do not travel: a
+    /// ClusterIP is not routable from another cluster, and a NodePort
+    /// Service still resolves to the in-cluster DNS name — so a
+    /// workload-cluster client that reads `status.address` and mounts
+    /// it gets a name it cannot resolve. Only `type: LoadBalancer`
+    /// derives something routable on its own, and NFS is one
+    /// long-lived TCP flow, so a flat or peered network beats a cloud
+    /// LB and its idle timeouts.
+    ///
+    /// Set this to whatever the consumer should actually dial — a
+    /// peered-VPC address, an internal L4 endpoint's `host:port`, a
+    /// DNS name that resolves on both sides. The operator does NOT
+    /// change the Service it creates; this changes only what it
+    /// ADVERTISES, so the in-cluster path keeps working unchanged.
+    ///
+    /// IPv6 goes in brackets: `[2001:db8::1]:2049`.
+    ///
+    /// Deliberately MUTABLE — unlike `bucket`/`keyPrefix`, an endpoint
+    /// can legitimately move. It is not part of the share's identity.
+    /// Clients already mounted keep pointing at the old address until
+    /// they remount; nothing recalls them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_address: Option<String>,
 }
 
 #[derive(JsonSchema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]

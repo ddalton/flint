@@ -362,7 +362,20 @@ pub fn phase_of(
 /// What consumers mount. A DNS name rather than a ClusterIP: it
 /// survives the Service being recreated, and it is what goes in a PV's
 /// `nfs.server` field.
-pub fn address_of(svc: &Service, namespace: &str) -> Option<String> {
+/// What `status.address` should say — the thing a consumer mounts.
+///
+/// `advertise` (from `spec.service.advertiseAddress`) wins over
+/// everything derived, and is returned VERBATIM. Explicit beats
+/// inferred: the operator can see a Service object but it cannot see
+/// the network the consumer lives on, and for every type except
+/// LoadBalancer what it can derive is in-cluster-only — a ClusterIP no
+/// other cluster can route to, or, for NodePort, the `.svc` DNS name
+/// rather than the node address the consumer actually needs. Deriving
+/// harder is not the answer; being told is.
+pub fn address_of(svc: &Service, namespace: &str, advertise: Option<&str>) -> Option<String> {
+    if let Some(a) = advertise.map(str::trim).filter(|a| !a.is_empty()) {
+        return Some(a.to_string());
+    }
     let spec = svc.spec.as_ref()?;
     let port = spec.ports.as_ref()?.first()?.port;
     let name = svc.metadata.name.as_ref()?;
@@ -767,7 +780,17 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         &share,
         FlintShareStatus {
             phase: Some(phase.clone()),
-            address: svc_live.as_ref().and_then(|s| address_of(s, &ns)),
+            address: svc_live.as_ref().and_then(|s| {
+                address_of(
+                    s,
+                    &ns,
+                    share
+                        .spec
+                        .service
+                        .as_ref()
+                        .and_then(|sv| sv.advertise_address.as_deref()),
+                )
+            }),
             observed_generation: generation,
             claim_name: Some(names.claim.clone()),
             conditions: Some(conds),
@@ -1622,12 +1645,12 @@ mod tests {
             status,
         };
         assert_eq!(
-            address_of(&svc("ClusterIP", None), "ws").as_deref(),
+            address_of(&svc("ClusterIP", None), "ws", None).as_deref(),
             Some("tenant-a.ws.svc.cluster.local:2049")
         );
         // A LoadBalancer with no ingress yet has no address to report —
         // reporting the ClusterIP would be a lie a consumer cannot reach.
-        assert_eq!(address_of(&svc("LoadBalancer", None), "ws"), None);
+        assert_eq!(address_of(&svc("LoadBalancer", None), "ws", None), None);
         let lb = svc(
             "LoadBalancer",
             Some(ServiceStatus {
@@ -1641,7 +1664,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            address_of(&lb, "ws").as_deref(),
+            address_of(&lb, "ws", None).as_deref(),
             Some("a.elb.amazonaws.com:2049")
         );
     }
@@ -1694,6 +1717,80 @@ mod tests {
 
         // Bottom of the ladder: nothing left on a timer.
         assert_eq!(settled_requeue(&share, Hibernated), REQUEUE_SETTLED);
+    }
+
+    /// **The only way a consumer in ANOTHER cluster gets a mountable
+    /// address.** Everything derived is in-cluster-only except a
+    /// LoadBalancer's ingress, and the NodePort case is the trap: it
+    /// resolves to the `.svc` DNS name rather than a node address, so a
+    /// foreign client reads `status.address`, tries to mount it, and
+    /// fails on a name it cannot resolve.
+    #[test]
+    fn an_advertised_address_is_what_a_foreign_consumer_mounts() {
+        let svc = |ty: &str| Service {
+            metadata: ObjectMeta {
+                name: Some("tenant-a".into()),
+                ..Default::default()
+            },
+            spec: Some(K8sServiceSpec {
+                type_: Some(ty.into()),
+                ports: Some(vec![ServicePort {
+                    port: 2049,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            status: None,
+        };
+        let cluster_ip = svc("ClusterIP");
+
+        // Baseline: derived, and in-cluster only.
+        assert_eq!(
+            address_of(&cluster_ip, "ws", None).as_deref(),
+            Some("tenant-a.ws.svc.cluster.local:2049")
+        );
+
+        // Advertised: verbatim, and it WINS over the derived value.
+        assert_eq!(
+            address_of(&cluster_ip, "ws", Some("hub-a.corp.internal:2149")).as_deref(),
+            Some("hub-a.corp.internal:2149")
+        );
+
+        // It wins over a LoadBalancer's ingress too — explicit beats
+        // inferred, and the operator cannot see the consumer's network.
+        let mut lb = svc("LoadBalancer");
+        lb.status = Some(ServiceStatus {
+            load_balancer: Some(LoadBalancerStatus {
+                ingress: Some(vec![LoadBalancerIngress {
+                    hostname: Some("a.elb.amazonaws.com".into()),
+                    ..Default::default()
+                }]),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            address_of(&lb, "ws", Some("10.0.4.7:2049")).as_deref(),
+            Some("10.0.4.7:2049")
+        );
+
+        // IPv6 survives verbatim — the brackets are the reason the CEL
+        // rule demands them, so the last colon is unambiguously the port.
+        assert_eq!(
+            address_of(&cluster_ip, "ws", Some("[2001:db8::1]:2049")).as_deref(),
+            Some("[2001:db8::1]:2049")
+        );
+
+        // Absent and empty both fall through rather than advertising "".
+        // An empty string is what a chart renders for an unset value,
+        // and publishing it would blank status.address.
+        assert_eq!(
+            address_of(&cluster_ip, "ws", Some("")).as_deref(),
+            Some("tenant-a.ws.svc.cluster.local:2049")
+        );
+        assert_eq!(
+            address_of(&cluster_ip, "ws", Some("   ")).as_deref(),
+            Some("tenant-a.ws.svc.cluster.local:2049")
+        );
     }
 
     /// `lastTransitionTime` must mean "when this changed", not "when we
