@@ -62,6 +62,22 @@ pub struct MetadataServer {
     /// the tier starts, and taken by the shutdown so it can only run
     /// once.
     tier_runtime: std::sync::Mutex<Option<TierRuntime>>,
+    /// The foreign-key sweep, parked until the listener is up. See
+    /// `crate::tier::import::sweep_foreign` for why it must not run
+    /// pre-listener — and why running it live changes what every step
+    /// inside it has to guarantee.
+    pending_sweep: std::sync::Mutex<Option<PendingSweep>>,
+}
+
+/// Everything `sweep_foreign` needs, captured at tier start and spawned
+/// once `serve` reaches phase Serving.
+struct PendingSweep {
+    backend: Arc<dyn crate::state_backend::StateBackend>,
+    store: Arc<dyn crate::tier::store::ObjectStore>,
+    export_root: std::path::PathBuf,
+    key_prefix: String,
+    note_path: Option<std::path::PathBuf>,
+    status: Arc<super::status::HubStatus>,
 }
 
 /// The tier handles a clean shutdown needs. Assembled at the end of
@@ -431,6 +447,7 @@ impl MetadataServer {
             status: Arc::new(super::status::HubStatus::new()),
             monitoring: crate::pnfs::config::MonitoringConfig::default(),
             tier_runtime: std::sync::Mutex::new(None),
+            pending_sweep: std::sync::Mutex::new(None),
         })
     }
 
@@ -732,6 +749,13 @@ impl MetadataServer {
 
         self.status.set_phase(super::status::HubPhase::Serving);
         info!("✅ Metadata Server is ready to accept connections");
+
+        // The foreign-key sweep, now that clients can be served. It
+        // runs BEHIND the listener on purpose (see
+        // `tier::import::sweep_foreign`), which is why every stub it
+        // places installs its eviction marker before its name appears
+        // and refuses to replace a name a client just created.
+        self.start_foreign_sweep();
         info!("");
 
         // Start gRPC control server in background (for DS registration)
@@ -740,6 +764,35 @@ impl MetadataServer {
         // Start TCP server (for NFS client connections)
         let addr = format!("{}:{}", self.config.bind.address, self.config.bind.port);
         self.serve_tcp(&addr).await
+    }
+
+    /// Spawn the parked foreign-key sweep, if one is owed.
+    fn start_foreign_sweep(&self) {
+        let Some(p) = self.pending_sweep.lock().unwrap().take() else {
+            return;
+        };
+        tokio::spawn(async move {
+            p.status.set_phase(super::status::HubPhase::Sweeping);
+            let rep = crate::tier::import::sweep_foreign(
+                p.backend,
+                p.store,
+                p.export_root,
+                p.key_prefix,
+                p.note_path,
+            )
+            .await;
+            p.status.set_sweep(rep);
+            if rep.stubs_created > 0 || rep.failed > 0 {
+                info!(
+                    "🪣 tier sweep: {} foreign stub(s) ingested, {} failed ({} scanned)",
+                    rep.stubs_created, rep.failed, rep.scanned
+                );
+            }
+            // Back to Serving whatever happened: the listener never
+            // stopped, and leaving the phase at Sweeping would make the
+            // file API refuse forever if the sweep died.
+            p.status.set_phase(super::status::HubPhase::Serving);
+        });
     }
 
     /// S3 tier startup (L2 step 7): store connect → bucket bootstrap →
@@ -915,8 +968,10 @@ impl MetadataServer {
 
         // Rebuild the durable registry and arbitrate any crash-torn
         // intents BEFORE the first tick (and before clients reconnect
-        // and mutate on top).
-        orch.startup().await;
+        // and mutate on top). The startup seed's ONE read of the DR
+        // manifest is handed to the importer below, which used to GET
+        // the same object again moments later.
+        let seed = orch.startup().await;
 
         // Step 12: import-refresh — resume a crashed import, or (on
         // FRESH state with bucket content) rebuild/adopt the tree from
@@ -942,20 +997,41 @@ impl MetadataServer {
             _ => None,
         };
         let mut imported = false;
+        let sweep_note = state_note_dir.as_ref().map(|p| p.join("flint-sweep-pending"));
+        let mut sweep_owed = false;
         if t.import_on_start {
             self.status.set_phase(super::status::HubPhase::Importing);
             let intent_path = state_note_dir.as_ref().map(|p| p.join("flint-import-intent"));
-            if let Some(rep) = crate::tier::import::maybe_import_on_start(
+            let outcome = crate::tier::import::maybe_import_on_start(
                 &self.backend,
                 &orch_store,
+                &seed,
                 crate::tier::import::ImportConfig {
                     export_root: &export_root,
                     key_prefix: &t.key_prefix,
                     intent_path: intent_path.as_deref(),
+                    sweep_note_path: sweep_note.as_deref(),
                 },
             )
-            .await
-            {
+            .await;
+            sweep_owed = outcome.sweep_owed;
+            if let Some(why) = &outcome.refused {
+                // The bucket HAS a manifest and we could not read it.
+                // Importing anyway would serve a tree with every
+                // directory, symlink, mode and owner missing — only the
+                // manifest carries those — and the sweep would then
+                // publish that impoverished tree back over the real one.
+                // The intent note is left in place so the next start
+                // retries.
+                error!(
+                    "🪣 tier import REFUSED: the bucket's manifest exists but is unusable \
+                     ({why}). This volume's namespace is NOT restored. The hub will serve \
+                     an empty export; do NOT let it publish over the bucket. Fix the \
+                     manifest object or restore from a versioned copy, then restart."
+                );
+                self.status.set_import_refused(why.clone());
+            }
+            if let Some(rep) = outcome.report {
                 // `is_some()` — NOT `stubs_created > 0`, which would
                 // false-negative the warm trigger on a crash-resumed
                 // import whose stubs all count as skipped_known.
@@ -971,6 +1047,22 @@ impl MetadataServer {
                     rep.failed
                 );
             }
+        }
+
+        // Park the foreign-key sweep. It is a full prefix LIST plus a
+        // HEAD per unknown object — minutes on a large bucket — and the
+        // manifest lane above already rebuilt the real tree, so making
+        // every client wait for it buys nothing. `serve` spawns it once
+        // the listener is up.
+        if sweep_owed {
+            *self.pending_sweep.lock().unwrap() = Some(PendingSweep {
+                backend: Arc::clone(&self.backend),
+                store: Arc::clone(&orch_store),
+                export_root: export_root.clone(),
+                key_prefix: t.key_prefix.clone(),
+                note_path: sweep_note.clone(),
+                status: Arc::clone(&self.status),
+            });
         }
 
         // Adopting a PVC that already holds files, against a bucket

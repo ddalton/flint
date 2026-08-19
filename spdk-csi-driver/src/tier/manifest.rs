@@ -253,7 +253,7 @@ fn rel_path(root: &Path, path: &Path) -> Option<String> {
 }
 
 /// The writer's persistent little state (owned by the orchestrator).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct WriterState {
     pub seq: u64,
     /// ETag of the manifest we last observed/wrote — the If-Match
@@ -262,27 +262,83 @@ pub struct WriterState {
     pub last_digest: Option<u64>,
 }
 
+/// What the startup seed found in the bucket.
+///
+/// The three arms are NOT interchangeable, and collapsing them is how a
+/// restore quietly loses a tree. `Absent` means a bucket that has never
+/// been published to — the adopt path, and a legitimate one.
+/// `Unreadable` means a manifest object EXISTS and could not be read:
+/// the network failed, or the bytes are corrupt. On a hub with fresh
+/// local state those look identical from the tree's point of view
+/// (nothing local, nothing restored) and could not be more different in
+/// consequence — one is an empty project, the other is a project whose
+/// every directory, symlink, mode and owner is about to be silently
+/// dropped, because only the manifest carries them.
+pub enum ManifestSeed {
+    /// Parsed. Carries the document so the importer does not GET it
+    /// again — startup used to read this object twice.
+    Present(Box<Manifest>, WriterState),
+    /// No manifest object under this prefix.
+    Absent,
+    /// It exists; we could not use it. Carries the reason for the log
+    /// and the writer state, so the hub can still publish forward.
+    Unreadable(String, WriterState),
+}
+
+impl ManifestSeed {
+    pub fn writer_state(self) -> WriterState {
+        match self {
+            ManifestSeed::Present(_, w) | ManifestSeed::Unreadable(_, w) => w,
+            ManifestSeed::Absent => WriterState::default(),
+        }
+    }
+
+    pub fn writer_state_ref(&self) -> std::borrow::Cow<'_, WriterState> {
+        match self {
+            ManifestSeed::Present(_, w) | ManifestSeed::Unreadable(_, w) => {
+                std::borrow::Cow::Borrowed(w)
+            }
+            ManifestSeed::Absent => std::borrow::Cow::Owned(WriterState::default()),
+        }
+    }
+}
+
 /// Seed from the bucket at startup: the manifest's own seq survives
 /// restarts AND total local state loss (it is bucket data).
-pub async fn seed(store: &dyn ObjectStore, key_prefix: &str) -> WriterState {
+///
+/// One GET, and the parsed document comes back with it — the importer
+/// consumes the same read rather than issuing its own.
+pub async fn seed_full(store: &dyn ObjectStore, key_prefix: &str) -> ManifestSeed {
     let key = manifest_key(key_prefix);
     match store.get_whole(&key, None).await {
         Ok((meta, bytes)) => match Manifest::parse(&bytes) {
             Ok(m) => {
                 debug!("tier manifest: seeded at seq {} (etag {})", m.seq, meta.etag);
-                WriterState { seq: m.seq, etag: Some(meta.etag), last_digest: None }
+                let w = WriterState { seq: m.seq, etag: Some(meta.etag), last_digest: None };
+                ManifestSeed::Present(Box::new(m), w)
             }
             Err(e) => {
-                warn!("tier manifest: existing {} unparseable ({}) — will overwrite", key, e);
-                WriterState { seq: 0, etag: Some(meta.etag), last_digest: None }
+                warn!("tier manifest: existing {} unparseable ({})", key, e);
+                ManifestSeed::Unreadable(
+                    format!("unparseable: {e}"),
+                    // seq 0 with the etag we saw: the next barrier
+                    // overwrites the corrupt object under If-Match, so
+                    // the hub publishes forward instead of wedging.
+                    WriterState { seq: 0, etag: Some(meta.etag), last_digest: None },
+                )
             }
         },
-        Err(StoreError::NotFound(_)) => WriterState::default(),
+        Err(StoreError::NotFound(_)) => ManifestSeed::Absent,
         Err(e) => {
             warn!("tier manifest: seed read failed ({}) — first write will create", e);
-            WriterState::default()
+            ManifestSeed::Unreadable(format!("read failed: {e}"), WriterState::default())
         }
     }
+}
+
+/// [`seed_full`] for callers that only want the writer state.
+pub async fn seed(store: &dyn ObjectStore, key_prefix: &str) -> WriterState {
+    seed_full(store, key_prefix).await.writer_state()
 }
 
 /// What one barrier did to the bucket's manifest.

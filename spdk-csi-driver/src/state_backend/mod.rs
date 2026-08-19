@@ -1010,6 +1010,33 @@ pub trait StateBackend: Send + Sync {
     /// truncate (the C2 order).
     async fn tier_put_evicted(&self, row: &TierEvictedRow) -> StateBackendResult<()>;
 
+    /// Write a batch of (evicted, generation) row pairs as ONE unit.
+    ///
+    /// The foreign-key sweep writes two rows per object. Both of the
+    /// per-row calls above are BARRIERS on the sqlite writer thread —
+    /// each waits for everything queued before it to commit — so a
+    /// 200k-object sweep pays 400k barrier round trips that cannot
+    /// coalesce, and the sweep runs behind a live listener, competing
+    /// with clients for that same writer.
+    ///
+    /// The default here is the honest per-row loop, so a backend that
+    /// gains nothing from batching (memory) needs no code. sqlite
+    /// overrides it with a single Immediate transaction.
+    ///
+    /// Partial failure is reported as failure: the caller rolls the
+    /// whole chunk back, because a stub with one of its two rows is
+    /// exactly the inconsistency the reconciler has to clean up.
+    async fn tier_ingest_batch(
+        &self,
+        rows: &[(TierEvictedRow, TierGenerationRow)],
+    ) -> StateBackendResult<()> {
+        for (e, g) in rows {
+            self.tier_put_evicted(e).await?;
+            self.tier_upsert_generation(g).await?;
+        }
+        Ok(())
+    }
+
     /// Every marker — the startup reconciler's work list and the
     /// in-memory consult map's source of truth.
     async fn tier_list_evicted(&self) -> StateBackendResult<Vec<TierEvictedRow>>;

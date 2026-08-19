@@ -199,6 +199,24 @@ your values file — don't rely on `--reuse-values`.)
   startupProbe budgets for all of this (`tier.startupFailureThreshold`,
   default 60 × 10s) — a pod in Running/not-Ready is working, not stuck:
   `kubectl logs` shows the claim and import progress.
+- **Only the namespace rebuild is pre-listener.** A DR restore reads
+  the manifest — one GET — and materializes the whole tree from it, and
+  the listener opens as soon as that is done. Bucket objects the
+  manifest does NOT describe (foreign uploads, or pre-existing data
+  being adopted) are folded in afterwards, by a sweep that runs behind
+  the live listener: it is a full prefix LIST plus a HEAD per unknown
+  object, and making every client wait for it would buy nothing, since
+  the manifest already rebuilt the real tree. `/status` reports phase
+  `sweeping` while it runs, and `sweep.completed` when it is done; an
+  interrupted sweep is recorded durably and resumes at the next start
+  rather than losing the remaining keys.
+- **A manifest the bucket HAS but cannot be read is a refusal, not a
+  warning.** Only the manifest carries directories, symlinks, modes and
+  owners, so importing without it would serve a flattened tree — and
+  then publish that back over the real one. The hub logs loudly, sets
+  `importRefused` in `/status`, restores nothing, and retries at the
+  next start. A bucket with *no* manifest is different and ordinary:
+  that is the adopt path.
 - **Watch one log line.** The tier reporter prints at most one line
   per interval (`📊 🪣 tier last 60s: …`, `FLINT_TIER_REPORT_SECS`) and
   is silent when idle — silence with a clean install is health. It

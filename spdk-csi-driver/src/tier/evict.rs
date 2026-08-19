@@ -182,6 +182,35 @@ pub(crate) fn update_marker(dev: u64, ino: u64, meta: EvictedMeta) {
     markers().insert((dev, ino), meta);
 }
 
+/// Install the marker for a stub the foreign-key sweep is about to make
+/// visible.
+///
+/// Two things about this are deliberate.
+///
+/// **It happens BEFORE the name is linked.** The sweep runs behind a
+/// live listener, so the instant a stub's name appears a client may
+/// GETATTR or READ it. Every one of those paths answers from this map.
+/// A stub whose rows exist but whose marker does not reads as an
+/// ordinary 0-byte file: GETATTR reports size 0, `cat` returns EOF with
+/// no error, and — the part that destroys data — the first small WRITE
+/// publishes over the real object under an If-Match that SUCCEEDS,
+/// because the generation row's etag is genuinely the bucket's current
+/// one. A 10 GiB object becomes 4 KiB and every copy of the original is
+/// gone. Pre-listener the same code was safe only because
+/// `evict::reconcile` loaded the markers before any client existed.
+///
+/// **It does NOT bump the cycle counter.** MARKER_CYCLE exists to catch
+/// byte-DESTROYING events mid-read: a reader that sampled the counter,
+/// read some bytes, and must learn its file was truncated underneath.
+/// A sweep insert destroys nothing — the name did not exist a moment
+/// ago, so no read can be in flight against it — and bumping would
+/// storm every concurrent reader in the volume with spurious DELAYs and
+/// livelock the COPY/CLONE windows. On a 200k-object sweep that is
+/// 200k false invalidations.
+pub fn insert_marker_for_import(dev: u64, ino: u64, meta: EvictedMeta) {
+    markers().insert((dev, ino), meta);
+}
+
 #[cfg(test)]
 pub(crate) fn install_marker_for_tests(dev: u64, ino: u64, size: u64) {
     markers().insert(

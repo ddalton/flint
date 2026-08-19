@@ -56,6 +56,13 @@ pub struct HubStatus {
     phase: RwLock<Option<HubPhase>>,
     started_unix: OnceLock<u64>,
     import: RwLock<Option<crate::tier::import::ImportReport>>,
+    sweep: RwLock<Option<crate::tier::import::SweepReport>>,
+    /// Set when the import was REFUSED because the bucket holds a
+    /// manifest we could not read. The most important field on this
+    /// document when it is set: the hub is serving an export that does
+    /// NOT reflect the bucket, and publishing forward from it would
+    /// overwrite the real tree.
+    import_refused: RwLock<Option<String>>,
     warm_fill: RwLock<Option<crate::tier::hydrate::WarmFillReport>>,
     epoch: RwLock<Option<Arc<crate::tier::epoch::EpochGuard>>>,
     orchestrator: RwLock<Option<Arc<crate::tier::flush::FlushOrchestrator>>>,
@@ -84,6 +91,18 @@ impl HubStatus {
     pub fn set_import(&self, report: crate::tier::import::ImportReport) {
         if let Ok(mut r) = self.import.write() {
             *r = Some(report);
+        }
+    }
+
+    pub fn set_sweep(&self, report: crate::tier::import::SweepReport) {
+        if let Ok(mut r) = self.sweep.write() {
+            *r = Some(report);
+        }
+    }
+
+    pub fn set_import_refused(&self, why: String) {
+        if let Ok(mut r) = self.import_refused.write() {
+            *r = Some(why);
         }
     }
 
@@ -142,6 +161,8 @@ impl HubStatus {
             uptime_secs: now_unix().saturating_sub(started),
             epoch: epoch_guard.as_ref().map(|g| EpochDoc { held: g.current().is_some(), number: g.current() }),
             import: self.import.read().ok().and_then(|r| r.clone()),
+            sweep: self.sweep.read().ok().and_then(|r| *r),
+            import_refused: self.import_refused.read().ok().and_then(|r| r.clone()),
             warm_fill: self.warm_fill.read().ok().and_then(|r| *r),
             tier: TierDoc {
                 gauges: crate::tier::reporter::latest_gauges(),
@@ -169,6 +190,14 @@ pub struct StatusDoc {
     pub uptime_secs: u64,
     pub epoch: Option<EpochDoc>,
     pub import: Option<crate::tier::import::ImportReport>,
+    /// `None` = no sweep ran. `completed: false` = one is still owed and
+    /// will resume at the next start.
+    pub sweep: Option<crate::tier::import::SweepReport>,
+    /// Set ⇒ the namespace was NOT restored and the export is not the
+    /// bucket's tree. Nothing should publish from this hub until it is
+    /// resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import_refused: Option<String>,
     pub warm_fill: Option<crate::tier::hydrate::WarmFillReport>,
     pub tier: TierDoc,
     pub nfs: NfsDoc,

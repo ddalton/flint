@@ -1161,6 +1161,75 @@ impl StateBackend for SqliteBackend {
         .map(|_| ())
     }
 
+    /// One Immediate transaction for the whole chunk.
+    ///
+    /// The per-row writes are barriers on the writer thread, so a
+    /// 200k-object sweep would pay 400k round trips that cannot
+    /// coalesce — while competing with live clients for that same
+    /// writer, since the sweep runs behind the listener. This is one
+    /// barrier and one fsync for the chunk.
+    ///
+    /// Immediate, not Deferred: the write lock is taken up front, so
+    /// the transaction cannot fail partway with SQLITE_BUSY after
+    /// having done half its work.
+    async fn tier_ingest_batch(
+        &self,
+        rows: &[(super::TierEvictedRow, super::TierGenerationRow)],
+    ) -> StateBackendResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let owned: Vec<(super::TierEvictedRow, super::TierGenerationRow)> = rows.to_vec();
+        let res = self
+            .with_conn_mut(move |conn| -> rusqlite::Result<()> {
+                let tx = conn.transaction_with_behavior(
+                    rusqlite::TransactionBehavior::Immediate,
+                )?;
+                {
+                    let mut ev = tx.prepare_cached(
+                        "INSERT OR REPLACE INTO tier_evicted
+                         (dev, ino, key, generation, etag, crc64_b64, size, path,
+                          evicted_unix, hydrating_unix)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    )?;
+                    let mut gen = tx.prepare_cached(
+                        "INSERT OR REPLACE INTO tier_generation
+                         (dev, ino, key, generation, etag, crc64_b64, size, copy_allowed,
+                          updated_unix)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    )?;
+                    for (e, g) in &owned {
+                        ev.execute(params![
+                            u64_to_i64(e.dev),
+                            u64_to_i64(e.ino),
+                            e.key,
+                            u64_to_i64(e.generation),
+                            e.etag,
+                            e.crc64_b64,
+                            u64_to_i64(e.size),
+                            e.path,
+                            u64_to_i64(e.evicted_unix),
+                            e.hydrating_unix.map(u64_to_i64),
+                        ])?;
+                        gen.execute(params![
+                            u64_to_i64(g.dev),
+                            u64_to_i64(g.ino),
+                            g.key,
+                            u64_to_i64(g.generation),
+                            g.etag,
+                            g.crc64_b64,
+                            u64_to_i64(g.size),
+                            g.copy_allowed,
+                            u64_to_i64(g.updated_unix),
+                        ])?;
+                    }
+                }
+                tx.commit()
+            })
+            .await?;
+        res.map_err(|e| StateBackendError::Storage(format!("sqlite: {}", e)))
+    }
+
     async fn tier_list_evicted(&self) -> StateBackendResult<Vec<super::TierEvictedRow>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(

@@ -312,14 +312,21 @@ impl FlushOrchestrator {
     /// Startup: durable registry first, then intent arbitration, then
     /// the manifest seq/guard seed (step 12 — the manifest's own seq
     /// is bucket data, so it survives even total local state loss).
-    pub async fn startup(&self) {
+    /// Returns what the seed found in the bucket, so the importer can
+    /// consume the SAME read instead of issuing its own GET of the same
+    /// object moments later. The three arms are load-bearing — see
+    /// [`crate::tier::manifest::ManifestSeed`].
+    pub async fn startup(&self) -> crate::tier::manifest::ManifestSeed {
         let n = self.load_generations().await;
         let i = self.reconcile_intents().await;
-        *self.manifest.lock().await =
-            crate::tier::manifest::seed(self.store.as_ref(), &self.cfg.key_prefix).await;
+        let seed =
+            crate::tier::manifest::seed_full(self.store.as_ref(), &self.cfg.key_prefix).await;
+        *self.manifest.lock().await = seed.writer_state_ref().into_owned();
+        let out = seed;
         if n > 0 || i > 0 {
             info!("tier flush: startup loaded {} generation row(s), reconciled {} intent(s)", n, i);
         }
+        out
     }
 
     /// Rebuild the registry from the A7 rows — the rows are the truth

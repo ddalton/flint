@@ -145,6 +145,11 @@ reports, tier gauges, client activity, and the RPO predicate:
 }
 ```
 
+`phase` moves `starting` → `claimingEpoch` → `importing` →
+`reconciling` → `serving`, and may sit at `sweeping` afterwards while
+foreign bucket keys are folded in behind the live listener. `sweeping`
+serves normally — the tree is already whole.
+
 Two things about it are load-bearing:
 
 - **It binds BEFORE the tier and before the NFS listener.** The epoch
@@ -152,6 +157,11 @@ Two things about it are load-bearing:
   whole bucket; that whole window is invisible to anything watching only
   port 2049, and it is exactly when you most want to tell "importing"
   from "wedged". Poll `phase`.
+- **`importRefused`, when present, is the most important field on the
+  document.** It means the bucket holds a manifest the hub could not
+  read, so the namespace was NOT restored: the export does not reflect
+  the bucket, and publishing forward from it would overwrite the real
+  tree. The hub restores nothing and retries at the next start.
 - **`rpoClean` is `null`, never `true`, when the tier is off.** It means
   "the bucket can rebuild this volume right now" — the question you must
   answer YES to before deleting a PVC. A share with no bucket has no
