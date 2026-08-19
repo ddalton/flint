@@ -10,6 +10,63 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [Unreleased]
+
+### Added
+
+- **`spec.service.advertiseAddress` on FlintShare**: what `status.address`
+  should say, verbatim. It is the only way a consumer OUTSIDE the
+  cluster gets a mountable address — every derived value is
+  in-cluster-only except a LoadBalancer's ingress, and NodePort is the
+  quiet trap: it returns the `.svc` DNS name rather than a node
+  address, so a foreign client reads the address, mounts it, and fails
+  on a name it cannot resolve. Admission requires an explicit port,
+  because an NFS client handed a bare host silently uses 2049. IPv6
+  must be bracketed. The Service itself is untouched — this changes
+  only what is advertised, so the in-cluster path is unchanged.
+- **`networkPolicy` in the flint-lite and flint-lite-operator charts**:
+  default-deny ingress with explicit holes. Off by default (an empty
+  client list breaks every mount, and only the cluster's operator knows
+  its node CIDRs) and it needs a CNI that enforces NetworkPolicy. The
+  operator chart also renders a no-ingress policy for the operator pod,
+  which serves nothing at all. Note the shape: a NetworkPolicy covers
+  only its own namespace, so `networkPolicy.hubNamespaces` lists the
+  namespaces to render a hub policy into — a share in an unlisted
+  namespace is unprotected and nothing detects that.
+
+### Changed
+
+- **The MDS gRPC control plane no longer starts in `mode: standalone`.**
+  It binds `0.0.0.0:50051`, carries `DeleteVolume`, and is
+  unauthenticated unless `FLINT_PNFS_CONTROL_TOKEN` is set — which
+  nothing in the flint-lite charts sets. A standalone hub refuses
+  `dataServers` by construction and has no CSI driver in front of it,
+  so every verb on that port was either meaningless or destructive,
+  reachable by any pod in the cluster, against a hub whose PVC may be
+  the only copy of the data. pNFS deployments are unaffected: they keep
+  the port, the bearer token, and the CSI chart's `flint-pnfs-control`
+  NetworkPolicy.
+
+### Fixed
+
+- **A request stamp from the far future no longer pins a share awake.**
+  `flint.io/requested-at` is clamped to "wanted right now" when it is
+  in the future, which is the right reading of ordinary clock skew and
+  the wrong one without a ceiling: a front door running an hour fast
+  held the share up for an hour, reporting `requested 0s ago` every
+  pass — indistinguishable from real demand, and logged nowhere. Past
+  one full `suspendAfterSecs` ahead the stamp is discarded rather than
+  clamped, the hub's own activity clock decides, and the operator warns
+  and emits an `ImplausibleRequest` event naming the skew. Waking is
+  unaffected: it is presence-only, so a skewed stamp still wakes a
+  suspended share, which is the safe direction.
+- **The crypto-provider guard now walks `[[bin]]`** instead of naming
+  two files by hand. It covered 2 of the 9 binaries that build, so the
+  guard's own rationale — "what shipped broken was a binary that never
+  called it" — still described a gap it had: the next binary to grow a
+  kube client would have shipped unchecked, which is exactly the shape
+  of the 1.26.0/1.27.0 startup panic.
+
 ## [1.28.0] - 2026-08-19
 
 ### Added — the idle lifecycle and the hub's HTTP surface

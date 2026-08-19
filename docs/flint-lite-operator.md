@@ -96,6 +96,23 @@ Kubernetes cannot express this in CEL or a ValidatingAdmissionPolicy
 controller's cache. Delete the winner and the survivor is promoted on
 the next reconcile.
 
+**The enforcement stops at the cluster boundary, and the bucket does
+not pick it up.** Arbitration reads one reflector over one API server,
+so two clusters can each admit a share on the same prefix and neither
+will see the other. The store-side epoch catches that only when the
+prefixes are *equal*: the epoch object is keyed on the exact prefix
+string, so `tenant-a/` and `tenant-a/sub/` mint DIFFERENT epoch
+objects, never contend, and produce two hubs writing overlapping bytes
+with no fence anywhere and no error on either side. Equal prefixes at
+least serialize into a takeover; nested ones do not.
+
+So if shares are created from more than one cluster, uniqueness has to
+be owned upstream of Kubernetes — one prefix per project, never nested,
+never reused, `UNIQUE` on the normalized `(endpoint, bucket, prefix)`
+in whatever database allocates them. There is no way to add that check
+here, and `spec.bucket`/`spec.keyPrefix` are immutable once set, so a
+wrong prefix is a byte migration rather than an edit.
+
 ## Lifecycle and status
 
 `spec.lifecycle: Suspended` scales the hub to zero and keeps the PVC —
@@ -166,6 +183,54 @@ Three things worth knowing:
 
 NFS is one long-lived TCP flow, so prefer a flat or peered network to a
 cloud load balancer, and mind LB idle timeouts if you use one.
+
+## Locking down the network
+
+Once shares are reachable across clusters, "8080 is never on the
+consumer-facing Service" stops being a design principle and starts
+being a control that something has to enforce. Both charts ship
+`networkPolicy`, off by default:
+
+```yaml
+networkPolicy:
+  enabled: true
+  hubNamespaces: [workspaces]        # where FlintShares live
+  nfsClientCIDRs: ["10.0.0.0/16"]    # who may reach 2049
+  apiClientSelectors:                # who may reach 8080, besides the operator
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: projects-frontdoor
+```
+
+Three things to know before turning it on:
+
+- **It needs a CNI that enforces NetworkPolicy.** Cilium and Calico do.
+  On a cluster whose CNI does not, every rule here is ignored in
+  silence — the objects exist, `kubectl get networkpolicy` looks
+  healthy, and nothing is enforced. kind's default CNI is in that
+  group, which is why no e2e leg asserts enforcement.
+- **An empty client list admits nothing.** That is deliberate: a policy
+  that falls open when unconfigured reads as protection and is not. If
+  you enable this without setting `nfsClientCIDRs`, every mount breaks.
+  Kubelet-driven mounts arrive from the NODE ip, not a pod ip, so node
+  CIDRs are usually what you want — a podSelector cannot express that
+  client set at all.
+- **A policy only covers its own namespace.** `hubNamespaces` is the
+  list helm renders a hub policy into. **A share created in a namespace
+  that is not listed is unprotected, and nothing detects that** — keep
+  the list in step with where shares are created.
+
+The operator's own policy admits no ingress whatsoever, because the
+operator serves nothing: it watches the API server and applies objects,
+all of it outbound.
+
+Selecting the hub pods at all is also what closes **50051**, the MDS
+gRPC control plane. It binds `0.0.0.0`, carries `DeleteVolume`, and is
+unauthenticated unless `FLINT_PNFS_CONTROL_TOKEN` is set — which
+nothing in these charts sets. Hub images 1.28.0 and newer do not start
+it in standalone mode at all (there are no data servers to register and
+no CSI driver in front of it, so every verb on it is either meaningless
+or destructive); the policy is what covers an older image.
 
 ## The hub's HTTP surface: status, and files without a mount
 

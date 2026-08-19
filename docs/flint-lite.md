@@ -317,3 +317,12 @@ sharp edge worth reading before you start.
 - **Dashboards/alarms**: the F68a "data through the MDS" warning is
   posture-aware — all-MDS I/O is the *norm* in lite, and the server
   logs it as telemetry, not alarm.
+- **Network exposure**: `networkPolicy.enabled` renders a default-deny
+  ingress policy for the hub with explicit holes for 2049 and the
+  monitoring port. Off by default — an empty client list admits
+  nothing, and only you know your node CIDRs (kubelet-driven mounts
+  arrive from the NODE ip, so a podSelector cannot express that client
+  set). It needs a CNI that enforces NetworkPolicy; where the CNI does
+  not, every rule is ignored silently. Turning it on also closes 50051,
+  the MDS gRPC control plane — images 1.28.0+ do not start it in
+  standalone mode at all, and the policy is what covers an older one.

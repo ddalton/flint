@@ -523,6 +523,33 @@ RPO=$(kexec "$CURL http://127.0.0.1:8080/status" | tr -d '\r' \
 [ "$RPO" = "null" ] || fail "rpoClean is '$RPO' on a tier-off share — it MUST be null"
 pass "/status serves on the pod IP; rpoClean is null (not true) with no bucket"
 
+# The gRPC control plane must NOT be listening. It binds 0.0.0.0, is
+# unauthenticated unless FLINT_PNFS_CONTROL_TOKEN is set (nothing sets
+# it), and carries DeleteVolume — on a hub whose PVC may be the only
+# copy of the data. A standalone hub has no data servers to register
+# and no CSI driver in front of it, so every verb on that port is
+# either meaningless or destructive.
+#
+# Read the listening sockets straight out of /proc rather than probing
+# with a tool the image may not have: ports are hex, state 0A = LISTEN.
+# 2049 = 0x0801, 8080 = 0x1F90, 50051 = 0xC383.
+LISTENING=$(kexec "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null" \
+            | awk '$4 == "0A" { print $2 }' | sed 's/.*://' | sort -u | tr '\n' ' ')
+# Anti-vacuity FIRST: if the ports we KNOW are up are missing, the
+# parse is broken and the absence of 50051 below would prove nothing.
+case " $LISTENING " in
+  *" 0801 "*) ;;
+  *) fail "cannot see 2049 in the pod's listening sockets ('$LISTENING') — the /proc parse is broken, so this leg is not testing anything" ;;
+esac
+case " $LISTENING " in
+  *" 1F90 "*) ;;
+  *) fail "cannot see 8080 in the pod's listening sockets ('$LISTENING') — the /proc parse is broken" ;;
+esac
+case " $LISTENING " in
+  *" C383 "*) fail "the gRPC control plane (50051) IS LISTENING on a standalone hub — DeleteVolume is reachable by any pod in the cluster" ;;
+esac
+pass "50051 is not listening on a standalone hub (2049 and 8080 are, so the check can see)"
+
 # The file API refuses without the token, and works with it.
 AUTH="Authorization: Bearer $TOKEN"
 CODE=$(kexec "$CURL -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/files?path=/'")
@@ -867,8 +894,37 @@ DEPS=$(kubectl -n "$CHARTNS" get deployments -o name | wc -l | tr -d ' ')
 [ "$DEPS" = "1" ] || fail "$DEPS Deployments in $CHARTNS — adoption must never create a second one"
 PVC_UID2=$(kubectl -n "$CHARTNS" get pvc flint-lite-data -o jsonpath='{.metadata.uid}')
 [ "$PVC_UID" = "$PVC_UID2" ] || fail "the claim was replaced ($PVC_UID → $PVC_UID2)"
-MARKER=$(kubectl -n "$CHARTNS" exec deployment/flint-lite -- sh -c 'cat /data/exports/marker.txt' 2>/dev/null | tr -d '\r')
-[ "$MARKER" = "adopted-data" ] || fail "the adopted hub does not see the pre-adoption data ('$MARKER')"
+# Adoption rolls the Deployment (the operator's config checksum differs
+# from helm's), and `strategy: Recreate` on an RWO claim means there is
+# a window with the old pod Terminating and the new one Pending. Wait
+# it out and name the pod explicitly: `exec deployment/...` resolves
+# through the selector and will happily pick a pod that cannot exec,
+# which is indistinguishable from missing data once stderr is dropped.
+kubectl -n "$CHARTNS" rollout status deployment/flint-lite --timeout=180s >/dev/null 2>&1 \
+  || fail "the adopted Deployment never finished rolling"
+for i in $(seq 1 30); do
+  ADOPTED_POD=$(kubectl -n "$CHARTNS" get pods -l app.kubernetes.io/name=flint-lite \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{.items[?(@.status.containerStatuses[0].ready==true)].metadata.name}' 2>/dev/null \
+    | awk '{print $1}')
+  [ -n "$ADOPTED_POD" ] && break
+  sleep 2
+done
+[ -n "${ADOPTED_POD:-}" ] || { kubectl -n "$CHARTNS" get pods; \
+  fail "no ready hub pod in $CHARTNS after adoption"; }
+# Last attempt keeps stderr: if this fails, the reason should be in the
+# log rather than inferred from an empty string.
+MARKER=""
+for i in $(seq 1 10); do
+  MARKER=$(kubectl -n "$CHARTNS" exec "$ADOPTED_POD" -- sh -c 'cat /data/exports/marker.txt' 2>/dev/null | tr -d '\r')
+  [ "$MARKER" = "adopted-data" ] && break
+  sleep 2
+done
+if [ "$MARKER" != "adopted-data" ]; then
+  echo "--- last exec, with stderr ---"
+  kubectl -n "$CHARTNS" exec "$ADOPTED_POD" -- sh -c 'ls -la /data/exports/; cat /data/exports/marker.txt' || true
+  fail "the adopted hub does not see the pre-adoption data ('$MARKER')"
+fi
 pass "adopted in place: one Deployment, same PVC ($PVC_UID2), data intact"
 
 echo
