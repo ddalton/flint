@@ -21,11 +21,23 @@
 #      namespace, is Failed with a Conflict condition and NO Deployment;
 #      deleting the winner promotes it
 #   6  the operator repairs a hand-mangled CRD schema on restart
-#   7  reclaim: Retain keeps the PVC when the share is deleted, and the
+#   7  the hub's own HTTP surface: /status answers on the pod IP and
+#      reports rpoClean as null (never true) with no bucket, and the
+#      file API round-trips bytes with the kernel mount in BOTH
+#      directions while refusing an unauthenticated caller and a
+#      symlink out of the export
+#   8  the idle ladder: a quiet share suspends to replicas 0 while
+#      KEEPING its PVC, the suspend survives later reconciles (the
+#      annotation carrier), stamping the ladder's wake input brings it
+#      back, and an admin's spec.lifecycle: Suspended outranks it
+#   9  reclaim: Retain keeps the PVC when the share is deleted, and the
 #      three owned children are garbage collected; Delete removes it
-#   8  adoption: a share adopts a live helm release IN PLACE (one
+#  10  adoption: a share adopts a live helm release IN PLACE (one
 #      Deployment, same PVC, same data), and a differently-named share
 #      is fenced with AdoptionBlocked instead of double-mounting
+#
+# Legs 7 and 8 run BEFORE reclaim on purpose: both drive tenant-a and
+# its live kernel mount, and leg 9 is the leg that deletes them.
 #
 # Images are built from the WORKING TREE, so this always tests the code
 # you are sitting on. KEEP=1 leaves the cluster standing.
@@ -95,6 +107,10 @@ cp "$CARGO_DIR/target/$TRIPLE/release/flint-pnfs-mds" "$IMGDIR/"
 cp "$CARGO_DIR/target/$TRIPLE/release/flint-lite-operator" "$IMGDIR/"
 cat >"$IMGDIR/Dockerfile.hub" <<'EOF'
 FROM alpine:3.20
+# curl is for the TEST, not the product: leg 7 drives the file API from
+# inside the pod, and alpine's wget is BusyBox's — it cannot issue PUT
+# or DELETE at all. The shipped hub image has no curl and needs none.
+RUN apk add --no-cache curl
 COPY flint-pnfs-mds /usr/local/bin/flint-pnfs-mds
 EOF
 cat >"$IMGDIR/Dockerfile.op" <<'EOF'
@@ -363,8 +379,230 @@ done
   || fail "the operator did NOT restore the stripped schema — that field would be pruned on every apply, silently"
 pass "stripped property (spec.logLevel) restored by the operator at startup"
 
-# ── 7. reclaim ───────────────────────────────────────────────────────
-say "leg 7: reclaim Retain keeps the PVC; Delete removes it"
+# ── 7. the hub's HTTP surface: status, and files without a mount ─────
+say "leg 7: /status answers, and the file API round-trips without any mount"
+TOKEN=$(head -c 24 /dev/urandom | base64 | tr -d '=+/' | head -c 24)
+kubectl -n "$NS" create secret generic api-token --from-literal=token="$TOKEN" >/dev/null
+kubectl -n "$NS" patch flintshare tenant-a --type=merge -p "{
+  \"spec\": { \"monitoring\": { \"enabled\": true, \"port\": 8080,
+    \"fileApi\": { \"enabled\": true, \"tokenSecretRef\": \"api-token\" } } } }" >/dev/null \
+  || fail "enabling the file API was refused"
+kubectl -n "$NS" rollout status deployment/tenant-a --timeout=180s >/dev/null 2>&1 \
+  || fail "the hub never rolled with the file API on"
+
+# Everything below runs INSIDE the cluster, against the pod IP. The
+# status port is deliberately not on the Service, so this is the only
+# way to reach it — which is the property being asserted.
+HUBPOD=$(kubectl -n "$NS" get pods -l flint.io/share=tenant-a \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+[ -n "$HUBPOD" ] || fail "no hub pod found for tenant-a"
+kexec() { kubectl -n "$NS" exec "$HUBPOD" -- sh -c "$1"; }
+# curl, never BusyBox wget: wget cannot issue PUT, and the status-code
+# assertions below want the code itself rather than scraped headers.
+# `-f` turns a non-2xx into a non-zero exit for the calls that must
+# succeed; the calls that ASSERT a code omit it and read %{http_code}.
+CURL="curl -sS --max-time 30"
+
+for i in $(seq 1 30); do
+  PH=$(kexec "$CURL http://127.0.0.1:8080/status 2>/dev/null" | tr -d '\r' \
+       | sed -n 's/.*"phase":"\([a-zA-Z]*\)".*/\1/p')
+  [ "$PH" = "serving" ] && break
+  sleep 2
+done
+[ "${PH:-}" = "serving" ] || fail "/status never reported phase serving (got '${PH:-<none>}')"
+
+# rpoClean must be NULL for a tier-off share — never true. A controller
+# reading absence as "clean" would delete the only copy of the data.
+RPO=$(kexec "$CURL http://127.0.0.1:8080/status" | tr -d '\r' \
+      | sed -n 's/.*"rpoClean":\([a-z]*\).*/\1/p')
+[ "$RPO" = "null" ] || fail "rpoClean is '$RPO' on a tier-off share — it MUST be null"
+pass "/status serves on the pod IP; rpoClean is null (not true) with no bucket"
+
+# The file API refuses without the token, and works with it.
+AUTH="Authorization: Bearer $TOKEN"
+CODE=$(kexec "$CURL -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/files?path=/'")
+[ "$CODE" = "401" ] || fail "the file API served a listing WITHOUT a token (HTTP $CODE)"
+
+kexec "$CURL -f -X POST -H '$AUTH' -H 'Content-Type: application/json' \
+       -d '{\"path\":\"/api-made\"}' \
+       -o /dev/null http://127.0.0.1:8080/files/folder" || fail "POST /files/folder failed"
+# The patch above RESTARTED the hub while the kernel client still held
+# state, so the server is in its RFC-mandated 90s grace window: OPEN
+# answers NFS4ERR_GRACE and every WRITE is refused, while reads serve
+# throughout. Browsing works and saving does not — the asymmetry that
+# is near-impossible to diagnose from outside — so the API is required
+# to say when to come back rather than failing opaquely.
+#
+# Grace is skipped entirely when nothing survived into this incarnation
+# (a hub woken from hibernation comes back on a fresh PVC), so both
+# answers are legitimate here and the leg accepts either. What it does
+# NOT accept is a 503 that leaves the caller guessing.
+kexec "printf '%s' 'written via HTTP, read via NFS' > /tmp/up.bin" \
+  || fail "could not stage the upload inside the pod"
+PUTURL='http://127.0.0.1:8080/files/content?path=/api-made/note.txt'
+put_note() {
+  kexec "$CURL -o /dev/null -D /tmp/put.hdr -w '%{http_code}' \
+         -X PUT -H '$AUTH' --data-binary @/tmp/up.bin '$PUTURL'"
+}
+CODE=$(put_note)
+case "$CODE" in
+  20*) pass "PUT accepted at once (HTTP $CODE) — nothing survived the roll, so grace ended early" ;;
+  503)
+    RETRY=$(kexec "sed -n 's/^[Rr]etry-[Aa]fter: *\([0-9][0-9]*\).*/\1/p' /tmp/put.hdr" | tr -d '\r')
+    [ -n "$RETRY" ] \
+      || { kexec "cat /tmp/put.hdr"; fail "503 in grace carried no numeric Retry-After — every caller is left guessing"; }
+    pass "writes refused during the post-restart grace window: 503, Retry-After ${RETRY}s (reads served throughout)"
+    for i in $(seq 1 40); do
+      sleep 5
+      CODE=$(put_note)
+      case "$CODE" in 20*) break ;; esac
+    done
+    case "$CODE" in
+      20*) pass "the same write lands once grace lapses (HTTP $CODE)" ;;
+      *) fail "the hub never left grace — PUT still HTTP $CODE after 200s" ;;
+    esac
+    ;;
+  *) fail "PUT /files/content: HTTP $CODE" ;;
+esac
+
+# The bytes must be visible to the KERNEL CLIENT that mounted this same
+# share — the whole point of the API is that it is the same filesystem.
+# The patch above rolled the server under this live mount, so every NFS
+# call here is bounded: a hard mount BLOCKS instead of failing, and an
+# unbounded read against a server that never came back hangs the run
+# forever instead of reporting the bug.
+SEEN=$(vm "timeout 60 cat $MNT/api-made/note.txt" | tr -d '\r')
+[ "$SEEN" = "written via HTTP, read via NFS" ] \
+  || fail "an HTTP upload is not visible to the NFS mount ('$SEEN') — or the mount never recovered the roll"
+
+# And the reverse direction.
+vm "timeout 60 sh -c \"echo -n 'written via NFS' > $MNT/api-made/from-nfs.txt\"" \
+  || fail "NFS write failed"
+GOT=$(kexec "$CURL -f -H '$AUTH' \
+      'http://127.0.0.1:8080/files/content?path=/api-made/from-nfs.txt'" | tr -d '\r')
+[ "$GOT" = "written via NFS" ] || fail "an NFS write is not visible to the API ('$GOT')"
+
+# A symlink is DATA, never a path the SERVER resolves. The server holds
+# its state database and its cloud credentials outside the export, so
+# following one is the credential-theft hole fixed in 1b05a14.
+#
+# The target has to be a file that exists ONLY inside the hub pod. An
+# absolute symlink on an NFS mount is resolved by the CLIENT against
+# the CLIENT's root — that is correct NFS behaviour, not a leak — so a
+# link to something both sides have (/etc/hostname) reads fine on the
+# client and proves nothing either way. /etc/flint/mds.yaml is the
+# hub's mounted ConfigMap: if the SERVER dereferenced, the client would
+# receive the hub's own config; because the server returns the link as
+# data, the client resolves it locally and finds nothing.
+vm "timeout 60 ln -sf /etc/flint/mds.yaml $MNT/api-made/escape.txt"
+CODE=$(kexec "$CURL -o /dev/null -w '%{http_code}' -H '$AUTH' \
+       'http://127.0.0.1:8080/files/content?path=/api-made/escape.txt'")
+[ "$CODE" = "409" ] || fail "the API followed a symlink out of the export (HTTP $CODE)"
+# READLINK must hand back the target as DATA — that is the server
+# refusing to resolve it, stated positively.
+TGT=$(vm "timeout 60 readlink $MNT/api-made/escape.txt" | tr -d '\r')
+[ "$TGT" = "/etc/flint/mds.yaml" ] \
+  || fail "READLINK did not return the link target as data (got '$TGT')"
+# And the read must not yield the hub's config. Asserted on CONTENT,
+# not on an exit code: a non-zero exit is also what a wedged mount and
+# a timeout produce, and neither of those proves anything.
+OUT=$(vm "timeout 60 cat $MNT/api-made/escape.txt 2>/dev/null" | tr -d '\r')
+echo "$OUT" | grep -q "level:" \
+  && fail "the NFS server DEREFERENCED the symlink and served the hub's own config — 1b05a14 has regressed"
+[ -z "$OUT" ] \
+  || fail "reading the symlink returned content the client should not have got: $OUT"
+pass "file API: 401 unauthenticated, HTTP↔NFS round trip both ways, symlink refused 409 and never dereferenced server-side"
+
+# ── 8. the idle ladder ───────────────────────────────────────────────
+say "leg 8: an idle share suspends, an annotation wakes it, an admin suspend outranks it"
+kubectl -n "$NS" patch flintshare tenant-a --type=merge \
+  -p '{"spec":{"idle":{"suspendAfterSecs":20}}}' >/dev/null \
+  || fail "spec.idle was refused"
+# CEL must refuse hibernation on a share with no bucket: that PVC is
+# the only copy of the data.
+if kubectl -n "$NS" patch flintshare tenant-a --type=merge \
+     -p '{"spec":{"idle":{"suspendAfterSecs":20,"hibernateAfterSecs":60}}}' \
+     >/tmp/op-e2e-hib.log 2>&1; then
+  fail "hibernateAfterSecs was accepted on a share with NO bucket"
+fi
+grep -qi "only copy" /tmp/op-e2e-hib.log \
+  || { cat /tmp/op-e2e-hib.log; fail "the refusal did not explain why"; }
+pass "hibernateAfterSecs is refused without a bucket, and says why"
+
+# Unmount first: a live kernel mount is real activity, and the ladder
+# is supposed to see it.
+vm "mountpoint -q $MNT && umount -lf $MNT" || true
+for i in $(seq 1 45); do
+  P=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$P" = "IdleSuspended" ] && break
+  sleep 2
+done
+[ "${P:-}" = "IdleSuspended" ] || {
+  kubectl -n "$NS" get flintshare tenant-a -o yaml | tail -40
+  kubectl -n "$OPNS" logs deployment/flint-lite-operator --tail=40
+  fail "the share never idle-suspended (phase ${P:-<none>})"
+}
+REPL=$(kubectl -n "$NS" get deployment tenant-a -o jsonpath='{.spec.replicas}')
+[ "$REPL" = "0" ] || fail "IdleSuspended but replicas=$REPL"
+# Suspend KEEPS the disk. That is the whole difference from hibernate.
+kubectl -n "$NS" get pvc tenant-a-data >/dev/null 2>&1 \
+  || fail "idle-suspend deleted the PVC — it must only scale to zero"
+pass "idle-suspended: replicas 0, PVC kept, phase distinguishable from an admin suspend"
+
+# The carrier must be an ANNOTATION, and it must SURVIVE the next
+# reconcile — a suspend the renderer does not read is undone in seconds.
+ST=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.metadata.annotations.flint\.io/idle-state}')
+[ "$ST" = "Suspended" ] || fail "the idle state is not on the CR as an annotation (got '$ST')"
+sleep 20
+REPL=$(kubectl -n "$NS" get deployment tenant-a -o jsonpath='{.spec.replicas}')
+[ "$REPL" = "0" ] || fail "the suspend was UNDONE by a later reconcile (replicas back to $REPL)"
+pass "the suspend survives repeated reconciles — the annotation carrier holds"
+
+# `flint.io/requested-at` is the LADDER'S INPUT: whatever wants this
+# share awake stamps it, and the level-triggered reconcile does the
+# rest. Asserted here as the operator's input and deliberately NOT as
+# any particular caller's contract — how a front door reaches a share
+# is a separate decision, and pinning it in a committed test now makes
+# changing it a test rewrite later.
+kubectl -n "$NS" annotate flintshare tenant-a \
+  "flint.io/requested-at=$(date -u +%FT%TZ)" --overwrite >/dev/null
+for i in $(seq 1 60); do
+  P=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$P" = "Ready" ] && break
+  sleep 2
+done
+[ "${P:-}" = "Ready" ] || {
+  kubectl -n "$NS" get flintshare tenant-a -o yaml | tail -30
+  fail "touching flint.io/requested-at did not wake the share (phase ${P:-<none>})"
+}
+pass "one annotation woke it back to Ready"
+
+# An admin's suspend outranks the ladder, and reports DIFFERENTLY — a
+# front door has to tell "will wake on request" from "someone said no".
+kubectl -n "$NS" patch flintshare tenant-a --type=merge \
+  -p '{"spec":{"lifecycle":"Suspended"}}' >/dev/null
+for i in $(seq 1 30); do
+  P=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.status.phase}' 2>/dev/null)
+  [ "$P" = "Suspended" ] && break
+  sleep 2
+done
+[ "${P:-}" = "Suspended" ] || fail "an admin suspend did not take (phase ${P:-<none>})"
+kubectl -n "$NS" annotate flintshare tenant-a \
+  "flint.io/requested-at=$(date -u +%FT%TZ)" --overwrite >/dev/null
+sleep 15
+P=$(kubectl -n "$NS" get flintshare tenant-a -o jsonpath='{.status.phase}')
+[ "$P" = "Suspended" ] || fail "a wake request overrode an ADMIN suspend (phase $P)"
+REPL=$(kubectl -n "$NS" get deployment tenant-a -o jsonpath='{.spec.replicas}')
+[ "$REPL" = "0" ] || fail "an admin-suspended share was scaled back up by a wake request"
+pass "spec.lifecycle: Suspended outranks the ladder; a wake request does not override it"
+
+# ── 9. reclaim ───────────────────────────────────────────────────────
+say "leg 9: reclaim Retain keeps the PVC; Delete removes it"
+# tenant-a arrives here admin-suspended at replicas 0, left that way by
+# leg 8. That is deliberate: cleanup must not need a running hub to
+# reach — a share you suspended BECAUSE it was misbehaving is exactly
+# the one you then delete, and a finalizer that waits on a pod that is
+# never coming back wedges the namespace.
 vm "umount -lf $MNT 2>/dev/null" 2>/dev/null
 kubectl -n "$NS" delete flintshare tenant-a --wait=true >/dev/null 2>&1 \
   || fail "deleting the share hung (a finalizer that never releases)"
@@ -401,8 +639,8 @@ kubectl -n "$NS" get pvc ephemeral-data >/dev/null 2>&1 \
   && fail "reclaim: Delete left the PVC behind"
 pass "reclaim: Delete removed the claim"
 
-# ── 8. adoption ──────────────────────────────────────────────────────
-say "leg 8: adopting a live helm release in place"
+# ── 10. adoption ─────────────────────────────────────────────────────
+say "leg 10: adopting a live helm release in place"
 helm install flint-lite "$LITE_CHART" -n "$CHARTNS" --create-namespace \
   --set image.ref="$HUBIMG" --set persistence.size=1Gi \
   >/tmp/op-e2e-lite.log 2>&1 || { tail -10 /tmp/op-e2e-lite.log; fail "lite chart install failed"; }
@@ -466,6 +704,8 @@ echo " PASS — the operator installed its own CRD, served a kernel client"
 echo " through a FlintShare, refused an identity change and a typo'd"
 echo " knob at admission, rolled a hub on a settings edit, refused a"
 echo " duplicate bucket subtree across namespaces, repaired a mangled"
-echo " schema, kept a Retain PVC through deletion, and adopted a live"
-echo " helm release without ever double-mounting its claim."
+echo " schema, served files over HTTP to the same tree a kernel client"
+echo " had mounted, suspended an idle share and woke it with a single"
+echo " annotation, kept a Retain PVC through deletion, and adopted a"
+echo " live helm release without ever double-mounting its claim."
 echo "══════════════════════════════════════════════════════════════════"

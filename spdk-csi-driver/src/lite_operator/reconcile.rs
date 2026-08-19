@@ -63,6 +63,56 @@ const REQUEUE_SETTLED: Duration = Duration::from_secs(300);
 const REQUEUE_PROGRESS: Duration = Duration::from_secs(15);
 const REQUEUE_BLOCKED: Duration = Duration::from_secs(30);
 
+/// How long a settled share may be left alone.
+///
+/// For a share with the idle ladder armed, this interval IS the
+/// resolution of `suspendAfterSecs`: the ladder only ever decides
+/// during a reconcile, and a `Hold` does not short-circuit, so the
+/// share is left until the next timer fires. At the flat
+/// `REQUEUE_SETTLED` a share configured to suspend after 20s is
+/// recorded `Held` at "idle 0s" and then comes down up to five minutes
+/// later — the knob means something other than what it says, and no
+/// unit test can see it because `decide` is pure and correct.
+///
+/// Floored at `REQUEUE_PROGRESS` so a very small threshold cannot turn
+/// into a hub poll per share per second, and capped at
+/// `REQUEUE_SETTLED` so arming the ladder never makes a share cost
+/// MORE to watch than leaving it off.
+///
+/// Each rung is looked at on its OWN knob: an up share is waiting to
+/// suspend, a parked one is waiting to hibernate, and a hibernated one
+/// is waiting for a wake — which arrives as a watch event, not on this
+/// timer.
+fn settled_requeue(share: &FlintShare, state: IdleState) -> Duration {
+    let idle = share.spec.idle.as_ref();
+    match state {
+        // Up, and the next rung down is a suspend.
+        IdleState::Active => bounded(idle.and_then(|i| i.suspend_after_secs)),
+        // Already parked, and the next rung down is a hibernate. A
+        // parked share previously requeued at REQUEUE_PROGRESS forever,
+        // re-applying four objects every 15s to decide nothing — the
+        // cost falls on precisely the shares the ladder put away to
+        // stop costing anything.
+        IdleState::Suspended => bounded(idle.and_then(|i| i.hibernate_after_secs)),
+        // Bottom of the ladder: there is no next rung, and a wake
+        // arrives as a watch event rather than on this timer.
+        IdleState::Hibernated => REQUEUE_SETTLED,
+        // Mid-verification is progress, not steady state. Unreachable
+        // from here today (`verify_and_hibernate` short-circuits with
+        // its own action) and cheap to keep right if that changes.
+        IdleState::HibernateVerifying => REQUEUE_PROGRESS,
+    }
+}
+
+/// Clamp a ladder threshold into a sane re-check interval, or fall back
+/// to the settled interval when that rung is not configured.
+fn bounded(threshold_secs: Option<u64>) -> Duration {
+    match threshold_secs {
+        Some(secs) => Duration::from_secs(secs).clamp(REQUEUE_PROGRESS, REQUEUE_SETTLED),
+        None => REQUEUE_SETTLED,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("kube api: {0}")]
@@ -726,7 +776,13 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
     .await?;
 
     Ok(Action::requeue(match phase {
-        Phase::Ready | Phase::Suspended => REQUEUE_SETTLED,
+        // An admin's Suspended is inert: the ladder returns `Stay`
+        // without so much as a poll, so there is nothing to look at
+        // sooner.
+        Phase::Suspended => REQUEUE_SETTLED,
+        Phase::Ready | Phase::IdleSuspended | Phase::Hibernated => {
+            settled_requeue(&share, idle::state_of(&share))
+        }
         _ => REQUEUE_PROGRESS,
     }))
 }
@@ -1279,7 +1335,7 @@ pub fn shares_using_claim(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lite_operator::crd::{FlintShareSpec, PersistenceSpec};
+    use crate::lite_operator::crd::{FlintShareSpec, IdleSpec, PersistenceSpec};
     use std::collections::BTreeMap;
     use k8s_openapi::api::apps::v1::{DeploymentSpec, DeploymentStatus};
     use k8s_openapi::api::core::v1::{
@@ -1583,6 +1639,56 @@ mod tests {
             address_of(&lb, "ws").as_deref(),
             Some("a.elb.amazonaws.com:2049")
         );
+    }
+
+    fn armed(secs: u64) -> IdleSpec {
+        IdleSpec {
+            suspend_after_secs: Some(secs),
+            hibernate_after_secs: None,
+            suspend_with_sessions: None,
+        }
+    }
+
+    /// The idle ladder only decides during a reconcile, so the settled
+    /// requeue is the resolution of `suspendAfterSecs`. Found in a
+    /// cluster, not here: the share sat `Held` at "idle 0s" with a
+    /// 20s threshold and the next look was 300s away.
+    #[test]
+    fn an_armed_ladder_is_looked_at_on_its_own_threshold() {
+        use IdleState::*;
+        let mut share = share_named("s");
+        // Ladder off: nothing to be timely about.
+        assert_eq!(settled_requeue(&share, Active), REQUEUE_SETTLED);
+
+        // Armed: the look-again interval tracks the knob, so a share
+        // that goes quiet is not held past its own threshold.
+        share.spec.idle = Some(armed(20));
+        assert_eq!(settled_requeue(&share, Active), Duration::from_secs(20));
+
+        // ... but never faster than REQUEUE_PROGRESS: a 1s threshold
+        // must not become a hub poll per share per second.
+        share.spec.idle = Some(armed(1));
+        assert_eq!(settled_requeue(&share, Active), REQUEUE_PROGRESS);
+
+        // ... and never slower than the unarmed case, so arming the
+        // ladder cannot make a share cost more to watch.
+        share.spec.idle = Some(armed(9_999));
+        assert_eq!(settled_requeue(&share, Active), REQUEUE_SETTLED);
+
+        // A share already parked is waiting on the HIBERNATE knob, not
+        // the suspend one, and with hibernation off it is left alone
+        // rather than re-applied every 15s to decide nothing.
+        share.spec.idle = Some(armed(20));
+        assert_eq!(settled_requeue(&share, Suspended), REQUEUE_SETTLED);
+        share.spec.idle = Some(IdleSpec {
+            suspend_after_secs: Some(20),
+            hibernate_after_secs: Some(120),
+            suspend_with_sessions: None,
+        });
+        assert_eq!(settled_requeue(&share, Suspended), Duration::from_secs(120));
+
+        // Bottom of the ladder: nothing left on a timer.
+        assert_eq!(settled_requeue(&share, Hibernated), REQUEUE_SETTLED);
     }
 
     /// `lastTransitionTime` must mean "when this changed", not "when we
