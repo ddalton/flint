@@ -289,7 +289,11 @@ not a second reader of the export directory, so it inherits everything
 the NFS path already does: a cold file hydrates from S3 and the caller
 gets 503 + `Retry-After` instead of a body of zeros; symlinks are
 listed but never followed; uploads take the write gate and produce the
-capture notes the tier publishes from. The full endpoint table is in
+capture notes the tier publishes from. Objects carry an `ETag` (the
+same change attribute a mounted client orders its cache by), so a
+caller can read, edit and write back under `If-Match` and be told `412`
+rather than silently losing the edit — detection between API callers,
+not exclusion against the mount. The full endpoint table is in
 [the operator guide](flint-lite-operator.md#the-hubs-http-surface-status-and-files-without-a-mount).
 
 ## Many shares: the operator

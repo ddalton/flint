@@ -54,7 +54,7 @@ use crate::nfs::v4::compound::{
 };
 use crate::nfs::v4::protocol::{Nfs4FileType, Nfs4Status, StateId};
 use crate::nfs::v4::CompoundDispatcher;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use std::sync::Arc;
 
 /// Share bits for the API's own opens. BOTH because an upload reads back
@@ -72,6 +72,12 @@ const CLAIM_NULL: u32 = 0;
 /// decode below walks them in exactly this sequence, which is what the
 /// fattr4 encoding guarantees.
 const FATTR4_TYPE: u32 = 1;
+/// The server's per-file mutation counter (`change_counter.rs`) — the
+/// same value a mounted client uses to order its cache, and the one
+/// this API publishes as an HTTP entity-tag. One validator for both
+/// doors: a UI holding an `ETag` and a mounted process holding a
+/// change value are talking about one version of one file.
+const FATTR4_CHANGE: u32 = 3;
 const FATTR4_SIZE: u32 = 4;
 const FATTR4_FILEID: u32 = 20;
 const FATTR4_MODE: u32 = 33;
@@ -189,6 +195,11 @@ pub struct Entry {
     /// stub would tell a user their data was gone.
     pub size: u64,
     pub fileid: u64,
+    /// The HTTP entity-tag for this object, quotes included, ready to
+    /// be copied verbatim into a later `If-Match`. Serialized on every
+    /// listing entry so a UI can make a conditional write without a
+    /// second round trip per file.
+    pub etag: String,
     pub mode: u32,
     pub modified_unix: i64,
     /// Only meaningful for symlinks: the raw target, carried as DATA and
@@ -197,6 +208,111 @@ pub struct Entry {
     /// anything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_target: Option<String>,
+    /// The raw fattr4 CHANGE value behind [`Entry::etag`]. Not
+    /// serialized — callers compare entity-tags, and publishing the
+    /// halves invites someone to compare them arithmetically, which
+    /// the attribute does not promise.
+    #[serde(skip)]
+    pub change: u64,
+}
+
+/// Render an object's identity as an HTTP entity-tag.
+///
+/// One caveat the callers must be told about, because it is invisible
+/// from here: the change attribute is floored by ctime, and the tier
+/// rewrites the local inode on both eviction (truncate in place) and
+/// hydration (pwrite into the marker inode). So on a TIERED share a
+/// file going cold moves its tag with no user-visible change, and a
+/// caller holding one across that boundary gets a 412 for no reason it
+/// can see. It fails closed — a re-read, never a lost update — and a
+/// share with no tier is exact. Documented in the operator guide's
+/// front-door contract; fixing it properly means a counter-only
+/// validator plus a per-boot nonce, which is more machinery than the
+/// annoyance has so far justified.
+///
+/// Both halves matter. CHANGE alone would miss a rename-over: the name
+/// is rebound to a DIFFERENT inode whose own counter starts fresh and
+/// can hold any value, including the one the caller remembers. The
+/// fileid pins identity, the change value pins content, and VERIFY
+/// checks exactly this pair.
+pub fn render_etag(fileid: u64, change: u64) -> String {
+    format!("\"{fileid:x}-{change:x}\"")
+}
+
+/// Inverse of [`render_etag`]. `None` for anything this server did not
+/// mint — a caller inventing entity-tags gets a 400, not a silent pass.
+pub fn parse_etag(raw: &str) -> Option<(u64, u64)> {
+    let inner = raw.trim().strip_prefix('"')?.strip_suffix('"')?;
+    let (f, c) = inner.split_once('-')?;
+    Some((u64::from_str_radix(f, 16).ok()?, u64::from_str_radix(c, 16).ok()?))
+}
+
+/// A condition evaluated INSIDE the compound that performs the
+/// mutation it guards.
+///
+/// This is NFS's own optimistic concurrency control, not a scheme
+/// invented for HTTP: VERIFY (RFC 5661 §18.30) compares a supplied
+/// fattr4 against the server's view of the current filehandle and
+/// answers NFS4ERR_NOT_SAME on mismatch, and a compound stops at its
+/// first error — so the RENAME or REMOVE behind a failed VERIFY never
+/// runs.
+///
+/// What it is NOT: a lock. A compound is not atomic, so another
+/// writer's compound can still interleave between the VERIFY and the
+/// mutation. This detects a lost update between callers that use it;
+/// it does not exclude a client that has the volume mounted. The
+/// exclusion primitive for that is [`crate::tier::gate`], which this
+/// deliberately does not take — holding a gate across an API request
+/// would let a caller stall the mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precondition {
+    /// `If-Match: *` — the object must exist. Carried by the LOOKUP
+    /// that resolves it: a missing name fails the compound before the
+    /// mutation, which is the whole condition.
+    Exists,
+    /// `If-Match: "<etag>"` — the object must exist AND still be the
+    /// one the caller read.
+    Is { fileid: u64, change: u64 },
+}
+
+impl Precondition {
+    /// The ops that impose this condition, leaving the compound free to
+    /// append the mutation. Resolution starts from the root, so the
+    /// filehandle state it leaves behind never constrains what follows.
+    fn ops(&self, path: &FsPath) -> Vec<Operation> {
+        let mut ops = path.resolve_ops();
+        ops.extend(self.verify_op());
+        ops
+    }
+
+    /// The VERIFY alone, for callers that have already positioned the
+    /// current filehandle on the object under test. `Exists` needs no
+    /// operation: the LOOKUP that positioned it IS the condition.
+    fn verify_op(&self) -> Option<Operation> {
+        match *self {
+            Precondition::Exists => None,
+            Precondition::Is { fileid, change } => {
+                Some(Operation::Verify { attrs: verify_attrs(fileid, change) })
+            }
+        }
+    }
+}
+
+/// The fattr4 a VERIFY of (CHANGE, FILEID) compares against.
+///
+/// Wire shape is the one `handle_verify` decodes: bitmap4 as a word
+/// count then the words, followed by attrlist4 as a length-prefixed
+/// opaque. Values run in ASCENDING attribute number — CHANGE is 3 and
+/// FILEID is 20 — because that is the order the server encodes its own
+/// side in, and the comparison is bytewise.
+fn verify_attrs(fileid: u64, change: u64) -> Bytes {
+    let mut b = BytesMut::with_capacity(28);
+    b.put_u32(1); // one bitmap word: both attributes live below 32
+    b.put_u32((1 << FATTR4_CHANGE) | (1 << FATTR4_FILEID));
+    b.put_u32(16); // attrlist4 length
+    b.put_u64(change);
+    b.put_u64(fileid);
+    b.freeze()
 }
 
 /// A page of a listing.
@@ -570,9 +686,23 @@ impl HubFs {
     /// answers NFS4ERR_NOTEMPTY, which the HTTP layer renders as 409
     /// rather than deleting a tree the caller did not ask to delete.
     pub async fn remove(&self, path: &FsPath) -> Result<(), FsError> {
+        self.remove_checked(path, None).await
+    }
+
+    /// REMOVE, optionally behind a [`Precondition`] evaluated in the
+    /// same compound.
+    pub async fn remove_checked(
+        &self,
+        path: &FsPath,
+        expect: Option<Precondition>,
+    ) -> Result<(), FsError> {
         let (parent, leaf) =
             path.split_leaf().ok_or(FsError::Invalid("cannot remove the root"))?;
-        let mut ops = parent.resolve_ops();
+        let mut ops = match expect {
+            Some(p) => p.ops(path),
+            None => Vec::new(),
+        };
+        ops.extend(parent.resolve_ops());
         ops.push(Operation::Remove(leaf.to_string()));
         self.compound(ops).await?;
         Ok(())
@@ -582,12 +712,52 @@ impl HubFs {
     /// resolve the source parent, SAVEFH it, resolve the target parent,
     /// then RENAME. Moves across directories fall out of that for free.
     pub async fn rename(&self, from: &FsPath, to: &FsPath) -> Result<(), FsError> {
+        self.rename_checked(from, to, None, None).await
+    }
+
+    /// RENAME, optionally behind preconditions evaluated in the same
+    /// compound.
+    ///
+    /// Two conditions because the two callers condition different
+    /// objects. An upload's swap conditions its DESTINATION — "replace
+    /// the file I read, not one someone else wrote since" — while a
+    /// move conditions its SOURCE, which is the object the request is
+    /// addressed to. Both are ordinary `If-Match`; they differ only in
+    /// which name the entity-tag came from.
+    pub async fn rename_checked(
+        &self,
+        from: &FsPath,
+        to: &FsPath,
+        expect_from: Option<Precondition>,
+        expect_to: Option<Precondition>,
+    ) -> Result<(), FsError> {
         let (from_parent, from_leaf) =
             from.split_leaf().ok_or(FsError::Invalid("cannot rename the root"))?;
         let (to_parent, to_leaf) =
             to.split_leaf().ok_or(FsError::Invalid("cannot rename onto the root"))?;
 
-        let mut ops = from_parent.resolve_ops();
+        // Both conditions are resolved from the root at the head of the
+        // compound, ahead of the mutation.
+        //
+        // Evaluating them LATER would be better — a COMPOUND is not
+        // atomic, so every operation between the VERIFY and the RENAME
+        // is a yield point where another writer can land its own rename
+        // and consume the version this one just checked. Positioning
+        // the VERIFY on the target and stepping back up with LOOKUPP
+        // would leave one operation in that gap instead of five. It was
+        // tried and it does not work: the filehandle LOOKUPP yields is
+        // not one RENAME accepts here, and every conditional write
+        // answered STALE. The window stays as wide as this ordering
+        // makes it, which is why the contract this surface publishes is
+        // detection rather than exclusion — see the drill.
+        let mut ops = Vec::new();
+        if let Some(p) = expect_from {
+            ops.extend(p.ops(from));
+        }
+        if let Some(p) = expect_to {
+            ops.extend(p.ops(to));
+        }
+        ops.extend(from_parent.resolve_ops());
         ops.push(Operation::SaveFh);
         ops.extend(to_parent.resolve_ops());
         ops.push(Operation::Rename {
@@ -602,7 +772,14 @@ impl HubFs {
 /// The attribute mask every listing requests, as bitmap words.
 fn listing_attr_mask() -> Vec<u32> {
     let mut words = vec![0u32; 2];
-    for a in [FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID, FATTR4_MODE, FATTR4_TIME_MODIFY] {
+    for a in [
+        FATTR4_TYPE,
+        FATTR4_CHANGE,
+        FATTR4_SIZE,
+        FATTR4_FILEID,
+        FATTR4_MODE,
+        FATTR4_TIME_MODIFY,
+    ] {
         words[(a / 32) as usize] |= 1 << (a % 32);
     }
     words
@@ -635,6 +812,7 @@ fn decode_entry(name: String, path: String, blob: &Bytes) -> Result<Entry, FsErr
     };
 
     let mut kind = "other";
+    let mut change = 0u64;
     let mut size = 0u64;
     let mut fileid = 0u64;
     let mut mode = 0u32;
@@ -648,6 +826,11 @@ fn decode_entry(name: String, path: String, blob: &Bytes) -> Result<Entry, FsErr
             5 => "symlink",
             _ => "other",
         };
+    }
+    // Attribute 3, so it decodes after TYPE and before SIZE. The order
+    // is the fattr4 encoding's, not this function's choice.
+    if has(FATTR4_CHANGE) {
+        change = dec.decode_u64().map_err(|_| FsError::Nfs(Nfs4Status::BadXdr))?;
     }
     if has(FATTR4_SIZE) {
         size = dec.decode_u64().map_err(|_| FsError::Nfs(Nfs4Status::BadXdr))?;
@@ -671,9 +854,11 @@ fn decode_entry(name: String, path: String, blob: &Bytes) -> Result<Entry, FsErr
         kind,
         size,
         fileid,
+        etag: render_etag(fileid, change),
         mode,
         modified_unix,
         link_target: None,
+        change,
     })
 }
 
@@ -732,11 +917,18 @@ mod tests {
     #[test]
     fn the_listing_mask_names_exactly_the_attrs_the_decoder_walks() {
         let mask = listing_attr_mask();
-        for a in [FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID, FATTR4_MODE, FATTR4_TIME_MODIFY] {
+        for a in [
+            FATTR4_TYPE,
+            FATTR4_CHANGE,
+            FATTR4_SIZE,
+            FATTR4_FILEID,
+            FATTR4_MODE,
+            FATTR4_TIME_MODIFY,
+        ] {
             assert!(mask[(a / 32) as usize] & (1 << (a % 32)) != 0, "attr {a} missing");
         }
         // Nothing else, or the decoder's positional walk would desync.
         let set: u32 = mask.iter().map(|w| w.count_ones()).sum();
-        assert_eq!(set, 5);
+        assert_eq!(set, 6);
     }
 }

@@ -10,6 +10,133 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [Unreleased]
+
+### Fixed — an exclusion that could take a file out of service permanently
+
+- **`tier::gate::exclude` had no deadline, and gave up nothing when it
+  hung.** It set `excluded = true` and THEN waited for `in_flight` to
+  reach zero with no bound, so one write syscall stuck in D-state left
+  the file refusing every entrant — with no `ExclusionGuard` yet in
+  existence for a `Drop` to clear. The gate is a process-local map with
+  no release path and no operator surface, so the state had exactly one
+  remedy: restart the hub. F33's watchdog does not cover it either —
+  that probes the backing store, and this wedge happens on a healthy
+  disk. Reachable today through eviction and hydration, the only two
+  callers.
+
+  `exclude` now takes a deadline (30s, generous because it waits out
+  in-flight syscalls on ONE file) and returns `Option`. **There is
+  deliberately no unbounded form left.** On the give-up path it clears
+  the flag and notifies before returning, which is the part that
+  matters and is mutation-verified: leaving the flag standing
+  reproduces the original wedge exactly, and the test says so. Both
+  callers already had the vocabulary for "not now" — eviction refuses
+  `Busy` and retries next tick, hydration falls into its existing
+  backoff — so an unrecoverable wedge becomes an ordinary retry.
+- A `gate_exclude_timeouts` meter counter, bumped inside the gate so no
+  future caller can forget it. The gate is otherwise uninstrumented;
+  this is the only signal that a file's writes are not draining, and
+  without it the caller's retry hides the symptom entirely.
+
+### Added — conditional requests on the hub's file API
+
+- **Every object now carries an `ETag`**, on downloads, on upload
+  responses, and on every listing entry. It renders the fattr4 CHANGE
+  attribute together with the fileid, which makes it the SAME validator
+  a mounted client uses to order its cache: an entity-tag held by a UI
+  and a change value held by a mounted process name one version of one
+  file rather than two schemes that happen to agree. Listings carry it
+  so a caller can browse a directory and write conditionally afterwards
+  without re-reading each file.
+- **`If-Match` on PUT / DELETE / move becomes a VERIFY (RFC 5661
+  §18.30) inside the same compound as the RENAME or REMOVE it guards.**
+  A compound stops at its first error, so a file that changed under the
+  caller is never replaced: 412, and the write is refused whole. Before
+  this, two PUTs to one path both answered 201 and one was discarded
+  with nothing anywhere recording it — the lost-update half of the bug
+  whose interleaving half was fixed in 1.29.0 by giving each upload its
+  own temp name. A refused upload takes its temp with it.
+- **`If-None-Match: *` is create-if-absent; `If-None-Match` on a GET
+  revalidates to 304.** On an evicted file that 304 is the difference
+  between a header and real, billed S3 egress, because revalidation
+  answers before hydration is triggered.
+- Entity-tags this server did not mint are refused with 400 rather than
+  412, so a caller with a bug learns it instead of retrying forever.
+  Weak validators are refused on writes (`If-Match` is defined on strong
+  comparison); a multi-tag `If-Match` is refused rather than reduced to
+  its first element, which would report a check that never ran.
+
+  **What this is NOT is a lock, and the docs say so where a caller will
+  read it.** An NFS compound is explicitly not atomic, so a writer on
+  the mount can still land between the VERIFY and the mutation. This
+  closes the lost update between API callers — two browser tabs, a
+  retried upload, two agents on one project — which is the race this
+  surface actually runs into. It is not a degraded imitation of an
+  object store's compare-and-swap: it is exactly the strength of NFS's
+  own optimistic concurrency control, which the HTTP door was alone in
+  not exposing. `If-None-Match: *` is weaker still — NFS has no
+  operation that fails a compound BECAUSE a name resolved, so it is a
+  stat with a race window, documented as such.
+
+  **A concurrency drill measures the guarantee rather than asserting
+  it, and it changed what the docs claim.** Eight writers doing
+  read-modify-write against one file, 200 appends: 168 lost without
+  `If-Match`, 32 with it. Five times better and emphatically not zero —
+  because a COMPOUND is not atomic, two writers can both pass their
+  VERIFY before either lands its RENAME. An earlier version of the leg
+  asserted zero loss and failed; the leg was wrong, not the code, and
+  the front-door contract now publishes the measured residual so nobody
+  builds a multi-user editor on top of a safety net believing it is a
+  serialiser. The drill's leg 1 is an anti-vacuity control that proves
+  the storm actually races before leg 2 claims credit for surviving it.
+
+  Two defects the drill found on the way, both real and both fixed
+  here: a download's `ETag` came from the opening stat while its bytes
+  came from per-chunk LOOKUPs, so a rename-over mid-read shipped one
+  file's bytes under another file's validator (now re-stat'd and 409'd);
+  and `Stale`/`FhExpired` answered `500`, which under concurrent writers
+  is ordinary and retryable — a conditioned mutation now answers `412`
+  like any other "the object you named is not the object here", and a
+  racing read answers `409`, so callers meet one contract instead of an
+  unexplained server error the first time two tabs save at once.
+
+  Two things the drill ruled OUT, recorded so they are not re-chased:
+  making the change counter a global sequence fixes nothing (tried
+  against the failing leg, no effect, reverted), and moving the VERIFY
+  adjacent to the RENAME with LOOKUPP does not work at all — the
+  filehandle it yields is not one RENAME accepts, and every conditional
+  write answered STALE.
+
+  Nineteen tests, four of which drive the fs layer directly rather than
+  HTTP. That is deliberate: the upload handler pre-checks a precondition
+  with a stat before writing a temp, and that shortcut alone satisfies
+  every HTTP-level test — delete the VERIFY from the compound and they
+  all still pass while the guarantee is gone. Verified by mutation:
+  removing the VERIFY fails 4 tests, and dropping just the fileid half
+  of the tag (which is what catches a rename-over onto a fresh inode)
+  fails 1.
+- **The front-door contract now states what a caller owes**
+  (`docs/flint-lite-operator.md`): send `If-Match` and handle 412 by
+  re-reading, treat `If-None-Match: *` as a check rather than a lock,
+  and know that a 304 is still activity — a UI revalidating on a timer
+  pins a project awake exactly as re-downloading does. Written where
+  ensure-live and keepalive already live, because the front door is a
+  web service handling untrusted input and two tabs on one project is
+  its ordinary case, not its exotic one.
+- The delete drill is `#[cfg(target_os = "linux")]`. On macOS racing
+  `remove_file` against one path reports success to several callers at
+  once — harness, not server; the identical drill on Linux yields
+  exactly one winner every round, verified before gating it. The
+  macOS-suite-is-not-the-suite rule earned its keep twice in this
+  change.
+- Documented one behaviour that is otherwise unexplainable from the
+  outside: on a TIERED share an entity-tag changes when a file is
+  evicted or hydrated, because both rewrite the local inode and the tag
+  derives from its change attribute. It fails closed (re-read, never a
+  lost edit) and a tier-less share is exact, but a caller seeing a lone
+  412 must not read it as evidence of a concurrent editor.
+
 ## [1.29.0] - 2026-08-19
 
 ### Fixed — four defects found by designing the cluster drill

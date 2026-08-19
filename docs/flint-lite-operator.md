@@ -283,6 +283,51 @@ Four things about that loop:
   holds is stale. A change means remount; an unchanged id across a
   restart means carry on.
 
+### Writing files on a user's behalf
+
+The front door is a web service handling untrusted input, which means
+the same project gets written from two browser tabs, from a retried
+upload, and from an agent, all at once. Three obligations follow, and
+they are contract, not advice:
+
+- **Send `If-Match` on every write you make on a user's behalf, and
+  handle `412` by re-reading rather than retrying the write.** Take the
+  tag from the `etag` on the listing entry or the download — a listing
+  carries one per file, so a browse gives you everything you need
+  without a stat per file. A `412` means the file changed under your
+  user since they read it; retrying the same body destroys whatever
+  arrived in between, which is precisely what the tag exists to
+  prevent. Without `If-Match` both writers get `201` and one edit is
+  discarded silently.
+- **Use `If-None-Match: *` for create, and do not trust it to
+  serialise a race.** It is checked with a stat, not inside the
+  compound, because NFS has no operation that fails a compound
+  *because* a name resolved. Two callers racing a create can both pass
+  it. It makes the single-writer case correct; it is not a lock.
+- **Know what the guarantee covers, and it is narrower than it looks.**
+  `If-Match` becomes a `VERIFY` inside the same NFS compound as the
+  rename. But a COMPOUND is not atomic, so two writers can both pass
+  their VERIFY before either lands its RENAME, and one update dies with
+  both callers seeing `201`. This is **detection, not serialisation**.
+
+  Measured, eight writers appending to one file, 200 writes: without
+  `If-Match` 168 updates were lost; with it, 32. A 5x improvement and a
+  16% residual. Use it as the safety net it is — it turns the common
+  two-tab case from silent corruption into a retry — but if your product
+  lets several users edit one file at once, you still need a merge or a
+  single-writer discipline above this API. It does not fence a client
+  that has the volume mounted either, and it is not a transaction: an
+  upload is single-shot, so a `412` means redo the whole write.
+
+One behaviour to expect on a tiered share: an entity-tag changes when
+a file is evicted to S3 or hydrated back, because both rewrite the
+local inode and the tag is derived from its change attribute. Nothing
+the user did changed, but a conditional write against a tag held across
+that boundary answers `412`. It fails closed — a re-read and retry,
+never a lost edit — and a share with no tier does not do it at all. Do
+not treat a lone `412` as evidence of a concurrent editor; treat it as
+"re-read before you write".
+
 ### Keepalive is mandatory, not optional
 
 Re-touch `requested-at` on a timer shorter than `suspendAfterSecs`, for
@@ -298,6 +343,9 @@ Two failure modes to design against:
   deliberately not activity, and the file API deliberately is. A UI
   that refreshes a listing on a timer pins that project awake forever
   and the ladder never fires. Poll `/status`; do not walk `/files`.
+  **A conditional GET that answers `304` is no different here** — it is
+  cheap in bytes and identical in wake-up, so revalidating on a timer
+  pins a project exactly as re-downloading does.
 - **Do not let a wrong clock look like demand.** A `requested-at` more
   than one `suspendAfterSecs` in the future is discarded, and the share
   reports an `ImplausibleRequest` event. That is a guard, not a
@@ -447,11 +495,11 @@ Six endpoints, all requiring `Authorization: Bearer <token>`:
 | Method | Path |
 |---|---|
 | GET | `/files?path=&recursive=&limit=&cursor=` |
-| GET | `/files/content?path=` (Range supported) |
-| PUT | `/files/content?path=` (`application/octet-stream`) |
-| DELETE | `/files/content?path=` |
+| GET | `/files/content?path=` (Range, `If-None-Match`) |
+| PUT | `/files/content?path=` (`application/octet-stream`, `If-Match`, `If-None-Match: *`) |
+| DELETE | `/files/content?path=` (`If-Match`) |
 | POST | `/files/folder` — `{"path": "/a/b"}` |
-| POST | `/files/move` — `{"from": "/a", "to": "/b"}` |
+| POST | `/files/move` — `{"from": "/a", "to": "/b"}` (`If-Match`, on `from`) |
 
 This exists so a project service can browse and edit a share **without
 mounting it**. It cannot hold kernel mounts at fleet scale: pod-spec
@@ -486,6 +534,44 @@ Things worth knowing before you wire it up:
   file or the new one, never a mixture, and a crashed upload leaves a
   recognisable `.flint-upload.*` temp rather than a corrupt file under
   the real name.
+- **Conditional requests are supported, and they detect rather than
+  prevent.** Every object carries an `ETag`, on downloads, on upload
+  responses, and on every listing entry — so a UI can list a directory
+  and then write conditionally without re-reading each file. Sending it
+  back as `If-Match` turns the write into a VERIFY inside the same NFS
+  compound as the rename or remove it guards, and a compound stops at
+  its first error, so a file that changed under you is never replaced:
+  the answer is `412` and the write is refused whole. `If-None-Match: *`
+  is create-if-absent. `If-None-Match` on a GET revalidates to `304`,
+  which on a cold file is the difference between a header and billed S3
+  egress.
+
+  The tag is the fattr4 CHANGE attribute plus the fileid — **the same
+  validator a mounted client uses**, so an entity-tag and a mounted
+  process's change value name one version of one file.
+
+  What it is not is a lock. An NFS compound is not atomic, so a writer
+  on the mount can still land between the VERIFY and the rename. This
+  closes the lost update between two API callers — two browser tabs, a
+  retried upload, two agents on one project — which is the race this
+  surface actually runs into. It does not fence the mount. That is not a
+  gap against some stronger HTTP idiom: it is exactly the strength of
+  NFS's own `VERIFY`, which this is re-exposing rather than reinventing.
+
+  Three rough edges worth knowing. `If-None-Match: *` is checked with a
+  stat rather than in the compound, because NFS has no operation that
+  fails a compound *because* a name resolved — two callers racing a
+  create can both pass it. An `If-Match` list of several tags is
+  refused with `400` rather than half-honoured; send one tag or `*`.
+  And **on a tiered share a tag changes when a file is evicted or
+  hydrated**: both rewrite the local inode, and the tag is derived from
+  its change attribute, so a tag held across that boundary answers
+  `412` with nothing the user did behind it. It fails closed — re-read
+  and retry, never a lost edit — and a share with no tier does not do
+  it at all.
+- **A 304 still counts as activity.** Cheap in bytes, identical in
+  wake-up. Revalidating on a timer pins a project awake exactly as
+  re-downloading on a timer does — use `/status` for liveness.
 - **Symlinks are data, not paths to follow.** They appear in listings
   with their target; `GET /files/content` on one answers 409. The server
   does not dereference a link on a caller's behalf — in NFS that is the
@@ -691,7 +777,11 @@ accept the pruning.
 - The idle ladder has **no cluster coverage yet** — its unit tests are
   thorough and no kind e2e leg exercises it end to end.
 - The file API is single-shot: no chunked or resumable upload, no
-  byte-range PATCH. Large uploads that fail are retried whole.
+  byte-range PATCH. Large uploads that fail are retried whole — and
+  `If-Match` does not make one a multi-request transaction.
+- Conditional writes detect a lost update between API callers; they do
+  not exclude a writer on the mount, and `If-None-Match: *` is a check
+  with a race window rather than an atomic create.
 - A recursive listing is bounded (50k entries, depth 32) and reports
   `truncated: true` rather than silently returning a short list.
 - Two SPELLINGS of one endpoint are not recognized as the same store by

@@ -8,10 +8,39 @@
 //! |---|---|---|
 //! | GET | `/files?path=&recursive=&limit=&cursor=` | PUTROOTFH + LOOKUP* + READDIR |
 //! | GET | `/files/content?path=` | LOOKUP* + READ |
-//! | PUT | `/files/content?path=` | OPEN(CREATE) + WRITE* + COMMIT + CLOSE + RENAME |
-//! | DELETE | `/files/content?path=` | REMOVE |
+//! | PUT | `/files/content?path=` | OPEN(CREATE) + WRITE* + COMMIT + CLOSE + [VERIFY +] RENAME |
+//! | DELETE | `/files/content?path=` | [VERIFY +] REMOVE |
 //! | POST | `/files/folder` | CREATE(NF4DIR) |
-//! | POST | `/files/move` | SAVEFH + RENAME |
+//! | POST | `/files/move` | [VERIFY +] SAVEFH + RENAME |
+//!
+//! ## Conditional requests
+//!
+//! Every object carries an `ETag` — on downloads, on upload responses,
+//! and on every listing entry. It is rendered from the fattr4 CHANGE
+//! attribute and the fileid, which means it is the SAME validator a
+//! mounted client uses to order its cache: a UI holding an entity-tag
+//! and a process holding a change value are talking about one version
+//! of one file, not two schemes that happen to agree.
+//!
+//! `If-Match` on a write becomes a VERIFY (RFC 5661 §18.30) inside the
+//! same compound as the RENAME or REMOVE it guards. A compound stops at
+//! its first error, so a file that moved under the caller is never
+//! replaced — the answer is 412 and the write is refused whole.
+//! `If-None-Match: *` is create-if-absent, and `If-None-Match` on a GET
+//! revalidates to 304.
+//!
+//! **What this is not: a lock.** A COMPOUND is explicitly not atomic,
+//! so another writer can still interleave between the VERIFY and the
+//! mutation. This detects a lost update between callers that use it; it
+//! does not exclude a client that has the volume mounted. That is not a
+//! shortfall against some stronger HTTP idiom — it is exactly the
+//! strength of NFS's own optimistic concurrency control, which this
+//! surface is re-exposing rather than reinventing. Describe it to
+//! callers as detection, never as exclusion.
+//!
+//! The drill measures the difference rather than asserting it: eight
+//! writers appending to one file, 200 writes, lost 168 unconditionally
+//! and 32 under `If-Match`. Five times better and not remotely zero.
 //!
 //! ## Where this listens, and why it matters
 //!
@@ -35,10 +64,17 @@
 //! timer would pin every project in the fleet awake forever, and the
 //! idle ladder would never fire. The front door polls `/status` for
 //! liveness; `/status` is deliberately NOT activity.
+//!
+//! **Read a 304 as free.** It is cheap in bytes and identical in
+//! activity: a conditional GET went through the dispatcher exactly as an
+//! unconditional one did. Revalidating on a timer pins a project awake
+//! precisely as re-downloading on a timer does. Conditional requests
+//! make that poll cheaper and therefore more tempting, which is why the
+//! rule is written here next to the feature that invites it.
 
 pub mod hubfs;
 
-use hubfs::{FsError, FsPath, HubFs};
+use hubfs::{Entry, FsError, FsPath, HubFs, Precondition};
 use crate::nfs::v4::protocol::Nfs4Status;
 use bytes::Bytes;
 use std::sync::Arc;
@@ -72,6 +108,130 @@ impl Default for ApiConfig {
             hydrate_wait_secs: 30,
         }
     }
+}
+
+/// A parsed `If-Match` / `If-None-Match` header value.
+struct Validators {
+    /// The header was `*` — "any current representation".
+    any: bool,
+    /// Entity-tags this server minted, already split into their halves.
+    tags: Vec<(u64, u64)>,
+    /// At least one tag arrived weak (`W/"…"`). Fine for revalidating a
+    /// GET, refused on a write: RFC 9110 §13.1.1 requires strong
+    /// comparison for `If-Match`, and a weak tag promises only that two
+    /// representations are equivalent — not that they are the same
+    /// bytes, which is the only thing worth conditioning a write on.
+    weak: bool,
+}
+
+impl Validators {
+    /// Weak comparison, for revalidating a GET.
+    fn matches(&self, etag: &str) -> bool {
+        self.any || self.tags.iter().any(|t| hubfs::render_etag(t.0, t.1) == etag)
+    }
+}
+
+/// Parse one precondition header. An entity-tag this server did not
+/// mint is an error rather than a non-match: a caller sending a token
+/// from somewhere else has a bug, and answering 412 would let it retry
+/// forever without ever learning that.
+fn parse_validators(raw: &str) -> Result<Validators, String> {
+    let raw = raw.trim();
+    if raw == "*" {
+        return Ok(Validators { any: true, tags: Vec::new(), weak: false });
+    }
+    let mut out = Validators { any: false, tags: Vec::new(), weak: false };
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (body, weak) = match part.strip_prefix("W/") {
+            Some(rest) => (rest.trim(), true),
+            None => (part, false),
+        };
+        match hubfs::parse_etag(body) {
+            Some(t) => {
+                out.weak |= weak;
+                out.tags.push(t);
+            }
+            None => {
+                return Err(format!(
+                    "not an entity-tag this server issued: {part} — send back an `etag` \
+                     from a listing or a download, quotes included"
+                ))
+            }
+        }
+    }
+    if out.tags.is_empty() {
+        return Err("no usable entity-tag in the precondition header".into());
+    }
+    Ok(out)
+}
+
+/// Turn an `If-Match` header into the condition the mutating compound
+/// will carry.
+fn write_precondition(raw: &str) -> Result<Precondition, String> {
+    let v = parse_validators(raw)?;
+    if v.weak {
+        return Err("If-Match requires a strong entity-tag; drop the W/ prefix".into());
+    }
+    if v.any {
+        return Ok(Precondition::Exists);
+    }
+    if v.tags.len() > 1 {
+        // A list is legal HTTP and would need one compound per tag to
+        // evaluate honestly. Refusing beats picking the first and
+        // reporting a guarantee that was never checked.
+        return Err("If-Match on a write accepts a single entity-tag or `*`".into());
+    }
+    let (fileid, change) = v.tags[0];
+    Ok(Precondition::Is { fileid, change })
+}
+
+/// Does `entry` satisfy `p`? Used only for the cheap pre-checks; the
+/// binding evaluation is the VERIFY inside the mutating compound.
+fn precondition_holds(p: Precondition, entry: &Entry) -> bool {
+    match p {
+        Precondition::Exists => true,
+        Precondition::Is { fileid, change } => entry.fileid == fileid && entry.change == change,
+    }
+}
+
+fn precondition_failed(what: &str) -> warp::reply::Response {
+    plain(
+        StatusCode::PRECONDITION_FAILED,
+        &format!("{what} changed since the entity-tag you sent; re-read it and retry"),
+    )
+}
+
+/// Render a failed mutation, knowing whether a precondition was in play.
+///
+/// With `If-Match` present, a missing object is a FAILED CONDITION, not
+/// a missing resource — RFC 9110 §13.1.1 is explicit that a target with
+/// no current representation fails `If-Match`. Answering 404 there
+/// would tell a caller its file vanished when what actually happened is
+/// that someone replaced it.
+fn mutate_err_reply(e: &FsError, conditioned: bool) -> warp::reply::Response {
+    // `Stale` belongs here beside `NoEnt`, and the drill is why. Under
+    // concurrent writers a mutating compound can reach its target
+    // through a filehandle that another caller's rename-over has just
+    // invalidated. Semantically that is the SAME event a failed VERIFY
+    // reports — the object you conditioned on is not the object here
+    // any more — but it arrives as a different status, and a caller
+    // told to "handle 412" would meet an unexplained 409 the first time
+    // two of its tabs saved at once. One event, one code.
+    if conditioned
+        && matches!(
+            e,
+            FsError::Nfs(Nfs4Status::NoEnt)
+                | FsError::Nfs(Nfs4Status::Stale)
+                | FsError::Nfs(Nfs4Status::FhExpired)
+        )
+    {
+        return precondition_failed("the target");
+    }
+    err_reply(e)
 }
 
 /// Chunk size for both directions. 1 MiB is well inside the NFS write
@@ -145,6 +305,19 @@ fn http_status(e: &FsError) -> StatusCode {
             // flush epoch swap. Both are "retry", not "failed".
             Nfs4Status::Delay | Nfs4Status::Grace => StatusCode::SERVICE_UNAVAILABLE,
             Nfs4Status::RoFs => StatusCode::FORBIDDEN,
+            // A VERIFY inside the mutating compound said the object is
+            // no longer the one the caller conditioned on.
+            Nfs4Status::NotSame => StatusCode::PRECONDITION_FAILED,
+            // The object was replaced while this compound was walking
+            // to it — a filehandle minted moments ago no longer
+            // resolves. That is "someone else wrote; come back", the
+            // same answer a mid-read replacement gets, and emphatically
+            // not a server fault. Under concurrent writers to one path
+            // this is ordinary, and 500 would tell a caller to stop
+            // rather than retry. (Drill-found.)
+            Nfs4Status::Stale | Nfs4Status::FhExpired => StatusCode::CONFLICT,
+            // Transient server-side scarcity, retryable by definition.
+            Nfs4Status::Resource => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         },
     }
@@ -269,11 +442,14 @@ fn raw_routes(
             .and(auth.clone())
             .and(warp::query::<PathQuery>())
             .and(warp::header::optional::<String>("range"))
-            .then(move |_, q: PathQuery, range: Option<String>| {
-                let fs = fs.clone();
-                let cfg = cfg.clone();
-                async move { handle_download(fs, cfg, q, range).await }
-            })
+            .and(warp::header::optional::<String>("if-none-match"))
+            .then(
+                move |_, q: PathQuery, range: Option<String>, inm: Option<String>| {
+                    let fs = fs.clone();
+                    let cfg = cfg.clone();
+                    async move { handle_download(fs, cfg, q, range, inm).await }
+                },
+            )
     };
 
     let upload = {
@@ -283,12 +459,16 @@ fn raw_routes(
             .and(warp::put())
             .and(auth.clone())
             .and(warp::query::<PathQuery>())
+            .and(warp::header::optional::<String>("if-match"))
+            .and(warp::header::optional::<String>("if-none-match"))
             .and(warp::body::content_length_limit(cfg.max_upload_bytes))
             .and(warp::body::bytes())
-            .then(move |_, q: PathQuery, body: Bytes| {
-                let fs = fs.clone();
-                async move { handle_upload(fs, q, body).await }
-            })
+            .then(
+                move |_, q: PathQuery, im: Option<String>, inm: Option<String>, body: Bytes| {
+                    let fs = fs.clone();
+                    async move { handle_upload(fs, q, body, im, inm).await }
+                },
+            )
     };
 
     let delete = {
@@ -297,9 +477,10 @@ fn raw_routes(
             .and(warp::delete())
             .and(auth.clone())
             .and(warp::query::<PathQuery>())
-            .then(move |_, q: PathQuery| {
+            .and(warp::header::optional::<String>("if-match"))
+            .then(move |_, q: PathQuery, im: Option<String>| {
                 let fs = fs.clone();
-                async move { handle_delete(fs, q).await }
+                async move { handle_delete(fs, q, im).await }
             })
     };
 
@@ -320,10 +501,11 @@ fn raw_routes(
         warp::path!("files" / "move")
             .and(warp::post())
             .and(auth)
+            .and(warp::header::optional::<String>("if-match"))
             .and(warp::body::json::<MoveBody>())
-            .then(move |_, b: MoveBody| {
+            .then(move |_, im: Option<String>, b: MoveBody| {
                 let fs = fs.clone();
-                async move { handle_move(fs, b).await }
+                async move { handle_move(fs, b, im).await }
             })
     };
 
@@ -436,6 +618,7 @@ async fn handle_download(
     cfg: ApiConfig,
     q: PathQuery,
     range: Option<String>,
+    if_none_match: Option<String>,
 ) -> warp::reply::Response {
     let path = match FsPath::parse(&q.path) {
         Ok(p) => p,
@@ -465,6 +648,31 @@ async fn handle_download(
             )
         }
         _ => return plain(StatusCode::CONFLICT, "path is not a regular file"),
+    }
+
+    // Revalidation, before any byte is moved. On an evicted file this
+    // is the difference between a 304 and a hydration: the bytes would
+    // come back from S3 as real, billed egress to answer a request whose
+    // answer is "you already have it".
+    //
+    // A 304 is still ACTIVITY. That is deliberate and it is the trap to
+    // watch: a UI that revalidates on a timer keeps the project awake
+    // exactly as a UI that re-downloads does, and the idle ladder never
+    // fires. Liveness belongs on /status, which is not activity.
+    let etag = hubfs::render_etag(entry.fileid, entry.change);
+    if let Some(raw) = if_none_match.as_deref() {
+        match parse_validators(raw) {
+            Ok(v) if v.matches(&etag) => {
+                let mut res = warp::reply::Response::new(Vec::<u8>::new().into());
+                *res.status_mut() = StatusCode::NOT_MODIFIED;
+                if let Ok(v) = warp::http::HeaderValue::from_str(&etag) {
+                    res.headers_mut().insert("etag", v);
+                }
+                return res;
+            }
+            Ok(_) => {}
+            Err(m) => return plain(StatusCode::BAD_REQUEST, &m),
+        }
     }
 
     let (start, end, partial) = match range.as_deref().and_then(|h| parse_range(h, entry.size)) {
@@ -530,6 +738,29 @@ async fn handle_download(
         );
     }
 
+    // Re-stat, and refuse if the object moved under the read.
+    //
+    // The bytes did NOT necessarily come from the file the opening stat
+    // described: every chunk re-resolves the path through LOOKUP, so a
+    // rename-over mid-read hands back the new file's bytes under the
+    // old file's `ETag`. Sizes matching does not rule it out — a
+    // same-size replacement passes the length check above — and a
+    // validator that names a version other than the bytes shipped
+    // beside it is worse than none, because a later `If-Match` built
+    // from it is checking the wrong thing.
+    //
+    // Found by the concurrency drill; no unit test raced hard enough to
+    // see it.
+    match fs.stat(&path).await {
+        Ok(after) if after.fileid == entry.fileid && after.change == entry.change => {}
+        Ok(_) | Err(_) => {
+            return plain(
+                StatusCode::CONFLICT,
+                "file changed while being read; retry the request",
+            )
+        }
+    }
+
     let mut res = warp::reply::Response::new(buf.into());
     let h = res.headers_mut();
     h.insert(
@@ -537,6 +768,12 @@ async fn handle_download(
         warp::http::HeaderValue::from_static("application/octet-stream"),
     );
     h.insert("accept-ranges", warp::http::HeaderValue::from_static("bytes"));
+    // The tag comes from the SAME stat that fixed Content-Length, so the
+    // validator a caller stores can never describe a different version
+    // than the bytes it stored alongside it.
+    if let Ok(v) = warp::http::HeaderValue::from_str(&etag) {
+        h.insert("etag", v);
+    }
     if partial {
         h.insert(
             "content-range",
@@ -579,7 +816,13 @@ fn upload_tmp_name(leaf: &str) -> String {
     )
 }
 
-async fn handle_upload(fs: Arc<HubFs>, q: PathQuery, body: Bytes) -> warp::reply::Response {
+async fn handle_upload(
+    fs: Arc<HubFs>,
+    q: PathQuery,
+    body: Bytes,
+    if_match: Option<String>,
+    if_none_match: Option<String>,
+) -> warp::reply::Response {
     let path = match FsPath::parse(&q.path) {
         Ok(p) => p,
         Err(e) => return err_reply(&e),
@@ -587,6 +830,67 @@ async fn handle_upload(fs: Arc<HubFs>, q: PathQuery, body: Bytes) -> warp::reply
     let Some((parent, leaf)) = path.split_leaf() else {
         return plain(StatusCode::BAD_REQUEST, "path names the export root, not a file");
     };
+
+    // ── preconditions (RFC 9110 §13.1) ──────────────────────────────
+    let expect = match if_match.as_deref().map(write_precondition).transpose() {
+        Ok(p) => p,
+        Err(m) => return plain(StatusCode::BAD_REQUEST, &m),
+    };
+    let must_be_absent = match if_none_match.as_deref() {
+        None => false,
+        Some(raw) => match parse_validators(raw) {
+            Ok(v) if v.any => true,
+            // `If-None-Match: "<tag>"` on a write asks "unless it is
+            // still exactly this", which no caller of this API has a
+            // use for and which would need its own compound arm.
+            Ok(_) => {
+                return plain(
+                    StatusCode::BAD_REQUEST,
+                    "If-None-Match on a write is supported only as `*` (create if absent)",
+                )
+            }
+            Err(m) => return plain(StatusCode::BAD_REQUEST, &m),
+        },
+    };
+    if must_be_absent && expect.is_some() {
+        return plain(
+            StatusCode::BAD_REQUEST,
+            "If-Match and If-None-Match: * cannot both hold on one request",
+        );
+    }
+
+    // The create-if-absent arm is a check with a window, and says so.
+    // NFS has no operation that fails a compound BECAUSE a name
+    // resolved, so unlike If-Match this one cannot ride along with the
+    // rename. Two callers racing a create can therefore both pass here
+    // and one will silently win. It is offered because it makes the
+    // common single-writer case correct and the alternative is offering
+    // nothing; do not describe it as a guarantee.
+    if must_be_absent {
+        match fs.stat(&path).await {
+            Ok(_) => {
+                return plain(
+                    StatusCode::PRECONDITION_FAILED,
+                    "the file already exists and If-None-Match: * was sent",
+                )
+            }
+            Err(FsError::Nfs(Nfs4Status::NoEnt)) => {}
+            Err(e) => return err_reply(&e),
+        }
+    }
+
+    // Fail fast on a tag that already disagrees: the rename's VERIFY is
+    // the authority, but there is no reason to write a whole temp file
+    // for a body that cannot land.
+    if let Some(p) = expect {
+        match fs.stat(&path).await {
+            Ok(e) if !precondition_holds(p, &e) => return precondition_failed(&path.display()),
+            Err(FsError::Nfs(Nfs4Status::NoEnt)) => return precondition_failed(&path.display()),
+            // Anything else — including a hydration DELAY — is the
+            // compound's to judge, not this shortcut's.
+            _ => {}
+        }
+    }
 
     // Write to a temp name and RENAME over the target.
     //
@@ -638,22 +942,41 @@ async fn handle_upload(fs: Arc<HubFs>, q: PathQuery, body: Bytes) -> warp::reply
         let _ = fs.remove(&tmp).await;
         return err_reply(&e);
     }
-    if let Err(e) = fs.rename(&tmp, &path).await {
+    // The swap, with the caller's condition evaluated INSIDE the same
+    // compound: VERIFY then RENAME, and a compound stops at its first
+    // error, so a file that moved under the caller is never replaced.
+    if let Err(e) = fs.rename_checked(&tmp, &path, None, expect).await {
         let _ = fs.remove(&tmp).await;
-        return err_reply(&e);
+        return mutate_err_reply(&e, expect.is_some());
     }
 
-    plain(StatusCode::CREATED, "written")
+    // Hand back the version that now exists, so a caller writing twice
+    // in a row does not have to re-read between them.
+    let mut res = plain(StatusCode::CREATED, "written");
+    if let Ok(e) = fs.stat(&path).await {
+        if let Ok(v) = warp::http::HeaderValue::from_str(&e.etag) {
+            res.headers_mut().insert("etag", v);
+        }
+    }
+    res
 }
 
-async fn handle_delete(fs: Arc<HubFs>, q: PathQuery) -> warp::reply::Response {
+async fn handle_delete(
+    fs: Arc<HubFs>,
+    q: PathQuery,
+    if_match: Option<String>,
+) -> warp::reply::Response {
     let path = match FsPath::parse(&q.path) {
         Ok(p) => p,
         Err(e) => return err_reply(&e),
     };
-    match fs.remove(&path).await {
+    let expect = match if_match.as_deref().map(write_precondition).transpose() {
+        Ok(p) => p,
+        Err(m) => return plain(StatusCode::BAD_REQUEST, &m),
+    };
+    match fs.remove_checked(&path, expect).await {
         Ok(()) => plain(StatusCode::OK, "removed"),
-        Err(e) => err_reply(&e),
+        Err(e) => mutate_err_reply(&e, expect.is_some()),
     }
 }
 
@@ -668,7 +991,11 @@ async fn handle_folder(fs: Arc<HubFs>, b: FolderBody) -> warp::reply::Response {
     }
 }
 
-async fn handle_move(fs: Arc<HubFs>, b: MoveBody) -> warp::reply::Response {
+async fn handle_move(
+    fs: Arc<HubFs>,
+    b: MoveBody,
+    if_match: Option<String>,
+) -> warp::reply::Response {
     let from = match FsPath::parse(&b.from) {
         Ok(p) => p,
         Err(e) => return err_reply(&e),
@@ -677,9 +1004,16 @@ async fn handle_move(fs: Arc<HubFs>, b: MoveBody) -> warp::reply::Response {
         Ok(p) => p,
         Err(e) => return err_reply(&e),
     };
-    match fs.rename(&from, &to).await {
+    // A move conditions the object being MOVED. The destination is not
+    // conditioned: RENAME replaces it by definition, and a caller that
+    // wants to protect it should be uploading, not moving.
+    let expect = match if_match.as_deref().map(write_precondition).transpose() {
+        Ok(p) => p,
+        Err(m) => return plain(StatusCode::BAD_REQUEST, &m),
+    };
+    match fs.rename_checked(&from, &to, expect, None).await {
         Ok(()) => plain(StatusCode::OK, "moved"),
-        Err(e) => err_reply(&e),
+        Err(e) => mutate_err_reply(&e, expect.is_some()),
     }
 }
 
@@ -1357,4 +1691,935 @@ mod tests {
              looking at would be suspended under them"
         );
     }
+
+    // ── conditional requests ─────────────────────────────────────────
+
+    /// Upload `body` to `path` with optional preconditions; return the
+    /// response.
+    async fn put(
+        api: &(impl Filter<Extract = (warp::reply::Response,), Error = warp::Rejection> + Clone
+                  + 'static),
+        path: &str,
+        body: &[u8],
+        if_match: Option<&str>,
+        if_none_match: Option<&str>,
+    ) -> warp::http::Response<bytes::Bytes> {
+        let mut req = warp::test::request()
+            .method("PUT")
+            .path(&format!("/files/content?path={path}"))
+            .header("authorization", bearer());
+        if let Some(v) = if_match {
+            req = req.header("if-match", v);
+        }
+        if let Some(v) = if_none_match {
+            req = req.header("if-none-match", v);
+        }
+        req.body(body.to_vec()).reply(api).await
+    }
+
+    fn etag_of(res: &warp::http::Response<bytes::Bytes>) -> String {
+        res.headers()
+            .get("etag")
+            .unwrap_or_else(|| panic!("no ETag on {:?}", res.status()))
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// The whole point: a caller that reads, edits and writes back can
+    /// find out that someone else wrote in between, instead of silently
+    /// discarding their work.
+    ///
+    /// Before this, two PUTs to one path both answered 201 and one was
+    /// dropped with nothing anywhere recording it — the lost-update half
+    /// of the bug whose interleaving half was fixed by giving each
+    /// upload its own temp name.
+    #[tokio::test]
+    async fn a_stale_entity_tag_refuses_the_write_instead_of_losing_it() {
+        let (api, _fs, temp) = harness().await;
+
+        let first = put(&api, "/doc.txt", b"one", None, None).await;
+        assert_eq!(first.status(), 201);
+        let stale = etag_of(&first);
+
+        // Somebody else writes. Their tag is fresh, ours is not.
+        let second = put(&api, "/doc.txt", b"two", Some(&stale), None).await;
+        assert_eq!(second.status(), 201, "the holder of the current tag must be able to write");
+        let fresh = etag_of(&second);
+        assert_ne!(stale, fresh, "a write that changed the file must change its tag");
+
+        // Now the first caller writes back what it had. It must not win.
+        let third = put(&api, "/doc.txt", b"three", Some(&stale), None).await;
+        assert_eq!(
+            third.status(),
+            412,
+            "a stale tag wrote anyway: {:?}",
+            String::from_utf8_lossy(third.body())
+        );
+        assert_eq!(
+            std::fs::read(temp.path().join("doc.txt")).unwrap(),
+            b"two".to_vec(),
+            "the refused write landed anyway"
+        );
+    }
+
+    /// A refused conditional upload must not leave its temp behind.
+    ///
+    /// Every other failure path in the upload deletes the temp; the
+    /// precondition path is a new one, and a leaked `.flint-upload.*`
+    /// is both a visible file in the user's project and a file the tier
+    /// would eventually publish to the bucket.
+    #[tokio::test]
+    async fn a_refused_conditional_upload_leaves_no_temp_behind() {
+        let (api, _fs, temp) = harness().await;
+        assert_eq!(put(&api, "/doc.txt", b"one", None, None).await.status(), 201);
+
+        // A tag for an object that is not there any more.
+        let bogus = hubfs::render_etag(999_999, 12_345);
+        let res = put(&api, "/doc.txt", b"two", Some(&bogus), None).await;
+        assert_eq!(res.status(), 412);
+
+        let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(UPLOAD_TMP_PREFIX))
+            .collect();
+        assert!(leftovers.is_empty(), "temp survived a refused upload: {leftovers:?}");
+    }
+
+    /// `If-Match` against a file that does not exist is a FAILED
+    /// CONDITION, not a missing resource. Answering 404 would tell a
+    /// caller its file vanished when someone actually replaced it.
+    #[tokio::test]
+    async fn if_match_on_an_absent_file_is_412_not_404() {
+        let (api, _fs, _t) = harness().await;
+        let tag = hubfs::render_etag(1, 1);
+        assert_eq!(put(&api, "/nope.txt", b"x", Some(&tag), None).await.status(), 412);
+
+        // Without a precondition the same path is an ordinary create.
+        assert_eq!(put(&api, "/nope.txt", b"x", None, None).await.status(), 201);
+    }
+
+    /// `If-None-Match: *` is create-if-absent.
+    #[tokio::test]
+    async fn if_none_match_star_creates_only_when_absent() {
+        let (api, _fs, temp) = harness().await;
+
+        assert_eq!(put(&api, "/new.txt", b"one", None, Some("*")).await.status(), 201);
+        let res = put(&api, "/new.txt", b"two", None, Some("*")).await;
+        assert_eq!(res.status(), 412, "created over an existing file");
+        assert_eq!(std::fs::read(temp.path().join("new.txt")).unwrap(), b"one".to_vec());
+    }
+
+    /// A conditional GET revalidates without moving bytes — which on an
+    /// evicted file is the difference between a 304 and billed S3 egress.
+    #[tokio::test]
+    async fn a_conditional_get_revalidates_with_304() {
+        let (api, _fs, _t) = harness().await;
+        assert_eq!(put(&api, "/doc.txt", b"hello", None, None).await.status(), 201);
+
+        let got = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+        assert_eq!(got.status(), 200);
+        let tag = etag_of(&got);
+        assert_eq!(got.body().as_ref(), b"hello");
+
+        let again = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .header("if-none-match", tag.clone())
+            .reply(&api)
+            .await;
+        assert_eq!(again.status(), 304);
+        assert!(again.body().is_empty(), "a 304 must carry no body");
+        assert_eq!(etag_of(&again), tag, "a 304 must still name the version");
+
+        // After a write the same tag no longer matches, so the caller
+        // gets the new bytes rather than a stale 304.
+        assert_eq!(put(&api, "/doc.txt", b"world!", None, None).await.status(), 201);
+        let third = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .header("if-none-match", tag)
+            .reply(&api)
+            .await;
+        assert_eq!(third.status(), 200);
+        assert_eq!(third.body().as_ref(), b"world!");
+    }
+
+    /// A listing's tag is the same tag a download issues, so a UI can
+    /// browse and then write conditionally without re-reading each file.
+    #[tokio::test]
+    async fn a_listing_carries_the_tag_a_download_would_issue() {
+        let (api, _fs, _t) = harness().await;
+        assert_eq!(put(&api, "/doc.txt", b"hello", None, None).await.status(), 201);
+
+        let list = warp::test::request()
+            .method("GET")
+            .path("/files?path=/")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+        assert_eq!(list.status(), 200);
+        let doc: serde_json::Value = serde_json::from_slice(list.body()).unwrap();
+        let from_listing = doc["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "doc.txt")
+            .expect("doc.txt missing from the listing")["etag"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let got = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+        assert_eq!(from_listing, etag_of(&got));
+
+        // And it is good enough to write with.
+        assert_eq!(
+            put(&api, "/doc.txt", b"edited", Some(&from_listing), None).await.status(),
+            201
+        );
+    }
+
+    /// An entity-tag this server never issued is a client bug. Answering
+    /// 412 would let it retry forever without ever learning that.
+    #[tokio::test]
+    async fn a_forged_entity_tag_is_a_400() {
+        let (api, _fs, _t) = harness().await;
+        assert_eq!(put(&api, "/doc.txt", b"one", None, None).await.status(), 201);
+
+        for bad in ["\"nonsense\"", "nonsense", "\"zz-zz\""] {
+            let res = put(&api, "/doc.txt", b"two", Some(bad), None).await;
+            assert_eq!(res.status(), 400, "{bad} was not refused as malformed");
+        }
+
+        // Weak validators are refused on writes: If-Match is defined on
+        // strong comparison, and weak means "equivalent", not "the same
+        // bytes".
+        let tag = etag_of(&put(&api, "/w.txt", b"one", None, None).await);
+        let res = put(&api, "/w.txt", b"two", Some(&format!("W/{tag}")), None).await;
+        assert_eq!(res.status(), 400);
+    }
+
+    /// DELETE and move condition too, or the contract is half a contract:
+    /// a UI could protect an edit and still lose the file to a stale
+    /// delete issued from another tab.
+    #[tokio::test]
+    async fn delete_and_move_honour_if_match() {
+        let (api, _fs, temp) = harness().await;
+
+        let first = put(&api, "/doc.txt", b"one", None, None).await;
+        let stale = etag_of(&first);
+        let fresh = etag_of(&put(&api, "/doc.txt", b"two", Some(&stale), None).await);
+
+        let del = warp::test::request()
+            .method("DELETE")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .header("if-match", stale.clone())
+            .reply(&api)
+            .await;
+        assert_eq!(del.status(), 412, "a stale tag deleted the file");
+        assert!(temp.path().join("doc.txt").exists());
+
+        let mv = warp::test::request()
+            .method("POST")
+            .path("/files/move")
+            .header("authorization", bearer())
+            .header("if-match", stale)
+            .json(&serde_json::json!({"from": "/doc.txt", "to": "/moved.txt"}))
+            .reply(&api)
+            .await;
+        assert_eq!(mv.status(), 412, "a stale tag moved the file");
+        assert!(temp.path().join("doc.txt").exists());
+
+        // The current tag works for both.
+        let mv = warp::test::request()
+            .method("POST")
+            .path("/files/move")
+            .header("authorization", bearer())
+            .header("if-match", fresh)
+            .json(&serde_json::json!({"from": "/doc.txt", "to": "/moved.txt"}))
+            .reply(&api)
+            .await;
+        assert_eq!(mv.status(), 200, "{:?}", String::from_utf8_lossy(mv.body()));
+        assert!(temp.path().join("moved.txt").exists());
+
+        let tag = etag_of(
+            &warp::test::request()
+                .method("GET")
+                .path("/files/content?path=/moved.txt")
+                .header("authorization", bearer())
+                .reply(&api)
+                .await,
+        );
+        let del = warp::test::request()
+            .method("DELETE")
+            .path("/files/content?path=/moved.txt")
+            .header("authorization", bearer())
+            .header("if-match", tag)
+            .reply(&api)
+            .await;
+        assert_eq!(del.status(), 200);
+        assert!(!temp.path().join("moved.txt").exists());
+    }
+
+    /// Unconditional requests must behave exactly as they did before
+    /// preconditions existed — every existing caller sends no headers.
+    #[tokio::test]
+    async fn requests_without_preconditions_are_unchanged() {
+        let (api, _fs, temp) = harness().await;
+        assert_eq!(put(&api, "/doc.txt", b"one", None, None).await.status(), 201);
+        assert_eq!(put(&api, "/doc.txt", b"two", None, None).await.status(), 201);
+        assert_eq!(std::fs::read(temp.path().join("doc.txt")).unwrap(), b"two".to_vec());
+
+        let del = warp::test::request()
+            .method("DELETE")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+        assert_eq!(del.status(), 200);
+
+        // A missing file with no precondition is still a 404, not a 412.
+        let del = warp::test::request()
+            .method("DELETE")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+        assert_eq!(del.status(), 404);
+    }
+
+    // ── the guarantee, tested where it actually lives ────────────────
+    //
+    // Every test above drives HTTP, and the upload handler pre-checks a
+    // precondition with a stat before it writes anything. That
+    // shortcut would satisfy all of them ON ITS OWN — delete the VERIFY
+    // from the mutating compound and they still pass, while the
+    // guarantee they claim to prove is gone. These call the fs layer
+    // directly so the compound is the only thing that can refuse.
+
+    /// The condition rides INSIDE the compound that renames.
+    #[tokio::test]
+    async fn rename_checked_refuses_a_stale_tag_with_no_handler_involved() {
+        let (_api, fs, temp) = harness().await;
+        std::fs::write(temp.path().join("doc.txt"), b"one").unwrap();
+        let doc = FsPath::parse("/doc.txt").unwrap();
+
+        let before = fs.stat(&doc).await.unwrap();
+        let stale = Precondition::Is { fileid: before.fileid, change: before.change };
+
+        // Mutate it so the recorded tag goes stale.
+        std::fs::write(temp.path().join("src.bin"), b"replacement").unwrap();
+        let src = FsPath::parse("/src.bin").unwrap();
+        fs.rename(&src, &doc).await.unwrap();
+
+        // Now the swap the handler would perform, straight at the fs.
+        std::fs::write(temp.path().join("src2.bin"), b"third").unwrap();
+        let src2 = FsPath::parse("/src2.bin").unwrap();
+        let err = fs.rename_checked(&src2, &doc, None, Some(stale)).await.unwrap_err();
+        assert_eq!(
+            err,
+            FsError::Nfs(Nfs4Status::NotSame),
+            "the VERIFY is not in the compound: a stale precondition renamed anyway"
+        );
+        assert_eq!(std::fs::read(temp.path().join("doc.txt")).unwrap(), b"replacement".to_vec());
+
+        // The current tag still works, so the refusal was the condition
+        // and not the mechanism being broken outright.
+        let now = fs.stat(&doc).await.unwrap();
+        fs.rename_checked(
+            &src2,
+            &doc,
+            None,
+            Some(Precondition::Is { fileid: now.fileid, change: now.change }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(temp.path().join("doc.txt")).unwrap(), b"third".to_vec());
+    }
+
+    /// Same, for REMOVE.
+    #[tokio::test]
+    async fn remove_checked_refuses_a_stale_tag_with_no_handler_involved() {
+        let (_api, fs, temp) = harness().await;
+        std::fs::write(temp.path().join("doc.txt"), b"one").unwrap();
+        let doc = FsPath::parse("/doc.txt").unwrap();
+
+        let before = fs.stat(&doc).await.unwrap();
+        std::fs::write(temp.path().join("src.bin"), b"two").unwrap();
+        fs.rename(&FsPath::parse("/src.bin").unwrap(), &doc).await.unwrap();
+
+        let err = fs
+            .remove_checked(
+                &doc,
+                Some(Precondition::Is { fileid: before.fileid, change: before.change }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, FsError::Nfs(Nfs4Status::NotSame));
+        assert!(temp.path().join("doc.txt").exists(), "a stale tag deleted the file");
+
+        let now = fs.stat(&doc).await.unwrap();
+        fs.remove_checked(
+            &doc,
+            Some(Precondition::Is { fileid: now.fileid, change: now.change }),
+        )
+        .await
+        .unwrap();
+        assert!(!temp.path().join("doc.txt").exists());
+    }
+
+    /// BOTH halves of the entity-tag are verified.
+    ///
+    /// The fileid half is what catches a rename-over: the name is
+    /// rebound to a different inode whose own change counter starts
+    /// fresh and can hold any value, including the one the caller
+    /// remembers. If only the change value were compared, that swap
+    /// would pass. This also pins the VERIFY payload's wire shape —
+    /// bitmap, length, and CHANGE-before-FILEID ordering — because a
+    /// malformed blob would fail the matching case too.
+    #[tokio::test]
+    async fn the_tag_verifies_identity_as_well_as_content() {
+        let (_api, fs, temp) = harness().await;
+        std::fs::write(temp.path().join("doc.txt"), b"one").unwrap();
+        let doc = FsPath::parse("/doc.txt").unwrap();
+        let e = fs.stat(&doc).await.unwrap();
+
+        for (fileid, change, why) in [
+            (e.fileid ^ 1, e.change, "a different inode passed the check"),
+            (e.fileid, e.change ^ 1, "a different change value passed the check"),
+            (e.fileid ^ 1, e.change ^ 1, "a wholly different tag passed the check"),
+        ] {
+            let err = fs
+                .remove_checked(&doc, Some(Precondition::Is { fileid, change }))
+                .await
+                .unwrap_err();
+            assert_eq!(err, FsError::Nfs(Nfs4Status::NotSame), "{why}");
+        }
+
+        // And the true pair passes, so the refusals above are the
+        // comparison working rather than the blob never matching.
+        fs.remove_checked(
+            &doc,
+            Some(Precondition::Is { fileid: e.fileid, change: e.change }),
+        )
+        .await
+        .unwrap();
+        assert!(!temp.path().join("doc.txt").exists());
+    }
+
+    /// `Precondition::Exists` is carried by the LOOKUP that resolves the
+    /// name, so a compound with it never reaches its mutation when the
+    /// object is gone.
+    #[tokio::test]
+    async fn exists_precondition_refuses_when_the_object_is_gone() {
+        let (_api, fs, temp) = harness().await;
+        std::fs::write(temp.path().join("src.bin"), b"x").unwrap();
+        let src = FsPath::parse("/src.bin").unwrap();
+        let absent = FsPath::parse("/absent.txt").unwrap();
+
+        let err = fs
+            .rename_checked(&src, &absent, None, Some(Precondition::Exists))
+            .await
+            .unwrap_err();
+        assert_eq!(err, FsError::Nfs(Nfs4Status::NoEnt));
+        assert!(temp.path().join("src.bin").exists(), "the source moved anyway");
+
+        // Present ⇒ the same call goes through.
+        std::fs::write(temp.path().join("there.txt"), b"y").unwrap();
+        let there = FsPath::parse("/there.txt").unwrap();
+        fs.rename_checked(&src, &there, None, Some(Precondition::Exists)).await.unwrap();
+        assert_eq!(std::fs::read(temp.path().join("there.txt")).unwrap(), b"x".to_vec());
+    }
+
+    // ── the rest of the HTTP surface ─────────────────────────────────
+
+    /// `If-Match: *` is "must exist", which is a different question from
+    /// "must be this version".
+    #[tokio::test]
+    async fn if_match_star_means_the_file_must_exist() {
+        let (api, _fs, temp) = harness().await;
+        assert_eq!(put(&api, "/doc.txt", b"one", None, None).await.status(), 201);
+
+        assert_eq!(
+            put(&api, "/doc.txt", b"two", Some("*"), None).await.status(),
+            201,
+            "If-Match: * refused an existing file"
+        );
+        assert_eq!(std::fs::read(temp.path().join("doc.txt")).unwrap(), b"two".to_vec());
+
+        assert_eq!(
+            put(&api, "/gone.txt", b"x", Some("*"), None).await.status(),
+            412,
+            "If-Match: * created a file that did not exist"
+        );
+
+        let del = warp::test::request()
+            .method("DELETE")
+            .path("/files/content?path=/gone.txt")
+            .header("authorization", bearer())
+            .header("if-match", "*")
+            .reply(&api)
+            .await;
+        assert_eq!(del.status(), 412);
+    }
+
+    /// A tag list is legal HTTP. Evaluating one honestly needs a
+    /// compound per tag, so it is refused rather than silently reduced
+    /// to its first element — which would report a check that never ran.
+    #[tokio::test]
+    async fn a_multi_tag_if_match_is_refused_rather_than_half_honoured() {
+        let (api, _fs, _t) = harness().await;
+        let tag = etag_of(&put(&api, "/doc.txt", b"one", None, None).await);
+        let other = hubfs::render_etag(7, 7);
+
+        let res = put(&api, "/doc.txt", b"two", Some(&format!("{tag}, {other}")), None).await;
+        assert_eq!(res.status(), 400, "{:?}", String::from_utf8_lossy(res.body()));
+    }
+
+    /// Revalidation accepts what a caching client actually sends: a
+    /// list, and weak tags (weak comparison is correct for GET even
+    /// though it is refused on a write).
+    #[tokio::test]
+    async fn a_conditional_get_accepts_tag_lists_and_weak_tags() {
+        let (api, _fs, _t) = harness().await;
+        let tag = etag_of(&put(&api, "/doc.txt", b"hello", None, None).await);
+
+        for header in [
+            format!("{}, {tag}", hubfs::render_etag(1, 1)),
+            format!("W/{tag}"),
+            "*".to_string(),
+        ] {
+            let res = warp::test::request()
+                .method("GET")
+                .path("/files/content?path=/doc.txt")
+                .header("authorization", bearer())
+                .header("if-none-match", header.clone())
+                .reply(&api)
+                .await;
+            assert_eq!(res.status(), 304, "If-None-Match: {header} did not revalidate");
+        }
+
+        // A list that does not contain the current tag still serves.
+        let res = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .header(
+                "if-none-match",
+                format!("{}, {}", hubfs::render_etag(1, 1), hubfs::render_etag(2, 2)),
+            )
+            .reply(&api)
+            .await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.body().as_ref(), b"hello");
+    }
+
+    /// Contradictory preconditions are a caller bug, not a race to
+    /// resolve at runtime.
+    #[tokio::test]
+    async fn contradictory_preconditions_are_refused() {
+        let (api, _fs, _t) = harness().await;
+        let tag = etag_of(&put(&api, "/doc.txt", b"one", None, None).await);
+
+        let res = put(&api, "/doc.txt", b"two", Some(&tag), Some("*")).await;
+        assert_eq!(res.status(), 400);
+
+        // `If-None-Match: "<tag>"` on a write is not offered; it must
+        // not be silently treated as `*`.
+        let res = put(&api, "/doc.txt", b"two", None, Some(&tag)).await;
+        assert_eq!(res.status(), 400, "a tagged If-None-Match was quietly accepted");
+    }
+
+    /// A ranged response names the version its bytes came from, or a
+    /// caller assembling a file from pieces cannot tell that the file
+    /// changed under it halfway through.
+    #[tokio::test]
+    async fn a_partial_response_carries_the_same_tag_as_the_whole() {
+        let (api, _fs, _t) = harness().await;
+        let whole = etag_of(&put(&api, "/doc.txt", b"0123456789", None, None).await);
+
+        let res = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/doc.txt")
+            .header("authorization", bearer())
+            .header("range", "bytes=2-5")
+            .reply(&api)
+            .await;
+        assert_eq!(res.status(), 206);
+        assert_eq!(res.body().as_ref(), b"2345");
+        assert_eq!(etag_of(&res), whole);
+    }
+
+    /// A tag must move when the file moves and hold still when it does
+    /// not. A validator that churned on every read would 412 every
+    /// conditional write; one that never moved would authorise a lost
+    /// update.
+    #[tokio::test]
+    async fn the_tag_is_stable_across_reads_and_moves_on_a_write() {
+        let (api, _fs, _t) = harness().await;
+        assert_eq!(put(&api, "/doc.txt", b"one", None, None).await.status(), 201);
+
+        let read_tag = || async {
+            etag_of(
+                &warp::test::request()
+                    .method("GET")
+                    .path("/files/content?path=/doc.txt")
+                    .header("authorization", bearer())
+                    .reply(&api)
+                    .await,
+            )
+        };
+        let first = read_tag().await;
+        assert_eq!(first, read_tag().await, "the tag churned across two plain reads");
+        assert_eq!(first, read_tag().await);
+
+        assert_eq!(put(&api, "/doc.txt", b"two", None, None).await.status(), 201);
+        assert_ne!(first, read_tag().await, "the tag survived a write that changed the file");
+    }
+
+    // ── the drill ────────────────────────────────────────────────────
+    //
+    // Unit tests prove the mechanism answers correctly when asked. A
+    // drill proves it survives the thing it was built for: many callers
+    // doing read-modify-write against one path at once, which is the
+    // front door's ordinary case (two tabs, a retried upload, an agent).
+    //
+    // Leg 1 is the ANTI-VACUITY CONTROL and it runs first on purpose.
+    // It shows the disease is reachable at these timings with these
+    // task counts. Without it leg 2 proves nothing: a storm that never
+    // actually races would "pass" against a completely broken guard.
+
+    /// How many writers, and how many appends each. Sized to race
+    /// reliably while keeping the drill inside a normal test run.
+    const DRILL_WRITERS: usize = 8;
+    const DRILL_ROUNDS: usize = 25;
+
+    /// GET, retrying the 409 the server answers when the object moved
+    /// under the read.
+    ///
+    /// That retry IS the caller contract, not a workaround: a reader
+    /// racing a writer is told to come back rather than handed bytes
+    /// and a validator that describe different files. The drill follows
+    /// the contract it documents. `None` means the file is gone.
+    async fn read_body(
+        api: &(impl Filter<Extract = (warp::reply::Response,), Error = warp::Rejection> + Clone
+                  + 'static),
+        path: &str,
+    ) -> Option<(Vec<u8>, String)> {
+        for _ in 0..5_000 {
+            let res = warp::test::request()
+                .method("GET")
+                .path(&format!("/files/content?path={path}"))
+                .header("authorization", bearer())
+                .reply(api)
+                .await;
+            match res.status().as_u16() {
+                200 => {
+                    let tag = res
+                        .headers()
+                        .get("etag")
+                        .expect("a 200 must carry a validator")
+                        .to_str()
+                        .unwrap()
+                        .to_string();
+                    return Some((res.body().to_vec(), tag));
+                }
+                409 | 503 => continue,
+                404 => return None,
+                other => panic!("unexpected {other} from a read: {:?}",
+                                String::from_utf8_lossy(res.body())),
+            }
+        }
+        panic!("a read never settled in 5000 attempts")
+    }
+
+    /// LEG 1 — the control. Unconditional read-modify-write from many
+    /// writers MUST lose data, or the drill is measuring nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drill_leg1_unconditional_writers_lose_updates() {
+        let (api, _fs, _t) = harness().await;
+        assert_eq!(put(&api, "/log.bin", b"", None, None).await.status(), 201);
+
+        let mut tasks = Vec::new();
+        for _ in 0..DRILL_WRITERS {
+            let api = api.clone();
+            tasks.push(async move {
+                for _ in 0..DRILL_ROUNDS {
+                    let (body, _) = read_body(&api, "/log.bin").await.expect("file vanished");
+                    let mut next = body;
+                    next.push(b'x');
+                    let _ = put(&api, "/log.bin", &next, None, None).await;
+                }
+            });
+        }
+        futures::future::join_all(tasks).await;
+
+        let (final_body, _) = read_body(&api, "/log.bin").await.expect("file vanished");
+        let total = DRILL_WRITERS * DRILL_ROUNDS;
+        assert!(
+            final_body.len() < total,
+            "ANTI-VACUITY FAILURE: {} unconditional writers × {} appends lost nothing \
+             ({} bytes survived of {}). The storm is not racing, so leg 2 would prove \
+             nothing about If-Match. Raise DRILL_WRITERS/DRILL_ROUNDS before trusting it.",
+            DRILL_WRITERS,
+            DRILL_ROUNDS,
+            final_body.len(),
+            total
+        );
+    }
+
+    /// LEG 2 — the cure, measured rather than assumed.
+    ///
+    /// The same storm, each writer following the documented contract:
+    /// send `If-Match`, and on 412 re-read and retry rather than
+    /// retrying the write.
+    ///
+    /// **This does NOT assert that nothing is lost, and that is the
+    /// finding.** A COMPOUND is not atomic, so two writers can both
+    /// pass their VERIFY before either lands its RENAME, and one update
+    /// dies with both callers seeing 201. An earlier version of this
+    /// leg asserted zero loss and failed — not because the guard is
+    /// broken, but because the leg asserted a property the design
+    /// explicitly does not provide. What `If-Match` buys is a window
+    /// narrowed from a whole client round trip to one operation inside
+    /// one compound. So the oracle is comparative: conditional writers
+    /// must lose dramatically less than unconditional ones, measured
+    /// side by side under identical contention.
+    ///
+    /// Closing the gap entirely needs an exclusion primitive this
+    /// surface deliberately does not take (holding one across an API
+    /// request would let a caller stall the mount).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drill_leg2_conditional_writers_lose_far_less() {
+        let (api, _fs, _t) = harness().await;
+        let total = DRILL_WRITERS * DRILL_ROUNDS;
+
+        let unconditional = storm(&api, "/plain.bin", false).await;
+        let conditional = storm(&api, "/guarded.bin", true).await;
+
+        let lost_plain = total - unconditional;
+        let lost_guarded = total - conditional;
+        println!(
+            "drill leg 2: {total} appends — unconditional kept {unconditional} \
+             (lost {lost_plain}), conditional kept {conditional} (lost {lost_guarded})"
+        );
+
+        assert!(
+            lost_plain > 0,
+            "the control lost nothing, so this comparison measures nothing"
+        );
+        assert!(
+            lost_guarded < lost_plain,
+            "conditional writes lost {lost_guarded} of {total}, unconditional lost \
+             {lost_plain} — the guard bought nothing under contention"
+        );
+        // A floor on the benefit. Deliberately loose: the exact ratio is
+        // a timing artifact of this machine, and a drill that fails on a
+        // fast laptop teaches nobody anything. What must hold is that
+        // the guard changes the outcome by a lot, not by a rounding
+        // error.
+        assert!(
+            lost_guarded * 3 < lost_plain,
+            "conditional writes lost {lost_guarded} of {total} against {lost_plain} \
+             unconditional — less than a 3x improvement is not worth a contract"
+        );
+    }
+
+    /// One storm. `conditional` writers send `If-Match` and honour 412
+    /// by re-reading; the others just write. Returns the surviving
+    /// length, which with append-only writers is the number of updates
+    /// that were not lost.
+    async fn storm(
+        api: &(impl Filter<Extract = (warp::reply::Response,), Error = warp::Rejection> + Clone
+                  + 'static),
+        path: &str,
+        conditional: bool,
+    ) -> usize {
+        assert_eq!(put(api, path, b"", None, None).await.status(), 201);
+
+        // A ceiling, not an expectation: under contention a writer may
+        // retry many times, but it must not spin forever.
+        const MAX_ATTEMPTS: usize = 5_000;
+
+        // Appends only, so the file's length can never go DOWN. A read
+        // that returns fewer bytes than one already observed is serving
+        // an older incarnation — the body and the validator would then
+        // describe different versions, which is a different and much
+        // worse bug than a lost update.
+        let high_water = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut tasks = Vec::new();
+        for w in 0..DRILL_WRITERS {
+            let api = api.clone();
+            let high_water = Arc::clone(&high_water);
+            let path = path.to_string();
+            tasks.push(async move {
+                for r in 0..DRILL_ROUNDS {
+                    let mut attempts = 0usize;
+                    loop {
+                        attempts += 1;
+                        assert!(
+                            attempts < MAX_ATTEMPTS,
+                            "writer {w} round {r} never landed in {MAX_ATTEMPTS} attempts"
+                        );
+                        let (body, tag) =
+                            read_body(&api, &path).await.expect("file vanished");
+                        let seen_max = high_water
+                            .fetch_max(body.len(), std::sync::atomic::Ordering::SeqCst);
+                        assert!(
+                            body.len() >= seen_max,
+                            "writer {w} round {r}: read {} bytes under tag {tag} after {} \
+                             were already visible — the body and the validator describe \
+                             different versions",
+                            body.len(),
+                            seen_max
+                        );
+                        let mut next = body;
+                        next.push(b'x');
+                        let tag = conditional.then_some(tag);
+                        let res = put(&api, &path, &next, tag.as_deref(), None).await;
+                        match res.status().as_u16() {
+                            201 => break,
+                            // The contract: re-read, do not retry the
+                            // body we already built.
+                            412 | 503 | 409 => continue,
+                            other => panic!(
+                                "writer {w} round {r}: unexpected {other}: {:?}",
+                                String::from_utf8_lossy(res.body())
+                            ),
+                        }
+                    }
+                }
+            });
+        }
+        futures::future::join_all(tasks).await;
+
+        let (final_body, _) = read_body(api, path).await.expect("file vanished");
+        assert!(
+            final_body.iter().all(|b| *b == b'x'),
+            "the file holds bytes nobody wrote — a torn or interleaved swap"
+        );
+        final_body.len()
+    }
+
+    /// LEG 3 — exactly one winner.
+    ///
+    /// **Linux only, and the reason is worth recording.** On macOS this
+    /// leg reports three to six winners out of eight, and it is the
+    /// HARNESS, not the server: racing `remove_file` on one path there
+    /// returns success to several callers. The identical drill on Linux
+    /// yields exactly one winner every round, conditional and
+    /// unconditional alike, which was confirmed before writing this
+    /// gate. Left ungated it would be a permanently red test on the
+    /// development machine, and a red test nobody can fix is a test
+    /// somebody deletes. Many callers race to delete the file
+    /// they just read. Conditional delete must let precisely one
+    /// through per incarnation; the rest are 412 (someone else won) or
+    /// 404 (they won and it is gone).
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drill_leg3_conditional_delete_has_exactly_one_winner() {
+        let (api, _fs, temp) = harness().await;
+
+        for round in 0..12 {
+            assert_eq!(put(&api, "/victim.bin", b"here", None, None).await.status(), 201);
+
+            let mut tasks = Vec::new();
+            for _ in 0..DRILL_WRITERS {
+                let api = api.clone();
+                tasks.push(async move {
+                    let Some((_, tag)) = read_body(&api, "/victim.bin").await else {
+                        return (String::from("gone"), 0u16);
+                    };
+                    let res = warp::test::request()
+                        .method("DELETE")
+                        .path("/files/content?path=/victim.bin")
+                        .header("authorization", bearer())
+                        .header("if-match", tag.clone())
+                        .reply(&api)
+                        .await;
+                    (tag, res.status().as_u16())
+                });
+            }
+            let seen = futures::future::join_all(tasks).await;
+            let winners = seen.iter().filter(|(_, st)| *st == 200).count();
+            assert_eq!(
+                winners, 1,
+                "round {round}: {winners} deletes succeeded, expected exactly 1 — saw {seen:?}"
+            );
+            assert!(!temp.path().join("victim.bin").exists());
+        }
+    }
+
+    /// LEG 4 — no tag is ever reused for different content.
+    ///
+    /// The tag is what a caller stores and later conditions on. If two
+    /// distinct contents could ever carry one tag, every guarantee
+    /// above is void — a stale write would pass its VERIFY.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn drill_leg4_a_tag_never_names_two_contents() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        let (api, _fs, _t) = harness().await;
+        assert_eq!(put(&api, "/churn.bin", b"seed", None, None).await.status(), 201);
+        let seen: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        let mut tasks = Vec::new();
+        for w in 0..DRILL_WRITERS {
+            let api = api.clone();
+            let seen = Arc::clone(&seen);
+            tasks.push(async move {
+                for r in 0..DRILL_ROUNDS {
+                    // A body unique to this (writer, round).
+                    let body = format!("w{w}-r{r}").into_bytes();
+                    loop {
+                        let res = put(&api, "/churn.bin", &body, None, None).await;
+                        match res.status().as_u16() {
+                            201 => break,
+                            503 => continue,
+                            other => panic!("unexpected {other} from a write"),
+                        }
+                    }
+
+                    // Read back; whatever we get, its tag must be
+                    // consistent with its content everywhere it appears.
+                    let Some((got, tag)) = read_body(&api, "/churn.bin").await else {
+                        panic!("the file vanished; nobody deletes in this leg")
+                    };
+                    let mut map = seen.lock().unwrap();
+                    if let Some(prev) = map.get(&tag) {
+                        assert_eq!(
+                            prev, &got,
+                            "tag {tag} named two different contents — a stale \
+                             conditional write would pass its VERIFY"
+                        );
+                    } else {
+                        map.insert(tag, got);
+                    }
+                }
+            });
+        }
+        futures::future::join_all(tasks).await;
+        let distinct = seen.lock().unwrap().len();
+        assert!(distinct > 1, "the file never changed identity; the drill did not churn");
+    }
+
+
 }
