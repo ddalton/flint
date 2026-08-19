@@ -106,28 +106,68 @@ mod crypto_provider_tests {
     /// WORKS; what shipped broken was a binary that never called it.
     /// So this reads the entry points themselves — the same
     /// source-is-the-schema idiom as the chart knob-list test.
+    ///
+    /// It enumerates `[[bin]]` from Cargo.toml rather than naming
+    /// files. The hand-written list this replaced covered two of the
+    /// nine binaries that actually build, so the guard's own doc
+    /// comment ("what shipped broken was a binary that never called
+    /// it") described a gap the guard still had: the next binary to
+    /// grow a kube client would have shipped unchecked, which is the
+    /// exact shape of the 1.26.0/1.27.0 regression.
     #[test]
     fn every_binary_that_builds_a_kube_client_installs_the_provider() {
-        // (path, source). `controller_operator.rs` is deliberately
-        // absent: its [[bin]] is commented out in Cargo.toml, so it is
-        // not compiled and cannot panic. Re-enable it and add it here.
-        for (path, src) in [
-            ("src/main.rs", include_str!("main.rs")),
-            (
-                "src/bin/flint_lite_operator.rs",
-                include_str!("bin/flint_lite_operator.rs"),
-            ),
-        ] {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+
+        // Hand-rolled rather than pulling in a toml dev-dependency:
+        // the shape is `[[bin]]` then `path = "..."`, and commented-out
+        // targets (a real case — `controller_operator.rs`) are not
+        // compiled and so cannot panic. Ignoring them is the point.
+        let mut paths = Vec::new();
+        let mut in_bin = false;
+        for line in manifest.lines() {
+            let t = line.trim();
+            if t.starts_with('#') {
+                continue;
+            }
+            if t.starts_with("[[") || t.starts_with('[') {
+                in_bin = t == "[[bin]]";
+                continue;
+            }
+            if in_bin {
+                if let Some(rest) = t.strip_prefix("path") {
+                    if let Some(v) = rest.split('=').nth(1) {
+                        paths.push(v.trim().trim_matches('"').to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            paths.len() >= 8,
+            "parsed only {} [[bin]] targets from Cargo.toml — the parser has drifted from the \
+             manifest and this guard is no longer guarding anything",
+            paths.len()
+        );
+
+        let mut checked = 0;
+        for path in &paths {
+            let src = match std::fs::read_to_string(root.join(path)) {
+                Ok(s) => s,
+                // A [[bin]] whose file is missing is a broken manifest,
+                // but that is cargo's complaint to make, not ours.
+                Err(_) => continue,
+            };
             if !src.contains("Client::try_default") {
                 continue;
             }
-            let install = src
-                .find("install_crypto_provider()")
-                .unwrap_or_else(|| panic!(
+            checked += 1;
+            let install = src.find("install_crypto_provider()").unwrap_or_else(|| {
+                panic!(
                     "{path} builds a kube client but never calls install_crypto_provider() — \
                      it will PANIC at startup on 'could not automatically determine the \
                      process-level CryptoProvider' (the 1.26.0/1.27.0 regression)"
-                ));
+                )
+            });
             let client = src.find("Client::try_default").expect("checked above");
             assert!(
                 install < client,
@@ -135,6 +175,11 @@ mod crypto_provider_tests {
                  happens during construction, so the order is the whole fix"
             );
         }
+        assert!(
+            checked >= 2,
+            "no [[bin]] target appears to build a kube client — either the walk broke or the \
+             detection string did; a guard that checks nothing passes silently"
+        );
     }
 }
 
