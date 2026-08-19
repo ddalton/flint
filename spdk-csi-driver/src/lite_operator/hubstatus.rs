@@ -173,7 +173,32 @@ impl HubSnapshot {
     /// "clean" would delete a project.
     pub fn hibernatable(&self) -> Result<(), String> {
         match self.rpo_clean {
-            Some(true) => Ok(()),
+            // `rpoClean` describes A volume. It is an answer about THIS
+            // pod's volume only if this pod is the one holding the tier
+            // epoch — and self-recognition is gated on the state
+            // directory's occupancy lock, so a second live process on
+            // the same PVC genuinely does not hold it. That makes
+            // `held` a real discriminator rather than a restatement of
+            // "the hub answered".
+            //
+            // The consequence of believing the wrong pod here is
+            // `claims.delete`, so anything short of "this hub holds the
+            // epoch" defers. Deferring is free: the next pass asks
+            // again. (`rpo` is only computed when the guard exists, so
+            // the `None` arm is unreachable from a well-formed status
+            // doc — it is a refusal rather than an `unwrap` because the
+            // hub is a separate process across a version boundary.)
+            Some(true) => match self.epoch.as_ref() {
+                Some(e) if e.held => Ok(()),
+                Some(_) => Err(
+                    "the hub does not hold the tier epoch — another process may own this volume"
+                        .to_string(),
+                ),
+                None => Err(
+                    "the hub reported a clean RPO but no tier epoch — refusing to reclaim a disk                      on an unattributed flush"
+                        .to_string(),
+                ),
+            },
             Some(false) => Err(self
                 .rpo
                 .as_ref()
@@ -287,6 +312,39 @@ mod tests {
 
     /// **No tier ⇒ the PVC is the only copy.** `rpoClean: null` must
     /// never read as permission to delete it. This is the assertion
+    /// A clean RPO from a hub that does NOT hold the tier epoch is an
+    /// answer about someone else's volume. The consequence of getting
+    /// this wrong is `claims.delete`, so it defers instead.
+    #[test]
+    fn a_clean_rpo_without_the_epoch_is_not_hibernatable() {
+        let held = snap(
+            r#"{"phase":"serving","rpoClean":true,"epoch":{"held":true,"number":7},
+                "activity":{"idleSecs":99999}}"#,
+        );
+        assert!(held.hibernatable().is_ok(), "the epoch holder's clean RPO must pass");
+
+        let not_held = snap(
+            r#"{"phase":"serving","rpoClean":true,"epoch":{"held":false,"number":7},
+                "activity":{"idleSecs":99999}}"#,
+        );
+        let err = not_held
+            .hibernatable()
+            .expect_err("a non-holder must NOT be able to authorise a delete");
+        assert!(err.contains("epoch"), "{err}");
+
+        // A clean RPO with no epoch at all cannot come from a healthy
+        // hub (rpo is only computed when the guard exists), so it is
+        // unattributed rather than trustworthy.
+        let no_epoch = snap(r#"{"phase":"serving","rpoClean":true,"activity":{"idleSecs":99999}}"#);
+        assert!(
+            no_epoch.hibernatable().is_err(),
+            "an unattributed clean RPO must not authorise a delete"
+        );
+
+        // Suspend is unaffected: it keeps the PVC either way.
+        assert!(not_held.suspendable(60).is_ok());
+    }
+
     /// that stands between a bug here and a deleted project.
     #[test]
     fn a_tierless_share_is_never_hibernatable() {
