@@ -51,19 +51,102 @@ scope by explicit decision.
 
 ## 2. Before you start
 
+### What trove can and cannot give us (checked, 2026-08-19)
+
+Trove is the cluster tooling (`~/github/trove`). Its AWS path was read
+for this plan; the findings change what is runnable and when.
+
+**Satisfied by trove, no work needed:**
+
+- **The CNI enforces NetworkPolicy.** Cilium 1.16.5 is the only CNI on
+  AWS clusters, in stock enforcement mode, with WireGuard pod encryption
+  on by default. So legs A2, D5 and E4 are live rather than `VOID` —
+  record "Cilium 1.16.5" with the result.
+- **Single-AZ pinning is enforced by refusal**, not by warning: a
+  cluster that cannot be pinned to one AZ fails to create unless
+  `allowCrossAz` is passed. That is the drill's cost rule, already
+  implemented upstream.
+- **Spot including the control plane** is the drive script's default,
+  with a reclaim poller that cordons and drains.
+- **An RWO StorageClass that works immediately**: `flint-nfs`, applied
+  post-install, needs no disk-init. `flint-spdk` is the performance
+  class and is gated on disk-init — leg D8 wants that one specifically.
+
+**Blocked — Phase C cannot run on trove as it stands:**
+
+- **Two AWS clusters cannot run concurrently.** All clusters share one
+  Mac-side WireGuard utun, and `set_device_key` no-ops when a device
+  already exists, so cluster B inherits cluster A's Mac identity while
+  B's nodes were cloud-inited to expect B's key. B's nodes reject the
+  Mac's packets and kubectl for B never connects. Stated in trove's own
+  source as a known limit.
+- **Even if it could**, both clusters get an identical hardcoded pod
+  CIDR (`10.244.0.0/16`) and the kubeadm default service CIDR, and pod
+  traffic is VXLAN-encapsulated so pod networks never enter the VPC
+  route table. The plan's preferred routing shape — peered VPC with
+  routable pods — is unreachable.
+- **No AWS cloud-controller-manager is installed**, so a
+  `type: LoadBalancer` Service stays `Pending` forever. The internal-L4
+  and per-project-LB shapes are both unavailable.
+- **The security group admits only its own group** plus the operator's
+  Mac, and trove has no API to widen it.
+
+**The substitute for Phase C: a foreign consumer that is not a cluster.**
+Stand up one or two plain EC2 instances in the same VPC and AZ, running
+a kernel NFS client, and let them reach the hub through NodePort plus a
+hand-added SG rule, with `advertiseAddress` set to
+`<node-private-ip>:<nodePort>`. That is a genuinely foreign client — its
+own kernel, its own NFS client identity, no shared API server — and it
+exercises the address contract, trunking, read amplification, partition
+behaviour and wake-from-behind-the-boundary. **State the limit in the
+report: it proves the mount path and the address contract, not two
+Kubernetes control planes.** Only C6 (suspend under a *kubelet-driven*
+consumer) genuinely needs a kubelet, and it can run from a second node
+inside cluster A that reaches the hub only via the advertised address.
+
+**Cut the partition with a Cilium policy, not an SG revoke.** The
+`rolesanywhere` identity's IAM policy has no
+`ec2:RevokeSecurityGroupIngress`, so the SG cannot be narrowed back
+once widened. A NetworkPolicy on the hub denying the consumer's CIDR is
+in-cluster, needs no AWS permission, and Cilium enforces it.
+
+**Manual work trove will not do:**
+
+- **S3 is entirely on the runner.** Trove has no S3 code, no IRSA, and
+  the node profile carries SSM only. The `rolesanywhere` policy has zero
+  `s3:` actions, so the bucket must be created out of band and the hub
+  needs a **separately minted, long-lived, bucket-scoped IAM user key**
+  — a rolesanywhere session key expires in about an hour and would wedge
+  the hub mid-drill. `tests/cloud/lite-tier-l4.sh` already does exactly
+  this; reuse it.
+- **Installing flint-lite.** Trove knows only the CSI chart; the lite
+  and operator charts are `helm install` by hand from OCI.
+- **disk-init**, which is a standing gate before `flint-spdk` can bind.
+- **Teardown.** There is no TTL, no budget and no auto-teardown — a
+  forgotten cluster bills until someone deletes it.
+
+**Two traps that silently produce wrong results:** `FLINT_CHART_VERSION`
+is captured at backend startup, so restart the backend after the pin
+bump and verify with `helm list -A`; and a component install failure
+does **not** fail the create, so a cluster can report Ready with no
+StorageClasses at all. Check `kubectl get sc` before trusting a green
+create.
+
 ### Blocking prerequisites
 
-- [ ] **Publish.** There are commits past `v1.28.0` and the charts still carry
-      `appVersion: 1.28.0`. A real cluster cannot pull `flint-lite-dev:local`.
-      Cut a release, or push dev-tagged multi-arch images and package the two
-      charts. **The drill tests what you publish, not what is in your tree.**
-- [ ] **Decide the routing shape** (see §4). This changes the cluster build, so
-      it cannot be deferred to leg time.
+- [x] **Publish.** Done: **v1.29.0** — `flint-driver`, `flint-pnfs` and
+      `flint-lite-operator` at `1.29.0` (amd64+arm64), charts
+      `flint-csi-driver` 1.29.0, `flint-lite` 0.4.0, `flint-lite-operator`
+      0.2.0. Trove is pinned to it. **Restart the trove backend** or it
+      deploys the previous chart.
+- [ ] **Decide the routing shape** (see §4). On trove this is settled by
+      elimination: NodePort plus a hand-added SG rule is the only shape
+      available, because there is no CCM and the pod CIDRs collide.
 - [ ] **A bucket in the same region as the clusters.** In-region S3↔EC2 is free
       both ways; out-of-region is billed per GiB and several legs move gigabytes.
-- [ ] **Confirm the CNI enforces NetworkPolicy.** Cilium and Calico do. Where it
-      does not, legs A2, D5 and E4 are void — **not passing, void.** Record
-      which it is before running them.
+- [x] **Confirm the CNI enforces NetworkPolicy.** Cilium 1.16.5, stock
+      enforcement mode. Checked in trove's source; still record it with the
+      results.
 
 ### Go / no-go gates
 
@@ -333,7 +416,14 @@ patch annotations → 200; read `status.address` → 200; read the operator's Le
 *Anti-vacuity:* the allowed calls must succeed in the same session as the denied
 ones — a bad kubeconfig denies everything and would otherwise "pass".
 
-### Phase C — cross-cluster (requires cluster B)
+### Phase C — the foreign consumer (requires the substitute rig, see §2)
+
+**Not two clusters.** Trove cannot run two AWS clusters concurrently, and
+even sequentially their pod and service CIDRs collide. These legs run
+against plain EC2 instances in the same VPC and AZ, mounting through
+NodePort with `advertiseAddress` set to `<node-private-ip>:<nodePort>`.
+That proves the mount path and the address contract; it does not prove
+two Kubernetes control planes, and the report must say so.
 
 | Leg | Claim | Time | Bytes |
 |---|---|---|---|
