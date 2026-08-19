@@ -73,11 +73,17 @@ spec:
   capacity: { storage: 100Gi }   # informational for NFS PVs
   accessModes: [ReadWriteMany]
   persistentVolumeReclaimPolicy: Retain
-  mountOptions: [nfsvers=4.1, proto=tcp, hard]
+  mountOptions: [nfsvers=4.1, proto=tcp, hard, nconnect=4, noatime]
   nfs:
     server: 203.0.113.10   # the hub Service's LB IP / routable address
     path: /
 ```
+
+**`nconnect>=2` is not optional.** Without it the kernel opens exactly
+one connection and silently refuses every additional trunk — no error,
+on either side, ever — and one TCP flow is also what fails to fill the
+bandwidth-delay product on any path longer than a rack. All the
+connections land on the same pod; a share is one hub by design.
 
 Bind it with a PVC (`storageClassName: ""` + a `volumeName` pin), and
 every pod that mounts the PVC shares the hub's namespace. Kubelet
@@ -100,8 +106,12 @@ helm install flint-lite-workspaces \
   --set nfs.server=203.0.113.10 \
   --set nfs.path=/workspaces \
   --set storageClass.name=flint-lite \
-  --set nfs.mountOptions='{nfsvers=4.1,proto=tcp,hard}'
+  --set nfs.mountOptions='{nfsvers=4.1,proto=tcp,hard,nconnect=4,noatime}'
 ```
+
+Same `nconnect` caveat as recipe A — the provisioner passes these
+options straight to the node's mount, so leaving it out gets one
+connection per node and no error saying so.
 
 Then `storageClassName: flint-lite` on any PVC mints a workspace. The
 provisioner is a single small Deployment; the data path is still the

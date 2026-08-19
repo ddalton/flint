@@ -184,6 +184,51 @@ Three things worth knowing:
 NFS is one long-lived TCP flow, so prefer a flat or peered network to a
 cloud load balancer, and mind LB idle timeouts if you use one.
 
+### Mount options for a cross-cluster mount
+
+The address is half of it; these are the other half. A WAN-ish path
+between client and hub changes which options matter, and one of them
+fails **silently** if you leave it out.
+
+```
+mount -t nfs4 -o vers=4.1,nconnect=4,hard,timeo=600,retrans=2,\
+noatime,actimeo=30 <status.address>:/ /mnt/project
+```
+
+- **`nconnect>=2` is mandatory, not a tuning knob.** The kernel opens
+  ONE connection without it and silently refuses every additional
+  trunk — no error, on either side, ever. One TCP flow across a
+  higher-latency path is also exactly what fails to fill the
+  bandwidth-delay product, so this is both the correctness scar and the
+  throughput lever. `nconnect=4` is a reasonable start. All the
+  connections land on the same pod, because there is only ever one.
+- **`hard`, and not `soft`.** Agents run git and sqlite; a soft mount
+  turns a server blip into silent write corruption rather than a wait.
+  The cost is that a hub which goes away hangs its clients in
+  uninterruptible sleep — which is why suspend-while-mounted is
+  something to configure deliberately (below) rather than discover.
+- **`actimeo` is the traffic a read-mostly cross-cluster mount actually
+  generates.** Attribute revalidation, not data. The default (up to
+  60s for directories) is usually fine; lower it only if agents need to
+  see each other's metadata changes faster, and know you are buying
+  that with round trips. Close-to-open consistency is unaffected — a
+  file closed by one client is seen whole by the next one to open it,
+  whatever `actimeo` says.
+- **`noatime`** — atime updates are writes, and they cross the boundary
+  too.
+
+**Suspend and a cross-cluster mount interact badly by default.** A
+partition between the workload cluster and the hub makes the agents
+INVISIBLE rather than absent: they stop driving NFS operations, the hub
+sees a quiet share, and if the front door's heartbeat is also cut, both
+suspend signals go quiet while every agent is alive and blocked. The
+hub then suspends underneath them. Set
+`spec.idle.suspendWithSessions: false` on any share mounted from
+another cluster — it refuses to suspend while a client still holds a
+lease. Note the residual honestly: NFSv4 leases expire, so a long
+enough partition drops the lease count to zero on its own and the
+window closes rather than the risk disappearing.
+
 ## The front-door contract
 
 The "front door" is whatever service owns projects — it decides a

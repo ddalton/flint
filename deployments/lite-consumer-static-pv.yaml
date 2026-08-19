@@ -26,6 +26,16 @@ spec:
     # hard (the default, stated for clarity): I/O blocks and retries
     # across hub restarts instead of surfacing EIO to the application.
     - hard
+    # NOT a tuning knob. Without nconnect>=2 the kernel opens exactly
+    # ONE connection and SILENTLY refuses every additional trunk — no
+    # error, on either side, ever. One TCP flow is also what fails to
+    # fill the bandwidth-delay product on a longer path, so this is the
+    # correctness scar and the throughput lever at once. Every
+    # connection lands on the same pod; a share is one hub by design.
+    - nconnect=4
+    # atime updates are writes. Across a cluster boundary they are
+    # writes that cross it.
+    - noatime
   nfs:
     server: 203.0.113.10
     path: /
