@@ -161,4 +161,39 @@ EOF
     echo "── pushing $(basename "$lite_pkg") to oci://registry-1.docker.io/$hub_ns"
     helm push "$lite_pkg" "oci://registry-1.docker.io/$hub_ns"
     echo "chart flint-lite $lite_version released."
+
+    # The flint-lite OPERATOR chart, likewise its own artifact. Two
+    # images must exist for it to be installable: its own (the
+    # operator) and the hub image its appVersion makes the fleet
+    # default — a fleet whose default hub image is unpublished is a
+    # fleet of ImagePullBackOff, which is the 1.2.0 bug this script
+    # exists to prevent, one level up.
+    op_dir="$repo_root/flint-lite-operator-chart"
+    if [ -d "$op_dir" ]; then
+        op_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$op_dir/Chart.yaml'))['version'])")
+        op_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$op_dir/Chart.yaml'))['appVersion'])")
+        for img in flint-lite-operator flint-pnfs; do
+            if ! tag_exists "$img" "$op_app"; then
+                echo "REFUSING to push flint-lite-operator $op_version:" \
+                     "$hub_ns/$img:$op_app is not on Docker Hub." >&2
+                exit 1
+            fi
+        done
+        # The checked-in CRD is install-time bootstrap for the operator's
+        # own compiled-in copy; if they disagree, the chart would install
+        # a schema the operator immediately replaces (or, with
+        # manageCrd: false, one that silently prunes fields).
+        gen=$(cd "$repo_root/spdk-csi-driver" && cargo run --quiet --bin crdgen)
+        if ! printf '%s\n' "$gen" | diff -q - "$op_dir/crds/flintshares.yaml" >/dev/null; then
+            echo "REFUSING to push flint-lite-operator $op_version: crds/flintshares.yaml" \
+                 "is stale — regenerate with: cargo run --bin crdgen >" \
+                 "flint-lite-operator-chart/crds/flintshares.yaml" >&2
+            exit 1
+        fi
+        helm package "$op_dir" --destination "$pkg_dir" >/dev/null
+        op_pkg="$pkg_dir/flint-lite-operator-$op_version.tgz"
+        echo "── pushing $(basename "$op_pkg") to oci://registry-1.docker.io/$hub_ns"
+        helm push "$op_pkg" "oci://registry-1.docker.io/$hub_ns"
+        echo "chart flint-lite-operator $op_version released."
+    fi
 fi

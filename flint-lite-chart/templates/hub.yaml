@@ -51,57 +51,10 @@ metadata:
     {{- include "flint-lite.labels" . | nindent 4 }}
     app.kubernetes.io/component: lite
 data:
+  # The body lives in the flint-lite.mdsYaml template so the Deployment
+  # can hash the SAME string into checksum/config — see the note there.
   mds.yaml: |
-    apiVersion: flint.io/v1alpha1
-    kind: PnfsConfig
-    mode: standalone
-    mds:
-      bind:
-        address: "0.0.0.0"
-        port: 2049
-      # Inert in standalone (no layouts are ever granted) but part of
-      # the config schema.
-      layout:
-        type: file
-        stripeSize: 8388608
-        policy: stripe
-      dataServers: []
-      state:
-        backend: sqlite
-        config:
-          path: /data/state/state.db
-      {{- if .Values.tier.enabled }}
-      # S3 cold tier (a field of the mds: section — the parser IGNORES
-      # unknown top-level keys, so misplacing this renders a silently
-      # tierless hub; the kind tier e2e's leg 1 pins the placement).
-      # The volume epoch is claimed BEFORE the listener binds (an
-      # unfenced hub never serves); ".flint/" under the prefix is
-      # reserved for tier control objects. Unset knobs take the server
-      # defaults — the economics gate's assumptions.
-      tier:
-        enabled: true
-        bucket: {{ .Values.tier.bucket | quote }}
-        {{- with .Values.tier.keyPrefix }}
-        keyPrefix: {{ . | quote }}
-        {{- end }}
-        {{- with .Values.tier.endpoint }}
-        endpoint: {{ . | quote }}
-        {{- end }}
-        importOnStart: {{ .Values.tier.importOnStart }}
-        {{- with .Values.tier.settings }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-      {{- end }}
-    exports:
-      - path: /data/exports
-        fsid: 1
-        options: [rw, sync, no_subtree_check]
-        access:
-          - network: 0.0.0.0/0
-            permissions: rw
-    logging:
-      level: {{ .Values.logLevel | default "info" }}
-      format: text
+    {{- include "flint-lite.mdsYaml" . | nindent 4 }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -164,6 +117,15 @@ spec:
       app: flint-lite
   template:
     metadata:
+      annotations:
+        # The roll trigger. The hub reads --config ONCE at boot: without
+        # this annotation a `helm upgrade` that changes tier.settings
+        # (or logLevel, or the prefix) writes a new ConfigMap and the
+        # running pod keeps its old values forever, while `kubectl get
+        # cm` shows the new ones. Changing this rolls the Deployment
+        # (Recreate — a brief outage; the same-PVC epoch re-claim is
+        # instant).
+        checksum/config: {{ include "flint-lite.mdsYaml" . | sha256sum }}
       labels:
         app: flint-lite
         flint.io/role: lite

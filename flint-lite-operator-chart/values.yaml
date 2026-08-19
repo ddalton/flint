@@ -1,0 +1,79 @@
+# flint-lite-operator — the FlintShare control plane.
+#
+# Install once per cluster; then every share is a `kubectl apply` of a
+# FlintShare, and `kubectl get flintshares -A` is the fleet.
+#
+#   helm install flint-lite-operator oci://registry-1.docker.io/dilipdalton/flint-lite-operator \
+#     -n flint-system --create-namespace
+#
+# The operator renders the SAME objects the flint-lite chart renders
+# (a golden test in the suite fails the build if they ever drift), so
+# adopting it does not change what runs — only what manages it.
+
+image:
+  # Composed as {repository}/{name}:{tag|Chart.appVersion}. `ref`
+  # overrides the whole reference verbatim (e.g. a kind-loaded
+  # "flint-lite-operator:local").
+  repository: dilipdalton
+  name: flint-lite-operator
+  tag: ""
+  ref: ""
+  pullPolicy: IfNotPresent
+
+# Default hub image for shares that do not set spec.image. THIS is the
+# fleet's upgrade lever: change it, roll the operator, and every share
+# that did not pin an image moves on its next reconcile (each roll is a
+# Recreate bounce of that hub).
+hubImage: ""          # "" = dilipdalton/flint-pnfs:<Chart.appVersion>
+hubImagePullPolicy: IfNotPresent
+
+# startupProbe budget (in 10s periods) for tiered hubs that do not set
+# spec.startupFailureThreshold. Startup legitimately runs long: the
+# epoch claim may WAIT OUT a dead holder's lease and a DR import walks
+# the whole bucket, all before the listener binds.
+hubStartupFailureThreshold: 60
+
+# Namespaces the operator watches. "" = all (the fleet posture).
+# Restricting it to one namespace also restricts what conflict
+# arbitration can see — two shares on one bucket prefix in DIFFERENT
+# namespaces would then both run, and when one hub dies for a lease
+# window the other takes the prefix over. Only narrow this if the
+# fleet genuinely lives in one namespace.
+watchNamespace: ""
+
+# Leader election. The operator is a single replica with strategy
+# Recreate, but a partitioned node can leave an old pod running while
+# the replacement starts: the lease is what keeps exactly one of them
+# writing. `false` disables it (dev only).
+leaderElection: true
+
+# The operator applies its own compiled-in CRD at startup. Leave this
+# on: helm NEVER upgrades crds/, so with it off the schema freezes at
+# whatever this cluster first installed and every knob added in a later
+# release is silently pruned at admission — the exact failure the CRD
+# exists to retire. Off is for clusters where policy forbids the
+# operator managing CRDs; then a human applies `crdgen` output on every
+# upgrade.
+manageCrd: true
+
+rbac:
+  # Create the ClusterRole/Binding. The operator needs cluster scope:
+  # shares live in tenant namespaces and uniqueness spans all of them.
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}     # e.g. eks.amazonaws.com/role-arn for IRSA
+
+logLevel: info
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}
+nameOverride: ""

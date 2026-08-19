@@ -10,6 +10,56 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [Unreleased]
+
+### Added — the flint-lite operator (`FlintShare`)
+
+- **`flint.io/v1alpha1 FlintShare`** and `flint-lite-operator`: one
+  custom resource per volume instead of one helm release per volume.
+  The operator renders the same four objects the lite chart renders
+  (ConfigMap, RWO PVC, Service, single-replica Recreate Deployment) —
+  a golden test compares its output against a fixture regenerated from
+  `helm template` by `scripts/check-render-parity.sh`, and the fixture
+  records the chart's hash so a chart edit without a regenerated
+  fixture fails the suite. New chart: `flint-lite-operator-chart`
+  (RBAC, leader-election Lease, CRD bootstrap). Docs:
+  `docs/flint-lite-operator.md`.
+- **The tier knobs are schema**: `spec.settings` is an all-`Option`
+  mirror of the server's `TierKnobs` with ZERO schema defaults, so a
+  typo is refused at admission while an unset knob still takes the
+  SERVER's default (a CRD default would be materialized into stored
+  objects at admission — stale-values-by-construction). Parity with
+  the server type is unit-tested in both directions. `TierConfig` is
+  split into identity + `TierKnobs` (`#[serde(flatten)]`; the on-disk
+  `tier:` block is unchanged).
+- **Fleet uniqueness**, enforced by the controller because CEL cannot
+  see other objects: at most one share per `(endpoint, bucket, prefix
+  subtree)` across all namespaces, oldest wins, losers carry a
+  `Conflict` condition and are scaled to zero. Unarbitrated duplicates
+  are not merely wasteful — when one hub dies for a lease window the
+  other TAKES OVER the prefix and serves that data at its own address.
+- **Chart→CR adoption** (`spec.existingClaim`): the operator adopts an
+  existing release's objects in place and holds `AdoptionBlocked`
+  while any foreign pod still mounts the claim. RWO is node-granular,
+  so a second Deployment can share a node with the first — two sqlite
+  writers on one `state.db`, which the epoch provably cannot fence
+  (both pods self-recognize as the holder).
+- **The operator owns its CRD**: it server-side-applies its compiled-in
+  copy at startup, guarded by a `flint.io/crd-schema-version`
+  annotation so an old operator cannot stomp a newer schema. Helm never
+  upgrades `crds/`, and a frozen structural schema silently prunes
+  every knob added later.
+
+### Fixed
+
+- **flint-lite chart: a settings change now reaches the running hub.**
+  The pod template gained a `checksum/config` annotation, so
+  `helm upgrade` with changed `tier.settings` (or `logLevel`, or the
+  prefix) rolls the Deployment. Before this, the ConfigMap updated and
+  nothing else happened — the server parses `--config` once at boot and
+  has no reload path, so `kubectl get cm` showed the new value while
+  the hub kept the old one indefinitely.
+
 ## [1.27.0] - 2026-08-18
 
 ### Added — the cold-read release (flint-lite S3 tier, agent workloads)

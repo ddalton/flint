@@ -1,0 +1,42 @@
+flint-lite-operator {{ .Chart.AppVersion }} is installed in {{ .Release.Namespace }}.
+
+Default hub image: {{ include "flint-lite-operator.hubImage" . }}
+Watching: {{ .Values.watchNamespace | default "all namespaces" }}
+
+Create a share:
+
+  kubectl apply -f - <<'EOF'
+  apiVersion: flint.io/v1alpha1
+  kind: FlintShare
+  metadata:
+    name: tenant-a
+    namespace: {{ .Release.Namespace }}
+  spec:
+    persistence:
+      size: 20Gi
+    # Tier to a bucket (optional — without it the PVC is the only copy
+    # of the data). The bucket must already exist, with VERSIONING ON.
+    # bucket: my-team-flint
+    # keyPrefix: tenant-a/          # must end with "/"; immutable
+    # credentialsSecretRef: flint-s3   # "" = IRSA / instance role
+  EOF
+
+Watch it come up (a tiered share is legitimately "Starting" for
+minutes — it claims the volume epoch, which may wait out a dead
+holder's lease, and may import the whole bucket, all before its
+listener binds):
+
+  kubectl get flintshares -A -w
+  kubectl describe flintshare tenant-a -n {{ .Release.Namespace }}
+
+Mount it from any pod in the cluster:
+
+  <address from `kubectl get fsh`>  e.g. tenant-a.{{ .Release.Namespace }}.svc.cluster.local:/data/exports
+
+Two things worth knowing:
+
+  * Deleting a FlintShare keeps its PVC (reclaim: Retain by default)
+    and NEVER touches the bucket.
+  * At most one share may own a bucket subtree. A second one is
+    refused with a Conflict condition naming the winner — two hubs on
+    one prefix means that when one dies, the other takes it over.

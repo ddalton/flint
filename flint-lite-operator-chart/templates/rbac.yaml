@@ -1,0 +1,123 @@
+{{- /*
+RBAC for the operator.
+
+Deliberately explicit rather than a wildcard: this controller creates
+Deployments and deletes PVCs on request, and the list below is the
+honest statement of that blast radius. Two grants are worth naming —
+
+  * `customresourcedefinitions` create/patch, because the operator
+    keeps its OWN CRD current (helm never upgrades crds/, so a
+    chart-only CRD freezes and silently prunes new knobs). Drop it and
+    set manageCrd: false if policy forbids it, and apply the CRD by
+    hand on every upgrade.
+  * `persistentvolumeclaims` delete, used ONLY when a share says
+    `reclaim: Delete`. The claim carries no ownerReference precisely so
+    that this decision is always an explicit action and never garbage
+    collection.
+
+Nothing here touches buckets: the operator's blast radius stops at
+Kubernetes objects, by design.
+*/}}
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "flint-lite-operator.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if .Values.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+rules:
+  # The API this operator serves.
+  - apiGroups: ["flint.io"]
+    resources: ["flintshares"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["flint.io"]
+    resources: ["flintshares/status", "flintshares/finalizers"]
+    verbs: ["get", "update", "patch"]
+  # The operator owns its own CRD (see the note above).
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  # The three children that carry ownerReferences.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  # The claim: created and (only on reclaim: Delete) deleted.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Pods: read-only, and only to answer two questions — is this hub
+  # still pre-listener, and is a foreign writer still mounting the
+  # claim we are about to adopt?
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Credentials: hashed into a pod-template annotation so a rotation
+  # rolls the hub. Read, never written.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-lite-operator.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-lite-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Leader election, namespaced to the operator's own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}-leases
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}-leases
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "flint-lite-operator.name" . }}-leases
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-lite-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

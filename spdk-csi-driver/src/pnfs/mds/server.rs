@@ -710,7 +710,7 @@ impl MetadataServer {
                     .map(|p| p.join("flint-ballast.bin"))
             }
             _ => {
-                if t.ballast_bytes > 0 {
+                if t.knobs.ballast_bytes > 0 {
                     info!("🪣 tier space: memory state backend — ballast disabled");
                 }
                 None
@@ -718,10 +718,10 @@ impl MetadataServer {
         };
         let space = crate::tier::space::configure(crate::tier::space::SpaceConfig {
             root: export_root.clone(),
-            reserve_bytes: t.reserve_bytes,
-            watermark_pct: t.watermark_pct,
+            reserve_bytes: t.knobs.reserve_bytes,
+            watermark_pct: t.knobs.watermark_pct,
             ballast_path,
-            ballast_bytes: t.ballast_bytes,
+            ballast_bytes: t.knobs.ballast_bytes,
         })
         .map_err(|e| crate::pnfs::Error::Config(format!("tier: space model: {}", e)))?;
         tokio::spawn(async move {
@@ -736,9 +736,9 @@ impl MetadataServer {
         });
         info!(
             "🪣 tier space: reserve {} MiB, watermark {}%, ballast {} MiB",
-            t.reserve_bytes / (1024 * 1024),
-            t.watermark_pct,
-            t.ballast_bytes / (1024 * 1024)
+            t.knobs.reserve_bytes / (1024 * 1024),
+            t.knobs.watermark_pct,
+            t.knobs.ballast_bytes / (1024 * 1024)
         );
 
         let store: Arc<dyn ObjectStore> = Arc::new(
@@ -774,12 +774,12 @@ impl MetadataServer {
             .await
             .map_err(|e| crate::pnfs::Error::Config(format!("tier: server_id: {}", e)))?;
         let mut ecfg = epoch::EpochConfig::new(&t.key_prefix, format!("hub-{:016x}", server_id));
-        ecfg.heartbeat = Duration::from_secs(t.epoch_heartbeat_secs.max(1));
-        ecfg.lease_misses = t.epoch_lease_misses.max(1);
+        ecfg.heartbeat = Duration::from_secs(t.knobs.epoch_heartbeat_secs.max(1));
+        ecfg.lease_misses = t.knobs.epoch_lease_misses.max(1);
         info!(
             "🔐 tier: claiming the volume epoch as {} (a live foreign holder is \
              waited out: {} × {}s)",
-            ecfg.holder_id, ecfg.lease_misses, t.epoch_heartbeat_secs
+            ecfg.holder_id, ecfg.lease_misses, t.knobs.epoch_heartbeat_secs
         );
         let lease = epoch::claim(&store, &ecfg, &t.key_prefix)
             .await
@@ -815,12 +815,12 @@ impl MetadataServer {
             })?;
 
         let mut fcfg = FlushConfig::new(export_root.clone(), t.key_prefix.clone());
-        fcfg.floor = Duration::from_secs(t.flush_floor_secs);
-        fcfg.quiesce = Duration::from_secs(t.quiesce_secs);
-        fcfg.whole_put_max = t.whole_put_max_bytes;
-        fcfg.part_floor = t.part_floor_bytes.max(store.min_part_size());
-        let floor_s = t.flush_floor_secs;
-        let quiesce_s = t.quiesce_secs;
+        fcfg.floor = Duration::from_secs(t.knobs.flush_floor_secs);
+        fcfg.quiesce = Duration::from_secs(t.knobs.quiesce_secs);
+        fcfg.whole_put_max = t.knobs.whole_put_max_bytes;
+        fcfg.part_floor = t.knobs.part_floor_bytes.max(store.min_part_size());
+        let floor_s = t.knobs.flush_floor_secs;
+        let quiesce_s = t.knobs.quiesce_secs;
         // The hydrator, the watermark pass, and the A12 reporter share
         // the store; the reporter also reads the guard.
         let orch_store = Arc::clone(&store);
@@ -911,10 +911,10 @@ impl MetadataServer {
             Arc::clone(&self.backend),
             Arc::clone(&orch_store),
             crate::tier::hydrate::HydrateConfig {
-                hold: Duration::from_secs(t.hydrate_hold_secs.max(1)),
-                concurrency: t.hydrate_concurrency.max(1),
-                fetch_parallel: t.hydrate_fetch_parallel.max(1),
-                warm_concurrency: t.hydrate_warm_concurrency.max(1),
+                hold: Duration::from_secs(t.knobs.hydrate_hold_secs.max(1)),
+                concurrency: t.knobs.hydrate_concurrency.max(1),
+                fetch_parallel: t.knobs.hydrate_fetch_parallel.max(1),
+                warm_concurrency: t.knobs.hydrate_warm_concurrency.max(1),
                 ..Default::default()
             },
         );
@@ -927,7 +927,7 @@ impl MetadataServer {
         // restarts — a mid-fill crash resumes instead of silently
         // going best-effort-once; planting the note by hand is the
         // sanctioned manual re-trigger.
-        if t.hydrate_warm_after_import {
+        if t.knobs.hydrate_warm_after_import {
             let warm_note = state_note_dir.as_ref().map(|p| p.join("flint-warm-fill-pending"));
             let note_present = warm_note.as_ref().map(|p| p.exists()).unwrap_or(false);
             if imported || note_present {
@@ -955,7 +955,7 @@ impl MetadataServer {
             let export_root = export_root.clone();
             let key_prefix = t.key_prefix.clone();
             let probe_view = self.base_dispatcher.open_file_view();
-            let tick = Duration::from_secs(t.tick_secs.max(1));
+            let tick = Duration::from_secs(t.knobs.tick_secs.max(1));
             tokio::spawn(async move {
                 let probe = move |_dev: u64, ino: u64| probe_view.has_writable_ino(ino);
                 let mut iv = interval(tick);
@@ -984,7 +984,7 @@ impl MetadataServer {
             });
         }
 
-        let tick = Duration::from_secs(t.tick_secs.max(1));
+        let tick = Duration::from_secs(t.knobs.tick_secs.max(1));
         tokio::spawn(async move {
             let mut iv = interval(tick);
             iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

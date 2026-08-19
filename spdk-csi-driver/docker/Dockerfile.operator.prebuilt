@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+# flint-lite-operator — runtime-only image for a HOST-CROSS-COMPILED
+# binary, same recipe as Dockerfile.csi.prebuilt / Dockerfile.pnfs.prebuilt.
+#
+#   for T in x86_64 aarch64; do
+#     cargo zigbuild --release --target $T-unknown-linux-musl \
+#       --bin flint-lite-operator; done
+#   # stage: docker/prebuilt/amd64/flint-lite-operator   (from x86_64)
+#   #        docker/prebuilt/arm64/flint-lite-operator   (from aarch64)
+#   for A in amd64 arm64; do
+#     docker build --platform linux/$A -f docker/Dockerfile.operator.prebuilt \
+#       --build-arg BIN_DIR=docker/prebuilt \
+#       -t dilipdalton/flint-lite-operator:<tag>-$A . && \
+#     docker push dilipdalton/flint-lite-operator:<tag>-$A; done
+#   docker manifest create dilipdalton/flint-lite-operator:<tag> \
+#     --amend ...-amd64 --amend ...-arm64 && docker manifest push ...
+#
+# The operator talks to exactly one thing (the API server) and writes
+# nothing to disk, so this image carries no tools: the chart runs it
+# as non-root with a read-only root filesystem and every capability
+# dropped.
+FROM ubuntu:24.04
+
+ARG BIN_DIR=docker/prebuilt
+ARG TARGETARCH
+
+# ca-certificates only. In-cluster the API server is verified with the
+# service account's mounted CA, but an out-of-cluster kubeconfig
+# (dev, `kubectl proxy`-less debugging) needs the system store.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ${BIN_DIR}/${TARGETARCH}/flint-lite-operator /usr/local/bin/flint-lite-operator
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/flint-lite-operator"]

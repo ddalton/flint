@@ -130,6 +130,16 @@ pub struct MdsConfig {
 /// docs/plans/s3-tier-l2-design-review.md; knobs per A11 are
 /// REQUIREMENTS, not tuning — the defaults are the economics gate's
 /// assumptions).
+///
+/// Split in two on purpose: the five IDENTITY fields below say which
+/// bucket/prefix this hub owns, and the rest are TUNING ([`TierKnobs`],
+/// flattened so the on-disk `tier:` block is unchanged — one flat map,
+/// exactly as every shipped mds.yaml and the chart render it). The
+/// split exists because the FlintShare CRD's `spec.settings` is the
+/// knob half alone: identity is first-class CR spec, and the knob half
+/// is mirrored field-for-field as all-`Option` (see
+/// `lite_operator::crd::TierSettings`), which the
+/// `crd_settings_mirror_matches_tier_knobs` test pins to this struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TierConfig {
     /// Kill switch that keeps the section in the file: `enabled: false`
@@ -151,6 +161,25 @@ pub struct TierConfig {
     #[serde(default)]
     pub endpoint: Option<String>,
 
+    /// Step 12: run import-refresh at startup when the tier state is
+    /// FRESH and the bucket holds content (the DR restore / bucket
+    /// adopt path), and always to resume a crashed import. `false`
+    /// leaves the bucket unimported (flush-only posture).
+    #[serde(rename = "importOnStart", default = "default_true")]
+    pub import_on_start: bool,
+
+    /// The tuning half — flattened, so this is NOT a nested block in
+    /// the YAML.
+    #[serde(flatten)]
+    pub knobs: TierKnobs,
+}
+
+/// The tuning half of the tier config (see [`TierConfig`]). Every
+/// field takes a server default when absent — that contract is what
+/// the operator's all-`Option` mirror preserves, and why the CRD must
+/// never materialize defaults of its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TierKnobs {
     /// A11: per-file flush-interval floor — caps a hot file's request
     /// bill. The economics gate priced 60 s.
     #[serde(rename = "flushFloorSecs", default = "default_tier_flush_floor")]
@@ -216,13 +245,6 @@ pub struct TierConfig {
     #[serde(rename = "hydrateFetchParallel", default = "default_tier_hydrate_fetch_parallel")]
     pub hydrate_fetch_parallel: usize,
 
-    /// Step 12: run import-refresh at startup when the tier state is
-    /// FRESH and the bucket holds content (the DR restore / bucket
-    /// adopt path), and always to resume a crashed import. `false`
-    /// leaves the bucket unimported (flush-only posture).
-    #[serde(rename = "importOnStart", default = "default_true")]
-    pub import_on_start: bool,
-
     /// Warm fill: after an import that ran (DR restore / bucket adopt
     /// — the world where every file is a stub), bulk-restore the tree
     /// smallest-first instead of waiting for demand touches (a
@@ -237,6 +259,17 @@ pub struct TierConfig {
     /// sequentially (fanout 1), so peak fill buffering ~ this x 8 MiB.
     #[serde(rename = "hydrateWarmConcurrency", default = "default_tier_hydrate_warm_concurrency")]
     pub hydrate_warm_concurrency: usize,
+}
+
+impl Default for TierKnobs {
+    /// The server defaults, materialized. Deserializing an empty map
+    /// produces exactly this (asserted by
+    /// `tier_knob_defaults_match_empty_parse`) — so a caller that
+    /// needs "what would the server use for an unset knob?" has one
+    /// answer, not two copies that drift.
+    fn default() -> Self {
+        serde_yaml::from_str("{}").expect("every TierKnobs field has a serde default")
+    }
 }
 
 fn default_tier_flush_floor() -> u64 {
@@ -990,21 +1023,21 @@ mod tests {
         assert!(t.enabled);
         assert_eq!(t.key_prefix, "");
         assert_eq!(t.endpoint, None);
-        assert_eq!(t.flush_floor_secs, 60);
-        assert_eq!(t.quiesce_secs, 10);
-        assert_eq!(t.tick_secs, 10);
-        assert_eq!(t.whole_put_max_bytes, 64 * 1024 * 1024);
-        assert_eq!(t.part_floor_bytes, 16 * 1024 * 1024);
-        assert_eq!(t.epoch_heartbeat_secs, 10);
-        assert_eq!(t.epoch_lease_misses, 6);
-        assert_eq!(t.reserve_bytes, 256 * 1024 * 1024);
-        assert_eq!(t.watermark_pct, 85);
-        assert_eq!(t.ballast_bytes, 64 * 1024 * 1024);
-        assert_eq!(t.hydrate_hold_secs, 15);
-        assert_eq!(t.hydrate_concurrency, 4);
-        assert_eq!(t.hydrate_fetch_parallel, 6);
-        assert!(!t.hydrate_warm_after_import, "warm fill is opt-in");
-        assert_eq!(t.hydrate_warm_concurrency, 16);
+        assert_eq!(t.knobs.flush_floor_secs, 60);
+        assert_eq!(t.knobs.quiesce_secs, 10);
+        assert_eq!(t.knobs.tick_secs, 10);
+        assert_eq!(t.knobs.whole_put_max_bytes, 64 * 1024 * 1024);
+        assert_eq!(t.knobs.part_floor_bytes, 16 * 1024 * 1024);
+        assert_eq!(t.knobs.epoch_heartbeat_secs, 10);
+        assert_eq!(t.knobs.epoch_lease_misses, 6);
+        assert_eq!(t.knobs.reserve_bytes, 256 * 1024 * 1024);
+        assert_eq!(t.knobs.watermark_pct, 85);
+        assert_eq!(t.knobs.ballast_bytes, 64 * 1024 * 1024);
+        assert_eq!(t.knobs.hydrate_hold_secs, 15);
+        assert_eq!(t.knobs.hydrate_concurrency, 4);
+        assert_eq!(t.knobs.hydrate_fetch_parallel, 6);
+        assert!(!t.knobs.hydrate_warm_after_import, "warm fill is opt-in");
+        assert_eq!(t.knobs.hydrate_warm_concurrency, 16);
 
         let t2: TierConfig = serde_yaml::from_str(
             "bucket: b\nenabled: false\nkeyPrefix: vol1/\nendpoint: \"http://minio:9000\"\nepochLeaseMisses: 3\n",
@@ -1013,7 +1046,7 @@ mod tests {
         assert!(!t2.enabled);
         assert_eq!(t2.key_prefix, "vol1/");
         assert_eq!(t2.endpoint.as_deref(), Some("http://minio:9000"));
-        assert_eq!(t2.epoch_lease_misses, 3);
+        assert_eq!(t2.knobs.epoch_lease_misses, 3);
     }
 
     #[test]

@@ -1,0 +1,442 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    flint.io/crd-schema-version: '1'
+  name: flintshares.flint.io
+spec:
+  group: flint.io
+  names:
+    categories: []
+    kind: FlintShare
+    plural: flintshares
+    shortNames:
+    - fsh
+    singular: flintshare
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .status.address
+      name: ADDRESS
+      type: string
+    - jsonPath: .spec.bucket
+      name: BUCKET
+      type: string
+    - jsonPath: .spec.keyPrefix
+      name: PREFIX
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: A mountable NFS share served by one flint-lite hub, optionally tiered to an S3 prefix
+        properties:
+          spec:
+            description: |-
+              A mountable NFS share backed by one hub — optionally tiered to one
+              bucket prefix.
+
+              "Share" is deliberate: `FlintVolume` would collide with the
+              CSI/SPDK volume vocabulary this project already uses, and the
+              object-store backing is an option, not the identity (a tier-off
+              share is a perfectly good share).
+            properties:
+              bucket:
+                description: |-
+                  Bucket this share publishes to. Must already exist, with
+                  VERSIONING ON (delete-marker recovery assumes it) — the hub
+                  never creates buckets and the operator never touches their
+                  contents.
+
+                  **Absent = tier off**: a plain NFS hub whose PVC is the only
+                  copy of the data. Immutable.
+                nullable: true
+                type: string
+              credentialsSecretRef:
+                description: |-
+                  Name of an EXISTING Secret in this namespace, injected wholesale
+                  as env (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` [+
+                  `AWS_SESSION_TOKEN`]). Absent = ambient credentials (IRSA /
+                  instance role), which is the better answer on EKS.
+
+                  The operator watches this Secret: a rotation rolls the hub
+                  deliberately instead of waiting for the hub to fence itself out
+                  on a failed heartbeat.
+                nullable: true
+                type: string
+              endpoint:
+                description: |-
+                  Custom S3 endpoint (MinIO and friends; forces path-style
+                  addressing). Absent = real S3.
+
+                  Mutable on purpose — an endpoint can legitimately move — but it
+                  participates in share uniqueness, so a change can make this
+                  share a conflict LOSER and scale it to zero.
+                nullable: true
+                type: string
+              existingClaim:
+                description: |-
+                  Adoption: bind this share to an EXISTING PVC instead of
+                  creating one. This is the migration path off the chart (the
+                  chart's PVC is `flint-lite-data`) — see the operator plan's
+                  step 2b. The operator never deletes a claim it adopted unless
+                  `reclaim: Delete` says so.
+                nullable: true
+                type: string
+              image:
+                description: |-
+                  Hub image override, verbatim (`repo/name:tag`). Absent = the
+                  operator's fleet-wide default, which is how a fleet upgrade is
+                  one operator rollout instead of N edits.
+                nullable: true
+                type: string
+              importOnStart:
+                description: |-
+                  DR / bucket adoption: when the tier state is FRESH and the
+                  bucket holds content, import the namespace before serving.
+                  Absent = the server default (on).
+                nullable: true
+                type: boolean
+              keyPrefix:
+                description: |-
+                  Prefix under the bucket, e.g. `tenant-a/`. ONE PREFIX = ONE
+                  SHARE = ONE HUB — the operator refuses a second share on the
+                  same subtree (see `lite_operator::conflict`). Immutable.
+                nullable: true
+                type: string
+              lifecycle:
+                description: |-
+                  `Active` (default) serves; `Suspended` scales the hub to zero
+                  and KEEPS the PVC — the share stops costing compute and stays
+                  instantly wakeable.
+                enum:
+                - Active
+                - Suspended
+                nullable: true
+                type: string
+              logLevel:
+                description: '`RUST_LOG` for the hub. Absent = `info`.'
+                nullable: true
+                type: string
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: Node selector for the hub pod.
+                nullable: true
+                type: object
+              persistence:
+                description: |-
+                  The hub's disk. Sized for the WORKING SET when the tier is on
+                  (durable data lives in the bucket), for the WHOLE DATASET when
+                  it is off.
+                properties:
+                  size:
+                    description: |-
+                      Requested size, e.g. `20Gi`. Required — capacity is a decision,
+                      not a default: with the tier on this is the working-set budget
+                      that decides how much of the tree stays hot.
+                    type: string
+                  storageClassName:
+                    description: |-
+                      StorageClass. Absent = the cluster default class. Any CSI
+                      driver's RWO volume works; the hub writes plain files.
+                    nullable: true
+                    type: string
+                required:
+                - size
+                type: object
+              reclaim:
+                description: |-
+                  What CR deletion does to the PVC. Absent = `Retain`.
+                  The BUCKET is never touched, under any policy.
+                enum:
+                - Retain
+                - Delete
+                nullable: true
+                type: string
+              region:
+                description: '`AWS_REGION` for the SDK. Absent = ambient (env / IRSA / IMDS).'
+                nullable: true
+                type: string
+              resources:
+                description: |-
+                  Container resources. Requests/limits as plain quantity strings
+                  (`{"memory": "1Gi"}`).
+                nullable: true
+                properties:
+                  limits:
+                    additionalProperties:
+                      type: string
+                    nullable: true
+                    type: object
+                  requests:
+                    additionalProperties:
+                      type: string
+                    nullable: true
+                    type: object
+                type: object
+              restartPolicy:
+                description: |-
+                  Whether a config or credential change rolls the hub
+                  immediately. Absent = `Immediate`. `Manual` renders the new
+                  ConfigMap but leaves the running pod alone (status reports
+                  `ConfigCurrent=False`) so the bounce can be scheduled.
+                enum:
+                - Immediate
+                - Manual
+                nullable: true
+                type: string
+              service:
+                description: How consumers reach the hub.
+                nullable: true
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    nullable: true
+                    type: object
+                  nodePort:
+                    description: 'Fixed nodePort when `type: NodePort`. Absent = Kubernetes picks.'
+                    format: int32
+                    nullable: true
+                    type: integer
+                  port:
+                    description: Absent = 2049.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  type:
+                    description: |-
+                      Absent = `ClusterIP`. NFS is one long-lived TCP flow: prefer
+                      flat/peered networks to a cloud LB, and mind LB idle timeouts.
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    nullable: true
+                    type: string
+                type: object
+              settings:
+                description: |-
+                  Tier tuning. Every knob absent = the SERVER's default, and the
+                  server's defaults are the economics gate's assumptions, not
+                  neutral tuning — so absence is the right answer unless you have
+                  measured a reason.
+                nullable: true
+                properties:
+                  ballastBytes:
+                    description: |-
+                      Ballast next to state.db, released at critical fullness so the
+                      durable bookkeeping keeps committing. 0 disables.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  epochHeartbeatSecs:
+                    description: Epoch heartbeat interval, seconds.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  epochLeaseMisses:
+                    description: |-
+                      Missed heartbeats before a successor may judge this holder dead
+                      (lease TTL ≈ heartbeat × misses — and the startupProbe budget
+                      must cover it).
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  flushFloorSecs:
+                    description: |-
+                      Per-file flush-interval floor, seconds — the cap on a hot
+                      file's request bill (server default 60).
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  hydrateConcurrency:
+                    description: Concurrent demand restores.
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  hydrateFetchParallel:
+                    description: |-
+                      Ranged GETs per restore (the cold-read fan-out). Peak restore
+                      buffering ≈ hydrateConcurrency × this × 8 MiB.
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  hydrateHoldSecs:
+                    description: In-RPC park bound while a hydration runs, seconds.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  hydrateWarmAfterImport:
+                    description: |-
+                      After a DR/adopt import, bulk-restore the tree instead of
+                      waiting for demand touches. The wake-up half of a cold share.
+                    nullable: true
+                    type: boolean
+                  hydrateWarmConcurrency:
+                    description: Concurrent warm-fill restores (a pool of its own).
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  partFloorBytes:
+                    description: Multipart part-grid floor (clamped up to the backend minimum).
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  quiesceSecs:
+                    description: 'Quiescence guard: files touched more recently are skipped.'
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  reserveBytes:
+                    description: |-
+                      Admission headroom: writes answer NFS4ERR_NOSPC while
+                      `avail − reserve` cannot cover them (NOSPC before hard-full —
+                      F55: EIO makes postgres PANIC).
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  tickSecs:
+                    description: Flush loop cadence, seconds.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  watermarkPct:
+                    description: Eviction-trigger watermark, percent used.
+                    format: uint8
+                    maximum: 255.0
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  wholePutMaxBytes:
+                    description: Below this size a generation publishes as ONE conditional PUT.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+              startupFailureThreshold:
+                description: |-
+                  startupProbe budget, in 10-second periods, for the tiered
+                  hub's pre-listener work (epoch claim may WAIT OUT a dead
+                  holder's lease; a DR import walks the whole bucket). Absent =
+                  60 (ten minutes). Misreading this window as failure is how an
+                  operator kills a takeover at 55 seconds.
+                format: int32
+                nullable: true
+                type: integer
+            required:
+            - persistence
+            type: object
+            x-kubernetes-validations:
+            - message: spec.bucket is immutable — create a new FlintShare instead
+              rule: '!has(oldSelf.bucket) ? !has(self.bucket) : (has(self.bucket) && self.bucket == oldSelf.bucket)'
+            - message: spec.keyPrefix is immutable — create a new FlintShare instead
+              rule: '(has(oldSelf.keyPrefix) ? oldSelf.keyPrefix : '''') == (has(self.keyPrefix) ? self.keyPrefix : '''')'
+            - message: spec.keyPrefix must end with '/' — a prefix without it also matches sibling names
+              rule: '!has(self.keyPrefix) || self.keyPrefix == '''' || self.keyPrefix.endsWith(''/'')'
+            - message: spec.keyPrefix must not start with '/'
+              rule: '!has(self.keyPrefix) || !self.keyPrefix.startsWith(''/'')'
+            - message: '''.flint/'' under a prefix is reserved for tier control objects'
+              rule: '!has(self.keyPrefix) || !self.keyPrefix.contains(''.flint/'')'
+            - message: spec.settings needs spec.bucket — the tier is off without one
+              rule: '!has(self.settings) || has(self.bucket)'
+            - message: spec.credentialsSecretRef needs spec.bucket — the tier is off without one
+              rule: '!has(self.credentialsSecretRef) || has(self.bucket)'
+          status:
+            description: |-
+              Observed state. Everything here is derived — the operator never
+              asks the user to write status, and never reads it back as input.
+            nullable: true
+            properties:
+              address:
+                description: |-
+                  What consumers mount (`host:port`), once there is something to
+                  mount.
+                nullable: true
+                type: string
+              claimName:
+                description: |-
+                  The PVC actually in use — canonical or adopted. Recorded
+                  because an adopted share's children do NOT follow the
+                  CR-derived naming.
+                nullable: true
+                type: string
+              conditions:
+                description: |-
+                  Standard conditions (`Ready`, `ConfigCurrent`, `Conflict`,
+                  `AdoptionBlocked`), upstream field-for-field.
+                items:
+                  description: A metav1.Condition mirror (same field names, same semantics).
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        RFC3339. Only bumped when `status` actually changes, so it
+                        means what it says.
+                      type: string
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      type: string
+                    status:
+                      description: '`"True"` | `"False"` | `"Unknown"`.'
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              observedGeneration:
+                description: The `.metadata.generation` this status describes.
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: |-
+                  One-word summary for `kubectl get`. The detail is in
+                  `conditions`.
+                enum:
+                - Pending
+                - Starting
+                - Ready
+                - Suspended
+                - Failed
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: FlintShare
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

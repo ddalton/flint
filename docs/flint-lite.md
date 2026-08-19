@@ -224,11 +224,30 @@ render so a typo'd knob can't silently take its default). The defaults
 are the economics model's assumptions — treat them as a contract, not
 a starting point.
 
+## Many shares: the operator
+
+This chart is one release per hub, which is the right shape at one to
+ten of them. For a fleet — bucket-per-tenant, dozens of workspaces —
+there is an operator: install it once, then each volume is a
+`FlintShare` custom resource, `kubectl get flintshares -A` is the
+fleet, and the tier knobs become a typed schema instead of a free-form
+map. It renders the same four objects this chart renders (a golden test
+in the suite fails the build if they drift), so moving is adoption, not
+migration. See [the operator guide](flint-lite-operator.md) — including
+the migration path from an existing release of this chart, which has a
+sharp edge worth reading before you start.
+
 ## Operational notes
 
 - **One hub per dataset.** The hub is the coherence authority; two hubs
   over one tree is split-brain. With the tier on this is "one hub per
-  bucket prefix", enforced live by the epoch guard.
+  bucket prefix", enforced live by the epoch guard — and, if you run
+  the operator, refused up front across the whole fleet.
+- **A settings change needs a restart.** The hub parses its config once
+  at boot and has no reload path. `helm upgrade` with a changed
+  `tier.settings` rolls the hub because the pod template carries a
+  `checksum/config` annotation; if you edit the ConfigMap by hand
+  instead, nothing happens until the pod restarts.
 - **Backup**: with the tier on, durability lives in the bucket (RPO =
   the flush cadence) and the PVC is a rebuildable working set. Without
   the tier, the PVC *is* the data — snapshot it with its CSI driver's

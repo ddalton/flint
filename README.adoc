@@ -9,8 +9,11 @@ TIP: Looking for a shared POSIX filesystem without any of this machinery?
 on any CSI driver's RWO PVC serving real NFSv4.2 (locks, close-to-open
 coherence), an optional S3 cold tier, and nothing to install on consumer
 clusters — no SPDK, no dedicated hardware, no CRDs. See
-`flint-lite-chart/README.md` and `docs/flint-lite.md`. Everything below
-this line concerns the full CSI driver.
+`flint-lite-chart/README.md` and `docs/flint-lite.md`. For a FLEET of
+them (bucket-per-tenant workspaces), `flint-lite-operator-chart/` adds
+one `FlintShare` custom resource per volume — see
+`docs/flint-lite-operator.md`. Everything below this line concerns the
+full CSI driver.
 
 == Prerequisites
 

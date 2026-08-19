@@ -1,0 +1,25 @@
+apiVersion: v2
+name: flint-lite-operator
+description: >-
+  Fleet control plane for flint-lite hubs — one FlintShare custom
+  resource per volume, reconciled into the same four objects the
+  flint-lite chart renders.
+type: application
+
+# Chart version. Independent of the flint release train (like
+# flint-lite): this chart ships the operator, and appVersion pins the
+# image it runs.
+version: 0.1.0
+
+# The flint release whose image this chart runs. The operator binary
+# and the hub image ship from the same build, and the operator's
+# default hub image (values.yaml: hubImage) must reference a hub that
+# understands every knob the CRD can express.
+appVersion: "1.28.0"
+
+keywords:
+  - nfs
+  - s3
+  - operator
+  - flint
+home: https://github.com/ddalton/flint
