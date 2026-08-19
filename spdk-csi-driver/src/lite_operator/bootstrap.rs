@@ -42,7 +42,15 @@ pub const SCHEMA_VERSION_ANNOTATION: &str = "flint.io/crd-schema-version";
 /// new printer column). It is what tells a mixed-version fleet which
 /// operator's CRD is the newer one; leaving it behind after adding a
 /// field means an older operator can prune that field back out.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// The equal-version case deliberately RE-APPLIES (drift repair), so
+/// forgetting a bump is not a no-op — it is an older operator quietly
+/// deleting the newer one's fields on its next startup.
+///
+/// - `1` — as shipped in 1.28.0.
+/// - `2` — `spec.service.advertiseAddress` and its CEL rule, plus
+///   `status.serverId`.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The CRD this binary would install, annotated with its schema
 /// version. Identical to what `crdgen` prints and what the chart

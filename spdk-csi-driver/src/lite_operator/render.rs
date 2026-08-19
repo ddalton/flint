@@ -37,6 +37,7 @@ use std::fmt::Write as _;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvFromSource, EnvVar,
+    EnvVarSource, ObjectFieldSelector,
     PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, PodSpec,
     PodTemplateSpec, Probe, ResourceRequirements, SecretEnvSource, Service, ServicePort,
     SecretVolumeSource, ServiceSpec as K8sServiceSpec, TCPSocketAction, Volume, VolumeMount,
@@ -189,6 +190,7 @@ pub fn selector_labels(share: &FlintShare) -> BTreeMap<String, String> {
 pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
     let s = &share.spec;
     let log = s.log_level.clone().unwrap_or_else(|| d.log_level.clone());
+    let wake_warm = super::idle::wake_warm_fill(share);
     let mut y = String::new();
 
     let _ = writeln!(y, "apiVersion: flint.io/v1alpha1");
@@ -236,9 +238,24 @@ pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
                 .unwrap_or_default();
             for (k, v) in map {
                 let key = k.as_str().unwrap_or_default();
+                if key == WARM_FILL_KNOB && wake_warm.is_some() {
+                    continue; // the intent below wins
+                }
                 let val = serde_yaml::to_string(&v).unwrap_or_default();
                 let _ = writeln!(y, "    {key}: {}", val.trim_end());
             }
+        }
+        // `flint.io/wake-intent` — what the front door knows and the
+        // operator cannot: whether a person is about to open this
+        // project (`warm`, pull the working set back during import) or
+        // something merely touched it (`cold`, hydrate on demand). It
+        // overrides the standing knob for exactly one boot, and it is
+        // meaningful only at boot, which is why `checksum` ignores this
+        // line: a hub already running past its import gains nothing
+        // from a rollout, and rolling one minutes after it woke would
+        // hang the very agent the wake was for.
+        if let Some(warm) = wake_warm {
+            let _ = writeln!(y, "    {WARM_FILL_KNOB}: {warm}");
         }
     }
 
@@ -318,6 +335,32 @@ fn yaml_str(s: &str) -> String {
 
 pub fn checksum(s: &str) -> String {
     format!("{:x}", Sha256::digest(s.as_bytes()))
+}
+
+/// The one tier knob that is BOOT-ONLY, so a change to it can never
+/// justify rolling a running hub.
+pub const WARM_FILL_KNOB: &str = "hydrateWarmAfterImport";
+
+/// The checksum that decides whether the hub rolls.
+///
+/// Boot-only settings are stripped before hashing. The warm fill runs
+/// during import and never again, so a hub that is already serving
+/// gains exactly nothing from a restart that changes it — while the
+/// restart itself costs mounted clients a ~90s grace window. The
+/// pathological case is the one this exists for: the front door writes
+/// `wake-intent: warm`, the share wakes and imports, the intent is
+/// consumed and cleared, and the resulting config change rolls the hub
+/// minutes after it came up — hanging the agent the wake was for.
+///
+/// The ConfigMap still carries the real value; only the decision to
+/// restart ignores it.
+pub fn rollout_checksum(mds_yaml: &str) -> String {
+    let stripped: String = mds_yaml
+        .lines()
+        .filter(|l| l.trim_start().split(':').next() != Some(WARM_FILL_KNOB))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    checksum(&stripped)
 }
 
 fn meta(share: &FlintShare, name: String) -> ObjectMeta {
@@ -443,11 +486,29 @@ pub fn deployment(
         annotations.insert("checksum/creds".to_string(), c.to_string());
     }
 
-    let mut env = vec![EnvVar {
-        name: "RUST_LOG".to_string(),
-        value: Some(log),
-        ..Default::default()
-    }];
+    let mut env = vec![
+        EnvVar {
+            name: "RUST_LOG".to_string(),
+            value: Some(log),
+            ..Default::default()
+        },
+        // Published on /status as `podName`. With `serverId` it is how
+        // a caller tells a plain restart (podName changed, the state
+        // survived) from a wake onto a fresh PVC (serverId changed,
+        // every client stateid is stale). Mirrored in the chart; the
+        // parity test compares the two.
+        EnvVar {
+            name: "POD_NAME".to_string(),
+            value_from: Some(EnvVarSource {
+                field_ref: Some(ObjectFieldSelector {
+                    field_path: "metadata.name".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ];
     if let Some(region) = s.region.as_deref().filter(|r| !r.is_empty() && s.tiered()) {
         env.push(EnvVar {
             name: "AWS_REGION".to_string(),
@@ -679,7 +740,7 @@ pub fn render(
     selector_override: Option<LabelSelector>,
 ) -> Rendered {
     let yaml = mds_yaml(share, d);
-    let sum = checksum(&yaml);
+    let sum = rollout_checksum(&yaml);
     Rendered {
         names: names(share),
         config_map: config_map(share, d),
@@ -744,6 +805,61 @@ mod tests {
             import_on_start: Some(true),
             ..base_spec()
         }
+    }
+
+    /// `flint.io/wake-intent` is what the front door knows and the
+    /// operator cannot: whether a person is about to open this project
+    /// or something merely touched it. It has to reach the pod, and it
+    /// must not roll one that is already up.
+    #[test]
+    fn a_wake_intent_reaches_the_config_but_never_rolls_a_running_hub() {
+        let with_intent = |v: Option<&str>| {
+            let mut sh = share("t", tiered_spec());
+            if let Some(v) = v {
+                sh.metadata
+                    .annotations
+                    .get_or_insert_with(Default::default)
+                    .insert(crate::lite_operator::idle::ANN_WAKE_INTENT.into(), v.into());
+            }
+            sh
+        };
+        let d = RenderDefaults::default();
+
+        // No intent: the knob is absent, so the server default stands.
+        let plain = mds_yaml(&with_intent(None), &d);
+        assert!(!plain.contains(WARM_FILL_KNOB), "no intent must render nothing:\n{plain}");
+
+        // warm/cold reach the config as the boot-only knob.
+        assert!(mds_yaml(&with_intent(Some("warm")), &d)
+            .contains(&format!("{WARM_FILL_KNOB}: true")));
+        assert!(mds_yaml(&with_intent(Some("cold")), &d)
+            .contains(&format!("{WARM_FILL_KNOB}: false")));
+
+        // A typo is NOT read as "cold" — guessing "do less" on a
+        // misspelling shows up as a slow project and nothing else.
+        assert!(!mds_yaml(&with_intent(Some("wrm")), &d).contains(WARM_FILL_KNOB));
+
+        // THE POINT: the rollout decision ignores all of it. Every
+        // variant hashes the same, so consuming the intent after the
+        // wake cannot restart the hub it just woke.
+        let sums: Vec<_> = [None, Some("warm"), Some("cold"), Some("wrm")]
+            .iter()
+            .map(|v| rollout_checksum(&mds_yaml(&with_intent(*v), &d)))
+            .collect();
+        assert!(
+            sums.windows(2).all(|w| w[0] == w[1]),
+            "a boot-only knob changed the rollout checksum — clearing the intent would roll \
+             the hub minutes after it woke, hanging the agent the wake was for"
+        );
+
+        // And the guard is not vacuous: a real setting still rolls.
+        let mut louder = share("t", tiered_spec());
+        louder.spec.log_level = Some("debug".into());
+        assert_ne!(
+            rollout_checksum(&mds_yaml(&louder, &d)),
+            rollout_checksum(&plain),
+            "stripping the boot-only line must not have blunted the checksum entirely"
+        );
     }
 
     /// The knob half is the whole reason `settings` is typed: what the

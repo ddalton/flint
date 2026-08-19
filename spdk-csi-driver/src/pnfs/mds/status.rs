@@ -68,6 +68,9 @@ pub struct HubStatus {
     orchestrator: RwLock<Option<Arc<crate::tier::flush::FlushOrchestrator>>>,
     backend: RwLock<Option<Arc<dyn crate::state_backend::StateBackend>>>,
     leases: RwLock<Option<Arc<crate::nfs::v4::state::lease::LeaseManager>>>,
+    /// The persisted NFS server identity — the same one filehandles are
+    /// stamped with and the tier epoch is held under.
+    server_id: OnceLock<String>,
 }
 
 impl HubStatus {
@@ -76,6 +79,12 @@ impl HubStatus {
         let _ = s.started_unix.set(now_unix());
         *s.phase.write().unwrap() = Some(HubPhase::Starting);
         s
+    }
+
+    /// Record the persisted server identity, once it is known (it comes
+    /// from the state backend, so it is not available at construction).
+    pub fn set_server_id(&self, id: impl Into<String>) {
+        let _ = self.server_id.set(id.into());
     }
 
     pub fn set_phase(&self, phase: HubPhase) {
@@ -157,6 +166,11 @@ impl HubStatus {
 
         StatusDoc {
             phase: self.phase(),
+            server_id: self.server_id.get().cloned(),
+            // Downward API, set by the chart and the operator's render.
+            // Absent outside Kubernetes (the lima rigs), which is
+            // honest rather than a fabricated hostname.
+            pod_name: std::env::var("POD_NAME").ok().filter(|v| !v.is_empty()),
             started_unix: started,
             uptime_secs: now_unix().saturating_sub(started),
             epoch: epoch_guard.as_ref().map(|g| EpochDoc { held: g.current().is_some(), number: g.current() }),
@@ -186,6 +200,25 @@ impl HubStatus {
 #[serde(rename_all = "camelCase")]
 pub struct StatusDoc {
     pub phase: HubPhase,
+    /// WHICH HUB ANSWERED. Both are part of the published contract
+    /// because a caller polling `/status` across a suspend or a
+    /// hibernate is talking to a different process each time, and
+    /// nothing else in this document says so.
+    ///
+    /// `serverId` is the persisted NFS identity: filehandles are
+    /// stamped with it and the tier epoch is held under it, so it is
+    /// STABLE across restarts on the same state, and CHANGES when a
+    /// hibernate wakes onto a fresh PVC — which is exactly the event
+    /// that invalidates a client's stateids. `podName` is the
+    /// incarnation, and changes on every restart.
+    ///
+    /// A caller that sees `serverId` change knows mounts must be
+    /// re-established; one that sees only `podName` change knows the
+    /// hub bounced but the state survived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pod_name: Option<String>,
     pub started_unix: u64,
     pub uptime_secs: u64,
     pub epoch: Option<EpochDoc>,
@@ -316,6 +349,72 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+
+    /// **The ladder never fires in production if this regresses.**
+    ///
+    /// The projects UI polls `/status` for liveness, on a timer, for
+    /// every project it is showing. If rendering that document counted
+    /// as activity, every share in the fleet would be held awake by the
+    /// act of being looked at — and the symptom would be "auto-suspend
+    /// doesn't work", with a hub that is genuinely, correctly busy
+    /// serving the poller.
+    ///
+    /// The file API is the opposite case and is asserted here too: a
+    /// person clicking through files IS use, and must postpone the
+    /// suspend. Both halves in one test, because the distinction is the
+    /// contract — either alone would pass while the pair is broken.
+    #[tokio::test]
+    async fn polling_status_is_not_activity_but_browsing_files_is() {
+        use crate::nfs::activity;
+
+        let before = activity::snapshot();
+        let status = HubStatus::new();
+        for _ in 0..5 {
+            let _ = status.render().await;
+        }
+        let after = activity::snapshot();
+        assert_eq!(
+            (after.data_ops, after.namespace_ops, after.browse_ops),
+            (before.data_ops, before.namespace_ops, before.browse_ops),
+            "rendering /status counted as activity — a UI polling for liveness would pin \
+             every project in the fleet awake and the idle ladder would never fire"
+        );
+
+        // The file API reaches the tree through `dispatch_compound`,
+        // which notes every compound. These are the operations its
+        // listing and download paths actually issue.
+        use crate::nfs::v4::compound::Operation;
+        assert_eq!(
+            activity::classify(&[Operation::ReadDir {
+                cookie: 0,
+                cookieverf: [0; 8],
+                dircount: 4096,
+                maxcount: 4096,
+                attr_request: vec![],
+            }]),
+            Some(activity::ActivityClass::Browse),
+            "a browse listing must postpone the suspend — it is a person looking at the project"
+        );
+        assert_eq!(
+            activity::classify(&[Operation::Read {
+                stateid: crate::nfs::v4::protocol::StateId::new(0, [0; 12]),
+                offset: 0,
+                count: 4096,
+            }]),
+            Some(activity::ActivityClass::Data),
+            "a download must postpone the suspend"
+        );
+
+        // And the counters really do move, so the equality above is a
+        // statement about /status rather than about a dead metric.
+        let pre = activity::snapshot();
+        activity::note(activity::ActivityClass::Browse);
+        assert_eq!(
+            activity::snapshot().browse_ops,
+            pre.browse_ops + 1,
+            "the browse counter never moved — the assertion above proves nothing"
+        );
+    }
     use super::*;
 
     /// A hub with no tier must report `rpoClean: null`, never `true`.

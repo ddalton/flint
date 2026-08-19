@@ -68,6 +68,12 @@ impl HubPhase {
 #[serde(rename_all = "camelCase")]
 pub struct HubSnapshot {
     pub phase: HubPhase,
+    /// The persisted NFS server identity. STABLE across restarts on the
+    /// same state, and DIFFERENT after a hibernate wakes onto a fresh
+    /// PVC — which is the event that invalidates every client stateid.
+    /// `None` = a hub too old to report it.
+    #[serde(default)]
+    pub server_id: Option<String>,
     #[serde(default)]
     pub uptime_secs: u64,
     #[serde(default)]

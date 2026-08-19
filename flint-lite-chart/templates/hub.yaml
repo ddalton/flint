@@ -153,6 +153,14 @@ spec:
           env:
             - name: RUST_LOG
               value: {{ .Values.logLevel | default "info" | quote }}
+            # Published on /status as `podName`. With `serverId` it is
+            # how a caller tells a plain restart (podName changed, the
+            # state survived) from a wake onto a fresh PVC (serverId
+            # changed, every client stateid is stale).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             {{- if and .Values.tier.enabled .Values.tier.region }}
             - name: AWS_REGION
               value: {{ .Values.tier.region | quote }}

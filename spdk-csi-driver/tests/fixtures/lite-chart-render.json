@@ -55,6 +55,14 @@
                       "value": "debug"
                     },
                     {
+                      "name": "POD_NAME",
+                      "valueFrom": {
+                        "fieldRef": {
+                          "fieldPath": "metadata.name"
+                        }
+                      }
+                    },
+                    {
                       "name": "AWS_REGION",
                       "value": "us-east-1"
                     }
@@ -311,6 +319,14 @@
                     {
                       "name": "RUST_LOG",
                       "value": "info"
+                    },
+                    {
+                      "name": "POD_NAME",
+                      "valueFrom": {
+                        "fieldRef": {
+                          "fieldPath": "metadata.name"
+                        }
+                      }
                     }
                   ],
                   "image": "dilipdalton/flint-pnfs:1.28.0",
@@ -483,6 +499,14 @@
                     {
                       "name": "RUST_LOG",
                       "value": "info"
+                    },
+                    {
+                      "name": "POD_NAME",
+                      "valueFrom": {
+                        "fieldRef": {
+                          "fieldPath": "metadata.name"
+                        }
+                      }
                     }
                   ],
                   "image": "dilipdalton/flint-pnfs:1.28.0",
@@ -670,6 +694,14 @@
                       "value": "info"
                     },
                     {
+                      "name": "POD_NAME",
+                      "valueFrom": {
+                        "fieldRef": {
+                          "fieldPath": "metadata.name"
+                        }
+                      }
+                    },
+                    {
                       "name": "AWS_REGION",
                       "value": "us-east-1"
                     }
@@ -813,5 +845,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "fafdfa69c830b325eae7c34fd170e1382ce5b636e846852751dc34fc95b3126e"
+  "chartSha256": "2975a9557e40e20da351b5a5cde2d57ae49d895c2a5de92424bfdca05405ee75"
 }

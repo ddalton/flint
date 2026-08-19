@@ -120,6 +120,24 @@ pub fn wake_intent(share: &FlintShare) -> Option<&str> {
     annotation(share, ANN_WAKE_INTENT)
 }
 
+/// Whether this wake should pull the working set back during import.
+///
+/// `Some(true)` = `warm`, `Some(false)` = `cold`, `None` = no intent
+/// expressed, so the share's own `hydrateWarmAfterImport` stands.
+///
+/// This is the one thing the front door knows and the operator cannot:
+/// whether a person is about to open the project, or something merely
+/// touched it. An unrecognised value reads as no intent rather than as
+/// `cold` — guessing "do less" on a typo would show up as a slow
+/// project and nothing else.
+pub fn wake_warm_fill(share: &FlintShare) -> Option<bool> {
+    match wake_intent(share)?.trim() {
+        "warm" => Some(true),
+        "cold" => Some(false),
+        _ => None,
+    }
+}
+
 fn parse_time(s: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
     let s = s?;
     chrono::DateTime::parse_from_rfc3339(s)

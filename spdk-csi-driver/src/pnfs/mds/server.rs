@@ -632,6 +632,12 @@ impl MetadataServer {
         // makes the whole startup observable.
         self.status.attach_backend(self.backend.clone());
         self.status.attach_leases(self.state_mgr.leases.clone());
+        // Published on /status so a caller can tell a restart (podName
+        // changed, state survived) from a hibernate-wake onto a fresh
+        // PVC (serverId changed, every stateid is stale).
+        if let Ok(id) = self.backend.get_or_init_server_id().await {
+            self.status.set_server_id(id.to_string());
+        }
         // The file API rides the same listener. It resolves its token
         // BEFORE binding and is simply not mounted without one — there
         // is no token-optional mode for a surface that can rewrite
