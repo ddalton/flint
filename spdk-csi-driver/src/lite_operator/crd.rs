@@ -60,6 +60,10 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"ADDRESS","type":"string","jsonPath":".status.address"}"#,
     printcolumn = r#"{"name":"BUCKET","type":"string","jsonPath":".spec.bucket"}"#,
     printcolumn = r#"{"name":"PREFIX","type":"string","jsonPath":".spec.keyPrefix"}"#,
+    // The front door's index. A share's Kubernetes name is derived
+    // (`fs-<project-id>`), so this is what makes the mapping legible
+    // from the cluster side without decoding names by eye.
+    printcolumn = r#"{"name":"PROJECT","type":"string","jsonPath":".metadata.labels['flint.io/project-id']","priority":1}"#,
     printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -462,6 +466,12 @@ pub enum Reclaim {
     /// Delete the PVC with the CR. The bucket is still untouched — for
     /// a tiered share the durable copy survives; for a tier-off share
     /// this destroys the data.
+    ///
+    /// **An adopted claim (`spec.existingClaim`) is never deleted, even
+    /// with this set.** The operator does not delete volumes it did not
+    /// create; the share is removed, the claim is left, and a
+    /// `ReclaimRefused` event says so. Hibernation has always refused
+    /// on the same grounds.
     Delete,
 }
 
@@ -564,6 +574,22 @@ pub struct FlintShareStatus {
     /// CR-derived naming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_name: Option<String>,
+
+    /// The hub's persisted NFS server identity, as last observed.
+    ///
+    /// **A change here means every existing mount is stale.** The id is
+    /// stable across ordinary restarts, because it lives on the PVC
+    /// with the rest of the NFS state — but a hibernate deletes that
+    /// PVC, so a woken share comes back with a new one and the
+    /// stateids clients still hold refer to a server generation that
+    /// no longer exists. A front door that records this value alongside
+    /// a brokered mount can tell the difference between "the hub
+    /// bounced, carry on" and "remount before you trust that handle",
+    /// without polling the hub itself.
+    ///
+    /// `None` = not observed yet, or a hub too old to report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
 
     /// Standard conditions (`Ready`, `ConfigCurrent`, `Conflict`,
     /// `AdoptionBlocked`), upstream field-for-field.
@@ -961,7 +987,25 @@ mod tests {
             .iter()
             .map(|c| c["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["PHASE", "ADDRESS", "BUCKET", "PREFIX", "AGE"]);
+        assert_eq!(
+            names,
+            vec!["PHASE", "ADDRESS", "BUCKET", "PREFIX", "PROJECT", "AGE"]
+        );
+        // PROJECT is priority 1 — `kubectl get flintshares` stays
+        // narrow and `-o wide` shows the front door's index.
+        let project = cols
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "PROJECT")
+            .expect("PROJECT column");
+        assert_eq!(project["priority"], 1);
+        // Bracket notation, because the label key contains dots and a
+        // backslash escape is not valid JSON.
+        assert_eq!(
+            project["jsonPath"],
+            ".metadata.labels['flint.io/project-id']"
+        );
         assert_eq!(crd["spec"]["names"]["shortNames"][0], "fsh");
         assert_eq!(crd["spec"]["scope"], "Namespaced");
         assert!(crd["spec"]["versions"][0]["subresources"]["status"].is_object());

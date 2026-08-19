@@ -210,6 +210,31 @@ pub fn claim_plan(
 /// Hash a Secret's contents so a rotation becomes a pod-template
 /// change. Sorted keys: a map's iteration order must not decide
 /// whether the fleet rolls.
+/// The label a referenced credentials Secret must carry for the
+/// operator to WATCH it.
+///
+/// The watch was `Api::<Secret>::all` with no selector, so every
+/// Secret in the cluster — every service-account token, every
+/// unrelated tenant's credentials — was resident in the operator's
+/// memory for the sake of the handful it cares about.
+///
+/// Selecting on this label bounds that. The consequence of a missing
+/// label is deliberately mild: the checksum is computed from a direct
+/// `get`, not from the watch store (see `apply`), so an unlabelled
+/// Secret still rotates the hub — on the next periodic reconcile
+/// rather than instantly. The label buys immediacy, not correctness,
+/// which is why adding it can be a warning rather than a failure.
+pub const LABEL_CREDENTIALS: &str = "flint.io/credentials";
+
+/// Whether a Secret carries the watch label, whatever its value.
+pub fn is_watched_secret(secret: &Secret) -> bool {
+    secret
+        .metadata
+        .labels
+        .as_ref()
+        .is_some_and(|l| l.contains_key(LABEL_CREDENTIALS))
+}
+
 pub fn creds_checksum(secret: &Secret) -> String {
     let mut h = Sha256::new();
     if let Some(data) = &secret.data {
@@ -518,6 +543,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 address: None,
                 observed_generation: generation,
                 claim_name: None,
+                server_id: carry_server_id(&share, None),
                 conditions: Some(conds),
             },
         )
@@ -556,6 +582,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                     address: None,
                     observed_generation: generation,
                     claim_name: Some(names.claim.clone()),
+                    server_id: carry_server_id(&share, None),
                     conditions: Some(conds),
                 },
             )
@@ -586,6 +613,35 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                     &mut conds,
                     condition("CredentialsFound", true, "Present", None, generation),
                 );
+                // Found, hashed, and the hub will roll on a rotation
+                // either way — but only a labelled Secret gets a watch
+                // event, so an unlabelled one rolls on the next
+                // periodic pass instead of within seconds. Say so
+                // rather than letting someone discover the latency
+                // during a credential incident.
+                if !is_watched_secret(&s) {
+                    let msg = format!(
+                        "Secret {secret_name} is missing the label {LABEL_CREDENTIALS} — \
+                         rotations will be picked up on the next periodic reconcile rather \
+                         than immediately. `kubectl label secret {secret_name} \
+                         {LABEL_CREDENTIALS}=true` to close the gap."
+                    );
+                    set_condition(
+                        &mut conds,
+                        condition(
+                            "CredentialsWatched",
+                            false,
+                            "Unlabelled",
+                            Some(msg),
+                            generation,
+                        ),
+                    );
+                } else {
+                    set_condition(
+                        &mut conds,
+                        condition("CredentialsWatched", true, "Labelled", None, generation),
+                    );
+                }
             }
             None => {
                 let msg = format!(
@@ -733,6 +789,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 address: None,
                 observed_generation: generation,
                 claim_name: Some(names.claim.clone()),
+                server_id: carry_server_id(&share, None),
                 conditions: Some(conds),
             },
         )
@@ -793,10 +850,38 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             }),
             observed_generation: generation,
             claim_name: Some(names.claim.clone()),
+            server_id: carry_server_id(&share, idle_outcome.server_id.clone()),
             conditions: Some(conds),
         },
     )
     .await?;
+
+    // Consume `wake-intent`, but only once the hub it was for is
+    // actually serving.
+    //
+    // The ORDER is the whole subtlety. Clearing it in the same patch
+    // that sets the share Active would clear it before the render that
+    // reads it ever runs, so the intent would never reach the pod —
+    // wired and inert, which is the state this was in to begin with.
+    // Clearing it here means the ConfigMap flips back to the standing
+    // setting on the next pass, and because `rollout_checksum` ignores
+    // the boot-only knob, that flip does NOT roll the hub. Leaving it
+    // set instead would make one front-door hint permanent.
+    if phase == Phase::Ready
+        && idle::state_of(&share) == idle::IdleState::Active
+        && idle::wake_intent(&share).is_some()
+    {
+        let patch = serde_json::json!({
+            "metadata": { "annotations": { idle::ANN_WAKE_INTENT: serde_json::Value::Null } }
+        });
+        Api::<FlintShare>::namespaced(ctx.client.clone(), &ns)
+            .patch(
+                &share.name_any(),
+                &PatchParams::apply(FIELD_MANAGER),
+                &Patch::Merge(&patch),
+            )
+            .await?;
+    }
 
     Ok(Action::requeue(match phase {
         // An admin's Suspended is inert: the ladder returns `Stay`
@@ -816,6 +901,11 @@ struct IdleOutcome {
     /// `Some` ⇒ the ladder changed something and this reconcile ends
     /// here; the change it made re-triggers the loop.
     short_circuit: Option<Action>,
+    /// The hub's persisted server id, when this pass actually reached
+    /// the hub. Carried out rather than polled for separately: the
+    /// ladder already made that round trip, and a second one for a
+    /// field that changes about once a week would be the wrong trade.
+    server_id: Option<String>,
 }
 
 /// Poll the hub, decide, act.
@@ -857,6 +947,10 @@ async fn drive_idle_ladder(
         return Ok(IdleOutcome {
             phase: ladder_phase.unwrap_or(Phase::Pending),
             short_circuit: None,
+            // Deliberately not observed: this branch exists BECAUSE it
+            // makes no round trip. `apply` carries the last known id
+            // forward rather than blanking it.
+            server_id: None,
         });
     }
 
@@ -868,12 +962,14 @@ async fn drive_idle_ladder(
     // could not be reached reports neither, and `None` here means
     // "unknown", never "nobody is mounted".
     let mut sessions_live = None;
+    let mut server_id = None;
     let hub_quiet = if state.is_down() {
         Err("the hub is scaled to zero".to_string())
     } else {
         match poll_hub(ctx, share, &ns, names, dep).await {
             Ok(snap) => {
                 sessions_live = snap.sessions_live();
+                server_id = snap.server_id.clone();
                 let after = cfg
                     .as_ref()
                     .and_then(|c| c.suspend_after_secs)
@@ -963,6 +1059,7 @@ async fn drive_idle_ladder(
             return Ok(IdleOutcome {
                 phase: ladder_phase.unwrap_or(Phase::Pending),
                 short_circuit: None,
+                server_id: server_id.clone(),
             })
         }
         Decision::Hold(why) => {
@@ -973,6 +1070,7 @@ async fn drive_idle_ladder(
             return Ok(IdleOutcome {
                 phase: ladder_phase.unwrap_or(Phase::Pending),
                 short_circuit: None,
+                server_id: server_id.clone(),
             });
         }
         Decision::Suspend => (IdleState::Suspended, "idle".to_string()),
@@ -1031,6 +1129,7 @@ async fn drive_idle_ladder(
         IdleState::Active => Phase::Starting,
     };
     Ok(IdleOutcome {
+        server_id: None,
         phase,
         // The annotation patch re-triggers the loop, which re-renders
         // with the new state. Requeue anyway rather than relying on the
@@ -1068,7 +1167,7 @@ async fn verify_and_hibernate(
             conds,
             condition("IdleEligible", false, "WokenDuringVerify", Some(note), generation),
         );
-        return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)) });
+        return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None });
     }
 
     let snap = match poll_hub(ctx, share, &ns, names, dep).await {
@@ -1081,7 +1180,7 @@ async fn verify_and_hibernate(
                 conds,
                 condition("HubReachable", false, "PollFailed", Some(why.clone()), generation),
             );
-            return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)) });
+            return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None });
         }
     };
 
@@ -1103,7 +1202,7 @@ async fn verify_and_hibernate(
             conds,
             condition("IdleEligible", false, "NotRecoverable", Some(why), generation),
         );
-        return Ok(IdleOutcome { phase: Phase::Ready, short_circuit: Some(Action::requeue(REQUEUE_BLOCKED)) });
+        return Ok(IdleOutcome { phase: Phase::Ready, short_circuit: Some(Action::requeue(REQUEUE_BLOCKED)), server_id: None });
     }
 
     // Clean. Record Hibernated FIRST, so the render scales to zero and
@@ -1124,7 +1223,7 @@ async fn verify_and_hibernate(
         conds,
         condition("IdleEligible", true, "Hibernating", Some(note), generation),
     );
-    Ok(IdleOutcome { phase: Phase::Hibernated, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)) })
+    Ok(IdleOutcome { phase: Phase::Hibernated, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None })
 }
 
 /// Patch the ladder's durable position onto the CR.
@@ -1224,9 +1323,33 @@ async fn poll_hub(
     };
     let port = m.port.unwrap_or(render::HEALTH_PORT);
 
+    // SELECTED, not the whole namespace. This runs once per poll per
+    // share, so at fleet scale it is the dominant API-server term — and
+    // in a namespace holding many shares, each poll was paging in every
+    // other share's pods to discard them client-side.
+    //
+    // The selector comes from the Deployment rather than from
+    // `render::labels`, because those two are not the same thing for an
+    // ADOPTED share: its Deployment was born with the chart's selector
+    // and a Deployment's selector is immutable. Asking the object what
+    // it selects is the only version that is right in both cases, and
+    // `pod_is_ours` still re-checks it below.
+    let lp = dep
+        .and_then(|d| d.spec.as_ref())
+        .and_then(|sp| sp.selector.match_labels.as_ref())
+        .filter(|m| !m.is_empty())
+        .map(|m| {
+            ListParams::default().labels(
+                &m.iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        })
+        .unwrap_or_default();
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
     let all = pods
-        .list(&ListParams::default())
+        .list(&lp)
         .await
         .map_err(|e| format!("listing pods: {e}"))?
         .items;
@@ -1240,6 +1363,42 @@ async fn poll_hub(
         .ok_or_else(|| "no running hub pod with an IP".to_string())?;
 
     hubstatus::poll(&ip, port, std::time::Duration::from_secs(3)).await
+}
+
+/// Why an adopted claim outlives its share. One string, because the
+/// same rule is applied from two places and they must not drift.
+pub const ADOPTED_CLAIM_NOT_DELETED: &str =
+    "the claim is adopted (spec.existingClaim) and the operator does not delete volumes it \
+     did not create";
+
+/// The server id to publish this pass.
+///
+/// A reconcile that did not reach the hub — the ladder is off, the
+/// share is scaled to zero, the poll failed — must not blank a value
+/// it simply did not look for. `write_status` replaces the whole
+/// status, so "unobserved" has to be spelled as "keep what was there".
+fn carry_server_id(share: &FlintShare, observed: Option<String>) -> Option<String> {
+    observed.or_else(|| share.status.as_ref().and_then(|s| s.server_id.clone()))
+}
+
+/// Whether the operator may delete this share's claim.
+///
+/// **Adopted claims are never deleted, whatever `reclaim` says.** The
+/// user pointed `spec.existingClaim` at a PVC they made; `reclaim:
+/// Delete` means "delete the PVC I created for this share", and here
+/// the operator created nothing. The hibernate path has always refused
+/// on these grounds (`hibernate_reclaim`); CR deletion did not, so one
+/// field meant two different things depending on the route that
+/// reached it.
+///
+/// The asymmetry of being wrong settles it. Adoption is the documented
+/// migration path off a helm release, so an adopted claim is evidence
+/// that something else still believes it owns that data — deleting it
+/// destroys a volume whose real owner expects it to be there.
+/// Refusing leaks a PVC, which is visible in `kubectl get pvc` and
+/// removable with one command.
+pub fn may_delete_claim(reclaim: &Reclaim, claim_is_adopted: bool) -> bool {
+    matches!(reclaim, Reclaim::Delete) && !claim_is_adopted
 }
 
 /// CR deletion. Owner GC takes the ConfigMap, Service and Deployment;
@@ -1267,6 +1426,24 @@ async fn cleanup(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             )
             .await;
         }
+        // `may_delete_claim` is the rule; this arm is what happens when
+        // it says no. Guarding on the function rather than repeating
+        // `claim_is_adopted` is what keeps the two in step.
+        Reclaim::Delete if !may_delete_claim(&reclaim, names.claim_is_adopted) => {
+            let why = ADOPTED_CLAIM_NOT_DELETED;
+            warn!(
+                share = %share.name_any(), claim = %names.claim,
+                "reclaim: Delete — REFUSED: {why}"
+            );
+            event(
+                &ctx,
+                &share,
+                EventType::Warning,
+                "ReclaimRefused",
+                &format!("PVC {} was NOT deleted despite reclaim: Delete — {why}", names.claim),
+            )
+            .await;
+        }
         Reclaim::Delete => {
             // Order matters and is the whole reason this runs before
             // the finalizer is removed: the delete is issued FIRST, and
@@ -1281,7 +1458,6 @@ async fn cleanup(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             match claims.delete(&names.claim, &DeleteParams::default()).await {
                 Ok(_) => {
                     warn!(share = %share.name_any(), claim = %names.claim,
-                          adopted = names.claim_is_adopted,
                           "reclaim: Delete — deleting the PVC");
                     event(
                         &ctx,
@@ -1744,6 +1920,33 @@ mod tests {
 
         // Bottom of the ladder: nothing left on a timer.
         assert_eq!(settled_requeue(&share, Hibernated), REQUEUE_SETTLED);
+    }
+
+    /// `reclaim: Delete` and `spec.existingClaim` are both the user's
+    /// words, and they contradict each other. The hibernate path has
+    /// always resolved that by refusing; CR deletion resolved it by
+    /// deleting and logging `adopted=true`, so the same field meant
+    /// two different things depending on which route reached it.
+    #[test]
+    fn an_adopted_claim_is_never_deleted_whatever_reclaim_says() {
+        // The operator's own claim: `reclaim` is the whole decision.
+        assert!(may_delete_claim(&Reclaim::Delete, false));
+        assert!(!may_delete_claim(&Reclaim::Retain, false));
+
+        // Adopted: refused in BOTH directions. Retain would have kept
+        // it anyway; Delete is the arm that used to destroy a volume
+        // the operator never created.
+        assert!(!may_delete_claim(&Reclaim::Delete, true));
+        assert!(!may_delete_claim(&Reclaim::Retain, true));
+
+        // And it agrees with the hibernate path, which is the point —
+        // `hibernate_reclaim` returns early on exactly this condition.
+        for reclaim in [Reclaim::Retain, Reclaim::Delete] {
+            assert!(
+                !may_delete_claim(&reclaim, true),
+                "hibernate refuses an adopted claim; deletion must not disagree"
+            );
+        }
     }
 
     /// **The only way a consumer in ANOTHER cluster gets a mountable
