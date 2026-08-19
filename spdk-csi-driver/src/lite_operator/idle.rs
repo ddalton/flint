@@ -329,6 +329,45 @@ mod tests {
         }
     }
 
+    /// The third signal is OPT-IN, and it has to actually work when
+    /// opted into. It was inert until the reconciler threaded
+    /// `nfs.activeLeases` through: the caller passed a hardcoded
+    /// `None`, so `suspendWithSessions: false` was a knob the CRD
+    /// advertised and nothing honoured.
+    ///
+    /// The default stays off deliberately. An idle NFSv4 mount renews
+    /// its lease forever, so defaulting this on would pin every mounted
+    /// share awake permanently — the state the ladder exists to end.
+    #[test]
+    fn the_sessions_guard_is_opt_in_but_real_once_opted_into() {
+        let s = share(&[]);
+        let quiet = |cfg: &IdleSpec, sessions| {
+            decide(
+                Some(cfg),
+                Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: sessions },
+            )
+        };
+
+        // Default: a live lease does NOT hold the suspend.
+        assert_eq!(quiet(&idle(Some(60), None), Some(true)), Decision::Suspend);
+
+        // Opted in: it does.
+        let guarded = IdleSpec {
+            suspend_after_secs: Some(60),
+            hibernate_after_secs: None,
+            suspend_with_sessions: Some(false),
+        };
+        assert!(matches!(quiet(&guarded, Some(true)), Decision::Hold(_)));
+
+        // Opted in with nobody mounted: still suspends.
+        assert_eq!(quiet(&guarded, Some(false)), Decision::Suspend);
+
+        // Opted in and the hub did not say. UNKNOWN is not "nobody",
+        // but it is not a hold either — the two signals that DID answer
+        // both say idle, and this rung only ever adds a refusal.
+        assert_eq!(quiet(&guarded, None), Decision::Suspend);
+    }
+
     /// **Absent is OFF.** Defaulting the ladder on would auto-suspend
     /// every share in an existing fleet — including tier-off ones whose
     /// consumers mount `status.address` as a plain PV and have never

@@ -83,6 +83,10 @@ pub struct HubSnapshot {
     pub epoch: Option<Epoch>,
     #[serde(default)]
     pub sweep: Option<Sweep>,
+    /// The NFSv4 layer's own view. `None` = a hub too old to report it,
+    /// which must never read as "no clients".
+    #[serde(default)]
+    pub nfs: Option<Nfs>,
     /// Set ⇒ the bucket holds a manifest the hub could not read, so the
     /// namespace was NOT restored. Nothing may publish from this hub.
     #[serde(default)]
@@ -112,6 +116,17 @@ pub struct Rpo {
     pub manifest_current: bool,
     #[serde(default)]
     pub beyond_rpo: Option<usize>,
+}
+
+/// What the NFSv4 state manager knows about live clients.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Nfs {
+    /// Unexpired NFSv4 leases. `None` = the hub did not say, which is
+    /// NOT zero: an absent count must never be read as "nobody is
+    /// mounted" by a predicate that scales hubs to zero.
+    #[serde(default)]
+    pub active_leases: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -164,6 +179,17 @@ impl HubSnapshot {
             return Err("a foreign-key sweep is still running".to_string());
         }
         Ok(())
+    }
+
+    /// Does a client still hold a lease on this hub?
+    ///
+    /// `None` = the hub did not report, so the answer is unknown and
+    /// the caller must not infer "nobody". Feeds `Inputs::sessions_live`,
+    /// which `spec.idle.suspendWithSessions: false` acts on.
+    pub fn sessions_live(&self) -> Option<bool> {
+        self.nfs
+            .and_then(|n| n.active_leases)
+            .map(|n| n > 0)
     }
 
     /// May the PVC be deleted — i.e. can the bucket rebuild this volume?
@@ -312,6 +338,25 @@ mod tests {
 
     /// **No tier ⇒ the PVC is the only copy.** `rpoClean: null` must
     /// never read as permission to delete it. This is the assertion
+    /// `activeLeases` has to survive the trip from the hub's document
+    /// into the predicate, and an ABSENT count must not read as zero —
+    /// the caller scales hubs to zero on this.
+    #[test]
+    fn a_missing_lease_count_is_unknown_rather_than_nobody() {
+        let mounted = snap(r#"{"phase":"serving","nfs":{"activeLeases":2}}"#);
+        assert_eq!(mounted.sessions_live(), Some(true));
+
+        let empty = snap(r#"{"phase":"serving","nfs":{"activeLeases":0}}"#);
+        assert_eq!(empty.sessions_live(), Some(false));
+
+        // A hub too old to report it, and a hub reporting nfs with no
+        // count, are both UNKNOWN.
+        let silent = snap(r#"{"phase":"serving"}"#);
+        assert_eq!(silent.sessions_live(), None, "absent must not read as nobody");
+        let partial = snap(r#"{"phase":"serving","nfs":{}}"#);
+        assert_eq!(partial.sessions_live(), None);
+    }
+
     /// A clean RPO from a hub that does NOT hold the tier epoch is an
     /// answer about someone else's volume. The consequence of getting
     /// this wrong is `claims.delete`, so it defers instead.

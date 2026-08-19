@@ -841,11 +841,16 @@ async fn drive_idle_ladder(
     // already down has no pod, and a share still starting has no
     // listener — in both cases the poll would fail, and a failed poll
     // must never read as idleness.
+    // Threaded alongside `hub_quiet` from the same poll: a hub that
+    // could not be reached reports neither, and `None` here means
+    // "unknown", never "nobody is mounted".
+    let mut sessions_live = None;
     let hub_quiet = if state.is_down() {
         Err("the hub is scaled to zero".to_string())
     } else {
         match poll_hub(ctx, share, &ns, names, dep).await {
             Ok(snap) => {
+                sessions_live = snap.sessions_live();
                 let after = cfg
                     .as_ref()
                     .and_then(|c| c.suspend_after_secs)
@@ -899,7 +904,7 @@ async fn drive_idle_ladder(
             share,
             now: chrono::Utc::now(),
             hub_quiet,
-            sessions_live: None,
+            sessions_live,
         },
     );
 
