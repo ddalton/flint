@@ -131,6 +131,15 @@ spec:
         flint.io/role: lite
         {{- include "flint-lite.selectorLabels" . | nindent 8 }}
     spec:
+      # SIGTERM starts a real shutdown: drain in-flight replies, flush
+      # everything dirty, write the DR manifest, then mark the epoch
+      # released so the next hub claims without waiting out a lease
+      # nobody holds. The default 30s is not enough to publish a large
+      # dirty set — a hub killed at the deadline is still CORRECT (it
+      # leaves the epoch held, so no successor serves a bucket that is
+      # behind the PVC) but it is slow to wake and its last writes stay
+      # unpublished until it comes back.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

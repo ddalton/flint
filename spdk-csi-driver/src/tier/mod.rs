@@ -61,5 +61,6 @@ pub mod import;
 pub mod manifest;
 pub mod meter;
 pub mod reporter;
+pub mod rpo;
 pub mod space;
 pub mod store;

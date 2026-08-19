@@ -206,6 +206,16 @@ pub struct FlintShareSpec {
     /// operator kills a takeover at 55 seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_failure_threshold: Option<i32>,
+
+    /// Seconds the kubelet waits after SIGTERM before SIGKILL. The hub
+    /// spends that window draining, flushing every dirty file, writing
+    /// the DR manifest and releasing the epoch — which is what makes
+    /// the NEXT start instant instead of a lease wait. Absent = 120.
+    /// A hub killed at the deadline is still correct (it leaves the
+    /// epoch held so no successor serves a stale bucket), just slow to
+    /// wake with its last writes unpublished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_grace_period_seconds: Option<i64>,
 }
 
 /// The hub's disk.
@@ -645,6 +655,7 @@ mod tests {
             existing_claim: None,
             restart_policy: None,
             startup_failure_threshold: None,
+            termination_grace_period_seconds: None,
         }
     }
 

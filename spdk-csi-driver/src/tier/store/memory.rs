@@ -227,6 +227,9 @@ fn mpu_etag(bytes: &[u8], parts: usize) -> String {
 struct EpochBody {
     holder_id: String,
     epoch: u64,
+    /// Clean-shutdown mark — see `ObjectStore::epoch_release`.
+    #[serde(default)]
+    released: bool,
 }
 
 #[async_trait]
@@ -412,6 +415,7 @@ impl ObjectStore for MemoryStore {
             epoch: body.epoch,
             token: o.etag.clone(),
             last_renew_unix: Some(o.last_modified_unix),
+            released: body.released,
         }))
     }
 
@@ -423,7 +427,12 @@ impl ObjectStore for MemoryStore {
     ) -> StoreResult<EpochLease> {
         let epoch = supersede.map_or(1, |s| s.epoch + 1);
         let body = Bytes::from(
-            serde_json::to_vec(&EpochBody { holder_id: holder_id.into(), epoch }).unwrap(),
+            serde_json::to_vec(&EpochBody {
+                holder_id: holder_id.into(),
+                epoch,
+                released: false,
+            })
+            .unwrap(),
         );
         let condition = match supersede {
             None => PutCondition::IfNoneMatchAny,
@@ -448,6 +457,7 @@ impl ObjectStore for MemoryStore {
             serde_json::to_vec(&EpochBody {
                 holder_id: lease.holder_id.clone(),
                 epoch: lease.epoch,
+                released: false,
             })
             .unwrap(),
         );
@@ -474,12 +484,28 @@ impl ObjectStore for MemoryStore {
     }
 
     async fn epoch_release(&self, key: &str, lease: &EpochLease) -> StoreResult<()> {
+        // Mark, never delete — deleting restarts epoch numbering at 1.
+        let body = Bytes::from(
+            serde_json::to_vec(&EpochBody {
+                holder_id: lease.holder_id.clone(),
+                epoch: lease.epoch,
+                released: true,
+            })
+            .unwrap(),
+        );
         let mut inner = self.inner.lock().unwrap();
         Self::check_condition(
             inner.objects.get(key),
             &PutCondition::IfMatch(lease.token.clone()),
         )?;
-        inner.objects.remove(key);
+        let obj = StoredObject {
+            etag: put_etag(&body),
+            crc64: crc64_nvme(&body),
+            meta: HashMap::new(),
+            last_modified_unix: now_unix(),
+            bytes: body,
+        };
+        inner.objects.insert(key.to_string(), obj);
         Ok(())
     }
 
@@ -725,9 +751,23 @@ mod tests {
         let err = s.epoch_release(K, &l1b).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)), "deposed release must fail");
 
-        // The holder releases; the key is gone.
+        // The holder releases: the cell is MARKED, not deleted. Losing
+        // it would restart epoch numbering at 1 for the next claimant,
+        // and every publish stamp on the volume is already past that.
         s.epoch_release(K, &l2).await.unwrap();
-        assert!(s.epoch_read(K).await.unwrap().is_none());
+        let after = s.epoch_read(K).await.unwrap().expect("the cell must survive a release");
+        assert!(after.released, "a clean shutdown marks the cell released");
+        assert_eq!(after.epoch, 2, "and the epoch number is preserved");
+        assert_eq!(after.holder_id, "hub-b");
+
+        // The successor supersedes the released cell at epoch+1 — the
+        // fast path `claim` takes with no quiet wait.
+        let l3 = s.epoch_acquire(K, "hub-c", Some(&after)).await.unwrap();
+        assert_eq!(l3.epoch, 3, "numbering continues, it does not reset");
+        assert!(
+            !s.epoch_read(K).await.unwrap().unwrap().released,
+            "a fresh claim clears the released mark"
+        );
     }
 
     #[tokio::test]

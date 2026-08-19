@@ -39,6 +39,119 @@ pub mod memory;
 pub mod sqlite;
 
 pub use memory::MemoryBackend;
+
+static SINGLE_OCCUPANCY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Did this process take the state directory's occupancy lock?
+///
+/// True means no other process can be using this state database, and
+/// therefore no other process shares this hub's `server_id`. The epoch
+/// protocol leans on that: its self-recognition arm deposes a holder
+/// bearing our own id on sight, which is only safe when a second live
+/// incarnation is impossible.
+///
+/// Caveat worth knowing: `flock` is advisory and is not reliable across
+/// nodes on network filesystems. It fences the case that actually
+/// happens — two pods on one node sharing an RWO claim — and a
+/// cross-node NFS-backed claim would fall back to the lease timeout,
+/// which is the safe direction.
+pub fn is_single_occupant() -> bool {
+    SINGLE_OCCUPANCY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Declare single occupancy without a lock, for backends that cannot
+/// be shared between processes at all. A memory backend lives in this
+/// process's heap: its `server_id` is generated here and dies here, so
+/// no second process can ever present it and the identity confusion
+/// the lock exists to prevent is structurally impossible.
+pub fn declare_private_state() {
+    SINGLE_OCCUPANCY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Take the state directory's exclusive occupancy lock, and hold it
+/// for the life of the process.
+///
+/// The hub's durable identity — its `server_id` — lives in the state
+/// database. Two processes sharing that directory therefore share an
+/// identity, and the epoch protocol's self-recognition arm will let the
+/// second one depose the first on sight, believing it to be its own
+/// restarted incarnation. That is the one split-brain the store-side
+/// epoch cannot arbitrate, and it is reachable by ordinary Kubernetes
+/// behaviour: a wake during a graceful shutdown, a node drain, an
+/// eviction, `kubectl delete pod`.
+///
+/// `flock` is the right primitive here precisely because it is tied to
+/// the process: the kernel drops it at exit, crash included, so a dead
+/// hub never blocks its own replacement. Retries cover the normal
+/// handoff, where the incumbent is mid-drain and about to exit.
+pub fn hold_single_occupancy(dir: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        static HELD: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+        if HELD.get().is_some() {
+            return Ok(());
+        }
+        SINGLE_OCCUPANCY.store(false, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join("flint-hub.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| format!("open {}: {}", path.display(), e))?;
+
+        // ~grace + slack: long enough for a draining incumbent to
+        // finish its final flush and exit, short enough that a truly
+        // wedged one fails the pod rather than hanging forever.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(150);
+        let mut waited = false;
+        loop {
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                if waited {
+                    tracing::info!(
+                        "🔒 state dir {} released by the previous hub — proceeding",
+                        dir.display()
+                    );
+                }
+                let _ = HELD.set(file);
+                SINGLE_OCCUPANCY.store(true, std::sync::atomic::Ordering::Relaxed);
+                return Ok(());
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(format!("flock {}: {}", path.display(), err));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "another flint hub still holds {} — refusing to start a second \
+                     writer on this volume (two processes here share one server_id, \
+                     which the epoch protocol cannot fence)",
+                    path.display()
+                ));
+            }
+            if !waited {
+                tracing::warn!(
+                    "🔒 state dir {} is held by another hub process — waiting for it \
+                     to finish draining",
+                    dir.display()
+                );
+                waited = true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+
 pub use sqlite::SqliteBackend;
 
 use std::sync::Arc;

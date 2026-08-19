@@ -346,6 +346,10 @@ pub struct EpochState {
     /// The store's own clock for the last renewal (S3 Last-Modified) —
     /// A8: takeover is judged against the STORE's clock, not ours.
     pub last_renew_unix: Option<u64>,
+    /// The holder shut down cleanly and will never publish under this
+    /// epoch again — a successor supersedes immediately instead of
+    /// waiting out the lease. Written by [`ObjectStore::epoch_release`].
+    pub released: bool,
 }
 
 /// A held lease (write side).
@@ -433,6 +437,11 @@ pub trait ObjectStore: Send + Sync {
     /// Heartbeat CAS. `PreconditionFailed` means deposed: self-fence.
     async fn epoch_renew(&self, key: &str, lease: &EpochLease) -> StoreResult<EpochLease>;
 
+    /// Mark the cell released: a clean handoff. The epoch NUMBER must
+    /// survive (deleting the cell would restart numbering at 1 and
+    /// break the monotonicity every publish stamp depends on), and the
+    /// write must be guarded on `lease`'s own token so a deposed
+    /// holder cannot mark a live successor's cell.
     async fn epoch_release(&self, key: &str, lease: &EpochLease) -> StoreResult<()>;
 
     /// Backend part granularity for the A11 part-size grid.

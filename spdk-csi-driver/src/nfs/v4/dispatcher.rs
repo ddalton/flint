@@ -460,6 +460,13 @@ impl CompoundDispatcher {
         // checking after SEQUENCE binds the session below.
         let request_wire_size = request.wire_size;
 
+        // The idle signal. One scan of the op list per COMPOUND, before
+        // the list is consumed by the loop below — a bare SEQUENCE
+        // renewal or an attribute poll leaves the clock untouched, so a
+        // mounted-but-unused volume can still go idle. See
+        // `crate::nfs::activity` for what counts and why.
+        crate::nfs::activity::note_compound(&request.operations);
+
         for (i, operation) in request.operations.into_iter().enumerate() {
             debug!("COMPOUND[{}]: Processing operation: {:?}", i, operation);
 
@@ -5051,6 +5058,40 @@ mod tests {
         let response = dispatcher.dispatch_compound(request, Vec::new()).await;
         assert_eq!(response.status, Nfs4Status::Ok);
         assert_eq!(response.results.len(), 2);
+    }
+
+    /// Pins the idle-signal WIRING: dispatching a content read must
+    /// move the activity counters, i.e. `note_compound` really runs on
+    /// the dispatch path. Which ops count is pinned separately by the
+    /// unit tests in `crate::nfs::activity` — asserted there rather than
+    /// here because the counters are process-global and other tests
+    /// dispatch compounds in parallel, so "unchanged" is not a claim
+    /// this test can make without flaking.
+    #[tokio::test]
+    async fn dispatching_a_read_records_activity() {
+        use crate::nfs::activity;
+        let (dispatcher, _temp) = create_test_dispatcher();
+        let before = activity::snapshot().data_ops;
+
+        // The READ itself fails without a filehandle; classification is
+        // by intent, not outcome — a client asking for bytes is a user.
+        dispatcher
+            .dispatch_compound(
+                CompoundRequest {
+                    tag: "activity".to_string(),
+                    tag_valid: true,
+                    minor_version: 0,
+                    operations: vec![Operation::Read {
+                        stateid: StateId::ANONYMOUS,
+                        offset: 0,
+                        count: 1,
+                    }],
+                    wire_size: 0,
+                },
+                Vec::new(),
+            )
+            .await;
+        assert!(activity::snapshot().data_ops > before);
     }
 
     #[tokio::test]

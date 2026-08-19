@@ -67,6 +67,7 @@ pub struct RenderDefaults {
     pub image_pull_policy: String,
     /// `failureThreshold` for the tiered startupProbe, in 10s periods.
     pub startup_failure_threshold: i32,
+    pub termination_grace_period_seconds: i64,
     pub log_level: String,
     pub service_port: i32,
 }
@@ -84,6 +85,7 @@ impl Default for RenderDefaults {
             // walks the whole bucket. Reading this window as failure is
             // how a liveness probe kills a takeover at 55 seconds.
             startup_failure_threshold: 60,
+            termination_grace_period_seconds: 120,
             log_level: "info".to_string(),
             service_port: NFS_PORT,
         }
@@ -486,6 +488,13 @@ pub fn deployment(
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
+                    // The shutdown budget: drain, final flush, manifest
+                    // barrier, epoch release. The 30s Kubernetes
+                    // default cannot publish a large dirty set.
+                    termination_grace_period_seconds: Some(
+                        s.termination_grace_period_seconds
+                            .unwrap_or(d.termination_grace_period_seconds),
+                    ),
                     node_selector: s.node_selector.clone().filter(|m| !m.is_empty()),
                     containers: vec![Container {
                         name: "hub".to_string(),
@@ -617,6 +626,7 @@ mod tests {
             existing_claim: None,
             restart_policy: None,
             startup_failure_threshold: None,
+            termination_grace_period_seconds: None,
         }
     }
 

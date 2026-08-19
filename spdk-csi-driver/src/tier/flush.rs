@@ -249,6 +249,14 @@ pub struct FlushOrchestrator {
     /// manifest itself is written at the end of every tick (the flush
     /// barrier) when its content changed.
     manifest: tokio::sync::Mutex<crate::tier::manifest::WriterState>,
+    /// The most recent barrier's outcome — the only durable answer to
+    /// "does the bucket currently describe this tree?". Read by the
+    /// RPO predicate the lifecycle controller gates suspend and
+    /// hibernate on. `None` until the first barrier runs, which is
+    /// deliberately NOT clean: a hub that has not yet described itself
+    /// to the bucket must not be hibernated on the strength of an
+    /// empty dirty list.
+    last_barrier: std::sync::Mutex<Option<crate::tier::manifest::BarrierOutcome>>,
 }
 
 impl FlushOrchestrator {
@@ -266,7 +274,14 @@ impl FlushOrchestrator {
             generations: DashMap::new(),
             last_flush: DashMap::new(),
             manifest: tokio::sync::Mutex::new(crate::tier::manifest::WriterState::default()),
+            last_barrier: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The last barrier's outcome, for the status surface and the RPO
+    /// predicate. `None` before the first barrier of this process.
+    pub fn last_barrier(&self) -> Option<crate::tier::manifest::BarrierOutcome> {
+        self.last_barrier.lock().ok().and_then(|g| g.clone())
     }
 
     pub fn key_for(&self, path: &Path) -> Option<String> {
@@ -604,7 +619,7 @@ impl FlushOrchestrator {
             }
         };
         let mut st = self.manifest.lock().await;
-        crate::tier::manifest::write_at_barrier(
+        let outcome = crate::tier::manifest::write_at_barrier(
             self.store.as_ref(),
             &self.cfg.key_prefix,
             epoch,
@@ -612,6 +627,9 @@ impl FlushOrchestrator {
             built,
         )
         .await;
+        if let Ok(mut slot) = self.last_barrier.lock() {
+            *slot = Some(outcome);
+        }
     }
 
     /// Flush one file. `row` is its durable dirty entry from this

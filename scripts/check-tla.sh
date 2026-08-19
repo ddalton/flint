@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and seventy-three runs, ALL required.
+# One hundred and seventy-four runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -18,8 +18,8 @@
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
 #   71 FlintReplication   33 FlintComposition   15 FlintExtents
-#   11 FlintExtentsProbe   7 FlintTruncate      7 FlintTierSession
-#    7 FlintTierMarker     7 FlintTierEpoch     5 FlintAdmission
+#   11 FlintExtentsProbe   8 FlintTierEpoch     7 FlintTruncate
+#    7 FlintTierSession    7 FlintTierMarker    5 FlintAdmission
 #    4 FlintSnapshots      3 FlintClaims        3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
@@ -1056,6 +1056,14 @@ mutation_run FlintTierEpoch FlintTierEpochNoRotate.cfg "tier-epoch rotation muta
 liveness_mutation_run FlintTierEpoch FlintTierEpochNoFence.cfg "tier-epoch fence mutation (FenceOn412=FALSE: the immortal zombie — a deposed incarnation believes forever)"
 mutation_run FlintTierEpoch FlintTierEpochProbeStale.cfg "tier-epoch stale-publish probe (RESIDUAL required-fail: the phase-H wake-up window — a deposed create lands before the first heartbeat CAS)" "Inv_NoStalePublishLand"
 mutation_run FlintTierEpoch FlintTierEpochNoStampCheck.cfg "tier-epoch stamp-check mutation (StampCheck=FALSE = the pre-fix world: the zombie's If-Match lands over the live successor — the probe that forced successor_check + startup_reverify, kept as the regression test)" "Inv_NoSuccessorOverwrite"
+# The clean handoff (CleanRelease / ClaimReleased). A shutting-down hub
+# marks its cell released so the NEXT hub — which after a hibernate has a
+# fresh server_id and cannot self-recognize — claims without waiting out
+# a lease nobody holds. The mark is a BARRIER: the mutation below marks
+# before fencing and must be caught, or the strict run's theorem is
+# vacuous and the code's drain -> flush -> fence -> release ordering is
+# unmodelled.
+mutation_run FlintTierEpoch FlintTierEpochReleaseBeforeFence.cfg "tier-epoch release-order mutation (FenceBeforeRelease=FALSE: the released mark invites a successor while the outgoing reign can still publish)" "Inv_NoPostReleaseLand"
 
 # ── FlintTierMarker.tla — the eviction-marker visibility protocol ──────
 # Two of the chaos campaign's six drill-found bugs were interleaving

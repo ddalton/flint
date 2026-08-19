@@ -31,6 +31,7 @@ pub mod rpc;          // RPC message handling (shared with NFSv4)
 pub mod kerberos;     // Pure Rust Kerberos acceptor for RPCSEC_GSS
 pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
 pub mod pipeline;     // Per-connection RPC pipelining (RFC 8881 §2.10.6)
+pub mod activity;     // Client-activity signal (the idle-lifecycle input)
 pub mod fence;        // F33: backing-store self-fencing watchdog
 pub mod volume_marker; // F30: volume-identity marker (export must prove its id)
 pub mod server_v4;    // NFSv4.2 TCP server

@@ -173,10 +173,25 @@ pub async fn claim(
                 }
                 Err(e) => return Err(e),
             },
-            Some(state) if state.holder_id == cfg.holder_id => {
+            Some(state)
+                if state.holder_id == cfg.holder_id
+                    && crate::state_backend::is_single_occupant() =>
+            {
                 // Self-recognition (A8): our previous incarnation died
                 // holding the epoch. Supersede immediately — no wait,
                 // no operator CAS.
+                //
+                // Gated on holding the state directory's occupancy
+                // lock, which is what makes "our own id" proof that the
+                // previous incarnation is GONE rather than merely
+                // unresponsive. Without that gate a second process on
+                // the same PVC — the wake-during-drain window — reads
+                // the same server_id out of the same database and
+                // deposes a hub that is mid-flush, the one split-brain
+                // the epoch cannot otherwise fence. Unlocked (memory
+                // backend, or a filesystem where flock does not hold)
+                // we fall through to the foreign-holder path and wait
+                // the lease out, which is slower and always safe.
                 match store.epoch_acquire(&cfg.key, &cfg.holder_id, Some(&state)).await {
                     Ok(lease) => {
                         info!(
@@ -187,6 +202,35 @@ pub async fn claim(
                         takeover_sweep(store, data_prefix).await?;
                         return Ok(lease);
                     }
+                    Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Some(state) if state.released => {
+                // A clean handoff: the previous holder finished its
+                // final flush, fenced itself and marked the cell before
+                // exiting. There is nothing to wait for — waiting would
+                // burn `lease_misses × heartbeat` (a minute by default)
+                // proving a hub is dead when it already said so.
+                //
+                // This is what makes waking a hibernated volume fast:
+                // its PVC was deleted, so the woken hub has a NEW
+                // server_id and cannot take the self-recognition arm
+                // above — without this it would sit through the full
+                // foreign-holder timeout on every wake.
+                match store.epoch_acquire(&cfg.key, &cfg.holder_id, Some(&state)).await {
+                    Ok(lease) => {
+                        info!(
+                            "tier epoch: {} released cleanly at epoch {} — {} claims \
+                             epoch {} with no wait",
+                            state.holder_id, state.epoch, cfg.holder_id, lease.epoch
+                        );
+                        takeover_sweep(store, data_prefix).await?;
+                        return Ok(lease);
+                    }
+                    // Someone else claimed it first; re-read and retry.
                     Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
                         continue;
                     }
@@ -299,21 +343,131 @@ async fn takeover_sweep(store: &Arc<dyn ObjectStore>, data_prefix: &str) -> Stor
     Ok(pending.len())
 }
 
-/// Renew the lease every heartbeat until deposed. On deposition (412)
-/// or a full lease window of failed renewals: fence the guard, fire
-/// `on_deposed`, exit. The task never unfences — recovery is a fresh
-/// [`claim`] by a restarted process.
+/// What a shutdown release did to the epoch cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    /// The cell is marked released; a successor claims with no wait.
+    Released,
+    /// We were deposed before or during the release — the cell belongs
+    /// to someone else and was deliberately left untouched.
+    LostCas,
+    /// The store refused the write; the cell stays held and the next
+    /// claimant waits out the lease the slow way.
+    Failed,
+}
+
+/// A running heartbeat, plus the handle a clean shutdown uses to stop
+/// it and release the epoch.
+pub struct HeartbeatHandle {
+    task: tokio::task::JoinHandle<()>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    outcome: tokio::sync::oneshot::Receiver<ReleaseOutcome>,
+}
+
+impl HeartbeatHandle {
+    /// Stop beating and mark the cell released, then wait for the
+    /// answer. Bounded by `timeout`: a shutdown must not hang on a
+    /// slow bucket past the pod's termination grace.
+    ///
+    /// Call this AFTER the final flush and AFTER fencing the guard —
+    /// the released mark is a barrier, and anything that publishes
+    /// after it lands on a prefix another hub may already own.
+    pub async fn release(mut self, timeout: Duration) -> ReleaseOutcome {
+        let Some(tx) = self.shutdown.take() else {
+            return ReleaseOutcome::Failed;
+        };
+        if tx.send(()).is_err() {
+            // The heartbeat already exited — deposed, most likely.
+            return ReleaseOutcome::LostCas;
+        }
+        match tokio::time::timeout(timeout, &mut self.outcome).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => ReleaseOutcome::Failed,
+            Err(_) => {
+                warn!("tier epoch: release timed out — cell left held");
+                ReleaseOutcome::Failed
+            }
+        }
+    }
+
+    /// Stop the heartbeat WITHOUT releasing (the dirty-shutdown path:
+    /// a hub that could not flush must leave the cell held so no
+    /// successor claims instantly and serves a stale bucket).
+    pub fn abort(self) {
+        self.task.abort();
+    }
+}
+
+/// Renew the lease every heartbeat until deposed or shut down. On
+/// deposition (412) or a full lease window of failed renewals: fence
+/// the guard, fire `on_deposed`, exit. The task never unfences —
+/// recovery is a fresh [`claim`] by a restarted process.
 pub fn spawn_heartbeat(
     store: Arc<dyn ObjectStore>,
     cfg: EpochConfig,
-    mut lease: EpochLease,
+    lease: EpochLease,
     guard: Arc<EpochGuard>,
     on_deposed: Box<dyn FnOnce() + Send>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> HeartbeatHandle {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel::<ReleaseOutcome>();
+    let task = tokio::spawn(async move {
+        let mut lease = lease;
         let mut consecutive_failures: u32 = 0;
+        // Cleared when the shutdown channel closes without a signal —
+        // i.e. the caller dropped the handle. That is NOT a shutdown
+        // request: a dropped oneshot sender resolves the receiver with
+        // an error, and treating that as "release the epoch" would
+        // hand the volume away the instant anyone stopped holding the
+        // handle. The heartbeat keeps beating; only an explicit signal
+        // releases.
+        let mut shutdown_live = true;
         loop {
-            tokio::time::sleep(cfg.heartbeat).await;
+            tokio::select! {
+                _ = tokio::time::sleep(cfg.heartbeat) => {}
+                res = &mut shutdown_rx, if shutdown_live => {
+                    if res.is_err() {
+                        shutdown_live = false;
+                        continue;
+                    }
+                    // Clean shutdown. The release CAS is issued HERE,
+                    // by the task that owns the live token, because the
+                    // token rotates on every renewal and no one else
+                    // has the current one — a caller CASing with the
+                    // claim-time token would 412 on any hub older than
+                    // one heartbeat, i.e. always, silently.
+                    let outcome = if guard.is_fenced() {
+                        // Already deposed: marking the cell now would
+                        // stamp `released` on a live successor's reign.
+                        ReleaseOutcome::LostCas
+                    } else {
+                        match store.epoch_release(&cfg.key, &lease).await {
+                            Ok(()) => {
+                                info!(
+                                    "tier epoch: released cleanly at epoch {} — the next \
+                                     hub claims with no lease wait",
+                                    lease.epoch
+                                );
+                                ReleaseOutcome::Released
+                            }
+                            Err(StoreError::PreconditionFailed(_))
+                            | Err(StoreError::NotFound(_)) => {
+                                warn!(
+                                    "tier epoch: release lost the CAS — deposed during \
+                                     shutdown; leaving the cell to its new holder"
+                                );
+                                ReleaseOutcome::LostCas
+                            }
+                            Err(e) => {
+                                warn!("tier epoch: release failed: {} — cell left held", e);
+                                ReleaseOutcome::Failed
+                            }
+                        }
+                    };
+                    let _ = outcome_tx.send(outcome);
+                    return;
+                }
+            }
             match store.epoch_renew(&cfg.key, &lease).await {
                 Ok(next) => {
                     lease = next;
@@ -355,7 +509,8 @@ pub fn spawn_heartbeat(
                 }
             }
         }
-    })
+    });
+    HeartbeatHandle { task, shutdown: Some(shutdown_tx), outcome: outcome_rx }
 }
 
 #[cfg(test)]
@@ -435,6 +590,10 @@ mod tests {
         let (_mem, store) = stores();
         // heartbeat = 1h, misses = 1000: the foreign-wait path would
         // hang for weeks. Self-recognition must return immediately.
+        // Self-recognition is gated on proven single occupancy — in
+        // production the state-directory lock; here, the memory store's
+        // structurally private state.
+        crate::state_backend::declare_private_state();
         let c = cfg("hub-a", 3_600_000, 1000);
         let l1 = claim(&store, &c, "vol/").await.unwrap();
         assert_eq!(l1.epoch, 1);
@@ -447,6 +606,55 @@ mod tests {
         // The dead incarnation's lease is fenced.
         let err = store.epoch_renew(&c.key, &l1).await.unwrap_err();
         assert!(matches!(err, StoreError::PreconditionFailed(_)));
+    }
+
+    /// The hibernate/wake path. A woken hub reads its state from a
+    /// FRESH PVC, so it has a new server_id and is a FOREIGN holder to
+    /// the cell its predecessor left — self-recognition cannot save it.
+    /// Without the released mark it would sit out the full
+    /// `lease_misses × heartbeat` timeout proving a hub is dead that
+    /// already announced its own death.
+    #[tokio::test]
+    async fn a_released_cell_is_claimed_by_a_stranger_with_no_wait() {
+        let (_mem, store) = stores();
+        // Same absurd timeout as the self-recognition test: if the
+        // foreign-wait path is taken at all, this hangs for weeks.
+        let ca = cfg("hub-a", 3_600_000, 1000);
+        let la = claim(&store, &ca, "vol/").await.unwrap();
+        assert_eq!(la.epoch, 1);
+
+        // hub-a shuts down cleanly.
+        store.epoch_release(&ca.key, &la).await.unwrap();
+
+        // A DIFFERENT holder id — the woken hub on a fresh PVC.
+        let cb = cfg("hub-b", 3_600_000, 1000);
+        let lb = tokio::time::timeout(Duration::from_secs(5), claim(&store, &cb, "vol/"))
+            .await
+            .expect("a released cell must be claimable immediately")
+            .unwrap();
+        assert_eq!(lb.epoch, 2, "numbering continues from the released epoch");
+
+        // And the predecessor is fenced, released or not.
+        let err = store.epoch_renew(&cb.key, &la).await.unwrap_err();
+        assert!(matches!(err, StoreError::PreconditionFailed(_)));
+    }
+
+    /// A hub deposed mid-shutdown must not be able to stamp `released`
+    /// on the cell its successor now holds — that would invite a third
+    /// hub to claim instantly while the successor is serving.
+    #[tokio::test]
+    async fn a_deposed_holder_cannot_mark_a_live_successors_cell() {
+        let (_mem, store) = stores();
+        let ca = cfg("hub-a", 3_600_000, 1000);
+        let la = claim(&store, &ca, "vol/").await.unwrap();
+        let observed = store.epoch_read(&ca.key).await.unwrap().unwrap();
+        let lb = store.epoch_acquire(&ca.key, "hub-b", Some(&observed)).await.unwrap();
+
+        let err = store.epoch_release(&ca.key, &la).await.unwrap_err();
+        assert!(matches!(err, StoreError::PreconditionFailed(_)));
+        let cell = store.epoch_read(&ca.key).await.unwrap().unwrap();
+        assert!(!cell.released, "the live successor's cell stays unreleased");
+        assert_eq!(cell.epoch, lb.epoch);
     }
 
     #[tokio::test(start_paused = true)]
@@ -505,7 +713,17 @@ mod tests {
         let lb = store.epoch_acquire(&ca.key, "hub-b", Some(&observed)).await.unwrap();
         assert_eq!(lb.epoch, 2);
 
-        hb.await.unwrap(); // must exit on its own — deposed
+        // The heartbeat must exit on its own — deposed. Poll the
+        // observable effect rather than joining the task: the handle
+        // now owns a shutdown channel, and dropping it must NOT be
+        // read as a shutdown request.
+        for _ in 0..200 {
+            if guard.is_fenced() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(hb);
         assert!(guard.is_fenced());
         assert_eq!(guard.current(), None);
         assert!(deposed.load(Ordering::SeqCst));

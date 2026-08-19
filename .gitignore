@@ -31,3 +31,8 @@ tests/system/kuttl-test-*
 tests/system/*.log
 .claude/
 spdk-csi-driver/docker/prebuilt/
+
+# Formal-model gate: scripts/check-tla.sh fetches this on first use and
+# caches it here (override with TLA_TOOLS_JAR). It is a 2 MB upstream
+# release artifact, not source.
+.tla2tools.jar

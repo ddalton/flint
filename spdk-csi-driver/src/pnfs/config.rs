@@ -916,7 +916,13 @@ impl PnfsConfig {
         cfg: &StateConfig,
     ) -> Result<std::sync::Arc<dyn crate::state_backend::StateBackend>, String> {
         match cfg.backend {
-            StateBackend::Memory => Ok(crate::state_backend::memory_backend()),
+            StateBackend::Memory => {
+                // No file, no sharing: identity cannot outlive or
+                // escape this process, so the occupancy question is
+                // already answered.
+                crate::state_backend::declare_private_state();
+                Ok(crate::state_backend::memory_backend())
+            }
             StateBackend::Sqlite => {
                 let path = cfg
                     .config
@@ -929,6 +935,25 @@ impl PnfsConfig {
                         std::fs::create_dir_all(p).map_err(|e| {
                             format!("create dir {}: {}", p.display(), e)
                         })?;
+                        // SINGLE OCCUPANCY. Two hubs on one PVC is not
+                        // a theoretical race: a scale 0→1 during a
+                        // graceful shutdown creates the new pod
+                        // immediately (a ReplicaSet does not count a
+                        // terminating pod as active), and on a
+                        // node-granular RWO claim both land on the same
+                        // node. The second process reads the SAME
+                        // server_id out of this database, so the epoch
+                        // protocol recognises it as ITSELF and lets it
+                        // depose the incumbent mid-flush — the one case
+                        // the epoch provably cannot fence. The same
+                        // window opens on evictions, node drains and
+                        // `kubectl delete pod`, none of which any
+                        // controller can gate.
+                        //
+                        // The lock lives for the life of the process
+                        // and is released by the kernel on exit, so a
+                        // crashed pod never wedges its successor.
+                        crate::state_backend::hold_single_occupancy(p)?;
                     }
                 }
                 // open_durable (synchronous=FULL), not open (NORMAL):

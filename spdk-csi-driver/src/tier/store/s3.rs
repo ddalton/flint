@@ -134,6 +134,13 @@ struct EpochBody {
     /// second reproducing the token. Liveness is still judged on S3's
     /// Last-Modified, never on this.
     salt: String,
+    /// Set by a clean shutdown: the holder finished its final flush,
+    /// fenced itself, and will never publish under this epoch again.
+    /// A successor may supersede it IMMEDIATELY instead of waiting out
+    /// a lease it knows is dead. `serde(default)` keeps cells written
+    /// by older hubs readable — they simply read as not-released.
+    #[serde(default)]
+    released: bool,
 }
 
 fn now_unix() -> u64 {
@@ -517,6 +524,7 @@ impl ObjectStore for S3Store {
                     epoch: body.epoch,
                     token: meta.etag,
                     last_renew_unix: meta.last_modified_unix,
+                    released: body.released,
                 }))
             }
             Err(StoreError::NotFound(_)) => Ok(None),
@@ -554,16 +562,29 @@ impl ObjectStore for S3Store {
     }
 
     async fn epoch_release(&self, key: &str, lease: &EpochLease) -> StoreResult<()> {
-        // S3 DELETE has no If-Match; verify-then-delete is the best a
-        // CAS-object epoch offers (the residual race is A8's
-        // documented heartbeat window; Azure's native lease closes it).
-        let state = self.epoch_read(key).await?;
-        match state {
-            Some(s) if s.token == lease.token => self.delete(key).await,
-            _ => Err(StoreError::PreconditionFailed(
-                "epoch_release: not the holder anymore".into(),
-            )),
-        }
+        // MARK, never delete. Deleting the cell would reset the epoch
+        // counter — `epoch_acquire` computes the next epoch as
+        // `supersede.map_or(1, |s| s.epoch + 1)`, so the next claimant
+        // over an absent cell starts again at 1, and every publish
+        // stamp plus `startup_reverify`'s monotonicity check would then
+        // be comparing against numbers the volume has already used. The
+        // released cell keeps its holder and epoch and simply says
+        // "this holder is finished"; a successor supersedes at epoch+1
+        // with no quiet wait.
+        //
+        // Guarded on the caller's own lease token, so a hub deposed
+        // mid-shutdown cannot stamp `released` onto a live successor's
+        // cell — that would invite a third hub to claim instantly while
+        // the successor is serving.
+        self.epoch_put_marked(
+            key,
+            &lease.holder_id,
+            lease.epoch,
+            PutCondition::IfMatch(lease.token.clone()),
+            true,
+        )
+        .await
+        .map(|_| ())
     }
 
     fn min_part_size(&self) -> u64 {
@@ -697,12 +718,24 @@ impl S3Store {
         epoch: u64,
         condition: PutCondition,
     ) -> StoreResult<EpochLease> {
+        self.epoch_put_marked(key, holder_id, epoch, condition, false).await
+    }
+
+    async fn epoch_put_marked(
+        &self,
+        key: &str,
+        holder_id: &str,
+        epoch: u64,
+        condition: PutCondition,
+        released: bool,
+    ) -> StoreResult<EpochLease> {
         let body = Bytes::from(
             serde_json::to_vec(&EpochBody {
                 holder_id: holder_id.to_string(),
                 epoch,
                 renewed_unix: now_unix(),
                 salt: uuid::Uuid::new_v4().to_string(),
+                released,
             })
             .unwrap(),
         );

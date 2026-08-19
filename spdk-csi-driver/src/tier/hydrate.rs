@@ -337,7 +337,8 @@ pub async fn park(path: &Path) {
 /// marker is gone at drain — including files a client's demand upgrade
 /// finished; `still_cold` is the rest (space skips + retry abandons +
 /// anything a client re-evicted mid-fill).
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WarmFillReport {
     pub candidates: usize,
     pub queued: usize,

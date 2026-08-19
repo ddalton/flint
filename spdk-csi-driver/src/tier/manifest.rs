@@ -285,21 +285,67 @@ pub async fn seed(store: &dyn ObjectStore, key_prefix: &str) -> WriterState {
     }
 }
 
-/// Write one barrier's manifest. Returns Some(seq) when a new manifest
-/// landed, None when skipped (unchanged) or failed (logged + metered;
-/// the previous manifest simply stays the RPO record one barrier
-/// longer).
+/// What one barrier did to the bucket's manifest.
+///
+/// The distinction between `Unchanged` and `Failed` is load-bearing and
+/// used to be invisible: both returned `None`. "Unchanged" means the
+/// standing manifest still describes the tree exactly — the normal arm
+/// for an idle hub, which skips every barrier after its first. "Failed"
+/// means the bucket's manifest is now BEHIND the tree. Anything that
+/// decides whether the bucket can rebuild this volume — `rpoClean`, and
+/// through it the hibernate that deletes the PVC — must be able to tell
+/// those apart, because one is safe and the other loses data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BarrierOutcome {
+    /// A new manifest landed at `seq`.
+    Wrote { seq: u64, beyond_rpo: usize, skipped_special: usize },
+    /// The tree is unchanged since `seq`; the standing manifest stands.
+    Unchanged { seq: u64, beyond_rpo: usize, skipped_special: usize },
+    /// The write failed (logged + metered). The previous manifest stays
+    /// the RPO record, so the bucket no longer describes the tree.
+    Failed,
+}
+
+impl BarrierOutcome {
+    /// Does the bucket's manifest currently describe this tree?
+    pub fn is_current(&self) -> bool {
+        !matches!(self, BarrierOutcome::Failed)
+    }
+
+    /// Files present locally that the manifest cannot restore.
+    pub fn beyond_rpo(&self) -> Option<usize> {
+        match self {
+            BarrierOutcome::Wrote { beyond_rpo, .. }
+            | BarrierOutcome::Unchanged { beyond_rpo, .. } => Some(*beyond_rpo),
+            BarrierOutcome::Failed => None,
+        }
+    }
+
+    pub fn seq(&self) -> Option<u64> {
+        match self {
+            BarrierOutcome::Wrote { seq, .. } | BarrierOutcome::Unchanged { seq, .. } => Some(*seq),
+            BarrierOutcome::Failed => None,
+        }
+    }
+}
+
+/// Write one barrier's manifest.
 pub async fn write_at_barrier(
     store: &dyn ObjectStore,
     key_prefix: &str,
     epoch: u64,
     state: &mut WriterState,
     built: Built,
-) -> Option<u64> {
+) -> BarrierOutcome {
     let digest = built.digest();
     if state.last_digest == Some(digest) {
-        return None;
+        return BarrierOutcome::Unchanged {
+            seq: state.seq,
+            beyond_rpo: built.beyond_rpo,
+            skipped_special: built.skipped_special,
+        };
     }
+    let (beyond_rpo, skipped_special) = (built.beyond_rpo, built.skipped_special);
     let m = Manifest {
         version: MANIFEST_VERSION,
         seq: state.seq + 1,
@@ -334,7 +380,7 @@ pub async fn write_at_barrier(
                 m.entries.len(),
                 m.beyond_rpo
             );
-            Some(m.seq)
+            BarrierOutcome::Wrote { seq: m.seq, beyond_rpo, skipped_special }
         }
         Err(e) => {
             crate::tier::meter::bump(crate::tier::meter::Counter::ManifestFailures);
@@ -350,7 +396,7 @@ pub async fn write_at_barrier(
             if matches!(e, StoreError::PreconditionFailed(_) | StoreError::Conflict(_)) {
                 *state = seed(store, key_prefix).await;
             }
-            None
+            BarrierOutcome::Failed
         }
     }
 }
@@ -432,11 +478,17 @@ mod tests {
 
         let b1 = build(td.path(), &gens).unwrap();
         let w1 = write_at_barrier(&store, "p/", 5, &mut st, b1).await;
-        assert_eq!(w1, Some(1));
+        assert_eq!(w1.seq(), Some(1));
+        assert!(matches!(w1, BarrierOutcome::Wrote { .. }));
 
-        // Unchanged tree ⇒ no write (the digest short-circuit).
+        // Unchanged tree ⇒ no write (the digest short-circuit). The
+        // manifest still describes the tree, so this is CURRENT — the
+        // arm an idle hub takes on every barrier, and the one the RPO
+        // predicate must not confuse with a failed write.
         let b2 = build(td.path(), &gens).unwrap();
-        assert_eq!(write_at_barrier(&store, "p/", 5, &mut st, b2).await, None);
+        let w2 = write_at_barrier(&store, "p/", 5, &mut st, b2).await;
+        assert!(matches!(w2, BarrierOutcome::Unchanged { seq: 1, .. }));
+        assert!(w2.is_current());
 
         // The RPO is readable from the bucket ALONE.
         let (_, bytes) = store.get_whole(&manifest_key("p/"), None).await.unwrap();
@@ -448,7 +500,7 @@ mod tests {
         std::fs::write(td.path().join("b.bin"), b"bb").unwrap();
         gens.insert(ident(&td.path().join("b.bin")), rec("p/b.bin", 1, 2));
         let b3 = build(td.path(), &gens).unwrap();
-        assert_eq!(write_at_barrier(&store, "p/", 5, &mut st, b3).await, Some(2));
+        assert_eq!(write_at_barrier(&store, "p/", 5, &mut st, b3).await.seq(), Some(2));
 
         // A fresh writer seeds seq from the bucket (restart survival).
         let st2 = seed(&store, "p/").await;

@@ -108,7 +108,11 @@ CONSTANTS
   Sweep,       \* TRUE = every claim aborts all in-flight assemblies (A8)
   TokenRotate, \* TRUE = renew rotates the CAS token (real-S3 bug 1's fix)
   FenceOn412,  \* TRUE = a failed renew fences + exits the incarnation
-  StampCheck   \* TRUE = a 412's arbitration fences on a foreign object
+  StampCheck,  \* TRUE = a 412's arbitration fences on a foreign object
+  FenceBeforeRelease \* TRUE = a clean shutdown FENCES before marking the
+                     \* cell released (the shipped order). FALSE marks
+                     \* first and keeps holding — the straggler window
+                     \* Inv_NoPostReleaseLand exists to forbid.
                \* stamped with an epoch ABOVE ours (the successor fence
                \* this module's ProbeOverwrite forced into the code —
                \* store-verified there; the model's dataEp is never
@@ -117,7 +121,7 @@ CONSTANTS
 
 VARIABLES
   \* ── the store (each action touching it is one CAS round) ──
-  epochObj,    \* [held, holder, ep, tok, renews] — the epoch cell
+  epochObj,    \* [held, holder, ep, tok, renews, released] — the epoch cell
   nextTok,     \* token generator (etags are unforgeable + fresh)
   dataTag,     \* the one data key's etag lineage; 0 = absent
   dataEp,      \* epoch stamped on the current data object (0 = absent)
@@ -136,19 +140,22 @@ VARIABLES
   preSweepMpuLand,        \* T1 witness
   renewingHolderDeposed,  \* T2 witness
   stalePublishLand,       \* probe 1 witness (the phase-H window)
-  succOverwrite           \* probe 2 witness (local-wins vs the successor)
+  succOverwrite,          \* probe 2 witness (local-wins vs the successor)
+  postReleaseLand         \* T3 witness: a publish landed from a reign that
+                          \* had already marked its cell released
 
 vars == <<epochObj, nextTok, dataTag, dataEp, uploads, sweptEp, st, lease, lastTok,
           quiet, renewsSeen, baseTag, flush, pubs, crashes, renewBudget,
           claimBudget, preSweepMpuLand, renewingHolderDeposed, stalePublishLand,
-          succOverwrite>>
+          succOverwrite, postReleaseLand>>
 
 NoFlush   == [active |-> FALSE, stage |-> "none", kind |-> "none",
               cond |-> 0, epInit |-> 0]
 ZeroLease == [ep |-> 0, tok |-> 0]
 
 TypeOK ==
-  /\ epochObj \in [held: BOOLEAN, holder: Hubs, ep: Nat, tok: Nat, renews: Nat]
+  /\ epochObj \in [held: BOOLEAN, holder: Hubs, ep: Nat, tok: Nat, renews: Nat,
+                   released: BOOLEAN]
   /\ nextTok \in Nat
   /\ dataTag \in Nat /\ dataEp \in Nat
   /\ uploads \subseteq [hub: Hubs, cond: Nat, epInit: Nat]
@@ -169,7 +176,7 @@ TypeOK ==
 
 Init ==
   /\ epochObj = [held |-> FALSE, holder |-> CHOOSE h \in Hubs : TRUE,
-                 ep |-> 0, tok |-> 0, renews |-> 0]
+                 ep |-> 0, tok |-> 0, renews |-> 0, released |-> FALSE]
   /\ nextTok = 1
   /\ dataTag = 0 /\ dataEp = 0
   /\ uploads = {}
@@ -185,10 +192,11 @@ Init ==
   /\ claimBudget = MaxClaims
   /\ preSweepMpuLand = FALSE /\ renewingHolderDeposed = FALSE
   /\ stalePublishLand = FALSE /\ succOverwrite = FALSE
+  /\ postReleaseLand = FALSE
 
 unchangedWitnesses ==
   UNCHANGED <<preSweepMpuLand, renewingHolderDeposed, stalePublishLand,
-              succOverwrite>>
+              succOverwrite, postReleaseLand>>
 
 (***************************************************************************)
 (* The claim.  Create and supersede are read+CAS pairs collapsed to one    *)
@@ -202,7 +210,7 @@ AcquireCreate(h) ==
   /\ claimBudget' = claimBudget - 1
   /\ ~epochObj.held
   /\ epochObj' = [held |-> TRUE, holder |-> h, ep |-> 1,
-                  tok |-> nextTok, renews |-> 0]
+                  tok |-> nextTok, renews |-> 0, released |-> FALSE]
   /\ lease' = [lease EXCEPT ![h] = [ep |-> 1, tok |-> nextTok]]
   /\ nextTok' = nextTok + 1
   /\ st' = [st EXCEPT ![h] = "claimed"]
@@ -218,7 +226,7 @@ SelfRecognize(h) ==
   /\ claimBudget' = claimBudget - 1
   /\ epochObj.held /\ epochObj.holder = h
   /\ epochObj' = [held |-> TRUE, holder |-> h, ep |-> epochObj.ep + 1,
-                  tok |-> nextTok, renews |-> 0]
+                  tok |-> nextTok, renews |-> 0, released |-> FALSE]
   /\ lease' = [lease EXCEPT ![h] = [ep |-> epochObj.ep + 1, tok |-> nextTok]]
   /\ nextTok' = nextTok + 1
   /\ st' = [st EXCEPT ![h] = "claimed"]
@@ -264,13 +272,66 @@ Takeover(h) ==
   /\ renewingHolderDeposed' =
        (renewingHolderDeposed \/ epochObj.renews > renewsSeen[h])
   /\ epochObj' = [held |-> TRUE, holder |-> h, ep |-> epochObj.ep + 1,
-                  tok |-> nextTok, renews |-> 0]
+                  tok |-> nextTok, renews |-> 0, released |-> FALSE]
   /\ lease' = [lease EXCEPT ![h] = [ep |-> epochObj.ep + 1, tok |-> nextTok]]
   /\ nextTok' = nextTok + 1
   /\ st' = [st EXCEPT ![h] = "claimed"]
   /\ UNCHANGED <<dataTag, dataEp, uploads, sweptEp, lastTok, quiet,
                  renewsSeen, baseTag, flush, pubs, crashes, renewBudget,
-                 preSweepMpuLand, stalePublishLand, succOverwrite>>
+                 preSweepMpuLand, stalePublishLand, succOverwrite,
+                 postReleaseLand>>
+
+(***************************************************************************)
+(* The clean handoff.  A hub that is shutting down flushes, FENCES itself, *)
+(* and only then CAS-marks its cell released; a successor may claim a      *)
+(* released cell with no quiet wait.                                       *)
+(*                                                                         *)
+(* The order is the whole theorem.  Marking before fencing would leave a   *)
+(* window where the cell invites an instant successor while the outgoing   *)
+(* hub can still land a publish — Inv_NoPostReleaseLand is exactly that    *)
+(* straggler, specialized from FlintTierSession's Inv_NoStragglerLand to   *)
+(* the single-cell protocol.  The release is guarded on the holder's OWN   *)
+(* token, so a deposed hub cannot mark a live successor's reign.           *)
+(***************************************************************************)
+
+CleanRelease(h) ==
+  /\ st[h] = "holding"
+  /\ ~flush[h].active                     \* the final flush has completed
+  /\ epochObj.held
+  /\ epochObj.tok = lease[h].tok           \* the CAS: still our reign
+  /\ epochObj' = [epochObj EXCEPT !.released = TRUE, !.tok = nextTok]
+  /\ nextTok' = nextTok + 1
+  \* Fenced BEFORE the mark is observable: idle with a zero lease is the
+  \* model's fence — every publish guard below reads through lease[h].
+  \* FenceBeforeRelease = FALSE is the mutation: mark the cell but keep
+  \* holding, i.e. the order the code must NOT ship. It invites a
+  \* successor while this reign can still land a publish.
+  /\ IF FenceBeforeRelease
+       THEN /\ st' = [st EXCEPT ![h] = "idle"]
+            /\ lease' = [lease EXCEPT ![h] = ZeroLease]
+       ELSE /\ lease' = [lease EXCEPT ![h] = [ep |-> lease[h].ep, tok |-> nextTok]]
+            /\ UNCHANGED st
+  /\ UNCHANGED <<dataTag, dataEp, uploads, sweptEp, lastTok, quiet, renewsSeen,
+                 baseTag, flush, pubs, crashes, renewBudget, claimBudget>>
+  /\ unchangedWitnesses
+
+\* A released cell is claimable on sight: its holder has proven it is
+\* finished, so waiting out Misses polls would buy nothing.  This is what
+\* makes a wake-from-hibernation fast — the woken hub has a FRESH
+\* server_id (its PVC was deleted), so SelfRecognize cannot fire for it.
+ClaimReleased(h) ==
+  /\ st[h] \in {"idle", "watching"}
+  /\ claimBudget > 0
+  /\ claimBudget' = claimBudget - 1
+  /\ epochObj.held /\ epochObj.released
+  /\ epochObj' = [held |-> TRUE, holder |-> h, ep |-> epochObj.ep + 1,
+                  tok |-> nextTok, renews |-> 0, released |-> FALSE]
+  /\ lease' = [lease EXCEPT ![h] = [ep |-> epochObj.ep + 1, tok |-> nextTok]]
+  /\ nextTok' = nextTok + 1
+  /\ st' = [st EXCEPT ![h] = "claimed"]
+  /\ UNCHANGED <<dataTag, dataEp, uploads, sweptEp, lastTok, quiet, renewsSeen,
+                 baseTag, flush, pubs, crashes, renewBudget>>
+  /\ unchangedWitnesses
 
 \* Every claim path sweeps before holding (claim() runs takeover_sweep on
 \* all three arms); the successor's import seeds its data-etag belief.
@@ -367,10 +428,19 @@ FlushPlan(h) ==
                  renewBudget, claimBudget>>
   /\ unchangedWitnesses
 
+\* A publish landing from the very reign whose cell already says
+\* "finished". The release is a barrier: if this can be set, a successor
+\* invited in by the mark can be overwritten by its predecessor.
+PostRelease(h) ==
+  /\ epochObj.released
+  /\ epochObj.ep = lease[h].ep
+  /\ epochObj.holder = h
+
 LandWitnesses(h, c) ==
   /\ stalePublishLand' = (stalePublishLand \/ Stale(h))
   /\ succOverwrite' =
        (succOverwrite \/ (Stale(h) /\ c # 0 /\ dataEp > lease[h].ep))
+  /\ postReleaseLand' = (postReleaseLand \/ PostRelease(h))
   /\ UNCHANGED renewingHolderDeposed
 
 \* The 412 rediscovery arm carries the SUCCESSOR FENCE (StampCheck):
@@ -473,6 +543,7 @@ Next ==
   \E h \in Hubs :
     \/ AcquireCreate(h) \/ SelfRecognize(h) \/ ObserveForeign(h)
     \/ PollQuiet(h) \/ Takeover(h) \/ SweepDone(h)
+    \/ CleanRelease(h) \/ ClaimReleased(h)
     \/ RenewOk(h) \/ RenewDeposed(h)
     \/ FlushPlan(h) \/ PutLand(h) \/ MpuInit(h) \/ MpuComplete(h)
     \/ Crash(h)
@@ -486,6 +557,7 @@ Fairness ==
     /\ WF_vars(AcquireCreate(h)) /\ WF_vars(SelfRecognize(h))
     /\ WF_vars(ObserveForeign(h)) /\ WF_vars(PollQuiet(h))
     /\ WF_vars(Takeover(h)) /\ WF_vars(SweepDone(h))
+    /\ WF_vars(ClaimReleased(h))
     /\ WF_vars(RenewDeposed(h))
     /\ WF_vars(PutLand(h)) /\ WF_vars(MpuInit(h)) /\ WF_vars(MpuComplete(h))
 
@@ -497,6 +569,12 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 Inv_NoPreSweepMpuLand      == ~preSweepMpuLand
 Inv_NoRenewingHolderDeposed == ~renewingHolderDeposed
+\* The clean handoff is a BARRIER: no publish from a reign that has
+\* already marked its cell released. The mark invites an immediate
+\* successor, so a straggler landing after it would overwrite a live
+\* hub's object. Discharged by CleanRelease fencing (idle + zero lease)
+\* in the same step it writes the mark.
+Inv_NoPostReleaseLand      == ~postReleaseLand
 
 \* PROBES — reachable in the shipped protocol; kept OUT of the strict
 \* run's invariant list.  Probe 1 is the phase-H wake-up window; probe 2
@@ -506,6 +584,7 @@ Inv_NoStalePublishLand   == ~stalePublishLand
 Inv_NoSuccessorOverwrite == ~succOverwrite
 
 Inv == TypeOK /\ Inv_NoPreSweepMpuLand /\ Inv_NoRenewingHolderDeposed
+       /\ Inv_NoPostReleaseLand
        /\ Inv_NoSuccessorOverwrite
 
 \* A deposed incarnation eventually stops believing it holds (heartbeat

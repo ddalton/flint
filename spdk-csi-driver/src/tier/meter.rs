@@ -20,7 +20,8 @@ macro_rules! counters {
 
         /// One consistent-enough view (relaxed loads; the meter is
         /// telemetry, not arbitration).
-        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
         pub struct MeterSnapshot {
             $( pub $name: u64, )+
         }

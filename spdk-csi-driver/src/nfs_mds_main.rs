@@ -133,15 +133,45 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
 
     // Create and start MDS
     info!("⚙️  Initializing Metadata Server...");
-    let mds = spdk_csi_driver::pnfs::mds::MetadataServer::new(mds_config, exports).await?;
+    let monitoring = config.monitoring.clone();
+    let mut mds = spdk_csi_driver::pnfs::mds::MetadataServer::new(mds_config, exports).await?;
+    // The status surface is off unless the deployment asks for it. It
+    // binds before the tier starts, so the epoch-claim and import
+    // phases — the long, pre-listener part of startup — are visible to
+    // whatever is waiting for this hub to come up.
+    if monitoring.health.enabled {
+        info!(
+            "   • Status endpoint: :{}{} (+ /status)",
+            monitoring.health.port, monitoring.health.path
+        );
+    }
+    mds.set_monitoring(monitoring);
 
     info!("🚀 Starting Metadata Server...");
     info!("");
     
-    // Serve (blocks forever)
-    if let Err(e) = mds.serve().await {
-        error!("❌ Server error: {}", e);
-        return Err(e.into());
+    // Serve until told to stop. SIGTERM is the normal way a hub ends:
+    // a lifecycle suspend, a rolling update, a node drain, a spot
+    // reclaim. Without a handler the process is SIGKILLed at the grace
+    // deadline with its last writes unflushed and its epoch cell still
+    // claimed — the next hub then waits out a lease nobody holds, and
+    // anything dirtied since the last barrier exists only on the PVC.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        r = mds.serve() => {
+            if let Err(e) = r {
+                error!("❌ Server error: {}", e);
+                return Err(e.into());
+            }
+        }
+        _ = sigterm.recv() => {
+            info!("🛑 SIGTERM — draining and flushing before exit");
+            mds.graceful_shutdown().await;
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("🛑 SIGINT — draining and flushing before exit");
+            mds.graceful_shutdown().await;
+        }
     }
 
     Ok(())

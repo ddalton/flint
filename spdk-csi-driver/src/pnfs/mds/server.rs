@@ -48,6 +48,28 @@ pub struct MetadataServer {
     /// `LayoutRecord`s and bump the instance counter. Same `Arc` the
     /// state managers are using.
     backend: Arc<dyn crate::state_backend::StateBackend>,
+    /// The read-only status surface. Populated as subsystems come up
+    /// and served on the health port when monitoring is enabled.
+    status: Arc<super::status::HubStatus>,
+    /// Health/metrics ports. Set by the binary before `serve`; the
+    /// default leaves the surface off, which is the shipped posture
+    /// for every deployment that has not opted in.
+    monitoring: crate::pnfs::config::MonitoringConfig,
+    /// What a graceful shutdown needs to reach: the flush
+    /// orchestrator (for the final barrier), the epoch guard (to fence
+    /// before releasing) and the heartbeat (which owns the only live
+    /// lease token, so it must issue the release itself). `None` until
+    /// the tier starts, and taken by the shutdown so it can only run
+    /// once.
+    tier_runtime: std::sync::Mutex<Option<TierRuntime>>,
+}
+
+/// The tier handles a clean shutdown needs. Assembled at the end of
+/// `start_tier`; consumed by `graceful_shutdown`.
+struct TierRuntime {
+    orch: Arc<crate::tier::flush::FlushOrchestrator>,
+    guard: Arc<crate::tier::epoch::EpochGuard>,
+    heartbeat: crate::tier::epoch::HeartbeatHandle,
 }
 
 impl MetadataServer {
@@ -406,7 +428,23 @@ impl MetadataServer {
             callback_manager,
             state_mgr,
             backend,
+            status: Arc::new(super::status::HubStatus::new()),
+            monitoring: crate::pnfs::config::MonitoringConfig::default(),
+            tier_runtime: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Enable the health/status surface. Called by the binary with the
+    /// top-level `monitoring:` block, which `MdsConfig` does not carry.
+    /// Must be set before [`Self::serve`] — the endpoint binds early in
+    /// startup so the epoch-claim and import phases are observable.
+    pub fn set_monitoring(&mut self, monitoring: crate::pnfs::config::MonitoringConfig) {
+        self.monitoring = monitoring;
+    }
+
+    /// The live status surface, for subsystems that report into it.
+    pub fn status(&self) -> Arc<super::status::HubStatus> {
+        self.status.clone()
     }
 
     /// Phase B.4 startup hook: pull every persisted record (clients,
@@ -563,6 +601,22 @@ impl MetadataServer {
             );
         }
 
+        // Seed the idle clock at boot. A hub woken from suspend must
+        // report "idle for 0s", not "idle since 1970" — otherwise the
+        // lifecycle controller could suspend it again before its first
+        // client has finished mounting.
+        crate::nfs::activity::init();
+
+        // The status surface comes up FIRST — before the tier, before
+        // the listener. Everything after this point can take minutes
+        // (waiting out a dead epoch holder, importing a large prefix),
+        // and all of it is pre-listener, so a controller watching only
+        // the NFS port cannot tell startup from a wedge. Binding here
+        // makes the whole startup observable.
+        self.status.attach_backend(self.backend.clone());
+        self.status.attach_leases(self.state_mgr.leases.clone());
+        let _status_server = super::status::spawn(&self.monitoring.health, self.status.clone());
+
         // Phase B.4: pull persisted state out of the backend before
         // accepting any TCP connections. Once this returns, a
         // reconnecting client whose clientid / sessionid / stateid
@@ -657,6 +711,7 @@ impl MetadataServer {
             // TODO: Implement leader election
         }
 
+        self.status.set_phase(super::status::HubPhase::Serving);
         info!("✅ Metadata Server is ready to accept connections");
         info!("");
 
@@ -781,6 +836,7 @@ impl MetadataServer {
              waited out: {} × {}s)",
             ecfg.holder_id, ecfg.lease_misses, t.knobs.epoch_heartbeat_secs
         );
+        self.status.set_phase(super::status::HubPhase::ClaimingEpoch);
         let lease = epoch::claim(&store, &ecfg, &t.key_prefix)
             .await
             .map_err(|e| crate::pnfs::Error::Config(format!("tier: epoch claim: {}", e)))?;
@@ -793,7 +849,7 @@ impl MetadataServer {
         // the split-brain protection A8 demands ("stops serving"). Two
         // hubs on one prefix is a misconfiguration, and runbr proved
         // what serving on moved authority does to pinned clients.
-        epoch::spawn_heartbeat(
+        let heartbeat = epoch::spawn_heartbeat(
             Arc::clone(&store),
             ecfg,
             lease,
@@ -825,12 +881,19 @@ impl MetadataServer {
         // the store; the reporter also reads the guard.
         let orch_store = Arc::clone(&store);
         let reporter_guard = Arc::clone(&guard);
+        let shutdown_guard = Arc::clone(&guard);
         let orch = Arc::new(FlushOrchestrator::new(
             store,
             Arc::clone(&self.backend),
             fcfg,
             guard,
         ));
+        // Held for the shutdown path; the flush loop below consumes
+        // its own clone of `orch`.
+        let shutdown_orch = Arc::clone(&orch);
+        self.status.attach_epoch(Arc::clone(&reporter_guard));
+        self.status.attach_orchestrator(Arc::clone(&orch));
+
         // Rebuild the durable registry and arbitrate any crash-torn
         // intents BEFORE the first tick (and before clients reconnect
         // and mutate on top).
@@ -861,6 +924,7 @@ impl MetadataServer {
         };
         let mut imported = false;
         if t.import_on_start {
+            self.status.set_phase(super::status::HubPhase::Importing);
             let intent_path = state_note_dir.as_ref().map(|p| p.join("flint-import-intent"));
             if let Some(rep) = crate::tier::import::maybe_import_on_start(
                 &self.backend,
@@ -877,6 +941,7 @@ impl MetadataServer {
                 // false-negative the warm trigger on a crash-resumed
                 // import whose stubs all count as skipped_known.
                 imported = true;
+                self.status.set_import(rep.clone());
                 info!(
                     "🪣 tier import: {} dir(s), {} symlink(s), {} stub(s) restored \
                      ({} tombstoned skipped, {} failed)",
@@ -889,12 +954,35 @@ impl MetadataServer {
             }
         }
 
+        // Adopting a PVC that already holds files, against a bucket
+        // that has never seen them. Nothing marked those files dirty —
+        // capture notes mutations, and theirs happened before the tier
+        // existed — so without this the flusher publishes nothing, the
+        // manifest lists nothing, and the volume reports a clean RPO
+        // while every byte lives only on the PVC. The gate is narrow on
+        // purpose: fresh tier state (nothing published or evicted yet)
+        // AND an import that found no bucket content to restore. In any
+        // other shape the local tree either came FROM the bucket or is
+        // already tracked, and re-marking it would be a pointless
+        // whole-tree upload.
+        if !imported && crate::tier::import::state_is_fresh(&self.backend).await {
+            let rep = crate::tier::import::adopt_local_tree(&self.backend, &export_root).await;
+            if rep.marked_dirty > 0 || rep.unreadable_dirs > 0 {
+                info!(
+                    "🪣 tier adopt: {} pre-existing file(s) marked for publication \
+                     ({} skipped, {} unreadable dir(s)) — this PVC predates its bucket",
+                    rep.marked_dirty, rep.skipped_excluded, rep.unreadable_dirs
+                );
+            }
+        }
+
         // Step 10 (C2): finish or roll back half-evictions and load
         // the marker consult map — BEFORE the listener binds, so the
         // first READ of an evicted file finds its marker, never a
         // bare 0-byte stub. Step 11 extends it: crashed hydrations are
         // truncated back to the stub (partials never serve) or, if
         // provably complete, committed.
+        self.status.set_phase(super::status::HubPhase::Reconciling);
         let er = crate::tier::evict::reconcile(&self.backend).await;
         if er.finished > 0 || er.rolled_back > 0 || er.hydrations_reset > 0 {
             warn!(
@@ -939,8 +1027,11 @@ impl MetadataServer {
                     }
                 }
                 let h = Arc::clone(&hydrator);
+                let warm_status = self.status.clone();
                 tokio::spawn(async move {
-                    crate::tier::hydrate::warm_fill(&h, warm_note.as_deref()).await;
+                    let report =
+                        crate::tier::hydrate::warm_fill(&h, warm_note.as_deref()).await;
+                    warm_status.set_warm_fill(report);
                 });
             }
         }
@@ -1014,7 +1105,105 @@ impl MetadataServer {
             "🪣 tier: flush loop every {:?} (floor {}s, quiesce {}s)",
             tick, floor_s, quiesce_s
         );
+
+        // Hand the shutdown path what it needs. Nothing else holds the
+        // heartbeat, and the heartbeat is the only owner of a live
+        // lease token, so a clean release is impossible without this.
+        if let Ok(mut slot) = self.tier_runtime.lock() {
+            *slot =
+                Some(TierRuntime { orch: shutdown_orch, guard: shutdown_guard, heartbeat });
+        }
         Ok(())
+    }
+
+    /// Wind the hub down so a successor — or a wake from hibernation —
+    /// finds a bucket that describes this volume exactly.
+    ///
+    /// Order matters at every step:
+    ///
+    /// 1. **Fence new work first.** Without the drain gate a WRITE can
+    ///    land after the final flush, and the released mark would then
+    ///    invite a successor onto a prefix missing those bytes.
+    /// 2. **Push RAM capture marks into durable rows**, so the final
+    ///    tick can see everything that was dirtied.
+    /// 3. **Final flush + manifest barrier** — the RPO record.
+    /// 4. **Fence the guard BEFORE releasing.** A clean release is a
+    ///    barrier: while `current()` still answers `Some`, a late
+    ///    publish could land on a prefix whose cell already says
+    ///    "finished" and whose successor may already be claiming.
+    /// 5. **Release only if the volume is actually recoverable.** A hub
+    ///    that could not flush leaves the cell HELD on purpose: the
+    ///    next claimant then waits out the lease the slow way instead
+    ///    of instantly serving a bucket that is behind the PVC.
+    pub async fn graceful_shutdown(&self) {
+        self.status.set_phase(super::status::HubPhase::Draining);
+        let runtime = self.tier_runtime.lock().ok().and_then(|mut g| g.take());
+
+        // Stop accepting work at frame boundaries (F55). Unreplied
+        // requests retransmit against the next incarnation.
+        let gate = crate::nfs::pipeline::DrainGate::global();
+        gate.begin();
+        let drain_ms = std::env::var("FLINT_NFS_DRAIN_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(3000);
+        let (remaining, clean) = gate.drain(std::time::Duration::from_millis(drain_ms)).await;
+        if !clean {
+            // F33b's prompt-exit obligation still stands: we do not wait
+            // past the deadline, but the flush below is what actually
+            // protects the data, and it has not run yet.
+            warn!(
+                "shutdown: drain deadline expired with {} reply(ies) in flight — \
+                 continuing to the final flush",
+                remaining
+            );
+        }
+
+        let Some(runtime) = runtime else {
+            info!("🛑 drained; no tier to flush");
+            return;
+        };
+
+        if let Err(e) = crate::tier::durable::drain_pending(&self.backend).await {
+            warn!("shutdown: durable dirty-bit flush failed: {} — the final tick may miss work", e);
+        }
+        runtime.orch.tick().await;
+
+        let rpo = crate::tier::rpo::evaluate(
+            self.backend.as_ref(),
+            &runtime.guard,
+            Some(runtime.orch.as_ref()),
+        )
+        .await;
+
+        // The barrier: nothing may publish from here on.
+        runtime.guard.fence();
+
+        if rpo.clean {
+            let outcome = runtime
+                .heartbeat
+                .release(std::time::Duration::from_secs(15))
+                .await;
+            match outcome {
+                crate::tier::epoch::ReleaseOutcome::Released => {
+                    self.status.set_phase(super::status::HubPhase::Released);
+                    info!("🛑 clean shutdown: flushed, manifest current, epoch released");
+                }
+                other => {
+                    warn!("🛑 shutdown flushed cleanly but the epoch release did not land: {:?}", other);
+                }
+            }
+        } else {
+            // Deliberately no release. The bucket cannot rebuild this
+            // volume right now, and a released cell would let the next
+            // hub claim instantly and serve exactly that gap.
+            warn!(
+                "🛑 shutdown with work still unpublished ({}) — epoch left HELD so no \
+                 successor claims a bucket that is behind this PVC",
+                rpo.why()
+            );
+            runtime.heartbeat.abort();
+        }
     }
 
     /// Start gRPC control server for DS registration

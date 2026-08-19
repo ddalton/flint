@@ -110,6 +110,14 @@ tier:
   startupFailureThreshold: 60
 
 # RUST_LOG for the hub.
+# How long the kubelet waits after SIGTERM before SIGKILL. The hub
+# uses that window to drain in-flight replies, flush every dirty file,
+# write the DR manifest and release the epoch — so the next start (or
+# the next hub) comes up instantly instead of waiting out a lease
+# nobody holds. Raise it if this volume routinely holds a large dirty
+# set: the flush is bounded by unpublished bytes, not by a constant.
+terminationGracePeriodSeconds: 120
+
 logLevel: info
 resources: {}
 nodeSelector: {}

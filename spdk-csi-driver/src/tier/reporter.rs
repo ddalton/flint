@@ -31,8 +31,48 @@ use crate::tier::store::ObjectStore;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// The most recent gauge collection, for readers outside the log —
+/// the hub's status endpoint. Published every interval INCLUDING idle
+/// ones: a hub that is doing nothing is exactly the hub a lifecycle
+/// controller is asking about, and it must still be able to see the
+/// dirty/evicted/epoch numbers.
+static PUBLISHED: std::sync::OnceLock<std::sync::RwLock<Option<PublishedGauges>>> =
+    std::sync::OnceLock::new();
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedGauges {
+    #[serde(flatten)]
+    pub gauges: Gauges,
+    /// When this collection ran — the reader needs to know how stale
+    /// the numbers are, since they refresh only once per interval.
+    pub collected_unix: u64,
+}
+
+fn published_slot() -> &'static std::sync::RwLock<Option<PublishedGauges>> {
+    PUBLISHED.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+/// The latest gauge collection, if the reporter has run at least once.
+pub fn latest_gauges() -> Option<PublishedGauges> {
+    published_slot().read().ok().and_then(|g| g.clone())
+}
+
+fn publish(gauges: &Gauges) {
+    if let Ok(mut slot) = published_slot().write() {
+        *slot = Some(PublishedGauges {
+            gauges: gauges.clone(),
+            collected_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        });
+    }
+}
+
 /// Point-in-time gauges the collector reads next to the counter delta.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Gauges {
     pub dirty_files: usize,
     /// Stat-sum of the dirty paths — the upper bound of what the next
@@ -335,6 +375,14 @@ pub fn spawn(
                 }
             }
 
+            // Publish BEFORE the idle short-circuit below. The status
+            // endpoint's readers care most about a quiet hub — that is
+            // the one a controller is deciding whether to suspend — and
+            // skipping the publish here would freeze its view at the
+            // last busy interval. Only the MPU fields go stale on idle
+            // intervals, since their probe costs an S3 LIST.
+            publish(&g);
+
             // The MPU probe costs an S3 LIST — only on active
             // intervals (compose's own silence rule, pre-checked).
             let mut act = delta;
@@ -359,6 +407,8 @@ pub fn spawn(
                 }
                 Err(e) => debug!("tier reporter: MPU probe failed: {}", e),
             }
+            // Re-publish now that the MPU fields are filled in.
+            publish(&g);
 
             match compose(&delta, &g, &knobs) {
                 Some((true, msg)) => warn!("🚨 🪣 tier last {}s: {}", interval_secs, msg),

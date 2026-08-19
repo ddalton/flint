@@ -113,6 +113,7 @@
               "nodeSelector": {
                 "topology.kubernetes.io/zone": "us-east-1a"
               },
+              "terminationGracePeriodSeconds": 120,
               "volumes": [
                 {
                   "configMap": {
@@ -321,6 +322,7 @@
                   ]
                 }
               ],
+              "terminationGracePeriodSeconds": 120,
               "volumes": [
                 {
                   "configMap": {
@@ -499,6 +501,7 @@
                   ]
                 }
               ],
+              "terminationGracePeriodSeconds": 120,
               "volumes": [
                 {
                   "configMap": {
@@ -694,6 +697,7 @@
                   ]
                 }
               ],
+              "terminationGracePeriodSeconds": 120,
               "volumes": [
                 {
                   "configMap": {
@@ -783,5 +787,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "72b2494c833bda0841274a05c03043549dff36889ec53185f5dfee10a13f6450"
+  "chartSha256": "f194864fb1fc3b71a074724d9be5816e1f7570ce7e0c5de785ccf2df400897f6"
 }
