@@ -88,6 +88,51 @@ spec:
                   `reclaim: Delete` says so.
                 nullable: true
                 type: string
+              idle:
+                description: |-
+                  Wind the share down when nobody is using it. Absent = off, and
+                  each rung is opt-in on its own.
+                nullable: true
+                properties:
+                  hibernateAfterSecs:
+                    description: |-
+                      Seconds of no client activity before the PVC is DELETED and the
+                      bucket becomes the only copy. Requires `spec.bucket`, and the
+                      operator verifies a clean flush at drain time before acting.
+
+                      The CR is never deleted by this — only the disk.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  suspendAfterSecs:
+                    description: |-
+                      Seconds of no client activity before the hub is scaled to zero.
+                      The PVC is kept, so waking is a pod start.
+
+                      Seconds, not a duration string: `15m` and `15M` differ by a
+                      factor of 60 in some parsers and by an error in others, and this
+                      number decides when someone's project goes away.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  suspendWithSessions:
+                    description: |-
+                      Refuse to suspend while any NFS client still holds a lease, even
+                      if it has been quiet. Absent = false: an idle mount renews its
+                      lease forever, so "has sessions" would pin every mounted share
+                      awake permanently — which is exactly the state this ladder
+                      exists to end. Set it for shares whose consumers cannot tolerate
+                      a reconnect.
+                    nullable: true
+                    type: boolean
+                type: object
+                x-kubernetes-validations:
+                - message: spec.idle.hibernateAfterSecs requires spec.idle.suspendAfterSecs — hibernate is the lower rung of the same ladder
+                  rule: '!has(self.hibernateAfterSecs) || has(self.suspendAfterSecs)'
+                - message: spec.idle.hibernateAfterSecs must be >= spec.idle.suspendAfterSecs
+                  rule: '!has(self.hibernateAfterSecs) || !has(self.suspendAfterSecs) || self.hibernateAfterSecs >= self.suspendAfterSecs'
               image:
                 description: |-
                   Hub image override, verbatim (`repo/name:tag`). Absent = the
@@ -123,6 +168,66 @@ spec:
                 description: '`RUST_LOG` for the hub. Absent = `info`.'
                 nullable: true
                 type: string
+              monitoring:
+                description: |-
+                  The hub's own HTTP surface: `/health`, `/status`, and optionally
+                  the file API. Absent = off, which is the shipped posture for
+                  every share that has not opted in.
+                nullable: true
+                properties:
+                  enabled:
+                    description: Absent = off.
+                    nullable: true
+                    type: boolean
+                  fileApi:
+                    description: Browse and edit files over HTTP without mounting the share.
+                    nullable: true
+                    properties:
+                      enabled:
+                        description: Absent = off.
+                        nullable: true
+                        type: boolean
+                      hydrateWaitSecs:
+                        description: |-
+                          Seconds a download waits for an evicted file to hydrate before
+                          answering 503 with a Retry-After. Absent = 30.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      maxDownloadBytes:
+                        description: |-
+                          Largest single download, in bytes. Absent = 5Gi. A browse click
+                          on a cold file pulls it out of S3 — real, billed egress — so
+                          this is the cap that bounds one careless click. Larger files are
+                          fetched with Range requests.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      maxUploadBytes:
+                        description: Largest single upload, in bytes. Absent = 5Gi.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      tokenSecretRef:
+                        description: |-
+                          Name of an EXISTING Secret in this namespace holding the bearer
+                          token under key `token`. The operator projects it into the hub
+                          at a fixed path, so rotating the token is a Secret edit rather
+                          than a pod-spec change.
+
+                          Absent = the hub falls back to `FLINT_FILE_API_TOKEN` in its
+                          environment. With NEITHER source the hub logs why and does not
+                          serve the routes at all — there is no token-optional mode for a
+                          surface that can rewrite every file in the project.
+                        nullable: true
+                        type: string
+                    type: object
+                  port:
+                    description: Absent = 8080.
+                    format: int32
+                    nullable: true
+                    type: integer
+                type: object
               nodeSelector:
                 additionalProperties:
                   type: string
@@ -343,6 +448,18 @@ spec:
                 format: int32
                 nullable: true
                 type: integer
+              terminationGracePeriodSeconds:
+                description: |-
+                  Seconds the kubelet waits after SIGTERM before SIGKILL. The hub
+                  spends that window draining, flushing every dirty file, writing
+                  the DR manifest and releasing the epoch — which is what makes
+                  the NEXT start instant instead of a lease wait. Absent = 120.
+                  A hub killed at the deadline is still correct (it leaves the
+                  epoch held so no successor serves a stale bucket), just slow to
+                  wake with its last writes unpublished.
+                format: int64
+                nullable: true
+                type: integer
             required:
             - persistence
             type: object
@@ -361,6 +478,8 @@ spec:
               rule: '!has(self.settings) || has(self.bucket)'
             - message: spec.credentialsSecretRef needs spec.bucket — the tier is off without one
               rule: '!has(self.credentialsSecretRef) || has(self.bucket)'
+            - message: spec.idle.hibernateAfterSecs needs spec.bucket — hibernation deletes the PVC, and without a bucket that PVC is the only copy of the data
+              rule: '!has(self.idle) || !has(self.idle.hibernateAfterSecs) || has(self.bucket)'
           status:
             description: |-
               Observed state. Everything here is derived — the operator never
@@ -428,6 +547,8 @@ spec:
                 - Starting
                 - Ready
                 - Suspended
+                - IdleSuspended
+                - Hibernated
                 - Failed
                 nullable: true
                 type: string
