@@ -214,14 +214,51 @@ one to prefer.
 quiet trap: without `advertiseAddress` the operator derives the `.svc` DNS name
 for it, which a foreign client cannot resolve. Leg C1 asserts exactly this.
 
-### Cluster shape
+### Cluster shape and what it costs
 
-- **Cluster A** (hub): 3 nodes, one AZ. The hub's PVC needs an RWO
-  StorageClass — `flint-spdk` if flint's own CSI driver is installed, otherwise
-  the cloud default. Legs D8 and E1 are specifically about the real CSI volume.
-- **Cluster B** (consumers): 2 nodes. Same AZ as A where possible; leg C2 notes
-  when it is not, because that is where cross-AZ charges appear.
-- Both pure-spot, control plane included.
+**One instance type everywhere: `i4i.large`, all spot, control plane
+included.** Measured in us-west-1 at **$0.0408–0.0441/hr** against
+$0.1148–0.1175 for `i4i.xlarge` — a 2.7x saving for a drill that is
+functional, not a benchmark. It stays SPDK-eligible (trove matches on
+the `i4i` family, not the size), and it keeps a local NVMe, which
+`m5.large` does not. Using a single type also improves AZ pinning: the
+chooser only accepts an AZ quoting **every** requested type.
+
+| Role | Count | Type | $/hr |
+|---|---|---|---|
+| Cluster A control plane | 1 | i4i.large spot | ~0.044 |
+| Cluster A workers | 2 | i4i.large spot | ~0.088 |
+| Foreign consumers (plain EC2) | 2 | i4i.large spot | ~0.088 |
+| **Total** | **5** | | **~$0.22/hr** |
+
+At ~16 h of drill wall clock that is **≈ $3.50 of compute**. Transfer is
+≈ $0: S3 is in-region (free both ways) and everything is pinned to one
+AZ. Budget ~$5 all in, and the real financial risk is not the rate — it
+is that **trove has no TTL or auto-teardown**, so a forgotten cluster
+bills indefinitely.
+
+**What `i4i.large` costs in fidelity, stated up front.** The standing
+rule on this rig is to drop to a small instance for functional drills
+but *never for a number anyone will quote*. Two vCPU and 16 GiB affect
+some legs and not others:
+
+- **Throughput-derived numbers become provisional.** B2 and D2 measure
+  drain time at real S3 rates; on 2 vCPU with burstable network they
+  will be pessimistic. **Do not compare them to the ~13.3 s/GiB figure
+  measured on larger hardware** — report them as a floor ("120 s of
+  grace was/was not enough on this shape"), which is the pass/fail the
+  legs actually need.
+- **Unaffected**: A7 (memory per request byte), C3 (bytes across the
+  boundary), E-phase checksums, and every status-code and ordering
+  oracle. These are the majority.
+- **Set an explicit memory limit on the hub container** before A7, so
+  the leg measures the buffering behaviour instead of OOM-killing the
+  node.
+- **Size the drill PVCs small** (~5 GiB). D8 deliberately fills one, and
+  a 468 GB volume would make that leg slow and pointless.
+
+If a quotable throughput number is ever wanted, re-run B2/D2 alone on
+`i4i.xlarge` — one leg, one hour, about $0.12.
 
 ---
 
