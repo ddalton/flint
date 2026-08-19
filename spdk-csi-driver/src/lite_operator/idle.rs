@@ -141,6 +141,41 @@ pub fn requested_age_secs(
     Some((now - at).num_seconds().max(0) as u64)
 }
 
+/// How far in the FUTURE the request stamp is, if it is.
+///
+/// `requested_age_secs` clamps a future stamp to 0 — "wanted right
+/// now" — which is the right reading of ordinary clock skew and the
+/// wrong reading without a ceiling. A front door running an hour fast
+/// stamps an hour ahead, the clamp reports 0s forever, and the share
+/// is pinned awake for the length of the skew: indistinguishable from
+/// real demand, and invisible. This is the term that makes it
+/// distinguishable. `None` = no stamp, or a stamp in the past.
+pub fn request_skew_secs(
+    share: &FlintShare,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<u64> {
+    let at = requested_at(share)?;
+    let ahead = (at - now).num_seconds();
+    (ahead > 0).then_some(ahead as u64)
+}
+
+/// A request stamp too far ahead to be skew, given this share's own
+/// threshold. `Some(ahead_secs)` = do not trust it, and say so.
+///
+/// The bound is one full `suspendAfter`: inside that, a fast clock
+/// costs at most one extra window of uptime and the clamp absorbs it;
+/// beyond it, the stamp can outlive its own threshold indefinitely,
+/// which is not skew any more. Shares with the ladder off cannot be
+/// pinned by definition, so there is nothing to judge.
+pub fn implausible_request(
+    cfg: Option<&IdleSpec>,
+    share: &FlintShare,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<u64> {
+    let after = cfg.and_then(|c| c.suspend_after_secs)?;
+    request_skew_secs(share, now).filter(|ahead| *ahead > after)
+}
+
 /// What the reconciler should do about the ladder this pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -245,7 +280,19 @@ pub fn decide(cfg: Option<&IdleSpec>, input: Inputs<'_>) -> Decision {
     // ever recorded counts as stale — a share the front door has never
     // brokered is exactly the abandoned case, and requiring a heartbeat
     // that will never come would pin it awake forever.
-    if let Some(age) = request_age {
+    //
+    // A stamp further ahead than one full threshold is discarded rather
+    // than clamped. Clamping reads it as "wanted right now", so a front
+    // door with a badly wrong clock would hold the share up for the
+    // length of its skew — and because the clamp reports 0s, the reason
+    // would read exactly like genuine demand. Discarding it falls
+    // through to the hub's own activity clock, which is the signal that
+    // does not depend on anyone else's notion of the time.
+    let trusted_age = match implausible_request(cfg, share, input.now) {
+        Some(_) => None,
+        None => request_age,
+    };
+    if let Some(age) = trusted_age {
         if age < after {
             return Decision::Hold(format!("requested {age}s ago, under the {after}s threshold"));
         }
@@ -464,13 +511,83 @@ mod tests {
     /// now".
     #[test]
     fn a_future_request_timestamp_clamps_to_now() {
-        let s = share(&[(ANN_REQUESTED_AT, "2026-08-19T13:00:00Z")]);
+        // 60s ahead, judged against a 900s threshold: ordinary skew.
+        let s = share(&[(ANN_REQUESTED_AT, "2026-08-19T12:01:00Z")]);
         assert_eq!(requested_age_secs(&s, now()), Some(0));
+        let cfg = idle(Some(900), None);
+        assert_eq!(implausible_request(Some(&cfg), &s, now()), None);
         let d = decide(
-            Some(&idle(Some(60), None)),
+            Some(&cfg),
             Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None },
         );
-        assert!(matches!(d, Decision::Hold(_)));
+        assert!(matches!(d, Decision::Hold(_)), "modest skew still reads as demand");
+    }
+
+    /// The clamp without a ceiling is a way to pin a share awake
+    /// forever. A front door an hour fast stamps an hour ahead; the
+    /// clamp reports 0s every pass, so the share never suspends and
+    /// the reason reads exactly like real demand. Past one full
+    /// threshold the stamp is discarded and the hub's own activity
+    /// clock — which depends on nobody else's notion of the time —
+    /// decides.
+    #[test]
+    fn a_request_from_the_far_future_is_discarded_rather_than_clamped() {
+        let s = share(&[(ANN_REQUESTED_AT, "2026-08-19T13:00:00Z")]);
+        let cfg = idle(Some(60), None);
+
+        // Still clamps — the accessor's contract is unchanged, and
+        // that is precisely why it cannot be the thing that judges.
+        assert_eq!(requested_age_secs(&s, now()), Some(0));
+        assert_eq!(request_skew_secs(&s, now()), Some(3600));
+        assert_eq!(implausible_request(Some(&cfg), &s, now()), Some(3600));
+
+        assert_eq!(
+            decide(
+                Some(&cfg),
+                Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None },
+            ),
+            Decision::Suspend,
+            "a nonsense stamp must not outvote the hub saying it is quiet"
+        );
+
+        // It is only the REQUEST signal that is discarded. A hub that
+        // says it is busy still holds the share up.
+        assert!(matches!(
+            decide(
+                Some(&cfg),
+                Inputs {
+                    share: &s,
+                    now: now(),
+                    hub_quiet: Err("wrote 4 MiB 3s ago".into()),
+                    sessions_live: None,
+                },
+            ),
+            Decision::Hold(_)
+        ));
+
+        // A past stamp has no skew, and the ladder being off means
+        // there is no threshold to judge against.
+        let past = share(&[(ANN_REQUESTED_AT, "2026-08-19T11:00:00Z")]);
+        assert_eq!(request_skew_secs(&past, now()), None);
+        assert_eq!(implausible_request(Some(&idle(None, None)), &s, now()), None);
+    }
+
+    /// A wake request is presence-only, so a skewed clock can still
+    /// wake a share — which is the safe direction. Discarding the
+    /// stamp must never mean refusing to come back up.
+    #[test]
+    fn a_skewed_stamp_still_wakes_a_suspended_share() {
+        let s = share(&[
+            (ANN_IDLE_STATE, "Suspended"),
+            (ANN_REQUESTED_AT, "2026-08-19T13:00:00Z"),
+        ]);
+        assert_eq!(
+            decide(
+                Some(&idle(Some(60), None)),
+                Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None },
+            ),
+            Decision::Wake
+        );
     }
 
     /// An admin's `lifecycle: Suspended` always wins, and a wake

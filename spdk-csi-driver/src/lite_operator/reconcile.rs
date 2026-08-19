@@ -921,11 +921,38 @@ async fn drive_idle_ladder(
         return verify_and_hibernate(ctx, share, names, dep, conds).await;
     }
 
+    let now = chrono::Utc::now();
+
+    // A request stamp from the future beyond any plausible skew is a
+    // broken clock somewhere, and `decide` discards it rather than
+    // letting it pin the share awake. Say so out loud: discarded
+    // silently, the symptom is "this project never suspends" with
+    // nothing anywhere naming the cause.
+    if let Some(ahead) = idle::implausible_request(cfg.as_ref(), share, now) {
+        warn!(
+            share = %share.name_any(), ahead_secs = ahead,
+            "{} is {}s in the FUTURE — ignoring it as a request signal; \
+             check the clock on whatever writes it",
+            idle::ANN_REQUESTED_AT, ahead,
+        );
+        event(
+            ctx,
+            share,
+            EventType::Warning,
+            "ImplausibleRequest",
+            &format!(
+                "{} is {}s in the future and is being ignored — the writer's clock is wrong",
+                idle::ANN_REQUESTED_AT, ahead
+            ),
+        )
+        .await;
+    }
+
     let decision = idle::decide(
         cfg.as_ref(),
         idle::Inputs {
             share,
-            now: chrono::Utc::now(),
+            now,
             hub_quiet,
             sessions_live,
         },
