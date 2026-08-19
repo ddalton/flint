@@ -559,7 +559,18 @@ fn apply_settable_attrs_inner(
                 return (applied, Some(Nfs4Status::Delay));
             }
         }
-        match std::fs::OpenOptions::new().write(true).open(path).and_then(|f| f.set_len(size)) {
+        // The `is_symlink` guard above already answers INVAL for a link,
+        // but it was read from a `symlink_metadata` taken at the top of
+        // this function — a whole sequence of chown/chmod ago. Going
+        // through open_beneath makes the refusal atomic with the
+        // truncate rather than trusting that nothing swapped the name in
+        // between.
+        match crate::nfs::v4::open_beneath::open(
+            std::fs::OpenOptions::new().write(true),
+            path,
+        )
+        .and_then(|f| f.set_len(size))
+        {
             Ok(()) => {
                 // A2 dirty capture, at the ONE chokepoint both size
                 // lanes share (SETATTR and OPEN-createattrs both land
@@ -606,7 +617,9 @@ fn apply_settable_attrs_inner(
             if let Some(t) = want.mtime {
                 times = times.set_modified(t.to_system_time());
             }
-            match std::fs::File::open(path).and_then(|f| f.set_times(times)) {
+            match crate::nfs::v4::open_beneath::open_read(path)
+                .and_then(|f| f.set_times(times))
+            {
                 Ok(()) => {
                     want.atime.map(|_| applied.push(FATTR4_TIME_ACCESS_SET));
                     want.mtime.map(|_| applied.push(FATTR4_TIME_MODIFY_SET));
@@ -651,7 +664,17 @@ pub fn attr_numbers_to_bitmap(attrs: &[u32]) -> Vec<u32> {
     words
 }
 
-fn io_error_to_nfs4(e: &std::io::Error) -> Nfs4Status {
+pub fn io_error_to_nfs4(e: &std::io::Error) -> Nfs4Status {
+    // ELOOP here is not a symlink cycle — every by-path open in the data
+    // path goes through `open_beneath`, which sets O_NOFOLLOW, so ELOOP
+    // means "the object named is a symbolic link and the server declined
+    // to follow it". RFC 8881 §18.16.3: that is NFS4ERR_SYMLINK, which
+    // tells the client to READLINK and re-resolve on its own side —
+    // where symlink resolution belongs. Reporting NFS4ERR_IO instead
+    // would turn a normal, recoverable answer into a hard failure.
+    if crate::nfs::v4::open_beneath::is_symlink_refusal(e) {
+        return Nfs4Status::SymLink;
+    }
     match e.kind() {
         std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
         std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
@@ -2886,7 +2909,16 @@ impl FileOperationHandler {
         let create_result = match op.objtype {
             Nfs4FileType::Regular => {
                 // Create regular file
-                tokio::fs::File::create(&obj_path).await.map(|_| ())
+                // Through open_beneath: File::create means
+                // O_WRONLY|O_CREAT|O_TRUNC, so CREATE(NF4LNK, "x" ->
+                // /data/state/state.db) followed by CREATE(NF4REG,
+                // "x") used to truncate whatever the link named.
+                crate::nfs::v4::open_beneath::open_async(
+                    tokio::fs::OpenOptions::new().write(true).create(true).truncate(true),
+                    &obj_path,
+                )
+                .await
+                .map(|_| ())
             }
             Nfs4FileType::Directory => {
                 // Create directory
@@ -2931,7 +2963,16 @@ impl FileOperationHandler {
             | Nfs4FileType::CharDevice => {
                 debug!("CREATE: {:?} → regular-file stand-in at {:?}",
                        op.objtype, obj_path);
-                tokio::fs::File::create(&obj_path).await.map(|_| ())
+                // Through open_beneath: File::create means
+                // O_WRONLY|O_CREAT|O_TRUNC, so CREATE(NF4LNK, "x" ->
+                // /data/state/state.db) followed by CREATE(NF4REG,
+                // "x") used to truncate whatever the link named.
+                crate::nfs::v4::open_beneath::open_async(
+                    tokio::fs::OpenOptions::new().write(true).create(true).truncate(true),
+                    &obj_path,
+                )
+                .await
+                .map(|_| ())
             }
             _ => {
                 warn!("CREATE: Object type {:?} not yet supported", op.objtype);

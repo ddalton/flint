@@ -654,17 +654,17 @@ impl PerfOperationHandler {
 
         let copy_result = tokio::task::spawn_blocking(move || {
             // Open source file for reading
-            let src_file = std::fs::File::open(&src_path)?;
+            use crate::nfs::v4::open_beneath;
+            let src_file = open_beneath::open_read(&src_path)?;
 
             // Open destination file for writing. truncate(false) is
             // explicit, not incidental: COPY writes a byte RANGE and must
             // leave everything outside it — including the destination's
             // length — alone.
-            let dst_file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&dst_path)?;
+            let dst_file = open_beneath::open(
+                std::fs::OpenOptions::new().write(true).create(true).truncate(false),
+                &dst_path,
+            )?;
 
             // RFC 7862 §15.2.3: "SAVED_FH and CURRENT_FH must be different
             // files. If SAVED_FH and CURRENT_FH refer to the same file, the
@@ -975,15 +975,15 @@ impl PerfOperationHandler {
         // CLONE copies a byte range and says nothing about mode, owner,
         // or the bytes past the range.
         let clone_result = tokio::task::spawn_blocking(move || {
-            let src_file = std::fs::File::open(&src_path)?;
+            use crate::nfs::v4::open_beneath;
+            let src_file = open_beneath::open_read(&src_path)?;
             // truncate(false) is the whole fix stated as code: the old
             // whole-file path opened this destination with truncate(true)
             // BEFORE it knew whether the clone could succeed.
-            let dst_file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&dst_path)?;
+            let dst_file = open_beneath::open(
+                std::fs::OpenOptions::new().write(true).create(true).truncate(false),
+                &dst_path,
+            )?;
 
             let src_size = src_file.metadata()?.len();
             let len = resolve_range_len(src_size, src_offset, count)?;
@@ -1227,7 +1227,10 @@ impl PerfOperationHandler {
                             | nix::fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE
                     }
                 };
-                let file = std::fs::OpenOptions::new().write(true).open(&p)?;
+                let file = crate::nfs::v4::open_beneath::open(
+                    std::fs::OpenOptions::new().write(true),
+                    &p,
+                )?;
                 // A4 write gate, spanning the fallocate AND its capture
                 // note (which therefore lives in this closure, not at
                 // the async caller). Excluded → WouldBlock → DELAY.
@@ -1389,7 +1392,12 @@ impl PerfOperationHandler {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                let lmeta = std::fs::metadata(&path)?;
+                // symlink_metadata, not metadata: a link's own
+                // inode is never in the eviction table, so a
+                // symlink leaf falls through to the open below
+                // and is refused there rather than answering
+                // SEEK about a file the client never named.
+                let lmeta = std::fs::symlink_metadata(&path)?;
                 if let Some(logical) = crate::tier::evict::logical_size(lmeta.dev(), lmeta.ino()) {
                     // RFC 7862 §15.11.3, as for the dense case below.
                     if start > logical {
@@ -1408,7 +1416,7 @@ impl PerfOperationHandler {
             #[cfg(target_os = "linux")]
             {
                 use std::os::fd::AsRawFd;
-                let file = std::fs::File::open(&path)?;
+                let file = crate::nfs::v4::open_beneath::open_read(&path)?;
                 let size = file.metadata()?.len();
 
                 // RFC 7862 §15.11.3: "If the sa_offset is beyond the end of

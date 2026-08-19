@@ -1598,10 +1598,11 @@ impl CompoundDispatcher {
                                 let cur =
                                     std::fs::metadata(&t.path).map(|m| m.len()).unwrap_or(0);
                                 if end > cur {
-                                    if let Err(e) = std::fs::OpenOptions::new()
-                                        .write(true)
-                                        .open(&t.path)
-                                        .and_then(|f| f.set_len(end))
+                                    if let Err(e) = crate::nfs::v4::open_beneath::open(
+                                        std::fs::OpenOptions::new().write(true),
+                                        &t.path,
+                                    )
+                                    .and_then(|f| f.set_len(end))
                                     {
                                         // The stripes hold the bytes but the
                                         // size authority failed to advance —
@@ -3793,7 +3794,10 @@ impl CompoundDispatcher {
                     }
                     _ => candidate,
                 };
-                match std::fs::OpenOptions::new().write(true).open(&blocking_path) {
+                match crate::nfs::v4::open_beneath::open(
+                    std::fs::OpenOptions::new().write(true),
+                    &blocking_path,
+                ) {
                     Ok(file) => {
                         let cur_size = file.metadata().map(|m| m.len()).unwrap_or(0);
                         if candidate > cur_size {
@@ -3817,7 +3821,10 @@ impl CompoundDispatcher {
                         std::time::UNIX_EPOCH
                             + std::time::Duration::new(secs.max(0) as u64, nsecs),
                     );
-                if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&blocking_path) {
+                if let Ok(file) = crate::nfs::v4::open_beneath::open(
+                    std::fs::OpenOptions::new().write(true),
+                    &blocking_path,
+                ) {
                     let _ = file.set_times(ft);
                 }
             }

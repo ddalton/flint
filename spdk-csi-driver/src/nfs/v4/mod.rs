@@ -18,6 +18,7 @@ pub mod protocol;
 pub mod xdr;              // NFSv4 XDR encoding/decoding - DONE
 pub mod compound;         // COMPOUND operation framework - DONE
 pub mod filehandle;       // NFSv4 file handle management - DONE
+pub mod open_beneath;     // The one by-path open door (leaf symlinks are never followed)
 pub mod fh_kernel;        // v4 kernel inode handles (F26 §12: name_to_handle_at)
 pub mod filehandle_pnfs;  // pNFS file-ID based filehandles (RFC 8435) - NEW
 pub mod pseudo;           // Pseudo-filesystem (RFC 7530 Section 7) - NEW

@@ -343,12 +343,13 @@ impl IoOperationHandler {
         if !allow_fresh_open {
             return;
         }
-        let opened = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map(|f| (f, true))
-            .or_else(|_| std::fs::File::open(path).map(|f| (f, false)));
+        use crate::nfs::v4::open_beneath;
+        let opened = open_beneath::open(
+            std::fs::OpenOptions::new().read(true).write(true),
+            path,
+        )
+        .map(|f| (f, true))
+        .or_else(|_| open_beneath::open_read(path).map(|f| (f, false)));
         if let Ok((f, writable)) = opened {
             let file = Arc::new(f);
             let ino = CachedFile::ino_of(&file);
@@ -490,6 +491,27 @@ impl IoOperationHandler {
             let file_path = parent_path.join(&filename);
             debug!("OPEN: Creating file at {:?}", file_path);
 
+            // RFC 8881 §18.16.3: OPEN of a symbolic link is
+            // NFS4ERR_SYMLINK — the client READLINKs and re-resolves in
+            // its own namespace. Answering early matters here because
+            // the create path admits against the space reserve and
+            // stamps ownership on the way to its open; none of that
+            // should happen for a request that cannot succeed. The
+            // BINDING guarantee is `open_beneath`'s O_NOFOLLOW below,
+            // which cannot be raced — this check only buys the right
+            // error and an untouched filesystem.
+            if crate::nfs::v4::open_beneath::leaf_is_symlink(&file_path) {
+                warn!("OPEN(create): {:?} is a symlink → SYMLINK", file_path);
+                return OpenRes {
+                    status: Nfs4Status::SymLink,
+                    stateid: None,
+                    change_info: None,
+                    result_flags: 0,
+                    delegation: OpenDelegationType::None,
+                    attrset: vec![],
+                };
+            }
+
             // Extract verifier for EXCLUSIVE4 / EXCLUSIVE4_1 paths.
             // Per RFC 8881 §18.16.5 the verifier is the client's
             // dedupe key on retry: same verifier on an existing file
@@ -590,7 +612,12 @@ impl IoOperationHandler {
             // read+write: this fd is seeded into the fd-cache below and
             // must serve BOTH directions (a write-only fd turns a later
             // READ through the cache into EBADF).
-            match tokio::fs::OpenOptions::new().read(true).write(true).create(true).open(&file_path).await {
+            match crate::nfs::v4::open_beneath::open_async(
+                tokio::fs::OpenOptions::new().read(true).write(true).create(true),
+                &file_path,
+            )
+            .await
+            {
                 Ok(created) => {
                     debug!(
                         "OPEN: {} file {:?}",
@@ -749,7 +776,10 @@ impl IoOperationHandler {
                             if cacheable_stateid(&stateid.other)
                                 && !self.fd_cache.contains(&stateid.other)
                             {
-                                let file = Arc::new(created.into_std().await);
+                                // Already a std File — `open_beneath`
+                                // hands one back so both doors (sync
+                                // and async) return the same type.
+                                let file = Arc::new(created);
                                 let ino = CachedFile::ino_of(&file);
                                 self.fd_cache.insert(
                                     stateid.other,
@@ -794,11 +824,18 @@ impl IoOperationHandler {
                 }
                 Err(e) => {
                     warn!("OPEN: Failed to create file {:?}: {}", file_path, e);
-                    let status = match e.kind() {
-                        std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
-                        std::io::ErrorKind::AlreadyExists => Nfs4Status::Exist,
-                        std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
-                        _ => Nfs4Status::Io,
+                    let status = if crate::nfs::v4::open_beneath::is_symlink_refusal(&e) {
+                        // The leaf became a symlink between the check
+                        // above and this open — the race the pre-check
+                        // cannot cover and O_NOFOLLOW does.
+                        Nfs4Status::SymLink
+                    } else {
+                        match e.kind() {
+                            std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,
+                            std::io::ErrorKind::AlreadyExists => Nfs4Status::Exist,
+                            std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
+                            _ => Nfs4Status::Io,
+                        }
                     };
                     return OpenRes {
                         status,
@@ -865,6 +902,32 @@ impl IoOperationHandler {
                 ),
             },
         };
+
+        // RFC 8881 §18.16.3, the no-create arm — and the one that
+        // actually mattered. This path never opened anything itself; it
+        // minted a stateid and left `seed_open_fd` (and, failing that,
+        // READ's own fallback open) to resolve the path later. Both
+        // followed the link, so a client could LOOKUP a symlink, OPEN
+        // it, and READ whatever it pointed at. Refusing the OPEN is
+        // both the RFC answer and the point at which the client is
+        // still able to do the right thing.
+        //
+        // CLAIM_FH included: the filehandle names the link itself
+        // (LOOKUP is required to return the link's own handle), so
+        // arriving by handle is not evidence of anything.
+        if let Some(p) = &target_path {
+            if crate::nfs::v4::open_beneath::leaf_is_symlink(p) {
+                warn!("OPEN(no-create): {:?} is a symlink → SYMLINK", p);
+                return OpenRes {
+                    status: Nfs4Status::SymLink,
+                    stateid: None,
+                    change_info: None,
+                    result_flags: 0,
+                    delegation: OpenDelegationType::None,
+                    attrset: vec![],
+                };
+            }
+        }
 
         // If opening for WRITE, recall any read delegations
         // share_access: 1 = READ, 2 = WRITE, 3 = BOTH
@@ -1223,13 +1286,16 @@ impl IoOperationHandler {
                     // Prefer read+write so a later WRITE on this
                     // stateid reuses the entry; fall back to
                     // read-only when the file mode denies write.
-                    let (file, writable) = match std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(&path)
-                    {
+                    use crate::nfs::v4::open_beneath;
+                    let (file, writable) = match open_beneath::open(
+                        std::fs::OpenOptions::new().read(true).write(true),
+                        &path,
+                    ) {
                         Ok(f) => (f, true),
-                        Err(_) => (std::fs::File::open(&path)?, false),
+                        // A symlink leaf is refused in BOTH arms — the
+                        // read-only retry must not become the way in.
+                        Err(e) if open_beneath::is_symlink_refusal(&e) => return Err(e),
+                        Err(_) => (open_beneath::open_read(&path)?, false),
                     };
                     let file = Arc::new(file);
                     if cacheable {
@@ -1474,11 +1540,10 @@ impl IoOperationHandler {
             
             let path_clone = path.clone();
             let file_result = tokio::task::spawn_blocking(move || {
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(&path_clone)
+                crate::nfs::v4::open_beneath::open(
+                    std::fs::OpenOptions::new().read(true).write(true).create(true),
+                    &path_clone,
+                )
             }).await;
             
             let file_arc: Arc<File> = match file_result {
@@ -1808,9 +1873,10 @@ impl IoOperationHandler {
                 Ok(())
             } else {
                 // Cold path: no cached fd. Open fresh and sync.
-                let file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&path)?;
+                let file = crate::nfs::v4::open_beneath::open(
+                    std::fs::OpenOptions::new().write(true),
+                    &path,
+                )?;
                 file.sync_all()?;
                 Ok(())
             }
@@ -2809,5 +2875,132 @@ mod tests {
             OPEN4_SHARE_ACCESS_READ,
         );
         assert_eq!(delegation, OpenDelegationType::None);
+    }
+
+    /// The escape, run end to end as a client would run it.
+    ///
+    /// Every step here is a legal NFS operation: CREATE a symlink (the
+    /// server is required to support it), LOOKUP it (the server is
+    /// required to return the LINK's own filehandle, not the target's),
+    /// then OPEN and READ. The server's job is to stop at the OPEN with
+    /// NFS4ERR_SYMLINK so the client READLINKs and resolves the target
+    /// in its OWN namespace — where `/data/state/state.db` means the
+    /// client's file, not the hub's.
+    ///
+    /// Before this guard the server followed the link on the client's
+    /// behalf, and since the hub's namespace holds its state database,
+    /// its service-account token and its S3 credentials, "read any file
+    /// the server process can read" is the whole security boundary.
+    #[tokio::test]
+    async fn opening_a_symlink_never_dereferences_it() {
+        let (handler, fh_mgr, temp) = create_test_handler();
+
+        // The target sits OUTSIDE the export — as the hub's state db and
+        // its projected service-account token both do.
+        let outside = temp.path().parent().unwrap().join("flint-secret-target");
+        std::fs::write(&outside, b"AKIA-hub-credentials").unwrap();
+        let link = temp.path().join("innocent.txt");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let export_fh = fh_mgr.path_to_filehandle(fh_mgr.get_export_path()).unwrap();
+        let mut ctx = CompoundContext::new(0);
+        ctx.current_fh = Some(export_fh.clone());
+
+        // CLAIM_NULL, no create: LOOKUP-then-OPEN, the ordinary shape.
+        let res = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_READ,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"attacker".to_vec(),
+                    openhow: OpenHow::NoCreate,
+                    claim: OpenClaim::Null("innocent.txt".to_string()),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(
+            res.status,
+            Nfs4Status::SymLink,
+            "OPEN of a symlink must answer NFS4ERR_SYMLINK (RFC 8881 §18.16.3)"
+        );
+        assert!(res.stateid.is_none(), "a refused OPEN must mint no stateid");
+
+        // CLAIM_FH: arriving with the link already as CFH is not
+        // evidence of anything — LOOKUP is REQUIRED to hand out the
+        // link's own handle, so this is the same request by another road.
+        let mut ctx = CompoundContext::new(0);
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&link).unwrap());
+        let res = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_READ,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"attacker".to_vec(),
+                    openhow: OpenHow::NoCreate,
+                    claim: OpenClaim::Fh,
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(res.status, Nfs4Status::SymLink, "CLAIM_FH is the same hole");
+
+        // And the create form, which additionally used to TRUNCATE the
+        // target on the way in: O_CREAT without O_EXCL follows a link.
+        let mut ctx = CompoundContext::new(0);
+        ctx.current_fh = Some(export_fh);
+        let res = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_BOTH,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"attacker".to_vec(),
+                    openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+                    claim: OpenClaim::Null("innocent.txt".to_string()),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(res.status, Nfs4Status::SymLink, "OPEN(CREATE) must refuse too");
+
+        // The target was never read and never written.
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"AKIA-hub-credentials",
+            "the file outside the export must be untouched"
+        );
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    /// The no-create OPEN path never opened anything itself — it minted
+    /// a stateid and left the resolution to READ's own fallback open. So
+    /// refusing at OPEN is necessary but not sufficient: READ must also
+    /// refuse, because a stateid from an earlier legitimate OPEN can
+    /// outlive the file being replaced by a link, and because READ
+    /// accepts the anonymous stateid without any OPEN at all.
+    #[tokio::test]
+    async fn reading_through_a_symlink_filehandle_is_refused() {
+        let (handler, fh_mgr, temp) = create_test_handler();
+
+        let outside = temp.path().parent().unwrap().join("flint-secret-read-target");
+        std::fs::write(&outside, b"super secret bytes").unwrap();
+        let link = temp.path().join("link.dat");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let mut ctx = CompoundContext::new(0);
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&link).unwrap());
+
+        let res = handler
+            .handle_read(
+                ReadOp { stateid: StateId::ANONYMOUS, offset: 0, count: 4096 },
+                &ctx,
+            )
+            .await;
+        assert_ne!(res.status, Nfs4Status::Ok, "READ must not serve a symlink's target");
+        assert!(res.data.is_empty(), "and must return no bytes of it");
+        let _ = std::fs::remove_file(&outside);
     }
 }
