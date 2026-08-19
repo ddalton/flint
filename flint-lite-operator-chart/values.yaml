@@ -56,6 +56,37 @@ leaderElection: true
 # upgrade.
 manageCrd: true
 
+# Default-deny ingress, for the operator and for the hubs it runs.
+# OFF by default: an empty client list breaks every mount, and only
+# this cluster's operator knows its node CIDRs. Needs a CNI that
+# enforces NetworkPolicy (Cilium, Calico) — elsewhere every rule is
+# ignored silently.
+networkPolicy:
+  enabled: false
+
+  # Namespaces holding FlintShares. A NetworkPolicy only covers its own
+  # namespace, so each one that runs hubs needs its own copy and this
+  # is the list helm renders them into. A share in a namespace NOT
+  # listed here is unprotected and nothing detects that — keep this in
+  # step with where shares are created.
+  hubNamespaces: []
+  #  - workspaces
+
+  # Who may reach a hub's 2049. Kubelet-driven mounts arrive from the
+  # NODE ip, so node CIDRs are usually what you want; a podSelector
+  # cannot express that client set. Cross-cluster consumers (the
+  # advertiseAddress case) are always CIDRs. EMPTY ADMITS NOTHING.
+  nfsClientCIDRs: []
+  nfsClientSelectors: []      # NetworkPolicyPeer objects, verbatim
+
+  # EXTRA peers for a hub's 8080 (/status, /health, the file API). The
+  # operator is admitted automatically — it polls the pod ip directly,
+  # and a hub it cannot poll is an unknown hub that never suspends.
+  # Add the browse front door here; nothing else needs this port, and
+  # the file API can rewrite any file in the project.
+  apiClientCIDRs: []
+  apiClientSelectors: []
+
 rbac:
   # Create the ClusterRole/Binding. The operator needs cluster scope:
   # shares live in tenant namespaces and uniqueness spans all of them.

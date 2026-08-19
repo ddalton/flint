@@ -1,0 +1,93 @@
+{{- if .Values.networkPolicy.enabled }}
+# The operator serves NOTHING. It is a controller: it watches the API
+# server and applies objects, all of it outbound. So the correct ingress
+# rule is none at all, and this policy exists to say that explicitly —
+# `policyTypes: [Ingress]` with an empty rule list denies every inbound
+# connection to the operator pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "flint-lite-operator.name" . }}-deny-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "flint-lite-operator.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress: []
+{{- range $ns := .Values.networkPolicy.hubNamespaces }}
+---
+# Default-deny ingress for every hub the operator RUNS in {{ $ns }},
+# with explicit holes.
+#
+# This is per-namespace on purpose and it is the limitation to know:
+# a NetworkPolicy only covers its own namespace, shares live in tenant
+# namespaces, and helm can only create what it is told about. List the
+# namespaces here; a share created in one that is NOT listed is
+# unprotected, and nothing in this chart can detect that.
+#
+# Selecting the hub pods at all is what closes 50051 — the MDS gRPC
+# control plane, which binds 0.0.0.0 and carries DeleteVolume
+# unauthenticated unless FLINT_PNFS_CONTROL_TOKEN is set. Hub images
+# 1.28.0+ do not start it in standalone; this covers an older one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "flint-lite-operator.name" $ }}-hubs
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flint-lite-operator.labels" $ | nindent 4 }}
+spec:
+  # Every hub the operator creates, whatever its share is named. The
+  # operator stamps this label on all four children (render.rs
+  # `labels()`); `flint.io/share` is the per-share one, deliberately
+  # NOT used here so a new share is covered the moment it exists.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: flint-lite
+  policyTypes: ["Ingress"]
+  ingress:
+    # NFS. Kubelet-driven mounts arrive from the NODE ip, so a pod
+    # selector cannot express that client set.
+    - from:
+        {{- if not (or $.Values.networkPolicy.nfsClientCIDRs $.Values.networkPolicy.nfsClientSelectors) }}
+        # Admits NOTHING on 2049 — deliberate. A policy that falls open
+        # when unconfigured reads as protection and is not.
+        []
+        {{- end }}
+        {{- range $.Values.networkPolicy.nfsClientCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+        {{- range $.Values.networkPolicy.nfsClientSelectors }}
+        - {{ toYaml . | nindent 10 | trim }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 2049
+    # The hub's HTTP surface: /status, /health, the file API. The
+    # OPERATOR must reach it — it polls the pod ip directly for
+    # rpoClean, idleness and lease counts, and a hub it cannot poll is
+    # an unknown hub that never suspends. Extra peers (a browse front
+    # door) go in apiClientSelectors.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "flint-lite-operator.selectorLabels" $ | nindent 14 }}
+        {{- range $.Values.networkPolicy.apiClientCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+        {{- range $.Values.networkPolicy.apiClientSelectors }}
+        - {{ toYaml . | nindent 8 | trim }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}
+{{- end }}

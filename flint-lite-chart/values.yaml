@@ -124,6 +124,41 @@ terminationGracePeriodSeconds: 120
 # lifecycle controller polls /status here (phase, epoch, and the RPO
 # predicate that gates hibernation), and the project front door uses the
 # file API to browse without holding a kernel mount.
+# Default-deny ingress for the hub pod. OFF by default: a policy that
+# lands with an empty client list breaks every mount, and only this
+# cluster's operator knows its node CIDRs. Needs a CNI that enforces
+# NetworkPolicy (Cilium, Calico); elsewhere every rule here is ignored
+# silently.
+#
+# Turning it on closes 50051 — the MDS gRPC control plane, which binds
+# 0.0.0.0 and carries DeleteVolume unauthenticated unless
+# FLINT_PNFS_CONTROL_TOKEN is set. Images 1.28.0+ do not start it in
+# standalone at all; the policy is what covers an older one.
+networkPolicy:
+  enabled: false
+
+  # Who may reach 2049. Kernel mounts driven by kubelet arrive from the
+  # NODE ip, not a pod ip, so node CIDRs are usually what you want —
+  # a podSelector cannot express that client set at all. Cross-cluster
+  # consumers are always CIDRs. BOTH LISTS EMPTY ADMITS NOTHING.
+  nfsClientCIDRs: []
+  #  - "10.0.0.0/16"
+  # NetworkPolicyPeer objects, verbatim (podSelector/namespaceSelector).
+  # For in-pod mounts, where the client's pod ip is the source.
+  nfsClientSelectors: []
+  #  - namespaceSelector:
+  #      matchLabels:
+  #        kubernetes.io/metadata.name: workloads
+
+  # Who may reach the monitoring port (/status, /health, the file API).
+  # Keep this to the scraper and the browse front door — the file API
+  # can rewrite any file in the project. Empty admits nothing.
+  apiClientCIDRs: []
+  apiClientSelectors: []
+  #  - podSelector:
+  #      matchLabels:
+  #        app.kubernetes.io/name: projects-frontdoor
+
 monitoring:
   enabled: false
   port: 8080
