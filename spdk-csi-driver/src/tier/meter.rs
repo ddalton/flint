@@ -138,6 +138,13 @@ counters! {
     /// Warm fill: items abandoned after WARM_MAX_ATTEMPTS failed
     /// restores (a demand touch will still retry them).
     warm_abandoned,
+    /// A `gate::exclude` gave up on its deadline instead of waiting
+    /// forever. Rare and self-healing on its own (the caller retries),
+    /// but a file that keeps appearing here has an in-flight write that
+    /// never finishes — the one shape whose only other outcome was a
+    /// permanently wedged file. The gate is otherwise uninstrumented,
+    /// so this is the only signal that it is under strain at all.
+    gate_exclude_timeouts,
 }
 
 #[inline]
@@ -196,6 +203,7 @@ pub enum Counter {
     HydrationMillis,
     WarmSkippedSpace,
     WarmAbandoned,
+    GateExcludeTimeouts,
 }
 
 impl Counter {
@@ -243,6 +251,7 @@ impl Counter {
             Counter::HydrationMillis => &hydration_millis,
             Counter::WarmSkippedSpace => &warm_skipped_space,
             Counter::WarmAbandoned => &warm_abandoned,
+            Counter::GateExcludeTimeouts => &gate_exclude_timeouts,
         }
     }
 }

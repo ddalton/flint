@@ -35,6 +35,7 @@
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::capture::{self, FileCapture};
 
@@ -190,25 +191,74 @@ pub fn drain_and_take_epoch(dev: u64, ino: u64) -> Option<FileCapture> {
 }
 
 /// Exclusion for eviction/hydration (steps 10/11 own the callers).
-/// Blocks until in-flight ops finish; from then until drop, every
-/// `enter` on the file is refused with [`Excluded`]. Queues behind a
-/// concurrent drain or exclusion.
+/// Waits out in-flight ops; from then until drop, every `enter` on the
+/// file is refused with [`Excluded`]. Queues behind a concurrent drain
+/// or exclusion.
 pub struct ExclusionGuard {
     cell: Arc<GateCell>,
 }
 
-pub fn exclude(dev: u64, ino: u64) -> ExclusionGuard {
+/// How long [`exclude`] will wait before giving the file back.
+///
+/// Generous on purpose — this waits out in-flight syscalls on ONE file,
+/// and a healthy-but-slow store under load must not trip it (the F33
+/// fence deadline is 90s for the whole backing store, for the same
+/// reason). What it must never be is absent; see [`exclude`].
+const EXCLUDE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Take the file out of service, or give up and say so.
+///
+/// **There is deliberately no unbounded form.** The wait this replaces
+/// set `excluded` and THEN waited for `in_flight` to reach zero with no
+/// deadline — so one write syscall stuck in D-state left the file
+/// refusing every entrant forever, with no `ExclusionGuard` yet in
+/// existence for a `Drop` to clear. The gate is a process-local map
+/// with no release path and no operator surface, so that state had
+/// exactly one remedy: restart the hub. The F33 watchdog does not cover
+/// it either — that probes the backing store, and this wedge can happen
+/// on a healthy disk.
+///
+/// `None` means "not now": both callers already answer that way
+/// (eviction refuses Busy and retries next tick, hydration backs off),
+/// which turns an unrecoverable wedge into an ordinary retry.
+pub fn exclude(dev: u64, ino: u64) -> Option<ExclusionGuard> {
+    exclude_within(dev, ino, EXCLUDE_DEADLINE)
+}
+
+/// [`exclude`] with an explicit deadline. Tests use it to make the
+/// give-up path observable without waiting out the real one.
+pub fn exclude_within(dev: u64, ino: u64, within: Duration) -> Option<ExclusionGuard> {
     let c = cell(dev, ino);
+    let deadline = Instant::now() + within;
     let mut st = c.st.lock().unwrap();
+
+    // Wait out another exclusion or a drain barrier. Nothing is claimed
+    // yet, so giving up here costs nothing and changes nothing.
     while st.excluded || st.barrier {
-        st = c.cv.wait(st).unwrap();
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            super::meter::bump(super::meter::Counter::GateExcludeTimeouts);
+            return None;
+        };
+        st = c.cv.wait_timeout(st, left).unwrap().0;
     }
+
+    // Claim it, then wait out the writers already inside.
     st.excluded = true;
     while st.in_flight > 0 {
-        st = c.cv.wait(st).unwrap();
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            // BACK OUT, and this is the whole point of the deadline.
+            // The flag is already refusing entrants; returning while it
+            // stands would leave the file wedged with nothing to drop.
+            st.excluded = false;
+            drop(st);
+            c.cv.notify_all();
+            super::meter::bump(super::meter::Counter::GateExcludeTimeouts);
+            return None;
+        };
+        st = c.cv.wait_timeout(st, left).unwrap().0;
     }
     drop(st);
-    ExclusionGuard { cell: c }
+    Some(ExclusionGuard { cell: c })
 }
 
 impl Drop for ExclusionGuard {
@@ -454,4 +504,80 @@ mod tests {
         let epoch = h.join().unwrap().expect("the note must be in the drained epoch");
         assert_eq!(epoch.intervals, vec![(7, 10)]);
     }
+    /// The deadline exists so a wedged writer cannot take a file out of
+    /// service permanently — and giving up must LEAVE NO TRACE.
+    ///
+    /// The bug this guards is specific: the old wait set `excluded` and
+    /// then drained with no deadline, so a stuck in-flight ticket left
+    /// the flag standing with no `ExclusionGuard` in existence for a
+    /// `Drop` to clear. Every writer to that file was refused forever,
+    /// and the gate has no release path — the only remedy was
+    /// restarting the hub. A give-up that forgot to clear the flag
+    /// would reproduce it exactly.
+    #[test]
+    fn a_timed_out_exclusion_gives_the_file_back() {
+        capture::force_enable();
+        let ino = 0x9001_u64;
+
+        // A writer inside the gate that outlives the attempt.
+        let held = enter(DEV, ino).expect("idle file");
+
+        let t0 = Instant::now();
+        assert!(
+            exclude_within(DEV, ino, Duration::from_millis(50)).is_none(),
+            "exclusion completed while a writer was still in flight"
+        );
+        assert!(t0.elapsed() >= Duration::from_millis(50), "it did not actually wait");
+
+        // THE ASSERTION THAT MATTERS: the file still works. A new
+        // writer must not be refused by a flag nobody owns.
+        let another = enter(DEV, ino).expect("the give-up wedged the file");
+        drop(another);
+        drop(held);
+
+        // And with the writer gone, exclusion succeeds — so the refusal
+        // above was the deadline doing its job, not the cell being
+        // broken.
+        assert!(
+            exclude_within(DEV, ino, Duration::from_secs(5)).is_some(),
+            "exclusion failed on an idle file"
+        );
+    }
+
+    /// Giving up is counted. A file whose writes never drain is
+    /// otherwise invisible: the gate has no other instrumentation, and
+    /// the caller's retry hides the symptom.
+    #[test]
+    fn a_timed_out_exclusion_is_metered() {
+        capture::force_enable();
+        let ino = 0x9002_u64;
+        let held = enter(DEV, ino).expect("idle file");
+
+        let before = super::super::meter::snapshot().gate_exclude_timeouts;
+        assert!(exclude_within(DEV, ino, Duration::from_millis(20)).is_none());
+        let after = super::super::meter::snapshot().gate_exclude_timeouts;
+        assert!(after > before, "a give-up left no trace in the meter");
+        drop(held);
+    }
+
+    /// A second exclusion queues behind the first and honours the same
+    /// deadline — the wait-for-the-other-holder arm, which claims
+    /// nothing and so must also change nothing.
+    #[test]
+    fn exclusion_waits_for_an_incumbent_then_gives_up() {
+        capture::force_enable();
+        let ino = 0x9003_u64;
+
+        let first = exclude_within(DEV, ino, Duration::from_secs(5)).expect("idle file");
+        assert!(
+            exclude_within(DEV, ino, Duration::from_millis(30)).is_none(),
+            "two exclusions were held at once"
+        );
+
+        // The incumbent is untouched by the failed attempt.
+        assert!(matches!(enter(DEV, ino), Err(Excluded)), "the incumbent lost its exclusion");
+        drop(first);
+        assert!(enter(DEV, ino).is_ok(), "the file did not come back");
+    }
+
 }

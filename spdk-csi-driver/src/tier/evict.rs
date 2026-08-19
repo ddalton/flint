@@ -347,7 +347,13 @@ pub async fn evict_file(
     // function. The marker lands in the consult map BEFORE the guard
     // drops, so there is no window in which a write could slip in
     // between drain and marker.
-    let _excl = gate::exclude(dev, ino);
+    //
+    // Bounded: a write syscall wedged in D-state must not take this
+    // file out of service permanently. Eviction is background work, so
+    // "not now" is a complete answer — the next tick tries again.
+    let Some(_excl) = gate::exclude(dev, ino) else {
+        return EvictOutcome::Refused(Refusal::Busy);
+    };
 
     // Clean in EVERY form: swept epoch empty, nothing queued, durable
     // bit clear. (take_epoch under exclusion is atomic-with-drain by

@@ -674,12 +674,16 @@ pub(crate) async fn restore_once_fanout(
     // Exclusion for the restore window (A5: behind the A4 gate). The
     // marker already refuses content ops; the exclusion is the
     // belt-and-suspenders against any un-consulted lane.
+    // Bounded (see gate::exclude): a wedged in-flight write must not
+    // take the file out of service permanently. Failing here lands in
+    // the caller's ordinary backoff, which is what a busy file wants.
     let excl = tokio::task::spawn_blocking({
         let (d, i) = (dev, ino);
         move || gate::exclude(d, i)
     })
     .await
-    .map_err(|e| format!("exclude join: {}", e))?;
+    .map_err(|e| format!("exclude join: {}", e))?
+    .ok_or("exclusion busy: in-flight writes did not drain")?;
 
     let mut meta = evict::marker_meta(dev, ino).ok_or("marker vanished")?;
 

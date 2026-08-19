@@ -2102,7 +2102,8 @@ mod tests {
         // can alias onto this identity (safe in production — pessimal
         // upload — but this test asserts EXACT capture state). Clear it.
         crate::tier::capture::forget(dev, ino);
-        let excl = crate::tier::gate::exclude(dev, ino);
+        let excl = crate::tier::gate::exclude(dev, ino)
+            .expect("exclusion must be available on an idle file");
         let res = handler.handle_write(write(0), &ctx).await;
         assert_eq!(
             res.status,
