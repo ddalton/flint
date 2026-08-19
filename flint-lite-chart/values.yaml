@@ -94,7 +94,9 @@ tier:
   # 16Mi, epochHeartbeatSecs 10, epochLeaseMisses 6, reserveBytes
   # 256Mi, watermarkPct 85, ballastBytes 64Mi, hydrateHoldSecs 15,
   # hydrateConcurrency 4, hydrateFetchParallel 6 (ranged GETs per
-  # restore — cold-read fan-out). Example: {watermarkPct: 90}.
+  # restore — cold-read fan-out), hydrateWarmAfterImport false (bulk
+  # warm fill after a DR/adopt import — resumes across restarts),
+  # hydrateWarmConcurrency 16. Example: {watermarkPct: 90}.
   settings: {}
 
   # With the tier on, startup legitimately runs a long time before the

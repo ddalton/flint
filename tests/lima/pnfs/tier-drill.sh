@@ -76,7 +76,7 @@ s3() {
     aws --endpoint-url "http://127.0.0.1:$MINIO_PORT" "$@"
 }
 
-start_server() { # $1 = watermarkPct
+start_server() { # $1 = watermarkPct, $2 = hydrateWarmAfterImport (default false)
   cat > "$CFG" <<EOF
 apiVersion: flint.io/v1alpha1
 kind: PnfsConfig
@@ -112,6 +112,7 @@ mds:
     watermarkPct: $1
     reserveBytes: 67108864
     ballastBytes: 16777216
+    hydrateWarmAfterImport: ${2:-false}
 
 exports:
   - path: $EXPORT_DIR
@@ -310,6 +311,18 @@ while s3 s3api head-object --bucket "$BUCKET" --key "${PREFIX}victim.txt" >/dev/
 done
 pass "tombstone consumed: the bucket object is gone"
 
+# The warm leg's size oracle: every non-empty regular file's size,
+# captured while the tree is FULLY LOCAL (nothing evicted yet). After
+# the phase-4 warm fill, each of these paths must hold its full size
+# again — "non-zero" would certify fill-STARTED, not fill-COMPLETED
+# (restores pwrite in place, so a file is non-zero at its first chunk;
+# chaos-K exploits exactly that window), and legitimately-empty files
+# are exempt by construction.
+SIZE_ORACLE="$LOG_DIR/warm-size-oracle"
+(cd "$EXPORT_DIR" && find . -type f ! -size 0 -exec stat -f "%z %N" {} \; | sort -k2) \
+  > "$SIZE_ORACLE"
+[ -s "$SIZE_ORACLE" ] || fail "size oracle came up empty — capture point moved?"
+
 # ══════════════════════════════════════════════════════════════════════
 # Phase 2 — restart under the live mount, evict, hydrate
 # ══════════════════════════════════════════════════════════════════════
@@ -378,8 +391,74 @@ vm "cd $MNT/repo && git fsck --strict >/dev/null 2>&1 && git log --oneline | wc 
   || fail "post-DR git fsck/log failed"
 pass "sqlite queries and git fsck pass on the restored tree"
 
+# ══════════════════════════════════════════════════════════════════════
+# Phase 4 — warm DR: destroy the PVC AGAIN, rebuild with the warm fill
+# (a fresh destroy is load-bearing: only fresh state triggers the
+# import, and only an import that ran triggers the fill)
+# ══════════════════════════════════════════════════════════════════════
+say "phase 4: destroying the PVC a second time (warm-fill DR)"
+vm "umount -lf $MNT" || fail "phase-4 umount failed"
+stop_server
+rm -rf "$EXPORT_DIR" "$STATE_DIR"
+mkdir -p "$EXPORT_DIR" "$STATE_DIR"
+chmod 0777 "$EXPORT_DIR"
+
+say "phase 4: restarting with hydrateWarmAfterImport=true"
+start_server 99 true
+grep -q "tier import" "$MDS_LOG" \
+  || { tail -30 "$MDS_LOG"; fail "phase-4 import-refresh never ran"; }
+
+# The truthful done-signal is the driver's own report line — never a
+# non-zero-size poll (in-place restores are non-zero at chunk one).
+# NO CLIENT MOUNT EXISTS YET: everything below is the fill's own work.
+say "phase 4: waiting for the warm fill's report line"
+for _ in $(seq 1 120); do
+  grep -q "tier warm fill done" "$MDS_LOG" && break
+  kill -0 "$(cat "$PIDFILE")" 2>/dev/null || { tail -30 "$MDS_LOG"; fail "hub died mid-fill"; }
+  sleep 1
+done
+grep -q "tier warm fill done" "$MDS_LOG" \
+  || { tail -30 "$MDS_LOG"; fail "warm fill never reported within 120s"; }
+FILL_LINE=$(grep "tier warm fill done" "$MDS_LOG" | tail -1)
+echo "   $FILL_LINE"
+F_RESTORED=$(echo "$FILL_LINE" | sed -E 's/.*done: ([0-9]+) restored.*/\1/')
+F_CAND=$(echo "$FILL_LINE" | sed -E 's/.* ([0-9]+) candidates.*/\1/')
+F_COLD=$(echo "$FILL_LINE" | sed -E 's/.* ([0-9]+) still cold.*/\1/')
+F_SPACE=$(echo "$FILL_LINE" | sed -E 's/.* ([0-9]+) stopped for space.*/\1/')
+[ "$F_CAND" -gt 0 ] || fail "warm fill saw 0 candidates — the import restored no stubs?"
+[ "$F_COLD" = "0" ] && [ "$F_SPACE" = "0" ] \
+  || fail "warm fill left files cold (still_cold=$F_COLD stopped_for_space=$F_SPACE)"
+[ "$F_RESTORED" = "$F_CAND" ] \
+  || fail "warm fill restored $F_RESTORED of $F_CAND candidates"
+pass "warm fill restored all $F_RESTORED stubs with ZERO client reads"
+
+# Size EQUALITY against the phase-1 oracle (full sizes, not non-zero),
+# checked SERVER-SIDE before any mount exists.
+while read -r WANT_SZ REL; do
+  GOT_SZ=$(stat -f %z "$EXPORT_DIR/$REL" 2>/dev/null) \
+    || fail "warm-restored tree is missing $REL"
+  [ "$GOT_SZ" = "$WANT_SZ" ] \
+    || fail "$REL is $GOT_SZ bytes after the fill, wanted $WANT_SZ (partial restore?)"
+done < "$SIZE_ORACLE"
+MD5_WARM=$(md5 -q "$EXPORT_DIR/model.bin")
+[ "$MD5_WARM" = "$MD5_ORIG" ] \
+  || fail "warm-restored model.bin differs server-side: $MD5_WARM ≠ $MD5_ORIG"
+pass "every oracle file back at full size; model.bin byte-identical server-side"
+
+# Only now does a client appear — reads must be plain local serves.
+vm "timeout 30 mount -t nfs4 -o minorversion=1,proto=tcp,port=$MDS_PORT \
+      $HOST_IP:/ $MNT" || fail "phase-4 mount failed"
+MD5_W2=$(vm "md5sum $MNT/model.bin | awk '{print \$1}'" | tr -d '\r')
+[ "$MD5_W2" = "$MD5_ORIG" ] || fail "phase-4 client read differs: $MD5_W2 ≠ $MD5_ORIG"
+vm "cd $MNT && sqlite3 tier.db 'select count(*) from t;' | grep -q 2" \
+  || fail "phase-4 sqlite query failed"
+vm "cd $MNT/repo && git fsck --strict >/dev/null 2>&1 && git log --oneline | wc -l | grep -q 3" \
+  || fail "phase-4 git fsck/log failed"
+pass "client verify on the pre-warmed tree: md5, sqlite, git all pass"
+
 echo
 echo "══════════════════════════════════════════════════════════════════"
 echo " PASS — capture→flush→manifest, tombstones, restart, evict,"
-echo " hydrate-under-a-kernel-client, and DR-from-the-bucket all held"
+echo " hydrate-under-a-kernel-client, DR-from-the-bucket, and the"
+echo " WARM FILL (eager DR restore, zero client reads) all held"
 echo "══════════════════════════════════════════════════════════════════"

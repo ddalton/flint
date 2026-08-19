@@ -1,8 +1,8 @@
 # Formal models — the replica-lifecycle machine, the snapshot protocol, the multi-process claims layer, the pNFS truncate gate, the block-layout extent allocator, the block admission layer, the block serving-composition machine, the S3-tier volume epoch, the S3-tier eviction marker, and the multi-volume hub's session lease
 
-Nine spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
+Ten spec modules plus two probe modules (`FlintA2Probe`, `FlintExtentsProbe` —
 ghost-witness overlays on `FlintReplication` / `FlintExtents`), one gate
-(`scripts/check-tla.sh`, **one hundred and sixty-five** TLC runs).
+(`scripts/check-tla.sh`, **one hundred and seventy-three** TLC runs).
 
 Both counts here have drifted before, in both files, because nothing
 regenerated them. They do now:
@@ -373,6 +373,21 @@ the marker at serve; wired at READ, COPY-source, and CLONE-source),
 modeled as `CycleCheck`; the `CycleBlind` mutation preserves the
 pre-fix counterexample as the regression test.
 
+The warm-fill wave (2026-08) refined the counter's evidence to
+**insert-only**: `forget()` no longer bumps.  A bulk fill's completion
+storm — hundreds of marker-clears per second during the small-file
+phase — made every clear-bump a spurious DELAY on reads of unrelated,
+already-present files and a livelock on any COPY whose window outlasts
+the inter-completion gap.  The refinement is sound because of C2's
+marker-before-truncate order: every in-window byte destruction is
+preceded by an in-window INSERT, while a forget only ever follows a
+completed fsynced restore.  Both bump sites are now constants
+(`CycleOnInsert` / `CycleOnClear`): the strict run holds with
+`CycleOnClear=FALSE` (clear-bumps were never load-bearing — the
+machine check that licensed the code change), and the `InsertBlind`
+mutation (`CycleOnInsert=FALSE`, check ON) must resurrect CycleBlind's
+counterexample forever (insert-bumps are the load-bearing half).
+
 `FlintTierSession.tla` (2026-08-18) models the **multi-volume hub's
 two-level lease** — MODEL BEFORE CODE (the FlintExtents posture): step 0
 of `docs/plans/multi-volume-hub-design.md`, written before any
@@ -425,7 +440,7 @@ Verification of snapshots is layered deliberately:
 
 Run the gate: `scripts/check-tla.sh` (fetches tla2tools.jar — pinned
 v1.7.4, the version the pass/fail phrase-greps were validated against —
-on first use).  It runs one hundred and seventy-two configs, ALL required:
+on first use).  It runs one hundred and seventy-three configs, ALL required:
 
 1. `FlintReplication.cfg` — the shipped design, 3-leg breadth
    (GateStrict, RejoinGuard, FenceZombie all TRUE): all invariants plus

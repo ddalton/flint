@@ -54,6 +54,15 @@
 (* eviction takes the A4 exclusion (drain + refuse), a different           *)
 (* protection with its own unit drills.  So are CRC content checks         *)
 (* (numbers, not interleavings) and the epoch (FlintTierEpoch).            *)
+(*                                                                         *)
+(* WARM-FILL REFINEMENT (2026-08): the cycle counter's two bump sites are  *)
+(* now constants.  The warm fill's completion storm (hundreds of           *)
+(* forgets/sec during a bulk restore) made the shipped bump-on-clear a     *)
+(* DELAY storm on unrelated reads and a livelock on long COPY windows, so  *)
+(* the code moved to INSERT-ONLY evidence.  The strict run proves          *)
+(* clear-bumps were never load-bearing (CycleOnClear=FALSE holds);         *)
+(* InsertBlind proves insert-bumps are (CycleOnInsert=FALSE resurrects     *)
+(* CycleBlind's counterexample).                                           *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -66,6 +75,21 @@ CONSTANTS
                  \* cycle inside the read window clears the marker
                  \* before the re-consult looks, and the counter is the
                  \* only evidence it ever happened
+  CycleOnInsert, \* TRUE = a marker INSERT bumps the counter.  The
+                 \* load-bearing half: C2's marker-before-truncate
+                 \* order means every in-window byte destruction is
+                 \* preceded by an in-window insert.  InsertBlind
+                 \* (FALSE) must resurrect CycleBlind's counterexample.
+  CycleOnClear,  \* TRUE = a marker CLEAR (forget) also bumps — the
+                 \* pre-warm-fill shipped code.  The warm fill's
+                 \* completion storm (hundreds of forgets/sec) made
+                 \* every clear-bump a spurious DELAY on unrelated
+                 \* reads and a livelock on long COPY windows, so the
+                 \* shipped posture is now FALSE; the strict run
+                 \* proves clear-bumps were never load-bearing (a
+                 \* forget follows a completed fsynced restore — a
+                 \* window containing only forgets read consistent
+                 \* bytes).
   HydFlagOn,     \* TRUE = restore_once's durable hydrating flag
   MaxEvicts, MaxHyds, MaxHydFails, MaxReads, MaxCrashes
 
@@ -123,7 +147,8 @@ unchangedW == UNCHANGED <<badServe, badAttr>>
 
 EvApply(op) ==
   IF op = "row" THEN /\ drow' = TRUE /\ UNCHANGED <<ram, bytes, cyc>>
-  ELSE IF op = "mark" THEN /\ ram' = TRUE /\ cyc' = cyc + 1
+  ELSE IF op = "mark" THEN /\ ram' = TRUE
+                           /\ cyc' = IF CycleOnInsert THEN cyc + 1 ELSE cyc
                            /\ UNCHANGED <<drow, bytes>>
   ELSE /\ bytes' = "stub" /\ UNCHANGED <<ram, drow, cyc>>
 
@@ -191,7 +216,7 @@ HyCommitRows ==
 HyClearMarker ==
   /\ up /\ hy = "done" /\ ~drow
   /\ ram' = FALSE
-  /\ cyc' = cyc + 1
+  /\ cyc' = IF CycleOnClear THEN cyc + 1 ELSE cyc
   /\ hy' = "idle"
   /\ UNCHANGED <<bytes, drow, hyd, up, ev, rd, rdData, rdCyc, evicts, hyds,
                  hydFails, reads, crashes>>
@@ -263,7 +288,9 @@ Crash ==
   /\ crashes < MaxCrashes
   /\ up' = FALSE
   /\ ram' = FALSE
-  /\ cyc' = IF ram THEN cyc + 1 ELSE cyc   \* the wipe clears markers too
+  \* the wipe clears markers too (a clear-class event; no window
+  \* survives a crash — rd resets — so this bump is never load-bearing)
+  /\ cyc' = IF ram /\ CycleOnClear THEN cyc + 1 ELSE cyc
   /\ ev' = 0 /\ hy' = "idle" /\ rd' = "idle" /\ rdData' = "none"
   /\ crashes' = crashes + 1
   /\ UNCHANGED <<bytes, drow, hyd, rdCyc, evicts, hyds, hydFails, reads>>
@@ -294,7 +321,9 @@ Reconcile ==
        THEN /\ ram' = TRUE
             /\ UNCHANGED <<bytes, drow, hyd>>
        ELSE /\ UNCHANGED <<bytes, ram, drow, hyd>>
-  /\ cyc' = IF ram' # ram THEN cyc + 1 ELSE cyc
+  \* ram was wiped by the crash, so a change here is only ever a
+  \* RE-ARM — an insert-class event
+  /\ cyc' = IF ram' # ram /\ CycleOnInsert THEN cyc + 1 ELSE cyc
   /\ UNCHANGED <<ev, hy, rd, rdData, rdCyc, evicts, hyds, hydFails, reads,
                  crashes>>
   /\ unchangedW

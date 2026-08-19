@@ -130,6 +130,13 @@ counters! {
     /// Wall-clock milliseconds of COMPLETED restores (A12 reporter:
     /// delta ÷ hydrations_completed delta = average restore latency).
     hydration_millis,
+    /// Warm fill (bulk hydration): items dropped at the space bound
+    /// (watermark − margin, pending bytes counted) — the fill stops
+    /// rather than fight eviction.
+    warm_skipped_space,
+    /// Warm fill: items abandoned after WARM_MAX_ATTEMPTS failed
+    /// restores (a demand touch will still retry them).
+    warm_abandoned,
 }
 
 #[inline]
@@ -186,6 +193,8 @@ pub enum Counter {
     ImportStubs,
     ImportSkippedTombstoned,
     HydrationMillis,
+    WarmSkippedSpace,
+    WarmAbandoned,
 }
 
 impl Counter {
@@ -231,6 +240,8 @@ impl Counter {
             Counter::ImportStubs => &import_stubs,
             Counter::ImportSkippedTombstoned => &import_skipped_tombstoned,
             Counter::HydrationMillis => &hydration_millis,
+            Counter::WarmSkippedSpace => &warm_skipped_space,
+            Counter::WarmAbandoned => &warm_abandoned,
         }
     }
 }

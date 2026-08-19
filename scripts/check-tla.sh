@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# One hundred and seventy-two runs, ALL required.
+# One hundred and seventy-three runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -19,7 +19,7 @@
 #
 #   71 FlintReplication   33 FlintComposition   15 FlintExtents
 #   11 FlintExtentsProbe   7 FlintTruncate      7 FlintTierSession
-#    7 FlintTierEpoch      6 FlintTierMarker    5 FlintAdmission
+#    7 FlintTierMarker     7 FlintTierEpoch     5 FlintAdmission
 #    4 FlintSnapshots      3 FlintClaims        3 FlintA2Probe)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
@@ -1075,12 +1075,24 @@ mutation_run FlintTierEpoch FlintTierEpochNoStampCheck.cfg "tier-epoch stamp-che
 # marker at serve; READ + COPY-src + CLONE-src wired), modeled as
 # CycleCheck; the CycleBlind mutation preserves the pre-fix
 # counterexample as the regression test.
-strict_run FlintTierMarker FlintTierMarker.cfg "tier-marker strict (safe order + re-consult + cycle guard + hydrating flag: no stub/partial ever served, GETATTR truthful, restores converge)"
+#
+# WARM-FILL REFINEMENT (2026-08): the cycle counter's evidence is now
+# INSERT-ONLY — forget() no longer bumps.  A bulk fill's completion
+# storm (hundreds of forgets/sec) made every clear-bump a spurious
+# DELAY on unrelated reads and a livelock on COPY windows longer than
+# the inter-completion gap.  Sound because of C2's
+# marker-before-truncate order: every in-window byte destruction is
+# preceded by an in-window INSERT.  The strict run (CycleOnClear=FALSE)
+# is the proof clear-bumps were never load-bearing; the InsertBlind
+# mutation (CycleOnInsert=FALSE) is the proof insert-bumps are — it
+# must resurrect CycleBlind's counterexample forever.
+strict_run FlintTierMarker FlintTierMarker.cfg "tier-marker strict (safe order + re-consult + insert-only cycle guard + hydrating flag: no stub/partial ever served, GETATTR truthful, restores converge)"
 mutation_run FlintTierMarker FlintTierMarkerMarkLate.cfg "tier-marker order mutation (marklate = chaos BUG 4: marker after truncate — the bare-stub window)" "Inv_(NoStubServed|TruthfulAttrs)"
 mutation_run FlintTierMarker FlintTierMarkerNoRecheck.cfg "tier-marker re-consult mutation (no post-read check = chaos BUG 3: the mid-read evict race)" "Inv_NoStubServed"
 mutation_run FlintTierMarker FlintTierMarkerRowLate.cfg "tier-marker C2 mutation (rowlate: truncate before the durable row — a crash strands an evidence-free stub)" "Inv_(NoStubServed|TruthfulAttrs)"
 mutation_run FlintTierMarker FlintTierMarkerNoFlag.cfg "tier-marker flag mutation (no hydrating flag: a crashed restore's partial rolls back as local-wins and serves)" "Inv_(NoStubServed|TruthfulAttrs)"
 mutation_run FlintTierMarker FlintTierMarkerCycleBlind.cfg "tier-marker cycle mutation (CycleCheck=FALSE = the pre-fix shipped code: a complete evict+hydrate cycle inside the read window serves the pread's stale capture — campaign bug 8, kept as the regression test)" "Inv_NoStubServed"
+mutation_run FlintTierMarker FlintTierMarkerInsertBlind.cfg "tier-marker insert-bump mutation (CycleOnInsert=FALSE with the check ON: strips the counter's load-bearing half — the warm-fill wave's insert-only posture is the MINIMUM, drop the insert bump and CycleBlind's counterexample returns)" "Inv_NoStubServed"
 
 # ── FlintTierSession.tla — the multi-volume hub's two-level lease ──────
 # MODEL BEFORE CODE (the FlintExtents posture): step 0 of

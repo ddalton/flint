@@ -173,6 +173,19 @@ your values file — don't rely on `--reuse-values`.)
   a large file's cold-read time; raise it (with
   `hydrateConcurrency`) on fat-NIC hubs, mindful that peak restore
   buffering ≈ `hydrateConcurrency × hydrateFetchParallel × 8 MiB`.
+- **A cold TREE can restore eagerly instead.** Per-file hydration is
+  the wrong shape for a single-threaded tool walking a freshly
+  DR-restored workspace (`grep -r`, a build) — it pays one round-trip
+  per file. `tier.settings.hydrateWarmAfterImport: true` makes the hub
+  bulk-restore every stub after an import that ran (DR reinstall,
+  bucket adopt), smallest files first, on a dedicated pool
+  (`hydrateWarmConcurrency`, default 16; demand reads never queue
+  behind the fill, and a read of a file mid-fill simply joins its
+  restore). The fill stops short of the eviction watermark rather than
+  fight it, survives hub restarts (a durable note re-arms it), and
+  logs one `tier warm fill done` line when the tree is hot. Off by
+  default — a fill re-downloads every byte, so switch it on for
+  workloads that will sweep the tree anyway.
 - **Full disks degrade politely.** Admission answers NOSPC while
   `avail − reserve` can't cover a write (databases see NOSPC, never
   EIO), and a preallocated ballast next to the state db releases at
@@ -199,7 +212,10 @@ rebuild, not a loss: reinstall the chart with the **same bucket and
 keyPrefix**. The new hub takes over the epoch, restores the namespace
 from the bucket manifest as evicted stubs, and hydrates content on
 demand; everything flushed before the last barrier comes back
-byte-identical. This exact loop — uninstall with the PVC destroyed,
+byte-identical. Set `hydrateWarmAfterImport: true` for eager DR
+restore — the whole tree re-downloads up front (smallest files first,
+resuming across hub restarts) instead of paying a round-trip on each
+first touch. This exact loop — uninstall with the PVC destroyed,
 reinstall, hydrate-on-read — is `make test-lite-kind-tier-e2e` leg 4.
 
 Tuning beyond the identity fields goes through `tier.settings`

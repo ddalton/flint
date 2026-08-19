@@ -29,7 +29,7 @@ would silently take the default — and the knobs are the economics
 gate's REQUIREMENTS. Refuse at render instead. Kept in sync with
 TierConfig (spdk-csi-driver/src/pnfs/config.rs) by the suite test
 chart_tier_knob_list_matches_tier_config. */}}
-{{- $known := list "flushFloorSecs" "quiesceSecs" "tickSecs" "wholePutMaxBytes" "partFloorBytes" "epochHeartbeatSecs" "epochLeaseMisses" "reserveBytes" "watermarkPct" "ballastBytes" "hydrateHoldSecs" "hydrateConcurrency" "hydrateFetchParallel" }}
+{{- $known := list "flushFloorSecs" "quiesceSecs" "tickSecs" "wholePutMaxBytes" "partFloorBytes" "epochHeartbeatSecs" "epochLeaseMisses" "reserveBytes" "watermarkPct" "ballastBytes" "hydrateHoldSecs" "hydrateConcurrency" "hydrateFetchParallel" "hydrateWarmAfterImport" "hydrateWarmConcurrency" }}
 {{- range $k, $_ := .Values.tier.settings }}
 {{- if not (has $k $known) }}
 {{- fail (printf "tier.settings.%s is not a TierConfig knob (the server would silently ignore it — see spdk-csi-driver/src/pnfs/config.rs). Valid keys: %s. Identity fields (bucket, keyPrefix, endpoint, importOnStart) have first-class values under tier" $k (join ", " $known)) }}

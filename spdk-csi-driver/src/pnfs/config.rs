@@ -222,6 +222,21 @@ pub struct TierConfig {
     /// leaves the bucket unimported (flush-only posture).
     #[serde(rename = "importOnStart", default = "default_true")]
     pub import_on_start: bool,
+
+    /// Warm fill: after an import that ran (DR restore / bucket adopt
+    /// — the world where every file is a stub), bulk-restore the tree
+    /// smallest-first instead of waiting for demand touches (a
+    /// single-threaded tool walking a cold tree pays one RTT per
+    /// file). Survives hub restarts via a durable pending note. Off
+    /// by default: a fill also has a cost — every byte re-downloads.
+    #[serde(rename = "hydrateWarmAfterImport", default)]
+    pub hydrate_warm_after_import: bool,
+
+    /// Concurrent warm-fill restores (a pool of its own — demand
+    /// hydrations never contend with the fill). Warm restores fetch
+    /// sequentially (fanout 1), so peak fill buffering ~ this x 8 MiB.
+    #[serde(rename = "hydrateWarmConcurrency", default = "default_tier_hydrate_warm_concurrency")]
+    pub hydrate_warm_concurrency: usize,
 }
 
 fn default_tier_flush_floor() -> u64 {
@@ -262,6 +277,9 @@ fn default_tier_hydrate_concurrency() -> usize {
 }
 fn default_tier_hydrate_fetch_parallel() -> usize {
     6
+}
+fn default_tier_hydrate_warm_concurrency() -> usize {
+    16
 }
 
 /// Block-export reconciler settings (design doc §5, phase 1: one tgt per
@@ -985,6 +1003,8 @@ mod tests {
         assert_eq!(t.hydrate_hold_secs, 15);
         assert_eq!(t.hydrate_concurrency, 4);
         assert_eq!(t.hydrate_fetch_parallel, 6);
+        assert!(!t.hydrate_warm_after_import, "warm fill is opt-in");
+        assert_eq!(t.hydrate_warm_concurrency, 16);
 
         let t2: TierConfig = serde_yaml::from_str(
             "bucket: b\nenabled: false\nkeyPrefix: vol1/\nendpoint: \"http://minio:9000\"\nepochLeaseMisses: 3\n",

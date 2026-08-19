@@ -74,15 +74,25 @@ fn markers() -> &'static DashMap<(u64, u64), EvictedMeta> {
     M.get_or_init(DashMap::new)
 }
 
-/// Marker CYCLE counter — bumped on every marker presence transition
-/// (insert of a new marker, removal of one).  The un-gated read lanes'
-/// post-I/O re-consult is blind to a COMPLETE evict+hydrate cycle that
-/// lands inside the read window (the hydration clears the marker
-/// before the re-consult looks — FlintTierMarker's CycleBlind
-/// counterexample); this counter is the only evidence such a cycle
-/// happened.  Global rather than per-identity: "unchanged" proves no
-/// cycle anywhere, and a false positive from an unrelated file's cycle
-/// costs one DELAY retry.
+/// Marker CYCLE counter — bumped on every marker INSERT, and only on
+/// inserts.  The un-gated read lanes' post-I/O re-consult is blind to
+/// a COMPLETE evict+hydrate cycle that lands inside the read window
+/// (the hydration clears the marker before the re-consult looks —
+/// FlintTierMarker's CycleBlind counterexample); this counter is the
+/// only evidence such a cycle happened.  Insert-only suffices because
+/// of C2's marker-BEFORE-truncate order: every byte-destroying event
+/// inside a window is preceded by an in-window insert, while a forget
+/// only ever follows a completed fsynced restore — a window containing
+/// nothing but forgets read consistent bytes (FlintTierMarker: the
+/// strict run holds with CycleOnClear=FALSE; InsertBlind must fail).
+/// Bumping on forget too — the original design — was safe but not
+/// harmless: a warm fill's completion storm (hundreds of forgets/sec)
+/// turned every clear into a spurious DELAY on unrelated reads and a
+/// livelock on COPY windows longer than the inter-completion gap.
+/// Global rather than per-identity: "unchanged" proves no cycle
+/// STARTED anywhere, and a false positive from an unrelated file's
+/// eviction costs one DELAY retry — evictions are rare; restores need
+/// not be.
 static MARKER_CYCLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn bump_cycle() {
@@ -146,11 +156,12 @@ pub fn logical_size(dev: u64, ino: u64) -> Option<u64> {
 }
 
 /// Drop a marker from the consult map (identity events: the inode was
-/// removed or renamed-over; step 11's hydration completion).
+/// removed or renamed-over; step 11's hydration completion).  Does NOT
+/// bump the cycle counter — clears carry no read-window hazard (see
+/// MARKER_CYCLE's insert-only rationale), and a warm fill clears
+/// markers by the hundreds per second.
 pub fn forget(dev: u64, ino: u64) {
-    if markers().remove(&(dev, ino)).is_some() {
-        bump_cycle();
-    }
+    markers().remove(&(dev, ino));
 }
 
 /// A12 reporter gauge: currently-evicted (files, logical bytes).
@@ -840,9 +851,11 @@ mod tests {
     /// FlintTierMarker's CycleBlind counterexample, at helper level: a
     /// COMPLETE marker cycle (evict then hydrate) inside a read window
     /// leaves NO marker for the post-read re-consult to see — only the
-    /// cycle counter betrays it.  (The counter is process-global, so
-    /// asserts here are monotone-safe under parallel tests: the false
-    /// direction is certain, the true direction retries.)
+    /// cycle counter betrays it, via the cycle's INSERT half (forgets
+    /// no longer bump — the insert-only refinement).  (The counter is
+    /// process-global, so asserts here are monotone-safe under
+    /// parallel tests: the false direction is certain, the true
+    /// direction retries.)
     #[test]
     fn read_window_guard_detects_a_complete_marker_cycle() {
         capture::force_enable();
@@ -855,7 +868,7 @@ mod tests {
         assert!(!is_evicted(dev, ino), "the naive re-consult would pass");
         assert!(
             marker_cycle() > began,
-            "the cycle counter is the only evidence the cycle happened"
+            "the cycle's insert is the only evidence the cycle happened"
         );
         assert!(
             !read_window_intact(dev, ino, began),
@@ -873,6 +886,32 @@ mod tests {
             }
         }
         assert!(served, "a quiet window must serve");
+    }
+
+    /// The insert-only refinement's own contract (the warm fill's
+    /// license to clear markers by the hundreds per second): a window
+    /// that contains ONLY a forget stays intact — the counter moves on
+    /// inserts alone.  Retry absorbs unrelated parallel tests' inserts
+    /// (a bumping forget would fail every iteration by its own +1, so
+    /// a single success is proof).
+    #[test]
+    fn read_window_survives_a_forget_alone() {
+        capture::force_enable();
+        let (dev, ino) = (0xF11A8_u64, 0xF09E7_u64); // synthetic identity
+        let mut proven = false;
+        for _ in 0..200 {
+            install_marker_for_tests(dev, ino, 10); // insert, pre-window
+            let began = marker_cycle(); // window opens: marker present
+            forget(dev, ino); // restore completion inside the window
+            if read_window_intact(dev, ino, began) {
+                proven = true;
+                break;
+            }
+        }
+        assert!(
+            proven,
+            "a forget alone must never break a read window (insert-only evidence)"
+        );
     }
 
     struct Rig {

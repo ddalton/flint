@@ -640,30 +640,54 @@ mod tests {
         assert!(snapshot(k.0, k.1).unwrap().is_dirty());
 
         // Fresh file: queues once; a later note that knows the path
-        // fills it in; once confirmed durable, no re-queue.
+        // fills it in; once confirmed durable, no re-queue. The queue
+        // is PROCESS-GLOBAL and parallel tests drain it (note_and_land
+        // loops drain_pending — and a drain also confirms the taken
+        // marks durable), so the sequence runs under the retry-loop
+        // discipline: any step that finds the entry drained clears the
+        // memo and starts over.
         let k2 = (0xD0B1_u64, 0x2_u64);
-        note(k2.0, k2.1, W(0, 4));
-        assert!(queued().contains_key(&k2));
-        let seq_before = queued().get(&k2).unwrap().seq;
-        note_at(k2.0, k2.1, Some(std::path::Path::new("/x/f")), W(4, 4));
-        let q = queued().get(&k2).unwrap().clone();
-        assert_eq!(
-            q.path.as_deref(),
-            Some(std::path::Path::new("/x/f")),
-            "a later note with a path must upsert an earlier None"
-        );
-        assert!(q.seq > seq_before, "every queue touch must advance the mark sequence");
-        let taken = queued().remove(&k2).map(|(_, q)| q).unwrap();
-        confirm_durable(&[PendingMark { dev: k2.0, ino: k2.1, path: taken.path, seq: taken.seq }]);
-        note(k2.0, k2.1, W(8, 4));
-        assert!(!queued().contains_key(&k2), "confirmed-durable file must not re-queue");
+        let mut done = false;
+        for _ in 0..50 {
+            clear_durable(k2.0, k2.1);
+            queued().remove(&k2);
+            note(k2.0, k2.1, W(0, 4));
+            let Some(seq_before) = queued().get(&k2).map(|q| q.seq) else { continue };
+            note_at(k2.0, k2.1, Some(std::path::Path::new("/x/f")), W(4, 4));
+            let Some(q) = queued().get(&k2).map(|e| e.clone()) else { continue };
+            assert_eq!(
+                q.path.as_deref(),
+                Some(std::path::Path::new("/x/f")),
+                "a later note with a path must upsert an earlier None"
+            );
+            assert!(q.seq > seq_before, "every queue touch must advance the mark sequence");
+            let Some(taken) = queued().remove(&k2).map(|(_, q)| q) else { continue };
+            confirm_durable(&[PendingMark {
+                dev: k2.0,
+                ino: k2.1,
+                path: taken.path,
+                seq: taken.seq,
+            }]);
+            note(k2.0, k2.1, W(8, 4));
+            assert!(!queued().contains_key(&k2), "confirmed-durable file must not re-queue");
+            done = true;
+            break;
+        }
+        assert!(done, "parallel drains raced the queue 50 straight times");
 
-        // requeue puts a failed drain's marks back.
+        // requeue puts a failed drain's marks back (same discipline:
+        // a parallel drain may take the entry between the requeue and
+        // the read).
         let k3 = (0xD0B1_u64, 0x3_u64);
-        requeue(vec![PendingMark { dev: k3.0, ino: k3.1, path: None, seq: 0 }]);
-        assert!(queued().contains_key(&k3));
-        assert!(has_pending());
-        assert!(is_queued(k3.0, k3.1));
+        let mut done = false;
+        for _ in 0..50 {
+            requeue(vec![PendingMark { dev: k3.0, ino: k3.1, path: None, seq: 0 }]);
+            if queued().contains_key(&k3) && has_pending() && is_queued(k3.0, k3.1) {
+                done = true;
+                break;
+            }
+        }
+        assert!(done, "requeued mark never observed across 50 attempts");
     }
 
     #[test]

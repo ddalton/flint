@@ -179,6 +179,29 @@ pub fn admit_hydration(path: &Path, len: u64) -> bool {
     s.headroom() >= len || headroom_for_refusal(&s) >= len
 }
 
+/// The gap the warm fill keeps below the eviction watermark: fill and
+/// eviction must never share an operating region, or a fill under
+/// pressure becomes a hydrate/evict churn loop.
+const WARM_MARGIN_PCT: u64 = 2;
+
+/// Warm-fill admission (bulk hydration) — STRICTER than the demand
+/// admission on both axes: headroom must cover `len` PLUS the fill's
+/// admitted-but-unfinished bytes (`pending` — N blind concurrent
+/// admissions would otherwise overshoot by N × object size, and the
+/// fill must never eat the demand/write reserve), AND projected usage
+/// must stay at or below `watermarkPct − WARM_MARGIN_PCT`. The refresh
+/// is unconditional: statvfs is µs-scale at ≤ warm-concurrency calls
+/// per restore-duration, and successive admits must see the fill's own
+/// landed bytes. False = the fill stops/skips (never waits).
+pub fn admit_warm(path: &Path, len: u64, pending: u64) -> bool {
+    let Some(s) = current() else { return true };
+    if !path.starts_with(&s.cfg.root) {
+        return true;
+    }
+    s.refresh();
+    s.admit_warm_after_refresh(len, pending)
+}
+
 /// A10 admission for object creation (OPEN-create / CREATE).
 pub fn admit_create(path: &Path) -> Result<(), NoSpace> {
     let Some(s) = current() else { return Ok(()) };
@@ -226,6 +249,24 @@ impl Space {
         self.avail_raw
             .load(Ordering::Relaxed)
             .saturating_sub(self.cfg.reserve_bytes)
+    }
+
+    /// The pure half of [`admit_warm`] (unit-tested via `force_gauge`
+    /// — the public fn's unconditional refresh would overwrite a
+    /// forced gauge with real statvfs numbers).
+    fn admit_warm_after_refresh(&self, len: u64, pending: u64) -> bool {
+        let add = len.saturating_add(pending);
+        if self.headroom() < add {
+            return false;
+        }
+        let total = self.total.load(Ordering::Relaxed);
+        if total == 0 {
+            return false;
+        }
+        let avail = self.avail_raw.load(Ordering::Relaxed);
+        let used_after = total.saturating_sub(avail).saturating_add(add);
+        let pct_after = used_after.saturating_mul(100) / total;
+        pct_after <= (self.cfg.watermark_pct as u64).saturating_sub(WARM_MARGIN_PCT)
     }
 
     /// One statvfs reading into the gauge + watermark edge log +
@@ -408,6 +449,39 @@ mod tests {
         s.force_gauge(1000, 40);
         assert_eq!(s.headroom(), 0, "reserve larger than avail saturates to zero");
         assert_eq!(s.view().avail_bytes, 0);
+    }
+
+    #[test]
+    fn admit_warm_counts_pending_and_honors_margin_and_reserve() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let s = local(cfg(dir.path(), 100)); // watermark 85 ⇒ margin 83
+        s.force_gauge(1000, 500); // used 50%, headroom 400
+
+        assert!(s.admit_warm_after_refresh(100, 0), "plain fit admits");
+        assert!(
+            s.admit_warm_after_refresh(100, 100),
+            "modest pending still fits (projected 70%)"
+        );
+        assert!(
+            !s.admit_warm_after_refresh(100, 350),
+            "pending bytes count: 450 total exceeds the 400 headroom"
+        );
+        assert!(
+            !s.admit_warm_after_refresh(401, 0),
+            "past headroom = into the demand/write reserve — never"
+        );
+
+        // The watermark margin, isolated (no reserve in play).
+        let s2 = local(cfg(dir.path(), 0));
+        s2.force_gauge(1000, 400); // used 60%, headroom 400
+        assert!(
+            s2.admit_warm_after_refresh(230, 0),
+            "83% projected sits ON the watermark−2 boundary: admit"
+        );
+        assert!(
+            !s2.admit_warm_after_refresh(240, 0),
+            "84% projected crosses watermark−2: refuse (eviction fires at 85%)"
+        );
     }
 
     #[test]

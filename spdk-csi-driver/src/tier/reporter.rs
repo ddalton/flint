@@ -41,6 +41,9 @@ pub struct Gauges {
     /// 0 when nothing is dirty.
     pub oldest_unflushed_secs: u64,
     pub hydration_inflight: usize,
+    /// WARM (bulk-fill) restores among the inflight — the fill's
+    /// live progress signal.
+    pub warm_inflight: usize,
     pub evicted_files: usize,
     pub evicted_bytes: u64,
     /// None while the space gauge is not live.
@@ -164,6 +167,25 @@ pub fn compose(delta: &MeterSnapshot, g: &Gauges, k: &Knobs) -> Option<(bool, St
         }
         if delta.hydration_foreign_adopts > 0 {
             s.push_str(&format!(" · {} S3-wins adopts", delta.hydration_foreign_adopts));
+        }
+        seg.push(s);
+    }
+
+    // The warm fill (bulk hydration): progress while it runs, and a
+    // WARN when it hit the space bound — files an operator asked to
+    // pre-warm are staying cold.
+    if g.warm_inflight > 0 || delta.warm_skipped_space + delta.warm_abandoned > 0 {
+        let mut s = format!("warm {} inflight", g.warm_inflight);
+        if delta.warm_skipped_space > 0 {
+            s.push_str(&format!(" · {} skipped (space)", delta.warm_skipped_space));
+            warn_reasons.push(format!(
+                "warm fill stopped at the space bound ({} file(s) skipped) — the tree \
+                 stays partially cold",
+                delta.warm_skipped_space
+            ));
+        }
+        if delta.warm_abandoned > 0 {
+            s.push_str(&format!(" · {} abandoned", delta.warm_abandoned));
         }
         seg.push(s);
     }
@@ -293,6 +315,7 @@ pub fn spawn(
             g.evicted_files = ef;
             g.evicted_bytes = eb;
             g.hydration_inflight = crate::tier::hydrate::inflight_count();
+            g.warm_inflight = crate::tier::hydrate::warm_inflight();
             g.epoch = guard.current();
             g.epoch_renew_age_secs = guard.renew_age_secs();
             if let Ok(rows) = backend.tier_list_dirty().await {

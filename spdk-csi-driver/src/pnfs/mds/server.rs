@@ -843,22 +843,25 @@ impl MetadataServer {
         // reconcile (which loads the imported stubs' markers) and
         // BEFORE the listener binds. Tombstoned keys are never
         // resurrected (A7).
+        // The state-dir note files (import intent; warm-fill pending)
+        // live next to state.db — memory backends get neither, and the
+        // features they carry degrade gracefully without them.
+        let state_note_dir: Option<std::path::PathBuf> = match self.config.state.backend {
+            crate::pnfs::config::StateBackend::Sqlite => {
+                let db = self
+                    .config
+                    .state
+                    .config
+                    .get("path")
+                    .cloned()
+                    .unwrap_or_else(|| "/var/lib/flint-pnfs/state.db".to_string());
+                std::path::Path::new(&db).parent().map(|p| p.to_path_buf())
+            }
+            _ => None,
+        };
+        let mut imported = false;
         if t.import_on_start {
-            let intent_path = match self.config.state.backend {
-                crate::pnfs::config::StateBackend::Sqlite => {
-                    let db = self
-                        .config
-                        .state
-                        .config
-                        .get("path")
-                        .cloned()
-                        .unwrap_or_else(|| "/var/lib/flint-pnfs/state.db".to_string());
-                    std::path::Path::new(&db)
-                        .parent()
-                        .map(|p| p.join("flint-import-intent"))
-                }
-                _ => None,
-            };
+            let intent_path = state_note_dir.as_ref().map(|p| p.join("flint-import-intent"));
             if let Some(rep) = crate::tier::import::maybe_import_on_start(
                 &self.backend,
                 &orch_store,
@@ -870,6 +873,10 @@ impl MetadataServer {
             )
             .await
             {
+                // `is_some()` — NOT `stubs_created > 0`, which would
+                // false-negative the warm trigger on a crash-resumed
+                // import whose stubs all count as skipped_known.
+                imported = true;
                 info!(
                     "🪣 tier import: {} dir(s), {} symlink(s), {} stub(s) restored \
                      ({} tombstoned skipped, {} failed)",
@@ -900,16 +907,43 @@ impl MetadataServer {
         // Step 11: the hydrator — evicted files restore in place on
         // first touch; WRITE-triggered restores hold a reserved
         // concurrency slot (step-9 hung-task finding).
-        crate::tier::hydrate::install(
+        let hydrator = crate::tier::hydrate::install(
             Arc::clone(&self.backend),
             Arc::clone(&orch_store),
             crate::tier::hydrate::HydrateConfig {
                 hold: Duration::from_secs(t.hydrate_hold_secs.max(1)),
                 concurrency: t.hydrate_concurrency.max(1),
                 fetch_parallel: t.hydrate_fetch_parallel.max(1),
+                warm_concurrency: t.hydrate_warm_concurrency.max(1),
                 ..Default::default()
             },
         );
+
+        // Warm fill: bulk-restore the tree after an import that ran
+        // (DR restore / bucket adopt — the all-stubs world). AFTER
+        // install (markers entered RAM at reconcile, the hydrator
+        // exists) and AFTER the fence+import (an unfenced hub never
+        // gets here). The durable pending note re-arms the fill across
+        // restarts — a mid-fill crash resumes instead of silently
+        // going best-effort-once; planting the note by hand is the
+        // sanctioned manual re-trigger.
+        if t.hydrate_warm_after_import {
+            let warm_note = state_note_dir.as_ref().map(|p| p.join("flint-warm-fill-pending"));
+            let note_present = warm_note.as_ref().map(|p| p.exists()).unwrap_or(false);
+            if imported || note_present {
+                if let Some(p) = &warm_note {
+                    if !note_present {
+                        if let Err(e) = std::fs::write(p, b"warm-fill\n") {
+                            warn!("tier warm: cannot write pending note {}: {}", p.display(), e);
+                        }
+                    }
+                }
+                let h = Arc::clone(&hydrator);
+                tokio::spawn(async move {
+                    crate::tier::hydrate::warm_fill(&h, warm_note.as_deref()).await;
+                });
+            }
+        }
 
         // Step 11: the watermark-driven eviction pass goes LIVE —
         // hydration exists, so evicted files can come back. Runs on
