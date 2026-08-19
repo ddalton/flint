@@ -10,7 +10,35 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
-## [Unreleased]
+## [1.29.0] - 2026-08-19
+
+### Fixed — four defects found by designing the cluster drill
+
+- **Both charts' default-deny NetworkPolicies FELL OPEN.** Per the
+  NetworkPolicy API an ingress rule whose `from` is empty or missing
+  matches ALL sources; both charts rendered `from: []` under a comment
+  claiming it "admits NOTHING". Enabling the policy without setting a
+  client list published 2049 and the read-write file API to the entire
+  cluster, while reading as protection. Rules are now omitted entirely
+  unless they have a peer — a policy with no rules denies everything.
+- **Every operator Event was refused 403, silently.** kube-runtime's
+  Recorder publishes `events.k8s.io/v1` and the chart granted only the
+  core group. Publishing is best-effort by design so a lost event never
+  fails a reconcile, which is exactly why nothing noticed:
+  `AdoptionBlocked`, `ReclaimRefused`, `IdleSuspended`, `Woken`,
+  `CredentialsMissing` — all dropped, while the docs told operators to
+  read them.
+- **Two concurrent PUTs to one path corrupted the file.** The upload
+  temp name was keyed on the process id, and one hub serves every
+  request for a share — so both uploads opened the same temp file,
+  interleaved their bytes into it, and each renamed it over the target.
+  Both callers were told 201 Created. A UI retrying a slow upload is
+  enough to trigger it.
+- **`suspendWithSessions` was documented inverted.** The CRD said to
+  "set it" to refuse suspending under a live mount; the code arms the
+  guard on `false`. Anyone following the documentation got a share that
+  suspends out from under its own mount.
+
 
 ### Added
 
