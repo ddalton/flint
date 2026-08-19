@@ -16,8 +16,9 @@ image:
   # overrides the whole reference verbatim when set (e.g. a
   # kind-loaded local image "flint-lite-dev:local").
   # NOTE: `mode: standalone` and the S3 tier need image 1.26.0 or
-  # newer (multi-arch: amd64 + arm64). Older MDS binaries refuse the
-  # mode at boot.
+  # newer (multi-arch: amd64 + arm64); the warm-fill knobs
+  # (hydrateWarmAfterImport/hydrateWarmConcurrency) need 1.27.0.
+  # Older MDS binaries refuse the mode at boot.
   repository: dilipdalton
   name: flint-pnfs
   tag: ""

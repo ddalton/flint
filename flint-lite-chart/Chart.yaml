@@ -3,7 +3,11 @@ name: flint-lite
 description: Flint-lite — the standalone POSIX hub. One pod on any CSI driver's RWO PVC, real NFSv4.2 (locks, close-to-open, atomic rename), an optional S3 cold tier, and nothing to install on consumer clusters.
 type: application
 # Chart version — independent of the full flint-csi-driver-chart.
-version: 0.1.0
-# The hub image tag this chart defaults to — 1.26.0 is the first
-# release carrying `mode: standalone` and the S3 tier.
-appVersion: "1.26.0"
+# 0.2.0: the settings schema gained hydrateWarmAfterImport +
+# hydrateWarmConcurrency (and 1.27.0 ships hydrateFetchParallel's
+# fan-out) — pin chart and image together.
+version: 0.2.0
+# The hub image tag this chart defaults to — 1.26.0 was the first
+# release carrying `mode: standalone` and the S3 tier; 1.27.0 adds the
+# cold-read fan-out and the warm fill.
+appVersion: "1.27.0"
