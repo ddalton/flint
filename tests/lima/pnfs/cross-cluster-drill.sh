@@ -28,6 +28,11 @@
 #   leg 6  metadata-rate measurement (not an assertion) — create/unlink
 #          and stat rates from client B. Agents are metadata-heavy and
 #          delegations are off, so this number decides workload fit.
+#   leg 7  the INVERSE of leg 1: a third client wearing client A's
+#          hostname (same co_ownerid, own verifier) must not be handed
+#          a lock A still holds. Two pods in two workload clusters can
+#          trivially share a hostname, and RFC 8881 reads that as "the
+#          client rebooted" — correct per spec, fatal between machines.
 #
 # Client B's distinctness is manufactured the only honest way one VM
 # allows: the mount runs in its own network namespace (own nfs_net, own
@@ -63,6 +68,15 @@ VETH_NS=ccb1
 NS_NET=10.99.77.0/30
 NS_GW=10.99.77.1
 NS_IP=10.99.77.2
+# A THIRD client, used only by leg 7: its own netns, but client A's
+# hostname. Two pods in two clusters that happen to agree on a name.
+MNT_C=/mnt/cc-c
+NETNS_C=cca
+VETH_C_HOST=cca0
+VETH_C_NS=cca1
+NS_C_NET=10.99.78.0/30
+NS_C_GW=10.99.78.1
+NS_C_IP=10.99.78.2
 DRILL_MIB=64
 
 say()  { echo; echo "── $*"; }
@@ -85,9 +99,15 @@ cleanup() {
     echo "KEEP=1 — leaving servers, mounts and netns standing"
     return
   fi
-  vm "umount -lf $MNT_B 2>/dev/null; umount -lf $MNT_A 2>/dev/null; \
+  # Kill the lock holder first: a python process holding a lock on a
+  # mount whose server is about to die D-states the umount.
+  vm "pkill -f cc-alias-a.py 2>/dev/null; true" 2>/dev/null
+  vm "umount -lf $MNT_C 2>/dev/null; umount -lf $MNT_B 2>/dev/null; \
+      umount -lf $MNT_A 2>/dev/null; \
       ip netns del $NETNS 2>/dev/null; ip link del $VETH_HOST 2>/dev/null; \
-      iptables -t nat -D POSTROUTING -s $NS_NET -j MASQUERADE 2>/dev/null" \
+      ip netns del $NETNS_C 2>/dev/null; ip link del $VETH_C_HOST 2>/dev/null; \
+      iptables -t nat -D POSTROUTING -s $NS_NET -j MASQUERADE 2>/dev/null; \
+      iptables -t nat -D POSTROUTING -s $NS_C_NET -j MASQUERADE 2>/dev/null" \
       2>/dev/null
   for n in mds ds1 ds2; do
     [ -f "$PIDFILE_DIR/flint-pnfs-$n.pid" ] && \
@@ -352,8 +372,137 @@ echo "  stat:          100 calls in ${STAT_MS} ms ($(( 100000 / (STAT_MS + 1) ))
 echo "  (delegations off: every open is an MDS round trip — these numbers"
 echo "   decide agent-workload fit; record them, do not tune around them here)"
 
+# ── leg 7: client-identity COLLISION across "clusters" ────────────────
+say "leg 7: a third client wearing A's hostname must not silently take A's state"
+# Legs 1-6 prove two clients with DISTINCT identities coexist. This leg
+# is their inverse, and it is the one that matters once the clusters are
+# real: co_ownerid is derived from the client's hostname, and two pods
+# in two workload clusters can trivially have the same one.
+#
+# The server implements RFC 8881 §18.35 faithfully — same co_ownerid,
+# fresh verifier, same principal is "the client rebooted" (Case 5,
+# state/client.rs:602), so the newcomer's CREATE_SESSION DESTROYS the
+# incumbent's state. Correct per the spec, and catastrophic where the
+# two are different machines that merely agree on a hostname. Nothing in
+# docs/identity-contract.md covers it: that governs VOLUME identity, not
+# the EXCHANGE_ID client owner.
+#
+# The assertion is about the CONSEQUENCE rather than the wire: a lock A
+# holds must not evaporate because someone else turned up with A's name.
+if ! vm "command -v python3 >/dev/null"; then
+  skip "no python3 in VM — the collision leg needs fcntl"
+else
+  HOST_A=$(vm "hostname" | tr -d '\r')
+  echo "  client A's identity is '$HOST_A'; the newcomer will claim the same"
+  vm "ip netns del $NETNS_C 2>/dev/null; ip link del $VETH_C_HOST 2>/dev/null; true"
+  vm "ip netns add $NETNS_C && \
+      ip link add $VETH_C_HOST type veth peer name $VETH_C_NS && \
+      ip link set $VETH_C_NS netns $NETNS_C && \
+      ip addr add $NS_C_GW/30 dev $VETH_C_HOST && ip link set $VETH_C_HOST up && \
+      ip netns exec $NETNS_C ip addr add $NS_C_IP/30 dev $VETH_C_NS && \
+      ip netns exec $NETNS_C ip link set $VETH_C_NS up && \
+      ip netns exec $NETNS_C ip link set lo up && \
+      ip netns exec $NETNS_C ip route add default via $NS_C_GW && \
+      { iptables -C FORWARD -s $NS_C_NET -j ACCEPT 2>/dev/null || iptables -I FORWARD -s $NS_C_NET -j ACCEPT; } && \
+      { iptables -C FORWARD -d $NS_C_NET -j ACCEPT 2>/dev/null || iptables -I FORWARD -d $NS_C_NET -j ACCEPT; } && \
+      { iptables -t nat -C POSTROUTING -s $NS_C_NET -j MASQUERADE 2>/dev/null || \
+        iptables -t nat -A POSTROUTING -s $NS_C_NET -j MASQUERADE; }" \
+    || fail "netns plumbing for the colliding client failed"
+
+  # A takes an exclusive lock and holds it well past the collision.
+  # setsid + closed stdin so it outlives the ssh session, as in leg 3.
+  vm "rm -f /tmp/cc-alias-a.log; \
+      cat >/tmp/cc-alias-a.py <<'PY'
+import fcntl, time
+f = open('$MNT_A/shared.bin', 'r+b')
+fcntl.lockf(f, fcntl.LOCK_EX, 4096, 8192)
+print('A_LOCKED', flush=True)
+time.sleep(40)
+PY
+      setsid python3 /tmp/cc-alias-a.py >/tmp/cc-alias-a.log 2>&1 </dev/null & \
+      for i in \$(seq 50); do grep -q A_LOCKED /tmp/cc-alias-a.log 2>/dev/null && break; sleep 0.2; done; \
+      grep -c A_LOCKED /tmp/cc-alias-a.log" | grep -q '^1' \
+    || fail "client A never acquired the lock this leg is about"
+  pass "client A holds an exclusive lock on bytes 4096-12287"
+
+  # The newcomer mounts wearing A's hostname: same co_ownerid, its own
+  # boot verifier — the exact shape of two same-named pods in two
+  # clusters.
+  vm "mkdir -p $MNT_C"
+  vm "nsenter --net=/var/run/netns/$NETNS_C unshare --uts sh -c ' \
+        hostname $HOST_A && \
+        timeout 30 mount -t nfs4 -o minorversion=1,proto=tcp,port=$MDS_PORT \
+          $HOST_IP:/ $MNT_C'" \
+    || fail "the colliding client could not mount (netns route to host?)"
+  pass "a second client mounted under the SAME hostname '$HOST_A'"
+
+  # ANTI-VACUITY, the same guard leg 1 applies to A-vs-B. If the kernel
+  # folded C into A's nfs_client, C's fcntl would be arbitrated LOCALLY
+  # and a refusal below would say nothing whatever about the server. The
+  # netns split should prevent it — assert rather than assume.
+  SB_A2=$(vm "findmnt -no MAJ:MIN $MNT_A" | tr -d ' \r')
+  SB_C=$(vm "findmnt -no MAJ:MIN $MNT_C" | tr -d ' \r')
+  [ -n "$SB_C" ] || fail "could not read the newcomer's superblock"
+  [ "$SB_A2" != "$SB_C" ] \
+    || fail "the newcomer SHARES superblock $SB_C with client A — the kernel \
+folded them into one nfs_client, so any refusal below is the LOCAL lock \
+manager and this leg would pass vacuously. The collision was not \
+manufactured; do not read the result as a server property."
+  pass "the newcomer is a distinct nfs_client ($SB_A2 vs $SB_C) — refusals below are the SERVER's"
+
+  # SECOND anti-vacuity guard, and the one that decides whether this leg
+  # tests what it says. Linux does not derive co_ownerid from the
+  # hostname alone, so a kernel that disambiguates by source address
+  # would give the newcomer its OWN identity and there would be no
+  # collision to survive. The server says which happened: a genuine
+  # collision is EXCHANGE_ID case 5 ("client reboot detected"), because
+  # same owner + fresh verifier IS a reboot as far as RFC 8881 knows.
+  grep -q "case 5 (client reboot detected)" "$LOG_DIR/flint-pnfs-mds.log" \
+    || { grep -oE "EXCHANGE_ID: (new client [0-9]+|case [0-9]+ \([^)]*\))" \
+           "$LOG_DIR/flint-pnfs-mds.log" | sort | uniq -c; \
+         fail "the server never saw an owner collision — the newcomer was \
+given its own identity, so there was nothing for it to take and the \
+result below means nothing. The collision must be re-manufactured (try \
+the nfs4_unique_id module parameter) before this leg can be believed."; }
+  pass "the server logged EXCHANGE_ID case 5 — the co_ownerid genuinely collided"
+
+  C_RESULT=$(vm "nsenter --net=/var/run/netns/$NETNS_C python3 - <<'PY'
+import fcntl, errno
+f = open('$MNT_C/shared.bin', 'r+b')
+try:
+    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB, 4096, 8192)
+    print('C_TOOK_A_LOCK_A_STILL_HOLDS')
+except OSError as e:
+    print('C_REFUSED' if e.errno in (errno.EAGAIN, errno.EACCES) else 'C_ERRNO_%d' % e.errno)
+PY" | tr -d '\r')
+  echo "  newcomer's result: $C_RESULT"
+
+  case "$C_RESULT" in
+    C_REFUSED)
+      pass "the incumbent's lock SURVIVED a REAL owner collision (case 5 above) — the newcomer was refused"
+      echo "  note: RFC 8881 case 5 means the server read the newcomer as A"
+      echo "  RESTARTING. A's lock came through this one collision intact, but"
+      echo "  a SUSTAINED collision (a crash-looping same-named pod in another"
+      echo "  cluster) would have the two evicting and reclaiming each other"
+      echo "  indefinitely. This leg proves one exchange, not steady state." ;;
+    C_TOOK_A_LOCK_A_STILL_HOLDS)
+      fail "IDENTITY COLLISION IS SILENT DATA CORRUPTION: a client that merely shares hostname '$HOST_A' was granted a lock the incumbent still holds, with no error on either side. Two same-named pods in two workload clusters would corrupt each other's writes. Client identity must be made unique per consumer BEFORE any cross-cluster mount ships." ;;
+    *)
+      fail "the colliding client failed in an unexpected way ($C_RESULT) — neither refusal nor takeover; investigate before drawing any conclusion" ;;
+  esac
+
+  # A learning nothing about a takeover is the worst shape of this bug.
+  if vm "grep -q Traceback /tmp/cc-alias-a.log 2>/dev/null"; then
+    vm "tail -3 /tmp/cc-alias-a.log"
+    fail "the incumbent's lock holder CRASHED during the collision"
+  fi
+  pass "the incumbent survived the collision without an error of its own"
+fi
+
 echo
 echo "══════════════════════════════════════════════════════════════════"
 echo " PASS — two distinct clients shared one volume: coherent, locked,"
-echo " tool-exercised, DS-direct. This is the multi-cluster premise."
+echo " tool-exercised, DS-direct. This is the multi-cluster premise —"
+echo " and a third client sharing a hostname did not silently inherit"
+echo " the first one's locks."
 echo "══════════════════════════════════════════════════════════════════"
