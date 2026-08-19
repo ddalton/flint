@@ -1317,8 +1317,29 @@ impl MetadataServer {
         }
     }
 
-    /// Start gRPC control server for DS registration
+    /// Start gRPC control server for DS registration.
+    ///
+    /// **Not in standalone.** The control plane exists to let data
+    /// servers register and to serve CreateVolume/DeleteVolume for the
+    /// pNFS CSI driver. A standalone hub refuses `dataServers` by
+    /// construction and has no CSI driver in front of it, so every verb
+    /// on this port is either meaningless or destructive — and the port
+    /// binds `0.0.0.0`, is UNAUTHENTICATED unless `FLINT_PNFS_CONTROL_TOKEN`
+    /// is set (it is set nowhere in the flint-lite charts), and carries
+    /// `DeleteVolume`. That is a delete verb reachable by any pod in the
+    /// cluster, on a hub whose PVC may be the only copy of the data.
+    ///
+    /// The pNFS deployment keeps the port and is fenced by the CSI
+    /// chart's `flint-pnfs-control` NetworkPolicy plus the bearer token.
+    /// Standalone had neither.
     fn start_grpc_server(&self) {
+        if self.config.standalone {
+            info!(
+                "🔒 standalone: gRPC control plane NOT started (no data servers to register, \
+                 no CSI driver to serve — and DeleteVolume on an open port is not a feature)"
+            );
+            return;
+        }
         let device_registry = Arc::clone(&self.device_registry);
         let bind_addr = self.config.bind.address.clone();
         let nfs_port = self.config.bind.port;
