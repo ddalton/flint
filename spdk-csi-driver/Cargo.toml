@@ -69,6 +69,13 @@ k8s-openapi = { version = "0.27.0", features = ["latest"] }
 # both, so this is "add at the current pins", not "restore the old
 # line". Nothing else in the crate derives JsonSchema.
 schemars = "1.0"
+# rustls is a DIRECT dependency for exactly one line of code:
+# `install_crypto_provider()` in lib.rs. Since v1.26.0 put the AWS SDK
+# in the tree, rustls 0.23 sees BOTH provider features enabled
+# (aws-lc-rs from the SDK, ring from hyper-rustls) and refuses to guess
+# a process default — so every kube TLS client PANICKED at
+# construction. See lib.rs for the whole story.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"

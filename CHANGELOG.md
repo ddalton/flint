@@ -52,6 +52,22 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **⚠ The CSI driver could not start in 1.26.0 or 1.27.0.**
+  `csi-driver` panics on its second statement —
+  `Client::try_default()` — with "Could not automatically determine the
+  process-level CryptoProvider from Rustls crate features". rustls 0.23
+  picks its provider from its own crate features and refuses to guess
+  when several are enabled; until 1.26.0 only `ring` was in the tree,
+  and the AWS SDK added for the S3 tier brought `aws-lc-rs` alongside
+  it. Every binary that builds a kube client is affected (the driver in
+  all modes, and the dashboard backend it hosts). **NOT affected**: the
+  hub (`flint-pnfs-mds`) — it does not use kube, and the S3 tier passes
+  its provider to the SDK explicitly rather than through the process
+  default, which is why every tier drill and the real-S3 gate stayed
+  green while this was broken. Fixed by installing the provider
+  explicitly at the top of `main` (`install_crypto_provider()`), with a
+  test that reads each binary's source and fails if one builds a kube
+  client without installing it first.
 - **flint-lite chart: a settings change now reaches the running hub.**
   The pod template gained a `checksum/config` annotation, so
   `helm upgrade` with changed `tier.settings` (or `logLevel`, or the

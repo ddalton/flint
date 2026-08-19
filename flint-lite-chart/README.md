@@ -15,6 +15,13 @@ The full operator guide — consumer recipes, the S3 tier, DR runbook —
 is [`docs/flint-lite.md`](../docs/flint-lite.md). A full pNFS/SPDK
 cluster is the separate `flint-csi-driver-chart`'s job.
 
+Running a **fleet** of hubs (bucket-per-tenant)? One helm release per
+volume stops scaling somewhere around ten. `flint-lite-operator-chart`
+manages them as `FlintShare` custom resources instead — same four
+objects, rendered by a controller
+([`docs/flint-lite-operator.md`](../docs/flint-lite-operator.md)),
+adopting an existing release of this chart in place.
+
 ## Quickstart
 
 ```bash

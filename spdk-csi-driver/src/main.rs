@@ -156,7 +156,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_line_number(false)  // Don't show line numbers (we have emojis for context)
         .with_ansi(true)  // Enable colors in terminal
         .init();
-    
+
+    // MUST precede any TLS client. Without it, the kube client built
+    // on the next line panics on "Could not automatically determine
+    // the process-level CryptoProvider" — which is exactly what
+    // 1.26.0 and 1.27.0 ship: the driver cannot start.
+    // See spdk_csi_driver::install_crypto_provider.
+    spdk_csi_driver::install_crypto_provider();
+
     let kube_client = Client::try_default().await?;
     let node_id = std::env::var("NODE_ID")
         .unwrap_or_else(|_| std::env::var("HOSTNAME").unwrap_or("unknown-node".to_string()));

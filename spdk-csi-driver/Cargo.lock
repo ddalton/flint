@@ -3353,6 +3353,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "rustls 0.23.36",
  "schemars",
  "serde",
  "serde_json",

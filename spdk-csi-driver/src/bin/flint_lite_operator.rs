@@ -13,7 +13,13 @@
 //! - **A Secret watch.** Nothing in a CR changes when credentials
 //!   rotate, so without this the operator would never know — and the
 //!   hub would find out the hard way, by failing a heartbeat and
-//!   fencing itself.
+//!   fencing itself. Cost, stated rather than hidden: this caches every
+//!   Secret in the watched scope in the operator's memory. A
+//!   metadata-only watch would fix that, but `watches_stream` (the only
+//!   way to feed `metadata_watcher` into a Controller) is behind
+//!   kube's `unstable-runtime-stream-control` feature, and an unstable
+//!   flag is a worse trade than the memory. Narrow `watchNamespace` if
+//!   the cluster is large and the fleet is not.
 //! - **A watch on FlintShare itself.** Conflict arbitration is a
 //!   statement about OTHER objects: when a share appears or is deleted,
 //!   everyone whose subtree it overlaps has to re-decide. Without it a
@@ -92,6 +98,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    // Before ANY TLS: two rustls providers are in this crate's tree, so
+    // the process default has to be chosen explicitly or the client
+    // construction below panics outright.
+    spdk_csi_driver::install_crypto_provider();
     let client = Client::try_default().await?;
 
     if args.manage_crd {
