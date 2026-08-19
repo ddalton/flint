@@ -299,7 +299,7 @@ pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
 
 /// Defaults mirrored from the chart's values.yaml. They live here as
 /// named constants so the parity test's failure names the drift.
-const HEALTH_PORT: i32 = 8080;
+pub const HEALTH_PORT: i32 = 8080;
 const HEALTH_PATH: &str = "/health";
 /// Where a file-API token Secret is projected in the hub container.
 pub const FILE_API_TOKEN_MOUNT: &str = "/etc/flint/api-token";
@@ -572,9 +572,17 @@ pub fn deployment(
 
     // Suspended keeps every object and the PVC — only the pod goes.
     // Waking is a replica count, not a restore.
+    //
+    // The idle ladder gets a vote here, and MUST: this renderer is
+    // level-triggered and server-side-applies, so a suspend recorded
+    // anywhere the render does not read would be undone by the very
+    // next reconcile, seconds later, forever. The ladder's position
+    // lives in an annotation on the CR — metadata, not spec, because
+    // the user owns spec and the operator does not write it.
     let replicas = match s.lifecycle.clone().unwrap_or(Lifecycle::Active) {
-        Lifecycle::Active => 1,
         Lifecycle::Suspended => 0,
+        Lifecycle::Active if crate::lite_operator::idle::state_of(share).is_down() => 0,
+        Lifecycle::Active => 1,
     };
 
     // The pod template MUST satisfy the selector, and an adopted
@@ -722,6 +730,7 @@ mod tests {
             startup_failure_threshold: None,
             termination_grace_period_seconds: None,
             monitoring: None,
+            idle: None,
         }
     }
 

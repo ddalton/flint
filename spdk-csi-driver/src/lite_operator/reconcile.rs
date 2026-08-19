@@ -45,6 +45,8 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use super::conflict::{self, Admission, Candidate};
+use super::hubstatus;
+use super::idle::{self, Decision, IdleState};
 use super::crd::{FlintShare, FlintShareStatus, Lifecycle, Phase, Reclaim, RestartPolicy, ShareCondition};
 use super::render::{self, RenderDefaults};
 
@@ -112,13 +114,28 @@ pub enum ClaimPlan {
     Apply,
     /// Adopted, or unchanged in a way SSA would only churn.
     Skip,
+    /// The share is HIBERNATED: its PVC was deliberately deleted and the
+    /// bucket is the only copy. Re-applying it here would recreate an
+    /// empty disk on the very next reconcile — which is not just wasted
+    /// storage, it is the shape that makes a wake ambiguous, because
+    /// the hub would find a fresh empty PVC and could not tell it from
+    /// a DR restore that had already run.
+    Hibernated,
     /// The CR asks for LESS than the claim already has. Kubernetes
     /// cannot shrink a PVC, and an apply would fail every reconcile
     /// forever with an error nobody reads — say so in status instead.
     ShrinkRefused { have: String, want: String },
 }
 
-pub fn claim_plan(existing: Option<&PersistentVolumeClaim>, want: &str, adopted: bool) -> ClaimPlan {
+pub fn claim_plan(
+    existing: Option<&PersistentVolumeClaim>,
+    want: &str,
+    adopted: bool,
+    hibernated: bool,
+) -> ClaimPlan {
+    if hibernated {
+        return ClaimPlan::Hibernated;
+    }
     if adopted {
         return ClaimPlan::Skip;
     }
@@ -262,12 +279,25 @@ pub fn adoption_block(
 /// minutes (epoch claim waiting out a dead holder's lease, DR import
 /// walking the bucket). That is `Starting`, and an operator that calls
 /// it failure kills takeovers.
-pub fn phase_of(lifecycle: Lifecycle, dep: Option<&Deployment>, blocked: bool) -> Phase {
+pub fn phase_of(
+    lifecycle: Lifecycle,
+    dep: Option<&Deployment>,
+    blocked: bool,
+    idle_state: IdleState,
+) -> Phase {
     if blocked {
         return Phase::Failed;
     }
+    // An ADMIN's suspend outranks the ladder's, and reports
+    // differently: a front door must be able to tell "will wake on
+    // request" from "someone said no" without guessing.
     if lifecycle == Lifecycle::Suspended {
         return Phase::Suspended;
+    }
+    match idle_state {
+        IdleState::Hibernated => return Phase::Hibernated,
+        IdleState::Suspended => return Phase::IdleSuspended,
+        _ => {}
     }
     let status = dep.and_then(|d| d.status.as_ref());
     let available = status.and_then(|s| s.available_replicas).unwrap_or(0);
@@ -578,6 +608,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         existing_pvc.as_ref(),
         &share.spec.persistence.size,
         names.claim_is_adopted,
+        idle::state_of(&share) == idle::IdleState::Hibernated,
     ) {
         ClaimPlan::Apply => {
             if let Some(pvc) = rendered.pvc.clone() {
@@ -587,6 +618,11 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             }
         }
         ClaimPlan::Skip => {}
+        // Hibernated: the PVC was deliberately deleted and the bucket is
+        // the only copy. It comes back at WAKE, not here — recreating it
+        // now would leave an empty disk that a waking hub could not tell
+        // from a restore that had already run.
+        ClaimPlan::Hibernated => {}
         ClaimPlan::ShrinkRefused { have, want } => {
             let msg = format!(
                 "persistence.size {want} is smaller than the existing claim's {have}; Kubernetes \
@@ -610,13 +646,44 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
     dep.metadata.owner_references = Some(vec![owner]);
     let dep = deployments.patch(&names.deployment, &pp, &Patch::Apply(&dep)).await?;
 
+    // A hibernated share's disk, once its pod has genuinely drained.
+    // Driven from here rather than inside the decision because it has
+    // to happen on a LATER reconcile: the hub needs its whole
+    // termination grace period to flush and release the epoch.
+    if idle::state_of(&share) == IdleState::Hibernated
+        && reclaim_hibernated_disk(&ctx, &share, &ns, &names, Some(&dep)).await?
+    {
+        return Ok(Action::requeue(REQUEUE_SETTLED));
+    }
+
+    // --- 5b. The idle ladder --------------------------------------------
+    // Runs AFTER everything is applied, so the poll below sees the hub
+    // this reconcile actually produced, and any state change it writes
+    // is picked up by the reconcile its own annotation patch triggers.
+    let idle_outcome = drive_idle_ladder(&ctx, &share, &names, Some(&dep), &mut conds).await?;
+    if let Some(action) = idle_outcome.short_circuit {
+        write_status(
+            &ctx,
+            &share,
+            FlintShareStatus {
+                phase: Some(idle_outcome.phase),
+                address: None,
+                observed_generation: generation,
+                claim_name: Some(names.claim.clone()),
+                conditions: Some(conds),
+            },
+        )
+        .await?;
+        return Ok(action);
+    }
+
     // --- 6. Status ------------------------------------------------------
     let svc_live = get_opt(
         Api::<Service>::namespaced(ctx.client.clone(), &ns).get(&names.service),
     )
     .await?;
     let lifecycle = share.spec.lifecycle.clone().unwrap_or_default();
-    let phase = phase_of(lifecycle.clone(), Some(&dep), false);
+    let phase = phase_of(lifecycle.clone(), Some(&dep), false, idle::state_of(&share));
     let ready = phase == Phase::Ready;
     set_condition(
         &mut conds,
@@ -662,6 +729,406 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         Phase::Ready | Phase::Suspended => REQUEUE_SETTLED,
         _ => REQUEUE_PROGRESS,
     }))
+}
+
+/// What the ladder did this pass.
+struct IdleOutcome {
+    phase: Phase,
+    /// `Some` ⇒ the ladder changed something and this reconcile ends
+    /// here; the change it made re-triggers the loop.
+    short_circuit: Option<Action>,
+}
+
+/// Poll the hub, decide, act.
+///
+/// Every state change is written as an ANNOTATION patch on the CR, not
+/// to spec and not only to status. Spec belongs to the user. Status is
+/// not read before the render, so a suspend recorded only there would
+/// be undone by the very next reconcile — the renderer computes
+/// `replicas` and server-side-applies it, seconds later, forever.
+async fn drive_idle_ladder(
+    ctx: &Arc<Ctx>,
+    share: &Arc<FlintShare>,
+    names: &render::Names,
+    dep: Option<&Deployment>,
+    conds: &mut Vec<ShareCondition>,
+) -> Result<IdleOutcome> {
+    let ns = share.namespace().unwrap_or_default();
+    let generation = share.metadata.generation;
+    let state = idle::state_of(share);
+    let cfg = share.spec.idle.clone();
+    let lifecycle = share.spec.lifecycle.clone().unwrap_or_default();
+
+    // The phase the ladder implies, independent of what it decides to
+    // do next. An admin's Suspended reports as `Suspended` and the
+    // ladder's as `IdleSuspended`, deliberately: a front door has to be
+    // able to tell "will wake on request" from "someone said no".
+    let ladder_phase = match (lifecycle.clone(), state) {
+        (Lifecycle::Suspended, _) => Some(Phase::Suspended),
+        (_, IdleState::Suspended) => Some(Phase::IdleSuspended),
+        (_, IdleState::Hibernated) => Some(Phase::Hibernated),
+        _ => None,
+    };
+
+    // Nothing to do at all: no policy, never been touched by the
+    // ladder, and no wake outstanding. The overwhelmingly common case,
+    // and it must cost nothing — in particular NO status poll, which is
+    // a network round trip per share per reconcile across the fleet.
+    if cfg.is_none() && state == IdleState::Active {
+        return Ok(IdleOutcome {
+            phase: ladder_phase.unwrap_or(Phase::Pending),
+            short_circuit: None,
+        });
+    }
+
+    // Ask the hub, but only when there is a hub to ask. A share that is
+    // already down has no pod, and a share still starting has no
+    // listener — in both cases the poll would fail, and a failed poll
+    // must never read as idleness.
+    let hub_quiet = if state.is_down() {
+        Err("the hub is scaled to zero".to_string())
+    } else {
+        match poll_hub(ctx, share, &ns, names, dep).await {
+            Ok(snap) => {
+                let after = cfg
+                    .as_ref()
+                    .and_then(|c| c.suspend_after_secs)
+                    .unwrap_or(u64::MAX);
+                let verdict = snap.suspendable(after);
+                set_condition(
+                    conds,
+                    condition(
+                        "HubReachable",
+                        true,
+                        "Polled",
+                        Some(format!(
+                            "phase {:?}, idle {}s, rpoClean {:?}",
+                            snap.phase, snap.activity.idle_secs, snap.rpo_clean
+                        )),
+                        generation,
+                    ),
+                );
+                verdict
+            }
+            Err(why) => {
+                // Reported, not acted on. This is the condition an
+                // operator looks at when a share will not suspend.
+                set_condition(
+                    conds,
+                    condition("HubReachable", false, "PollFailed", Some(why.clone()), generation),
+                );
+                Err(why)
+            }
+        }
+    };
+
+    // The hibernate verification, which cannot live in the pure
+    // decision function because it deletes a PVC.
+    //
+    // **Verify at DRAIN time, not at suspend time.** The drain's real
+    // outcome is unobservable from here: the hub exits 0 whether or not
+    // it flushed, scale-to-zero deletes the pod so no exit code
+    // survives, and the operator has no bucket credentials to read the
+    // released epoch mark itself. So the share is scaled back to ONE,
+    // asked directly whether the bucket can rebuild it, and only then
+    // is the disk reclaimed. A3's fast epoch re-claim makes that extra
+    // wake cheap.
+    if state == IdleState::HibernateVerifying {
+        return verify_and_hibernate(ctx, share, names, dep, conds).await;
+    }
+
+    let decision = idle::decide(
+        cfg.as_ref(),
+        idle::Inputs {
+            share,
+            now: chrono::Utc::now(),
+            hub_quiet,
+            sessions_live: None,
+        },
+    );
+
+    let (next, reason) = match &decision {
+        Decision::Stay => {
+            return Ok(IdleOutcome {
+                phase: ladder_phase.unwrap_or(Phase::Pending),
+                short_circuit: None,
+            })
+        }
+        Decision::Hold(why) => {
+            set_condition(
+                conds,
+                condition("IdleEligible", false, "Held", Some(why.clone()), generation),
+            );
+            return Ok(IdleOutcome {
+                phase: ladder_phase.unwrap_or(Phase::Pending),
+                short_circuit: None,
+            });
+        }
+        Decision::Suspend => (IdleState::Suspended, "idle".to_string()),
+        Decision::Wake => (IdleState::Active, "wake requested".to_string()),
+        Decision::BeginHibernate => (
+            IdleState::HibernateVerifying,
+            "verifying the flush before reclaiming the disk".to_string(),
+        ),
+    };
+
+    // Patch the annotations. This is the durable carrier; the render
+    // reads it on the reconcile this patch triggers.
+    let mut ann = serde_json::Map::new();
+    ann.insert(
+        idle::ANN_IDLE_STATE.to_string(),
+        serde_json::Value::String(next.as_str().to_string()),
+    );
+    ann.insert(
+        idle::ANN_IDLE_SINCE.to_string(),
+        serde_json::Value::String(now_rfc3339()),
+    );
+    if next == IdleState::Active {
+        // The request has been honoured; clearing it means the NEXT
+        // idle window starts from the hub's own activity clock rather
+        // than from a stale heartbeat. A null value removes the key.
+        ann.insert(idle::ANN_REQUESTED_AT.to_string(), serde_json::Value::Null);
+    }
+    let patch = serde_json::json!({ "metadata": { "annotations": ann } });
+    Api::<FlintShare>::namespaced(ctx.client.clone(), &ns)
+        .patch(&share.name_any(), &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+        .await?;
+
+    let (ev_reason, note) = match decision {
+        Decision::Suspend => (
+            "IdleSuspended",
+            format!("no activity for the configured window ({reason}) — scaled to zero; the PVC is kept and a wake is a pod start"),
+        ),
+        Decision::Wake => ("Woken", format!("{reason} — scaling back up")),
+        Decision::BeginHibernate => (
+            "HibernateStarted",
+            format!("{reason}; the PVC is deleted only after the hub reports a clean flush"),
+        ),
+        _ => unreachable!("Stay/Hold returned above"),
+    };
+    info!(share = %share.name_any(), state = next.as_str(), "idle ladder: {}", note);
+    event(ctx, share, EventType::Normal, ev_reason, &note).await;
+    set_condition(
+        conds,
+        condition("IdleEligible", true, ev_reason, Some(note), generation),
+    );
+
+    let phase = match next {
+        IdleState::Suspended => Phase::IdleSuspended,
+        IdleState::Hibernated => Phase::Hibernated,
+        IdleState::HibernateVerifying => Phase::Ready,
+        IdleState::Active => Phase::Starting,
+    };
+    Ok(IdleOutcome {
+        phase,
+        // The annotation patch re-triggers the loop, which re-renders
+        // with the new state. Requeue anyway rather than relying on the
+        // watch: a dropped event must not strand a share half-way.
+        short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
+    })
+}
+
+/// The hibernate rung: scale to one, prove the bucket can rebuild the
+/// volume, drain cleanly, and only then delete the PVC.
+///
+/// Everything about this is written to be safe when interrupted. The
+/// state annotation is durable, so an operator restart mid-verification
+/// resumes verifying rather than deleting unverified or waking for
+/// good. And a wake request arriving DURING verification aborts it: the
+/// share was wanted, which is a better reason to be up than the ladder
+/// had to bring it down.
+async fn verify_and_hibernate(
+    ctx: &Arc<Ctx>,
+    share: &Arc<FlintShare>,
+    names: &render::Names,
+    dep: Option<&Deployment>,
+    conds: &mut Vec<ShareCondition>,
+) -> Result<IdleOutcome> {
+    let ns = share.namespace().unwrap_or_default();
+    let generation = share.metadata.generation;
+
+    // Someone wants it. Abandon the hibernate — it is already up.
+    if idle::requested_at(share).is_some() {
+        set_idle_state(ctx, share, &ns, IdleState::Active, true).await?;
+        let note = "wake requested during hibernate verification — kept the PVC".to_string();
+        info!(share = %share.name_any(), "{note}");
+        event(ctx, share, EventType::Normal, "HibernateAborted", &note).await;
+        set_condition(
+            conds,
+            condition("IdleEligible", false, "WokenDuringVerify", Some(note), generation),
+        );
+        return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)) });
+    }
+
+    let snap = match poll_hub(ctx, share, &ns, names, dep).await {
+        Ok(s) => s,
+        Err(why) => {
+            // The hub is still coming back up, or unreachable. WAIT.
+            // The one thing this must never do is delete a PVC it could
+            // not ask about.
+            set_condition(
+                conds,
+                condition("HubReachable", false, "PollFailed", Some(why.clone()), generation),
+            );
+            return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)) });
+        }
+    };
+
+    if let Err(why) = snap.hibernatable() {
+        // Not clean. Stay up and keep flushing; the next pass asks
+        // again. This is the arm that stands between a bug and a
+        // deleted project, so it reports loudly rather than retrying
+        // silently forever.
+        warn!(share = %share.name_any(), "hibernate deferred: {why}");
+        event(
+            ctx,
+            share,
+            EventType::Warning,
+            "HibernateDeferred",
+            &format!("not reclaiming the disk: {why}"),
+        )
+        .await;
+        set_condition(
+            conds,
+            condition("IdleEligible", false, "NotRecoverable", Some(why), generation),
+        );
+        return Ok(IdleOutcome { phase: Phase::Ready, short_circuit: Some(Action::requeue(REQUEUE_BLOCKED)) });
+    }
+
+    // Clean. Record Hibernated FIRST, so the render scales to zero and
+    // the pod drains — the drain flushes and releases the epoch. The
+    // PVC deletion waits for the pod to actually be gone: deleting a
+    // claim a pod still mounts leaves it Terminating until the pod
+    // exits anyway, and doing it in that order means an interrupted
+    // operator could not tell a finished drain from an aborted one.
+    set_idle_state(ctx, share, &ns, IdleState::Hibernated, false).await?;
+    let note = format!(
+        "the bucket can rebuild this volume (rpoClean, epoch {}); scaling to zero, then \
+         reclaiming the disk. The CR and the bucket are untouched.",
+        snap.epoch.as_ref().and_then(|e| e.number).unwrap_or(0)
+    );
+    info!(share = %share.name_any(), "{note}");
+    event(ctx, share, EventType::Normal, "HibernateVerified", &note).await;
+    set_condition(
+        conds,
+        condition("IdleEligible", true, "Hibernating", Some(note), generation),
+    );
+    Ok(IdleOutcome { phase: Phase::Hibernated, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)) })
+}
+
+/// Patch the ladder's durable position onto the CR.
+async fn set_idle_state(
+    ctx: &Arc<Ctx>,
+    share: &FlintShare,
+    ns: &str,
+    next: IdleState,
+    clear_request: bool,
+) -> Result<()> {
+    let mut ann = serde_json::Map::new();
+    ann.insert(
+        idle::ANN_IDLE_STATE.to_string(),
+        serde_json::Value::String(next.as_str().to_string()),
+    );
+    ann.insert(idle::ANN_IDLE_SINCE.to_string(), serde_json::Value::String(now_rfc3339()));
+    if clear_request {
+        ann.insert(idle::ANN_REQUESTED_AT.to_string(), serde_json::Value::Null);
+    }
+    let patch = serde_json::json!({ "metadata": { "annotations": ann } });
+    Api::<FlintShare>::namespaced(ctx.client.clone(), ns)
+        .patch(&share.name_any(), &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
+        .await?;
+    Ok(())
+}
+
+/// Delete a hibernated share's PVC, once its pod is genuinely gone.
+///
+/// Separate from the decision above and driven from the main apply
+/// path, because it has to happen on a LATER reconcile: the hub needs
+/// its full termination grace period to drain, flush and release the
+/// epoch, and deleting the claim while the pod still mounts it just
+/// parks the claim in Terminating — where an interrupted operator
+/// cannot tell a finished drain from an aborted one.
+async fn reclaim_hibernated_disk(
+    ctx: &Arc<Ctx>,
+    share: &FlintShare,
+    ns: &str,
+    names: &render::Names,
+    dep: Option<&Deployment>,
+) -> Result<bool> {
+    // Adopted claims are the user's. The operator did not create it and
+    // does not get to delete it.
+    if names.claim_is_adopted {
+        return Ok(false);
+    }
+    // A wake landed between the hibernate decision and this reclaim.
+    // The data is in the bucket either way — the verification proved
+    // that before anything was scaled down — so deleting here would
+    // only turn a pod-start wake into a full DR import. Let the ladder
+    // process the request instead.
+    if idle::requested_at(share).is_some() {
+        return Ok(false);
+    }
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let all = pods.list(&ListParams::default()).await?.items;
+    let still_running = all
+        .iter()
+        .any(|p| pod_is_ours(dep, p) && pod_mounts_claim(p, &names.claim));
+    if still_running {
+        // Draining. The grace period is sized for a real flush.
+        return Ok(false);
+    }
+    let claims: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
+    if get_opt(claims.get(&names.claim)).await?.is_none() {
+        return Ok(false); // already reclaimed
+    }
+    claims.delete(&names.claim, &Default::default()).await?;
+    let note = format!(
+        "PVC {} deleted — the bucket is now the only copy, and waking this share is a DR \
+         import. The CR and the bucket itself are untouched.",
+        names.claim
+    );
+    warn!(share = %share.name_any(), "{note}");
+    event(ctx, share, EventType::Normal, "DiskReclaimed", &note).await;
+    Ok(true)
+}
+
+/// Find this share's hub pod and ask it for `/status`.
+///
+/// The POD IP, never the Service — the Service carries NFS and may be a
+/// LoadBalancer, and the hub's monitoring port also serves a read-write
+/// file API.
+async fn poll_hub(
+    ctx: &Arc<Ctx>,
+    share: &FlintShare,
+    ns: &str,
+    names: &render::Names,
+    dep: Option<&Deployment>,
+) -> std::result::Result<hubstatus::HubSnapshot, String> {
+    let Some(m) = share.spec.monitoring.as_ref().filter(|m| m.enabled.unwrap_or(false)) else {
+        return Err(
+            "spec.monitoring is off, so the hub publishes no status — the idle ladder cannot \
+             tell whether anyone is using this share"
+                .to_string(),
+        );
+    };
+    let port = m.port.unwrap_or(render::HEALTH_PORT);
+
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let all = pods
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| format!("listing pods: {e}"))?
+        .items;
+    let ip = all
+        .iter()
+        .filter(|p| pod_is_ours(dep, p) && pod_mounts_claim(p, &names.claim))
+        // A terminating pod still has an IP and still answers, and its
+        // answer is about a hub that is going away. Never poll one.
+        .filter(|p| p.metadata.deletion_timestamp.is_none())
+        .find_map(|p| p.status.as_ref()?.pod_ip.clone())
+        .ok_or_else(|| "no running hub pod with an IP".to_string())?;
+
+    hubstatus::poll(&ip, port, std::time::Duration::from_secs(3)).await
 }
 
 /// CR deletion. Owner GC takes the ConfigMap, Service and Deployment;
@@ -850,6 +1317,7 @@ mod tests {
                 startup_failure_threshold: None,
             termination_grace_period_seconds: None,
             monitoring: None,
+            idle: None,
             },
         );
         s.metadata.namespace = Some("ws".into());
@@ -890,11 +1358,11 @@ mod tests {
     /// look broken for a spec the user can simply correct.
     #[test]
     fn a_smaller_size_is_refused_rather_than_retried_forever() {
-        assert_eq!(claim_plan(None, "20Gi", false), ClaimPlan::Apply);
-        assert_eq!(claim_plan(Some(&pvc_of("20Gi")), "20Gi", false), ClaimPlan::Apply);
-        assert_eq!(claim_plan(Some(&pvc_of("20Gi")), "100Gi", false), ClaimPlan::Apply);
+        assert_eq!(claim_plan(None, "20Gi", false, false), ClaimPlan::Apply);
+        assert_eq!(claim_plan(Some(&pvc_of("20Gi")), "20Gi", false, false), ClaimPlan::Apply);
+        assert_eq!(claim_plan(Some(&pvc_of("20Gi")), "100Gi", false, false), ClaimPlan::Apply);
         assert_eq!(
-            claim_plan(Some(&pvc_of("100Gi")), "20Gi", false),
+            claim_plan(Some(&pvc_of("100Gi")), "20Gi", false, false),
             ClaimPlan::ShrinkRefused {
                 have: "100Gi".into(),
                 want: "20Gi".into()
@@ -902,7 +1370,7 @@ mod tests {
         );
         // An adopted claim is someone else's declaration; we bind to
         // it, we do not re-declare it.
-        assert_eq!(claim_plan(Some(&pvc_of("100Gi")), "20Gi", true), ClaimPlan::Skip);
+        assert_eq!(claim_plan(Some(&pvc_of("100Gi")), "20Gi", true, false), ClaimPlan::Skip);
     }
 
     #[test]
@@ -1059,20 +1527,20 @@ mod tests {
             available_replicas: Some(0),
             ..Default::default()
         });
-        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), false), Phase::Starting);
+        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Active), Phase::Starting);
 
         dep.status = Some(DeploymentStatus {
             replicas: Some(1),
             available_replicas: Some(1),
             ..Default::default()
         });
-        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), false), Phase::Ready);
+        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Active), Phase::Ready);
         assert_eq!(
-            phase_of(Lifecycle::Suspended, Some(&dep), false),
+            phase_of(Lifecycle::Suspended, Some(&dep), false, IdleState::Active),
             Phase::Suspended
         );
-        assert_eq!(phase_of(Lifecycle::Active, None, false), Phase::Pending);
-        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), true), Phase::Failed);
+        assert_eq!(phase_of(Lifecycle::Active, None, false, IdleState::Active), Phase::Pending);
+        assert_eq!(phase_of(Lifecycle::Active, Some(&dep), true, IdleState::Active), Phase::Failed);
     }
 
     #[test]
@@ -1178,5 +1646,87 @@ mod tests {
             vec![("ws".to_string(), "tenant-a".to_string())]
         );
         assert!(shares_using_claim(&fleet, "ws", "tenant-a-data").is_empty());
+    }
+
+    /// **Without a durable carrier the ladder cannot work at all.**
+    ///
+    /// The reconciler is level-triggered and server-side-applies what
+    /// it renders. `render` computes `replicas` and `claim_plan`
+    /// re-applies a missing PVC — so a suspend held only in status, or
+    /// only in the controller's memory, is undone by the very next
+    /// reconcile, within seconds, forever. These two assertions are the
+    /// coupling that makes the annotation carrier load-bearing rather
+    /// than decorative.
+    #[test]
+    fn the_render_obeys_the_idle_annotation() {
+        use crate::lite_operator::idle;
+
+        let mut share = share_named("tenant-a");
+        // Active, no ladder: one replica.
+        let r = render::render(&share, &RenderDefaults::default(), None, None);
+        assert_eq!(r.deployment.spec.as_ref().unwrap().replicas, Some(1));
+
+        // The ladder says down. Nothing in SPEC changed — only metadata.
+        share.metadata.annotations = Some(
+            [(idle::ANN_IDLE_STATE.to_string(), "Suspended".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let r = render::render(&share, &RenderDefaults::default(), None, None);
+        assert_eq!(
+            r.deployment.spec.as_ref().unwrap().replicas,
+            Some(0),
+            "a suspend the renderer does not read is undone on the next reconcile"
+        );
+
+        // And the PVC is still rendered — suspend KEEPS the disk.
+        assert!(r.pvc.is_some(), "suspend must not touch the claim");
+    }
+
+    /// A hibernated share's PVC was deliberately deleted, and the
+    /// bucket is the only copy. Re-applying it would leave an empty
+    /// disk that a waking hub cannot distinguish from a restore that
+    /// already ran.
+    #[test]
+    fn a_hibernated_share_does_not_get_its_pvc_recreated() {
+        assert_eq!(
+            claim_plan(None, "20Gi", false, true),
+            ClaimPlan::Hibernated,
+            "a hibernated share must not have its claim re-applied"
+        );
+        // And the ordinary path is untouched.
+        assert_eq!(claim_plan(None, "20Gi", false, false), ClaimPlan::Apply);
+    }
+
+    /// The front door has to be able to tell "will wake if I ask" from
+    /// "an admin said no". One phase for both makes that impossible,
+    /// and a front door that cannot tell retries forever against a
+    /// share that is never coming back.
+    #[test]
+    fn an_admin_suspend_and_an_idle_suspend_report_different_phases() {
+        let dep = dep_with_checksum(None, None);
+        assert_eq!(
+            phase_of(Lifecycle::Suspended, Some(&dep), false, IdleState::Active),
+            Phase::Suspended
+        );
+        assert_eq!(
+            phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Suspended),
+            Phase::IdleSuspended
+        );
+        assert_eq!(
+            phase_of(Lifecycle::Active, Some(&dep), false, IdleState::Hibernated),
+            Phase::Hibernated
+        );
+        // An admin's decision outranks the ladder's.
+        assert_eq!(
+            phase_of(Lifecycle::Suspended, Some(&dep), false, IdleState::Suspended),
+            Phase::Suspended,
+            "spec.lifecycle wins, and reports as such"
+        );
+        // And a conflict loser is Failed regardless of either.
+        assert_eq!(
+            phase_of(Lifecycle::Active, Some(&dep), true, IdleState::Suspended),
+            Phase::Failed
+        );
     }
 }

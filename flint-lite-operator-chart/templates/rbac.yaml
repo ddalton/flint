@@ -10,10 +10,12 @@ honest statement of that blast radius. Two grants are worth naming —
     chart-only CRD freezes and silently prunes new knobs). Drop it and
     set manageCrd: false if policy forbids it, and apply the CRD by
     hand on every upgrade.
-  * `persistentvolumeclaims` delete, used ONLY when a share says
-    `reclaim: Delete`. The claim carries no ownerReference precisely so
-    that this decision is always an explicit action and never garbage
-    collection.
+  * `persistentvolumeclaims` delete, used in exactly two places:
+    when a share says `reclaim: Delete` on CR deletion, and when the
+    idle ladder HIBERNATES a share — and the second only after the hub
+    itself has confirmed the bucket can rebuild the volume. The claim
+    carries no ownerReference precisely so that this decision is always
+    an explicit, verified action and never garbage collection.
 
 Nothing here touches buckets: the operator's blast radius stops at
 Kubernetes objects, by design.

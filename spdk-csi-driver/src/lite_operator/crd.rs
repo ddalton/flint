@@ -91,6 +91,12 @@ use serde::{Deserialize, Serialize};
     .message("spec.settings needs spec.bucket — the tier is off without one"))]
 #[x_kube(validation = Rule::new("!has(self.credentialsSecretRef) || has(self.bucket)")
     .message("spec.credentialsSecretRef needs spec.bucket — the tier is off without one"))]
+// Hibernation DELETES the PVC. Without a bucket that PVC is the only
+// copy of the data, so this is not a tuning mistake to discover at 3am
+// — it is refused at admission.
+#[x_kube(validation = Rule::new(
+    "!has(self.idle) || !has(self.idle.hibernateAfterSecs) || has(self.bucket)")
+    .message("spec.idle.hibernateAfterSecs needs spec.bucket — hibernation deletes the PVC, and without a bucket that PVC is the only copy of the data"))]
 pub struct FlintShareSpec {
     /// Bucket this share publishes to. Must already exist, with
     /// VERSIONING ON (delete-marker recovery assumes it) — the hub
@@ -222,6 +228,59 @@ pub struct FlintShareSpec {
     /// every share that has not opted in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitoring: Option<MonitoringSpec>,
+
+    /// Wind the share down when nobody is using it. Absent = off, and
+    /// each rung is opt-in on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<IdleSpec>,
+}
+
+/// The idle ladder: Suspend, then Hibernate.
+///
+/// **Absent is OFF, per rung.** Defaulting this on would auto-suspend
+/// every existing share in a fleet — including tier-off ones whose
+/// consumers mount `status.address` as a plain PV and have never heard
+/// of the wake annotation. Their mounts would hang, and nothing in
+/// their world would know to wake anything.
+///
+/// The two rungs are not variations of one setting. Suspend scales the
+/// hub to zero and KEEPS the PVC: cheap, reversible in seconds, and safe
+/// for any share. Hibernate DELETES the PVC, at which point the bucket
+/// is the only copy — so it requires a bucket, and the operator verifies
+/// a clean flush at drain time before it acts.
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("!has(self.hibernateAfterSecs) || has(self.suspendAfterSecs)")
+    .message("spec.idle.hibernateAfterSecs requires spec.idle.suspendAfterSecs — hibernate is the lower rung of the same ladder"))]
+#[x_kube(validation = Rule::new(
+    "!has(self.hibernateAfterSecs) || !has(self.suspendAfterSecs) || self.hibernateAfterSecs >= self.suspendAfterSecs")
+    .message("spec.idle.hibernateAfterSecs must be >= spec.idle.suspendAfterSecs"))]
+pub struct IdleSpec {
+    /// Seconds of no client activity before the hub is scaled to zero.
+    /// The PVC is kept, so waking is a pod start.
+    ///
+    /// Seconds, not a duration string: `15m` and `15M` differ by a
+    /// factor of 60 in some parsers and by an error in others, and this
+    /// number decides when someone's project goes away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend_after_secs: Option<u64>,
+
+    /// Seconds of no client activity before the PVC is DELETED and the
+    /// bucket becomes the only copy. Requires `spec.bucket`, and the
+    /// operator verifies a clean flush at drain time before acting.
+    ///
+    /// The CR is never deleted by this — only the disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hibernate_after_secs: Option<u64>,
+
+    /// Refuse to suspend while any NFS client still holds a lease, even
+    /// if it has been quiet. Absent = false: an idle mount renews its
+    /// lease forever, so "has sessions" would pin every mounted share
+    /// awake permanently — which is exactly the state this ladder
+    /// exists to end. Set it for shares whose consumers cannot tolerate
+    /// a reconnect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend_with_sessions: Option<bool>,
 }
 
 /// The hub's HTTP surface.
@@ -480,8 +539,17 @@ pub enum Phase {
     Starting,
     /// Serving.
     Ready,
-    /// `lifecycle: Suspended` — scaled to zero, PVC kept.
+    /// `lifecycle: Suspended` — scaled to zero, PVC kept. An ADMIN
+    /// decision: a wake request does not override it.
     Suspended,
+    /// Scaled to zero by the idle ladder, PVC kept. Distinct from
+    /// `Suspended` on purpose: the front door has to be able to tell
+    /// "will wake on request" from "an admin said no", and one phase
+    /// for both makes that impossible.
+    IdleSuspended,
+    /// Scaled to zero AND the PVC deleted — the bucket is the only
+    /// copy. Waking is a full DR import.
+    Hibernated,
     /// Refused: another share owns this bucket subtree, or adoption is
     /// blocked. See conditions.
     Failed,
@@ -721,6 +789,7 @@ mod tests {
             startup_failure_threshold: None,
             termination_grace_period_seconds: None,
             monitoring: None,
+            idle: None,
         }
     }
 

@@ -42,5 +42,7 @@
 pub mod bootstrap;
 pub mod conflict;
 pub mod crd;
+pub mod hubstatus;
+pub mod idle;
 pub mod reconcile;
 pub mod render;

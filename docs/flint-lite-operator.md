@@ -231,6 +231,99 @@ Things worth knowing before you wire it up:
   *hub's* namespace, which holds its state database and its cloud
   credentials.
 
+## The idle ladder: winding a share down when nobody is using it
+
+Off by default, and **each rung is opt-in on its own**:
+
+```yaml
+spec:
+  monitoring:
+    enabled: true              # REQUIRED — the ladder reads the hub's /status
+  idle:
+    suspendAfterSecs: 900      # 15m idle → scale to zero, KEEP the PVC
+    hibernateAfterSecs: 86400  # 24h down → delete the PVC (needs spec.bucket)
+```
+
+Absent means off because defaulting it on would auto-suspend every
+share in an existing fleet — including tier-off ones whose consumers
+mount `status.address` as a plain PV and have never heard of the wake
+annotation. Their mounts would simply hang.
+
+### The two rungs are not one setting with two numbers
+
+**Suspend** scales the hub to zero and keeps everything else: the CR,
+the Service, the ConfigMap, and the PVC. Waking is a pod start and an
+epoch re-claim on the same state database — seconds. Safe for any
+share, tiered or not.
+
+**Hibernate** deletes the PVC. At that moment the bucket is the only
+copy, so it requires `spec.bucket` (refused at admission otherwise) and
+the operator will not act on a timer alone — see below. Waking is a
+full DR import.
+
+**The CR is never deleted by either.** Only an explicit
+`kubectl delete flintshare` does that, and `spec.reclaim` decides what
+happens to the disk then. The bucket is never touched under any policy.
+
+### Suspending needs two independent signals
+
+A share comes down only when **both** are true:
+
+1. the front door's `flint.io/requested-at` annotation is older than
+   `suspendAfterSecs`, and
+2. the hub's own `/status` reports `activity.idleSecs` past the same
+   threshold.
+
+Each covers the other's blind spot. An agent that computes in memory
+for twenty minutes without touching the filesystem looks idle to the
+hub — the heartbeat keeps it alive. A workload that mounted without the
+front door in the loop has no heartbeat at all — the hub's own clock
+keeps it alive. It also avoids comparing clocks: the annotation is
+judged on the front door's, idleness on the hub's, and neither has to
+agree with the operator's.
+
+**A hub that cannot be polled is never suspended.** An unreachable hub
+is an unknown hub, not an idle one, and the `HubReachable` condition
+says so.
+
+### Hibernation is verified at drain time, not assumed
+
+The drain's real outcome is unobservable from the operator: the hub
+exits 0 whether or not it flushed, scale-to-zero deletes the pod so no
+exit code survives, and the operator has no bucket credentials to check
+the epoch mark itself. So hibernation is **verify-then-delete**:
+
+1. scale the share back to **one** (`idle-state: HibernateVerifying`),
+2. poll `/status` until `rpoClean` is true,
+3. scale to zero and let the hub drain, flush and release the epoch,
+4. wait for the pod to be genuinely gone,
+5. only then delete the PVC.
+
+`rpoClean: null` — a share with no bucket — is a **refusal**, not a
+pass. A3's fast epoch re-claim is what makes the extra wake cheap
+enough for this to be the default posture rather than a compromise.
+
+### Waking
+
+The front door touches an annotation:
+
+```sh
+kubectl annotate flintshare fs-myproject \
+  flint.io/requested-at="$(date -u +%FT%TZ)" --overwrite
+```
+
+That is the whole protocol. Keep touching it on a heartbeat shorter
+than `suspendAfterSecs` while a session is alive.
+
+**`spec.lifecycle: Suspended` always wins.** It is an admin decision
+and a wake request does not override it — which is why the phases are
+distinct: `Suspended` means "an admin said no", `IdleSuspended` means
+"will wake on request", and a front door that cannot tell them apart
+retries forever against a share that is never coming back.
+
+Phases: `Pending` → `Starting` → `Ready`, plus `Suspended`,
+`IdleSuspended`, `Hibernated` and `Failed`.
+
 ## Changing settings, and what actually restarts the hub
 
 The hub parses its config **once, at boot**, and has no reload path;
@@ -330,14 +423,11 @@ accept the pruning.
 - One served version, no conversion webhook. `v1alpha1` may change.
 - No admission webhook: what CEL can express is in the CRD
   (identity immutability, prefix syntax), the rest is reconcile-time.
-- `Hibernated` (delete the PVC, wake via DR import + warm fill) is not
-  implemented. The pieces it needs now exist — the hub drains and
-  flushes on SIGTERM, releases the epoch cleanly, and reports `rpoClean`
-  — but the operator does not yet drive verify-then-delete, and
-  hibernating an unflushed hub loses the RPO window permanently.
-- **Idle auto-suspend is not implemented.** The hub reports
-  `activity.idleSecs` on `/status`, and the operator does not yet act on
-  it; `spec.lifecycle: Suspended` is still a manual decision.
+- Waking a hibernated share re-creates the PVC and drives a DR import,
+  but there is no `wake-intent: warm` handling yet — the tree hydrates
+  on demand rather than bulk-filling.
+- The idle ladder has **no cluster coverage yet** — its unit tests are
+  thorough and no kind e2e leg exercises it end to end.
 - The file API is single-shot: no chunked or resumable upload, no
   byte-range PATCH. Large uploads that fail are retried whole.
 - A recursive listing is bounded (50k entries, depth 32) and reports
