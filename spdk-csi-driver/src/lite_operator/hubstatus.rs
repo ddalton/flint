@@ -297,6 +297,76 @@ mod tests {
         serde_json::from_str(json).expect("the hub's own document must parse")
     }
 
+    /// THE FLEET RIG'S ANTI-VACUITY GUARD.
+    ///
+    /// `flint-hub-stub` stands in for a real hub so 300 "live" shares
+    /// fit on a small cluster. The failure mode that would quietly
+    /// ruin every measurement taken with it: the stub's document
+    /// drifts, `poll_hub` falls onto its `Err` branch, every share
+    /// reads as unreachable — and the rig reports a beautifully stable
+    /// fleet while measuring nothing at all.
+    ///
+    /// So the stub builds the REAL `StatusDoc`, and this pins that the
+    /// operator can still read one, field by field for the fields the
+    /// ladder actually acts on. A rename on either side fails here
+    /// rather than on a cluster.
+    #[test]
+    fn the_fleet_rig_stubs_document_is_readable_by_the_operator() {
+        use crate::nfs::activity::ActivitySnapshot;
+        use crate::pnfs::mds::status::{EpochDoc, NfsDoc, StatusDoc, TierDoc};
+        use crate::tier::rpo::RpoStatus;
+
+        // Constructed exactly as src/bin/flint_hub_stub.rs does.
+        let doc = StatusDoc {
+            phase: crate::pnfs::mds::status::HubPhase::Serving,
+            server_id: Some("stub-1".into()),
+            pod_name: Some("tenant-a-abc".into()),
+            started_unix: 1_000,
+            uptime_secs: 42,
+            epoch: Some(EpochDoc { held: true, number: Some(1) }),
+            import: None,
+            sweep: None,
+            import_refused: None,
+            warm_fill: None,
+            tier: TierDoc { gauges: None, meters: Default::default() },
+            nfs: NfsDoc { active_leases: Some(3) },
+            activity: ActivitySnapshot {
+                last_activity_unix: 900,
+                idle_secs: 1234,
+                data_ops: 0,
+                namespace_ops: 0,
+                browse_ops: 0,
+            },
+            rpo_clean: Some(true),
+            rpo: Some(RpoStatus {
+                clean: true,
+                dirty_files: 0,
+                pending_capture: false,
+                tombstones: 0,
+                epoch_held: true,
+                manifest_current: true,
+                manifest_seq: Some(1),
+                beyond_rpo: Some(0),
+                awaiting_first_barrier: false,
+            }),
+        };
+
+        let wire = serde_json::to_string(&doc).expect("the stub must serialize");
+        let got: HubSnapshot = serde_json::from_str(&wire)
+            .expect("the OPERATOR must be able to read the stub's document");
+
+        // The fields the ladder acts on — not a smoke test.
+        assert_eq!(got.phase, HubPhase::Serving, "phase drives the suspend gate");
+        assert_eq!(got.activity.idle_secs, 1234, "idleSecs is the hub's half of the AND");
+        assert_eq!(got.rpo_clean, Some(true), "rpoClean authorizes deleting a PVC");
+        assert_eq!(got.server_id.as_deref(), Some("stub-1"));
+        assert!(got.hibernatable().is_ok(), "a clean stub must be hibernatable");
+        assert!(
+            got.suspendable(600).is_ok(),
+            "a stub idle for 1234s must be suspendable against a 600s threshold"
+        );
+    }
+
     /// The document the hub actually emits — pinned here so a field
     /// rename on either side fails the suite instead of silently
     /// defaulting to a value the ladder then acts on.

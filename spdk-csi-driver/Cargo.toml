@@ -55,6 +55,13 @@ path = "src/nfs_ds_main.rs"
 name = "pnfs-csi-cli"
 path = "src/pnfs_csi_cli_main.rs"
 
+# The fleet rig's stand-in hub. Not shipped in any image — it exists so
+# 300 "live" shares fit on a small cluster and the measurement is about
+# the OPERATOR rather than about 300 copies of the tier.
+[[bin]]
+name = "flint-hub-stub"
+path = "src/bin/flint_hub_stub.rs"
+
 # Removed old binaries:
 # - node-agent: now a library module, not standalone binary
 # - spdk-dashboard-backend: replaced by spdk_dashboard_backend_minimal.rs

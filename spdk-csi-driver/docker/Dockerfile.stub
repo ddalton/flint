@@ -1,0 +1,17 @@
+# The fleet rig's stand-in hub.
+#
+# It installs as /usr/local/bin/flint-pnfs-mds ON PURPOSE: the operator
+# renders that command and those args, so a share points at this image
+# via spec.image and NOTHING else about the rendering changes. That is
+# what keeps the rig a measurement of the operator rather than of a
+# special case built for the rig.
+#
+# Never published to a release tag. It serves TCP 2049, /health and
+# /status and nothing else — no NFS, no tier, no S3.
+FROM alpine:3.20
+RUN adduser -D -u 65532 flint
+COPY docker/prebuilt/stub/flint-hub-stub /usr/local/bin/flint-pnfs-mds
+RUN chmod +x /usr/local/bin/flint-pnfs-mds
+USER 65532
+EXPOSE 2049 8080
+ENTRYPOINT ["/usr/local/bin/flint-pnfs-mds"]
