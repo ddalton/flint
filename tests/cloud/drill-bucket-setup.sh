@@ -111,26 +111,41 @@ pass "minted $KEY_ID"
 # --- 4. prove the key actually works on this bucket ------------------------
 # IAM is eventually consistent, so a fresh key can 403 for a few seconds.
 # Never hand back a credential that has not completed a round trip.
+#
+# The probe body is a REAL FILE, not /dev/null: the v2 CLI rejects a
+# character device with "Blob values must be a path to a file" — a
+# client-side parameter error that never reaches S3 and so retries
+# forever. That cost a bucket-setup run, silently, because the error
+# went to /dev/null too. Hence also: keep the last error and print it.
 say "verifying the scoped key round-trips"
-OK=""
+PROBE=$(mktemp); printf 'flint drill preflight\n' > "$PROBE"
+trap 'rm -f "$PROBE"' EXIT
+scoped() { env -u AWS_PROFILE -u AWS_SESSION_TOKEN \
+    AWS_ACCESS_KEY_ID="$KEY_ID" AWS_SECRET_ACCESS_KEY="$KEY_SECRET" \
+    aws --region "$REGION" "$@"; }
+
+OK=""; ERR=""
 for i in $(seq 1 12); do
-    if AWS_ACCESS_KEY_ID="$KEY_ID" AWS_SECRET_ACCESS_KEY="$KEY_SECRET" \
-       AWS_SESSION_TOKEN="" aws --region "$REGION" s3api put-object \
-       --bucket "$BUCKET" --key ".flint-drill-preflight" --body /dev/null >/dev/null 2>&1; then
+    if ERR=$(scoped s3api put-object --bucket "$BUCKET" \
+             --key ".flint-drill-preflight" --body "$PROBE" 2>&1 >/dev/null); then
         OK=1; break
     fi
     sleep 5
 done
-[ -n "$OK" ] || fail "the new key still cannot write to $BUCKET after 60s"
-AWS_ACCESS_KEY_ID="$KEY_ID" AWS_SECRET_ACCESS_KEY="$KEY_SECRET" AWS_SESSION_TOKEN="" \
-    aws --region "$REGION" s3api delete-object --bucket "$BUCKET" \
-    --key ".flint-drill-preflight" >/dev/null 2>&1 || true
-pass "wrote and deleted a probe object with the scoped key"
+[ -n "$OK" ] || fail "the new key still cannot write to $BUCKET after 60s.
+Last error was:
+    $ERR"
+
+# Read it back too. A PUT that 200s and a GET that 404s is a bucket in a
+# state worth knowing about before the drill, not during it.
+scoped s3api get-object --bucket "$BUCKET" --key ".flint-drill-preflight" \
+    /dev/stdout >/dev/null 2>&1 || fail "wrote the probe but could not read it back"
+scoped s3api delete-object --bucket "$BUCKET" --key ".flint-drill-preflight" >/dev/null 2>&1 || true
+pass "wrote, read and deleted a probe object with the scoped key"
 
 # And prove it is actually SCOPED — a key that works everywhere is not
 # the thing we asked for.
-if AWS_ACCESS_KEY_ID="$KEY_ID" AWS_SECRET_ACCESS_KEY="$KEY_SECRET" AWS_SESSION_TOKEN="" \
-   aws --region "$REGION" s3 ls >/dev/null 2>&1; then
+if scoped s3 ls >/dev/null 2>&1; then
     echo "  ! WARNING: this key can list ALL buckets — the policy is wider than intended"
 else
     pass "cannot list other buckets (scoped, as intended)"
