@@ -387,8 +387,9 @@ corruption.
 **A9 — conditional writes, and the number we published about them.** *Claim, in
 two parts:* (i) a write carrying a stale `If-Match` is refused with 412 and
 changes nothing, while the holder of the current tag succeeds; (ii) the loss
-ratio the front-door contract publishes — measured in-process at **32 lost of
-200 with `If-Match` against 168 without** — holds no worse over a real network.
+ratio the front-door contract publishes — measured in-process at **32-66 lost of
+200 with `If-Match` against 168-174 without**, across repeated runs — holds no
+worse over a real network.
 
 Part (ii) is the one worth the cluster time, because it is a **falsifiable
 prediction, not a re-run**. The VERIFY→RENAME gap that loses updates is
@@ -399,6 +400,11 @@ came from maximum contention against an in-process dispatcher with no network at
 all. If it loses MORE, the model of where the window lives is wrong and the
 number in `docs/flint-lite-operator.md` is wrong in the dangerous direction — a
 front door would have been told the guard is stronger than it is.
+
+Note the in-process spread is load dependent and the worst case came from the
+LEAST loaded machine, so "the cluster is busier" is not a reason to expect a
+better number. Run both arms back to back on the same share, not on different
+days.
 
 *Oracle:* two arms, same writers and rounds, run back to back against one share:
 8 concurrent clients × 25 rounds of read-modify-write (append one byte),

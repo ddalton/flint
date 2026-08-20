@@ -39,8 +39,10 @@
 //! callers as detection, never as exclusion.
 //!
 //! The drill measures the difference rather than asserting it: eight
-//! writers appending to one file, 200 writes, lost 168 unconditionally
-//! and 32 under `If-Match`. Five times better and not remotely zero.
+//! writers appending to one file, 200 writes, lost 168-174 of them
+//! unconditionally and 32-66 under `If-Match` across repeated runs.
+//! Roughly three times better, not remotely zero, and load dependent —
+//! the residual is worst when writers interleave tightly.
 //!
 //! ## Where this listens, and why it matters
 //!
@@ -2429,15 +2431,18 @@ mod tests {
             "conditional writes lost {lost_guarded} of {total}, unconditional lost \
              {lost_plain} — the guard bought nothing under contention"
         );
-        // A floor on the benefit. Deliberately loose: the exact ratio is
-        // a timing artifact of this machine, and a drill that fails on a
-        // fast laptop teaches nobody anything. What must hold is that
-        // the guard changes the outcome by a lot, not by a rounding
-        // error.
+        // A floor on the benefit, and the margin is measured rather than
+        // chosen. Across repeated Linux runs the control lost 168-174 of
+        // 200 while the conditional arm lost 32-66 — a 2.6x to 5.4x
+        // improvement, and the spread is real: the residual is LOAD
+        // DEPENDENT, worst when writers interleave tightly on an
+        // otherwise idle machine. A 3x floor straddled that range and
+        // made this leg flaky, which is worse than a weaker claim
+        // honestly stated.
         assert!(
-            lost_guarded * 3 < lost_plain,
+            lost_guarded * 2 < lost_plain,
             "conditional writes lost {lost_guarded} of {total} against {lost_plain} \
-             unconditional — less than a 3x improvement is not worth a contract"
+             unconditional — less than a 2x improvement is not worth a contract"
         );
     }
 

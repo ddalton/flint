@@ -310,9 +310,12 @@ they are contract, not advice:
   their VERIFY before either lands its RENAME, and one update dies with
   both callers seeing `201`. This is **detection, not serialisation**.
 
-  Measured, eight writers appending to one file, 200 writes: without
-  `If-Match` 168 updates were lost; with it, 32. A 5x improvement and a
-  16% residual. Use it as the safety net it is — it turns the common
+  Measured across repeated runs, eight writers appending to one file,
+  200 writes: without `If-Match` 168-174 updates were lost; with it,
+  32-66. Roughly a 3x improvement and a **16-33% residual**, and the
+  spread is not noise — the residual is worst when writers interleave
+  tightly, so a busier fleet is not automatically a safer one. Use it as
+  the safety net it is — it turns the common
   two-tab case from silent corruption into a retry — but if your product
   lets several users edit one file at once, you still need a merge or a
   single-writer discipline above this API. It does not fence a client

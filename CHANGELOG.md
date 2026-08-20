@@ -10,7 +10,7 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
-## [Unreleased]
+## [1.30.0] - 2026-08-19
 
 ### Fixed — an exclusion that could take a file out of service permanently
 
@@ -80,11 +80,15 @@ covered by the stability guarantee.
   stat with a race window, documented as such.
 
   **A concurrency drill measures the guarantee rather than asserting
-  it, and it changed what the docs claim.** Eight writers doing
-  read-modify-write against one file, 200 appends: 168 lost without
-  `If-Match`, 32 with it. Five times better and emphatically not zero —
-  because a COMPOUND is not atomic, two writers can both pass their
-  VERIFY before either lands its RENAME. An earlier version of the leg
+  it, and it changed what the docs claim — twice.** Eight writers doing
+  read-modify-write against one file, 200 appends: 168-174 lost without
+  `If-Match`, 32-66 with it, across repeated runs. Roughly three times
+  better and emphatically not zero, because a COMPOUND is not atomic and
+  two writers can both pass their VERIFY before either lands its RENAME.
+  The first figure published here came from a SINGLE sample and read 5x;
+  repeating the run showed the residual is load dependent — worst when
+  writers interleave tightly on an idle machine — and the honest number
+  is a 16-33% range, not a point. An earlier version of the leg
   asserted zero loss and failed; the leg was wrong, not the code, and
   the front-door contract now publishes the measured residual so nobody
   builds a multi-user editor on top of a safety net believing it is a
@@ -1603,7 +1607,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.30.0...HEAD
+[1.30.0]: https://github.com/ddalton/flint/compare/v1.29.0...v1.30.0
 [1.5.0]: https://github.com/ddalton/flint/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/ddalton/flint/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ddalton/flint/compare/v1.2.0...v1.3.0
