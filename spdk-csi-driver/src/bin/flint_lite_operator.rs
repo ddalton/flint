@@ -180,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         fleet: store.clone(),
         admit_cache: std::sync::Mutex::new(None),
+        failures: dashmap::DashMap::new(),
     });
 
     info!(

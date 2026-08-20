@@ -149,6 +149,82 @@ fn apply_gate_state(dep: &Deployment, want: &str) -> Option<GateState> {
     Some(if (0..FULL_APPLY_AFTER).contains(&age) { GateState::Fresh } else { GateState::Stale })
 }
 
+/// Ceiling for the failure backoff. A share that has been failing for
+/// fifteen minutes is not going to be fixed by asking faster.
+const RETRY_MAX: Duration = Duration::from_secs(900);
+/// How long a share may sit un-Ready at full speed before the interval
+/// starts stretching. Long enough to cover a normal cold start (the
+/// startupProbe budget is 600s) without stretching a healthy boot.
+const PROGRESS_PATIENCE_SECS: i64 = 600;
+
+/// Exponential backoff for a share whose reconcile is FAILING.
+///
+/// The old policy was a flat 30s under a doc comment that claimed
+/// "exponential-ish, bounded". At fleet scale that flat rate is the
+/// term that makes a BROKEN fleet cost more than a healthy one: every
+/// other path settles at 300s or 1800s, so a hundred shares failing for
+/// one shared reason — a bad node, a missing Secret, an AZ blip — drive
+/// the apiserver harder precisely when it is least able to take it, and
+/// the pressure never decays.
+///
+/// Doubling from 30s to a 900s ceiling turns that into a decaying
+/// signal. Cleared on any success, so a transient failure costs one
+/// slow retry rather than a penalty box.
+fn retry_backoff(consecutive_failures: u32) -> Duration {
+    let shift = consecutive_failures.saturating_sub(1).min(16);
+    let secs = 30u64.saturating_mul(1u64 << shift);
+    Duration::from_secs(secs).min(RETRY_MAX)
+}
+
+/// How often to look at a share that is not Ready yet.
+///
+/// `Pending` and `Starting` used to requeue at a flat 15s FOREVER, with
+/// no cap and no give-up. A share that can never start therefore never
+/// stops asking — measured on a rig where 131 Pending and 67 Starting
+/// shares drove the apiserver harder than the same fleet healthy.
+///
+/// A cold start is genuinely worth watching closely, so the first
+/// `PROGRESS_PATIENCE_SECS` are unchanged. After that the interval
+/// stretches toward the settled rate: still converging is still
+/// progress, but it no longer costs the same as the first ten minutes.
+fn progress_requeue(not_ready_for_secs: Option<i64>) -> Duration {
+    match not_ready_for_secs {
+        Some(age) if age > PROGRESS_PATIENCE_SECS => {
+            // One doubling per patience window past the first.
+            let steps = ((age - PROGRESS_PATIENCE_SECS) / PROGRESS_PATIENCE_SECS).min(8) as u32;
+            let secs = REQUEUE_PROGRESS.as_secs().saturating_mul(1u64 << (steps + 1));
+            Duration::from_secs(secs).min(REQUEUE_SETTLED)
+        }
+        _ => REQUEUE_PROGRESS,
+    }
+}
+
+/// Spread a requeue so the fleet does not self-synchronise.
+///
+/// Without this, 3000 shares seeded together stay in lockstep forever:
+/// every interval is a fixed constant, so they all come due in the same
+/// second and the apiserver sees a 3000-wide spike on a 300s beat
+/// instead of a flat 10/s. Deterministic per share — a hash, not a
+/// random — so a requeue is reproducible and a share cannot be unlucky
+/// twice for different reasons.
+fn jittered(d: Duration, key: &str) -> Duration {
+    use std::hash::{Hash, Hasher};
+    if d <= REQUEUE_PROGRESS {
+        return d; // too short to be worth spreading
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    // Spread CONTINUOUSLY across +/-25%, in milliseconds, not in
+    // integer percent: percent granularity gives only 51 distinct
+    // values, so at 3000 shares ~59 of them still come due in the same
+    // millisecond. Caught by the spread test, which is why it counts
+    // distinct intervals rather than just asserting "it moved".
+    let base = d.as_millis() as u64;
+    let span = base / 2; // the full +/-25% width
+    let offset = if span == 0 { 0 } else { h.finish() % span };
+    Duration::from_millis(base * 3 / 4 + offset)
+}
+
 fn settled_requeue(share: &FlintShare, state: IdleState) -> Duration {
     let idle = share.spec.idle.as_ref();
     match state {
@@ -225,6 +301,9 @@ pub struct Ctx {
     /// built from. See [`admit_table`] for why the fingerprint lives
     /// here rather than the table being rebuilt from a watch event.
     pub admit_cache: std::sync::Mutex<Option<(u64, Arc<conflict::AdmitTable>)>>,
+    /// Consecutive reconcile failures per share, for [`error_policy`]'s
+    /// backoff. Keyed `namespace/name`; cleared on any success.
+    pub failures: dashmap::DashMap<String, u32>,
 }
 
 /// The arbitration table for the current fleet, rebuilt only when the
@@ -1046,7 +1125,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             observed_generation: generation,
             claim_name: Some(names.claim.clone()),
             server_id: carry_server_id(&share, idle_outcome.server_id.clone()),
-            conditions: Some(conds),
+            conditions: Some(conds.clone()),
         },
     )
     .await?;
@@ -1078,7 +1157,11 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             .await?;
     }
 
-    Ok(Action::requeue(match phase {
+    // Reconciled without error: whatever was failing is not failing now,
+    // so the next failure starts its backoff from the bottom.
+    ctx.failures.remove(&format!("{ns}/{}", share.name_any()));
+
+    let interval = match phase {
         // An admin's Suspended is inert: the ladder returns `Stay`
         // without so much as a poll, so there is nothing to look at
         // sooner.
@@ -1086,8 +1169,16 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         Phase::Ready | Phase::IdleSuspended | Phase::Hibernated => {
             settled_requeue(&share, idle::state_of(&share))
         }
-        _ => REQUEUE_PROGRESS,
-    }))
+        // Not Ready yet. Watch closely at first, then stretch — see
+        // `progress_requeue`.
+        _ => progress_requeue(
+            conds.iter()
+                .find(|c| c.r#type == "Ready" && c.status != "True")
+                .and_then(|c| chrono::DateTime::parse_from_rfc3339(&c.last_transition_time).ok())
+                .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds()),
+        ),
+    };
+    Ok(Action::requeue(jittered(interval, &format!("{ns}/{}", share.name_any()))))
 }
 
 /// What the ladder did this pass.
@@ -1732,9 +1823,23 @@ async fn event(ctx: &Ctx, share: &FlintShare, ty: EventType, reason: &str, note:
 /// Requeue policy on error: exponential-ish, bounded. A failing API
 /// call is usually transient; a failing render is not, and neither
 /// deserves a hot loop.
-pub fn error_policy(share: Arc<FlintShare>, err: &Error, _ctx: Arc<Ctx>) -> Action {
-    warn!(share = %share.name_any(), "reconcile failed: {err}");
-    Action::requeue(Duration::from_secs(30))
+pub fn error_policy(share: Arc<FlintShare>, err: &Error, ctx: Arc<Ctx>) -> Action {
+    let key = format!(
+        "{}/{}",
+        share.metadata.namespace.clone().unwrap_or_default(),
+        share.name_any()
+    );
+    let n = {
+        let mut e = ctx.failures.entry(key.clone()).or_insert(0);
+        *e = e.saturating_add(1);
+        *e
+    };
+    let wait = jittered(retry_backoff(n), &key);
+    warn!(
+        share = %share.name_any(), failures = n, retry_in_secs = wait.as_secs(),
+        "reconcile failed: {err}"
+    );
+    Action::requeue(wait)
 }
 
 /// Map a child object (Secret, PVC, Pod) back to the shares that care
@@ -2161,6 +2266,107 @@ mod tests {
 
         // Bottom of the ladder: nothing below it, so the floor again.
         assert_eq!(settled_requeue(&share, Hibernated), REQUEUE_PARKED);
+    }
+
+    // ---------------------------------------------------------------
+    // Failure and boot must SHED load, not add it. Every other requeue
+    // path settles at 300s or 1800s; these two governed a fleet that is
+    // NOT working, and they were the only ones that got faster the
+    // worse things got. Measured on a rig: 131 Pending + 67 Starting
+    // shares drove the apiserver harder than the same fleet healthy.
+    // ---------------------------------------------------------------
+
+    /// The backoff must actually back off, and must stop somewhere.
+    #[test]
+    fn a_failing_share_is_asked_less_and_less_often() {
+        assert_eq!(retry_backoff(1), Duration::from_secs(30), "the first retry is prompt");
+        assert_eq!(retry_backoff(2), Duration::from_secs(60));
+        assert_eq!(retry_backoff(3), Duration::from_secs(120));
+
+        // Strictly increasing until the ceiling, then pinned there.
+        let mut prev = Duration::ZERO;
+        for n in 1..=40u32 {
+            let d = retry_backoff(n);
+            assert!(d >= prev, "backoff went BACKWARDS at {n}: {prev:?} -> {d:?}");
+            assert!(d <= RETRY_MAX, "backoff blew past the ceiling at {n}: {d:?}");
+            prev = d;
+        }
+        assert_eq!(retry_backoff(40), RETRY_MAX, "it must reach and hold the ceiling");
+
+        // The whole point, stated as a comparison: a share failing for a
+        // while must cost LESS than a healthy one, not more.
+        assert!(
+            retry_backoff(10) > REQUEUE_SETTLED,
+            "a persistently failing share must be cheaper to hold than a settled one, \
+             or a broken fleet outruns a healthy fleet — which is what it used to do"
+        );
+        // And it must not overflow into a tiny value on a huge count.
+        assert_eq!(retry_backoff(u32::MAX), RETRY_MAX);
+    }
+
+    /// A cold start is worth watching; a share that has been Starting
+    /// for an hour is not worth watching at the same rate.
+    #[test]
+    fn a_share_that_never_starts_stops_being_asked_every_15s() {
+        // Inside the patience window: unchanged, because a real cold
+        // start (epoch claim + DR import) lives here.
+        assert_eq!(progress_requeue(None), REQUEUE_PROGRESS);
+        assert_eq!(progress_requeue(Some(0)), REQUEUE_PROGRESS);
+        assert_eq!(progress_requeue(Some(PROGRESS_PATIENCE_SECS)), REQUEUE_PROGRESS);
+
+        // Past it, it stretches, monotonically, to the settled rate.
+        let mut prev = REQUEUE_PROGRESS;
+        for mult in 1..=12i64 {
+            let d = progress_requeue(Some(PROGRESS_PATIENCE_SECS * (mult + 1)));
+            assert!(d >= prev, "progress interval went backwards at {mult}x");
+            assert!(d <= REQUEUE_SETTLED, "it must never exceed the settled rate");
+            prev = d;
+        }
+        assert!(
+            progress_requeue(Some(86_400)) >= REQUEUE_SETTLED,
+            "a share stuck for a day must cost no more than a settled one"
+        );
+        assert!(
+            progress_requeue(Some(PROGRESS_PATIENCE_SECS * 3)) > REQUEUE_PROGRESS,
+            "past the patience window it MUST have stretched — otherwise this is the \
+             flat-15s-forever behaviour with extra steps"
+        );
+    }
+
+    /// Without jitter a fleet seeded together stays in lockstep: every
+    /// interval is a constant, so 3000 shares come due in the same
+    /// second and the apiserver sees a 3000-wide spike on a 300s beat
+    /// rather than a flat rate.
+    #[test]
+    fn requeues_are_spread_so_the_fleet_does_not_beat_in_unison() {
+        let spread: std::collections::HashSet<u64> = (0..200)
+            .map(|i| jittered(REQUEUE_SETTLED, &format!("ns/s{i}")).as_millis() as u64)
+            .collect();
+        assert!(
+            spread.len() > 150,
+            "200 shares produced only {} distinct intervals — that is still a herd. \
+             Integer-percent jitter gives at most 51 buckets, which at 3000 shares \
+             leaves ~59 coming due in the same millisecond.",
+            spread.len()
+        );
+
+        // Bounded: jitter must not turn a 300s interval into 15s or an
+        // hour. +/-25%.
+        for i in 0..500 {
+            let d = jittered(REQUEUE_SETTLED, &format!("ns/s{i}"));
+            assert!(
+                d >= REQUEUE_SETTLED.mul_f64(0.74) && d <= REQUEUE_SETTLED.mul_f64(1.26),
+                "jitter escaped +/-25% for s{i}: {d:?}"
+            );
+        }
+
+        // Deterministic: the same share must not be re-rolled every
+        // reconcile, or "spread" becomes "random walk".
+        assert_eq!(jittered(REQUEUE_SETTLED, "ns/a"), jittered(REQUEUE_SETTLED, "ns/a"));
+
+        // And a short interval is left alone — spreading 15s buys
+        // nothing and blurs the progress signal.
+        assert_eq!(jittered(REQUEUE_PROGRESS, "ns/a"), REQUEUE_PROGRESS);
     }
 
     // ---------------------------------------------------------------
