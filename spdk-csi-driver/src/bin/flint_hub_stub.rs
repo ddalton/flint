@@ -70,7 +70,16 @@ fn phase_from_env() -> HubPhase {
 /// advances with wall time so a share can cross a `suspendAfterSecs`
 /// threshold during a run without the rig sleeping through it.
 fn idle_secs(started: u64) -> u64 {
-    let raw = std::env::var("STUB_IDLE_SECS").unwrap_or_else(|_| "0".into());
+    // DEFAULT IS UPTIME, not 0. A hub nobody is talking to reports an
+    // idle counter that advances with the clock — that is what a real
+    // idle hub does, and it is the input the ladder acts on. A stub
+    // pinned at 0 would look permanently busy AND would hold its
+    // condition message constant, which silently hides the
+    // self-amplification term the fleet rig exists to measure.
+    let raw = match std::env::var("STUB_IDLE_SECS") {
+        Ok(v) => v,
+        Err(_) => return now_unix().saturating_sub(started),
+    };
     if let Some(rate) = raw.strip_prefix("ramp:") {
         let rate: u64 = rate.parse().unwrap_or(1);
         return now_unix().saturating_sub(started) * rate;

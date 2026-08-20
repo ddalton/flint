@@ -47,6 +47,12 @@ FAILED=0
 say "rig: $N shares, $LIVE live (stub hubs), $NS_COUNT namespaces, sc=$SC"
 echo "  output: $OUT"
 
+# THE LADDER IS ARMED ON PURPOSE. poll_hub runs from the idle
+# evaluation, so a share with no spec.idle is NEVER polled - and the
+# per-share /status poll is one of the terms this rig exists to
+# measure. Thresholds sit far outside the run (suspend 1h, hibernate
+# 24h) so the ladder is exercised without moving anything mid-window.
+
 # --- namespaces ------------------------------------------------------------
 for i in $(seq 0 $((NS_COUNT-1))); do
     kubectl create ns "fleet-$i" >/dev/null 2>&1
@@ -91,6 +97,7 @@ spec:
   image: $STUB_IMAGE
   persistence: {size: 1Gi, storageClassName: $SC}
   monitoring: {enabled: true, port: 8080}
+  idle: {suspendAfterSecs: 3600, hibernateAfterSecs: 86400}
 ---
 YAML
         else
@@ -111,6 +118,7 @@ spec:
   image: $STUB_IMAGE
   persistence: {size: 1Gi, storageClassName: $SC}
   monitoring: {enabled: true, port: 8080}
+  idle: {suspendAfterSecs: 3600, hibernateAfterSecs: 86400}
 ---
 YAML
         fi
@@ -191,16 +199,37 @@ fi
 # Read from the APISERVER's own metrics, filtered to the operator's
 # user-agent, rather than trusting anything the operator says about
 # itself. Two samples, WINDOW apart, and the rate is the difference.
-WINDOW=${WINDOW:-300}
+# THE WINDOW MUST EXCEED REQUEUE_SETTLED (300s) or the measurement
+# lands in the quiet gap between requeues and reports a rate of ~0 for a
+# fleet that is working normally. Caught by A4 on the first smoke run.
+WINDOW=${WINDOW:-400}
+if [ "$WINDOW" -lt 320 ]; then
+    echo "  ! WINDOW=$WINDOW is shorter than the 300s settled requeue — the rate will be an artifact" >&2
+fi
 say "measuring for ${WINDOW}s of steady state"
 
+# apiserver_request_total carries NO client/user-agent label - its
+# labels are code/component/dry_run/group/resource/scope/subresource/
+# verb/version. So attribution is by RESOURCE: flintshares traffic is
+# the operator's by construction (nothing else touches the CRD), and it
+# is where the status-write term lives - the one that turns a large
+# fleet into constant apiserver load. Child-object traffic is reported
+# separately and is NOT claimed to be the operator's alone.
 apiserver_ops() {
     kubectl get --raw /metrics 2>/dev/null | awk '
-        /^apiserver_request_total\{/ && /flint-lite-operator/ {
-            if (match($0, /verb="[^"]*"/)) { v=substr($0, RSTART+6, RLENGTH-7) }
-            n=$NF; tot[v]+=n; all+=n
+        /^apiserver_request_total\{/ {
+            r=""; v=""
+            if (match($0, /resource="[^"]*"/)) { r=substr($0, RSTART+10, RLENGTH-11) }
+            if (match($0, /verb="[^"]*"/))     { v=substr($0, RSTART+6,  RLENGTH-7)  }
+            n=$NF+0
+            if (r=="flintshares") { fs[v]+=n; fsall+=n }
+            if (r=="deployments"||r=="services"||r=="configmaps"||r=="persistentvolumeclaims") { chall+=n }
+            all+=n
         }
-        END { for (v in tot) printf "%s=%d\n", v, tot[v]; printf "TOTAL=%d\n", all }'
+        END {
+            for (v in fs) printf "FS_%s=%d\n", v, fs[v]
+            printf "FS_TOTAL=%d\nCHILD_TOTAL=%d\nTOTAL=%d\n", fsall, chall, all
+        }'
 }
 oprss() {
     kubectl -n "$OPNS" top pod --no-headers 2>/dev/null | awk '{c+=$2+0; m+=$3+0} END{print c" "m}'
@@ -223,23 +252,30 @@ def load(p):
     d={}
     for l in open(p):
         if '=' in l:
-            k,v=l.strip().split('=',1)
-            d[k]=int(v)
+            k,v=l.strip().split('=',1); d[k]=int(v)
     return d
 x,y=load(a),load(b)
-writes=0; reads=0
-print(f"  apiserver requests by the operator, per second (window {el}s):")
+def rate(k): return (y.get(k,0)-x.get(k,0))/el
+print(f"  FLINTSHARES traffic - the operator's, by construction (window {el}s):")
+fs_w=fs_r=0.0
 for k in sorted(set(x)|set(y)):
-    if k=='TOTAL': continue
-    r=(y.get(k,0)-x.get(k,0))/el
+    if not k.startswith('FS_') or k=='FS_TOTAL': continue
+    r=rate(k)
     if r<=0: continue
-    print(f"    {k:<12} {r:8.2f}/s")
-    if k in ('POST','PUT','PATCH','DELETE'): writes+=r
-    else: reads+=r
-tot=(y.get('TOTAL',0)-x.get('TOTAL',0))/el
-print(f"    {'TOTAL':<12} {tot:8.2f}/s   (writes {writes:.2f}/s, reads {reads:.2f}/s)")
+    verb=k[3:]
+    print(f"    {verb:<12} {r:8.2f}/s")
+    # APPLY is server-side apply — a WRITE. Classifying it as a read
+    # made the status-write term read 0.00/s on the first real run,
+    # against 19.5 APPLY/s actually happening.
+    if verb in ('POST','PUT','PATCH','DELETE','APPLY'): fs_w+=r
+    else: fs_r+=r
+print(f"    {'TOTAL':<12} {rate('FS_TOTAL'):8.2f}/s   (writes {fs_w:.2f}/s, reads {fs_r:.2f}/s)")
 print()
-print(f"  per share: {tot/n*60:.2f} apiserver req/min/share, {writes/n*60:.2f} writes/min/share")
+print(f"  child objects (deploy/svc/cm/pvc, not the operator's alone): {rate('CHILD_TOTAL'):.2f}/s")
+print(f"  whole apiserver:                                             {rate('TOTAL'):.2f}/s")
+print()
+print(f"  per share: {rate('FS_TOTAL')/n*60:.2f} req/min/share, {fs_w/n*60:.2f} writes/min/share")
+print(f"  STATUS-WRITE LOAD: {fs_w:.2f}/s across {n} shares with NOTHING changing")
 PY
 echo "  operator cpu(m) mem(Mi):  before [$RSS0]  after [$RSS1]"
 
@@ -254,9 +290,15 @@ def load(p):
             k,v=l.strip().split('=',1); d[k]=int(v)
     return d
 x=load('$OUT/api-t0.txt'); y=load('$OUT/api-t1.txt')
-print(y.get('TOTAL',0)-x.get('TOTAL',0))")
-echo "  apiserver requests attributed to the operator in the window = $TOTDELTA"
-if [ "${TOTDELTA:-0}" -lt 10 ]; then
+print(y.get('FS_TOTAL',0)-x.get('FS_TOTAL',0))")
+echo "  flintshare apiserver requests in the window = $TOTDELTA"
+# Expect at least half of one full requeue cycle's worth of traffic:
+# N shares / 300s * window, halved for slack. A flat threshold passes
+# vacuously on a big fleet and fails spuriously on a small one.
+EXPECT=$(( N * WINDOW / 300 / 2 ))
+[ "$EXPECT" -lt 5 ] && EXPECT=5
+echo "  expected at least $EXPECT (N/300s x window, halved)"
+if [ "${TOTDELTA:-0}" -lt "$EXPECT" ]; then
     fail "the operator made ~no apiserver calls — either it is wedged, or the user-agent filter matched nothing, so the RATE ABOVE IS NOT A RATE"
 else
     pass "the operator was live and working during the window"
