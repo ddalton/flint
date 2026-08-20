@@ -90,6 +90,21 @@ fn now_unix() -> u64 {
 pub struct EpochGuard {
     epoch: AtomicU64,
     fenced: AtomicBool,
+    /// WHY `fenced` was set, and the whole reason this flag exists.
+    ///
+    /// `fenced` alone conflates two opposite situations: "a rival
+    /// deposed us, the cell is theirs" and "we closed the barrier on
+    /// our own way out". Both must stop publishing, so one flag was
+    /// enough — until the clean shutdown started fencing one line
+    /// before it calls `release()`. Then `is_fenced()` was true on
+    /// every clean exit and the release CAS was never issued at all:
+    /// the cell stayed held, and the next hub paid the full
+    /// `heartbeat × lease_misses` wait instead of claiming instantly.
+    /// That is a silent cost on every identity-changing wake.
+    ///
+    /// `true` means WE fenced ourselves to shut down cleanly, and the
+    /// release is still owed. Deposition never sets it.
+    fenced_for_shutdown: AtomicBool,
     /// Unix time of the last successful renew (the claim counts as
     /// one) — the A12 reporter's lease-age gauge. Telemetry only;
     /// liveness decisions stay with the heartbeat/fence machinery.
@@ -102,6 +117,7 @@ impl EpochGuard {
         Arc::new(EpochGuard {
             epoch: AtomicU64::new(epoch),
             fenced: AtomicBool::new(false),
+            fenced_for_shutdown: AtomicBool::new(false),
             last_renew_unix: AtomicU64::new(now_unix()),
         })
     }
@@ -136,7 +152,27 @@ impl EpochGuard {
     /// `current()` answers `None`. One-way — a fenced incumbent
     /// re-enters through a fresh [`claim`], never by unfencing.
     pub fn fence(&self) {
-        self.fenced.store(true, Ordering::Relaxed);
+        self.fenced.store(true, Ordering::Release);
+    }
+
+    /// Close the barrier as part of OUR OWN clean shutdown.
+    ///
+    /// Identical to [`fence`] for every publisher — `current()` answers
+    /// `None` from here on — but it records that the fence is ours, so
+    /// the heartbeat still issues the release CAS on the way out.
+    /// Order matters: the reason is stored before the flag, so anyone
+    /// who observes `fenced` also observes why.
+    pub fn fence_for_shutdown(&self) {
+        self.fenced_for_shutdown.store(true, Ordering::Relaxed);
+        self.fenced.store(true, Ordering::Release);
+    }
+
+    /// Fenced by something OTHER than our own shutdown — deposed, or
+    /// unable to prove liveness. The clean release is suppressed only
+    /// for these; a shutdown fence still owes the mark.
+    pub fn fenced_by_deposition(&self) -> bool {
+        self.fenced.load(Ordering::Acquire)
+            && !self.fenced_for_shutdown.load(Ordering::Relaxed)
     }
 
     /// Tests only: production guards are constructed at [`held`] and
@@ -436,9 +472,13 @@ pub fn spawn_heartbeat(
                     // has the current one — a caller CASing with the
                     // claim-time token would 412 on any hub older than
                     // one heartbeat, i.e. always, silently.
-                    let outcome = if guard.is_fenced() {
-                        // Already deposed: marking the cell now would
-                        // stamp `released` on a live successor's reign.
+                    let outcome = if guard.fenced_by_deposition() {
+                        // Deposed: marking the cell now would stamp
+                        // `released` on a live successor's reign. NOT
+                        // `is_fenced()` — a clean shutdown fences
+                        // itself immediately before calling us, so
+                        // that test suppressed every release there
+                        // has ever been.
                         ReleaseOutcome::LostCas
                     } else {
                         match store.epoch_release(&cfg.key, &lease).await {
@@ -727,6 +767,87 @@ mod tests {
         assert!(guard.is_fenced());
         assert_eq!(guard.current(), None);
         assert!(deposed.load(Ordering::SeqCst));
+    }
+
+    /// THE REGRESSION, found by the flint-lite cluster drill.
+    ///
+    /// `server.rs` fences the guard one line before it calls
+    /// `release()` — barrier first, then the mark, deliberately
+    /// adjacent. While the release arm tested `is_fenced()`, that
+    /// ordering made the clean release UNREACHABLE: every clean
+    /// shutdown took the LostCas arm without ever touching the store,
+    /// left the cell HELD, and cost the next hub the full
+    /// `heartbeat × lease_misses` wait. Measured on a real cluster as
+    /// 79s instead of 13s on every identity-changing wake.
+    #[tokio::test(start_paused = true)]
+    async fn a_clean_shutdown_fence_still_releases_the_cell() {
+        let (_mem, store) = stores();
+        let ca = cfg("hub-a", 50, 3);
+        let la = claim(&store, &ca, "vol/").await.unwrap();
+        let guard = EpochGuard::held(la.epoch);
+        let hb = spawn_heartbeat(
+            Arc::clone(&store),
+            ca.clone(),
+            la,
+            Arc::clone(&guard),
+            Box::new(|| {}),
+        );
+
+        // Exactly the ordering the shutdown path uses.
+        guard.fence_for_shutdown();
+        assert!(guard.is_fenced(), "publishes must still be barred");
+        assert_eq!(guard.current(), None, "nothing may publish after the barrier");
+        assert!(!guard.fenced_by_deposition(), "our own fence is not a deposition");
+
+        let outcome = hb.release(Duration::from_secs(15)).await;
+        assert!(
+            matches!(outcome, ReleaseOutcome::Released),
+            "clean shutdown must release, got {:?}",
+            outcome
+        );
+        let cell = store.epoch_read(&ca.key).await.unwrap().unwrap();
+        assert!(cell.released, "the cell must carry the released mark");
+
+        // And the whole point of the mark: no successor waits.
+        let cb = cfg("hub-b", 50, 3);
+        let started = tokio::time::Instant::now();
+        let lb = claim(&store, &cb, "vol/").await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "a stranger waited {:?} on a released cell",
+            started.elapsed()
+        );
+        assert_eq!(lb.epoch, 2);
+    }
+
+    /// The property the broken check was reaching for, kept intact: a
+    /// hub fenced because it was DEPOSED must not stamp `released`
+    /// over its successor's reign.
+    #[tokio::test(start_paused = true)]
+    async fn a_deposed_guard_still_suppresses_the_clean_release() {
+        let (_mem, store) = stores();
+        let ca = cfg("hub-a", 50, 3);
+        let la = claim(&store, &ca, "vol/").await.unwrap();
+        let guard = EpochGuard::held(la.epoch);
+        let hb = spawn_heartbeat(
+            Arc::clone(&store),
+            ca.clone(),
+            la,
+            Arc::clone(&guard),
+            Box::new(|| {}),
+        );
+
+        guard.fence();
+        assert!(guard.fenced_by_deposition());
+
+        let outcome = hb.release(Duration::from_secs(15)).await;
+        assert!(
+            matches!(outcome, ReleaseOutcome::LostCas),
+            "a deposed hub must not release, got {:?}",
+            outcome
+        );
+        let cell = store.epoch_read(&ca.key).await.unwrap().unwrap();
+        assert!(!cell.released, "the successor's cell must stay unreleased");
     }
 
     /// The A8 drill's second half: true takeover with an in-flight MPU —
