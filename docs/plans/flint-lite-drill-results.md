@@ -38,3 +38,42 @@ Shares: `workspaces/tenant-a` (5Gi, flint-spdk, file API on) and
 | E7 | **PASS** | Anti-vacuity: authenticated `/files` 200 first. A symlink to `/etc/passwd` and one to `../../state/state.db` (the credential-theft vector) both return **409 "path is a symbolic link; read its target from the listing"** — never dereferenced. Traversal *through* a symlinked directory component is refused too (503 `Resource`; a 409 would be clearer, but it is a refusal, not a traversal). The listing carries the raw target as data (`linkTarget: "../../state/state.db"`, `size` = target length). **Zero `escape*` objects reached the bucket**; the manifest names both as symlinks. No symlink carries its target's bytes into S3. |
 | C6 | **PASS — wedge confirmed, and bounded** | Anti-vacuity: mounts asserted present on B's node before the suspend. Suspending with kubelet-driven cross-cluster mounts held **does wedge consumer teardown**: pods went to `Error` but would not terminate for 288s, the node kept **2 pinned nfs4 mounts** under `/var/lib/kubelet/pods/…/kubernetes.io~nfs/`, and exactly one process sat in D state — `172.31.0.236-manager`, the kernel NFS state manager for that server. **Waking the hub cleared all three pods in ~31s.** The recorded scar now holds for a kubelet-managed mount, not just a Lima kernel — and this is the empirical case for `suspendWithSessions: false` as the default. |
 | §M0 mitigation | **VALIDATED** | With a live cross-cluster mount and `suspendWithSessions: false` on a **60s** ladder, the share stayed `Ready`/`replicas=1` for **350s** (≈6× the threshold), the operator reporting `IdleEligible=False` — **"a client still holds a lease"**. Paired with C6 (where the default `true` wedged three consumer pods for 288s and pinned two node mounts), this is direct evidence that `suspendWithSessions: false` should be the **default**, not an option — exactly as the plan's §M0 argued. |
+| B7 | **PASS** | Fast arm: clean suspend → wake **Ready in 13s**, same `serverId`, `epochTakeovers=0` — pod start plus instant self-recognition. Slow arm (same bucket, same session): epoch left held + PVC destroyed so the successor has a **new** `serverId` → **Ready in 79s**, `epochTakeovers=1`. Two arms, same instrument, opposite results, oracle read as a counter not a log grep. |
+
+## SHIPPED BUG FOUND — the clean epoch release never lands
+
+**Deterministic, 3/3 reproductions plus the original.** On every clean
+shutdown with `rpoClean: true`, the hub logs:
+
+```
+🛑 SIGTERM — draining and flushing before exit
+🛑 WARN shutdown flushed cleanly but the epoch release did not land: LostCas
+```
+
+and the cell keeps `"released": false`.
+
+**Cause.** `server.rs` shutdown order is `guard.fence()` (the publish
+barrier, mandated by the plan's [R-4] for straggler safety) and then
+`heartbeat.release(...)`. But the heartbeat's shutdown arm in
+`tier/epoch.rs` opens with `if guard.is_fenced() { ReleaseOutcome::LostCas }`,
+reading the fence as "already deposed". The clean shutdown sets that exact
+flag one line earlier, so the guard is **always** fenced when the release
+runs and `store.epoch_release()` is **never called**. Proof: the inner
+branch's own warning (`"release lost the CAS — deposed during shutdown"`)
+never appears in any log — only the outer one does.
+
+`is_fenced()` carries two meanings — "deposed by a rival" and "we closed
+the barrier ourselves on the way out" — and only the first should suppress
+the release.
+
+**Measured cost.** Self-recognition hides it whenever the `serverId` is
+unchanged (B7 fast arm, 13s). It does not hide it when the identity
+changes — which is exactly the hibernate-wake path, since hibernate
+destroys the PVC and therefore the `serverId`. B7's slow arm measured
+**79s vs 13s**: every hibernated project's first wake pays the full
+6×10s lease that a landed release exists to avoid.
+
+**Why nothing caught it.** The kind e2e asserts the ladder's Kubernetes
+side, never the bucket's `released` flag; the formal model checks the
+protocol, not this predicate collision; and the fast path masks it in
+every same-identity restart.
