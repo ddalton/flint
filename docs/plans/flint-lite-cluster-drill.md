@@ -149,16 +149,29 @@ create.
 
 ### Blocking prerequisites
 
-- [x] **Publish.** Done: **v1.29.0** — `flint-driver`, `flint-pnfs` and
-      `flint-lite-operator` at `1.29.0` (amd64+arm64), charts
-      `flint-csi-driver` 1.29.0, `flint-lite` 0.4.0, `flint-lite-operator`
-      0.2.0. Trove is pinned to it. **Restart the trove backend** or it
+- [x] **Publish.** Done: **v1.30.0** — `flint-driver`, `flint-pnfs` and
+      `flint-lite-operator` at `1.30.0` (amd64+arm64), charts
+      `flint-csi-driver` 1.30.0, `flint-lite` 0.4.1, `flint-lite-operator`
+      0.2.1. Trove is pinned to it. **Restart the trove backend** or it
       deploys the previous chart.
-- [ ] **Decide the routing shape** (see §4). On trove this is settled by
-      elimination: NodePort plus a hand-added SG rule is the only shape
-      available, because there is no CCM and the pod CIDRs collide.
-- [ ] **A bucket in the same region as the clusters.** In-region S3↔EC2 is free
-      both ways; out-of-region is billed per GiB and several legs move gigabytes.
+
+      1.30.0 rather than the 1.29.0 this plan was written against, and one
+      of its two changes bears on the drill directly: `tier::gate::exclude`
+      could leave a file refusing every writer forever, reachable through
+      eviction and hydration — i.e. on any tiered share, which is every
+      share here. The other adds `ETag`/`If-Match` to the file API, which
+      is what leg A9 tests.
+- [x] **Decide the routing shape** (see §4). Settled by elimination:
+      NodePort plus a hand-added SG rule is the only shape available,
+      because there is no CCM and the pod CIDRs collide.
+- [x] **A bucket in the same region as the clusters.** Done:
+      `flint-lite-drill-20260820` in `us-west-1`, versioning on, with a
+      bucket-scoped IAM user (`flint-drill-hub`) and a long-lived key,
+      created by `tests/cloud/drill-bucket-setup.sh`. That script verified
+      the key round-trips AND that it provably cannot list any other
+      bucket. In-region S3↔EC2 is free both ways; out-of-region is billed
+      per GiB and several legs move gigabytes. **Teardown is not
+      automatic** — the script prints the commands.
 - [x] **Confirm the CNI enforces NetworkPolicy.** Cilium 1.16.5, stock
       enforcement mode. Checked in trove's source; still record it with the
       results.
@@ -232,7 +245,9 @@ for it, which a foreign client cannot resolve. Leg C1 asserts exactly this.
 ### Cluster shape and what it costs
 
 **One instance type everywhere: `i4i.large`, all spot, control plane
-included.** Measured in us-west-1 at **$0.0408–0.0441/hr** against
+included.** Pinned in `~/github/trove/scripts/aws-live.env.fish`
+(`TROVE_AWS_CP_TYPE`, `TROVE_AWS_WORKER_TYPES`); the drive script already
+defaults the control plane to spot, so no hand-rolled create is needed. Measured in us-west-1 at **$0.0408–0.0441/hr** against
 $0.1148–0.1175 for `i4i.xlarge` — a 2.7x saving for a drill that is
 functional, not a benchmark. It stays SPDK-eligible (trove matches on
 the `i4i` family, not the size), and it keeps a local NVMe, which
