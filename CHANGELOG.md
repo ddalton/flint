@@ -10,6 +10,125 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.31.0] - 2026-08-20
+
+The drill-fix release. Three shipped bugs, all found by the flint-lite
+real-cluster drill against real S3, plus a memory fix that matters once
+hubs are 1:1 with projects. Every fix here was checked against its own
+absence: each regression test was re-run with its fix reverted and
+confirmed to fail first.
+
+### Fixed — a stale device number silently emptied the manifest
+
+- **Generation rows are keyed `(dev, ino)`, and `dev` is stable only by
+  luck.** A CSI restage can hand the volume back on a different device
+  minor. When it moved, every row still LOADED — so this never looked
+  like data loss — but none of them matched what the tree walk found, so
+  `manifest::build` counted every file as `beyond_rpo`, dropped it from
+  `entries`, and the barrier published that manifest over the good one.
+
+  Measured on a real cluster: `dev` moved 66311 → 66312 and
+  `tenant-a/.flint/manifest` went from **7919 bytes and 37 entries to
+  534 bytes and 4 entries** — one directory and three symlinks, not a
+  single entry carrying an S3 key — while all 33 data objects sat intact
+  in the bucket, no longer named by it. A share created fresh for the
+  drill wrote a literally empty `{"entries":[]}` one second after its
+  first restart. Proof it is the device and not the inode: `a5-probe.bin`
+  has the *same* inode in the row and the live file.
+
+  It never healed on its own — `dirtyFiles` is 0, so nothing republishes.
+  Rewriting one file by hand moved `beyondRpo` 33 → 32 and left a second
+  row for it, then it froze.
+
+  The manifest is the sole input to manifest-first cold import, and
+  `mode`, `uid`, `gid`, `mtime` and symlink targets live **only** there —
+  the foreign-key sweep can recover bytes but not those. What kept the
+  drill from losing them is that `rpoClean` also goes permanently false,
+  so `HibernateDeferred` refused to reclaim the PVC.
+
+  Startup now re-homes rows to the export root's live `st_dev`. The prune
+  is not optional: deletes match on `dev` too, so a file removed during a
+  drifted boot leaves its row behind, and re-homing alone would let it
+  collide with a REUSED inode and claim another file's object. A row
+  survives only if its inode is still live under the export root.
+
+### Fixed — the clean epoch release was never issued
+
+- **`is_fenced()` meant two opposite things** — "a rival deposed us" and
+  "we closed the barrier on our own way out" — and the clean shutdown
+  sets it one line before calling `release()`. So `store.epoch_release()`
+  was never called on any clean shutdown, ever; the cell stayed HELD and
+  the next hub waited out `heartbeat × lease_misses` instead of claiming
+  instantly.
+
+  Deterministic, 3/3 on hubs 10–12s old, proved by the ABSENCE of the
+  inner branch's own warning, and corroborated twice: B7 measured **79s
+  versus 13s** for an identity-changing wake, and E5 saw a 79s takeover
+  after a demonstrably clean shutdown. That is the whole hibernate-wake
+  path, since hibernate destroys the PVC and with it the `serverId`.
+
+  The guard now records WHY it was fenced. Note the CAS was always the
+  real arbiter — a deposed hub's release 412s because the token rotates
+  on every renewal — so the pre-check bought nothing and cost every
+  hibernate-wake about 66 seconds.
+
+### Fixed — expired client leases were only reaped by inbound traffic
+
+- **`nfs.activeLeases` is a raw `leases.len()`, and the only production
+  caller of `cleanup_expired()` was the top of every COMPOUND.** That is
+  inbound-driven, so it cannot reap the one case that matters: a volume
+  whose only client is gone or partitioned sends nothing.
+
+  The periodic sweep looked like it covered this and did not — it retires
+  LAYOUT GRANT ROWS, and standalone (flint-lite) turns layouts off
+  entirely, so in that posture it swept nothing at all.
+
+  Measured under a real `iptables` partition: `activeLeases` held at **1
+  for 770 seconds** against a 90-second lease, then dropped to 0 the
+  instant a single file-API compound arrived, and the share suspended
+  208s later — so the ladder was working throughout and the stale lease
+  was the only thing pinning it. With `suspendWithSessions: false` a
+  partitioned agent fleet would pin its share awake permanently.
+
+  The courtesy-release pass now runs on both the COMPOUND path and each
+  sweep tick, so the dead client's locks, sessions, stateids and
+  delegations are released too rather than just the gauge being fixed.
+
+### Changed — downloads above 8 MiB stream instead of buffering
+
+- **Buffering every response body bounded hub memory by the DOWNLOAD CAP,
+  which defaults to 5 GiB.** A 512 MiB request took `VmHWM` from 30 MB to
+  541 MiB, and the same GET under a 256Mi limit was OOM-killed — which
+  takes the NFS export down with it, because one process serves both.
+  Hubs are 1:1 with projects, so that was a per-project cost across the
+  fleet.
+
+  Downloads now split at `streamThresholdBytes` (8 MiB). At or below it
+  nothing changes: the body is buffered whole, so the status code and
+  `Content-Length` are decided with every byte in hand and a shrink or
+  rename-over mid-read is refused as a clean 409 before any byte ships.
+  Above it the body streams and memory is O(chunk) whatever the file size.
+
+  What streaming gives up is stated plainly: the status line ships before
+  the last byte is read, so a mid-read change ends the stream with an
+  error — a reset connection, never a clean short body under 200. The
+  terminal re-stat that catches a rename-over still runs.
+
+  Both the cap and the threshold are checked against the RANGE, not the
+  file, so a small `Range` of a huge file keeps the buffered path.
+
+### Known, and NOT fixed in this release
+
+- **The write reserve is defeated by write speed.** A single 600 MiB PUT
+  onto a volume with 539 MiB free returned `201 Created` and drove `df`
+  to **0 bytes available** — the entire reserve consumed, with
+  `nospcWriteRefusals` still 0. `admit_bytes` reads a gauge refreshed
+  every 2 seconds and has no accounting for bytes already admitted but
+  not yet landed; `admit_warm`, twenty lines below in the same file,
+  already implements exactly that accounting and documents why. The hub
+  self-healed here via publish-and-evict, but the reserve exists to keep
+  the state database writable and it did not hold.
+
 ## [1.30.0] - 2026-08-19
 
 ### Fixed — an exclusion that could take a file out of service permanently
