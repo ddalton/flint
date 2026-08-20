@@ -10,6 +10,95 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.32.0] - 2026-08-20
+
+The cold-read-guard release. One shipped bug, found while validating
+1.31.0 on a real cluster, plus two documentation defects
+that between them stopped a new user mounting a share at all. The
+validation run that found it also passed all seven of its own legs
+against 1.31.0 — the three fixes that release shipped are now
+cluster-proven, not just unit-proven.
+
+### Fixed — a cold read failed its own guard
+
+- **After a hibernate/DR wake, the first `GET` of every file answered
+  409.** The download's terminal check refuses when the file's `change`
+  attribute moved under the read. That is how a rename-over is caught,
+  and it is worth keeping: a caller handed the new file's bytes under
+  the old file's `ETag` has been given the wrong object.
+
+  But the tier REWRITES THE LOCAL INODE when it hydrates a stub — a
+  pwrite into the marker inode, which `hubfs::render_etag` already
+  documents for the `If-Match` case — so on a cold file the hub's own
+  hydration moved `change` and the read failed its own guard.
+
+  Measured on a real cluster after a hibernate that deleted the PVC:
+  13 of 13 files answered 409 on first touch and 200 on the immediate
+  retry. Every caller paid two round trips for bytes that were never in
+  doubt, and a caller that did not retry saw a cold project as broken.
+
+  On the streaming path it was worse. Past a committed `200` the
+  mismatch cannot be a clean 409 any more, so it poisoned the body
+  instead — a reset connection on a file nothing had touched.
+
+  The hydration is now forced with a one-byte probe, parked on exactly
+  as the read loop would, BEFORE the guard's baseline is taken. A
+  replacement landing in that window is still caught: `fileid` and the
+  logical size must both survive it, which a rename-over or a resize
+  does not. The `ETag` published is the post-hydration one, because the
+  pre-hydration tag names bytes the caller did not receive and would
+  412 on their next `If-Match` for no reason they could see.
+
+  Re-proven on the same cluster, same corpus, same hibernate: 13 of 13
+  files 200 on first touch, all byte-identical, with `stubsCreated: 13`
+  in `/status` confirming the tree really was cold.
+
+### Changed — success is no longer reported under an `error` key
+
+- `POST /files/folder` answered `{"error":"created"}` on a 201, and
+  `PUT` / `DELETE` / `POST /files/move` did the same with their own
+  words. Success came back through the error body because both shared
+  one helper. Anything scanning for `error` to detect failure read every
+  successful mutation as a failure.
+
+  They now answer `{"status":"created"|"written"|"removed"|"moved"}`.
+  **This is a wire-format change** on the four mutating routes; the
+  status codes are unchanged.
+
+### Fixed — neither documented mount command worked
+
+- The operator chart's `NOTES.txt` told users to mount
+  `<address>:/data/exports`. That is a path INSIDE the container, and
+  the server refuses it with `NFS4ERR_NOENT`. The export is the server
+  root.
+- The operator guide told users to mount `<status.address>:/`. That
+  expands to `host:2049:/`, which `mount` refuses outright.
+
+  Both now show the form that works, and that also survives a
+  `spec.service.advertiseAddress` on a port other than 2049 — the host
+  before the colon, the port in `-o port=`.
+
+- The operator guide never named the keys `credentialsSecretRef` must
+  carry. They are loaded with `envFrom`, so they must be
+  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` verbatim. Anything else
+  leaves the SDK with no credentials at all; it then falls back to the
+  instance role, and where IMDS is unreachable from pods that surfaces
+  as a startup crash loop reading `bucket <name> unreachable: dispatch
+  failure` — which names the bucket rather than the cause.
+
+### Known gaps (unchanged, stated so they are not rediscovered)
+
+- `streamThresholdBytes` is settable in `flint-lite-chart` but has no
+  `FlintShare` field, so operator-managed shares take the 8 MiB default.
+- The write reserve (`admit_bytes` reading a stale gauge with no
+  in-flight accounting) is still open.
+
+### Verification
+
+1691 tests on macOS, **1699 on real Linux**, zero failures. The
+cold-read fix was re-run with `hydration_is_benign` reverted to the old
+always-refuse behaviour and its test fails first.
+
 ## [1.31.0] - 2026-08-20
 
 The drill-fix release. Three shipped bugs, all found by the flint-lite
