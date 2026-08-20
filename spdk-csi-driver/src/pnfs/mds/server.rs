@@ -653,6 +653,7 @@ impl MetadataServer {
                 max_upload_bytes: self.monitoring.file_api.max_upload_bytes,
                 max_download_bytes: self.monitoring.file_api.max_download_bytes,
                 hydrate_wait_secs: self.monitoring.file_api.hydrate_wait_secs,
+                stream_threshold_bytes: self.monitoring.file_api.stream_threshold_bytes,
             };
             (fs, cfg)
         });

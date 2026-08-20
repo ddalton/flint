@@ -806,6 +806,24 @@ pub struct FileApiConfig {
     /// answering 503 with a Retry-After.
     #[serde(rename = "hydrateWaitSecs", default = "default_file_api_hydrate_wait")]
     pub hydrate_wait_secs: u64,
+
+    /// Downloads at or below this size are buffered whole before the
+    /// status line is sent; larger ones stream.
+    ///
+    /// This is the hub's download memory bound. Buffering buys a real
+    /// property — the status code and `Content-Length` are decided with
+    /// every byte in hand, so a 200 can never be followed by a short
+    /// body — but it costs the response size in anonymous memory, and
+    /// hubs are 1:1 with projects, so that cost multiplies across the
+    /// fleet. Measured before this split: a 512 MiB request moved
+    /// `VmHWM` from 30 MB to 541 MiB, and the same GET under a 256Mi
+    /// limit was OOM-killed, taking the NFS export down with it.
+    ///
+    /// Above the threshold the body streams and a mid-read change
+    /// (eviction, shrink, rename-over) ends the stream with an error so
+    /// the connection resets — never a clean short body under 200.
+    #[serde(rename = "streamThresholdBytes", default = "default_file_api_stream_threshold")]
+    pub stream_threshold_bytes: u64,
 }
 
 impl Default for FileApiConfig {
@@ -817,6 +835,7 @@ impl Default for FileApiConfig {
             max_upload_bytes: default_file_api_max_upload(),
             max_download_bytes: default_file_api_max_download(),
             hydrate_wait_secs: default_file_api_hydrate_wait(),
+            stream_threshold_bytes: default_file_api_stream_threshold(),
         }
     }
 }
@@ -868,6 +887,7 @@ fn default_file_api_token_env() -> String { "FLINT_FILE_API_TOKEN".to_string() }
 fn default_file_api_max_upload() -> u64 { 5 * 1024 * 1024 * 1024 }
 fn default_file_api_max_download() -> u64 { 5 * 1024 * 1024 * 1024 }
 fn default_file_api_hydrate_wait() -> u64 { 30 }
+fn default_file_api_stream_threshold() -> u64 { 8 * 1024 * 1024 }
 
 /// Prometheus configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

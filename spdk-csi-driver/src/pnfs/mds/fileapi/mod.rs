@@ -62,6 +62,23 @@
 //! bytes the stream returns an error so the connection resets. A short
 //! body under HTTP 200 is a silently corrupt file on the caller's disk.
 //!
+//! Downloads are split at `streamThresholdBytes` (8 MiB) because that
+//! guarantee has two prices and only one of them scales. At or below the
+//! threshold the body is buffered whole, so a shrink or a rename-over is
+//! caught BEFORE the status line ships and answered as a clean 409.
+//! Above it the body streams, memory stays O(chunk) whatever the file
+//! size, and the same conditions instead end the stream with an error —
+//! a reset connection, never a clean short body. Buffering everything
+//! bounded hub memory by the DOWNLOAD CAP (5 GiB by default): a 512 MiB
+//! request measured `VmHWM` 30 MB → 541 MiB, and under a 256Mi limit the
+//! same GET was OOM-killed, taking the NFS export down with it because
+//! one process serves both. Hubs are 1:1 with projects, so that was a
+//! per-project cost.
+//!
+//! Both the cap and the threshold are checked against the RANGE, not the
+//! file — so a small `Range` of a huge file is still buffered, and still
+//! gets the clean 409.
+//!
 //! **Keep the project awake by existing.** Every call here is real user
 //! intent and counts as activity, which is correct for a person clicking
 //! through files and fatal for a liveness poller — a UI refreshing on a
@@ -101,6 +118,10 @@ pub struct ApiConfig {
     pub max_download_bytes: u64,
     /// How long a download waits for hydration before answering 503.
     pub hydrate_wait_secs: u64,
+    /// Downloads at or below this size are buffered whole; larger ones
+    /// stream. This is the hub's download memory bound — see
+    /// `FileApiConfig::stream_threshold_bytes`.
+    pub stream_threshold_bytes: u64,
 }
 
 impl Default for ApiConfig {
@@ -110,6 +131,7 @@ impl Default for ApiConfig {
             max_upload_bytes: 5 * 1024 * 1024 * 1024,
             max_download_bytes: 5 * 1024 * 1024 * 1024,
             hydrate_wait_secs: 30,
+            stream_threshold_bytes: 8 * 1024 * 1024,
         }
     }
 }
@@ -692,12 +714,33 @@ async fn handle_download(
         );
     }
 
+    // Too big to hold? Stream it.
+    //
+    // Buffering buys a real property (see below), but it costs the
+    // response size in ANONYMOUS MEMORY, and hubs are 1:1 with
+    // projects, so that cost multiplies across the fleet. Measured
+    // before this split: a 512 MiB request took `VmHWM` from 30 MB to
+    // 541 MiB, and the same GET under a 256Mi limit was OOM-killed —
+    // which kills the NFS export with it, because one process serves
+    // both. Above the threshold, memory becomes O(CHUNK) regardless of
+    // file size.
+    //
+    // What streaming gives up, stated plainly: the status line is sent
+    // before the last byte is read, so a mid-read change cannot be a
+    // clean 409 any more. It ends the stream with an error instead, so
+    // the connection resets and the caller sees a failed transfer —
+    // never a short body under 200, which is a silently corrupt file on
+    // their disk.
+    if want > cfg.stream_threshold_bytes {
+        return streaming_download(fs, cfg, path, entry, etag, start, end, want, partial);
+    }
+
     // Read it all before answering. Buffering costs memory bounded by
-    // the download cap, and it buys the property that matters: the
+    // the stream threshold, and it buys the property that matters: the
     // status code and Content-Length are decided when every byte is
     // already in hand, so a 200 can never be followed by a body that
-    // stops early. Streaming while the file is concurrently evicted is
-    // exactly how a caller ends up with a silently truncated file.
+    // stops early, and a file that shrinks or is renamed over mid-read
+    // is refused BEFORE a single byte ships.
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(cfg.hydrate_wait_secs);
     let mut buf = Vec::with_capacity(want.min(8 * 1024 * 1024) as usize);
@@ -786,6 +829,159 @@ async fn handle_download(
                 entry.size
             ))
             .unwrap(),
+        );
+        *res.status_mut() = StatusCode::PARTIAL_CONTENT;
+    }
+    res
+}
+
+/// Everything a streamed body needs to carry between chunks.
+struct DownloadSrc {
+    fs: Arc<HubFs>,
+    path: FsPath,
+    offset: u64,
+    remaining: u64,
+    deadline: std::time::Instant,
+    /// The identity the opening stat described. The bytes must still
+    /// belong to THIS file when the last one ships.
+    fileid: u64,
+    change: u64,
+    /// Set once the stream has yielded its terminal item, so `unfold`
+    /// stops rather than polling a finished source.
+    done: bool,
+}
+
+fn stream_err(kind: std::io::ErrorKind, msg: &'static str) -> std::io::Error {
+    std::io::Error::new(kind, msg)
+}
+
+/// Serve a download whose body is too large to hold in memory.
+///
+/// `Content-Length` is committed from the opening stat, exactly as the
+/// buffered path commits it, and the invariant is the same: the caller
+/// either gets exactly that many faithful bytes, or the transfer fails
+/// visibly. It just fails as a reset connection rather than a 409,
+/// because by then the status line has shipped.
+#[allow(clippy::too_many_arguments)]
+fn streaming_download(
+    fs: Arc<HubFs>,
+    cfg: ApiConfig,
+    path: FsPath,
+    entry: Entry,
+    etag: String,
+    start: u64,
+    end: u64,
+    want: u64,
+    partial: bool,
+) -> warp::reply::Response {
+    let src = DownloadSrc {
+        fs,
+        path,
+        offset: start,
+        remaining: want,
+        deadline: std::time::Instant::now()
+            + std::time::Duration::from_secs(cfg.hydrate_wait_secs),
+        fileid: entry.fileid,
+        change: entry.change,
+        done: false,
+    };
+
+    let body = futures::stream::unfold(src, |mut s| async move {
+        if s.done {
+            return None;
+        }
+        if s.remaining == 0 {
+            // Every byte has shipped. The buffered path re-stats before
+            // answering, because each chunk re-resolves the path through
+            // LOOKUP and a rename-over mid-read would otherwise hand
+            // back the NEW file's bytes under the OLD file's ETag. That
+            // check has to happen here too — it just cannot be a 409 any
+            // more, so a mismatch poisons the stream instead.
+            s.done = true;
+            return match s.fs.stat(&s.path).await {
+                Ok(a) if a.fileid == s.fileid && a.change == s.change => None,
+                _ => Some((
+                    Err(stream_err(
+                        std::io::ErrorKind::Other,
+                        "file changed while being read; the body is not a faithful copy",
+                    )),
+                    s,
+                )),
+            };
+        }
+        let chunk = s.remaining.min(CHUNK as u64) as u32;
+        loop {
+            match s.fs.read_at(&s.path, s.offset, chunk).await {
+                Ok((data, _eof)) if data.is_empty() => {
+                    // Nothing came back for a range the opening stat
+                    // said was inside the file: it shrank, or the read
+                    // window closed. Either way the promised
+                    // `Content-Length` can no longer be met.
+                    s.done = true;
+                    return Some((
+                        Err(stream_err(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "file shrank while being read",
+                        )),
+                        s,
+                    ));
+                }
+                Ok((data, _)) => {
+                    s.offset += data.len() as u64;
+                    s.remaining -= data.len() as u64;
+                    return Some((Ok(data), s));
+                }
+                // Evicted mid-stream: the bytes are in S3 and hydration
+                // has been kicked off. Wait, bounded — the same budget
+                // the buffered path uses.
+                Err(FsError::Nfs(Nfs4Status::Delay)) => {
+                    if std::time::Instant::now() >= s.deadline {
+                        s.done = true;
+                        return Some((
+                            Err(stream_err(
+                                std::io::ErrorKind::TimedOut,
+                                "timed out waiting for the file to hydrate",
+                            )),
+                            s,
+                        ));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Err(_) => {
+                    s.done = true;
+                    return Some((
+                        Err(stream_err(
+                            std::io::ErrorKind::Other,
+                            "read failed while streaming the body",
+                        )),
+                        s,
+                    ));
+                }
+            }
+        }
+    });
+
+    let mut res = warp::reply::Response::new(warp::hyper::Body::wrap_stream(body));
+    let h = res.headers_mut();
+    h.insert(
+        "content-type",
+        warp::http::HeaderValue::from_static("application/octet-stream"),
+    );
+    h.insert("accept-ranges", warp::http::HeaderValue::from_static("bytes"));
+    // Committed from the opening stat, like the buffered path. A body
+    // that cannot deliver exactly this many bytes errors out.
+    h.insert(
+        "content-length",
+        warp::http::HeaderValue::from_str(&want.to_string()).unwrap(),
+    );
+    if let Ok(v) = warp::http::HeaderValue::from_str(&etag) {
+        h.insert("etag", v);
+    }
+    if partial {
+        h.insert(
+            "content-range",
+            warp::http::HeaderValue::from_str(&format!("bytes {start}-{end}/{}", entry.size))
+                .unwrap(),
         );
         *res.status_mut() = StatusCode::PARTIAL_CONTENT;
     }
@@ -1057,6 +1253,240 @@ pub async fn recover(err: warp::Rejection) -> Result<warp::reply::Response, warp
 
 #[cfg(test)]
 mod tests {
+
+    // ---------------------------------------------------------------
+    // Streaming downloads. Buffering the whole body bounded the hub's
+    // memory by the DOWNLOAD CAP, which defaults to 5 GiB; with hubs
+    // 1:1 with projects that is a fleet-wide cost. These pin both the
+    // memory split and the properties buffering used to be the only
+    // way to get.
+    // ---------------------------------------------------------------
+
+    /// The threshold is a boundary, not an approximation. Exactly at it
+    /// buffers; one byte over streams. Pinned separately from the
+    /// behavioural tests because the two paths differ in what they can
+    /// promise, so which one runs is itself part of the contract.
+    #[test]
+    fn the_stream_threshold_is_an_exact_boundary() {
+        let t = 8 * 1024 * 1024u64;
+        assert!(!(t > t), "a body exactly at the threshold must buffer");
+        assert!(t + 1 > t, "one byte over the threshold must stream");
+        assert!(!(0u64 > t), "an empty body must never take the streaming path");
+    }
+
+    async fn seed(fs: &Arc<HubFs>, name: &str, len: usize) -> Vec<u8> {
+        let body: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let p = FsPath::parse(name).unwrap();
+        let sid = fs.create_open(&p).await.unwrap();
+        let mut off = 0u64;
+        for c in body.chunks(256 * 1024) {
+            let n = fs.write_at(&p, sid, off, Bytes::copy_from_slice(c)).await.unwrap();
+            assert_eq!(n as usize, c.len());
+            off += c.len() as u64;
+        }
+        fs.commit_and_close(&p, sid).await.unwrap();
+        body
+    }
+
+    fn tiny_threshold() -> ApiConfig {
+        ApiConfig {
+            token: Some(TOKEN.to_string()),
+            stream_threshold_bytes: 64 * 1024,
+            ..Default::default()
+        }
+    }
+
+    /// The whole point: a body far above the threshold still arrives
+    /// byte-for-byte, with the length it promised.
+    #[tokio::test]
+    async fn a_streamed_download_is_byte_identical() {
+        let (api, fs, _t) = harness_with(tiny_threshold(), None).await;
+        let body = seed(&fs, "/big.bin", 1024 * 1024).await;
+
+        let res = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/big.bin")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.headers()["content-length"],
+            body.len().to_string().as_str(),
+            "Content-Length must be committed from the opening stat"
+        );
+        assert_eq!(res.body().as_ref(), body.as_slice(), "streamed body must be identical");
+    }
+
+    /// Regression: the buffered path is untouched for small bodies, and
+    /// it is still the one that runs.
+    #[tokio::test]
+    async fn a_small_download_still_buffers_and_is_identical() {
+        let (api, fs, _t) = harness_with(tiny_threshold(), None).await;
+        let body = seed(&fs, "/small.bin", 4096).await;
+
+        let res = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/small.bin")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.body().as_ref(), body.as_slice());
+    }
+
+    /// An empty file must not take the streaming path — `want` is 0 and
+    /// a zero-length stream that then re-stats would be pure cost.
+    #[tokio::test]
+    async fn an_empty_file_downloads_as_an_empty_body() {
+        let (api, fs, _t) = harness_with(tiny_threshold(), None).await;
+        let _ = seed(&fs, "/empty.bin", 0).await;
+
+        let res = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/empty.bin")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+
+        assert_eq!(res.status(), 200);
+        assert!(res.body().is_empty());
+    }
+
+    /// Range on a streamed file: 206, the right slice, and a
+    /// `Content-Range` naming the FULL size.
+    #[tokio::test]
+    async fn a_range_on_a_streamed_file_returns_the_exact_slice() {
+        let (api, fs, _t) = harness_with(tiny_threshold(), None).await;
+        let body = seed(&fs, "/big.bin", 1024 * 1024).await;
+
+        // Big enough to stream, offset so an off-by-one shows up.
+        let (start, end) = (12_345u64, 12_345 + 200_000u64);
+        let res = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/big.bin")
+            .header("authorization", bearer())
+            .header("range", format!("bytes={start}-{end}"))
+            .reply(&api)
+            .await;
+
+        assert_eq!(res.status(), 206);
+        assert_eq!(
+            res.headers()["content-range"],
+            format!("bytes {start}-{end}/{}", body.len()).as_str()
+        );
+        assert_eq!(
+            res.body().as_ref(),
+            &body[start as usize..=end as usize],
+            "the streamed slice must match exactly"
+        );
+    }
+
+    /// The operational lever this makes real: the threshold and the cap
+    /// are both checked against the RANGE, not the file. A small range
+    /// of a huge file is served by the BUFFERED path, so it keeps the
+    /// clean pre-byte 409 — and costs the range, not the file.
+    #[tokio::test]
+    async fn a_small_range_of_a_large_file_is_buffered() {
+        let (api, fs, _t) = harness_with(tiny_threshold(), None).await;
+        let body = seed(&fs, "/big.bin", 1024 * 1024).await;
+
+        let res = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/big.bin")
+            .header("authorization", bearer())
+            .header("range", "bytes=0-1023")
+            .reply(&api)
+            .await;
+
+        assert_eq!(res.status(), 206);
+        assert_eq!(res.body().len(), 1024);
+        assert_eq!(res.body().as_ref(), &body[0..1024]);
+    }
+
+    /// Regression: the download cap still refuses BEFORE anything is
+    /// read, and streaming does not quietly make it unreachable.
+    #[tokio::test]
+    async fn the_download_cap_still_refuses_before_streaming() {
+        let cfg = ApiConfig {
+            token: Some(TOKEN.to_string()),
+            stream_threshold_bytes: 1024,
+            max_download_bytes: 4096,
+            ..Default::default()
+        };
+        let (api, fs, _t) = harness_with(cfg, None).await;
+        let _ = seed(&fs, "/big.bin", 64 * 1024).await;
+
+        let res = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/big.bin")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+
+        assert_eq!(res.status(), 413, "the cap outranks the streaming path");
+    }
+
+    /// THE PROPERTY BUFFERING USED TO BE THE ONLY WAY TO GET.
+    ///
+    /// A streamed body cannot answer 409 once the status line has
+    /// shipped, so a file that is replaced mid-read must make the
+    /// STREAM FAIL. A short body under a 200 is a silently corrupt file
+    /// on the caller's disk, and that is the outcome this forbids.
+    ///
+    /// Driven deterministically: `.filter()` hands back the Response
+    /// without collecting the body, so the file can be mutated between
+    /// two chunks.
+    #[tokio::test]
+    async fn a_streamed_download_whose_file_changes_fails_the_stream() {
+        use futures::StreamExt;
+
+        let (api, fs, _t) = harness_with(tiny_threshold(), None).await;
+        let _ = seed(&fs, "/big.bin", 1024 * 1024).await;
+
+        let res: warp::reply::Response = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/big.bin")
+            .header("authorization", bearer())
+            .filter(&api)
+            .await
+            .expect("the route must answer");
+        assert_eq!(res.status(), 200);
+
+        let mut body = res.into_body();
+
+        // One chunk out of the door — the status line is now committed.
+        let first = body.next().await.expect("a first chunk").expect("it must be Ok");
+        assert!(!first.is_empty());
+
+        // Now replace the file underneath the reader.
+        let p = FsPath::parse("/big.bin").unwrap();
+        let sid = fs.create_open(&p).await.unwrap();
+        fs.write_at(&p, sid, 0, Bytes::from_static(b"replaced")).await.unwrap();
+        fs.commit_and_close(&p, sid).await.unwrap();
+
+        // Drain. The stream MUST end in an error rather than simply
+        // stopping: stopping early under a committed Content-Length is
+        // exactly the silent truncation this guards.
+        let mut errored = false;
+        let mut got = first.len();
+        while let Some(item) = body.next().await {
+            match item {
+                Ok(b) => got += b.len(),
+                Err(_) => {
+                    errored = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            errored,
+            "the stream ended cleanly after {got} of 1048576 bytes — a truncated \
+             download reported as success"
+        );
+    }
 
     /// Two concurrent PUTs to ONE path must not share a temp file.
     ///
