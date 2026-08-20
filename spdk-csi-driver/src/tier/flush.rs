@@ -399,10 +399,17 @@ impl FlushOrchestrator {
                 })
                 .or_insert(r);
         }
+        // INSERT BEFORE DELETE, and the order is the whole point.
+        //
+        // The two keys differ (`dev` differs), so the re-homed row never
+        // collides with the stale one and the pair can coexist. Deleting
+        // first would open a window where a crash leaves NEITHER — which
+        // is precisely the bug being repaired here, made permanent for
+        // those files. Insert-first makes the migration idempotent and
+        // crash-safe: the worst a crash leaves is a duplicate under a
+        // dead device number, which the next boot re-homes and prunes.
         let (mut rehomed, mut dropped) = (0usize, 0usize);
-        for r in &stale {
-            let _ = self.backend.tier_delete_generation(r.dev, r.ino).await;
-        }
+        let mut kept: Vec<(u64, u64)> = Vec::new();
         for (ino, r) in best {
             let row = crate::state_backend::TierGenerationRow {
                 dev: live_dev,
@@ -416,8 +423,22 @@ impl FlushOrchestrator {
                 updated_unix: r.updated_unix,
             };
             match self.backend.tier_upsert_generation(&row).await {
-                Ok(()) => rehomed += 1,
+                Ok(()) => {
+                    rehomed += 1;
+                    kept.push((r.dev, ino));
+                }
                 Err(e) => warn!("tier flush: re-homing generation row ino {} failed: {}", ino, e),
+            }
+        }
+        // Now the old rows can go: every survivor already has its
+        // re-homed twin durable. A row whose re-home FAILED is left
+        // alone rather than deleted — losing it is the failure this
+        // whole function exists to prevent.
+        for r in &stale {
+            let survived = kept.iter().any(|(d, i)| *d == r.dev && *i == r.ino);
+            let prunable = !live_inos.contains(&r.ino);
+            if survived || prunable {
+                let _ = self.backend.tier_delete_generation(r.dev, r.ino).await;
             }
         }
         dropped += stale.len().saturating_sub(rehomed);
@@ -1714,6 +1735,50 @@ mod tests {
             built.entries.iter().any(|e| e.key.as_deref() == Some("t/kept.bin")),
             "the manifest must name the file again"
         );
+    }
+
+    /// The re-homing is a MIGRATION, so it has to be safe to run twice —
+    /// it runs on every boot, and a crash mid-way must leave the next
+    /// boot able to finish the job rather than a mess.
+    ///
+    /// Insert-before-delete is what buys that: the two keys differ on
+    /// `dev`, so a crash between them leaves a duplicate under a dead
+    /// device number, never a hole. Deleting first would leave NEITHER
+    /// row — the exact bug this repairs, made permanent.
+    #[tokio::test]
+    async fn re_homing_generation_rows_is_idempotent() {
+        let r = rig(1024, 256);
+        let f = r.root.join("kept.bin");
+        std::fs::write(&f, b"payload").unwrap();
+        let (live_dev, ino) = ident(&f);
+
+        let stale = crate::state_backend::TierGenerationRow {
+            dev: live_dev ^ 0x1,
+            ino,
+            key: "t/kept.bin".into(),
+            generation: 3,
+            etag: "\"abc\"".into(),
+            crc64_b64: None,
+            size: 7,
+            copy_allowed: true,
+            updated_unix: 1000,
+        };
+        r.backend.tier_upsert_generation(&stale).await.unwrap();
+
+        r.orch.startup().await;
+        let after_one = r.backend.tier_list_generations().await.unwrap();
+        assert_eq!(after_one.len(), 1, "one row in, one row out: {after_one:?}");
+        assert_eq!(after_one[0].dev, live_dev);
+        assert_eq!(after_one[0].generation, 3);
+
+        // Second boot: nothing stale left, so it must be a no-op rather
+        // than duplicating or dropping anything.
+        r.orch.startup().await;
+        let after_two = r.backend.tier_list_generations().await.unwrap();
+        assert_eq!(after_two.len(), 1, "a second pass changed the rows: {after_two:?}");
+        assert_eq!(after_two[0].dev, live_dev);
+        assert_eq!(after_two[0].generation, 3);
+        assert!(r.orch.generation_of(live_dev, ino).is_some());
     }
 
     #[tokio::test]
