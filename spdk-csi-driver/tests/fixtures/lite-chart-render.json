@@ -352,6 +352,12 @@
                       "port": 2049
                     }
                   },
+                  "resources": {
+                    "requests": {
+                      "cpu": "100m",
+                      "memory": "128Mi"
+                    }
+                  },
                   "volumeMounts": [
                     {
                       "mountPath": "/etc/flint",
@@ -530,6 +536,12 @@
                     "periodSeconds": 5,
                     "tcpSocket": {
                       "port": 2049
+                    }
+                  },
+                  "resources": {
+                    "requests": {
+                      "cpu": "100m",
+                      "memory": "128Mi"
                     }
                   },
                   "startupProbe": {
@@ -736,6 +748,12 @@
                       "port": 2049
                     }
                   },
+                  "resources": {
+                    "requests": {
+                      "cpu": "100m",
+                      "memory": "128Mi"
+                    }
+                  },
                   "startupProbe": {
                     "failureThreshold": 60,
                     "periodSeconds": 10,
@@ -845,5 +863,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "8f2259f9c36237b29c6f5b82959af99870f6da8a51d3c8855b05f7c94647d4fe"
+  "chartSha256": "c63e85c2d91ee3a48a2fe76acf2512adfcad62846f49ad6e256d04087d577a2d"
 }

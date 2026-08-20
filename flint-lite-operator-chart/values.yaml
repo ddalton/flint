@@ -128,12 +128,38 @@ serviceAccount:
   annotations: {}     # e.g. eks.amazonaws.com/role-arn for IRSA
 
 logLevel: info
+# Sized for a FLEET, not a demo. Measured on a real cluster at the
+# design target (3000 FlintShares, 300 live): the operator's reflector
+# store and its in-flight reconciles sit at ~50 MiB, and the old
+# 256Mi limit was where BOTH replicas were OOMKilled (exit 137, 8
+# restarts each) before the reconcile concurrency was bounded.
+#
+# 512Mi is ~5.8x the worst spike at the design target. The spike is a
+# watch RELIST, which briefly holds the reflector store twice: measured
+# 53 MiB total at 3000 shares, of which ~35 MiB is store (~12 KiB per
+# share), so a relist peaks near 88 MiB. That leaves 3.2x headroom at
+# 6000 shares and 2x at 10,000.
+#
+# A limit is a CEILING, not a reservation — the request below is what
+# reserves capacity — so an oversized limit is nearly free while an
+# undersized one is a fleet-wide outage: the operator OOMs, CrashLoops,
+# and no project in the cluster can be woken, because level-triggered
+# wake only happens while it reconciles. But a limit set absurdly high
+# is not free either: it lets a leak run longer before anything notices
+# and can push a NODE into memory pressure, evicting other pods, before
+# the operator is the one killed. 512Mi is where those meet.
+#
+# NO CPU LIMIT, deliberately. Reconcile wall time is the denominator of
+# the operator's self-trigger amplification: throttling the operator
+# makes each reconcile longer, which is exactly the direction that
+# makes the fleet less stable. A request reserves capacity; a limit
+# would take it away under load.
 resources:
   requests:
-    cpu: 50m
-    memory: 64Mi
+    cpu: 500m
+    memory: 128Mi
   limits:
-    memory: 256Mi
+    memory: 512Mi
 nodeSelector: {}
 tolerations: []
 podAnnotations: {}

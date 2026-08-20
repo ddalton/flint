@@ -205,6 +205,15 @@ monitoring:
     streamThresholdBytes: 8388608
 
 logLevel: info
-resources: {}
+# Requests only, no limits, and matched by the operator's
+# RenderDefaults — a hub with neither runs BestEffort, which at fleet
+# scale means the scheduler packs by pod count alone and every hub is
+# first out under node memory pressure. A memory LIMIT is deliberately
+# absent: a hub is a filesystem server whose working set belongs to the
+# caller, and a limit makes it killable mid-operation.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
 nodeSelector: {}
 nameOverride: ""

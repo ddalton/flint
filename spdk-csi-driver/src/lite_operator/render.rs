@@ -72,6 +72,21 @@ pub struct RenderDefaults {
     pub termination_grace_period_seconds: i64,
     pub log_level: String,
     pub service_port: i32,
+    /// Fleet-wide hub resource REQUESTS, used when `spec.resources`
+    /// says nothing. Without these a hub renders `resources: None` and
+    /// runs BestEffort: the scheduler sees a zero-cost pod, packs by
+    /// pod count alone, and every hub is first in line under node
+    /// memory pressure. At 300 live hubs that stops being a default
+    /// and becomes a capacity plan nobody wrote down.
+    ///
+    /// Requests only, no limits, and deliberately so. A memory LIMIT on
+    /// the hub is what turned a large download into an OOMKill that
+    /// took the NFS export down with it; streaming bounded that, but a
+    /// hub is still a filesystem server whose working set is the
+    /// caller's, not ours. Requests make it schedulable; a limit makes
+    /// it killable.
+    pub hub_cpu_request: String,
+    pub hub_memory_request: String,
 }
 
 impl Default for RenderDefaults {
@@ -90,6 +105,8 @@ impl Default for RenderDefaults {
             termination_grace_period_seconds: 120,
             log_level: "info".to_string(),
             service_port: NFS_PORT,
+            hub_cpu_request: "100m".to_string(),
+            hub_memory_request: "128Mi".to_string(),
         }
     }
 }
@@ -625,11 +642,24 @@ pub fn deployment(
         });
     }
 
-    let resources = s.resources.as_ref().map(|r| ResourceRequirements {
-        requests: r.requests.clone().map(quantities),
-        limits: r.limits.clone().map(quantities),
-        ..Default::default()
-    });
+    // `spec.resources` wins outright when set — an operator who wrote
+    // a number meant it. Absent, fall back to the fleet defaults rather
+    // than to nothing: see `RenderDefaults::hub_cpu_request`.
+    let resources = match s.resources.as_ref() {
+        Some(r) => Some(ResourceRequirements {
+            requests: r.requests.clone().map(quantities),
+            limits: r.limits.clone().map(quantities),
+            ..Default::default()
+        }),
+        None => Some(ResourceRequirements {
+            requests: Some(std::collections::BTreeMap::from([
+                ("cpu".to_string(), Quantity(d.hub_cpu_request.clone())),
+                ("memory".to_string(), Quantity(d.hub_memory_request.clone())),
+            ])),
+            limits: None,
+            ..Default::default()
+        }),
+    };
 
     // Suspended keeps every object and the PVC — only the pod goes.
     // Waking is a replica count, not a restore.

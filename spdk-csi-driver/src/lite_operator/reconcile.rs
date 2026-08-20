@@ -62,6 +62,14 @@ const REQUEUE_SETTLED: Duration = Duration::from_secs(300);
 /// control, look again soon.
 const REQUEUE_PROGRESS: Duration = Duration::from_secs(15);
 const REQUEUE_BLOCKED: Duration = Duration::from_secs(30);
+/// The floor for a share that is parked with nothing to count down to.
+///
+/// Measured at the design target before this existed: 3000 shares, 300
+/// live, produced ~99 apiserver writes/s with NOTHING changing —
+/// 11.8/s of status applies plus ~87/s of child-object applies. The
+/// 2700 parked shares were most of it, each re-applying four identical
+/// objects on a 300s beat to conclude nothing had happened.
+const REQUEUE_PARKED: Duration = Duration::from_secs(1800);
 
 /// How long a settled share may be left alone.
 ///
@@ -83,6 +91,64 @@ const REQUEUE_BLOCKED: Duration = Duration::from_secs(30);
 /// suspend, a parked one is waiting to hibernate, and a hibernated one
 /// is waiting for a wake — which arrives as a watch event, not on this
 /// timer.
+/// Stamped on the Deployment: what the operator last applied, and when
+/// it last proved it. Both halves are needed — the hash alone cannot
+/// tell a match that is one reconcile old from one that is a week old,
+/// and a level-triggered operator must not let drift survive forever.
+const ANN_RENDER_HASH: &str = "flint.io/render-hash";
+const ANN_RENDER_VERIFIED: &str = "flint.io/render-verified-at";
+
+/// How long a parked share may coast on a matching hash before the
+/// operator re-asserts everything regardless. Ten parked requeues.
+const FULL_APPLY_AFTER: i64 = 10 * 1800;
+
+#[derive(Debug, PartialEq, Eq)]
+enum GateState {
+    /// Hash matches and the stamp is recent: the applies are provably
+    /// no-ops and can be skipped.
+    Fresh,
+    /// Hash matches but the stamp is old, or the stamp is unparseable.
+    /// Re-assert anyway — see FULL_APPLY_AFTER.
+    Stale,
+}
+
+/// A fingerprint of everything a reconcile would apply.
+///
+/// Deliberately hashes the SERIALIZED objects rather than a few chosen
+/// fields: a gate that hashes a subset silently stops noticing whatever
+/// was left out, and the failure is a share that never converges with
+/// nothing in the logs to say why.
+fn render_fingerprint(r: &render::Rendered) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for v in [
+        serde_json::to_string(&r.config_map).ok(),
+        serde_json::to_string(&r.service).ok(),
+        serde_json::to_string(&r.deployment).ok(),
+        r.pvc.as_ref().and_then(|p| serde_json::to_string(p).ok()),
+    ] {
+        v.hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
+}
+
+/// Read the gate off a live Deployment. `None` = no usable stamp (a
+/// share this operator has not applied yet, or one whose render
+/// changed), which always means apply.
+fn apply_gate_state(dep: &Deployment, want: &str) -> Option<GateState> {
+    let ann = dep.metadata.annotations.as_ref()?;
+    if ann.get(ANN_RENDER_HASH).map(String::as_str) != Some(want) {
+        return None;
+    }
+    let verified = ann.get(ANN_RENDER_VERIFIED)?;
+    let age = chrono::DateTime::parse_from_rfc3339(verified)
+        .ok()
+        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())?;
+    // A stamp from the FUTURE is a clock problem, not freshness. Treat
+    // it as stale rather than trusting it indefinitely.
+    Some(if (0..FULL_APPLY_AFTER).contains(&age) { GateState::Fresh } else { GateState::Stale })
+}
+
 fn settled_requeue(share: &FlintShare, state: IdleState) -> Duration {
     let idle = share.spec.idle.as_ref();
     match state {
@@ -93,10 +159,34 @@ fn settled_requeue(share: &FlintShare, state: IdleState) -> Duration {
         // re-applying four objects every 15s to decide nothing — the
         // cost falls on precisely the shares the ladder put away to
         // stop costing anything.
-        IdleState::Suspended => bounded(idle.and_then(|i| i.hibernate_after_secs)),
+        // Already parked. The timer exists ONLY to notice the next
+        // rung falling due, so re-check when that is actually near
+        // rather than every 300s for hours.
+        //
+        // Clamping the raw threshold (what this did before) is wrong at
+        // fleet scale: `bounded` caps at REQUEUE_SETTLED, so a share
+        // with `hibernateAfterSecs: 86400` re-checked every 300s for a
+        // day — 288 wakeups, 287 of which could only conclude "not
+        // yet". Clamping the time REMAINING keeps the rung's resolution
+        // exactly (the last re-check before it falls due is still
+        // within REQUEUE_PROGRESS) while costing one wakeup, not
+        // hundreds. `down_for` is read from an annotation with no I/O.
+        //
+        // No hibernate rung configured ⇒ nothing to count down to, so
+        // the timer buys nothing at all and goes to the parked floor.
+        IdleState::Suspended => match idle.and_then(|i| i.hibernate_after_secs) {
+            Some(after) => {
+                let down_for = idle::since(share)
+                    .map(|t| (chrono::Utc::now() - t).num_seconds().max(0) as u64)
+                    .unwrap_or(0);
+                Duration::from_secs(after.saturating_sub(down_for))
+                    .clamp(REQUEUE_PROGRESS, REQUEUE_PARKED)
+            }
+            None => REQUEUE_PARKED,
+        },
         // Bottom of the ladder: there is no next rung, and a wake
         // arrives as a watch event rather than on this timer.
-        IdleState::Hibernated => REQUEUE_SETTLED,
+        IdleState::Hibernated => REQUEUE_PARKED,
         // Mid-verification is progress, not steady state. Unreachable
         // from here today (`verify_and_hibernate` short-circuits with
         // its own action) and cheap to keep right if that changes.
@@ -769,11 +859,45 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         .ok_or_else(|| Error::Invalid("FlintShare has no uid".into()))?;
     let pp = PatchParams::apply(FIELD_MANAGER).force();
 
+    // THE PARKED-SHARE APPLY GATE.
+    //
+    // Every reconcile re-applies four objects with no diff check. For a
+    // share the ladder has already put away, none of them CAN have
+    // changed — the operator is rewriting identical bytes on a timer.
+    // Measured at the design target: 3000 shares with 300 live produced
+    // ~99 apiserver writes/s with nothing changing, and the 2700 parked
+    // shares were most of it.
+    //
+    // So: hash what we are about to apply, stamp it on the Deployment,
+    // and for a PARKED share skip the applies while the stamp matches.
+    //
+    // Live shares are deliberately NOT gated. They are the minority, a
+    // live hub is where drift actually costs something, and gating them
+    // would trade a real property for a rounding error.
+    //
+    // THE FORCED PASS IS NOT OPTIONAL. This operator is level-triggered:
+    // its correctness argument is that it re-asserts desired state
+    // whether or not it believes anything changed. A hash gate is a
+    // bet that the hash sees everything — and it does not see a
+    // hand-edited ConfigMap, a stripped label, or anything else that
+    // changes the CLUSTER without changing the RENDER. So the stamp
+    // carries a timestamp and a stale one forces a full apply, which
+    // bounds how long any drift can survive to FULL_APPLY_AFTER
+    // regardless of what the hash thinks.
+    let parked = idle::state_of(&share).is_down();
+    let render_hash = render_fingerprint(&rendered);
+    let gate = parked
+        .then(|| existing_dep.as_ref().and_then(|d| apply_gate_state(d, &render_hash)))
+        .flatten();
+    let skip_applies = matches!(gate, Some(GateState::Fresh));
+
     let mut cm = rendered.config_map.clone();
     cm.metadata.owner_references = Some(vec![owner.clone()]);
-    Api::<ConfigMap>::namespaced(ctx.client.clone(), &ns)
-        .patch(&names.config_map, &pp, &Patch::Apply(&cm))
-        .await?;
+    if !skip_applies {
+        Api::<ConfigMap>::namespaced(ctx.client.clone(), &ns)
+            .patch(&names.config_map, &pp, &Patch::Apply(&cm))
+            .await?;
+    }
 
     let claims: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &ns);
     let existing_pvc = get_opt(claims.get(&names.claim)).await?;
@@ -811,13 +935,30 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
 
     let mut svc = rendered.service.clone();
     svc.metadata.owner_references = Some(vec![owner.clone()]);
-    Api::<Service>::namespaced(ctx.client.clone(), &ns)
-        .patch(&names.service, &pp, &Patch::Apply(&svc))
-        .await?;
+    if !skip_applies {
+        Api::<Service>::namespaced(ctx.client.clone(), &ns)
+            .patch(&names.service, &pp, &Patch::Apply(&svc))
+            .await?;
+    }
 
-    let mut dep = rendered.deployment.clone();
-    dep.metadata.owner_references = Some(vec![owner]);
-    let dep = deployments.patch(&names.deployment, &pp, &Patch::Apply(&dep)).await?;
+    let dep = if skip_applies {
+        // Nothing was applied, so reuse what we already read. The only
+        // consumer below is the hibernate reclaim, which wants the LIVE
+        // Deployment — which this is.
+        existing_dep.clone().expect("gate only engages with an existing Deployment")
+    } else {
+        let mut dep = rendered.deployment.clone();
+        dep.metadata.owner_references = Some(vec![owner]);
+        // Stamp the gate on the object it gates on, so the next
+        // reconcile can read both halves in the GET it already does.
+        let ann = dep.metadata.annotations.get_or_insert_with(Default::default);
+        ann.insert(ANN_RENDER_HASH.to_string(), render_hash.clone());
+        ann.insert(
+            ANN_RENDER_VERIFIED.to_string(),
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        );
+        deployments.patch(&names.deployment, &pp, &Patch::Apply(&dep)).await?
+    };
 
     // A hibernated share's disk, once its pod has genuinely drained.
     // Driven from here rather than inside the decision because it has
@@ -1972,10 +2113,18 @@ mod tests {
         assert_eq!(settled_requeue(&share, Active), REQUEUE_SETTLED);
 
         // A share already parked is waiting on the HIBERNATE knob, not
-        // the suspend one, and with hibernation off it is left alone
-        // rather than re-applied every 15s to decide nothing.
+        // the suspend one. With hibernation OFF there is no next rung
+        // to count down to, so the timer buys nothing at all and the
+        // share drops to the parked floor.
         share.spec.idle = Some(armed(20));
-        assert_eq!(settled_requeue(&share, Suspended), REQUEUE_SETTLED);
+        assert_eq!(settled_requeue(&share, Suspended), REQUEUE_PARKED);
+
+        // With hibernation ON, the interval is the time REMAINING to
+        // that rung, not the raw threshold. This is the fleet-scale
+        // point: clamping the threshold capped at 300s, so a share with
+        // `hibernateAfterSecs: 86400` re-checked 288 times in a day to
+        // conclude "not yet" 287 times. No `idle-since` annotation
+        // here, so `down_for` is 0 and the whole threshold remains.
         share.spec.idle = Some(IdleSpec {
             suspend_after_secs: Some(20),
             hibernate_after_secs: Some(120),
@@ -1983,8 +2132,146 @@ mod tests {
         });
         assert_eq!(settled_requeue(&share, Suspended), Duration::from_secs(120));
 
-        // Bottom of the ladder: nothing left on a timer.
-        assert_eq!(settled_requeue(&share, Hibernated), REQUEUE_SETTLED);
+        // A DAY-long hibernate threshold must not become 288 wakeups.
+        share.spec.idle = Some(IdleSpec {
+            suspend_after_secs: Some(20),
+            hibernate_after_secs: Some(86_400),
+            suspend_with_sessions: None,
+        });
+        assert_eq!(
+            settled_requeue(&share, Suspended),
+            REQUEUE_PARKED,
+            "a far-off rung must clamp to the parked floor, not to REQUEUE_SETTLED"
+        );
+
+        // And once the rung is NEAR, resolution comes back: a share
+        // that went down 86,340s ago is 60s from hibernating and must
+        // be looked at then, not in half an hour.
+        share.metadata.annotations.get_or_insert_with(Default::default).insert(
+            idle::ANN_IDLE_SINCE.to_string(),
+            (chrono::Utc::now() - chrono::Duration::seconds(86_340))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        );
+        let near = settled_requeue(&share, Suspended);
+        assert!(
+            near <= Duration::from_secs(75) && near >= REQUEUE_PROGRESS,
+            "a rung 60s away must be re-checked in ~60s, got {near:?} — clamping on the \
+             raw threshold instead of the REMAINING time loses the rung's resolution"
+        );
+
+        // Bottom of the ladder: nothing below it, so the floor again.
+        assert_eq!(settled_requeue(&share, Hibernated), REQUEUE_PARKED);
+    }
+
+    // ---------------------------------------------------------------
+    // The parked-share apply gate. Measured at the design target before
+    // it existed: 3000 shares / 300 live produced ~99 apiserver
+    // writes/s with NOTHING changing, most of it 2700 parked shares
+    // re-applying four identical objects on a timer.
+    // ---------------------------------------------------------------
+
+    fn dep_with(hash: Option<&str>, verified: Option<chrono::DateTime<chrono::Utc>>) -> Deployment {
+        let mut d = Deployment::default();
+        let mut ann = std::collections::BTreeMap::new();
+        if let Some(h) = hash {
+            ann.insert(ANN_RENDER_HASH.to_string(), h.to_string());
+        }
+        if let Some(v) = verified {
+            ann.insert(
+                ANN_RENDER_VERIFIED.to_string(),
+                v.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            );
+        }
+        d.metadata.annotations = Some(ann);
+        d
+    }
+
+    /// The gate only engages on an exact match with a recent stamp.
+    #[test]
+    fn the_apply_gate_engages_only_on_a_fresh_exact_match() {
+        let now = chrono::Utc::now();
+        assert_eq!(
+            apply_gate_state(&dep_with(Some("abc"), Some(now)), "abc"),
+            Some(GateState::Fresh)
+        );
+        assert_eq!(
+            apply_gate_state(&dep_with(Some("abc"), Some(now)), "different"),
+            None,
+            "a changed render must always apply"
+        );
+        assert_eq!(
+            apply_gate_state(&dep_with(None, Some(now)), "abc"),
+            None,
+            "a Deployment this operator has never stamped must always apply"
+        );
+        assert_eq!(
+            apply_gate_state(&dep_with(Some("abc"), None), "abc"),
+            None,
+            "a hash with no timestamp cannot be aged, so it cannot be trusted"
+        );
+    }
+
+    /// THE PROPERTY THAT KEEPS THIS OPERATOR LEVEL-TRIGGERED.
+    ///
+    /// The whole correctness argument is that desired state is
+    /// re-asserted whether or not anything is believed to have changed.
+    /// A hash gate is a bet that the hash sees everything — and it does
+    /// NOT see a hand-edited ConfigMap, a stripped label, or anything
+    /// else that changes the CLUSTER without changing the RENDER. So a
+    /// stale stamp must fall out of the gate, which bounds how long any
+    /// such drift can survive no matter what the hash says.
+    #[test]
+    fn a_stale_stamp_forces_a_full_apply_however_well_the_hash_matches() {
+        let old = chrono::Utc::now() - chrono::Duration::seconds(FULL_APPLY_AFTER + 60);
+        assert_eq!(
+            apply_gate_state(&dep_with(Some("abc"), Some(old)), "abc"),
+            Some(GateState::Stale),
+            "drift that the render cannot see must not be able to survive forever"
+        );
+
+        // A stamp from the FUTURE is a clock problem, not freshness —
+        // trusting it would extend the gate indefinitely.
+        let future = chrono::Utc::now() + chrono::Duration::seconds(3600);
+        assert_eq!(
+            apply_gate_state(&dep_with(Some("abc"), Some(future)), "abc"),
+            Some(GateState::Stale)
+        );
+
+        // Unparseable is not fresh either.
+        let mut d = dep_with(Some("abc"), None);
+        d.metadata.annotations.as_mut().unwrap()
+            .insert(ANN_RENDER_VERIFIED.to_string(), "not-a-time".to_string());
+        assert_eq!(apply_gate_state(&d, "abc"), None);
+    }
+
+    /// The fingerprint must move when ANY of the four applied objects
+    /// moves. A gate that hashes a subset silently stops noticing
+    /// whatever was left out, and the symptom is a share that never
+    /// converges with nothing in the logs to say why.
+    #[test]
+    fn the_render_fingerprint_moves_when_any_applied_object_moves() {
+        let share = share_named("fp");
+        let d = render::RenderDefaults::default();
+        let base = render::render(&share, &d, None, None);
+        let h0 = render_fingerprint(&base);
+
+        let mut only_cm = render::render(&share, &d, None, None);
+        only_cm.config_map.data.get_or_insert_with(Default::default)
+            .insert("x".into(), "y".into());
+        assert_ne!(render_fingerprint(&only_cm), h0, "a ConfigMap change must move it");
+
+        let mut only_svc = render::render(&share, &d, None, None);
+        only_svc.service.metadata.labels.get_or_insert_with(Default::default)
+            .insert("x".into(), "y".into());
+        assert_ne!(render_fingerprint(&only_svc), h0, "a Service change must move it");
+
+        let mut only_dep = render::render(&share, &d, None, None);
+        only_dep.deployment.spec.as_mut().unwrap().replicas = Some(7);
+        assert_ne!(render_fingerprint(&only_dep), h0, "a Deployment change must move it");
+
+        // And it must be STABLE: two renders of the same input agree,
+        // or the gate never engages and buys nothing.
+        assert_eq!(render_fingerprint(&render::render(&share, &d, None, None)), h0);
     }
 
     /// `reclaim: Delete` and `spec.existingClaim` are both the user's
