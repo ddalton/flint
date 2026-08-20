@@ -317,6 +317,7 @@ impl FlushOrchestrator {
     /// object moments later. The three arms are load-bearing — see
     /// [`crate::tier::manifest::ManifestSeed`].
     pub async fn startup(&self) -> crate::tier::manifest::ManifestSeed {
+        self.heal_generation_device().await;
         let n = self.load_generations().await;
         let i = self.reconcile_intents().await;
         let seed =
@@ -327,6 +328,106 @@ impl FlushOrchestrator {
             info!("tier flush: startup loaded {} generation row(s), reconciled {} intent(s)", n, i);
         }
         out
+    }
+
+    /// Re-home generation rows whose `dev` no longer matches the mounted
+    /// export, and prune the ones that no longer name a live file.
+    ///
+    /// Generation rows are keyed `(dev, ino)`, and `dev` is stable only
+    /// by luck: it is the device number of the mounted volume, and a
+    /// CSI restage can hand the volume back on a different minor. When
+    /// it drifts, EVERY row is still loaded but no longer matches
+    /// anything the tree walk finds, so `manifest::build` counts every
+    /// file as `beyond_rpo` and DROPS it from the manifest — then the
+    /// barrier publishes that manifest over the good one. Measured on a
+    /// real cluster: `dev` moved 66311 → 66312 and
+    /// `tenant-a/.flint/manifest` went from 7919 bytes and 37 entries
+    /// to 534 bytes and 4 entries, with all 33 data objects still
+    /// present in the bucket but no longer named by it. `rpoClean` then
+    /// stays false forever, so hibernate is blocked permanently — which
+    /// is the only reason that bucket did not lose its POSIX metadata.
+    ///
+    /// The prune is not optional. Re-homing alone would let a row whose
+    /// file was deleted during a drifted boot (its delete missed,
+    /// because deletes match on `dev` too) collide with a REUSED inode
+    /// and claim someone else's S3 key. So a row survives only if its
+    /// inode is still live under the export root.
+    async fn heal_generation_device(&self) {
+        let root = self.cfg.export_root.clone();
+        let live_dev = match std::fs::metadata(&root) {
+            Ok(md) => {
+                use std::os::unix::fs::MetadataExt;
+                md.dev()
+            }
+            Err(e) => {
+                warn!("tier flush: cannot stat export root to check generation dev: {}", e);
+                return;
+            }
+        };
+        let rows = match self.backend.tier_list_generations().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("tier flush: cannot read generation rows to check dev: {}", e);
+                return;
+            }
+        };
+        let stale: Vec<_> = rows.iter().filter(|r| r.dev != live_dev).collect();
+        if stale.is_empty() {
+            return;
+        }
+        // Only now — a drift is rare — pay for a tree walk.
+        let live_inos = match tokio::task::spawn_blocking(move || live_inodes(&root)).await {
+            Ok(Ok(set)) => set,
+            _ => {
+                warn!("tier flush: generation dev drifted but the export walk failed — \
+                       leaving rows alone rather than guessing");
+                return;
+            }
+        };
+        // Newest wins when two rows land on one inode.
+        let mut best: std::collections::HashMap<u64, &crate::state_backend::TierGenerationRow> =
+            std::collections::HashMap::new();
+        for r in &stale {
+            if !live_inos.contains(&r.ino) {
+                continue;
+            }
+            best.entry(r.ino)
+                .and_modify(|cur| {
+                    if r.updated_unix > cur.updated_unix {
+                        *cur = r;
+                    }
+                })
+                .or_insert(r);
+        }
+        let (mut rehomed, mut dropped) = (0usize, 0usize);
+        for r in &stale {
+            let _ = self.backend.tier_delete_generation(r.dev, r.ino).await;
+        }
+        for (ino, r) in best {
+            let row = crate::state_backend::TierGenerationRow {
+                dev: live_dev,
+                ino,
+                key: r.key.clone(),
+                generation: r.generation,
+                etag: r.etag.clone(),
+                crc64_b64: r.crc64_b64.clone(),
+                size: r.size,
+                copy_allowed: r.copy_allowed,
+                updated_unix: r.updated_unix,
+            };
+            match self.backend.tier_upsert_generation(&row).await {
+                Ok(()) => rehomed += 1,
+                Err(e) => warn!("tier flush: re-homing generation row ino {} failed: {}", ino, e),
+            }
+        }
+        dropped += stale.len().saturating_sub(rehomed);
+        warn!(
+            "🔧 tier flush: export device changed to {} — re-homed {} generation row(s), \
+             dropped {} that no longer name a live file. Without this every file would \
+             have counted beyond RPO and the next manifest barrier would have published \
+             a manifest that names none of them.",
+            live_dev, rehomed, dropped
+        );
     }
 
     /// Rebuild the registry from the A7 rows — the rows are the truth
@@ -1272,6 +1373,33 @@ async fn read_whole(path: &Path) -> Result<Bytes, String> {
         .map_err(|e| format!("read: {}", e))
 }
 
+/// Every inode of a regular file living under `root`, for the
+/// generation-row re-homing prune.
+#[cfg(unix)]
+fn live_inodes(root: &std::path::Path) -> std::io::Result<std::collections::HashSet<u64>> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = std::collections::HashSet::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            let md = match ent.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if md.is_dir() {
+                stack.push(ent.path());
+            } else if md.is_file() {
+                out.insert(md.ino());
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1524,6 +1652,68 @@ mod tests {
             .unwrap()
             .into_iter()
             .find(|r| r.dev == dev && r.ino == ino)
+    }
+
+    /// A CSI restage can hand the volume back on a different device
+    /// minor. Generation rows are keyed `(dev, ino)`, so when that
+    /// happens every row still loads and none of them match — and the
+    /// next manifest barrier publishes a manifest naming NO files.
+    /// Observed on a real cluster: 33 rows loaded, 33 counted beyond
+    /// RPO, manifest cut from 7919 bytes to 534.
+    #[tokio::test]
+    async fn a_drifted_export_device_re_homes_its_generation_rows() {
+        let r = rig(1024, 256);
+        let f = r.root.join("kept.bin");
+        std::fs::write(&f, b"payload").unwrap();
+        let (live_dev, ino) = ident(&f);
+
+        // The row as a PREVIOUS boot wrote it: right inode, stale device.
+        let stale = crate::state_backend::TierGenerationRow {
+            dev: live_dev ^ 0x1,
+            ino,
+            key: "t/kept.bin".into(),
+            generation: 7,
+            etag: "\"deadbeef\"".into(),
+            crc64_b64: None,
+            size: 7,
+            copy_allowed: true,
+            updated_unix: 1000,
+        };
+        r.backend.tier_upsert_generation(&stale).await.unwrap();
+
+        // A row for an inode that no longer exists must NOT be re-homed:
+        // its inode can be reused and it would then claim another
+        // file's object.
+        let orphan = crate::state_backend::TierGenerationRow {
+            ino: ino.wrapping_add(1_000_000),
+            key: "t/vanished.bin".into(),
+            ..stale.clone()
+        };
+        r.backend.tier_upsert_generation(&orphan).await.unwrap();
+
+        r.orch.startup().await;
+
+        let healed = r.orch.generation_of(live_dev, ino).expect("row must re-home to the live dev");
+        assert_eq!(healed.key, "t/kept.bin");
+        assert_eq!(healed.generation, 7, "the re-homed row keeps its generation");
+        assert!(
+            r.orch.generation_of(stale.dev, ino).is_none(),
+            "the stale-dev row must be gone, not duplicated"
+        );
+        assert!(
+            r.orch.generation_of(live_dev, orphan.ino).is_none(),
+            "a row whose inode is not live must be dropped, never re-homed"
+        );
+
+        // The point of all of it: the manifest names the file again.
+        let gens: std::collections::HashMap<(u64, u64), GenRecord> =
+            r.orch.generations.iter().map(|e| (*e.key(), e.value().clone())).collect();
+        let built = crate::tier::manifest::build(&r.root, &gens).unwrap();
+        assert_eq!(built.beyond_rpo, 0, "nothing may be counted beyond RPO after healing");
+        assert!(
+            built.entries.iter().any(|e| e.key.as_deref() == Some("t/kept.bin")),
+            "the manifest must name the file again"
+        );
     }
 
     #[tokio::test]
