@@ -1293,8 +1293,11 @@ impl MetadataServer {
         )
         .await;
 
-        // The barrier: nothing may publish from here on.
-        runtime.guard.fence();
+        // The barrier: nothing may publish from here on. This is OUR
+        // fence, not a deposition, and the distinction is load-bearing
+        // — the release CAS below is still owed, and a plain `fence()`
+        // here suppressed it entirely.
+        runtime.guard.fence_for_shutdown();
 
         if rpo.clean {
             let outcome = runtime
