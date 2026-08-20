@@ -42,6 +42,7 @@ Shares: `workspaces/tenant-a` (5Gi, flint-spdk, file API on) and
 | **C4 / D7** | **CONFIRMED — the documented residual is FALSE** | Under a proven partition, `nfs.activeLeases` stayed **1 for 770 seconds (12.8 min)** against a **90s** NFSv4 lease, and the share stayed `Ready`/`idle=Active` the whole time with `suspendAfterSecs=120` **and** `suspendWithSessions: false` armed. Then **one** file-API compound took it to **0 immediately** (`fileapi_rc=200` → `activeLeases=0`). That is the anti-vacuity the plan demanded: the same instrument that read "1, forever" read 0 the instant a compound drove the sweep, which also proves the lease had been expired the entire time — nothing was reaping it. **And the ladder then fired**: the share went `IdleSuspended` at **t+988s**, 208s after that one compound (its own `suspendAfterSecs` plus reconcile cadence), so the ladder was armed and working the entire 12.8 minutes and the stale lease was the *only* thing holding it. One stimulus, two coupled effects. **A partitioned agent fleet pins its share awake forever**, and the docs' "leases expire, so a long enough partition drops the count to zero on its own — document the window" is wrong: the window never closes. |
 | **E3** | **PASS — strong form, and it earned its keep** | `HibernateStarted → HibernateDeferred — not reclaiming the disk: 8 file(s) beyond RPO`. The PVC was **not** deleted (same uid throughout). This was not a staged refusal: the share genuinely was not recoverable, because of the generation-key bug below. The predicate refused a real reclaim of a real disk holding the only complete copy of the POSIX metadata. **This is the single property that kept the drill from losing data.** |
 | **E2** | **PARTIAL — blocked by the bug it exposed** | The hibernate never completed, so "PVC destroyed, then bytes return identical" is **not** demonstrated. What did hold: all 8 × 32 MiB files read back **byte-identical** across a suspend→wake (`identical=8 mismatched=0`), and the comparison is not vacuous — against a deliberately corrupted truth list the same harness reported exactly `identical=7 mismatched=1`. Wake took 203s, most of it the ladder re-deciding rather than the hub booting. |
+| **D8** | **REFUTED — the hub does reach hard-full** | The claim was "the tier's space admission delivers ENOSPC while the filesystem still has ≥ the reserve free — the hub never reaches hard-full". It does reach hard-full. A **single 600 MiB PUT** onto a volume with **539 MiB free** (283 MiB headroom after a ~268 MiB reserve) returned **HTTP 201** and drove `df` to **0 bytes available, 100% used** — the entire reserve consumed, with `nospcWriteRefusals` still **0**. The admission never refused once. The incremental fill did produce a genuine `507` with **155 MiB free** inside the failing iteration (the plan's anti-vacuity, and the reserve did hold *there*) — but 155 MiB is already below the reserve, so even that refusal came late. **The hub self-healed** (publish + evict took it back to 84%, then 12% after cleanup) and nothing was lost. |
 | D3 (flock arm) | **PASS** | A second `flint-pnfs-mds` started by hand inside the running hub pod, on the same `/data/state`, **never became a writer**. It logged `🔒 state dir /data/state is held by another hub process — waiting for it to finish draining`, waited the full 150s budget (`~grace + slack`), then exited non-zero with `refusing to start a second writer on this volume (two processes here share one server_id, which the epoch protocol cannot fence)`. Oracles read as **counts, not greps**: `refusals=1`, `bound2049=0` — it never reached the listener, never claimed an epoch. Anti-vacuity: a first run with `timeout 60` caught it mid-wait with `refusals=0`, proving the count tracks the refusal and not merely the process exiting. |
 | **F29 recovery** | **FOUND — the wedge has a non-destructive exit** | The force-delete wedge that voided D9 is cleared by **dropping the volume's last referencing pod**, which lets kubelet issue the `NodeUnstageVolume` the force-delete skipped. `spec.lifecycle: Suspended` (replicas→0) then `Active` did it: both wedged shares were `Ready` **30s** later, csi-node logging `Volume … unstaged successfully` for both PVCs. **Why a plain `kubectl delete pod` can never work:** the ReplicaSet recreates a pod immediately, so the volume never loses its last reference and kubelet never unstages — the driver's F29 refusal (`main.rs:4968`) is correct in itself, but kubelet's volume-manager cache still says "staged" and so `NodeStageVolume` is never called again. Nothing self-heals and nothing surfaces the remedy. |
 
@@ -193,6 +194,45 @@ root on one filesystem, so `ino` alone identifies a file, while `dev` adds a
 value that is stable only by luck. Normalise it — remap stored rows to the
 export root's live `st_dev` at load, or drop `dev` from the lookup — and
 deduplicate rows that collide on `ino` by `updated_unix`.
+
+## FOURTH FINDING — the write reserve is defeated by write speed, and the code knows
+
+`admit_bytes` (`tier/space.rs:155`) is the A10 admission for every
+byte-extending client mutation. It reads `s.headroom()` — a gauge the refresher
+updates every **`REFRESH_SECS = 2`** — and deliberately does *not* force a
+`statvfs` on the admit path ("Admits never pay this"); only the refusal branch
+re-checks. There is **no accounting for bytes already admitted but not yet
+landed**.
+
+So a sustained write admits chunk after chunk against a gauge up to two seconds
+stale. At NVMe speeds two seconds is hundreds of megabytes, which is larger
+than the whole reserve. Measured: 600 MiB written onto 539 MiB free, `201
+Created`, `df` avail **0**.
+
+**The codebase already contains the fix, applied to the wrong path.**
+`admit_warm` — the bulk-hydration admission, twenty lines below — is documented
+as *"STRICTER than the demand admission on both axes: headroom must cover `len`
+PLUS the fill's admitted-but-unfinished bytes (`pending` — N blind concurrent
+admissions would otherwise overshoot by N × object size, and the fill must
+never eat the demand/write reserve), AND the refresh is unconditional."* Every
+word of that rationale applies to a bulk client upload. The warm fill is
+protected from overshoot; the client write path that the reserve exists to
+bound is not.
+
+**Why it matters even though nothing broke here.** The reserve's job is to keep
+the state database writable when the export fills. This drill drove the volume
+to literally zero bytes and the hub stayed `Ready` — publish-and-evict clawed
+the space back, and a 64 MiB `flint-ballast.bin` sits in the state dir for
+exactly this. That is the mitigation working, not the guard working. A hub that
+cannot write `state.db` is the failure this reserve was drawn to prevent, and
+right now the only thing standing between a fast uploader and that state is how
+quickly eviction runs.
+
+**Fix:** give `admit_bytes` the same `pending` accounting `admit_warm` already
+has — a running total of admitted-but-unlanded bytes, decremented as writes
+land — or force the `statvfs` refresh once headroom falls below some multiple
+of the reserve. The second is cheaper and bounds the error to one refresh
+window's worth of writes near the boundary only.
 
 ## Legs NOT run, and why
 
