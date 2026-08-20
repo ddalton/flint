@@ -63,6 +63,27 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
     done
 done
 
+# Content check, which an mtime cannot fake. The operator has the hub
+# image pinned at COMPILE TIME, so the binary itself says which release
+# it was built for — compare that against the chart's appVersion. This is
+# what actually catches "rebuilt the wrong tree": a fresh timestamp on
+# code from a stale checkout passes every mtime test there is.
+want_pin=$(awk '/^appVersion:/ {gsub(/"/,"",$2); print $2}' \
+           "$here/../flint-lite-chart/Chart.yaml")
+if [ -n "$want_pin" ] && [ "$stale" = "0" ]; then
+    for arch in amd64 arm64; do
+        got=$(strings "$dest/$arch/flint-lite-operator" 2>/dev/null \
+              | grep -oE 'dilipdalton/flint-pnfs:[0-9.]+' | sort -u | head -1)
+        if [ "$got" != "dilipdalton/flint-pnfs:$want_pin" ]; then
+            echo "  ✗ WRONG BUILD $arch/flint-lite-operator pins '${got:-<none>}'," >&2
+            echo "                the chart's appVersion is $want_pin" >&2
+            stale=1
+        else
+            echo "  ✓ pin check $arch: $got"
+        fi
+    done
+fi
+
 if [ "$stale" != "0" ]; then
     # Leave NOTHING behind. A half-staged directory is worse than an
     # empty one: the next run — or a careless `docker build` — would find
