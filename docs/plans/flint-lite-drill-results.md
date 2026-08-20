@@ -44,6 +44,8 @@ Shares: `workspaces/tenant-a` (5Gi, flint-spdk, file API on) and
 | **E2** | **PARTIAL — blocked by the bug it exposed** | The hibernate never completed, so "PVC destroyed, then bytes return identical" is **not** demonstrated. What did hold: all 8 × 32 MiB files read back **byte-identical** across a suspend→wake (`identical=8 mismatched=0`), and the comparison is not vacuous — against a deliberately corrupted truth list the same harness reported exactly `identical=7 mismatched=1`. Wake took 203s, most of it the ladder re-deciding rather than the hub booting. |
 | **D8** | **REFUTED — the hub does reach hard-full** | The claim was "the tier's space admission delivers ENOSPC while the filesystem still has ≥ the reserve free — the hub never reaches hard-full". It does reach hard-full. A **single 600 MiB PUT** onto a volume with **539 MiB free** (283 MiB headroom after a ~268 MiB reserve) returned **HTTP 201** and drove `df` to **0 bytes available, 100% used** — the entire reserve consumed, with `nospcWriteRefusals` still **0**. The admission never refused once. The incremental fill did produce a genuine `507` with **155 MiB free** inside the failing iteration (the plan's anti-vacuity, and the reserve did hold *there*) — but 155 MiB is already below the reserve, so even that refusal came late. **The hub self-healed** (publish + evict took it back to 84%, then 12% after cleanup) and nothing was lost. |
 | **D6** | **PASS — the best anti-vacuity in the set** | One stimulus (`flint.io/requested-at`), three outcomes. **Leader failover:** deleting the lease holder moved the lease to the standby in **46s** (`leaseDurationSeconds: 15`), and the same stimulus then woke the share. **No operator at all** (`replicas=0`): the stimulus was stamped and the share sat at `IdleSuspended`/`replicas=0` for **245s — `woke=NO`**. **Operator restored:** the **already-stamped** annotation took effect and the share was `Ready` in **41s** — `woke=YES`, proving the wake is genuinely level-triggered rather than edge-triggered on the write. A typo'd key or wrong namespace would have failed all three halves and could not be mistaken for a pass. **Confirms §M6-7: level-triggered wake is real only while the operator reconciles — "fails safe, only a delete hangs" is wrong.** Two replicas plus a PDB is therefore load-bearing, not hygiene. |
+| **D1** | **PASS — nothing certified was lost** | A fresh share reached `rpo(clean=True, beyondRpo=0, seq=3)` — first boot, so its generation rows were still keyed on the live device. Anti-vacuity first: **3 distinct epoch-cell ETags** in 3 samples, so the instrument reads the live cell and not a cache. Then total local-state loss: the hub `--force --grace-period=0`, the share suspended so kubelet could unstage, and the **PVC destroyed**. The bucket was the only remaining copy. It came back on a **new PVC uid** and all **6 × 48 MiB files returned byte-identical** at full size (`identical=6 lost=0`). Worth noting for the DR story: the operator **re-creates the PVC immediately** — a level-triggered empty claim — which is what lets the import rebuild into it. |
+| **B6** | **PASS — the knob is wired end to end** | `wake-intent` reaches the hub's boot config with **opposite values from one instrument**: `warm` → `hydrateWarmAfterImport:true`, `cold` → `hydrateWarmAfterImport:false`, both caught in the ConfigMap 2s into the wake. It must be sampled *during* the wake — the operator consumes and clears the intent once the hub is up, then re-renders without the line, so a read taken after `phase=Ready` sees nothing and looks inert. **[C8] is resolved in this build**; the annotation is no longer the parsed-but-inert knob the plan flagged. |
 | D3 (flock arm) | **PASS** | A second `flint-pnfs-mds` started by hand inside the running hub pod, on the same `/data/state`, **never became a writer**. It logged `🔒 state dir /data/state is held by another hub process — waiting for it to finish draining`, waited the full 150s budget (`~grace + slack`), then exited non-zero with `refusing to start a second writer on this volume (two processes here share one server_id, which the epoch protocol cannot fence)`. Oracles read as **counts, not greps**: `refusals=1`, `bound2049=0` — it never reached the listener, never claimed an epoch. Anti-vacuity: a first run with `timeout 60` caught it mid-wait with `refusals=0`, proving the count tracks the refusal and not merely the process exiting. |
 | **F29 recovery** | **FOUND — the wedge has a non-destructive exit** | The force-delete wedge that voided D9 is cleared by **dropping the volume's last referencing pod**, which lets kubelet issue the `NodeUnstageVolume` the force-delete skipped. `spec.lifecycle: Suspended` (replicas→0) then `Active` did it: both wedged shares were `Ready` **30s** later, csi-node logging `Volume … unstaged successfully` for both PVCs. **Why a plain `kubectl delete pod` can never work:** the ReplicaSet recreates a pod immediately, so the volume never loses its last reference and kubelet never unstages — the driver's F29 refusal (`main.rs:4968`) is correct in itself, but kubelet's volume-manager cache still says "staged" and so `NodeStageVolume` is never called again. Nothing self-heals and nothing surfaces the remedy. |
 
@@ -237,81 +239,96 @@ window's worth of writes near the boundary only.
 
 ## Legs NOT run, and why
 
-Stated so the gaps are chosen rather than discovered later.
+Stated so the gaps are chosen rather than discovered later. Most of the
+original list was cleared in the second session; what remains is here.
 
 | Leg | Why not |
 |---|---|
-| **B4** (hibernate ordering: PVC only after the bucket says released) | Partly observed — the `HibernateStarted → HibernateVerified → DiskReclaimed` sequence was captured with the bucket-side inventory intact (see B3/E8). The timestamp-ordering oracle against the epoch object's `LastModified` was not run, and is now **partly meaningless anyway**: the release never lands (see the shipped bug), so `released: true` is not observable on this build. **Re-run after that fix.** |
-| **B6** (`wake-intent: warm`) | Not run. Needs a cold/warm arm pair with hydration DELAY counting; deprioritised behind the data-safety legs. |
-| **C4 / D7** (lease decay under partition) | Not run. Needs a sustained Cilium-policy partition plus lease-expiry timing; the highest-value remaining leg, because it decides whether a partitioned agent fleet pins its share awake forever. |
-| **D1** (node loss bounded by RPO) | Not run. |
-| **D2** (120s grace at real S3 rates) | Superseded in part by B2, which showed the grace window is **not spent** — the hub exits in ~1s and leaves the epoch held. A throughput-under-grace number would now be measuring something the code does not do. |
-| **D3** (wake racing drain; the flock) | Not run. Blocked by the same F29 wedge that voided D9 — producing the race needs an unclean kill. |
-| **D6** (leader node loss) | Not run. |
-| **D8** (disk-full on a real CSI volume) | Partly covered by A6, which produced a genuine `507` from the tier's space admission with `nospcWriteRefusals=1` and recorded the reserve margin (44 MiB free at refusal). The dedicated ENOSPC-vs-filesystem arm was not run. |
-| **E2 / E3** (hibernate round trip, refuse-then-complete) | Substantially covered: the full hibernate rung ran twice (B3/B5) with `HibernateVerified`, a new PVC UID, and a complete tree rebuilt from the bucket as stubs; and hibernate provably deferred while the RPO predicate was false. The byte-identical corpus comparison specifically across a hibernate was not run (it was run across a Retain detach in E1). |
-| **E4** (operator never deletes a PVC it could not ask about) | **Covered by B3/D5** — 20 samples over 500s with the PVC intact and `HubReachable=False (PollFailed)`. |
-| **Fleet budget** (3000 CRs / 300 live) | Out of scope on a 2-worker rig, as the plan already stated. |
+| **B4** (hibernate ordering: PVC only after the bucket says `released`) | Still not run, and still **not runnable on this build** — the clean release never lands, so `released: true` is not observable. The fix is now on `fix/epoch-clean-release`; re-run against a build carrying it. The *sequence* (`HibernateStarted → HibernateVerified/Deferred → DiskReclaimed`) has been observed three times. |
+| **D2** (120s grace at real S3 rates) | Superseded by B2: the grace window is **not spent** — the hub exits in ~1s and deliberately leaves the epoch held. A throughput-under-grace number would measure something the code does not do. |
+| **E2** (full hibernate round trip) | **Attempted, blocked by the generation-key bug** it exposed — hibernate correctly deferred, so the PVC was never destroyed. Bytes were verified byte-identical across a suspend/wake instead. Re-runnable once the fix ships. |
+| **Fleet budget** (3000 CRs / 300 live) | Out of scope on a 2-worker rig, as the plan said from the start. |
+| **True EC2 node termination** | D1 reproduced node loss as *total local-state loss* (force-kill + PVC destroy), which is what losing a node means for a node-local `flint-spdk` volume. It did **not** terminate an instance, so nothing here exercises kubelet rescheduling or trove's node replacement. |
 
 ## Summary
 
-**28 legs run. 26 PASS, 1 PASS-with-refuted-prediction (A9), 1 VOID (D9,
-instrument failed). No leg failed its oracle. Nothing lost data.**
+**36 legs across two sessions. 32 PASS, 1 pass-with-refuted-prediction (A9),
+1 claim REFUTED (D8), 1 PARTIAL (E2), 1 VOID (D9). No leg failed its oracle.
+Nothing lost data — twice because a safety predicate refused, not because
+nothing went wrong.**
 
-Phase A 9/9 · Phase B 7/9 · Phase C 6/7 · Phase D 2 arms · Phase E 4/8,
-plus the §M0 mitigation validated.
+Session 1 ran 28 legs and found the epoch-release bug. Session 2 ran the
+remainder — C4/D7, D3, D6, D8, D1, B6, E2, E3 — and found **three more shipped
+bugs**, one of them the most serious of the campaign.
 
-### Act on these
+### Act on these, in order
 
-1. **The clean epoch release never lands** (shipped bug, deterministic,
-   3/3 + 2 independent corroborations). `guard.is_fenced()` means both
-   "deposed" and "we closed the barrier ourselves", and the clean
-   shutdown sets it one line before calling `release()`, so
-   `store.epoch_release()` is never called. Cost: every identity-changing
-   wake pays the full 6×10s lease — measured 79s vs 13s (B7), and again
-   as E5's 79s takeover after a *clean* shutdown. Fix: distinguish
-   self-fencing from deposition.
-2. **The download path fully buffers** (A7). `VmHWM` 30 MB → 541 MiB on a
-   512 MiB request; at a 256Mi limit the same GET produced `OOMKilled`
-   and an empty reply. The 5 GiB default cap needs ~5 GiB of headroom or
-   one authenticated browse click kills the share and takes the NFS
-   export with it. The module doc already describes the streaming design
-   the code does not implement. A hybrid — buffer to a small threshold,
-   stream beyond with error-on-short — keeps the clean pre-byte 409 for
-   small files. Interim mitigation with no code change: lower
-   `maxDownloadBytes`, since the cap is checked against the *range*, not
-   the file.
-3. **`suspendWithSessions: false` should be the default** (C6 + §M0).
-   With the default, suspending under cross-cluster mounts left three
-   consumer pods unable to terminate for 288s and two pinned node
-   mounts; with it, the share correctly refused to suspend for 350s on a
-   60s ladder.
-4. **A cold read's first answer is 409, not 503** (A4). In-region
-   hydration outruns the read-window guard, so 409-then-retry is the
-   normal cold-open path. A front door handling only 503 errors on every
-   first cold open.
-5. **`nfsClientCIDRs` is inert for in-cluster pod clients on Cilium**
-   (A2). An `ipBlock` naming a pod's exact `/32` never opened; a
-   `podSelector` did. Fails closed, silently. Document it, or reject pod
-   CIDRs at admission.
-6. **A5: the cap bounds the response, not the egress.** A 1 KiB Range
-   against a cold 512 MiB file pulled all 512 MiB. The 413's advice to
-   use Range saves response size and no transfer.
-7. **A9's published loss range is ~5x too pessimistic for real clients.**
-   Direction confirmed (loss tracks hub CPU), magnitude refuted: 3.2%
-   residual idle and 8.8% loaded, against a contract quoting 16%/50%.
-8. **F29 in the CSI driver** — `--force` deleting a pod on a `flint-spdk`
-   volume wedges the staging path permanently (`restage required`), and a
-   normal pod delete does not clear it. Voided D9 and blocked D3.
+1. **A stale `dev` silently empties the manifest.** Generation rows are keyed
+   `(dev, ino)`; a restage can move `dev`; every row then loads but matches
+   nothing, so the barrier publishes a manifest naming **no files**. Measured:
+   7919 B/37 entries → 534 B/4 entries, and a fresh share wrote a literally
+   empty `{"entries":[]}`. Never self-heals. **Fixed** on
+   `fix/epoch-clean-release` (re-home to the live `st_dev`, prune rows whose
+   inode is no longer live).
+2. **The clean epoch release never lands.** `is_fenced()` conflated "deposed"
+   with "we fenced ourselves on the way out", and the clean shutdown sets it one
+   line before `release()`. Costs every identity-changing wake the full 6×10s
+   lease — 79s vs 13s. **Fixed** (`fence_for_shutdown` / `fenced_by_deposition`).
+3. **Expired leases are only reaped by inbound traffic.** A partitioned client
+   pins its share awake **forever** — 770s at `activeLeases: 1` against a 90s
+   lease, dropping to 0 the instant one compound arrived. The periodic sweep
+   looked like it covered this and did not: it reaps layout grants, and
+   standalone has no layouts. **Fixed** (the courtesy-release pass now runs on
+   both the COMPOUND path and each sweep tick).
+4. **The write reserve is defeated by write speed** (D8, **not fixed**). A
+   600 MiB PUT onto 539 MiB free returned `201` and took the volume to 0 bytes.
+   `admit_bytes` reads a 2s-stale gauge with no in-flight accounting;
+   `admit_warm` twenty lines below already implements exactly that accounting.
+5. **The download path fully buffers** (A7, not fixed). 512 MiB request →
+   541 MiB `VmHWM`; at a 256Mi limit, `OOMKilled` and an empty reply. Interim
+   mitigation needs no code: lower `maxDownloadBytes`, since the cap is checked
+   against the *range*.
+6. **`suspendWithSessions: false` should be the default** (C6 + §M0), now with
+   the caveat that finding 3 was what made the option safe to rely on.
+7. **Operator availability is load-bearing, not hygiene** (D6). With no
+   operator, *no project in the cluster can wake* — 245s of a stamped
+   `requested-at` doing nothing, then 41s to Ready once it returned. "Fails
+   safe, only a delete hangs" is wrong.
+8. **A cold read's first answer is 409, not 503** (A4) — and it cost this drill
+   a false "6 files lost" (see below).
+9. **`nfsClientCIDRs` is inert for in-cluster pod clients on Cilium** (A2).
+10. **Removing `spec.idle` does not un-park a parked share.** With the policy
+    deleted and `lifecycle: Active`, the share stayed `IdleSuspended` on a stale
+    `flint.io/idle-state` annotation — `IdleEligible=False (Held) idle and
+    unrequested`. Only `requested-at` brings it back. Desired state does not
+    converge.
 
-### Rig lessons
+### What the safety properties actually bought
 
-- On `i4i.large` the node root is **8 GB**; container ephemeral storage
-  lives there. A probe writing multi-GiB temp files trips kubelet
-  eviction on every pod on the node. Give probes a real PVC.
-- `curl --data-binary @file` buffers the whole body in RAM; use `-T`.
-- 8080 is deliberately not on the Service, so there is **no stable
-  address to poll a hub across a restart** — resolve the pod IP each
-  iteration or the poller measures a dead IP (this voided one A3 run).
-- Both clusters landed in the same AZ and subnet, so boundary transfer
-  was free. Do not assume that; verify it.
+Two separate refusals prevented real loss, both against defects nobody had
+predicted. `HibernateDeferred` would not reclaim a PVC while 8 files were beyond
+RPO — that PVC held the only complete copy of the POSIX metadata. And the flock
+refused a second writer on one `state.db` after waiting out its full budget.
+Neither was staged; both were load-bearing on the day.
+
+### Rig lessons, the expensive kind
+
+- **AWS security groups are stateful** — revoking a rule does **not** cut an
+  established flow. That produced a fully vacuous partition run whose numbers
+  looked exactly like the real result. The working cut is `iptables -j DROP` in
+  the client node's host netns.
+- **Never md5 a response body without checking its HTTP status.** This bit the
+  drill a third time and briefly read as "D1 lost all 6 files" — every file had
+  the same md5, which was the 60-byte `{"error":"file changed while being
+  read..."}` from A4's cold-read 409.
+- **A pipeline's exit status is `tail`'s.** `timeout … | tail -1` reports 0 for
+  a command that timed out. Redirect to a file and read `$?`.
+- **Disarm the idle ladder before measuring anything on a pod-identity
+  timescale.** A `suspendAfterSecs: 60` left over from an earlier leg made the
+  ladder's own suspend look like an [R-8] config roll in both arms.
+- The `flint.io/idle-state` annotation reads `Suspended` while `status.phase`
+  reads `IdleSuspended`; a script matching the phase string against the
+  annotation waits forever.
+- **Every fix in this campaign was checked against its own absence** — each new
+  regression test was re-run with the fix reverted and confirmed to fail. A
+  green test proves nothing on its own.
