@@ -273,6 +273,36 @@ impl CompoundDispatcher {
         self.dispatch_compound_inner(request, principal, None, back_channel).await
     }
 
+    /// RFC 8881 §8.4.2.4 courtesy-release: drop every expired client's
+    /// locks, then run the `StateManager` cascade that retires its
+    /// sessions, stateids, delegations and the lease record itself.
+    /// Returns how many clients were retired.
+    ///
+    /// This must be driven from TWO places, and the second one is the
+    /// whole point:
+    ///
+    /// 1. the top of every COMPOUND, so conflict checks (LOCK,
+    ///    share-deny, EXCLUSIVE4 retry) are self-healing; and
+    /// 2. the periodic lease sweep, because (1) is inbound-driven and
+    ///    therefore cannot reap the one case that matters — a volume
+    ///    whose ONLY client is gone or partitioned. No compound ever
+    ///    arrives to trigger it, so its lease sat in the map forever
+    ///    and `nfs.activeLeases` never decayed. Measured on a real
+    ///    cluster: 1 lease held for 770s against a 90s lease time,
+    ///    dropping to 0 the instant a single compound arrived. With
+    ///    `suspendWithSessions: false` that pins the share awake for
+    ///    good.
+    pub fn courtesy_release_expired(&self) -> usize {
+        let expired = self.state_mgr.leases.get_expired_clients();
+        for cid in &expired {
+            self.lock_mgr.remove_client_locks(*cid);
+        }
+        if !expired.is_empty() {
+            self.state_mgr.cleanup_expired();
+        }
+        expired.len()
+    }
+
     async fn dispatch_compound_inner(
         &self,
         request: CompoundRequest,
@@ -297,13 +327,7 @@ impl CompoundDispatcher {
         // by the dispatcher, so we drive its lock-release pass from
         // here using the same expired-client list before the
         // StateManager cascade nukes the lease records.
-        let expired = self.state_mgr.leases.get_expired_clients();
-        for cid in &expired {
-            self.lock_mgr.remove_client_locks(*cid);
-        }
-        if !expired.is_empty() {
-            self.state_mgr.cleanup_expired();
-        }
+        self.courtesy_release_expired();
 
         // RFC 5661 §15.1.6 / RFC 7530 §15.1.6: reject unrecognised minor
         // versions before doing any work. Only 0 (v4.0), 1 (v4.1) and 2 (v4.2)

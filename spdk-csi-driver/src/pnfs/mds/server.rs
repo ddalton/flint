@@ -1560,6 +1560,11 @@ impl MetadataServer {
         }
         let layout_manager = Arc::clone(&self.layout_manager);
         let leases = Arc::clone(&self.state_mgr.leases);
+        // The client-lease reaper. Without this the sweep only ever
+        // retired LAYOUT grant rows — and standalone (flint-lite) has
+        // layouts off entirely, so it swept nothing at all while
+        // expired lease records accumulated with no path out.
+        let dispatcher = Arc::clone(&self.base_dispatcher);
         tokio::spawn(async move {
             let hold = Duration::from_secs(u64::from(leases.lease_time()))
                 + leases.grace_remaining();
@@ -1582,6 +1587,18 @@ impl MetadataServer {
                 .await;
                 if swept > 0 {
                     info!("💀 lease sweep: {} (volume, client) pair(s) fully swept", swept);
+                }
+                // And the lease records themselves. The COMPOUND path
+                // does this too, but it is inbound-driven: a client
+                // that is gone or partitioned sends nothing, so its
+                // expired lease would otherwise never be retired.
+                let retired = dispatcher.courtesy_release_expired();
+                if retired > 0 {
+                    info!(
+                        "💀 lease sweep: {} expired client lease(s) retired (locks, \
+                         sessions and state released)",
+                        retired
+                    );
                 }
             }
         });
