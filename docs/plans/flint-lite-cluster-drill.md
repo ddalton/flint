@@ -304,6 +304,7 @@ against the pod IP.
 | **A6** | A genuinely full PVC answers 507, leaves no temp, does not wedge | 18 m | ~2.5 GiB local |
 | **A7** | Peak RSS grows ≈ linearly with request size | 25 m | ~1.4 GiB local |
 | **A8** | Two concurrent PUTs to one path do not corrupt the file | 10 m | ~256 MiB |
+| **A9** | `If-Match` refuses a stale write, and the published loss ratio survives a real network | 20 m | ~100 MiB |
 
 **A1 — calibration.** *Claim: an unauthenticated call to `/files` returns 401
 specifically.* This is the whole dimension's instrument. With no bearer token
@@ -382,6 +383,51 @@ md5 must equal one of the eight exactly.
 *Anti-vacuity:* the eight bodies have distinct md5s recorded up front, and the
 result must match one of them — "differs from body 1" would also be satisfied by
 corruption.
+
+**A9 — conditional writes, and the number we published about them.** *Claim, in
+two parts:* (i) a write carrying a stale `If-Match` is refused with 412 and
+changes nothing, while the holder of the current tag succeeds; (ii) the loss
+ratio the front-door contract publishes — measured in-process at **32 lost of
+200 with `If-Match` against 168 without** — holds no worse over a real network.
+
+Part (ii) is the one worth the cluster time, because it is a **falsifiable
+prediction, not a re-run**. The VERIFY→RENAME gap that loses updates is
+server-internal, so a client's round trip does not widen it; a longer client
+cycle instead raises the chance of a *412*, which is the guard working. Real
+infrastructure should therefore lose **less** than the in-process figure, which
+came from maximum contention against an in-process dispatcher with no network at
+all. If it loses MORE, the model of where the window lives is wrong and the
+number in `docs/flint-lite-operator.md` is wrong in the dangerous direction — a
+front door would have been told the guard is stronger than it is.
+
+*Oracle:* two arms, same writers and rounds, run back to back against one share:
+8 concurrent clients × 25 rounds of read-modify-write (append one byte),
+unconditional against one path and `If-Match` + re-read-on-412 against another.
+Record surviving bytes for each. Part (i) is asserted directly inside the second
+arm: capture a tag, let another client write, then replay the captured tag and
+require 412 **and** a file whose bytes are unchanged by the refusal.
+
+*Anti-vacuity:* three guards, none of which is the loss oracle.
+1. **The conditional arm must record a non-zero 412 count.** Writers that never
+   collide "pass" with zero loss while proving nothing — this is the leg's
+   vacuity mode, and it is the same one that made the in-process leg's first
+   version worthless.
+2. **The unconditional control must lose a substantial fraction.** If the
+   control loses nothing, the storm did not race on this hardware and both arms
+   are measuring an idle system.
+3. **The tag must provably rotate:** at least three distinct `ETag` values
+   observed across the run. A static tag means the instrument is reading a
+   cache, not the file — the same guard the epoch-cell legs use.
+Plus the A1 discipline: an authenticated 200 on `/files/content` **first**, so a
+404 from an unmounted file API can never be counted as "no loss".
+
+*Also worth capturing while the rig is up, since it has never been seen against
+real S3:* on a tiered share the tag moves when a file is evicted and again when
+it is hydrated, because both rewrite the local inode and the tag derives from
+its change attribute. Documented as fails-closed (a spurious 412, never a lost
+edit). Confirm it against a real bucket rather than a stub — and confirm that a
+GET across the same boundary still returns the right bytes, because a validator
+that drifts is an annoyance while a body that drifts is corruption.
 
 ### Phase B — the idle ladder and the front door
 
