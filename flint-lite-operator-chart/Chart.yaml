@@ -9,13 +9,13 @@ type: application
 # Chart version. Independent of the flint release train (like
 # flint-lite): this chart ships the operator, and appVersion pins the
 # image it runs.
-version: 0.2.3
+version: 0.2.4
 
 # The flint release whose image this chart runs. The operator binary
 # and the hub image ship from the same build, and the operator's
 # default hub image (values.yaml: hubImage) must reference a hub that
 # understands every knob the CRD can express.
-appVersion: "1.32.0"
+appVersion: "1.33.0"
 
 keywords:
   - nfs

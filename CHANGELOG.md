@@ -10,6 +10,125 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [1.33.0] - 2026-08-20
+
+The fleet-survival release. The flint-lite operator can now hold its
+stated design target — 3000 `FlintShare`s with ~300 live hubs — which
+it demonstrably could not before. Every claim below was measured on a
+real cluster, and the two that could not be measured cleanly are named
+as such rather than quoted.
+
+### Fixed — the operator OOMKilled at fleet scale
+
+- **At 3000 shares both operator replicas were `OOMKilled`** (exit 137)
+  against the 256Mi limit, 8 restarts each and still climbing 26 minutes
+  in, having brought up 131 of 300 hubs. The fleet **never converged**,
+  because the CrashLoop re-enters the same herd.
+
+  The cause was one unset knob: the controller's reconcile concurrency
+  is `Config::default()`, which is `0` — documented as UNBOUNDED — and
+  this binary never overrode it. A cold start therefore admitted ~3000
+  simultaneous reconciles, each snapshotting the whole fleet: ~2–3 GB of
+  transient allocation.
+
+  Capped at 32 with a 250 ms debounce. Same cluster, same fleet: **0
+  restarts, 49–53 MiB, 300 of 300 hubs, converged in 1389s.**
+
+### Changed — arbitration stops being the dominant CPU term
+
+- `conflict::admit` is O(rank²) and ran on **every reconcile**,
+  re-deriving an answer that only changes when the fleet changes.
+  Measured at N=3000: **13.5 ms** for the median share, **52.6 ms** for
+  the newest, so a full fleet pass was **~47 seconds of CPU** — 0.16 of
+  a core steady against a chart request of `50m`, and 3.1 cores at the
+  fastest legal requeue setting.
+
+  Replaced by a table built once per fleet change: **~2.5 ms for the
+  whole fleet, 18,516×.**
+
+  **A note for anyone reimplementing this: a `BTreeSet` successor lookup
+  is wrong.** Sibling prefixes are incomparable, so several descendants
+  of one prefix are admitted together — and `admit` names the **oldest**
+  overlap while a successor lookup names the **lexicographically
+  first**. The winner is published in the rejection message, so naming
+  the wrong one is a user-visible lie. The index takes the minimum age
+  rank over the descendant range.
+
+### Fixed — the operator triggered itself
+
+- Two condition **messages** embedded a live seconds counter, so
+  `status` changed on nearly every reconcile, which fired the operator's
+  own FlintShare watch, which scheduled another reconcile. Gain is
+  `1/(1 − min(1, d))` for a reconcile of `d` seconds: **non-terminating
+  once a reconcile takes a second**, and invisible at the four-share
+  scale every prior drill ran at.
+
+### Changed — a parked share now costs approximately nothing
+
+- Measured before: 3000 shares with 300 live produced **~99 apiserver
+  writes/s with nothing changing** (11.83 flintshare applies + 87.15
+  child-object applies), most of it 2700 parked shares re-applying four
+  identical objects on a timer.
+
+  Parked shares now re-check when their next ladder rung is **near**
+  rather than every 300s (clamping the raw threshold capped at 300s, so
+  `hibernateAfterSecs: 86400` meant 288 wakeups a day to say "not yet"
+  287 times), and skip the applies while a render-hash stamp matches.
+
+  Measured after, 3000 parked shares settled: **0.006–0.024 flintshare
+  writes/s and ~0.22/s child objects**, operator at **1m CPU / 77 MiB**.
+
+  **A stale stamp still forces a full apply.** This operator is
+  level-triggered — its correctness argument is that it re-asserts
+  desired state regardless of what it believes — and a hash cannot see a
+  hand-edited ConfigMap or a stripped label. The stamp carries a
+  timestamp, and a stale (or future-dated) one re-applies everything.
+
+### Changed — hubs now request resources, and that is visible
+
+- A hub with no `spec.resources` rendered `resources: None` and ran
+  **BestEffort**: the scheduler saw a zero-cost pod, packed by pod count
+  alone, and every hub was first out under node memory pressure. Hubs
+  now default to **100m / 128Mi, requests only, no limits** (a hub is a
+  filesystem server whose working set belongs to the caller; a limit
+  makes it killable mid-operation).
+
+  **⚠ Plan for it.** 300 live hubs now ask for **30 vCPU**. On a cluster
+  that cannot supply it they sit `Unschedulable` instead of silently
+  oversubscribing — which is the point, but it is a change in what a
+  fleet requires. Measured directly: 162 of 300 pods `Insufficient cpu`
+  on a 16-vCPU rig.
+
+- The operator is sized to `500m` / `128Mi` request with a **512Mi**
+  limit and **no CPU limit** — reconcile wall time is the denominator of
+  the self-trigger amplification above, so throttling the operator
+  pushes in exactly the wrong direction. 512Mi is ~5.8× the worst
+  measured spike (a watch relist briefly holds the store twice: ~88 MiB
+  at 3000 shares).
+
+### Not changed, deliberately
+
+- **The epoch lease stays at 10s × 6 (60s).** `30 × 4` was implemented
+  and reverted before release: it is a third of the PUTs for the same
+  failure tolerance, but it **doubles takeover latency after an unclean
+  death**, and nothing had measured it on a cluster. The last real
+  number for a foreign takeover is 80s at 10 × 6; there is no matching
+  one for 30 × 4. A timing change to the fencing lease should not ship
+  on a unit test. Both remain per-share knobs.
+
+### Verification
+
+1704 tests on macOS, **1712 on real Linux**. Two rig runs on real
+clusters (~$2.10 total, both torn down).
+
+**Stated plainly: two things are not measured.** S7 has not been
+re-measured against a converged fleet *with* live shares — the
+parked-only experiment isolates the term but is not the mixed steady
+state. And real exponential backoff (`error_policy` returns a flat 30s
+under a doc comment claiming otherwise) is **not built**: a fleet that
+cannot converge still pays 15s requeues forever, which is exactly what
+made one rig run void.
+
 ## [1.32.0] - 2026-08-20
 
 The cold-read-guard release. One shipped bug, found while validating
