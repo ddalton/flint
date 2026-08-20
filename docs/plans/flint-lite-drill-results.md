@@ -39,6 +39,9 @@ Shares: `workspaces/tenant-a` (5Gi, flint-spdk, file API on) and
 | C6 | **PASS — wedge confirmed, and bounded** | Anti-vacuity: mounts asserted present on B's node before the suspend. Suspending with kubelet-driven cross-cluster mounts held **does wedge consumer teardown**: pods went to `Error` but would not terminate for 288s, the node kept **2 pinned nfs4 mounts** under `/var/lib/kubelet/pods/…/kubernetes.io~nfs/`, and exactly one process sat in D state — `172.31.0.236-manager`, the kernel NFS state manager for that server. **Waking the hub cleared all three pods in ~31s.** The recorded scar now holds for a kubelet-managed mount, not just a Lima kernel — and this is the empirical case for `suspendWithSessions: false` as the default. |
 | §M0 mitigation | **VALIDATED** | With a live cross-cluster mount and `suspendWithSessions: false` on a **60s** ladder, the share stayed `Ready`/`replicas=1` for **350s** (≈6× the threshold), the operator reporting `IdleEligible=False` — **"a client still holds a lease"**. Paired with C6 (where the default `true` wedged three consumer pods for 288s and pinned two node mounts), this is direct evidence that `suspendWithSessions: false` should be the **default**, not an option — exactly as the plan's §M0 argued. |
 | B7 | **PASS** | Fast arm: clean suspend → wake **Ready in 13s**, same `serverId`, `epochTakeovers=0` — pod start plus instant self-recognition. Slow arm (same bucket, same session): epoch left held + PVC destroyed so the successor has a **new** `serverId` → **Ready in 79s**, `epochTakeovers=1`. Two arms, same instrument, opposite results, oracle read as a counter not a log grep. |
+| **C4 / D7** | **CONFIRMED — the documented residual is FALSE** | Under a proven partition, `nfs.activeLeases` stayed **1 for 770 seconds (12.8 min)** against a **90s** NFSv4 lease, and the share stayed `Ready`/`idle=Active` the whole time with `suspendAfterSecs=120` **and** `suspendWithSessions: false` armed. Then **one** file-API compound took it to **0 immediately** (`fileapi_rc=200` → `activeLeases=0`). That is the anti-vacuity the plan demanded: the same instrument that read "1, forever" read 0 the instant a compound drove the sweep, which also proves the lease had been expired the entire time — nothing was reaping it. **And the ladder then fired**: the share went `IdleSuspended` at **t+988s**, 208s after that one compound (its own `suspendAfterSecs` plus reconcile cadence), so the ladder was armed and working the entire 12.8 minutes and the stale lease was the *only* thing holding it. One stimulus, two coupled effects. **A partitioned agent fleet pins its share awake forever**, and the docs' "leases expire, so a long enough partition drops the count to zero on its own — document the window" is wrong: the window never closes. |
+| D3 (flock arm) | **PASS** | A second `flint-pnfs-mds` started by hand inside the running hub pod, on the same `/data/state`, **never became a writer**. It logged `🔒 state dir /data/state is held by another hub process — waiting for it to finish draining`, waited the full 150s budget (`~grace + slack`), then exited non-zero with `refusing to start a second writer on this volume (two processes here share one server_id, which the epoch protocol cannot fence)`. Oracles read as **counts, not greps**: `refusals=1`, `bound2049=0` — it never reached the listener, never claimed an epoch. Anti-vacuity: a first run with `timeout 60` caught it mid-wait with `refusals=0`, proving the count tracks the refusal and not merely the process exiting. |
+| **F29 recovery** | **FOUND — the wedge has a non-destructive exit** | The force-delete wedge that voided D9 is cleared by **dropping the volume's last referencing pod**, which lets kubelet issue the `NodeUnstageVolume` the force-delete skipped. `spec.lifecycle: Suspended` (replicas→0) then `Active` did it: both wedged shares were `Ready` **30s** later, csi-node logging `Volume … unstaged successfully` for both PVCs. **Why a plain `kubectl delete pod` can never work:** the ReplicaSet recreates a pod immediately, so the volume never loses its last reference and kubelet never unstages — the driver's F29 refusal (`main.rs:4968`) is correct in itself, but kubelet's volume-manager cache still says "staged" and so `NodeStageVolume` is never called again. Nothing self-heals and nothing surfaces the remedy. |
 
 ## SHIPPED BUG FOUND — the clean epoch release never lands
 
@@ -82,6 +85,45 @@ every same-identity restart.
 | E6 | **PASS — both parts, hazard demonstrated** | **(i) In scope:** a share on `nested/sub/` against an existing `nested/` was refused with `phase=Failed`, `Conflict=True`, a message naming the winner, and **0 Deployments, 0 PVCs** — refused before any hub started. **(ii) Across scopes** (a second operator installed on cluster B): B accepted `nested/sub/` with `conflict=False`, both hubs reached Ready simultaneously, and the bucket held **two independent epoch cells** (`nested/.flint/epoch` holder `hub-a738c6…`, `nested/sub/.flint/epoch` holder `hub-2266f2…`) — neither can fence the other. A wrote `/sub/overlap.txt` and B wrote `/overlap.txt`; both map to S3 key `nested/sub/overlap.txt`. The survivor is **exactly** B's bytes (anti-vacuity: exact match, not merely different from A's), while **hub A still serves `AAAA-written-by-cluster-A`** — silent divergence between what a hub serves and what its bucket holds. A hibernate/wake on A would return B's data. This is why prefix uniqueness must live in a control-plane DB (§M1-a); nothing in this repo can enforce it. |
 | E5 | **PASS — both halves** | Two clusters, one prefix (`nested/`). While A held the lease, B sat at `phase=Starting` for 320s and **its 2049 was refused (`rc=7`) at every sample** — the loser never binds. B's log: *"hub-a738c6… is ALIVE at epoch 2 (token advanced) — this hub waits; two hubs on one prefix is a misconfiguration."* Anti-vacuity at one instant: **A:2049 rc=52 (answering), B:2049 rc=7 (refused)**. With A removed, B stayed refused 63s then took over at **t+79s** (≈6×10s lease + pod start), oracle read as a **counter**: `epochTakeovers=1`, cell holder `hub-a738c6…`@2 → `hub-adcf0f…`@3. **Independently corroborates the release bug** — A shut down cleanly and B still paid the full lease. |
 | D9 | **VOID — instrument failed** | Force-killing the hub (`--force --grace-period=0`) to produce an unclean death skipped the CSI `NodeUnstageVolume`, and the flint CSI driver then refused every remount with `FailedPrecondition: staging path … is not mounted — restage required (F29)`. The successor never started, so nothing could be learned about self-recognition after an unclean death. **This is a CSI-driver defect, not flint-lite**, and the drill declares the CSI driver out of scope — but it makes `--force` unusable as an unclean-death instrument on a `flint-spdk` volume. D9's claim is partly covered anyway: B7's fast arm showed same-`serverId` re-claim in 13s with `epochTakeovers=0`. |
+
+## SECOND FINDING — `activeClients` never decays without inbound traffic
+
+**C4/D7, confirmed on real infrastructure.** The count that
+`suspendWithSessions: false` acts on is a raw map length, and the only
+production code that reaps it runs on the inbound path.
+
+- `active_count()` is `self.leases.len()` (`nfs/v4/state/lease.rs`) — no
+  expiry filter. An expired lease is still counted.
+- The **only** production caller of `StateManager::cleanup_expired()` is
+  `dispatch_compound_inner` (`nfs/v4/dispatcher.rs:305`), at the top of every
+  COMPOUND. No compounds arrive from a partitioned client, so nothing reaps.
+- The background sweep exists but is the wrong sweep:
+  `start_lease_sweep` (`pnfs/mds/server.rs:1548`) runs
+  `lease_sweep_pass(&layout_manager, …)`, which reaps **layout grant rows**,
+  not lease records — and standalone (flint-lite) turns layouts **off**
+  entirely, so in this posture it has nothing to sweep at all.
+
+**Consequence.** With `suspendWithSessions: false` — which §M0 argues should
+become the default, and which C6 independently supports — a partitioned agent
+fleet holds its share `Ready` indefinitely. The ladder never fires, the hub
+never suspends, and no rung of the idle ladder is reachable. The cost is a pod
+and a PVC per abandoned project, forever.
+
+**The instrument matters, and one attempt was vacuous.** Revoking the AWS
+security-group rule does **not** partition an established flow: security groups
+are stateful, so existing connections keep flowing and only new ones are
+refused. That attempt reported `activeLeases=1` too — for entirely the wrong
+reason — and was caught only because the leg required the mount to hang first.
+The working cut is an `iptables -j DROP` in the client node's host netns for
+`<hub-node>:<nodeport>`, verified by a write **and** a read both timing out
+(`rc=124`, captured with `$?` directly rather than through a pipeline, whose
+status would have been `tail`'s).
+
+**Two candidate fixes, both small.** Either filter expired leases out of
+`active_count()` (makes the gauge honest, leaves dead client state resident),
+or have the periodic sweep also drive `StateManager::cleanup_expired()` (also
+releases the dead client's locks, opens and delegations). The second is the
+real fix; the first alone would still leak state.
 
 ## Legs NOT run, and why
 
