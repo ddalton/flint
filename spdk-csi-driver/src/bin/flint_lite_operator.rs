@@ -144,7 +144,23 @@ async fn main() -> anyhow::Result<()> {
     // watch-erroring forever.
     shares.list(&kube::api::ListParams::default().limit(1)).await?;
 
-    let controller = Controller::new(shares, watcher::Config::default());
+    // BOUND THE FAN-OUT. `Config::default()` is `concurrency: 0`,
+    // documented as UNBOUNDED, and this binary never overrode it — so a
+    // cold start or a leader handover at the design target (3000 CRs)
+    // admits 3000 simultaneous reconciles, each of which snapshots the
+    // whole fleet. That is ~2-3 GB of transient allocation against a
+    // 256Mi limit: a deterministic OOMKill, and the CrashLoop that
+    // follows re-enters the same herd.
+    //
+    // The debounce coalesces the burst of watch events a single change
+    // fans out into (a share edit touches its Deployment, Service,
+    // ConfigMap and the share itself), at the cost of up to 250 ms of
+    // added wake latency — measured, not assumed, by the wake canary.
+    let controller = Controller::new(shares, watcher::Config::default()).with_config(
+        kube::runtime::controller::Config::default()
+            .concurrency(32)
+            .debounce(Duration::from_millis(250)),
+    );
     let store = controller.store();
 
     let ctx = Arc::new(reconcile::Ctx {
@@ -163,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
             },
         ),
         fleet: store.clone(),
+        admit_cache: std::sync::Mutex::new(None),
     });
 
     info!(

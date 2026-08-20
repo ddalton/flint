@@ -71,8 +71,12 @@ impl EpochConfig {
         EpochConfig {
             key: epoch_key(key_prefix),
             holder_id,
-            heartbeat: Duration::from_secs(10),
-            lease_misses: 6,
+            // Kept in step with `config::default_tier_heartbeat` /
+            // `default_tier_lease_misses`, which is where the reasoning
+            // for 30 x 4 lives. A split between the two would give a
+            // config-less caller a different lease than the chart's.
+            heartbeat: Duration::from_secs(30),
+            lease_misses: 4,
         }
     }
 }

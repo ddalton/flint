@@ -276,9 +276,11 @@ pub fn decide(cfg: Option<&IdleSpec>, input: Inputs<'_>) -> Decision {
                 if down_for >= after {
                     return Decision::BeginHibernate;
                 }
-                return Decision::Hold(format!(
-                    "suspended for {down_for}s; hibernate at {after}s"
-                ));
+                // Stable text: `down_for` ticks, and a Hold message
+                // reaches `status`, so a counter here re-triggers the
+                // reconcile that produced it. The threshold is what a
+                // reader actually needs; elapsed time is a metric.
+                return Decision::Hold(format!("waiting to hibernate at {after}s"));
             }
         }
         return Decision::Hold("idle and unrequested".to_string());
@@ -312,7 +314,8 @@ pub fn decide(cfg: Option<&IdleSpec>, input: Inputs<'_>) -> Decision {
     };
     if let Some(age) = trusted_age {
         if age < after {
-            return Decision::Hold(format!("requested {age}s ago, under the {after}s threshold"));
+            // Stable text, same reason as above.
+            return Decision::Hold(format!("recently requested; under the {after}s threshold"));
         }
     }
 
@@ -469,7 +472,10 @@ mod tests {
             Some(&cfg),
             Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None },
         );
-        assert!(matches!(d, Decision::Hold(w) if w.contains("60s ago")), "recent request must hold");
+        assert!(
+            matches!(d, Decision::Hold(w) if w.contains("under the")),
+            "recent request must hold"
+        );
 
         // Front door quiet, but the hub says someone is working.
         let s = share(&[(ANN_REQUESTED_AT, "2026-08-19T10:00:00Z")]);
@@ -495,6 +501,60 @@ mod tests {
     /// **An unreachable hub is not an idle hub.** The poll failure
     /// arrives as `Err` and must hold, not suspend — otherwise a
     /// network blip scales down a fleet.
+    /// A `Hold` reason reaches `status`, so it must not carry anything
+    /// that advances on its own.
+    ///
+    /// This is the self-amplification bug in miniature: a message with a
+    /// live seconds counter changed the CR on nearly every reconcile,
+    /// which fired the operator's own FlintShare watch, which scheduled
+    /// another reconcile — gain 1/(1 - min(1, d)), and non-terminating
+    /// once a reconcile takes a second. Invisible at 4 shares.
+    ///
+    /// Driven by evaluating the SAME share at two different instants:
+    /// the decision must be identical, message included.
+    #[test]
+    fn a_hold_reason_never_carries_a_ticking_counter() {
+        // hibernateAfter must be LONGER than the share has been down,
+        // or the second case takes the BeginHibernate branch and never
+        // reaches the Hold this test is about. (It did, first time.)
+        let cfg = idle(Some(600), Some(7200));
+
+        for anns in [
+            vec![(ANN_REQUESTED_AT, "2026-08-19T11:59:00Z")],
+            vec![
+                (ANN_IDLE_STATE, "Suspended"),
+                (ANN_IDLE_SINCE, "2026-08-19T11:00:00Z"),
+            ],
+        ] {
+            let s = share(&anns);
+            let early = decide(
+                Some(&cfg),
+                Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None },
+            );
+            // Same share, one minute later.
+            let later = decide(
+                Some(&cfg),
+                Inputs {
+                    share: &s,
+                    now: now() + chrono::Duration::seconds(60),
+                    hub_quiet: Ok(()),
+                    sessions_live: None,
+                },
+            );
+            assert!(
+                matches!(early, Decision::Hold(_)),
+                "this case must reach a Hold, or the test proves nothing: {early:?}"
+            );
+            if let (Decision::Hold(a), Decision::Hold(b)) = (&early, &later) {
+                assert_eq!(
+                    a, b,
+                    "the Hold reason moved with the clock ({a:?} -> {b:?}) — that writes \
+                     status on every reconcile and re-triggers the reconcile that wrote it"
+                );
+            }
+        }
+    }
+
     #[test]
     fn an_unreachable_hub_is_never_suspended() {
         let s = share(&[(ANN_REQUESTED_AT, "2026-08-19T00:00:00Z")]);

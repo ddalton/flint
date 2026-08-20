@@ -203,6 +203,167 @@ pub fn admit(fleet: &[Candidate], me: &Candidate) -> Admission {
     }
 }
 
+/// The same verdicts as [`admit`], computed once for a whole fleet.
+///
+/// # Why this exists
+///
+/// [`admit`] is O(rank²) in the caller's age-rank and runs on EVERY
+/// reconcile, re-deriving an answer that only changes when the fleet
+/// changes. Measured at N=3000: ~13 ms for the median share and ~51 ms
+/// for the newest, which is ~0.17 of a core at the steady reconcile
+/// rate and 3.5 cores at the (legal) fastest requeue setting — against
+/// a chart CPU request of 50m. The whole-fleet sweep is N³/6 ≈ 4.5e9
+/// `overlaps` calls.
+///
+/// # The lemma, and the half of it that is FALSE
+///
+/// `overlaps` IS the prefix order, and the admitted set is prefix-free
+/// by construction (a candidate is only admitted if it overlaps nothing
+/// already admitted). So for a prefix `p`:
+///
+/// - **Ancestor direction — at most one, and it is the immediate lex
+///   predecessor.** Two strict prefixes of `p` would be prefixes of each
+///   other, so both cannot be admitted. And no admitted `x` can sit
+///   strictly between an ancestor `a` and `p`: `a < x < p` forces `x` to
+///   start with `a` (differ before `len(a)` and `x` falls outside the
+///   interval), so `x` would overlap `a`. A `range(..p).next_back()` is
+///   therefore exact.
+/// - **Descendant direction — there can be MANY.** Two siblings under
+///   `p` are not comparable to each other, so both are admitted, and a
+///   later `p` overlaps both. **This is why a "first successor" lookup
+///   is wrong**: [`admit`] scans `admitted` in AGE order and returns the
+///   OLDEST overlap, while the first successor is the LEXICOGRAPHICALLY
+///   smallest. Worked case: admitted `tenant-b/` (older) and
+///   `tenant-a/` (newer), candidate `tenant-` — `admit` names
+///   `tenant-b/`, first-successor names `tenant-a/`.
+///
+/// So the descendant side takes the MINIMUM AGE RANK over the whole
+/// range `[p, p+)`, not the first key in it. Because `admitted` is
+/// built in age order, the age rank IS the index, so "oldest overlap"
+/// is "smallest index" and no re-comparison of timestamps is needed.
+pub struct AdmitTable {
+    /// Admitted shares in AGE ORDER. The index is the age rank.
+    admitted: Vec<(String, ShareKey)>,
+    /// (endpoint, bucket) → prefix → index into `admitted`.
+    groups: std::collections::HashMap<(String, String), std::collections::BTreeMap<String, usize>>,
+    /// Verdict per fleet member, keyed the two ways `admit` identifies
+    /// a candidate: by uid, and by namespace/name for a candidate the
+    /// API server has not stamped yet.
+    by_uid: std::collections::HashMap<String, Option<usize>>,
+    by_ref: std::collections::HashMap<String, Option<usize>>,
+}
+
+impl AdmitTable {
+    /// Build the table. One pass in the same age order [`admit`] uses.
+    pub fn build(fleet: &[Candidate]) -> Self {
+        let mut ordered: Vec<&Candidate> = fleet.iter().filter(|c| c.key.is_some()).collect();
+        ordered.sort_by(|a, b| {
+            a.created
+                .cmp(&b.created)
+                .then_with(|| a.uid.cmp(&b.uid))
+                .then_with(|| a.r#ref().cmp(&b.r#ref()))
+        });
+
+        let mut t = AdmitTable {
+            admitted: Vec::new(),
+            groups: std::collections::HashMap::new(),
+            by_uid: std::collections::HashMap::new(),
+            by_ref: std::collections::HashMap::new(),
+        };
+
+        for c in ordered {
+            let key = c.key.as_ref().expect("filtered");
+            let verdict = t.oldest_overlap(key);
+            if !c.uid.is_empty() {
+                t.by_uid.insert(c.uid.clone(), verdict);
+            }
+            t.by_ref.insert(c.r#ref(), verdict);
+            if verdict.is_none() {
+                let idx = t.admitted.len();
+                t.admitted.push((c.r#ref(), key.clone()));
+                t.groups
+                    .entry((key.endpoint.clone(), key.bucket.clone()))
+                    .or_default()
+                    .insert(key.prefix.clone(), idx);
+            }
+        }
+        t
+    }
+
+    /// The age rank of the OLDEST admitted share overlapping `key`, or
+    /// `None` if nothing does. See the lemma on [`AdmitTable`] for why
+    /// the descendant side is a range minimum and not a first hit.
+    fn oldest_overlap(&self, key: &ShareKey) -> Option<usize> {
+        let group = self.groups.get(&(key.endpoint.clone(), key.bucket.clone()))?;
+        let p = key.prefix.as_str();
+        let mut best: Option<usize> = None;
+
+        // Ancestor: exactly one candidate, the immediate predecessor.
+        if let Some((a, &idx)) = group.range(..p.to_string()).next_back() {
+            if p.starts_with(a.as_str()) {
+                best = Some(idx);
+            }
+        }
+        // Descendants (and an exact duplicate): the whole range, minimum
+        // rank. Bounded by the number of admitted shares beneath `p`,
+        // which is 0 for the overwhelmingly common disjoint case.
+        for (_, &idx) in group.range(p.to_string()..).take_while(|(k, _)| k.starts_with(p)) {
+            best = Some(best.map_or(idx, |b| b.min(idx)));
+        }
+        best
+    }
+
+    /// The same answer [`admit`] would give, including the named winner
+    /// and the byte-identical message.
+    pub fn verdict(&self, me: &Candidate) -> Admission {
+        let Some(my_key) = me.key.as_ref() else {
+            return Admission::Admitted; // tier off: owns no shared storage
+        };
+        let looked_up = if me.uid.is_empty() {
+            self.by_ref.get(&me.r#ref()).copied()
+        } else {
+            self.by_uid.get(&me.uid).copied()
+        };
+        match looked_up {
+            Some(None) => Admission::Admitted,
+            Some(Some(idx)) => {
+                let (wref, w) = &self.admitted[idx];
+                Admission::Rejected {
+                    winner: wref.clone(),
+                    message: format!(
+                        "bucket subtree s3://{}/{} (endpoint {}) is already owned by \
+                         FlintShare {}, which owns s3://{}/{} and is older; refusing to run a \
+                         second hub on it — when one hub dies for a lease window the other \
+                         takes the prefix over and serves its data",
+                        my_key.bucket,
+                        my_key.prefix,
+                        if my_key.endpoint.is_empty() { "aws" } else { &my_key.endpoint },
+                        wref,
+                        w.bucket,
+                        w.prefix,
+                    ),
+                }
+            }
+            // `me` was not in the fleet list (a stale cache, or the very
+            // first reconcile of a brand-new CR): judge it against what
+            // was admitted, with the shorter message `admit` uses there.
+            None => match self.oldest_overlap(my_key) {
+                None => Admission::Admitted,
+                Some(idx) => {
+                    let (wref, _) = &self.admitted[idx];
+                    Admission::Rejected {
+                        winner: wref.clone(),
+                        message: format!(
+                            "bucket subtree s3://{}/{} is already owned by FlintShare {}",
+                            my_key.bucket, my_key.prefix, wref
+                        ),
+                    }
+                }
+            },
+        }
+    }
+}
+
 /// Every share whose decision could change when `me` changes — the
 /// re-queue set. Deleting a winner has to wake its losers, or they sit
 /// in `Failed` forever while nothing owns the prefix.
@@ -220,6 +381,224 @@ pub fn overlap_set<'a>(fleet: &'a [Candidate], me: &Candidate) -> Vec<&'a Candid
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The measurement behind the change. `--ignored` because it is a
+    /// timing report, not an assertion — but it FAILS if the index is
+    /// not at least 100x faster on a full-fleet sweep at the design
+    /// target, so it cannot silently stop being the point.
+    ///
+    ///   cargo test --release --lib conflict -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn measure_admit_against_the_index_at_fleet_scale() {
+        use std::time::Instant;
+
+        for n in [300usize, 1000, 3000] {
+            // The design-target shape: disjoint prefixes, ages shuffled
+            // so lex order and age order disagree.
+            let fleet: Vec<Candidate> = (0..n)
+                .map(|i| cand(&format!("s{i}"), &format!("tenant-{i:05}/"), ((i * 37) % n) as i64))
+                .collect();
+
+            let median = &fleet[n / 2];
+            let newest = fleet.iter().max_by_key(|c| c.created).unwrap();
+
+            let t0 = Instant::now();
+            let _ = admit(&fleet, median);
+            let d_med = t0.elapsed();
+
+            let t0 = Instant::now();
+            let _ = admit(&fleet, newest);
+            let d_new = t0.elapsed();
+
+            // A FULL SWEEP is the honest comparison: the operator does
+            // one admit per reconcile per share, so a fleet-wide pass
+            // is N of them.
+            let t0 = Instant::now();
+            for c in &fleet {
+                let _ = admit(&fleet, c);
+            }
+            let d_sweep = t0.elapsed();
+
+            let t0 = Instant::now();
+            let table = AdmitTable::build(&fleet);
+            let d_build = t0.elapsed();
+
+            let t0 = Instant::now();
+            for c in &fleet {
+                let _ = table.verdict(c);
+            }
+            let d_lookups = t0.elapsed();
+
+            let indexed = d_build + d_lookups;
+            let speedup = d_sweep.as_secs_f64() / indexed.as_secs_f64();
+            println!(
+                "N={n:>5}  admit: median {:>9.3?}  newest {:>9.3?}  FULL SWEEP {:>10.3?}\n\
+                 {:>12}index: build {:>9.3?}  {n} lookups {:>9.3?}  TOTAL {:>10.3?}  ({speedup:.0}x)",
+                d_med, d_new, d_sweep, "", d_build, d_lookups, indexed
+            );
+
+            if n == 3000 {
+                assert!(
+                    speedup > 100.0,
+                    "the index is only {speedup:.1}x faster on a full sweep at N=3000 — \
+                     the whole point of AdmitTable is that arbitration stops being the \
+                     operator's dominant CPU term"
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // AdmitTable: it must answer EXACTLY what `admit` answers, winner
+    // and message included. `admit` is O(rank^2) per reconcile and runs
+    // on a fleet whose answer only changes when the fleet changes; the
+    // table replaces it. Equivalence is the whole safety argument, so
+    // it is tested against the real function rather than restated.
+    // ---------------------------------------------------------------
+
+    /// Every candidate in the fleet, plus a stranger, must agree.
+    fn assert_equivalent(fleet: &[Candidate], extra: &[Candidate]) {
+        let t = AdmitTable::build(fleet);
+        for c in fleet.iter().chain(extra.iter()) {
+            assert_eq!(
+                t.verdict(c),
+                admit(fleet, c),
+                "AdmitTable disagreed with admit() for {} (prefix {:?})",
+                c.r#ref(),
+                c.key.as_ref().map(|k| &k.prefix),
+            );
+        }
+    }
+
+    /// THE CASE THAT KILLS A "FIRST SUCCESSOR" INDEX.
+    ///
+    /// Two siblings are not comparable, so both are admitted; a later
+    /// broad prefix overlaps BOTH. `admit` names the OLDEST. A BTreeSet
+    /// successor lookup names the lexicographically first, which is a
+    /// different share whenever the lex-first is not the oldest — and
+    /// the winner is published in the rejection message and in
+    /// `status`, so naming the wrong one is a user-visible lie.
+    #[test]
+    fn a_broad_prefix_is_rejected_by_the_oldest_of_several_descendants() {
+        // `tenant-b/` is OLDER; `tenant-a/` sorts first lexically.
+        let b = cand("b", "tenant-b/", 10);
+        let a = cand("a", "tenant-a/", 20);
+        let broad = cand("broad", "tenant-", 30);
+        let fleet = vec![b.clone(), a.clone(), broad.clone()];
+
+        match admit(&fleet, &broad) {
+            Admission::Rejected { ref winner, .. } => {
+                assert_eq!(winner, "ws/b", "admit() names the OLDEST overlap");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        assert_equivalent(&fleet, &[]);
+    }
+
+    /// The ancestor direction really is bounded to one, and it is the
+    /// immediate lexicographic predecessor — the half of the lemma that
+    /// IS true, pinned so a future refactor cannot quietly widen it.
+    #[test]
+    fn a_deep_prefix_is_rejected_by_its_only_possible_ancestor() {
+        let outer = cand("outer", "t/", 10);
+        let sibling = cand("sib", "t/a", 20); // rejected: under `t/`
+        let deep = cand("deep", "t/b/c/", 30);
+        let fleet = vec![outer, sibling, deep];
+        assert_equivalent(&fleet, &[]);
+    }
+
+    /// `overlaps` is raw `starts_with`, so a prefix without a trailing
+    /// slash collides with a longer NAME, exactly as it would in S3.
+    /// The index must reproduce that, not a slash-aware version of it.
+    #[test]
+    fn non_slash_terminated_prefixes_collide_the_same_way_in_the_index() {
+        let fleet = vec![
+            cand("a", "tenant-a", 10),
+            cand("abc", "tenant-abc", 20), // starts_with("tenant-a") => overlaps
+            cand("z", "zzz/", 30),
+        ];
+        assert_equivalent(&fleet, &[]);
+    }
+
+    /// An empty prefix owns the whole bucket and overlaps everything —
+    /// the pathological range for the descendant scan.
+    #[test]
+    fn an_empty_prefix_is_handled_from_both_directions() {
+        let early = vec![cand("root", "", 5), cand("a", "a/", 10), cand("b", "b/", 20)];
+        assert_equivalent(&early, &[]);
+        let late = vec![cand("a", "a/", 10), cand("b", "b/", 20), cand("root", "", 30)];
+        assert_equivalent(&late, &[]);
+    }
+
+    /// A candidate the table never saw takes `admit`'s other branch,
+    /// which uses a SHORTER message. Both must match.
+    #[test]
+    fn a_candidate_absent_from_the_fleet_gets_the_short_message() {
+        let fleet = vec![cand("a", "tenant-a/", 10)];
+        let stranger = cand("ghost", "tenant-a/deep/", 99);
+        let clean = cand("clean", "other/", 99);
+        assert_equivalent(&fleet, &[stranger, clean]);
+    }
+
+    /// Tier-off shares own nothing, and separate buckets/endpoints are
+    /// separate universes. Neither may leak into the other's group.
+    #[test]
+    fn tier_off_and_foreign_stores_never_collide() {
+        let mut off = cand("off", "tenant-a/", 10);
+        off.key = None;
+        let mut other_bucket = cand("ob", "tenant-a/", 20);
+        other_bucket.key.as_mut().unwrap().bucket = "elsewhere".into();
+        let mut other_ep = cand("oe", "tenant-a/", 30);
+        other_ep.key.as_mut().unwrap().endpoint = "http://minio:9000".into();
+        let fleet = vec![off, other_bucket, other_ep, cand("mine", "tenant-a/", 40)];
+        assert_equivalent(&fleet, &[]);
+    }
+
+    /// Ties in `created` fall through to uid then to namespace/name, and
+    /// the table must break them the same way or the winner drifts.
+    #[test]
+    fn creation_time_ties_break_identically() {
+        let fleet = vec![
+            cand("c", "tenant-a/", 10),
+            cand("a", "tenant-a/", 10),
+            cand("b", "tenant-a/", 10),
+        ];
+        assert_equivalent(&fleet, &[]);
+    }
+
+    /// A fleet with the shape the design target actually has — many
+    /// disjoint prefixes plus deliberate nesting, siblings, duplicates
+    /// and unstamped newcomers — driven deterministically so a failure
+    /// reproduces. Guards against an index that is only right on the
+    /// hand-written cases above.
+    #[test]
+    fn the_index_agrees_with_admit_across_a_hostile_fleet() {
+        let shapes: [&dyn Fn(usize) -> String; 4] = [
+            &|i| format!("tenant-{i:04}/"),          // disjoint
+            &|i| format!("tenant-{:04}/sub/", i / 3), // nested under a disjoint one
+            &|i| format!("tenant-{:04}", i / 7),      // non-slash, collides by name
+            &|i| if i % 11 == 0 { String::new() } else { format!("g{}/x/", i % 5) },
+        ];
+        let mut fleet = Vec::new();
+        for i in 0..240usize {
+            let prefix = shapes[i % shapes.len()](i);
+            // Ages deliberately NOT in insertion order, so "oldest"
+            // and "lexicographically first" disagree constantly.
+            let created = ((i * 37) % 240) as i64;
+            let mut c = cand(&format!("s{i}"), &prefix, created);
+            if i % 23 == 0 {
+                c.uid = String::new(); // not yet stamped by the API server
+            }
+            fleet.push(c);
+        }
+        let strangers = vec![
+            cand("ghost-deep", "tenant-0003/sub/deeper/", 1),
+            cand("ghost-root", "", 2),
+            cand("ghost-clean", "nothing-like-this/", 3),
+        ];
+        assert_equivalent(&fleet, &strangers);
+    }
 
     fn cand(name: &str, prefix: &str, created: i64) -> Candidate {
         Candidate {

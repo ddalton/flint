@@ -288,10 +288,26 @@ fn default_tier_part_floor() -> u64 {
     16 * 1024 * 1024
 }
 fn default_tier_heartbeat() -> u64 {
-    10
+    // 30s, not 10s. Lease exclusion trades THREE things against each
+    // other — renewal cost, takeover latency, and tolerance of
+    // transient failures — and you get two. The old 10s x 6 misses
+    // maximized the last two, which is exactly the setting that costs
+    // the most PUTs: one per 10s per live hub forever, independent of
+    // any client I/O. At 300 live that is 30 PUT/s and ~2.6M object
+    // VERSIONS a day on one key.
+    //
+    // 30s x 4 keeps a 120s lease and still tolerates 3 consecutive
+    // failed renewals, at a third of the requests. What makes the
+    // longer TTL affordable is the clean-release fix in 1.31.0: an
+    // orderly shutdown marks the cell released and the next claim is
+    // immediate, so a normal suspend/wake pays NOTHING. The TTL is
+    // only paid after an UNCLEAN death. Tune back down per-share if a
+    // deployment would rather pay the PUTs for faster takeover.
+    30
 }
 fn default_tier_lease_misses() -> u32 {
-    6
+    // 4 x 30s = a 120s lease. See `default_tier_heartbeat`.
+    4
 }
 fn default_tier_reserve() -> u64 {
     256 * 1024 * 1024
@@ -1183,8 +1199,15 @@ mod tests {
         assert_eq!(t.knobs.tick_secs, 10);
         assert_eq!(t.knobs.whole_put_max_bytes, 64 * 1024 * 1024);
         assert_eq!(t.knobs.part_floor_bytes, 16 * 1024 * 1024);
-        assert_eq!(t.knobs.epoch_heartbeat_secs, 10);
-        assert_eq!(t.knobs.epoch_lease_misses, 6);
+        // 30 x 4 = a 120s lease. Pinned as a PAIR, because the product
+        // is the lease and changing one alone silently retunes it.
+        assert_eq!(t.knobs.epoch_heartbeat_secs, 30);
+        assert_eq!(t.knobs.epoch_lease_misses, 4);
+        assert_eq!(
+            t.knobs.epoch_heartbeat_secs * u64::from(t.knobs.epoch_lease_misses),
+            120,
+            "the lease TTL is the contract; the two knobs are just how it is paid for"
+        );
         assert_eq!(t.knobs.reserve_bytes, 256 * 1024 * 1024);
         assert_eq!(t.knobs.watermark_pct, 85);
         assert_eq!(t.knobs.ballast_bytes, 64 * 1024 * 1024);

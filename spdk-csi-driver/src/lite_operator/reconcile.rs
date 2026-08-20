@@ -131,6 +131,66 @@ pub struct Ctx {
     /// of the controller's own cache — the check must see other
     /// namespaces, which is exactly what admission control cannot.
     pub fleet: kube::runtime::reflector::Store<FlintShare>,
+    /// The arbitration table, and a fingerprint of the fleet it was
+    /// built from. See [`admit_table`] for why the fingerprint lives
+    /// here rather than the table being rebuilt from a watch event.
+    pub admit_cache: std::sync::Mutex<Option<(u64, Arc<conflict::AdmitTable>)>>,
+}
+
+/// The arbitration table for the current fleet, rebuilt only when the
+/// fleet actually changed.
+///
+/// # Why the fingerprint, and why it is checked HERE
+///
+/// `conflict::admit` is O(rank²) per call — measured 13.5 ms for the
+/// median share and 52.6 ms for the newest at N=3000, so a full fleet
+/// pass is ~47 SECONDS of CPU. The table answers the same question in
+/// ~2.5 ms for the whole fleet. But a cache is only safe if it cannot
+/// serve a stale answer, and a stale arbitration answer is not a slow
+/// reconcile — it strands losers in `Failed` forever, or admits a
+/// second hub onto a contended subtree.
+///
+/// The tempting place to rebuild is the FlintShare watch mapper. That
+/// is WRONG: the mapper and the reflector `Store` are fed by two
+/// INDEPENDENT watch connections, so the mapper can be behind the
+/// store (or ahead of it) with nothing forcing them to agree. Instead
+/// the LOOKUP validates itself — hash the fleet identity here, rebuild
+/// synchronously on a miss. The hash is O(N) over fields we would have
+/// had to read anyway; it costs microseconds against the milliseconds
+/// it replaces, and it can never answer from a fleet that is not the
+/// one the caller is reconciling against.
+fn admit_table(ctx: &Ctx) -> (Vec<Arc<FlintShare>>, Arc<conflict::AdmitTable>) {
+    use std::hash::{Hash, Hasher};
+
+    let state = ctx.fleet.state();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    state.len().hash(&mut h);
+    for s in &state {
+        s.metadata.uid.hash(&mut h);
+        s.metadata
+            .creation_timestamp
+            .as_ref()
+            .map(|t| t.0.as_second())
+            .hash(&mut h);
+        s.spec.bucket.hash(&mut h);
+        s.spec.prefix().hash(&mut h);
+        s.spec.endpoint_key().hash(&mut h);
+    }
+    let fp = h.finish();
+
+    if let Ok(guard) = ctx.admit_cache.lock() {
+        if let Some((cached_fp, table)) = guard.as_ref() {
+            if *cached_fp == fp {
+                return (state, Arc::clone(table));
+            }
+        }
+    }
+    let fleet: Vec<Candidate> = state.iter().map(|s| Candidate::of(s)).collect();
+    let table = Arc::new(conflict::AdmitTable::build(&fleet));
+    if let Ok(mut guard) = ctx.admit_cache.lock() {
+        *guard = Some((fp, Arc::clone(&table)));
+    }
+    (state, table)
 }
 
 // ---------------------------------------------------------------------------
@@ -502,14 +562,8 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
     // --- 1. Does anyone else own this bucket subtree? ------------------
     // Before anything is created: a duplicate that never reconciles is
     // a duplicate that can never take over.
-    let fleet: Vec<Candidate> = ctx
-        .fleet
-        .state()
-        .iter()
-        .map(|s| Candidate::of(s))
-        .collect();
-    if let Admission::Rejected { winner, message } = conflict::admit(&fleet, &Candidate::of(&share))
-    {
+    let (_fleet_state, table) = admit_table(&ctx);
+    if let Admission::Rejected { winner, message } = table.verdict(&Candidate::of(&share)) {
         warn!(share = %name, %winner, "refusing to reconcile: bucket subtree already owned");
         // An already-running loser must STOP. Skipping it would leave
         // exactly the hub that takes the prefix over when the winner
@@ -981,9 +1035,20 @@ async fn drive_idle_ladder(
                         "HubReachable",
                         true,
                         "Polled",
+                        // NO TICKING COUNTER HERE. `idle_secs` advances
+                        // every second, so embedding it changed the
+                        // condition message on nearly every reconcile,
+                        // which changed `status`, which fired the
+                        // operator's own FlintShare watch, which
+                        // scheduled another reconcile. The gain is
+                        // 1/(1 - min(1, d)) for a reconcile taking d
+                        // seconds: invisible at the 4-share scale every
+                        // drill has run at, and NON-TERMINATING once d
+                        // reaches 1s — which it does as the fleet grows.
+                        // Idle is published as a metric instead.
                         Some(format!(
-                            "phase {:?}, idle {}s, rpoClean {:?}",
-                            snap.phase, snap.activity.idle_secs, snap.rpo_clean
+                            "phase {:?}, rpoClean {:?}",
+                            snap.phase, snap.rpo_clean
                         )),
                         generation,
                     ),
