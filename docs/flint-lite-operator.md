@@ -534,7 +534,17 @@ Things worth knowing before you wire it up:
   one.
 - **Browse-driven hydration is real, billed S3 egress.** A click on a
   cold file pulls it out of the bucket. `maxDownloadBytes` (default 5Gi)
-  is the per-request cap; larger files are fetched with `Range`.
+  is the per-request cap; larger files are fetched with `Range`. Note
+  the cap bounds the RESPONSE, not the egress: the first `Range` of a
+  cold object still hydrates the whole object.
+- **Downloads above `streamThresholdBytes` (default 8Mi) stream.** Below
+  it a body is buffered whole and a mid-read change is a clean 409
+  before any byte ships; above it memory stays O(chunk) whatever the
+  file size, and a mid-read change ends the stream with an error so the
+  connection resets — never a short body under 200. Buffering everything
+  bounded hub memory by the download cap instead, which at 1:1 hubs per
+  project is a fleet-wide cost: a 512 MiB request moved `VmHWM` from
+  30 MB to 541 MiB, and under a 256Mi limit it was OOM-killed.
 - **Every call counts as activity**, which is what keeps a project a
   user is looking at from being suspended under them. Poll `/status`
   for liveness — it deliberately does NOT count — or an automated

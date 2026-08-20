@@ -192,6 +192,17 @@ monitoring:
     # How long a download waits for an evicted file to hydrate before
     # answering 503 with a Retry-After.
     hydrateWaitSecs: 30
+    # The hub's download memory bound. At or below this a body is
+    # buffered whole, so a file that shrinks or is renamed over mid-read
+    # is refused as a clean 409 BEFORE any byte ships. Above it the body
+    # streams and memory stays O(chunk) whatever the file size — the
+    # same conditions then end the stream with an error instead, so the
+    # connection resets rather than delivering a short body under 200.
+    # Buffering everything used to bound hub memory by maxDownloadBytes:
+    # a 512 MiB request measured VmHWM 30 MB -> 541 MiB, and under a
+    # 256Mi limit that GET was OOM-killed, taking the NFS export with
+    # it. Hubs are 1:1 with projects, so that was a per-project cost.
+    streamThresholdBytes: 8388608
 
 logLevel: info
 resources: {}
