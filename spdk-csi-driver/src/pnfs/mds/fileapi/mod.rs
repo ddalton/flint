@@ -294,6 +294,11 @@ pub struct MoveBody {
 }
 
 #[derive(serde::Serialize)]
+struct OkBody {
+    status: String,
+}
+
+#[derive(serde::Serialize)]
 struct ErrorBody {
     error: String,
     /// The NFS status behind the answer, when there was one. Diagnostics
@@ -387,6 +392,20 @@ fn plain(code: StatusCode, msg: &str) -> warp::reply::Response {
     use warp::Reply;
     let mut res = warp::reply::json(&ErrorBody { error: msg.to_string(), nfs_status: None })
         .into_response();
+    *res.status_mut() = code;
+    res
+}
+
+/// A SUCCESS body.
+///
+/// Separate from [`plain`] because these two must not share a shape:
+/// `plain` serialises through `ErrorBody`, so every successful mutation
+/// used to answer `{"error":"created"}` — success reported under an
+/// `error` key, which reads as a failure to anything scanning for one
+/// and is simply wrong to publish.
+fn note(code: StatusCode, msg: &str) -> warp::reply::Response {
+    use warp::Reply;
+    let mut res = warp::reply::json(&OkBody { status: msg.to_string() }).into_response();
     *res.status_mut() = code;
     res
 }
@@ -639,6 +658,24 @@ fn parse_range(h: &str, size: u64) -> Option<(u64, u64)> {
     Some((start, end.min(size - 1)))
 }
 
+/// Did only the hydration move under us, or did the file actually change?
+///
+/// Called after a read probe has forced a cold file local, to decide
+/// whether the post-hydration stat may become the baseline the terminal
+/// read guard compares against. Identity and logical size are the two
+/// things a hydration must NOT alter — it restores the bytes the
+/// manifest already named, into the same inode — so if both survived,
+/// the only thing that moved was `change`, and that is the tier's own
+/// pwrite rather than a writer.
+///
+/// Deliberately ignores `change` itself: that is the whole point, since
+/// hydration always moves it. Everything a writer could do that matters
+/// here shows up as a new `fileid` (rename-over, re-create) or a new
+/// size (truncate, append).
+fn hydration_is_benign(before: (u64, u64), after: (u64, u64)) -> bool {
+    before == after
+}
+
 async fn handle_download(
     fs: Arc<HubFs>,
     cfg: ApiConfig,
@@ -713,6 +750,63 @@ async fn handle_download(
             "file exceeds the single-request download cap; use Range to fetch it in pieces",
         );
     }
+
+    // Settle hydration BEFORE the read window opens.
+    //
+    // The terminal guard below refuses when `change` moved under the
+    // read, which is how a rename-over is caught. But the tier rewrites
+    // the local inode when it hydrates (pwrite into the marker inode —
+    // see `hubfs::render_etag`), so on a cold file the hub's OWN
+    // hydration moves `change` and the read fails its own guard. Every
+    // first read of every stub after a DR import 409s, and the caller
+    // has to ask twice for bytes that were never in doubt; on the
+    // streaming path it is worse, because there the mismatch poisons an
+    // already-committed 200 instead of answering cleanly.
+    //
+    // So: force the hydration first with a one-byte probe, park on it
+    // exactly as the read loop would, and only then take the baseline
+    // the guard compares against. A replacement that lands in this
+    // window is still caught — `fileid` and the logical size must both
+    // survive it — and the file is local afterwards, so the read that
+    // follows cannot trip over a hydration again.
+    //
+    // Measured on a real cluster before this: 13 of 13 files 409'd on
+    // first touch after a hibernate/DR wake, every one of them 200 on
+    // the immediate retry.
+    let (entry, etag) = if want > 0 {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(cfg.hydrate_wait_secs);
+        loop {
+            match fs.read_at(&path, start, 1).await {
+                Ok(_) => break,
+                Err(FsError::Nfs(Nfs4Status::Delay)) => {
+                    if std::time::Instant::now() >= deadline {
+                        return err_reply(&FsError::Nfs(Nfs4Status::Delay));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Err(e) => return err_reply(&e),
+            }
+        }
+        match fs.stat(&path).await {
+            Ok(after) => {
+                if !hydration_is_benign(
+                    (entry.fileid, entry.size),
+                    (after.fileid, after.size),
+                ) {
+                    return plain(
+                        StatusCode::CONFLICT,
+                        "file changed while being read; retry the request",
+                    );
+                }
+                let e2 = hubfs::render_etag(after.fileid, after.change);
+                (after, e2)
+            }
+            Err(e) => return err_reply(&e),
+        }
+    } else {
+        (entry, etag)
+    };
 
     // Too big to hold? Stream it.
     //
@@ -1152,7 +1246,7 @@ async fn handle_upload(
 
     // Hand back the version that now exists, so a caller writing twice
     // in a row does not have to re-read between them.
-    let mut res = plain(StatusCode::CREATED, "written");
+    let mut res = note(StatusCode::CREATED, "written");
     if let Ok(e) = fs.stat(&path).await {
         if let Ok(v) = warp::http::HeaderValue::from_str(&e.etag) {
             res.headers_mut().insert("etag", v);
@@ -1175,7 +1269,7 @@ async fn handle_delete(
         Err(m) => return plain(StatusCode::BAD_REQUEST, &m),
     };
     match fs.remove_checked(&path, expect).await {
-        Ok(()) => plain(StatusCode::OK, "removed"),
+        Ok(()) => note(StatusCode::OK, "removed"),
         Err(e) => mutate_err_reply(&e, expect.is_some()),
     }
 }
@@ -1186,7 +1280,7 @@ async fn handle_folder(fs: Arc<HubFs>, b: FolderBody) -> warp::reply::Response {
         Err(e) => return err_reply(&e),
     };
     match fs.mkdir(&path).await {
-        Ok(()) => plain(StatusCode::CREATED, "created"),
+        Ok(()) => note(StatusCode::CREATED, "created"),
         Err(e) => err_reply(&e),
     }
 }
@@ -1212,7 +1306,7 @@ async fn handle_move(
         Err(m) => return plain(StatusCode::BAD_REQUEST, &m),
     };
     match fs.rename_checked(&from, &to, expect, None).await {
-        Ok(()) => plain(StatusCode::OK, "moved"),
+        Ok(()) => note(StatusCode::OK, "moved"),
         Err(e) => mutate_err_reply(&e, expect.is_some()),
     }
 }
@@ -1272,6 +1366,146 @@ mod tests {
         assert!(!(t > t), "a body exactly at the threshold must buffer");
         assert!(t + 1 > t, "one byte over the threshold must stream");
         assert!(!(0u64 > t), "an empty body must never take the streaming path");
+    }
+
+    // ---------------------------------------------------------------
+    // The cold-read guard. A download's terminal check refuses when
+    // `change` moved under the read — that is how a rename-over is
+    // caught. But the tier rewrites the local inode when it HYDRATES,
+    // so before this the hub's own hydration tripped its own guard and
+    // every first read of every stub after a DR wake answered 409.
+    // Measured on a real cluster: 13 of 13 files, every one of them 200
+    // on the immediate retry.
+    // ---------------------------------------------------------------
+
+    /// Success is not an error, and must not be published under an
+    /// `error` key. Every mutating route used to answer through the
+    /// error body — `{"error":"created"}` on a 201 — which reads as a
+    /// failure to any client scanning for that field.
+    #[tokio::test]
+    async fn a_successful_mutation_does_not_answer_under_an_error_key() {
+        let (api, _fs, _t) = harness().await;
+
+        let cases = vec![
+            (
+                warp::test::request()
+                    .method("POST")
+                    .path("/files/folder")
+                    .header("authorization", bearer())
+                    .json(&serde_json::json!({"path": "/d"}))
+                    .reply(&api)
+                    .await,
+                "created",
+            ),
+            (
+                warp::test::request()
+                    .method("PUT")
+                    .path("/files/content?path=/d/f.bin")
+                    .header("authorization", bearer())
+                    .body("hello")
+                    .reply(&api)
+                    .await,
+                "written",
+            ),
+            (
+                warp::test::request()
+                    .method("POST")
+                    .path("/files/move")
+                    .header("authorization", bearer())
+                    .json(&serde_json::json!({"from": "/d/f.bin", "to": "/d/g.bin"}))
+                    .reply(&api)
+                    .await,
+                "moved",
+            ),
+            (
+                warp::test::request()
+                    .method("DELETE")
+                    .path("/files/content?path=/d/g.bin")
+                    .header("authorization", bearer())
+                    .reply(&api)
+                    .await,
+                "removed",
+            ),
+        ];
+
+        for (res, expected) in cases {
+            assert!(res.status().is_success(), "expected a 2xx, got {}", res.status());
+            let v: serde_json::Value = serde_json::from_slice(res.body().as_ref()).expect("a JSON body");
+            assert!(
+                v.get("error").is_none(),
+                "a successful response carried an `error` key: {v}"
+            );
+            assert_eq!(
+                v.get("status").and_then(|s| s.as_str()),
+                Some(expected),
+                "success must be reported under `status`"
+            );
+        }
+    }
+
+    /// A hydration keeps the inode and the logical size and moves only
+    /// `change`. That is the case the download must absorb rather than
+    /// refuse.
+    #[test]
+    fn a_hydration_that_only_moves_change_is_benign() {
+        assert!(
+            hydration_is_benign((42, 4096), (42, 4096)),
+            "same inode, same logical size — only `change` moved, which is what \
+             hydrating a stub does; refusing this is the 409-on-every-cold-read bug"
+        );
+    }
+
+    /// The guard must not have been widened into "never refuse". A
+    /// rename-over lands a DIFFERENT inode at the same path, and a
+    /// caller handed those bytes under the old file's validator has
+    /// been given the wrong object.
+    #[test]
+    fn a_replacement_inode_is_never_benign() {
+        assert!(
+            !hydration_is_benign((42, 4096), (43, 4096)),
+            "a different fileid at the same path is a rename-over, not a hydration"
+        );
+    }
+
+    /// Same inode, different logical size: a truncate or an append,
+    /// against a response that has already committed a Content-Length
+    /// built from the first stat.
+    #[test]
+    fn a_resize_under_the_read_is_never_benign() {
+        assert!(
+            !hydration_is_benign((42, 4096), (42, 8192)),
+            "the file grew under the read — the committed Content-Length is now a lie"
+        );
+        assert!(
+            !hydration_is_benign((42, 4096), (42, 0)),
+            "the file was truncated under the read"
+        );
+    }
+
+    /// The re-baseline has to publish the tag of the bytes it actually
+    /// shipped. Returning the pre-hydration tag would hand every caller
+    /// a validator that is already stale, so their next `If-Match`
+    /// would 412 for no reason they could see.
+    #[tokio::test]
+    async fn a_download_returns_the_tag_of_the_bytes_it_shipped() {
+        let (api, fs, _t) = harness().await;
+        let _ = seed(&fs, "/f.bin", 4096).await;
+
+        let res = warp::test::request()
+            .method("GET")
+            .path("/files/content?path=/f.bin")
+            .header("authorization", bearer())
+            .reply(&api)
+            .await;
+        assert_eq!(res.status(), 200);
+        let served = res.headers().get("etag").unwrap().to_str().unwrap().to_string();
+
+        let now = fs.stat(&FsPath::parse("/f.bin").unwrap()).await.unwrap();
+        assert_eq!(
+            served,
+            hubfs::render_etag(now.fileid, now.change),
+            "the ETag on the response must name the file as it stands after the read"
+        );
     }
 
     async fn seed(fs: &Arc<HubFs>, name: &str, len: usize) -> Vec<u8> {

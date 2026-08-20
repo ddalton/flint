@@ -29,9 +29,15 @@ listener binds):
   kubectl get flintshares -A -w
   kubectl describe flintshare tenant-a -n {{ .Release.Namespace }}
 
-Mount it from any pod in the cluster:
+Mount it from any pod in the cluster — the export is the SERVER ROOT,
+so the path is "/", not the hub's on-disk directory:
 
-  <address from `kubectl get fsh`>  e.g. tenant-a.{{ .Release.Namespace }}.svc.cluster.local:/data/exports
+  status.address is host:port, and mount will not take it whole
+  (host:2049:/ is refused). Split it — this also survives an
+  advertiseAddress on a port other than 2049:
+
+    ADDR=$(kubectl get fsh tenant-a -n {{ .Release.Namespace }} -o jsonpath='{.status.address}')
+    mount -t nfs4 -o vers=4.1,nconnect=4,port=${ADDR##*:} ${ADDR%:*}:/ /mnt/project
 
 Two things worth knowing:
 

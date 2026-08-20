@@ -25,6 +25,22 @@ spec:
     hydrateWarmAfterImport: true
 ```
 
+The secret named by `credentialsSecretRef` is loaded with `envFrom`, so
+its KEYS become environment variables verbatim and must be the names the
+AWS SDK reads:
+
+```console
+$ kubectl -n workspaces create secret generic flint-s3 \
+    --from-literal=AWS_ACCESS_KEY_ID=... \
+    --from-literal=AWS_SECRET_ACCESS_KEY=...       # + AWS_SESSION_TOKEN if temporary
+```
+
+Naming them anything else (`accessKeyId`, say) leaves the SDK with no
+credentials at all. It then falls back to the instance role, and on a
+node where IMDS is unreachable from pods that surfaces as a startup
+crash loop reading `bucket <name> unreachable: dispatch failure` — which
+names the bucket, not the credentials.
+
 ```console
 $ kubectl get flintshares -A
 NAMESPACE    NAME       PHASE   ADDRESS                                    BUCKET          PREFIX
@@ -190,10 +206,22 @@ The address is half of it; these are the other half. A WAN-ish path
 between client and hub changes which options matter, and one of them
 fails **silently** if you leave it out.
 
+`status.address` is `host:port`, and `mount` will not take it whole —
+`host:2049:/` is refused. Split it: the host goes before the colon, the
+port goes in `-o port=`. Doing it this way also survives a
+`spec.service.advertiseAddress` on a port other than 2049, which is the
+whole reason the field carries one.
+
 ```
+ADDR=$(kubectl get fsh tenant-a -n workspaces -o jsonpath='{.status.address}')
+
 mount -t nfs4 -o vers=4.1,nconnect=4,hard,timeo=600,retrans=2,\
-noatime,actimeo=30 <status.address>:/ /mnt/project
+noatime,actimeo=30,port=${ADDR##*:} ${ADDR%:*}:/ /mnt/project
 ```
+
+The export is the SERVER ROOT — `:/`, not the hub's on-disk
+`/data/exports`, which is a path inside the container and is refused
+with `NFS4ERR_NOENT`.
 
 - **`nconnect>=2` is mandatory, not a tuning knob.** The kernel opens
   ONE connection without it and silently refuses every additional
