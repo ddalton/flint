@@ -109,3 +109,86 @@ early run showed `writes 0.00/s` next to `APPLY 19.51/s`.
 2. **S1 metrics** — three changes shipped in one image and could not be
    attributed on-cluster. Land it before the next run.
 3. **Rig B** — per-hub constants, on real hubs.
+
+---
+
+# Rig run 2 — S7 and S9, cluster `runbw`
+
+Same shape (1 CP + 4 workers, `i4i.xlarge`, all-spot), 2026-08-20, ~2h,
+≈$1.20. Torn down.
+
+## S7: a parked fleet now costs essentially nothing
+
+3000 shares, **all parked**, measured after the seeding burst drained.
+Parked-only is deliberate — it isolates exactly the term S7 targets, and
+it converges in seconds because it creates no pods at all.
+
+```
+t+200s   flintshares 12.26/s    child 61.75/s     <- seed burst draining
+t+400s   flintshares  0.01/s    child  0.19/s     <- settled
+
+sample 1 flintshares  0.023/s   child  0.228/s
+sample 2 flintshares  0.006/s   child  0.229/s
+sample 3 flintshares  0.024/s   child  0.218/s
+operator 1m CPU / 77 MiB, holding 3000 shares
+```
+
+Against run 1's converged baseline of **~99 writes/s** (11.83 flintshare
+applies + 87.15 child), a settled parked fleet is now **~0.24/s**. The
+comparison is not apples to apples — run 1 had 300 live shares and this
+had none — but the parked contribution is what S7 targets, and it has
+gone to approximately zero.
+
+## S9: making hubs schedulable makes their cost visible
+
+The first attempt at run 2 **failed to converge, and that was the
+result**: 162 of 300 hub pods sat `Unschedulable — Insufficient cpu`.
+The new default hub request (100m/128Mi) means **300 live hubs ask for
+30 vCPU**, and the rig's four workers have 16 allocatable.
+
+This is S9 working, not S9 breaking. Before it, hubs were BestEffort:
+the scheduler saw a zero-cost pod, packed by pod count alone, and the
+capacity was borrowed silently. The number is now visible and has to be
+planned for. **The rig's stubs are not hubs**, so they now carry
+explicit tiny requests — otherwise the run measures cluster capacity
+rather than the control plane.
+
+## A run that was VOID, and why it is recorded
+
+The first 3000/300 attempt on this cluster produced `37.97` flintshare
+writes/s and `271/s` child — WORSE than the baseline. It is not a valid
+S7 measurement and is not quoted as one: the fleet never converged (131
+Pending, 67 Starting), and a not-Ready share requeues every 15s, which
+is the S8 term that has NOT been built. It was comparing a settled fleet
+to a thrashing one.
+
+The proximate cause was **kube-apiserver saturation** — 1.5 of 4 cores
+on the control-plane node — under the churn of a delete-and-recreate
+cycle. Worth recording on its own: at 3000 shares the KUBERNETES control
+plane needs sizing, independently of anything flint does. Deployment
+`Available` status ran ~20 minutes stale while the pods themselves were
+`1/1 Running` and all 300 hubs were `HubReachable` — so the operator was
+fine and the fleet was not.
+
+## Archive and restore, measured
+
+The full cycle, on a live 3000-share fleet:
+
+| step | result |
+|---|---|
+| archive (`reclaim: Retain`, default) | Deployment, Service, ConfigMap GC'd; **PVC kept** |
+| archive (`reclaim: Delete`) | **all five objects gone, PVC included**; bucket untouched |
+| restore (recreate the CR) | **Ready in 30s**, every object back |
+
+An archived project therefore costs **zero Kubernetes objects**. That
+changes the fleet sizing premise: the 3000 in "3000 shares" is the
+count of NON-ARCHIVED projects, not of all projects that ever existed.
+
+## What is still not measured
+
+- **S7 against a converged fleet WITH live shares.** The parked-only
+  experiment isolates the term cleanly, but the mixed steady state at
+  3000/300 has not been re-measured on the fixed operator.
+- **S8** (real backoff) is not built, and run 2 showed exactly why it
+  matters: a fleet that cannot converge pays 15s requeues forever and
+  drives the apiserver harder than a healthy one.

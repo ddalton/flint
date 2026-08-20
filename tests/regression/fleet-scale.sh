@@ -47,6 +47,16 @@ FAILED=0
 say "rig: $N shares, $LIVE live (stub hubs), $NS_COUNT namespaces, sc=$SC"
 echo "  output: $OUT"
 
+# RESOURCES ARE SET EXPLICITLY, AND SMALL, ON PURPOSE. A stub is not a
+# hub: it holds a socket and serves a JSON document. The operator's
+# fleet default (100m/128Mi) is sized for a real NFS server, and at 300
+# live that is 30 vCPU of REQUESTS — more than this rig's four workers
+# have, so 162 of 300 pods sat Unschedulable on the first attempt and
+# the run would have measured cluster capacity rather than the control
+# plane. Worth knowing as a deployment fact in its own right: making
+# hubs schedulable makes the capacity they were silently borrowing
+# visible, and 300 live hubs need planning for.
+
 # THE LADDER IS ARMED ON PURPOSE. poll_hub runs from the idle
 # evaluation, so a share with no spec.idle is NEVER polled - and the
 # per-share /status poll is one of the terms this rig exists to
@@ -98,6 +108,7 @@ spec:
   persistence: {size: 1Gi, storageClassName: $SC}
   monitoring: {enabled: true, port: 8080}
   idle: {suspendAfterSecs: 3600, hibernateAfterSecs: 86400}
+  resources: {requests: {cpu: 5m, memory: 16Mi}}
 ---
 YAML
         else
@@ -119,6 +130,7 @@ spec:
   persistence: {size: 1Gi, storageClassName: $SC}
   monitoring: {enabled: true, port: 8080}
   idle: {suspendAfterSecs: 3600, hibernateAfterSecs: 86400}
+  resources: {requests: {cpu: 5m, memory: 16Mi}}
 ---
 YAML
         fi
