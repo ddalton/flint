@@ -40,6 +40,8 @@ Shares: `workspaces/tenant-a` (5Gi, flint-spdk, file API on) and
 | §M0 mitigation | **VALIDATED** | With a live cross-cluster mount and `suspendWithSessions: false` on a **60s** ladder, the share stayed `Ready`/`replicas=1` for **350s** (≈6× the threshold), the operator reporting `IdleEligible=False` — **"a client still holds a lease"**. Paired with C6 (where the default `true` wedged three consumer pods for 288s and pinned two node mounts), this is direct evidence that `suspendWithSessions: false` should be the **default**, not an option — exactly as the plan's §M0 argued. |
 | B7 | **PASS** | Fast arm: clean suspend → wake **Ready in 13s**, same `serverId`, `epochTakeovers=0` — pod start plus instant self-recognition. Slow arm (same bucket, same session): epoch left held + PVC destroyed so the successor has a **new** `serverId` → **Ready in 79s**, `epochTakeovers=1`. Two arms, same instrument, opposite results, oracle read as a counter not a log grep. |
 | **C4 / D7** | **CONFIRMED — the documented residual is FALSE** | Under a proven partition, `nfs.activeLeases` stayed **1 for 770 seconds (12.8 min)** against a **90s** NFSv4 lease, and the share stayed `Ready`/`idle=Active` the whole time with `suspendAfterSecs=120` **and** `suspendWithSessions: false` armed. Then **one** file-API compound took it to **0 immediately** (`fileapi_rc=200` → `activeLeases=0`). That is the anti-vacuity the plan demanded: the same instrument that read "1, forever" read 0 the instant a compound drove the sweep, which also proves the lease had been expired the entire time — nothing was reaping it. **And the ladder then fired**: the share went `IdleSuspended` at **t+988s**, 208s after that one compound (its own `suspendAfterSecs` plus reconcile cadence), so the ladder was armed and working the entire 12.8 minutes and the stale lease was the *only* thing holding it. One stimulus, two coupled effects. **A partitioned agent fleet pins its share awake forever**, and the docs' "leases expire, so a long enough partition drops the count to zero on its own — document the window" is wrong: the window never closes. |
+| **E3** | **PASS — strong form, and it earned its keep** | `HibernateStarted → HibernateDeferred — not reclaiming the disk: 8 file(s) beyond RPO`. The PVC was **not** deleted (same uid throughout). This was not a staged refusal: the share genuinely was not recoverable, because of the generation-key bug below. The predicate refused a real reclaim of a real disk holding the only complete copy of the POSIX metadata. **This is the single property that kept the drill from losing data.** |
+| **E2** | **PARTIAL — blocked by the bug it exposed** | The hibernate never completed, so "PVC destroyed, then bytes return identical" is **not** demonstrated. What did hold: all 8 × 32 MiB files read back **byte-identical** across a suspend→wake (`identical=8 mismatched=0`), and the comparison is not vacuous — against a deliberately corrupted truth list the same harness reported exactly `identical=7 mismatched=1`. Wake took 203s, most of it the ladder re-deciding rather than the hub booting. |
 | D3 (flock arm) | **PASS** | A second `flint-pnfs-mds` started by hand inside the running hub pod, on the same `/data/state`, **never became a writer**. It logged `🔒 state dir /data/state is held by another hub process — waiting for it to finish draining`, waited the full 150s budget (`~grace + slack`), then exited non-zero with `refusing to start a second writer on this volume (two processes here share one server_id, which the epoch protocol cannot fence)`. Oracles read as **counts, not greps**: `refusals=1`, `bound2049=0` — it never reached the listener, never claimed an epoch. Anti-vacuity: a first run with `timeout 60` caught it mid-wait with `refusals=0`, proving the count tracks the refusal and not merely the process exiting. |
 | **F29 recovery** | **FOUND — the wedge has a non-destructive exit** | The force-delete wedge that voided D9 is cleared by **dropping the volume's last referencing pod**, which lets kubelet issue the `NodeUnstageVolume` the force-delete skipped. `spec.lifecycle: Suspended` (replicas→0) then `Active` did it: both wedged shares were `Ready` **30s** later, csi-node logging `Volume … unstaged successfully` for both PVCs. **Why a plain `kubectl delete pod` can never work:** the ReplicaSet recreates a pod immediately, so the volume never loses its last reference and kubelet never unstages — the driver's F29 refusal (`main.rs:4968`) is correct in itself, but kubelet's volume-manager cache still says "staged" and so `NodeStageVolume` is never called again. Nothing self-heals and nothing surfaces the remedy. |
 
@@ -124,6 +126,73 @@ status would have been `tail`'s).
 or have the periodic sweep also drive `StateManager::cleanup_expired()` (also
 releases the dead client's locks, opens and delegations). The second is the
 real fix; the first alone would still leak state.
+
+## THIRD FINDING, AND THE MOST SERIOUS — a stale `dev` silently empties the manifest
+
+**Found by accident while running E2, then reproduced deliberately on a second
+share.** Generation rows are persisted keyed by `(dev, ino)`
+(`tier_generation` columns `dev, ino, key, generation, …`), and `dev` — the
+device number of the mounted volume — **is not stable across a restage**. When
+it drifts, every row becomes unreachable and the consequences cascade.
+
+**The evidence, on `tenant-a`:**
+
+- the hub logs `tier flush: startup loaded 33 generation row(s)` — the rows are
+  read back fine, this is not data loss — and then, one line later,
+  `tier manifest: barrier seq 81 — 4 entries, 33 beyond RPO`;
+- the live export is `dev=66312`; all 33 rows carry `dev=66311`;
+- `a5-probe.bin` has **ino 131081 in both** the row and the live file. The
+  inode is identical. Only the device number moved;
+- `manifest::build` treats "no generation record" as `beyond_rpo` and **drops
+  the entry** (`manifest.rs:220-233`), and `write_at_barrier` then publishes
+  that manifest over the good one.
+
+**What it did to the bucket.** `tenant-a/.flint/manifest` went from **7919
+bytes, 37 entries, `beyond_rpo: 0`** (05:31) to **534 bytes, 4 entries — one
+directory and three symlinks, zero entries carrying an S3 key — `beyond_rpo:
+33`** (05:57). The 33 data objects are all still present and intact in S3; the
+manifest simply no longer mentions them.
+
+**Reproduced from a clean start.** `tenant-e2`, created fresh for this leg,
+published 8 objects under epoch 1 at 05:45:04 with correct `flint-gen`/
+`flint-epoch` metadata, restarted for hibernate-verify at 05:49:48, and wrote
+`{"seq":4,"epoch":2,"beyond_rpo":8,"entries":[]}` — a **completely empty
+manifest** — one second later.
+
+**It never heals.** `dirtyFiles` is 0, so nothing will ever republish those
+files. Rewriting one by hand proves the mechanism and the trap in one shot:
+overwriting `a6-small-1.bin` moved `beyondRpo` 33 → 32 and left a **second**
+row for that file (`(66311,131082)` stale, `(66312,131117)` live, generation
+2), then it froze at 32. Recovering a share means rewriting every file
+individually.
+
+**Consequences, in order:**
+
+1. **The manifest — documented as carrying everything, and the sole input to
+   manifest-first cold import — becomes false.** Bytes are recoverable through
+   the post-listener foreign-key sweep, but `mode`, `uid`, `gid`, `mtime` and
+   symlink targets live **only** in the manifest, so a sweep-based recovery
+   restores content and loses POSIX metadata.
+2. **`rpoClean` is permanently false, so hibernate is blocked forever.** That
+   is also what saved this drill: `HibernateDeferred` refused to delete a PVC
+   holding the only complete copy. The safety property worked exactly as
+   designed, against a defect nobody had predicted.
+3. Stale rows accumulate rather than being reconciled.
+4. It is **silent** — no error, no event, no failed publish. The only surfaces
+   are `rpo.beyondRpo` in `/status` and `IdleEligible=False`.
+
+**Why earlier legs passed.** The drift is not deterministic — it depends on
+which device minor the CSI driver gets on restage. A control test on
+`tenant-notoken` came back `dev=66310` **both** before and after a
+suspend/resume, so a single restage often reuses the number. B3/B5 hibernated
+successfully earlier in the drill for exactly that reason. This bug hides until
+the minor happens to move.
+
+**The fix.** `dev` earns nothing in that key: a hub owns exactly one export
+root on one filesystem, so `ino` alone identifies a file, while `dev` adds a
+value that is stable only by luck. Normalise it — remap stored rows to the
+export root's live `st_dev` at load, or drop `dev` from the lookup — and
+deduplicate rows that collide on `ino` by `updated_unix`.
 
 ## Legs NOT run, and why
 
