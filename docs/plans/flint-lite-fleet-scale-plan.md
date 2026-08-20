@@ -7,6 +7,13 @@
 > every finding went to an independent refuter. **14 findings survived
 > refutation (1 critical, 10 major, 3 minor) and are folded in below**;
 > §Review record says what each one changed.
+>
+> **rev 2 (2026-08-20):** multi-volume hubs are now EXPLICITLY out of
+> scope (§Explicitly out of scope); **Track B** adds the per-hub cost
+> terms rev 1 declared hub-side and skipped; and S6's single-machine rig
+> is split in two so the control plane is measured AT 300 live rather
+> than extrapolated from 16. **Track A has been adversarially reviewed;
+> Track B and the rig split have NOT.**
 
 ## The target, and why this document exists
 
@@ -22,6 +29,35 @@ process. Sharding the controller, collapsing Services, or adding a
 registry process buys new consensus surfaces and new split-brain modes
 while leaving every measured term intact. So the plan collapses the rate
 terms in place, proves it with a rig, then bounds the fan-out events.
+
+## Explicitly out of scope: multi-volume hubs
+
+**Nothing in this plan requires or assumes multi-volume hubs, and they
+are not a prerequisite for any step.** Stated because the obvious
+structural answer to "N entities each heartbeating" is a per-process
+lease covering N resources (etcd lease IDs, ZooKeeper sessions), which
+would take epoch-renewal cost from O(volumes) to O(hubs). It is
+deliberately not taken, for three reasons:
+
+1. **The economics do not justify it.** At 300 live the epoch heartbeat
+   is ~$389/month against roughly $3,000/month of hub compute — ~13%,
+   and ~4% after H2 below. A design carrying **8/8 critical-confirmed
+   review findings and a formally refuted lease model**
+   (`FlintTierSession` made depose-first mandatory) cannot be justified
+   by a rounding error.
+2. **It converts per-project isolation into shared fate.** One lease
+   covering N volumes means one lease failure fences **N projects
+   instead of one**. At 1:1 those are the same sentence; at 1:N it is a
+   different product. Per-project isolation is the thing flint-lite
+   sells.
+3. **The independence is why the epoch lease is trustworthy.** Each hub
+   runs a self-contained CAS loop that coordinates with nothing. That is
+   what let the chaos campaign, the formal models and two real-cluster
+   drills reason about it at all.
+
+Multi-volume should be decided on **density and per-project capacity
+economics** — see `docs/plans/multi-volume-hub-design.md` — and the
+heartbeat saving must **not** be counted among its benefits.
 
 ## S0 — what is already good enough (do not rebuild these)
 
@@ -159,14 +195,45 @@ replacing 13–51 ms per reconcile.
 > against the 17 ms it replaces) and rebuild synchronously on mismatch.
 > The mapper rebuild stays only as an optimisation.
 
-### S6 — The cluster rig *(days, dep S1)*
-`tests/regression/fleet-scale-kind.sh`. 3000 **real** CRs across M
-namespaces; parked shares pre-stamped with the operator's own durable
-annotations so they cost zero pods from birth. A stub hub that cannot
-drift replaces the full flint-pnfs pod, so one machine hosts 60+ live
-shares. Compositions: **A** 300 Active + 2700 IdleSuspended; **B** 300 +
-2700 Hibernated; **C** the legal clamp floor; **D** all Pending
-(the broken fleet). Every oracle carries an anti-vacuity guard.
+### S6 — Two rigs, because one was answering two questions badly *(days, dep S1)*
+
+Rev 1 built a single `fleet-scale-kind.sh` on **one machine** and
+accepted ~16–60 live hubs. Two things bind there, and only one of them
+is real: a single-node cluster cannot exceed **kubelet's default 110
+pods/node** no matter how small the pods are, and a laptop Docker VM
+holding 3000 CRs plus ~15,000 child objects pushes it to ~16. **Neither
+is a property of flint.** Split the rig so each half answers one
+question.
+
+**Rig A — control plane, AT the target.** 3000 real CRs, **300 live
+stub hubs**, on ~5 small spot nodes (enough to clear the 110/node
+ceiling; stubs are a few MB, so 300 of them is ~3 GB and ~3 vCPU).
+Estimated well under $0.50/hr. This measures what actually breaks:
+operator CPU and RSS, apiserver read/write rates, watch bandwidth,
+reconcile latency `d`, wake latency. **It hits 300 rather than
+extrapolating 20x from 16**, which is the whole reason to split.
+
+Keep everything rev 1 got right: the seeder pre-stamping parked shares
+with the operator's own durable annotations; the stub that constructs
+and serializes the **real `StatusDoc`** so drift is a compile error
+rather than a silent switch onto the operator's `Err` branch; the
+lie-on-command knobs; the collector; oracles O1–O11 run continuously;
+and the teardown path built **before** the first deliberate-OOM run, or
+3000 finalizer-bearing CRs make the rig unrecoverable.
+
+**Rig B — data plane, deliberately small.** 10–30 **real** hubs against
+real S3, measuring **per-hub constants**: barrier-walk CPU, epoch PUT
+rate, RSS, PVC attach time, DR-import time vs manifest entry count.
+Then extrapolate those constants to 300.
+
+**Why this is more honest than one rig:** extrapolating a per-hub
+constant from 30 real hubs is defensible; extrapolating everything from
+16 is not. It also separates "does the operator survive 3000 CRs"
+(Rig A, cheap, hits the number) from "what does one hub cost" (Rig B,
+real, small) — two questions the single rig answered badly at once.
+
+**Standing directive: ask before provisioning either rig.** Quote the
+shape and the hourly cost first.
 
 ### S7 — Make parked shares actually cheap *(days, dep S6)*
 Long jittered cadence + a render-hash apply gate on `is_down()` shares,
@@ -267,6 +334,87 @@ reverted or re-explained, not kept on faith.
 > *steady-state rate* measurements only; for burst measurements
 > saturation **is the result** and is recorded as an outcome.
 
+## Track B — per-hub cost (hub-side, no distributed-logic changes)
+
+Rev 1 was a control-plane plan and said so: "the barrier-walk CPU is a
+hub-side term I do not touch." But **fleet scalability is the product of
+the control plane surviving 3000 CRs and one hub not being wasteful 300
+times over**, so the per-hub terms belong here. All four are local, none
+alters the epoch lease's independence, and none needs multi-volume.
+
+Ordered by ratio of win to risk.
+
+### H1 — Reap the epoch key's noncurrent versions *(hours)*
+Every CAS renewal mints a version. At the current cadence that is
+**8,640 versions/day/live hub on one key** — ~3.15M/year/share — and
+nothing reaps them. `s3.rs:418-427` only **logs** a recommendation to
+enable `NoncurrentVersionExpiration`; the sole rule the tier actually
+creates is `flint-tier-abort-mpu` (`s3.rs:764`).
+
+**The trap:** S3 lifecycle filters match **prefix or tag, not suffix**,
+and the epoch cell is `<keyPrefix>.flint/epoch` — a suffix. So a prefix
+filter cannot target it without also catching data objects, whose
+versions the tier's delete-marker recovery **depends on**. Correct fix:
+**tag the epoch object on PUT** and use a tag-filtered rule. Inherits
+S12's shared-bucket rule-ID collision problem — fix both together.
+
+### H2 — Re-tune the lease, and write the trade down *(hours)*
+`epochHeartbeatSecs` and `epochLeaseMisses` are already CRD/config
+knobs; the defaults are `10s x 6` (`epoch.rs:70-77`,
+`config.rs:290-295`) = 60s TTL, tolerant of 5 consecutive failed PUTs,
+renewing 6x more often than the TTL requires.
+
+**Lease exclusion trades three things: renewal cost, takeover latency,
+and transient-failure tolerance. You get two.** `10 x 6` maximizes the
+last two, which is exactly the setting that costs the most PUTs.
+`30s x 4` gives 120s TTL, tolerates 3 failures, and is **3x cheaper**.
+
+**What makes the longer TTL acceptable here:** since 1.31.0 a CLEAN
+shutdown releases the cell, so a normal suspend/wake pays nothing. The
+TTL is only paid on **unclean** death. Change the chart default, publish
+the trade, and let a latency-sensitive deployment tune back down.
+
+### H3 — Stop rebuilding a manifest nobody reads *(days — the risky one)*
+`write_at_barrier` (`manifest.rs:389-403`) receives an **already-`Built`**
+manifest and only then compares digests, so the digest check skips the
+**S3 PUT, not the walk**. Every live hub walks its entire export, clones
+the generation registry and re-serializes every entry **every 10s**,
+whether or not anything changed — then usually throws it away.
+
+Order-of-magnitude (assumed 10k files/share, 50 us/file, so treat as a
+magnitude not a measurement): ~5% of a core per **idle** hub, ~15 cores
+fleet-wide at 300 live. Comparable to the entire heartbeat bill, and
+local to one function.
+
+**The trap that makes this the risky item:** `beyond_rpo` is computed
+FROM the built manifest, and it is **time-dependent, not
+change-dependent** — a file ages past the RPO window with nobody
+writing anything. A naive "nothing changed, skip the build" gate would
+freeze `beyond_rpo` at a stale value, and **`beyond_rpo == 0` is a
+conjunct of `rpoClean`, which is the hibernate gate that authorizes
+deleting a PVC.** Getting this wrong is a data-safety bug, not a
+performance regression.
+
+So the gate must be: skip the build only when the dirty set, capture
+queue and tombstones are all empty **AND** force a full rebuild every
+Nth tick so `beyond_rpo` cannot go stale. **Land H3 behind Rig B
+measurement and its own review** — it is the one Track B item that
+touches a data-safety conjunct.
+
+### H4 — Jitter the tier's periodic loops *(hours)*
+Every periodic tier loop is a bare `interval` seeded at process start,
+with no jitter anywhere. 300 hubs woken by a correlated event
+phase-lock their heartbeats and barriers onto the same second, which is
+the fleet-scale version of a thundering herd on the bucket. Jitter each
+period +/-25%. Trivial, independently valuable, and it makes every Rig B
+number less bimodal.
+
+### Suggested order across both tracks
+**H1, H2, H4 are near-free and independent — do them first**, alongside
+S1 (metrics). Then S2/S3 (the correct-on-inspection bundle and the
+self-trigger fix). Then the rigs. **H3 lands last in Track B**, behind
+measurement and review, because of the `beyond_rpo` coupling.
+
 ## What this does NOT deliver
 
 1. **Cross-cluster / no-operator prefix uniqueness is not closed.** S12
@@ -281,10 +429,12 @@ reverted or re-explained, not kept on faith.
 3. **The CSI controller is still `replicas: 1`** with no sidecar leader
    election. S11 bounds the rate into it; it does not make it HA.
    **Largest untouched availability term.**
-4. **Validated at 3000 CRs with ~16–60 live hubs, not 300.** The rig
-   trades pod fidelity for CR count because CR count is what breaks. Node
-   packing, attach rates, the aggregate epoch PUT rate and the manifest
-   barrier's export walk stay **extrapolations, flagged as such**.
+4. **The CONTROL plane is validated at 300 live (Rig A); the DATA plane
+   is not.** Rig A's 300 live hubs are **stubs** — no `state.db`, no
+   tier, no S3, no real PVC I/O. Rig B measures per-hub constants on
+   10–30 real hubs and those are extrapolated to 300. Node packing with
+   real hubs, EBS/NVMe attach storms at scale, and kube-proxy at 3000
+   Services remain **extrapolations, flagged as such**.
 5. **`managedFields` memory cannot be reduced here** — k8s-openapi models
    `fieldsV1` as untyped `serde_json::Value` and the Store retains it
    (17.4 KB/share, 52.4 MB at 3000). Size for it.
