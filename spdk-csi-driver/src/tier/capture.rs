@@ -387,9 +387,34 @@ pub fn enable() {
     FORCED.store(true, Ordering::Relaxed);
 }
 
+/// Serialises tests that queue marks and later drain them.
+///
+/// [`force_enable`]'s note that "per-file keys keep them isolated"
+/// holds for the capture maps and NOT for the pending queue:
+/// `durable::drain_pending` takes the WHOLE queue and writes it to
+/// whichever backend called it, so two tier tests running in parallel
+/// steal each other's marks and the loser finds its own files missing
+/// from its own backend. The tests already guarded the case where
+/// ANOTHER test's notes land here; the inverse — its own notes drained
+/// elsewhere — was the ~1-in-5 flake in `tier::import`, on Linux and
+/// macOS alike.
+///
+/// Held from rig construction to rig drop, because it must cover the
+/// queue AND the drain as one critical section: serialising only the
+/// drain leaves the theft window open between another test's queue and
+/// its own drain.
+#[cfg(test)]
+pub fn test_exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A test that panics holding this must not cascade into every test
+    // that runs after it.
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Tests (and only tests) flip capture on process-wide. There is
 /// deliberately no `force_disable`: concurrent tests share this flag,
-/// and per-file keys keep them isolated.
+/// and per-file keys keep them isolated — except for the pending
+/// queue, which is what [`test_exclusive`] exists for.
 pub fn force_enable() {
     enable();
 }

@@ -954,10 +954,15 @@ mod tests {
         root: PathBuf,
         mem: Arc<MemoryStore>,
         backend: Arc<dyn StateBackend>,
+        /// Serialises against every other tier rig: the capture pending
+        /// queue is process-global and a drain takes all of it. Last
+        /// field so it outlives the rest of the rig.
+        _excl: std::sync::MutexGuard<'static, ()>,
         orch: FlushOrchestrator,
     }
 
     fn rig() -> Rig {
+        let _excl = capture::test_exclusive();
         capture::force_enable();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
@@ -975,7 +980,7 @@ mod tests {
             cfg,
             crate::tier::epoch::EpochGuard::held(1),
         );
-        Rig { _dir: dir, root, mem, backend, orch }
+        Rig { _dir: dir, root, mem, backend, orch, _excl }
     }
 
     fn ident(path: &Path) -> (u64, u64) {

@@ -39,10 +39,12 @@
 //! callers as detection, never as exclusion.
 //!
 //! The drill measures the difference rather than asserting it: eight
-//! writers appending to one file, 200 writes, lost 168-174 of them
-//! unconditionally and 32-66 under `If-Match` across repeated runs.
-//! Roughly three times better, not remotely zero, and load dependent —
-//! the residual is worst when writers interleave tightly.
+//! writers appending to one file, 200 writes. The control loses 168-174
+//! of them; `If-Match` loses 32-66 on an idle machine and 90-102 under
+//! CPU load. So the benefit ranges from 5x down to under 2x, and the
+//! residual from 16% to 51%. CPU contention widens the VERIFY→RENAME
+//! gap by descheduling a task inside it, which means the guard is
+//! weakest exactly when concurrent writers are most likely.
 //!
 //! ## Where this listens, and why it matters
 //!
@@ -2431,18 +2433,25 @@ mod tests {
             "conditional writes lost {lost_guarded} of {total}, unconditional lost \
              {lost_plain} — the guard bought nothing under contention"
         );
-        // A floor on the benefit, and the margin is measured rather than
-        // chosen. Across repeated Linux runs the control lost 168-174 of
-        // 200 while the conditional arm lost 32-66 — a 2.6x to 5.4x
-        // improvement, and the spread is real: the residual is LOAD
-        // DEPENDENT, worst when writers interleave tightly on an
-        // otherwise idle machine. A 3x floor straddled that range and
-        // made this leg flaky, which is worse than a weaker claim
-        // honestly stated.
+        // DIRECTIONAL ONLY, and the reason is the finding.
+        //
+        // Every fixed ratio tried here was flaky, because the benefit is
+        // not a constant. Measured on Linux: idle machine, the control
+        // loses 168-174 of 200 and the guard loses 32-66 (2.6x-5.4x);
+        // under full-suite CPU load the control is unchanged but the
+        // guard loses 90-102 (1.7x-1.9x).
+        //
+        // CPU contention widens the server-internal VERIFY→RENAME gap by
+        // descheduling a task inside it — so the guard is weakest
+        // exactly when concurrent writers are most likely, which is the
+        // opposite of the comforting assumption. A threshold encoding
+        // any single load's ratio is a lie the suite tells at 1-in-5.
+        // What is stable, and what a caller can rely on, is the
+        // direction.
         assert!(
-            lost_guarded * 2 < lost_plain,
+            lost_guarded < lost_plain,
             "conditional writes lost {lost_guarded} of {total} against {lost_plain} \
-             unconditional — less than a 2x improvement is not worth a contract"
+             unconditional — the guard bought nothing"
         );
     }
 
@@ -2462,11 +2471,21 @@ mod tests {
         // retry many times, but it must not spin forever.
         const MAX_ATTEMPTS: usize = 5_000;
 
-        // Appends only, so the file's length can never go DOWN. A read
-        // that returns fewer bytes than one already observed is serving
-        // an older incarnation — the body and the validator would then
-        // describe different versions, which is a different and much
-        // worse bug than a lost update.
+        // Coherence oracle, and it applies to the CONDITIONAL arm only.
+        //
+        // Under `If-Match` the file's length can never go down: a writer
+        // that read N bytes writes N+1 only if its VERIFY still names
+        // the N-byte version. A read returning fewer bytes than one
+        // already observed would therefore mean the body and the
+        // validator came from different versions — the coherence bug
+        // this API fixes by re-stat'ing after the read.
+        //
+        // In the UNCONDITIONAL arm shrinking is not a bug, it is the
+        // whole point: a writer that read a stale short body writes it
+        // forward over a longer file, and that IS the lost update being
+        // measured. Asserting monotonic length there fails on a correct
+        // run, which is how this oracle first showed up — as a flaky
+        // drill rather than as a finding.
         let high_water = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let mut tasks = Vec::new();
@@ -2488,7 +2507,7 @@ mod tests {
                         let seen_max = high_water
                             .fetch_max(body.len(), std::sync::atomic::Ordering::SeqCst);
                         assert!(
-                            body.len() >= seen_max,
+                            !conditional || body.len() >= seen_max,
                             "writer {w} round {r}: read {} bytes under tag {tag} after {} \
                              were already visible — the body and the validator describe \
                              different versions",

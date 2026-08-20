@@ -80,15 +80,25 @@ covered by the stability guarantee.
   stat with a race window, documented as such.
 
   **A concurrency drill measures the guarantee rather than asserting
-  it, and it changed what the docs claim — twice.** Eight writers doing
-  read-modify-write against one file, 200 appends: 168-174 lost without
-  `If-Match`, 32-66 with it, across repeated runs. Roughly three times
-  better and emphatically not zero, because a COMPOUND is not atomic and
-  two writers can both pass their VERIFY before either lands its RENAME.
-  The first figure published here came from a SINGLE sample and read 5x;
-  repeating the run showed the residual is load dependent — worst when
-  writers interleave tightly on an idle machine — and the honest number
-  is a 16-33% range, not a point. An earlier version of the leg
+  it, and it rewrote what the docs claim — three times.** Eight writers
+  doing read-modify-write against one file, 200 appends. The
+  unconditional control loses 168-174 every time. `If-Match` loses
+  **32-66 on an idle machine and 90-102 under CPU load**: a benefit
+  ranging from 5x down to under 2x, and a residual from 16% to 51%.
+
+  The first figure published here came from a SINGLE sample and read
+  "5x, 16% residual". Repeating it gave a range. Repeating it under load
+  gave a much worse one, and explained the spread: a COMPOUND is not
+  atomic, and **CPU contention widens the server-internal VERIFY→RENAME
+  gap by descheduling a task inside it** — so the guard is weakest
+  exactly when concurrent writers are most likely, which is the opposite
+  of the comforting assumption. The front-door contract now says to size
+  expectations from the loaded number.
+
+  The test asserts DIRECTION only. Every fixed ratio tried — 3x, then
+  2x — was flaky at about 1 in 5, because the benefit is not a constant;
+  encoding one load's ratio as a threshold is a lie the suite tells
+  intermittently. An earlier version of the leg
   asserted zero loss and failed; the leg was wrong, not the code, and
   the front-door contract now publishes the measured residual so nobody
   builds a multi-user editor on top of a safety net believing it is a
@@ -128,6 +138,18 @@ covered by the stability guarantee.
   ensure-live and keepalive already live, because the front door is a
   web service handling untrusted input and two tabs on one project is
   its ordinary case, not its exotic one.
+- **Fixed a pre-existing ~1-in-5 flake across the tier test rigs.** The
+  capture pending queue is process-global and `durable::drain_pending`
+  takes ALL of it into whichever backend called, so two tier tests
+  running in parallel stole each other's marks and the loser found its
+  own files missing from its own backend. The tests already guarded the
+  case where another test's notes land here; the inverse was never
+  covered. All four rigs (import, hydrate, evict, flush) now hold a
+  `capture::test_exclusive()` guard from construction to drop, covering
+  queue AND drain as one critical section — serialising only the drain
+  leaves the theft window open. Costs ~13s of suite time and buys a gate
+  that means something: 0 occurrences in 34 runs, against roughly 1 in 5
+  before.
 - The delete drill is `#[cfg(target_os = "linux")]`. On macOS racing
   `remove_file` against one path reports success to several callers at
   once — harness, not server; the identical drill on Linux yields

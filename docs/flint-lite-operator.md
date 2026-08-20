@@ -310,12 +310,18 @@ they are contract, not advice:
   their VERIFY before either lands its RENAME, and one update dies with
   both callers seeing `201`. This is **detection, not serialisation**.
 
-  Measured across repeated runs, eight writers appending to one file,
-  200 writes: without `If-Match` 168-174 updates were lost; with it,
-  32-66. Roughly a 3x improvement and a **16-33% residual**, and the
-  spread is not noise — the residual is worst when writers interleave
-  tightly, so a busier fleet is not automatically a safer one. Use it as
-  the safety net it is — it turns the common
+  Measured, eight writers appending to one file, 200 writes: the
+  unconditional control loses 168-174 of them every time. `If-Match`
+  loses **32-66 on an idle machine and 90-102 under CPU load** — so the
+  benefit ranges from 5x down to **under 2x**, and the residual from
+  16% to **51%**.
+
+  That spread is the important part, and it points the wrong way. CPU
+  contention widens the server-internal gap between the VERIFY and the
+  rename by descheduling a task inside it, so **the guard is weakest
+  exactly when concurrent writers are most likely** — a busy hub is
+  precisely where you were counting on it. Size your expectations from
+  the loaded number, not the idle one. Use it as the safety net it is — it turns the common
   two-tab case from silent corruption into a retry — but if your product
   lets several users edit one file at once, you still need a merge or a
   single-writer discipline above this API. It does not fence a client

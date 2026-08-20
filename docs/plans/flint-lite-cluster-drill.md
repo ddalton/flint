@@ -388,23 +388,30 @@ corruption.
 two parts:* (i) a write carrying a stale `If-Match` is refused with 412 and
 changes nothing, while the holder of the current tag succeeds; (ii) the loss
 ratio the front-door contract publishes — measured in-process at **32-66 lost of
-200 with `If-Match` against 168-174 without**, across repeated runs — holds no
-worse over a real network.
+200 idle and 90-102 under load, against 168-174 without** — behaves as the load
+model predicts on real hardware.
 
 Part (ii) is the one worth the cluster time, because it is a **falsifiable
-prediction, not a re-run**. The VERIFY→RENAME gap that loses updates is
-server-internal, so a client's round trip does not widen it; a longer client
-cycle instead raises the chance of a *412*, which is the guard working. Real
-infrastructure should therefore lose **less** than the in-process figure, which
-came from maximum contention against an in-process dispatcher with no network at
-all. If it loses MORE, the model of where the window lives is wrong and the
-number in `docs/flint-lite-operator.md` is wrong in the dangerous direction — a
-front door would have been told the guard is stronger than it is.
+prediction, not a re-run** — and the prediction was already corrected once by
+measurement, which is why it is worth making explicitly.
 
-Note the in-process spread is load dependent and the worst case came from the
-LEAST loaded machine, so "the cluster is busier" is not a reason to expect a
-better number. Run both arms back to back on the same share, not on different
-days.
+The first version of this leg predicted real infrastructure would lose LESS,
+reasoning that the VERIFY→RENAME gap is server-internal so a client's round trip
+cannot widen it. The round trip cannot, but **CPU load can**: repeating the
+in-process drill under full-suite load moved the guard's loss from 32-66 of 200
+to 90-102, because contention deschedules a task inside the gap. The control was
+unchanged at 168-174 either way.
+
+So the prediction is now: **the cluster number tracks the hub's CPU load, not
+the network.** A quiet hub should land near 16% residual, a loaded one near 50%.
+Record the hub's CPU alongside the result or the number means nothing. If a
+loaded hub lands near the idle figure, the descheduling model is wrong and the
+contract's range is too pessimistic; if a quiet hub lands near 50%, something
+else is widening the gap and the contract is too optimistic.
+
+Run both arms back to back on the same share, not on different days, and capture
+the hub's CPU utilisation for the duration of each — the load is the independent
+variable here, not a nuisance to average away.
 
 *Oracle:* two arms, same writers and rounds, run back to back against one share:
 8 concurrent clients × 25 rounds of read-modify-write (append one byte),
