@@ -71,6 +71,9 @@ pub struct HubStatus {
     /// The persisted NFS server identity — the same one filehandles are
     /// stamped with and the tier epoch is held under.
     server_id: OnceLock<String>,
+    /// Whether the file API's routes were mounted. Set once, at bind
+    /// time, and only when the API is configured at all.
+    file_api: OnceLock<FileApiDoc>,
 }
 
 impl HubStatus {
@@ -79,6 +82,16 @@ impl HubStatus {
         let _ = s.started_unix.set(now_unix());
         *s.phase.write().unwrap() = Some(HubPhase::Starting);
         s
+    }
+
+    /// Record whether the file API's routes were actually mounted.
+    ///
+    /// Called only when `fileApi.enabled` is true, so an absent
+    /// `fileApi` on the document means "not configured" rather than
+    /// "configured and broken" — a distinction nothing else on this
+    /// document could carry.
+    pub fn set_file_api_mounted(&self, routes_mounted: bool) {
+        let _ = self.file_api.set(FileApiDoc { routes_mounted });
     }
 
     /// Record the persisted server identity, once it is known (it comes
@@ -192,6 +205,7 @@ impl HubStatus {
             activity: crate::nfs::activity::snapshot(),
             rpo_clean: rpo.as_ref().map(|r| r.clean),
             rpo: rpo,
+            file_api: self.file_api.get().cloned(),
         }
     }
 }
@@ -239,6 +253,28 @@ pub struct StatusDoc {
     /// is the single field a controller acts on. `None` = no tier.
     pub rpo_clean: Option<bool>,
     pub rpo: Option<RpoStatus>,
+    /// The file API's serving state. ABSENT means it is not configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_api: Option<FileApiDoc>,
+}
+
+/// Whether the hub's HTTP file API is actually serving.
+///
+/// This exists because `routesMounted: false` was previously invisible
+/// and is the one failure that looks exactly like health. The token is
+/// resolved ONCE, before the listener binds, and with no token the route
+/// table is never assembled: every `/files*` request answers **404, not
+/// 401**, while `/status` answers 200 unauthenticated on the same
+/// socket. The pod is Ready, the phase reaches `Serving`, a poll
+/// succeeds — and the only other signal is one line in the hub's log.
+///
+/// A `tokenSecretRef` whose Secret uses the wrong KEY produces exactly
+/// this: the projection mounts, `/etc/flint/api-token/token` does not
+/// exist, `resolve_token()` returns `None`. Nothing upstream could tell.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileApiDoc {
+    pub routes_mounted: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -349,6 +385,56 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+
+    /// **The failure this pins looks exactly like health.**
+    ///
+    /// `fileApi.enabled: true` with a Secret whose key is not `token`
+    /// gives a hub that is Ready, reaches `Serving`, answers `/status`
+    /// 200 — and answers every `/files*` with 404, because the route
+    /// table is assembled once at bind time and was never assembled at
+    /// all. Before `routesMounted` there was nothing on the wire that
+    /// distinguished it, so a front door saw a healthy hub and a
+    /// missing API and had no way to tell which side was wrong.
+    ///
+    /// Three states, and the ABSENT one carries meaning too: it is how
+    /// "nobody asked for the file API" stays distinguishable from
+    /// "somebody asked and it is not serving".
+    #[tokio::test]
+    async fn the_status_doc_says_whether_the_file_api_is_actually_serving() {
+        // 1. not configured at all -> the key is absent
+        let s = super::HubStatus::new();
+        assert!(
+            s.render().await.file_api.is_none(),
+            "an unconfigured file API must not appear on the document"
+        );
+        let json = serde_json::to_value(s.render().await).unwrap();
+        assert!(
+            json.get("fileApi").is_none(),
+            "and must not appear in the serialized form either"
+        );
+
+        // 2. configured, token resolved, routes mounted
+        let s = super::HubStatus::new();
+        s.set_file_api_mounted(true);
+        assert_eq!(s.render().await.file_api.map(|f| f.routes_mounted), Some(true));
+
+        // 3. configured, NO token -> routes were never mounted. This is
+        //    the state that is otherwise indistinguishable from health.
+        let s = super::HubStatus::new();
+        s.set_file_api_mounted(false);
+        let doc = s.render().await;
+        assert_eq!(
+            doc.file_api.as_ref().map(|f| f.routes_mounted),
+            Some(false),
+            "a configured-but-unmounted file API must say so"
+        );
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(
+            json["fileApi"]["routesMounted"],
+            serde_json::json!(false),
+            "and must say so in camelCase on the wire, where the operator reads it"
+        );
+    }
 
     /// **The ladder never fires in production if this regresses.**
     ///

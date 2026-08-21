@@ -665,6 +665,20 @@ impl MetadataServer {
             };
             (fs, cfg)
         });
+        // Publish whether the routes exist, BEFORE binding. Only when
+        // the API is configured: absent means "not asked for", false
+        // means "asked for and not served", and the second is the case
+        // that is otherwise indistinguishable from a healthy hub.
+        if self.monitoring.file_api.enabled {
+            self.status.set_file_api_mounted(file_api.is_some());
+            if file_api.is_none() {
+                tracing::error!(
+                    "fileApi.enabled is true but no token resolved — /files* will \
+                     answer 404 and /status will answer 200; check that the Secret \
+                     in tokenSecretRef has a key named `token`"
+                );
+            }
+        }
         let _status_server =
             super::status::spawn(&self.monitoring.health, self.status.clone(), file_api);
 

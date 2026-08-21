@@ -394,6 +394,9 @@ mod tests {
                 beyond_rpo: Some(0),
                 awaiting_first_barrier: false,
             }),
+            // The stub serves its file API, so the operator's
+            // routesMounted check has something truthful to read.
+            file_api: Some(crate::pnfs::mds::status::FileApiDoc { routes_mounted: true }),
         };
 
         let wire = serde_json::to_string(&doc).expect("the stub must serialize");
