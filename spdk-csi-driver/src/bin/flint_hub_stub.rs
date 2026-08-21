@@ -43,7 +43,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use spdk_csi_driver::nfs::activity::ActivitySnapshot;
-use spdk_csi_driver::pnfs::mds::status::{EpochDoc, HubPhase, NfsDoc, StatusDoc, TierDoc};
+use spdk_csi_driver::pnfs::mds::status::{
+    EpochDoc, FileApiDoc, HubPhase, NfsDoc, StatusDoc, TierDoc,
+};
 use spdk_csi_driver::tier::rpo::RpoStatus;
 
 fn env_u64(k: &str, d: u64) -> u64 {
@@ -199,7 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }),
                     // The stub serves its file API, so the operator's
                     // routesMounted check has something truthful to read.
-                    file_api: Some(crate::pnfs::mds::status::FileApiDoc { routes_mounted: true }),
+                    file_api: Some(FileApiDoc { routes_mounted: true }),
                 };
                 let body = serde_json::to_vec(&doc).unwrap_or_default();
                 let head = format!(
