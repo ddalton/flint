@@ -46,7 +46,8 @@ Three consequences that shape everything below:
    the running process, and `checksum/creds` — the annotation that turns a
    Secret rotation into a rollout — covers only `credentialsSecretRef`, and only
    on a tiered share (`lite_operator/reconcile.rs:844-853`). Nothing rolls the
-   hub when the API token changes.
+   hub when the API token changes. The tempting fix — hash the token Secret in
+   too, so a rotation rolls the pod — is the wrong trade; see §9.
 3. **There is exactly one token.** `resolve_token()` returns `Option<String>`,
    so a hub cannot accept a fleet credential *and* a project-scoped one at the
    same time. See §9.
@@ -150,11 +151,26 @@ Secret is enough — no bounce, no wake. Only the live set pays a restart. At th
 planned fleet shape (3000 shares, 300 live) that is 3000 cheap writes and 300
 brief `Recreate` bounces, not 3000 restarts.
 
+**The bounce is an availability event, and it should not be one.** Restarting a
+hub stalls every mounted client on that share. With a `hard` mount — which the
+consumer recipes mandate — in-flight I/O blocks in uninterruptible sleep until
+the new pod answers: the pod's termination grace (120s,
+`lite_operator/render.rs:105`), then the NFS grace period (60s,
+`pnfs/config.rs:962`) while clients reclaim. Nothing is lost and nothing must be
+remounted, because the `state.db` on the PVC keeps the `serverId` stable — it is
+a stall, not a wedge. But it means rotating an HTTP credential costs an NFS
+outage on the same share, coupling the two doors in exactly the way the rest of
+the design keeps them apart. §9 removes it. Until then: rotate in a window where
+a hub restart is acceptable, and **never force-delete a consumer that is blocked
+on the mount** — that turns a stall into a pod stuck in `Terminating` that pins
+the volume, and `umount` during the outage blocks the same way.
+
 **Handle `401` with one retry at the previous version.** During a rotation a hub
 may still be running the old value. Recompute with `version - 1` (or the
 previous root) and retry once; if that succeeds, the hub is stale and wants a
 bounce. Without this rule a rotation is a visible outage for every project a
-user opens mid-roll.
+user opens mid-roll — and the rule itself exists only to paper over the restart
+requirement, so §9 retires it.
 
 **Never log the token.** It rides an `Authorization` header, not a query
 parameter, so it stays out of access logs by default — keep it that way when you
@@ -221,14 +237,41 @@ HMAC to TokenRequest changes that function's body and nothing above it.
 
 ## 9. Open items
 
+- **Re-read the token instead of restarting the hub. This is the highest-value
+  change here.** The value is resolved once at boot
+  (`pnfs/mds/server.rs:647`) and captured into the auth filter
+  (`pnfs/mds/fileapi/mod.rs:468, 573`), so a rotation reaches a running hub only
+  via a restart — and a restart stalls every mounted client (§6). Resolve it
+  from the projected file behind a short TTL instead, so a rotation costs
+  nothing: no bounce, no stalled mounts, no fleet split between hubs that
+  happened to restart and hubs that did not.
+
+  Four constraints it has to respect. Keep "no token at boot ⇒ routes are not
+  mounted" exactly as it is — that is a provisioning decision, not a runtime one
+  — and re-read only once the routes exist. If the file later empties or cannot
+  be read, hold the last good value and log loudly; never fall back to
+  unauthenticated, and never tear the routes down on a transient read error.
+  **The mount must stay a whole-directory projection** — `render.rs:632` and the
+  chart both mount `/etc/flint/api-token` with no `subPath`, and a `subPath`
+  mount is frozen at pod start, which would silently return this to boot-time
+  behaviour. And propagation is bounded by the kubelet's own sync of mounted
+  Secrets (~1 minute, more with the API cache), so "live" means a minute or two,
+  not instant — which is why the next item matters.
+
 - **Multiple accepted tokens per hub.** `resolve_token()` returns
   `Option<String>`; a set would let a fleet credential and a project-scoped one
   coexist — the case per-hub secrets were reaching for and cannot serve today.
-  Smaller than §8 and independently useful.
-- **Roll the hub when the API token Secret changes.** Fold `tokenSecretRef` into
-  the `checksum/creds` path (`lite_operator/reconcile.rs:844`) so a rotation is a
-  deliberate rollout rather than a silent no-op until something else restarts
-  the pod. This is the single highest-value small change here.
+  With live re-read it also makes rotation overlap-safe: add the new token,
+  migrate callers, drop the old one, with no window where either is rejected.
+  That is what retires the `401`-retry rule in §6.
+
+- **Considered and rejected: hashing the token Secret into `checksum/creds`.**
+  It works — fold `tokenSecretRef` into `lite_operator/reconcile.rs:844` and a
+  rotation becomes a deliberate rollout instead of a silent no-op. It was the
+  first proposal here, and it is the wrong trade: it makes changing an HTTP
+  credential cost an NFS availability event on that share, for every mounted
+  client, and at fleet rotation it bounces every live hub. Live re-read gets the
+  same correctness with none of that. Recorded so it is not re-proposed.
 - **Who writes the Secret.** This note says the project service, to keep the
   root in one component. If the operator ever needs to mint (e.g. it starts
   creating shares on its own), revisit — but do not split the root across two
