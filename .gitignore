@@ -22,9 +22,14 @@ spdk-csi-driver/src/csi.v1.rs
 *~
 .kube/
 
-# System test configuration
-tests/system/config/kubeconfig
-tests/system/config/*.kubeconfig
+# Kubeconfigs. NEVER commit one: they carry bearer tokens and client
+# certs, and this repo is public. Eight were tracked until 2026-08-21 —
+# see the commit that added this block. The .example placeholder is the
+# one file that is meant to be here.
+kubeconfig
+kubeconfig-*.yaml
+*.kubeconfig
+!tests/system/config/kubeconfig.example
 
 # Test artifacts
 tests/system/kuttl-test-*
