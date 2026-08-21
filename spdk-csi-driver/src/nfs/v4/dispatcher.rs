@@ -4349,6 +4349,10 @@ mod tests {
     /// successful drain sets regardless of destination.
     #[tokio::test]
     async fn write_ack_requires_durable_dirty_bit() {
+        // Queues and/or drains the PROCESS-GLOBAL capture queue.
+        // Held for the whole body: the theft window is queue-to-drain,
+        // not the drain alone. See `capture::test_exclusive`.
+        let _excl = crate::tier::capture::test_exclusive();
         use std::os::unix::fs::MetadataExt;
         crate::tier::capture::force_enable();
         let (d, temp) = create_test_dispatcher();

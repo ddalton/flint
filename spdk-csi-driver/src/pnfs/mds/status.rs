@@ -453,15 +453,36 @@ mod tests {
     async fn polling_status_is_not_activity_but_browsing_files_is() {
         use crate::nfs::activity;
 
-        let before = activity::snapshot();
-        let status = HubStatus::new();
-        for _ in 0..5 {
-            let _ = status.render().await;
+        // The activity counters are PROCESS-GLOBAL, and every test that
+        // drives a compound bumps them: `dispatcher` notes one per
+        // COMPOUND (dispatcher.rs, `note_compound`) and the whole file
+        // API rides that same path. Those tests run concurrently with
+        // this one, so a single before/after window proves nothing — an
+        // off-by-one delta is far likelier to be a neighbour's READDIR
+        // than a bump from `render()`. Measured, twice: exact equality
+        // here failed 2 runs in 12, against the same filter set.
+        //
+        // Take windows until one comes back clean. This cannot hide the
+        // bug it exists to catch: if `render()` noted activity it would
+        // dirty EVERY window, and no number of retries would find a
+        // clean one. The retry filters out neighbours, not the fault.
+        let mut clean = false;
+        for _ in 0..64 {
+            let before = activity::snapshot();
+            let status = HubStatus::new();
+            for _ in 0..5 {
+                let _ = status.render().await;
+            }
+            let after = activity::snapshot();
+            if (after.data_ops, after.namespace_ops, after.browse_ops)
+                == (before.data_ops, before.namespace_ops, before.browse_ops)
+            {
+                clean = true;
+                break;
+            }
         }
-        let after = activity::snapshot();
-        assert_eq!(
-            (after.data_ops, after.namespace_ops, after.browse_ops),
-            (before.data_ops, before.namespace_ops, before.browse_ops),
+        assert!(
+            clean,
             "rendering /status counted as activity — a UI polling for liveness would pin \
              every project in the fleet awake and the idle ladder would never fire"
         );
@@ -493,11 +514,14 @@ mod tests {
 
         // And the counters really do move, so the equality above is a
         // statement about /status rather than about a dead metric.
+        // `>=`, not `+ 1`: neighbouring tests bump this counter too. It
+        // is still not vacuous — the counter is monotone and shared, so
+        // a counter that never moved for us never moved for them
+        // either, and ANY observed increase proves it is live.
         let pre = activity::snapshot();
         activity::note(activity::ActivityClass::Browse);
-        assert_eq!(
-            activity::snapshot().browse_ops,
-            pre.browse_ops + 1,
+        assert!(
+            activity::snapshot().browse_ops >= pre.browse_ops + 1,
             "the browse counter never moved — the assertion above proves nothing"
         );
     }

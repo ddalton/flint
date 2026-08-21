@@ -344,6 +344,10 @@ mod tests {
     /// which keeps the coverage check exact.
     #[test]
     fn storm_vs_drain_loses_no_interval() {
+        // Queues and/or drains the PROCESS-GLOBAL capture queue.
+        // Held for the whole body: the theft window is queue-to-drain,
+        // not the drain alone. See `capture::test_exclusive`.
+        let _excl = crate::tier::capture::test_exclusive();
         capture::force_enable();
         let ino = 0x31_u64;
         const WRITERS: usize = 8;
@@ -491,6 +495,10 @@ mod tests {
 
     #[test]
     fn drain_is_atomic_with_the_swap() {
+        // Queues and/or drains the PROCESS-GLOBAL capture queue.
+        // Held for the whole body: the theft window is queue-to-drain,
+        // not the drain alone. See `capture::test_exclusive`.
+        let _excl = crate::tier::capture::test_exclusive();
         capture::force_enable();
         let ino = 0x35_u64;
         // A ticket in flight holds the drain; the note lands before the

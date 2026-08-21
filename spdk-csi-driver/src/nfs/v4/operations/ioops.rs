@@ -2396,6 +2396,10 @@ mod tests {
     /// install would race this one).
     #[tokio::test]
     async fn read_of_evicted_file_hydrates_and_serves() {
+        // Queues and/or drains the PROCESS-GLOBAL capture queue.
+        // Held for the whole body: the theft window is queue-to-drain,
+        // not the drain alone. See `capture::test_exclusive`.
+        let _excl = crate::tier::capture::test_exclusive();
         use crate::tier::{capture, evict, flush, hydrate, store::memory::MemoryStore};
         use std::os::unix::fs::MetadataExt;
         capture::force_enable();

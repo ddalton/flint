@@ -124,6 +124,10 @@ mod tests {
 
     #[tokio::test]
     async fn drain_writes_rows_and_confirms_durable() {
+        // Queues and/or drains the PROCESS-GLOBAL capture queue.
+        // Held for the whole body: the theft window is queue-to-drain,
+        // not the drain alone. See `capture::test_exclusive`.
+        let _excl = crate::tier::capture::test_exclusive();
         capture::force_enable();
         let be: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
         let (dev, ino) = (0xD8A1_u64, 0x11_u64);
@@ -144,6 +148,10 @@ mod tests {
 
     #[tokio::test]
     async fn restore_marks_bit_set_files_whole_dirty_and_primes() {
+        // Queues and/or drains the PROCESS-GLOBAL capture queue.
+        // Held for the whole body: the theft window is queue-to-drain,
+        // not the drain alone. See `capture::test_exclusive`.
+        let _excl = crate::tier::capture::test_exclusive();
         capture::force_enable();
         let be: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
         let (dev, ino) = (0xD8A1_u64, 0x22_u64);

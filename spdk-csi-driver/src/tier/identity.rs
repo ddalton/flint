@@ -177,6 +177,10 @@ mod tests {
     /// loop re-notes until our backend shows the result.)
     #[tokio::test]
     async fn rename_over_tombstones_covered_and_repoints_moved() {
+        // Queues and/or drains the PROCESS-GLOBAL capture queue.
+        // Held for the whole body: the theft window is queue-to-drain,
+        // not the drain alone. See `capture::test_exclusive`.
+        let _excl = crate::tier::capture::test_exclusive();
         capture::force_enable();
         let be: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
         let (dev, moved_ino, covered_ino) = (0x1D7_u64, 0xA1_u64, 0xA2_u64);
@@ -219,6 +223,10 @@ mod tests {
 
     #[tokio::test]
     async fn remove_tombstones_and_forgets() {
+        // Queues and/or drains the PROCESS-GLOBAL capture queue.
+        // Held for the whole body: the theft window is queue-to-drain,
+        // not the drain alone. See `capture::test_exclusive`.
+        let _excl = crate::tier::capture::test_exclusive();
         capture::force_enable();
         let be: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
         let (dev, ino) = (0x1D7_u64, 0xB1_u64);

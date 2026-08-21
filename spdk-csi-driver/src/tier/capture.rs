@@ -389,6 +389,17 @@ pub fn enable() {
 
 /// Serialises tests that queue marks and later drain them.
 ///
+/// **Every test that queues OR drains must take this** — not just the
+/// tier ones. The queue is process-global and `drain_pending` takes ALL
+/// of it, so a test that merely drains into its own backend steals the
+/// marks of any test that only queued. That is not hypothetical: it was
+/// applied to the four `tier::{import,flush,hydrate,evict}` rigs and
+/// left off `tier::{identity,durable,gate}` and the NFS server tests,
+/// which drain the same queue — and those became the next flake
+/// (`tier::identity::tests::remove_tombstones_and_forgets` failing
+/// `!capture::is_durable`, ~1 run in 25, because a foreign drain's
+/// `confirm_durable` landed after its own forget).
+///
 /// [`force_enable`]'s note that "per-file keys keep them isolated"
 /// holds for the capture maps and NOT for the pending queue:
 /// `durable::drain_pending` takes the WHOLE queue and writes it to

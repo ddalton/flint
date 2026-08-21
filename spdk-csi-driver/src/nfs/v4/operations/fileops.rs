@@ -3936,6 +3936,10 @@ mod tests {
     /// re-seeds the covered row until OUR backend shows the result.
     #[tokio::test]
     async fn rename_over_tombstones_covered_generation() {
+        // Queues and/or drains the PROCESS-GLOBAL capture queue.
+        // Held for the whole body: the theft window is queue-to-drain,
+        // not the drain alone. See `capture::test_exclusive`.
+        let _excl = crate::tier::capture::test_exclusive();
         use crate::state_backend::{StateBackend, TierGenerationRow};
         use std::os::unix::fs::MetadataExt;
         crate::tier::capture::force_enable();
