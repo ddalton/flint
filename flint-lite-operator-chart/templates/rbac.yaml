@@ -67,8 +67,19 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]
+  # `delete` on services is for ONE path: shutting a conflict loser's
+  # API door before the scale-down, so a front door holding a cached
+  # endpoint and this project's bearer token cannot keep writing into
+  # the winner's subtree for the whole 120s grace period. Nothing else
+  # in the operator deletes a Service — children are reclaimed by owner
+  # GC. It is a broader grant than that one use needs, because RBAC
+  # cannot scope a verb to objects the operator owns; the owner check is
+  # in the code, at `owned_by`.
   - apiGroups: [""]
-    resources: ["services", "configmaps"]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]
   # The claim: created and (only on reclaim: Delete) deleted.
   - apiGroups: [""]

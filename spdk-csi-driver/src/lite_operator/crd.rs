@@ -335,6 +335,30 @@ pub struct IdleSpec {
 /// LoadBalancer, which would put a read-write file API on the internet.
 #[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
+// PORT 2049 IS REFUSED, and the reason is not tidiness.
+//
+// `spec.monitoring.port` was an unvalidated int32 — no minimum, no
+// maximum, no enum, no rule. Setting it to 2049 puts the READ-WRITE
+// file API on the port the consumer Service targets, and
+// `spec.service.type: LoadBalancer` is a first-class enum value with
+// nothing constraining it AND the documented cross-cluster
+// recommendation. That is a one-line path from a CR to a public,
+// rewrite-capable API plus an unauthenticated /status.
+//
+// It becomes MORE tempting, not less, now that the operator renders
+// only a headless Service and refuses to create anything routable:
+// "put it on the port that already has a LoadBalancer" is exactly the
+// workaround that invites. So it is refused at admission.
+//
+// The range floor is 1024 because the hub does not run privileged and
+// cannot bind below it anyway — a value under 1024 is a config that
+// fails at boot instead of at admission, which is the worse of the two.
+#[x_kube(validation = Rule::new(
+    "!has(self.port) || self.port != 2049")
+    .message("spec.monitoring.port must not be 2049 — that is the NFS port the consumer Service targets, and putting the read-write file API there can expose it through a LoadBalancer"))]
+#[x_kube(validation = Rule::new(
+    "!has(self.port) || (self.port >= 1024 && self.port <= 65535)")
+    .message("spec.monitoring.port must be between 1024 and 65535 — the hub is unprivileged and cannot bind a lower port"))]
 pub struct MonitoringSpec {
     /// Absent = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -736,8 +760,41 @@ pub struct FlintShareStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_with: Option<ConflictWith>,
 
+    /// Where the hub's HTTP file API answers, as an absolute URL.
+    ///
+    /// **This says WHERE. `phase` and `hubPhase` say WHETHER — read them
+    /// first.** A parked share has no pod, so this name does not
+    /// resolve; the field is a stable formula, not a liveness signal.
+    ///
+    /// Absent when the share has no file API, when the operator could
+    /// not verify the Service or the token, and on the paths that must
+    /// not advertise a door at all (`Failed`, `Terminating`).
+    ///
+    /// **It is an in-cluster name.** `*.svc.cluster.local` resolves only
+    /// through this cluster's DNS, and it is a HEADLESS Service, so it
+    /// resolves to pod IPs. Reaching it from another cluster is a
+    /// cluster-admin act — the operator renders a backend, never a
+    /// routable address. See `docs/plans/hub-api-service-design.md`.
+    ///
+    /// The intended consumer is a component that also reads this CR and
+    /// can patch `flint.io/requested-at`. A caller holding only this URL
+    /// cannot wake a parked share and is not a supported consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_endpoint: Option<String>,
+
+    /// The hub's OWN phase, from the operator's `/status` poll, when a
+    /// poll succeeded on this pass.
+    ///
+    /// **Absent means "not observed this pass", NOT a statement about
+    /// the hub.** It is never carried forward from a previous status:
+    /// a stale phase is worse than no phase, because a caller cannot
+    /// tell the difference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_phase: Option<String>,
+
     /// Standard conditions (`Ready`, `ConfigCurrent`, `Conflict`,
-    /// `AdoptionBlocked`), upstream field-for-field.
+    /// `AdoptionBlocked`, `ApiEndpointPublished`), upstream
+    /// field-for-field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<ShareCondition>>,
 }

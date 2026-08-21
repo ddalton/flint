@@ -248,6 +248,11 @@ spec:
                     nullable: true
                     type: integer
                 type: object
+                x-kubernetes-validations:
+                - message: spec.monitoring.port must not be 2049 — that is the NFS port the consumer Service targets, and putting the read-write file API there can expose it through a LoadBalancer
+                  rule: '!has(self.port) || self.port != 2049'
+                - message: spec.monitoring.port must be between 1024 and 65535 — the hub is unprivileged and cannot bind a lower port
+                  rule: '!has(self.port) || (self.port >= 1024 && self.port <= 65535)'
               nodeSelector:
                 additionalProperties:
                   type: string
@@ -596,6 +601,29 @@ spec:
                   mount.
                 nullable: true
                 type: string
+              apiEndpoint:
+                description: |-
+                  Where the hub's HTTP file API answers, as an absolute URL.
+
+                  **This says WHERE. `phase` and `hubPhase` say WHETHER — read them
+                  first.** A parked share has no pod, so this name does not
+                  resolve; the field is a stable formula, not a liveness signal.
+
+                  Absent when the share has no file API, when the operator could
+                  not verify the Service or the token, and on the paths that must
+                  not advertise a door at all (`Failed`, `Terminating`).
+
+                  **It is an in-cluster name.** `*.svc.cluster.local` resolves only
+                  through this cluster's DNS, and it is a HEADLESS Service, so it
+                  resolves to pod IPs. Reaching it from another cluster is a
+                  cluster-admin act — the operator renders a backend, never a
+                  routable address. See `docs/plans/hub-api-service-design.md`.
+
+                  The intended consumer is a component that also reads this CR and
+                  can patch `flint.io/requested-at`. A caller holding only this URL
+                  cannot wake a parked share and is not a supported consumer.
+                nullable: true
+                type: string
               claimName:
                 description: |-
                   The PVC actually in use — canonical or adopted. Recorded
@@ -606,7 +634,8 @@ spec:
               conditions:
                 description: |-
                   Standard conditions (`Ready`, `ConfigCurrent`, `Conflict`,
-                  `AdoptionBlocked`), upstream field-for-field.
+                  `AdoptionBlocked`, `ApiEndpointPublished`), upstream
+                  field-for-field.
                 items:
                   description: A metav1.Condition mirror (same field names, same semantics).
                   properties:
@@ -681,6 +710,17 @@ spec:
                 - prefix
                 - relation
                 type: object
+              hubPhase:
+                description: |-
+                  The hub's OWN phase, from the operator's `/status` poll, when a
+                  poll succeeded on this pass.
+
+                  **Absent means "not observed this pass", NOT a statement about
+                  the hub.** It is never carried forward from a previous status:
+                  a stale phase is worse than no phase, because a caller cannot
+                  tell the difference.
+                nullable: true
+                type: string
               observedGeneration:
                 description: The `.metadata.generation` this status describes.
                 format: int64

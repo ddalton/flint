@@ -120,6 +120,13 @@ pub struct Names {
     pub service: String,
     pub config_map: String,
     pub claim: String,
+    /// The API-only Service, when the share has a file API.
+    ///
+    /// `{base truncated to 50}-api-{first 8 hex of metadata.uid}`, and
+    /// every part of that earns its place — see [`api_service_name`].
+    /// `None` when `metadata.uid` is absent, which happens only for a
+    /// CR that has never been persisted (unit tests construct these).
+    pub api_service: Option<String>,
     /// True when `claim` came from `spec.existingClaim` — the operator
     /// did not create it and must not assume it may.
     pub claim_is_adopted: bool,
@@ -136,6 +143,11 @@ pub struct Rendered {
     /// immutable in ways SSA would just error on).
     pub pvc: Option<PersistentVolumeClaim>,
     pub service: Service,
+    /// The API-only Service. `None` unless BOTH `monitoring.enabled`
+    /// and `monitoring.fileApi.enabled` are true — a share that never
+    /// asked for a file API must not get a DNS name in front of an
+    /// unauthenticated `/status`.
+    pub api_service: Option<Service>,
     pub deployment: Deployment,
     pub mds_yaml: String,
     /// sha256 of `mds_yaml` — the pod-template annotation that turns a
@@ -160,10 +172,64 @@ pub fn names(share: &FlintShare) -> Names {
             .as_deref()
             .is_some_and(|c| !c.is_empty()),
         config_map: format!("{base}-config"),
+        api_service: api_service_name(&base, share.metadata.uid.as_deref()),
         deployment: base.clone(),
         service: base,
         claim,
     }
+}
+
+/// The API Service's name: `{base[..50]}-api-{uid[0:8]}`.
+///
+/// **The uid is not decoration, and a plain `{base}-api` is wrong four
+/// different ways.**
+///
+/// 1. **It would not fit.** A Service name is an RFC 1035 label capped
+///    at 63 characters and the CRD puts no `maxLength` on
+///    `metadata.name`. A share named 60-63 characters would 422 on
+///    every apply — and because the applies propagate with `?`, that
+///    error returns BEFORE the Deployment apply, so the share stops
+///    converging at all rather than merely losing its API door.
+///    Truncating the base to 50 makes this 63 at worst.
+///
+/// 2. **Another CR could mint it.** `Names::service` is the bare CR
+///    name, so a share literally NAMED `foo-api` renders its CONSUMER
+///    Service to `foo-api` — the same name share `foo` would render its
+///    API Service to. Server-side apply with `--force-conflicts` would
+///    then replace `metadata.ownerReferences` (a listType=map owned by
+///    this field manager), so `foo`'s API Service silently becomes a
+///    front for `foo-api`'s NFS listener, and `foo` never notices
+///    because `.owns(Service)` maps by ownerReference — which now names
+///    the other share.
+///
+/// 3. **A conflict loser could compute the winner's door.**
+///    `conflict::redirect` publishes the winner's namespace and name
+///    across namespaces (only its `address` is gated on same-namespace).
+///    Under a name-plus-namespace formula a loser could derive the
+///    winner's API endpoint by arithmetic — a stronger door than the
+///    NFS one, obtained without the disclosure the gating exists to
+///    prevent. `metadata.uid` is not in `ConflictWith`, so the formula
+///    stops working and resolving the winner's door requires reading
+///    the winner's CR, which is an authorization check the API server
+///    performs for free.
+///
+/// 4. **It removes a griefing vector.** With a computable suffix, any
+///    principal who can create a FlintShare in a shared namespace can
+///    permanently deny another share its API Service by choosing a
+///    name. No suffix fixes that, because every DNS-1123 label is a
+///    legal CR name; only an unguessable component does.
+///
+/// A reader of the victim's CR still learns its uid, so this is
+/// first-writer-wins rather than unforgeable — the owner check at apply
+/// time is what makes that outcome safe rather than a misroute.
+pub fn api_service_name(base: &str, uid: Option<&str>) -> Option<String> {
+    let uid = uid?;
+    let short: String = uid.chars().filter(|c| c.is_ascii_hexdigit()).take(8).collect();
+    if short.len() < 8 {
+        return None;
+    }
+    let head: String = base.chars().take(50).collect();
+    Some(format!("{head}-api-{short}"))
 }
 
 /// Labels every child carries. `flint.io/share` is the one that makes
@@ -476,6 +542,113 @@ pub fn service(share: &FlintShare, d: &RenderDefaults) -> Service {
     }
 }
 
+/// Whether this share's file API is switched on. Both halves are
+/// required: the API rides the health listener, so `monitoring.enabled`
+/// gates the socket and `fileApi.enabled` gates the routes on it.
+pub fn file_api_on(share: &FlintShare) -> bool {
+    share
+        .spec
+        .monitoring
+        .as_ref()
+        .is_some_and(|m| m.enabled.unwrap_or(false) && m
+            .file_api
+            .as_ref()
+            .is_some_and(|a| a.enabled.unwrap_or(false)))
+}
+
+/// The port the hub's HTTP surface listens on.
+pub fn api_port(share: &FlintShare) -> i32 {
+    share
+        .spec
+        .monitoring
+        .as_ref()
+        .and_then(|m| m.port)
+        .unwrap_or(HEALTH_PORT)
+}
+
+/// The API-only Service: a stable name in front of the hub's HTTP door,
+/// for a front door to use as a backend.
+///
+/// **Headless, and that is not a knob.** `docs/plans/flint-lite-fleet-scale-plan.md`
+/// records the envelope: 3000 ClusterIP Services is already 73% of a
+/// GKE-default /20 (4096). A second cluster IP per share would exhaust
+/// the allocator at roughly 2048 shares — BELOW the fleet size already
+/// validated — and the failure lands on the wrong door, because once
+/// the allocator is dry a brand-new share's CONSUMER Service cannot be
+/// created either. One tenant's share count would deny every other
+/// tenant new shares, reported only as a repeating apply error.
+/// `clusterIP: None` allocates nothing, still produces EndpointSlices
+/// and a stable per-share DNS name, and is a valid backend for anything
+/// that routes to endpoints.
+///
+/// **There is deliberately no `type` knob.** Not ClusterIP, not
+/// NodePort, not LoadBalancer. The operator renders the object a front
+/// door needs as a BACKEND and never the object that assigns a routable
+/// address, because NetworkPolicy cannot be the guard here:
+/// `networkPolicy.enabled` is false in both charts, `hubNamespaces`
+/// defaults to `[]` so enabling it protects no hub at all, a CNI may
+/// ignore every rule in silence, and `externalTrafficPolicy` is unset
+/// so an ipBlock allowlist cannot see the real client anyway. With no
+/// guard that can be relied on, the dangerous configuration has to be
+/// unrepresentable rather than defended. Routing across a boundary is a
+/// cluster-admin act.
+///
+/// **`targetPort` is the NAME, not the number.** The chart's own
+/// NetworkPolicy hardcodes 8080 against a free `spec.monitoring.port`
+/// and is wrong the moment anyone changes it; naming the target makes
+/// that class of bug unreachable here.
+pub fn api_service(share: &FlintShare) -> Option<Service> {
+    if !file_api_on(share) {
+        return None;
+    }
+    let name = names(share).api_service?;
+    let port = api_port(share);
+    Some(Service {
+        metadata: meta(share, name),
+        spec: Some(K8sServiceSpec {
+            // Headless. See the doc comment — this is load-bearing.
+            cluster_ip: Some("None".to_string()),
+            selector: Some(selector_labels(share)),
+            ports: Some(vec![ServicePort {
+                name: Some("api".to_string()),
+                // For a headless Service `port` feeds SRV records only:
+                // a client resolving the A record dials the CONTAINER
+                // port. So this number MUST equal what `targetPort`
+                // resolves to, or the published endpoint is a lie. Both
+                // come from `api_port`, and a test pins it.
+                port,
+                target_port: Some(IntOrString::String("http".to_string())),
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
+/// Where the file API answers, as an absolute URL.
+///
+/// Lives here rather than in `reconcile` so the Service's name and the
+/// published name cannot drift: both come from `names()`.
+///
+/// `http://` is spelled out rather than implied. The in-cluster hop is
+/// cleartext and the endpoint should say so — the hub terminates no TLS
+/// and `HealthConfig` has no field that could.
+///
+/// **`address_of` is deliberately NOT reused.** It takes a LIVE Service
+/// and reads `spec.ports.first().port` positionally, and returns `None`
+/// for a LoadBalancer with no ingress yet. Reusing it would import
+/// absent-windows this door must not have.
+pub fn api_endpoint(share: &FlintShare, namespace: &str) -> Option<String> {
+    let name = names(share).api_service?;
+    if !file_api_on(share) {
+        return None;
+    }
+    let port = api_port(share);
+    Some(format!("http://{name}.{namespace}.svc.cluster.local:{port}"))
+}
+
 /// The hub Deployment.
 ///
 /// `selector_override` exists for adoption: a Deployment's selector is
@@ -780,6 +953,7 @@ pub fn render(
         config_map: config_map(share, d),
         pvc: pvc(share),
         service: service(share, d),
+        api_service: api_service(share),
         deployment: deployment(share, d, &sum, creds_checksum, selector_override),
         mds_yaml: yaml,
         config_checksum: sum,
@@ -798,6 +972,154 @@ mod tests {
         let mut s = FlintShare::new(name, spec);
         s.metadata.namespace = Some("flint".to_string());
         s
+    }
+
+    /// A share with a uid, which is what the API Service's name needs.
+    fn share_with_uid(name: &str, uid: &str, spec: FlintShareSpec) -> FlintShare {
+        let mut s = share(name, spec);
+        s.metadata.uid = Some(uid.to_string());
+        s
+    }
+
+    fn fapi(enabled: bool) -> crate::lite_operator::crd::FileApiSpec {
+        crate::lite_operator::crd::FileApiSpec {
+            enabled: Some(enabled),
+            token_secret_ref: None,
+            max_upload_bytes: None,
+            max_download_bytes: None,
+            hydrate_wait_secs: None,
+        }
+    }
+
+    fn with_file_api(mut spec: FlintShareSpec, port: Option<i32>) -> FlintShareSpec {
+        spec.monitoring = Some(crate::lite_operator::crd::MonitoringSpec {
+            enabled: Some(true),
+            port,
+            file_api: Some(fapi(true)),
+        });
+        spec
+    }
+
+    const UID: &str = "3f9c1b7e-2a11-4c8e-9d0f-6b5a1c2d3e4f";
+
+    /// **A Service name is an RFC 1035 label capped at 63 characters and
+    /// the CRD puts no maxLength on `metadata.name`.**
+    ///
+    /// Under a plain `{base}-api` a share named 60-63 characters would
+    /// 422 on every apply — and because the applies propagate with `?`,
+    /// that error returns BEFORE the Deployment apply, so the share
+    /// stops converging entirely rather than merely losing its API door.
+    #[test]
+    fn the_api_service_name_always_fits_in_a_dns_label() {
+        for len in [1usize, 10, 49, 50, 51, 60, 63, 200] {
+            let base = "a".repeat(len);
+            let n = api_service_name(&base, Some(UID)).expect("uid present");
+            assert!(
+                n.len() <= 63,
+                "base len {len} produced a {}-char name: {n}",
+                n.len()
+            );
+            assert!(n.contains("-api-"), "{n}");
+            assert!(n.ends_with("3f9c1b7e"), "{n}");
+        }
+        // No uid: refuse to invent a name rather than collide on one.
+        assert_eq!(api_service_name("x", None), None);
+        assert_eq!(api_service_name("x", Some("short")), None);
+    }
+
+    /// **The uid is what stops another CR minting this name.**
+    ///
+    /// `Names::service` is the bare CR name, so a share literally named
+    /// `foo-api` renders its CONSUMER Service to `foo-api`. Under a
+    /// `{base}-api` scheme that is the same name share `foo` would give
+    /// its API Service, and a forced server-side apply would replace
+    /// `metadata.ownerReferences` wholesale — silently pointing `foo`'s
+    /// published endpoint at `foo-api`'s NFS listener.
+    #[test]
+    fn a_share_named_like_the_suffix_cannot_mint_another_shares_api_name() {
+        let victim = share_with_uid("foo", UID, with_file_api(base_spec(), None));
+        let attacker = share_with_uid("foo-api", "9999aaaa-0000-0000-0000-000000000000",
+                                      with_file_api(base_spec(), None));
+        let v = names(&victim).api_service.unwrap();
+        let a = names(&attacker).service.clone();
+        assert_ne!(v, a, "the victim's API name must not equal the attacker's Service name");
+        assert_ne!(v, names(&attacker).api_service.unwrap());
+    }
+
+    /// **Headless, and `port` MUST equal what `targetPort` resolves to.**
+    ///
+    /// For a headless Service `spec.ports[].port` feeds SRV records
+    /// only; a client resolving the A record dials the CONTAINER port.
+    /// If the two ever diverge the published endpoint names a port
+    /// nothing listens on.
+    #[test]
+    fn the_api_service_is_headless_and_its_port_matches_the_container() {
+        for port in [None, Some(9090i32)] {
+            let sh = share_with_uid("tenant-a", UID, with_file_api(base_spec(), port));
+            let svc = api_service(&sh).expect("file api on");
+            let spec = svc.spec.as_ref().unwrap();
+
+            assert_eq!(spec.cluster_ip.as_deref(), Some("None"), "must be headless");
+            assert!(spec.type_.is_none(), "no type knob: nothing routable may be rendered");
+
+            let p = &spec.ports.as_ref().unwrap()[0];
+            let want = port.unwrap_or(HEALTH_PORT);
+            assert_eq!(p.port, want);
+            assert_eq!(p.target_port, Some(IntOrString::String("http".into())),
+                       "targetPort must be the NAME, so it cannot drift from the containerPort");
+
+            // The container port the Deployment declares must BE that number.
+            let dep = deployment(&sh, &RenderDefaults::default(), "sum", None, None);
+            let ports = dep.spec.unwrap().template.spec.unwrap().containers[0]
+                .ports.clone().unwrap();
+            let http = ports.iter().find(|p| p.name.as_deref() == Some("http"))
+                .expect("the hub declares a named http port");
+            assert_eq!(http.container_port, want,
+                       "the Service's port and the container's http port must agree");
+
+            // Share-scoped selector, never a fixed one: a fixed selector
+            // would front every hub in the namespace.
+            assert_eq!(spec.selector.as_ref().unwrap(), &selector_labels(&sh));
+        }
+    }
+
+    /// A share that never asked for a file API must NOT get a DNS name
+    /// in front of an unauthenticated `/status`.
+    #[test]
+    fn no_file_api_means_no_service_and_no_endpoint() {
+        let cases: Vec<(&str, Option<crate::lite_operator::crd::MonitoringSpec>)> = vec![
+            ("no monitoring at all", None),
+            ("monitoring off", Some(crate::lite_operator::crd::MonitoringSpec {
+                enabled: Some(false), port: None,
+                file_api: Some(fapi(true)),
+            })),
+            ("monitoring on, fileApi off", Some(crate::lite_operator::crd::MonitoringSpec {
+                enabled: Some(true), port: None,
+                file_api: Some(fapi(false)),
+            })),
+            ("monitoring on, no fileApi block", Some(crate::lite_operator::crd::MonitoringSpec {
+                enabled: Some(true), port: None, file_api: None,
+            })),
+        ];
+        for (why, mon) in cases {
+            let mut spec = base_spec();
+            spec.monitoring = mon;
+            let sh = share_with_uid("tenant-a", UID, spec);
+            assert!(api_service(&sh).is_none(), "{why}: rendered a Service");
+            assert!(api_endpoint(&sh, "flint").is_none(), "{why}: published an endpoint");
+        }
+    }
+
+    /// The published endpoint and the Service's name come from the same
+    /// place, so they cannot drift.
+    #[test]
+    fn the_endpoint_names_the_service_that_was_rendered() {
+        let sh = share_with_uid("tenant-a", UID, with_file_api(base_spec(), Some(9090)));
+        let svc = api_service(&sh).unwrap();
+        let name = svc.metadata.name.clone().unwrap();
+        let ep = api_endpoint(&sh, "workspaces").unwrap();
+        assert_eq!(ep, format!("http://{name}.workspaces.svc.cluster.local:9090"));
+        assert!(ep.starts_with("http://"), "the in-cluster hop is cleartext and must say so");
     }
 
     fn base_spec() -> FlintShareSpec {

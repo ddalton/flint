@@ -797,6 +797,37 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         // exactly the hub that takes the prefix over when the winner
         // dies for a lease window.
         if existing_dep.is_some() {
+            // SHUT THE API DOOR FIRST, before the scale-down.
+            //
+            // The scale-down is an ordinary termination with a 120s
+            // grace period, so the loser's hub keeps serving for that
+            // whole window — and a front door holding a CACHED endpoint
+            // plus this project's bearer token can keep WRITING through
+            // it the entire time, into a subtree the winner owns. The
+            // loser's own CR says the door is closed.
+            //
+            // Deleting the Service removes the EndpointSlice, so the
+            // name stops resolving immediately rather than at the end of
+            // grace. It is a control, not an announcement: blanking
+            // `status.apiEndpoint` alone would only tell a caller that
+            // re-reads, and a caller that re-read would not be the
+            // problem.
+            //
+            // Deliberately NOT the consumer Service: leaving NFS
+            // advertised through the same window is pre-existing
+            // behaviour and closing it is a consumer-visible change that
+            // deserves its own commit and its own e2e leg. The argument
+            // for closing it is the same one made here.
+            if let Some(api_name) = names.api_service.as_deref() {
+                match Api::<Service>::namespaced(ctx.client.clone(), &ns)
+                    .delete(api_name, &Default::default())
+                    .await
+                {
+                    Ok(_) => tracing::info!(service = %api_name, "fenced loser: API door shut"),
+                    Err(kube::Error::Api(e)) if e.code == 404 => {}
+                    Err(e) => tracing::warn!(error = %e, "could not shut the loser's API door"),
+                }
+            }
             // A merge patch, not an apply: `force` is only legal on an
             // apply patch, and a full apply here would mean rendering
             // (and thereby endorsing) a spec we have just refused.
@@ -855,12 +886,32 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             &mut conds,
             condition("Ready", false, "Conflict", message, generation),
         );
+        // EXPLICIT, not omitted. `conds` is seeded from the previous
+        // status and `set_condition` upserts by type, so a share that
+        // WAS serving and then lost arbitration would otherwise publish
+        // `apiEndpoint: absent` next to `ApiEndpointPublished: True` —
+        // the field saying the door is gone and the condition saying it
+        // is open, on precisely the CR where a front door is deciding
+        // what to do about a conflict.
+        set_condition(
+            &mut conds,
+            condition(
+                "ApiEndpointPublished",
+                false,
+                "Conflict",
+                "this share lost prefix arbitration; its API door is not published"
+                    .to_string(),
+                generation,
+            ),
+        );
         write_status(
             &ctx,
             &share,
             FlintShareStatus {
                 phase: Some(Phase::Failed),
                 address: None,
+                api_endpoint: None,
+                hub_phase: None,
                 observed_generation: generation,
                 claim_name: None,
                 server_id: carry_server_id(&share, None),
@@ -908,12 +959,24 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 &mut conds,
                 condition("Ready", false, "AdoptionBlocked", why, generation),
             );
+            set_condition(
+                &mut conds,
+                condition(
+                    "ApiEndpointPublished",
+                    false,
+                    "AdoptionBlocked",
+                    "adoption is blocked; no hub is serving this share".to_string(),
+                    generation,
+                ),
+            );
             write_status(
                 &ctx,
                 &share,
                 FlintShareStatus {
                     phase: Some(Phase::Failed),
                     address: None,
+                    api_endpoint: None,
+                    hub_phase: None,
                     observed_generation: generation,
                     claim_name: Some(names.claim.clone()),
                     server_id: carry_server_id(&share, None),
@@ -1198,7 +1261,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         existing_dep.clone().expect("gate only engages with an existing Deployment")
     } else {
         let mut dep = rendered.deployment.clone();
-        dep.metadata.owner_references = Some(vec![owner]);
+        dep.metadata.owner_references = Some(vec![owner.clone()]);
         // Stamp the gate on the object it gates on, so the next
         // reconcile can read both halves in the GET it already does.
         let ann = dep.metadata.annotations.get_or_insert_with(Default::default);
@@ -1232,6 +1295,13 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             FlintShareStatus {
                 phase: Some(idle_outcome.phase),
                 address: None,
+                // The ladder is mid-transition: the pod is going away or
+                // coming back. `address` is already withheld here for
+                // the same reason and this door is no different — except
+                // that an HTTP caller RETRIES where an NFS one hangs, so
+                // a published URL with nothing behind it is worse here.
+                api_endpoint: None,
+                hub_phase: None,
                 observed_generation: generation,
                 claim_name: Some(names.claim.clone()),
                 server_id: carry_server_id(&share, None),
@@ -1244,10 +1314,44 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
     }
 
     // --- 6. Status ------------------------------------------------------
+    // --- 5c. The API door -----------------------------------------------
+    // Applied AFTER the Deployment and its error deliberately NOT
+    // propagated: a door object must never be able to stop the NFS door
+    // from converging.
+    if let Some(api_svc) = rendered.api_service.clone() {
+        if !skip_applies {
+            let mut api_svc = api_svc;
+            api_svc.metadata.owner_references = Some(vec![owner.clone()]);
+            let name = api_svc.metadata.name.clone().unwrap_or_default();
+            // Owner-verified, exactly like the consumer Service: if the
+            // object exists and its controller ownerRef names a
+            // different share, do NOT apply. Server-side apply with
+            // force replaces `metadata.ownerReferences` wholesale — it
+            // is a listType=map owned by this field manager — so an
+            // unguarded apply would silently take another share's
+            // object and the victim would never get a watch event,
+            // because `.owns()` maps by ownerReference.
+            let existing =
+                get_opt(Api::<Service>::namespaced(ctx.client.clone(), &ns).get(&name)).await?;
+            let collides = existing.as_ref().is_some_and(|e| !owned_by(&e.metadata, &share));
+            if collides {
+                tracing::warn!(share = %name, "API Service name is held by another share");
+            } else if let Err(e) = Api::<Service>::namespaced(ctx.client.clone(), &ns)
+                .patch(&name, &pp, &Patch::Apply(&api_svc))
+                .await
+            {
+                tracing::warn!(error = %e, service = %name, "API Service apply failed");
+            }
+        }
+    }
+
     let svc_live = get_opt(
         Api::<Service>::namespaced(ctx.client.clone(), &ns).get(&names.service),
     )
     .await?;
+    let (api_endpoint, api_cond) =
+        resolve_api_endpoint(&ctx, &share, &ns, &names, generation).await?;
+    set_condition(&mut conds, api_cond);
     let lifecycle = share.spec.lifecycle.clone().unwrap_or_default();
     let phase = phase_of(lifecycle.clone(), Some(&dep), false, idle::state_of(&share));
     let ready = phase == Phase::Ready;
@@ -1294,6 +1398,11 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                         .and_then(|sv| sv.advertise_address.as_deref()),
                 )
             }),
+            api_endpoint,
+            // NEVER carried forward. `None` here means "not observed on
+            // this pass", and a stale phase would be indistinguishable
+            // from a fresh one to a caller.
+            hub_phase: idle_outcome.hub_phase.clone(),
             observed_generation: generation,
             claim_name: Some(names.claim.clone()),
             server_id: carry_server_id(&share, idle_outcome.server_id.clone()),
@@ -1365,6 +1474,14 @@ struct IdleOutcome {
     /// ladder already made that round trip, and a second one for a
     /// field that changes about once a week would be the wrong trade.
     server_id: Option<String>,
+    /// The hub's OWN phase, when this pass actually reached it.
+    ///
+    /// Carried out of the poll the ladder already made, like
+    /// `server_id`. `None` means NOT OBSERVED on this pass — never
+    /// "the hub has no phase" — and it is never carried forward,
+    /// because a stale phase is worse than an absent one: a caller
+    /// cannot tell the difference.
+    hub_phase: Option<String>,
 }
 
 /// Poll the hub, decide, act.
@@ -1417,6 +1534,7 @@ async fn drive_idle_ladder(
             // makes no round trip. `apply` carries the last known id
             // forward rather than blanking it.
             server_id: None,
+            hub_phase: None,
         });
     }
 
@@ -1429,6 +1547,7 @@ async fn drive_idle_ladder(
     // "unknown", never "nobody is mounted".
     let mut sessions_live = None;
     let mut server_id = None;
+    let mut hub_phase = None;
     let hub_quiet = if state.is_down() {
         Err("the hub is scaled to zero".to_string())
     } else {
@@ -1436,6 +1555,7 @@ async fn drive_idle_ladder(
             Ok(snap) => {
                 sessions_live = snap.sessions_live();
                 server_id = snap.server_id.clone();
+                hub_phase = Some(format!("{:?}", snap.phase));
                 let after = cfg
                     .as_ref()
                     .and_then(|c| c.suspend_after_secs)
@@ -1590,6 +1710,7 @@ async fn drive_idle_ladder(
                 phase: ladder_phase.unwrap_or(Phase::Pending),
                 short_circuit: None,
                 server_id: server_id.clone(),
+                hub_phase: hub_phase.clone(),
             })
         }
         Decision::Hold(why) => {
@@ -1601,6 +1722,7 @@ async fn drive_idle_ladder(
                 phase: ladder_phase.unwrap_or(Phase::Pending),
                 short_circuit: None,
                 server_id: server_id.clone(),
+                hub_phase: hub_phase.clone(),
             });
         }
         Decision::Suspend => (IdleState::Suspended, "idle".to_string()),
@@ -1661,6 +1783,7 @@ async fn drive_idle_ladder(
     };
     Ok(IdleOutcome {
         server_id: None,
+        hub_phase: None,
         phase,
         // The annotation patch re-triggers the loop, which re-renders
         // with the new state. Requeue anyway rather than relying on the
@@ -1698,7 +1821,7 @@ async fn verify_and_hibernate(
             conds,
             condition("IdleEligible", false, "WokenDuringVerify", Some(note), generation),
         );
-        return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None });
+        return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None, hub_phase: None });
     }
 
     let snap = match poll_hub(ctx, share, &ns, names, dep).await {
@@ -1711,7 +1834,7 @@ async fn verify_and_hibernate(
                 conds,
                 condition("HubReachable", false, "PollFailed", Some(why.clone()), generation),
             );
-            return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None });
+            return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None, hub_phase: None });
         }
     };
 
@@ -1733,7 +1856,7 @@ async fn verify_and_hibernate(
             conds,
             condition("IdleEligible", false, "NotRecoverable", Some(why), generation),
         );
-        return Ok(IdleOutcome { phase: Phase::Ready, short_circuit: Some(Action::requeue(REQUEUE_BLOCKED)), server_id: None });
+        return Ok(IdleOutcome { phase: Phase::Ready, short_circuit: Some(Action::requeue(REQUEUE_BLOCKED)), server_id: None, hub_phase: None });
     }
 
     // Clean. Record Hibernated FIRST, so the render scales to zero and
@@ -1754,7 +1877,7 @@ async fn verify_and_hibernate(
         conds,
         condition("IdleEligible", true, "Hibernating", Some(note), generation),
     );
-    Ok(IdleOutcome { phase: Phase::Hibernated, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None })
+    Ok(IdleOutcome { phase: Phase::Hibernated, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None, hub_phase: None })
 }
 
 /// Rebuild a share's disk at a smaller size.
@@ -1795,6 +1918,7 @@ async fn drive_reprovision(
                     phase: Phase::Reprovisioning,
                     short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
                     server_id: None,
+            hub_phase: None,
                 });
             }
         };
@@ -1819,6 +1943,7 @@ async fn drive_reprovision(
                 phase: Phase::Reprovisioning,
                 short_circuit: Some(Action::requeue(REQUEUE_BLOCKED)),
                 server_id: None,
+            hub_phase: None,
             });
         }
         set_idle_state(ctx, share, &ns, IdleState::ReprovisionDraining, false).await?;
@@ -1838,6 +1963,7 @@ async fn drive_reprovision(
             phase: Phase::Reprovisioning,
             short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
             server_id: None,
+            hub_phase: None,
         });
     }
 
@@ -1858,6 +1984,7 @@ async fn drive_reprovision(
             phase: Phase::Reprovisioning,
             short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
             server_id: None,
+            hub_phase: None,
         });
     }
 
@@ -1878,6 +2005,7 @@ async fn drive_reprovision(
             phase: Phase::Reprovisioning,
             short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
             server_id: None,
+            hub_phase: None,
         });
     }
 
@@ -1899,6 +2027,7 @@ async fn drive_reprovision(
         phase: Phase::Starting,
         short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)),
         server_id: None,
+            hub_phase: None,
     })
 }
 
@@ -2294,12 +2423,24 @@ async fn cleanup(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         &mut conds,
         condition("Ready", false, "Terminating", why, share.metadata.generation),
     );
+    set_condition(
+        &mut conds,
+        condition(
+            "ApiEndpointPublished",
+            false,
+            "Terminating",
+            "the share is being deleted".to_string(),
+            share.metadata.generation,
+        ),
+    );
     if let Err(e) = write_status(
         &ctx,
         &share,
         FlintShareStatus {
             phase: Some(Phase::Terminating),
             address: None,
+            api_endpoint: None,
+            hub_phase: None,
             observed_generation: share.metadata.generation,
             claim_name: Some(names.claim.clone()),
             server_id: carry_server_id(&share, None),
@@ -2385,6 +2526,145 @@ async fn cleanup(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
 }
 
 /// A `get` that treats 404 as "not there" rather than an error.
+/// Decide what `status.apiEndpoint` should say, and why.
+///
+/// Returns the endpoint (or `None`) and the `ApiEndpointPublished`
+/// condition that explains it. The condition is ALWAYS returned, never
+/// omitted: `conds` is seeded from the previous status and upserted by
+/// type, so a share that turns its file API off would otherwise keep a
+/// stale `True` forever.
+///
+/// **Two live GETs, and both earn their place.**
+///
+/// A pure formula can never observe that its Service was deleted. Without
+/// the Service GET, a hand-deleted or GC'd API Service leaves the
+/// endpoint published and the condition `True` until the next full
+/// reconcile — up to `FULL_APPLY_AFTER` on a parked share — while DNS
+/// returns NXDOMAIN and the front door is told yes.
+///
+/// The Secret GET closes a failure that looks exactly like health. CEL
+/// can only check that `tokenSecretRef` is a non-empty STRING; the key
+/// the hub reads is hardcoded (`render` projects the whole Secret at
+/// `/etc/flint/api-token/` and the hub opens `token` inside it). A
+/// Secret whose key is `api-token` mounts perfectly, the file does not
+/// exist, `resolve_token()` returns `None`, and the hub serves NO
+/// `/files*` routes at all — 404, not 401 — while `/status` answers 200
+/// unauthenticated. Pod Ready, phase Serving, poll succeeds. Publishing
+/// an endpoint there advertises a door whose only reachable surface is
+/// an unauthenticated status document.
+///
+/// **Rate cost, stated because the fleet plan demands it.** These are two
+/// namespaced GETs per reconcile FOR FILE-API-ENABLED SHARES ONLY, not
+/// for the fleet. If that subset ever becomes the whole fleet, the Secret
+/// read must move to a LABEL-SCOPED reflector — and note the trap: this
+/// operator has already shipped a Secret watch that held every Secret in
+/// the cluster.
+async fn resolve_api_endpoint(
+    ctx: &Ctx,
+    share: &FlintShare,
+    ns: &str,
+    names: &render::Names,
+    generation: Option<i64>,
+) -> Result<(Option<String>, ShareCondition)> {
+    let cond = |ok: bool, reason: &str, msg: String| {
+        condition("ApiEndpointPublished", ok, reason, msg, generation)
+    };
+
+    if !render::file_api_on(share) {
+        return Ok((
+            None,
+            cond(
+                false,
+                "NotConfigured",
+                "spec.monitoring.fileApi is not enabled".to_string(),
+            ),
+        ));
+    }
+
+    let Some(svc_name) = names.api_service.clone() else {
+        // Only reachable for a CR with no metadata.uid, which means it
+        // was never persisted. Refuse rather than invent a name.
+        return Ok((
+            None,
+            cond(false, "NoUid", "the FlintShare has no metadata.uid".to_string()),
+        ));
+    };
+
+    // 1. the Service exists, and is OURS.
+    let live = get_opt(Api::<Service>::namespaced(ctx.client.clone(), ns).get(&svc_name)).await?;
+    let Some(live) = live else {
+        return Ok((
+            None,
+            cond(
+                false,
+                "ServiceMissing",
+                format!("Service {svc_name} does not exist"),
+            ),
+        ));
+    };
+    if !owned_by(&live.metadata, share) {
+        let msg = format!(
+            "Service {svc_name} exists but is owned by another share — refusing to \
+             publish an endpoint that would route somewhere else"
+        );
+        event(ctx, share, EventType::Warning, "ApiServiceCollision", &msg).await;
+        return Ok((None, cond(false, "NameCollision", msg)));
+    }
+
+    // 2. the token actually resolves.
+    if let Some(secret_name) = share
+        .spec
+        .monitoring
+        .as_ref()
+        .and_then(|m| m.file_api.as_ref())
+        .and_then(|a| a.token_secret_ref.as_deref())
+        .filter(|r| !r.is_empty())
+    {
+        let sec = get_opt(Api::<Secret>::namespaced(ctx.client.clone(), ns).get(secret_name)).await?;
+        let ok = sec.as_ref().is_some_and(|s| {
+            s.data
+                .as_ref()
+                .and_then(|d| d.get("token"))
+                .is_some_and(|v| !v.0.is_empty())
+        });
+        if !ok {
+            let msg = format!(
+                "Secret {secret_name} has no non-empty `token` key — the hub will serve \
+                 NO file routes (404, not 401) while /status answers 200"
+            );
+            event(ctx, share, EventType::Warning, "ApiTokenUnresolved", &msg).await;
+            return Ok((None, cond(false, "TokenUnresolved", msg)));
+        }
+    }
+    // No tokenSecretRef: the hub falls back to FLINT_FILE_API_TOKEN in
+    // its environment, which the operator does not set and cannot see —
+    // a tiered share's `credentialsSecretRef` is envFrom'd wholesale, so
+    // a tenant may supply one there. Not observable from here, so this
+    // is not treated as a failure. `/status`'s `fileApi.routesMounted`
+    // is the field that actually observes it.
+
+    Ok((
+        render::api_endpoint(share, ns),
+        cond(true, "InCluster", format!("http endpoint on Service {svc_name}")),
+    ))
+}
+
+/// Whether `meta`'s controller ownerReference names this share.
+///
+/// By UID, not name: names are reused and a recreated CR is a different
+/// object. This is what makes the uid-suffixed Service name safe rather
+/// than merely unguessable — a deliberate attacker who reads the
+/// victim's CR learns its uid and can name a share to collide, and this
+/// check turns that from a misroute into first-writer-wins.
+fn owned_by(meta: &kube::core::ObjectMeta, share: &FlintShare) -> bool {
+    let Some(uid) = share.metadata.uid.as_deref() else { return false };
+    meta.owner_references
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|o| o.controller.unwrap_or(false) && o.uid == uid)
+}
+
 async fn get_opt<T>(fut: impl std::future::Future<Output = kube::Result<T>>) -> Result<Option<T>> {
     match fut.await {
         Ok(v) => Ok(Some(v)),
