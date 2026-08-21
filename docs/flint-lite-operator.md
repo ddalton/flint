@@ -653,6 +653,22 @@ Things worth knowing before you wire it up:
 - **There is no token-optional mode.** With neither `tokenSecretRef` nor
   `FLINT_FILE_API_TOKEN` in the environment, the routes are not mounted
   at all and the hub logs why.
+- **One token per share does not scale to one caller of every share.**
+  A project service that browses the whole fleet would have to hold the
+  whole fleet's secrets — and per-hub secrets buy it no containment,
+  since it can open every project by construction.
+  [The fleet-auth note](plans/file-api-fleet-auth.md) is the design:
+  derive each token from one root key, keep that key out of the process
+  by delegating the MAC to a KMS, and write each Secret once at
+  provisioning without ever reading it back. It also records the
+  rotation cost, where the root key must not live, and the endgame
+  (audience-scoped ServiceAccount tokens) that would remove the
+  per-share Secret entirely.
+- **A token change does not roll the hub.** The value is resolved once
+  before the listener binds, and `checksum/creds` covers only
+  `credentialsSecretRef` — so a rotated token reaches a running hub only
+  when something else restarts the pod. Suspend and resume is the cheap
+  bounce.
 - **It refuses with 503 until the phase reaches `Serving`.** A listing
   taken mid-import would show a partial tree as though it were the whole
   one.

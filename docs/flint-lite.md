@@ -296,6 +296,13 @@ rather than silently losing the edit — detection between API callers,
 not exclusion against the mount. The full endpoint table is in
 [the operator guide](flint-lite-operator.md#the-hubs-http-surface-status-and-files-without-a-mount).
 
+The token is per hub, which is fine at one hub and becomes the problem
+at a hundred: a service that browses every project would need every
+project's secret. Don't build that store —
+[the fleet-auth note](plans/file-api-fleet-auth.md) derives each share's
+token from one root key instead, so the caller holds one key and
+recomputes rather than looking anything up.
+
 ## Many shares: the operator
 
 This chart is one release per hub, which is the right shape at one to
