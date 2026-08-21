@@ -144,6 +144,22 @@ impl Default for ApiConfig {
     }
 }
 
+/// Whether a download of `want` bytes takes the streaming path.
+///
+/// Named rather than inlined so a test can exercise the REAL decision
+/// against the REAL configured threshold. The boundary test used to
+/// restate `>` against a local `let t = 8 * 1024 * 1024`, which pinned
+/// nothing: changing `stream_threshold_bytes` — or inverting this
+/// comparison — left it green.
+///
+/// The boundary is deliberate. AT the threshold the body is buffered, so
+/// the status code and Content-Length are decided with every byte in
+/// hand; one byte OVER, memory becomes O(CHUNK) and a mid-read change
+/// can no longer be a clean 409.
+pub(crate) fn streams_rather_than_buffers(want: u64, cfg: &ApiConfig) -> bool {
+    want > cfg.stream_threshold_bytes
+}
+
 /// A parsed `If-Match` / `If-None-Match` header value.
 struct Validators {
     /// The header was `*` — "any current representation".
@@ -836,7 +852,7 @@ async fn handle_download(
     // the connection resets and the caller sees a failed transfer —
     // never a short body under 200, which is a silently corrupt file on
     // their disk.
-    if want > cfg.stream_threshold_bytes {
+    if streams_rather_than_buffers(want, &cfg) {
         return streaming_download(fs, cfg, path, entry, etag, start, end, want, partial);
     }
 
@@ -1373,10 +1389,23 @@ mod tests {
     /// promise, so which one runs is itself part of the contract.
     #[test]
     fn the_stream_threshold_is_an_exact_boundary() {
-        let t = 8 * 1024 * 1024u64;
-        assert!(!(t > t), "a body exactly at the threshold must buffer");
-        assert!(t + 1 > t, "one byte over the threshold must stream");
-        assert!(!(0u64 > t), "an empty body must never take the streaming path");
+        let cfg = ApiConfig::default();
+        let t = cfg.stream_threshold_bytes;
+        assert_eq!(t, 8 * 1024 * 1024, "the shipped default moved — intended?");
+
+        assert!(!streams_rather_than_buffers(t, &cfg), "AT the threshold must buffer");
+        assert!(streams_rather_than_buffers(t + 1, &cfg), "one byte OVER must stream");
+        assert!(!streams_rather_than_buffers(0, &cfg), "an empty body must never stream");
+
+        // The boundary must track the CONFIGURED value, not the default.
+        // Without this leg the whole test passes on a hardcoded 8 MiB.
+        let small = ApiConfig { stream_threshold_bytes: 1024, ..ApiConfig::default() };
+        assert!(!streams_rather_than_buffers(1024, &small), "AT a lowered threshold must buffer");
+        assert!(streams_rather_than_buffers(1025, &small), "over a lowered threshold must stream");
+        assert!(
+            streams_rather_than_buffers(8 * 1024 * 1024, &small),
+            "the old default must stream once the threshold is lowered under it"
+        );
     }
 
     // ---------------------------------------------------------------

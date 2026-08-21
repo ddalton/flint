@@ -1766,10 +1766,54 @@ mod tests {
         assert!(note.exists(), "the owed sweep must be recorded DURABLY");
         assert!(!intent.exists(), "and the import intent cleared behind it");
 
-        // The hub is suspended here — the sweep never ran. On the next
-        // start the state is no longer fresh, so only the note can
-        // rescue the remaining keys.
-        assert!(!state_is_fresh(&r.backend).await || true);
+        // The hub SERVED before it was suspended, and that is the whole
+        // point of this test: on the next start the fresh-state lane is
+        // shut, so the NOTE is the only thing that can still owe the
+        // sweep. A tombstone is the cheapest durable trace of a hub that
+        // has run.
+        //
+        // This used to be asserted as `!state_is_fresh(..) || true`,
+        // which is always true and therefore asserted nothing. It was
+        // hiding a real hole: nothing here had ever made the state
+        // non-fresh, so BOTH starts took the fresh-state lane, and
+        // `outcome2.sweep_owed` below was carried by that lane rather
+        // than by the note. The test could not have failed if the note
+        // had never been read at all.
+        r.backend
+            .tier_put_tombstone(&crate::state_backend::TierTombstone {
+                key: "t/served-before.bin".to_string(),
+                etag: None,
+                created_unix: 1,
+            })
+            .await
+            .unwrap();
+        assert!(
+            !state_is_fresh(&r.backend).await,
+            "the hub has served, so the FRESH-state import lane must be shut"
+        );
+
+        // CONTROL, and it is what makes the assertion after it mean
+        // something: same non-fresh state, same bucket, NO note. Nothing
+        // may owe a sweep. If this ever starts owing one, the leg below
+        // is measuring the other lane again.
+        let seed_ctl = manifest::seed_full(&*(r.mem.clone() as Arc<dyn ObjectStore>), "t/").await;
+        let control = maybe_import_on_start(
+            &r.backend,
+            &(r.mem.clone() as Arc<dyn ObjectStore>),
+            &seed_ctl,
+            ImportConfig {
+                export_root: &r.root,
+                key_prefix: "t/",
+                intent_path: Some(&intent),
+                sweep_note_path: None,
+            },
+        )
+        .await;
+        assert!(
+            !control.sweep_owed,
+            "non-fresh state with no note must owe NOTHING — otherwise the \
+             note is not what carries the sweep across the restart"
+        );
         let seed2 = manifest::seed_full(&*(r.mem.clone() as Arc<dyn ObjectStore>), "t/").await;
         let outcome2 = maybe_import_on_start(
             &r.backend,
