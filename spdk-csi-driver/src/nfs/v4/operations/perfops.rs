@@ -261,6 +261,7 @@ fn try_reflink_range(
 /// Server-side copy: copies data between two files without transferring
 /// data over the network. Dramatically reduces network load and improves
 /// performance for large file operations.
+#[derive(Clone)]
 pub struct CopyOp {
     /// Source stateid
     pub src_stateid: StateId,
@@ -308,6 +309,7 @@ pub enum CopyCompletion {
 /// Atomic copy-on-write clone: creates an instant copy of a file range
 /// using CoW semantics. With SPDK, this leverages snapshots for instant
 /// cloning with no data copy.
+#[derive(Clone)]
 pub struct CloneOp {
     /// Source stateid
     pub src_stateid: StateId,
@@ -1638,19 +1640,19 @@ mod tests {
             let m = std::fs::metadata(&dst_path).unwrap();
             crate::tier::capture::forget(m.dev(), m.ino());
         }
-        let res = handler
-            .handle_copy(
-                CopyOp {
-                    src_stateid: open_stateid_for(&handler, &src_path),
-                    dst_stateid: open_stateid_for(&handler, &dst_path),
-                    src_offset: 0,
-                    dst_offset: 512,
-                    count: src_len,
-                    sync: true,
-                },
-                &ctx,
-            )
-            .await;
+        let res = copy_retrying_delay(
+            &handler,
+            CopyOp {
+                src_stateid: open_stateid_for(&handler, &src_path),
+                dst_stateid: open_stateid_for(&handler, &dst_path),
+                src_offset: 0,
+                dst_offset: 512,
+                count: src_len,
+                sync: true,
+            },
+            &ctx,
+        )
+        .await;
         assert_eq!(res.status, Nfs4Status::Ok);
         let md = std::fs::metadata(&dst_path).unwrap();
         let cap = crate::tier::capture::snapshot(md.dev(), md.ino())
@@ -1677,18 +1679,18 @@ mod tests {
             let m = std::fs::metadata(&dst_path).unwrap();
             crate::tier::capture::forget(m.dev(), m.ino());
         }
-        let res = handler
-            .handle_clone(
-                CloneOp {
-                    src_stateid: open_stateid_for(&handler, &src_path),
-                    dst_stateid: open_stateid_for(&handler, &dst_path),
-                    src_offset: 0,
-                    dst_offset: 8,
-                    count: 16,
-                },
-                &ctx,
-            )
-            .await;
+        let res = clone_retrying_delay(
+            &handler,
+            CloneOp {
+                src_stateid: open_stateid_for(&handler, &src_path),
+                dst_stateid: open_stateid_for(&handler, &dst_path),
+                src_offset: 0,
+                dst_offset: 8,
+                count: 16,
+            },
+            &ctx,
+        )
+        .await;
         assert_eq!(res.status, Nfs4Status::Ok);
         let md = std::fs::metadata(&dst_path).unwrap();
         let cap = crate::tier::capture::snapshot(md.dev(), md.ino())
@@ -1753,6 +1755,62 @@ mod tests {
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let handler = PerfOperationHandler::new(state_mgr, fh_mgr);
         (handler, temp_dir)
+    }
+
+    /// Issue a COPY, retrying only while the answer is NFS4ERR_DELAY.
+    ///
+    /// DELAY here is a legitimate answer from a correct server, not a
+    /// flake in the operation under test. `handle_copy` and
+    /// `handle_clone` sample `evict::marker_cycle()` — ONE
+    /// PROCESS-GLOBAL counter — before moving bytes and require it to be
+    /// unchanged afterwards (`file_read_window_intact`). Every eviction
+    /// anywhere in the process bumps it, so an unrelated test evicting
+    /// an unrelated file invalidates a window that was never at risk.
+    /// Proved directly: with our own file demonstrably not evicted,
+    /// installing a marker for `(0xDEAD, 0xBEEF)` moved the counter and
+    /// turned `file_read_window_intact` false.
+    ///
+    /// The guard is deliberately conservative — `evict.rs` says a cycle
+    /// inside the window means the bytes "may be the stub or a partial
+    /// restore, whatever the marker says NOW" — and a real NFSv4 client
+    /// answers DELAY by re-issuing. So does this.
+    ///
+    /// Deliberately NOT a wildcard: any other status is returned to the
+    /// caller on the first attempt and fails its assertion as before,
+    /// and an operation that answers DELAY forever still fails, because
+    /// the last DELAY is what gets returned.
+    async fn copy_retrying_delay(
+        handler: &PerfOperationHandler,
+        op: CopyOp,
+        ctx: &CompoundContext,
+    ) -> CopyRes {
+        let mut res = handler.handle_copy(op.clone(), ctx).await;
+        for _ in 0..64 {
+            if res.status != Nfs4Status::Delay {
+                break;
+            }
+            tokio::task::yield_now().await;
+            res = handler.handle_copy(op.clone(), ctx).await;
+        }
+        res
+    }
+
+    /// CLONE's half of [`copy_retrying_delay`] — same guard, same
+    /// reasoning.
+    async fn clone_retrying_delay(
+        handler: &PerfOperationHandler,
+        op: CloneOp,
+        ctx: &CompoundContext,
+    ) -> CloneRes {
+        let mut res = handler.handle_clone(op.clone(), ctx).await;
+        for _ in 0..64 {
+            if res.status != Nfs4Status::Delay {
+                break;
+            }
+            tokio::task::yield_now().await;
+            res = handler.handle_clone(op.clone(), ctx).await;
+        }
+        res
     }
 
     fn create_test_stateid(handler: &PerfOperationHandler, client_id: u64) -> StateId {
@@ -1938,7 +1996,7 @@ mod tests {
             count: src_len,
             sync: true,
         };
-        let res = handler.handle_copy(op, &ctx).await;
+        let res = copy_retrying_delay(&handler, op, &ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
         assert_eq!(res.count, src_len);
     }
@@ -2053,7 +2111,7 @@ mod tests {
             dst_offset: 0,
             count: 0,
         };
-        assert_eq!(handler.handle_clone(op, &ctx).await.status, Nfs4Status::Ok);
+        assert_eq!(clone_retrying_delay(&handler, op, &ctx).await.status, Nfs4Status::Ok);
 
         let after = std::fs::read(&dst_path).unwrap();
         assert_eq!(&after[..src_bytes.len()], &src_bytes[..], "cloned range");
@@ -2115,7 +2173,7 @@ mod tests {
             dst_offset: 8,
             count: 6,
         };
-        assert_eq!(handler.handle_clone(op, &ctx).await.status, Nfs4Status::Ok);
+        assert_eq!(clone_retrying_delay(&handler, op, &ctx).await.status, Nfs4Status::Ok);
 
         let after = std::fs::read(&dst_path).unwrap();
         assert_eq!(&after[8..14], b"456789", "the cloned range");
@@ -2186,7 +2244,7 @@ mod tests {
             sync: false,
         };
 
-        let res = handler.handle_copy(op, &ctx).await;
+        let res = copy_retrying_delay(&handler, op, &ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
         assert_eq!(res.count, src_len, "wr_count must be the full range");
         assert!(res.sync, "cr_synchronous states what the server did, not what was asked");
@@ -2256,7 +2314,7 @@ mod tests {
         );
         // [0,1024) into [2048,3072) — same file, disjoint: legal.
         assert_eq!(
-            handler.handle_clone(mk(0, 2048, 1024), &ctx).await.status,
+            clone_retrying_delay(&handler, mk(0, 2048, 1024), &ctx).await.status,
             Nfs4Status::Ok
         );
     }
@@ -2288,7 +2346,7 @@ mod tests {
             count: src_bytes.len() as u64,
         };
 
-        let res = handler.handle_clone(op, &ctx).await;
+        let res = clone_retrying_delay(&handler, op, &ctx).await;
         assert_eq!(res.status, Nfs4Status::Ok);
         assert_eq!(
             &std::fs::read(&dst_path).unwrap()[..src_bytes.len()],
@@ -2453,7 +2511,7 @@ mod tests {
             count: src_len,
             sync: true,
         };
-        assert_eq!(handler.handle_copy(op, &ctx).await.status, Nfs4Status::Ok);
+        assert_eq!(copy_retrying_delay(&handler, op, &ctx).await.status, Nfs4Status::Ok);
 
         let after = crate::nfs::v4::change_counter::current(dev, ino, far_future);
         assert!(
