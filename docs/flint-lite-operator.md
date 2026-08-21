@@ -311,6 +311,87 @@ Four things about that loop:
   holds is stale. A change means remount; an unchanged id across a
   restart means carry on.
 
+### What create and wake actually do
+
+Both paths end in the same place — one pod serving one volume — but
+they start from very different amounts of nothing, and the waits are
+not comparable. A UI that shows one spinner for both will be wrong
+about at least one of them.
+
+**Nothing in the data path starts a hub.** Neither door is a trigger.
+An NFS mount against a scaled-to-zero share hangs: the Service has no
+endpoints, so there is nothing to notice the attempt and a hard mount
+retries forever. The file API is the opposite failure and the better
+one — it refuses immediately rather than hanging. Either way the client
+is not what wakes the share, which is why ensure-live writes
+`requested-at` **before** it hands an address to anyone.
+
+**Create — the project has never existed.** The front door `create`s
+the CR; the operator applies four objects (a ConfigMap holding
+`mds.yaml`, a PersistentVolumeClaim, a Service, a Deployment) and the
+pod boots. For a tiered share the boot is the long part: it claims the
+volume epoch and imports the bucket before its listener binds.
+`Pending` covers the applies, `Starting` covers all of the rest.
+
+**Wake from `IdleSuspended` — the disk survived.** The Deployment goes
+back to one replica and the hub re-claims the epoch against the same
+`state.db`. Nothing is imported because nothing was lost. Measured on a
+real cluster at **41s to `Ready`**.
+
+**Wake from `Hibernated` — the disk was deleted.** The PVC is
+re-created, the hub imports the bucket manifest, and the epoch claim
+takes the *slow* path: hibernating destroys the volume and therefore
+the `serverId`, so self-recognition cannot short-circuit the lease and
+the claim waits out the full `lease_misses × heartbeat`. Measured at
+**79s against 13s** for the same-identity case. Every long-parked
+project pays that on its first open.
+
+**The wake is level-triggered, and that cuts both ways.** The operator
+acts on the annotation being *present*, not on the write event — so a
+`requested-at` stamped while the operator was down is honoured when it
+returns, and no wake is ever lost to a dropped watch. The other side is
+that **a share cannot wake while no operator is reconciling**. The
+drill measured exactly that: with the operator scaled to zero a stamped
+share sat at `IdleSuspended` for 245s untouched, then reached `Ready`
+41s after the operator came back, from the same annotation nobody had
+re-written. "It fails safe, only a delete hangs" is wrong — run two
+replicas, and see *Is the operator alive?* below.
+
+### One project, one hub, one disk
+
+Every share gets **its own PVC**: `<share>-data`, `ReadWriteOnce`,
+sized by `spec.persistence.size`, which is required — there is no
+default, because capacity is a decision. One project, one hub pod, one
+claim, nothing shared between projects. That is what makes
+`kubectl delete flintshare` a complete cleanup.
+
+The claim being `ReadWriteOnce` is not by itself the guard against two
+hubs on one disk — RWO is enforced per *node*, and a Deployment will
+happily start a replacement while the old pod is still terminating. So
+the strategy is `Recreate` (the operator never deliberately runs two)
+and the hub takes an exclusive `flock` on its state directory for the
+life of the process, which is the fence that also covers the cases the
+operator cannot see: evictions, node drains, and
+`kubectl delete pod`.
+
+The exception is `spec.existingClaim`, which adopts a claim the
+operator did not create. It then never re-declares that claim's size or
+class, and never deletes it — not even under `reclaim: Delete`.
+
+**For a tiered share the disk is a cache, not the copy.** The bucket
+holds the project; the PVC holds the working set, the eviction markers
+and `state.db`. That is what makes it safe for hibernate to take the
+disk away, and it is also the number to watch:
+`spec.persistence.size` is a working-set budget, not a project-size
+budget, and eviction works against it. **For a share with no
+`spec.bucket` the PVC is the only copy** — which is precisely why
+hibernate refuses one.
+
+At fleet scale the disks follow the ladder rather than the roster: 3000
+projects with 300 live holds **300 PVCs, not 3000**. A hibernated
+project holds none, and a project whose CR has been deleted holds no
+Kubernetes objects at all.
+
 ### Writing files on a user's behalf
 
 The front door is a web service handling untrusted input, which means
@@ -708,7 +789,9 @@ kubectl annotate flintshare fs-myproject \
 ```
 
 That is the whole protocol. Keep touching it on a heartbeat shorter
-than `suspendAfterSecs` while a session is alive.
+than `suspendAfterSecs` while a session is alive. What the two rungs
+then cost to come back — and why nothing wakes while the operator is
+down — is in *What create and wake actually do*.
 
 **`spec.lifecycle: Suspended` always wins.** It is an admin decision
 and a wake request does not override it — which is why the phases are
@@ -818,11 +901,15 @@ accept the pruning.
 - One served version, no conversion webhook. `v1alpha1` may change.
 - No admission webhook: what CEL can express is in the CRD
   (identity immutability, prefix syntax), the rest is reconcile-time.
-- Waking a hibernated share re-creates the PVC and drives a DR import,
-  but there is no `wake-intent: warm` handling yet — the tree hydrates
-  on demand rather than bulk-filling.
-- The idle ladder has **no cluster coverage yet** — its unit tests are
-  thorough and no kind e2e leg exercises it end to end.
+- Waking a hibernated share re-creates the PVC and drives a full DR
+  import; `wake-intent: warm` reaches the hub's config and bulk-fills
+  during that import, but it is consumed once and only at wake — there
+  is no way to ask a *running* hub to warm itself.
+- The idle ladder's hibernate rung has never completed a full round
+  trip on a real cluster: the drill's attempt was correctly *deferred*
+  by a bug it exposed, so "PVC destroyed, then the bytes come back
+  identical" is proven for suspend/wake and still only inferred for
+  hibernate/wake.
 - The file API is single-shot: no chunked or resumable upload, no
   byte-range PATCH. Large uploads that fail are retried whole — and
   `If-Match` does not make one a multi-request transaction.
