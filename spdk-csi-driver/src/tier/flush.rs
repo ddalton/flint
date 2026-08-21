@@ -286,13 +286,21 @@ impl FlushOrchestrator {
 
     pub fn key_for(&self, path: &Path) -> Option<String> {
         let rel = path.strip_prefix(&self.cfg.export_root).ok()?;
-        // `.flint/` under the prefix is the tier's own control
-        // namespace (the epoch object; step 12's manifests). A client
-        // file there must never shadow a control object.
+        // `.flint/` is the tier's own control namespace (the epoch
+        // object; step 12's manifests). A client file there must never
+        // shadow a control object.
+        //
+        // Checked at EVERY depth, not just the first component. A hub
+        // whose prefix is an ancestor of another share's — the case
+        // `lite_operator::conflict` exists to refuse — sees the inner
+        // share's `nested/.flint/epoch` as an ordinary relative path,
+        // and a first-component test would map it straight back to a
+        // key that overwrites that share's LIVE epoch cell. `.flint`
+        // is reserved throughout the tree, so there is no legitimate
+        // client file at any depth to lose.
         if rel
             .components()
-            .next()
-            .is_some_and(|c| c.as_os_str() == crate::tier::epoch::RESERVED_DIR)
+            .any(|c| c.as_os_str() == crate::tier::epoch::RESERVED_DIR)
         {
             warn!(
                 "tier flush: {} is under the reserved {}/ namespace — not tiered",
@@ -1608,12 +1616,15 @@ mod tests {
         root: PathBuf,
         mem: Arc<MemoryStore>,
         backend: Arc<dyn StateBackend>,
-        /// Serialises against every other tier rig: the capture pending
-        /// queue is process-global and a drain takes all of it. Last
-        /// field so it outlives the rest of the rig.
-        _excl: std::sync::MutexGuard<'static, ()>,
         guard: Arc<crate::tier::epoch::EpochGuard>,
         orch: FlushOrchestrator,
+        /// Serialises against every other tier rig: the capture pending
+        /// queue is process-global and a drain takes all of it.
+        ///
+        /// GENUINELY last: fields drop in declaration order, so anything
+        /// declared after this would tear down with the lock already
+        /// released — which is the window this guard exists to close.
+        _excl: std::sync::MutexGuard<'static, ()>,
     }
 
     fn rig(whole_put_max: u64, part_floor: u64) -> Rig {
@@ -2470,6 +2481,32 @@ mod tests {
             "a client file under .flint/ must not shadow a tier control object"
         );
         assert!(r.orch.key_for(&r.root.join("normal.bin")).is_some());
+
+        // At ANY depth, not just the first component. This is the
+        // ancestor-hub case: a share on `t/` that has somehow ended up
+        // holding a nested share's control objects must not map them
+        // back to keys that overwrite that share's LIVE epoch cell.
+        let nested = r.root.join("nested").join(crate::tier::epoch::RESERVED_DIR);
+        std::fs::create_dir_all(&nested).unwrap();
+        let inner = nested.join("epoch");
+        std::fs::write(&inner, b"another share's live epoch cell").unwrap();
+        assert_eq!(
+            r.orch.key_for(&inner),
+            None,
+            "a nested .flint/ is another share's control namespace — never tier it"
+        );
+        assert_eq!(
+            r.orch.key_for(&nested.join("manifest")),
+            None,
+            "same for the nested manifest"
+        );
+        // Anti-vacuity: the guard is the RESERVED name, not the depth.
+        let sibling = r.root.join("nested").join("ordinary.bin");
+        std::fs::write(&sibling, b"client data").unwrap();
+        assert!(
+            r.orch.key_for(&sibling).is_some(),
+            "an ordinary nested file is still tiered"
+        );
     }
 
     /// The A8 drill, first half: kill the hub mid-flush; the restart

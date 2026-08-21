@@ -1061,19 +1061,28 @@ async fn sweep_crashed_import(
 
 /// Reject absolute paths, `..`, `.` and the reserved namespace — a
 /// manifest and bucket listing are DATA, not trusted input.
+///
+/// The reserved namespace is rejected at EVERY depth, not just the
+/// first component. A hub whose prefix is an ancestor of another
+/// share's — the case `lite_operator::conflict` exists to refuse, and
+/// which the store-side epoch cannot fence because a nested prefix
+/// mints a DIFFERENT epoch object — lists the inner share's
+/// `nested/.flint/epoch` and `nested/.flint/manifest` as ordinary
+/// keys. Admitting them materializes another share's LIVE control
+/// objects as client files in this export, where a subsequent client
+/// write republishes over them. `.flint` is reserved throughout the
+/// tree, so nothing legitimate is refused.
 fn safe_rel_path(p: &str) -> Option<PathBuf> {
     if p.is_empty() {
         return None;
     }
     let pb = PathBuf::from(p);
-    let mut first = true;
     for c in pb.components() {
         match c {
             Component::Normal(seg) => {
-                if first && seg == crate::tier::epoch::RESERVED_DIR {
+                if seg == crate::tier::epoch::RESERVED_DIR {
                     return None;
                 }
-                first = false;
             }
             _ => return None,
         }
@@ -1151,11 +1160,14 @@ mod tests {
         root: PathBuf,
         mem: Arc<MemoryStore>,
         backend: Arc<dyn StateBackend>,
-        /// Serialises against every other tier rig: the capture pending
-        /// queue is process-global and a drain takes all of it. Last
-        /// field so it outlives the rest of the rig.
-        _excl: std::sync::MutexGuard<'static, ()>,
         orch: FlushOrchestrator,
+        /// Serialises against every other tier rig: the capture pending
+        /// queue is process-global and a drain takes all of it.
+        ///
+        /// GENUINELY last: fields drop in declaration order, so anything
+        /// declared after this would tear down with the lock already
+        /// released — which is the window this guard exists to close.
+        _excl: std::sync::MutexGuard<'static, ()>,
     }
 
     fn rig() -> Rig {
@@ -1224,6 +1236,37 @@ mod tests {
             !mine.iter().any(|p| p.contains(crate::tier::epoch::RESERVED_DIR)),
             "the reserved control namespace must never be published as client data"
         );
+    }
+
+    /// A bucket listing is DATA. The dangerous shape is an ancestor
+    /// hub: a share on `tenant-x/` lists a nested share's
+    /// `tenant-x/nested/.flint/epoch`, strips its own prefix, and is
+    /// left holding `nested/.flint/epoch` — which a first-component
+    /// test admits. Materializing it makes another share's live
+    /// control objects client-visible here, and a client write then
+    /// republishes over them. The store-side epoch cannot catch this:
+    /// a nested prefix mints a DIFFERENT epoch object and the two hubs
+    /// never contend.
+    #[test]
+    fn the_reserved_namespace_is_refused_at_every_depth() {
+        for bad in [
+            ".flint/epoch",
+            ".flint/manifest",
+            "nested/.flint/epoch",
+            "nested/.flint/manifest",
+            "a/b/c/.flint/epoch",
+        ] {
+            assert_eq!(safe_rel_path(bad), None, "{bad} is a control object, never client data");
+        }
+        // Anti-vacuity: the guard is the reserved NAME, not the depth,
+        // and not a substring of it.
+        for ok in ["README.md", "nested/main.rs", "a/b/c/d.bin", "flint/x", ".flintish/x"] {
+            assert!(safe_rel_path(ok).is_some(), "{ok} is ordinary client data");
+        }
+        // The pre-existing guards still hold.
+        for bad in ["", "/abs", "../escape", "./here", "a/../b"] {
+            assert_eq!(safe_rel_path(bad), None, "{bad} must stay refused");
+        }
     }
 
     /// What `start_tier` does, in the order it does it: seed the
