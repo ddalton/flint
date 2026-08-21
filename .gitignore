@@ -1,6 +1,11 @@
 # Rust
 target/
-Cargo.lock
+# NOT Cargo.lock. This ships binaries and container images, so the
+# lockfile is committed and a checkout builds the same dependency graph
+# the release was cut from. spdk-csi-driver/Cargo.lock has in fact been
+# tracked all along — this line never applied to it (gitignore does not
+# affect already-tracked files) and only sat here waiting to drop it the
+# first time something untracked it.
 
 # Generated files
 spdk-csi-driver/src/csi.v1.rs
