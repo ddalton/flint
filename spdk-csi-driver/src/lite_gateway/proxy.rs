@@ -234,6 +234,26 @@ enum Payload {
     Stream(reqwest::Body),
 }
 
+/// Which share a request addressed: a project, and optionally one of
+/// its volumes.
+type Target = (String, Option<String>);
+
+/// The addressing prefix, in both shapes.
+///
+/// **The `/volumes/` branch is first, and the order is load-bearing.**
+/// warp commits to a branch when it matches, so with the bare shape
+/// first, `/v1/projects/p/volumes/data/files` would bind
+/// `project = "p"` and leave `volumes/data/files` as an unmatched tail.
+/// Volumes-first also handles a project literally named `volumes`
+/// correctly, because the branch needs the LITERAL `volumes` in the
+/// fourth position and a project id there fails it.
+fn scope() -> impl Filter<Extract = (Target,), Error = Rejection> + Clone {
+    warp::path!("v1" / "projects" / String / "volumes" / String / ..)
+        .map(|p: String, v: String| (p, Some(v)))
+        .or(warp::path!("v1" / "projects" / String / ..).map(|p: String| (p, None)))
+        .unify()
+}
+
 /// The whole route table.
 pub fn routes(
     gw: Arc<Gateway>,
@@ -263,30 +283,64 @@ pub fn routes(
 
     let a = auth(gw.inbound.clone());
 
+    // A project's volumes. NOT under `scope()` — it is a statement
+    // about the project rather than about one of its volumes, and
+    // nesting it under the volume prefix would make the answer to
+    // "which volumes are there" require already knowing one.
+    let volumes = {
+        let gw = gw.clone();
+        warp::path!("v1" / "projects" / String / "volumes")
+            .and(warp::get())
+            .and(a.clone())
+            .then(move |p: String, _| {
+                let gw = gw.clone();
+                async move { list_volumes(gw, p).await }
+            })
+    };
+
+    // Wake / keepalive. A CONTROL operation: it reads the CR, stamps
+    // one annotation and reads the CR again. It never dials a hub —
+    // which is the point, because a file-API call counts as activity
+    // and this endpoint exists precisely for callers that are NOT
+    // making file calls.
+    let wake = {
+        let gw = gw.clone();
+        scope()
+            .and(warp::path!("wake"))
+            .and(warp::post())
+            .and(a.clone())
+            .then(move |t: Target, _| {
+                let gw = gw.clone();
+                async move { wake_share(gw, t.0, t.1).await }
+            })
+    };
+
     let list = {
         let gw = gw.clone();
-        warp::path!("v1" / "projects" / String / "files")
+        scope()
+            .and(warp::path!("files"))
             .and(warp::get())
             .and(a.clone())
             .and(query())
-            .then(move |p: String, _, q: Vec<(String, String)>| {
+            .then(move |t: Target, _, q: Vec<(String, String)>| {
                 let gw = gw.clone();
-                async move { serve(gw, p, Verb::List, q, &[], Payload::None).await }
+                async move { serve(gw, t.0, t.1, Verb::List, q, &[], Payload::None).await }
             })
     };
 
     let download = {
         let gw = gw.clone();
-        warp::path!("v1" / "projects" / String / "files" / "content")
+        scope()
+            .and(warp::path!("files" / "content"))
             .and(warp::get())
             .and(a.clone())
             .and(query())
             .and(warp::header::headers_cloned())
-            .then(move |p: String, _, q: Vec<(String, String)>, h: warp::http::HeaderMap| {
+            .then(move |t: Target, _, q: Vec<(String, String)>, h: warp::http::HeaderMap| {
                 let gw = gw.clone();
                 async move {
                     let fwd = pick_headers(&h, Verb::Download);
-                    serve(gw, p, Verb::Download, q, &fwd, Payload::None).await
+                    serve(gw, t.0, t.1, Verb::Download, q, &fwd, Payload::None).await
                 }
             })
     };
@@ -294,7 +348,8 @@ pub fn routes(
     let upload = {
         let gw = gw.clone();
         let limit = gw.cfg.max_upload_bytes;
-        warp::path!("v1" / "projects" / String / "files" / "content")
+        scope()
+            .and(warp::path!("files" / "content"))
             .and(warp::put())
             .and(a.clone())
             .and(query())
@@ -304,68 +359,75 @@ pub fn routes(
             // `body` is deliberately un-annotated: warp's body stream is
             // an opaque type, and naming it would pin an implementation
             // detail of warp into this file.
-            .then(move |p: String, _, q: Vec<(String, String)>, h: warp::http::HeaderMap, body| {
+            .then(move |t: Target, _, q: Vec<(String, String)>, h: warp::http::HeaderMap, body| {
                 let gw = gw.clone();
                 async move {
                     let fwd = pick_headers(&h, Verb::Upload);
                     let body = stream_body(body);
-                    serve(gw, p, Verb::Upload, q, &fwd, Payload::Stream(body)).await
+                    serve(gw, t.0, t.1, Verb::Upload, q, &fwd, Payload::Stream(body)).await
                 }
             })
     };
 
     let delete = {
         let gw = gw.clone();
-        warp::path!("v1" / "projects" / String / "files" / "content")
+        scope()
+            .and(warp::path!("files" / "content"))
             .and(warp::delete())
             .and(a.clone())
             .and(query())
             .and(warp::header::headers_cloned())
-            .then(move |p: String, _, q: Vec<(String, String)>, h: warp::http::HeaderMap| {
+            .then(move |t: Target, _, q: Vec<(String, String)>, h: warp::http::HeaderMap| {
                 let gw = gw.clone();
                 async move {
                     let fwd = pick_headers(&h, Verb::Delete);
-                    serve(gw, p, Verb::Delete, q, &fwd, Payload::None).await
+                    serve(gw, t.0, t.1, Verb::Delete, q, &fwd, Payload::None).await
                 }
             })
     };
 
     let folder = {
         let gw = gw.clone();
-        warp::path!("v1" / "projects" / String / "files" / "folder")
+        scope()
+            .and(warp::path!("files" / "folder"))
             .and(warp::post())
             .and(a.clone())
             .and(warp::header::headers_cloned())
             .and(warp::body::content_length_limit(64 * 1024))
             .and(warp::body::bytes())
-            .then(move |p: String, _, h: warp::http::HeaderMap, b: Bytes| {
+            .then(move |t: Target, _, h: warp::http::HeaderMap, b: Bytes| {
                 let gw = gw.clone();
                 async move {
                     let fwd = pick_headers(&h, Verb::Folder);
-                    serve(gw, p, Verb::Folder, vec![], &fwd, Payload::Buffered(b)).await
+                    serve(gw, t.0, t.1, Verb::Folder, vec![], &fwd, Payload::Buffered(b)).await
                 }
             })
     };
 
     let mv = {
         let gw = gw.clone();
-        warp::path!("v1" / "projects" / String / "files" / "move")
+        scope()
+            .and(warp::path!("files" / "move"))
             .and(warp::post())
             .and(a)
             .and(warp::header::headers_cloned())
             .and(warp::body::content_length_limit(64 * 1024))
             .and(warp::body::bytes())
-            .then(move |p: String, _, h: warp::http::HeaderMap, b: Bytes| {
+            .then(move |t: Target, _, h: warp::http::HeaderMap, b: Bytes| {
                 let gw = gw.clone();
                 async move {
                     let fwd = pick_headers(&h, Verb::Move);
-                    serve(gw, p, Verb::Move, vec![], &fwd, Payload::Buffered(b)).await
+                    serve(gw, t.0, t.1, Verb::Move, vec![], &fwd, Payload::Buffered(b)).await
                 }
             })
     };
 
     healthz
         .or(readyz)
+        .unify()
+        .or(volumes)
+        .unify()
+        .or(wake)
         .unify()
         .or(list)
         .unify()
@@ -382,6 +444,164 @@ pub fn routes(
         .recover(recover)
         .unify()
         .map(|r: warp::reply::Response| r)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WakeReply {
+    project: String,
+    volume: String,
+    phase: String,
+    /// `host:2049` — what a consumer mounts. Absent until there is
+    /// something to mount.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    address: Option<String>,
+    /// **Compare it across wakes.** Stable across an ordinary restart;
+    /// DIFFERENT after a hibernate, because that deletes the PVC — and
+    /// then every stateid a client holds is invalid, so the correct
+    /// response is a remount rather than resuming on the old handles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_endpoint: Option<String>,
+    /// Whether this call stamped the wake annotation.
+    requested: bool,
+    /// Seconds of quiet after which the idle ladder may suspend this
+    /// share. Absent = the ladder is off for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suspend_after_secs: Option<u64>,
+    /// How often to POST this endpoint again while holding a mount.
+    /// Absent = never needed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keepalive_secs: Option<u64>,
+    /// Set when this share can be scaled to zero out from under a live
+    /// mount. **A mounting consumer should read this and act on it** —
+    /// see `resolve::mount_hazard`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_warning: Option<String>,
+}
+
+/// `POST /v1/projects/{id}[/volumes/{v}]/wake` — bring a share up, and
+/// keep it up.
+///
+/// **It is a keepalive as much as a wake, and that is deliberate.**
+/// The idle ladder suspends only when TWO signals agree: the front
+/// door's `flint.io/requested-at` is stale AND the hub's own activity
+/// clock says idle. A consumer doing file I/O is held up by the second
+/// signal for free. A consumer that is NOT doing I/O — an agent
+/// computing in memory for twenty minutes with a mount held open, which
+/// is exactly the case `idle::decide` calls out — has only the first,
+/// and nothing else in the system will stamp it.
+///
+/// So this stamps on EVERY call, including when the share is already
+/// Ready. That is one small write per call, against a share whose
+/// alternative is being scaled to zero underneath a live `hard` mount.
+///
+/// It never dials the hub. Doing so would work, and would also make the
+/// endpoint self-defeating for the file-proxy path: file-API calls
+/// count as activity, so a "did it come up" probe through `/files`
+/// would keep alive every share it ever checked.
+async fn wake_share(
+    gw: Arc<Gateway>,
+    project: String,
+    volume: Option<String>,
+) -> warp::reply::Response {
+    if let Err(bad) = resolve::validate_project_id(&project) {
+        return json_err(StatusCode::BAD_REQUEST, "BadProjectId", bad.message(), None);
+    }
+    if let Some(v) = volume.as_deref() {
+        if let Err(bad) = resolve::validate_project_id(v) {
+            return json_err(StatusCode::BAD_REQUEST, "BadVolumeId", bad.message(), None);
+        }
+    }
+    let view = match look_up(&gw, &project, volume.as_deref()) {
+        Ok(v) => v,
+        Err(res) => return *res,
+    };
+
+    // An admin suspend is refused BEFORE anything is stamped: the CRD
+    // is explicit that a wake request does not override it, so stamping
+    // would leave an annotation that means nothing and reads like a
+    // pending wake to whoever looks next.
+    if let Decision::Refuse(r) = resolve::decide(&view) {
+        if r.reason == "AdminSuspended" || r.status == 410 || r.status == 409 {
+            return from_refusal(&r);
+        }
+    }
+
+    if let Err(res) = arm_wake(&gw, &view).await {
+        return *res;
+    }
+
+    // Wait for it, on the CR.
+    let view = match wait_for_ready(&gw, &project, volume.as_deref()).await {
+        Ok(v) => v,
+        Err(res) => return *res,
+    };
+
+    let body = WakeReply {
+        volume: resolve::volume_id_of_view(&view),
+        project,
+        phase: view.phase.as_ref().map(|p| format!("{p:?}")).unwrap_or_default(),
+        address: view.address.clone(),
+        server_id: view.server_id.clone(),
+        api_endpoint: view.api_endpoint.clone(),
+        requested: true,
+        suspend_after_secs: view.suspend_after_secs,
+        keepalive_secs: resolve::keepalive_secs(&view),
+        mount_warning: resolve::mount_hazard(&view),
+    };
+    if body.address.is_none() {
+        // Ready with no address is not something a caller can mount, and
+        // saying 200 would send it to parse a field that is not there.
+        return json_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NoAddress",
+            "the share is up but has published no NFS address yet",
+            Some(5),
+        );
+    }
+    warp::reply::json(&body).into_response()
+}
+
+#[derive(Serialize)]
+struct VolumeListing {
+    project: String,
+    volumes: Vec<resolve::VolumeRow>,
+}
+
+/// `GET /v1/projects/{id}/volumes` — what a UI needs to render a
+/// project that has more than one hub.
+///
+/// Answered entirely from the reflector, so listing a project costs no
+/// API-server call and — importantly — **touches no hub**. Asking "what
+/// volumes does this project have" must not wake anything, and it must
+/// not count as activity against the idle ladder.
+async fn list_volumes(gw: Arc<Gateway>, project: String) -> warp::reply::Response {
+    if let Err(bad) = resolve::validate_project_id(&project) {
+        return json_err(StatusCode::BAD_REQUEST, "BadProjectId", bad.message(), None);
+    }
+    let fleet = gw.store.state();
+    let found = resolve::shares_of(
+        &fleet,
+        &gw.cfg.share_name_prefix,
+        &project,
+        gw.cfg.namespace.as_deref(),
+    );
+    if found.is_empty() {
+        return json_err(
+            StatusCode::NOT_FOUND,
+            "NoSuchProject",
+            "no share is registered for that project",
+            None,
+        );
+    }
+    let mut volumes: Vec<resolve::VolumeRow> =
+        found.iter().map(|s| resolve::volume_row(s)).collect();
+    // Stable order. The reflector's is not, and a UI that re-renders a
+    // reordered list on every poll looks broken.
+    volumes.sort_by(|a, b| a.volume.cmp(&b.volume));
+    warp::reply::json(&VolumeListing { project, volumes }).into_response()
 }
 
 /// Query pairs, order-preserving and duplicate-preserving.
@@ -407,9 +627,11 @@ fn pick_headers(h: &warp::http::HeaderMap, verb: Verb) -> Vec<(String, String)> 
 }
 
 /// One request, end to end.
+#[allow(clippy::too_many_arguments)]
 async fn serve(
     gw: Arc<Gateway>,
     project: String,
+    volume: Option<String>,
     verb: Verb,
     q: Vec<(String, String)>,
     fwd_headers: &[(String, String)],
@@ -427,7 +649,17 @@ async fn serve(
         return json_err(StatusCode::BAD_REQUEST, "BadProjectId", bad.message(), None);
     }
 
-    let mut view = match look_up(&gw, &project) {
+    if let Some(v) = volume.as_deref() {
+        // A volume id becomes part of a label match, never part of an
+        // object name — but it is still caller input, so it is
+        // validated on the same terms as the project id rather than
+        // trusted because it is "only" a selector.
+        if let Err(bad) = resolve::validate_project_id(v) {
+            return json_err(StatusCode::BAD_REQUEST, "BadVolumeId", bad.message(), None);
+        }
+    }
+
+    let mut view = match look_up(&gw, &project, volume.as_deref()) {
         Ok(v) => v,
         Err(res) => return *res,
     };
@@ -439,12 +671,12 @@ async fn serve(
             if let Err(res) = arm_wake(&gw, &view).await {
                 return *res;
             }
-            match wait_for_ready(&gw, &project).await {
+            match wait_for_ready(&gw, &project, volume.as_deref()).await {
                 Ok(v) => view = v,
                 Err(res) => return *res,
             }
         }
-        Decision::Wait => match wait_for_ready(&gw, &project).await {
+        Decision::Wait => match wait_for_ready(&gw, &project, volume.as_deref()).await {
             Ok(v) => view = v,
             Err(res) => return *res,
         },
@@ -491,38 +723,94 @@ async fn serve(
     send_upstream(&gw, &view, verb, &url, fwd_headers, payload, &token).await
 }
 
-/// Find the project's share in the reflector, as a [`ShareView`].
-fn look_up(gw: &Gateway, project: &str) -> Result<ShareView, Box<warp::reply::Response>> {
+/// Find the addressed share in the reflector, as a [`ShareView`].
+///
+/// `volume` is `None` for the `/v1/projects/{id}/files*` shape, which
+/// serves only when the project has exactly one volume.
+fn look_up(
+    gw: &Gateway,
+    project: &str,
+    volume: Option<&str>,
+) -> Result<ShareView, Box<warp::reply::Response>> {
     let fleet = gw.store.state();
     match resolve::find(
         &fleet,
         &gw.cfg.share_name_prefix,
         project,
+        volume,
         gw.cfg.namespace.as_deref(),
     ) {
         Lookup::Found(s) => Ok(ShareView::of(&s)),
         Lookup::NotFound => Err(Box::new(json_err(
             StatusCode::NOT_FOUND,
-            "NoSuchProject",
-            "no share is registered for that project",
+            match volume {
+                Some(_) => "NoSuchVolume",
+                None => "NoSuchProject",
+            },
+            match volume {
+                Some(v) => format!("this project has no volume named {v:?}"),
+                None => "no share is registered for that project".to_string(),
+            }
+            .as_str(),
             None,
+        ))),
+        // ACTIONABLE, and answered as such. A project with several
+        // volumes is an ordinary configuration — nothing in the
+        // operator forbids it — so a request that did not name one is
+        // under-specified rather than wrong, and the caller gets the
+        // list it needs to ask again.
+        Lookup::NeedsVolume(vols) => Err(Box::new(volumes_reply(
+            StatusCode::CONFLICT,
+            "MultipleVolumes",
+            &format!(
+                "this project has {} volumes; address one as \
+                 /v1/projects/{project}/volumes/<volume>/files…",
+                vols.len()
+            ),
+            &vols,
         ))),
         Lookup::Ambiguous(who) => {
             // Loud on the operator's side, vague on the caller's: the
             // caller cannot fix this and does not need the namespaces.
             tracing::error!(
                 project = %project,
+                volume = ?volume,
                 candidates = ?who,
-                "two or more shares claim one project id — refusing to guess"
+                "two or more shares claim one (project, volume) — refusing to guess"
             );
             Err(Box::new(json_err(
                 StatusCode::CONFLICT,
-                "AmbiguousProject",
-                "more than one share claims that project id; refusing to guess between them",
+                "AmbiguousVolume",
+                "more than one share claims that project and volume; refusing to guess \
+                 between them",
                 None,
             )))
         }
     }
+}
+
+#[derive(Serialize)]
+struct VolumesBody {
+    error: String,
+    reason: String,
+    volumes: Vec<String>,
+}
+
+/// A refusal that carries the choice the caller has to make.
+fn volumes_reply(
+    status: StatusCode,
+    reason: &str,
+    msg: &str,
+    volumes: &[String],
+) -> warp::reply::Response {
+    let mut res = warp::reply::json(&VolumesBody {
+        error: msg.to_string(),
+        reason: reason.to_string(),
+        volumes: volumes.to_vec(),
+    })
+    .into_response();
+    *res.status_mut() = status;
+    res
 }
 
 /// Ask for the share to come back.
@@ -578,10 +866,14 @@ async fn arm_wake(gw: &Gateway, view: &ShareView) -> Result<(), Box<warp::reply:
 /// than hold a request open for either, the wake is armed — which
 /// persists — and a caller that times out gets a 503 with a
 /// `Retry-After`, having already made the share come back.
-async fn wait_for_ready(gw: &Gateway, project: &str) -> Result<ShareView, Box<warp::reply::Response>> {
+async fn wait_for_ready(
+    gw: &Gateway,
+    project: &str,
+    volume: Option<&str>,
+) -> Result<ShareView, Box<warp::reply::Response>> {
     let deadline = tokio::time::Instant::now() + gw.cfg.wake_wait;
     loop {
-        let view = look_up(gw, project)?;
+        let view = look_up(gw, project, volume)?;
         match resolve::decide(&view) {
             Decision::Dial(_) => return Ok(view),
             Decision::Refuse(r) => return Err(Box::new(from_refusal(&r))),
@@ -647,8 +939,11 @@ async fn send_upstream(
             return json_err(
                 StatusCode::BAD_GATEWAY,
                 "HubRejectedCredential",
-                "the hub rejected this gateway's credential. If a token rotation is in \
-                 flight, retry the upload — a streamed body cannot be replayed here.",
+                &format!(
+                    "the hub rejected this gateway's credential. {}. A streamed upload \
+                     cannot be replayed, so no retry was attempted.",
+                    credential_advice(gw, view)
+                ),
                 Some(5),
             );
         };
@@ -656,8 +951,10 @@ async fn send_upstream(
             return json_err(
                 StatusCode::BAD_GATEWAY,
                 "HubRejectedCredential",
-                "the hub rejected this gateway's credential and there is no previous \
-                 token version to fall back to",
+                &format!(
+                    "the hub rejected this gateway's credential. {}",
+                    credential_advice(gw, view)
+                ),
                 None,
             );
         };
@@ -765,6 +1062,39 @@ fn upstream_error(view: &ShareView, why: &str) -> warp::reply::Response {
     )
 }
 
+/// Why a hub most likely rejected us, and the binding we used.
+///
+/// **The first version of this message blamed a token rotation, and
+/// that was the wrong diagnosis in the common case.** A rotation is
+/// rare and self-heals; a provisioning mismatch is neither, and it
+/// produces exactly the same 401. The drill that first hit this had no
+/// rotation anywhere — its provisioning step had omitted
+/// `spec.endpoint` from the binding, which is a legal empty value that
+/// nothing complains about and that no hub will ever accept.
+///
+/// So the binding is NAMED. None of it is secret — endpoint, bucket,
+/// prefix and version are all readable from the CR by anyone who can
+/// read the CR — and without it the operator has nothing to compare
+/// against the Secret they wrote.
+fn credential_advice(gw: &Gateway, view: &ShareView) -> String {
+    match (&gw.minter, view.binding()) {
+        (Minter::Shared(_), _) => "This gateway uses a single shared hub token; the share's \
+             Secret holds a different value."
+            .to_string(),
+        (Minter::Derived(_), Ok(b)) => format!(
+            "This gateway DERIVES tokens. Check that the share's token Secret was written \
+             from the same root key and the same binding: endpoint={:?} bucket={:?} \
+             keyPrefix={:?} version={}. `flint-hub-gateway --derive-for {}/{}` prints what \
+             this gateway expects. Note that spec.endpoint is part of the binding and is \
+             MUTABLE — changing it invalidates every token derived before the change.",
+            b.endpoint, b.bucket, b.key_prefix, b.version, view.namespace, view.name
+        ),
+        (Minter::Derived(_), Err(_)) => "This gateway derives tokens, but this share has no \
+             bucket to bind one to."
+            .to_string(),
+    }
+}
+
 /// Belt and braces: never let a credential reach a response body.
 ///
 /// `reqwest` does not put headers in its error strings today, and the
@@ -864,6 +1194,13 @@ mod tests {
         auth: Option<String>,
         if_match: Option<String>,
         range: Option<String>,
+        /// What framing the upstream request actually used. A body
+        /// carrying BOTH a Content-Length and `chunked` is a malformed
+        /// request that some servers accept and others treat as request
+        /// smuggling, so the fix for the 411 has to produce one or the
+        /// other — never both.
+        content_length: Option<String>,
+        transfer_encoding: Option<String>,
         body: Vec<u8>,
     }
 
@@ -888,54 +1225,86 @@ mod tests {
     /// logged and answered 200 with a marker body, and the test fails
     /// on the log.
     async fn fake_hub(log: HubLog, name: &'static str) -> String {
-        let route = warp::any()
-            .and(warp::method())
+        let reply = move |m: warp::http::Method,
+                          p: warp::path::FullPath,
+                          q: String,
+                          h: HeaderMap,
+                          b: Bytes,
+                          log: HubLog| {
+            let hdr = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).map(String::from);
+            log.0.lock().unwrap().push(Seen {
+                method: m.to_string(),
+                path: p.as_str().to_string(),
+                query: q,
+                auth: hdr("authorization"),
+                if_match: hdr("if-match"),
+                range: hdr("range"),
+                content_length: hdr("content-length"),
+                transfer_encoding: hdr("transfer-encoding"),
+                body: b.to_vec(),
+            });
+            // Every body NAMES THE HUB THAT SERVED IT. That is what
+            // makes a cross-routed request visible in the response a
+            // caller sees, rather than only in a log the test happens
+            // to check.
+            let body = if p.as_str() == "/status" {
+                // The marker. If this ever reaches a caller the gateway
+                // has failed at its whole job.
+                format!(r#"{{"phase":"Serving","hub":"{name}","THIS-IS-THE-STATUS-DOCUMENT":true}}"#)
+            } else {
+                format!(r#"{{"hub":"{name}","entries":[]}}"#)
+            };
+            let mut res = warp::reply::Response::new(body.into());
+            res.headers_mut().insert("etag", "\"abc123\"".parse().unwrap());
+            res.headers_mut().insert("content-type", "application/json".parse().unwrap());
+            // Something the allowlist does NOT name. A proxy that
+            // copies headers wholesale leaks it.
+            res.headers_mut().insert("x-hub-internal", "leaked".parse().unwrap());
+            res.headers_mut().insert("set-cookie", "hubsession=1".parse().unwrap());
+            res
+        };
+
+        // THE CONTENT-LENGTH CHECK IS EXPLICIT, and it has to be.
+        //
+        // The real hub guards its PUT with
+        // `warp::body::content_length_limit`, which REFUSES a request
+        // carrying no Content-Length — 411, before the handler runs.
+        // This fake hub originally used a bare `bytes()` on every
+        // method, strictly more permissive than the product, so the
+        // gateway's streaming upload (`Body::wrap_stream` has unknown
+        // length, so hyper frames it `Transfer-Encoding: chunked`)
+        // sailed through every test here and 411'd against a real hub
+        // on the very first upload of the kind drill.
+        //
+        // The obvious fix — a `content_length_limit` PUT branch
+        // `.or()`ed with a permissive one — DOES NOT WORK, and the
+        // reason is worth writing down: warp's `or` BACKTRACKS on
+        // rejection, so a 411 from the first branch is swallowed and
+        // the permissive branch answers anyway. The test went green
+        // again while testing nothing. Checking the header in the
+        // handler is the only version that cannot be backtracked
+        // around.
+        let hub = warp::method()
             .and(warp::path::full())
-            .and(
-                warp::filters::query::raw()
-                    .or(warp::any().map(String::new))
-                    .unify(),
-            )
+            .and(warp::filters::query::raw().or(warp::any().map(String::new)).unify())
             .and(warp::header::headers_cloned())
             .and(warp::body::bytes())
-            .map(
-                move |m: warp::http::Method,
-                      p: warp::path::FullPath,
-                      q: String,
-                      h: HeaderMap,
-                      b: Bytes| {
-                    let hdr = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).map(String::from);
-                    log.0.lock().unwrap().push(Seen {
-                        method: m.to_string(),
-                        path: p.as_str().to_string(),
-                        query: q,
-                        auth: hdr("authorization"),
-                        if_match: hdr("if-match"),
-                        range: hdr("range"),
-                        body: b.to_vec(),
-                    });
-                    // Every body NAMES THE HUB THAT SERVED IT. That is
-                    // what makes a cross-routed request visible in the
-                    // response a caller sees, rather than only in a log
-                    // the test happens to check.
-                    let body = if p.as_str() == "/status" {
-                        // The marker. If this ever reaches a caller the
-                        // gateway has failed at its whole job.
-                        format!(r#"{{"phase":"Serving","hub":"{name}","THIS-IS-THE-STATUS-DOCUMENT":true}}"#)
-                    } else {
-                        format!(r#"{{"hub":"{name}","entries":[]}}"#)
-                    };
-                    let mut res = warp::reply::Response::new(body.into());
-                    res.headers_mut().insert("etag", "\"abc123\"".parse().unwrap());
-                    res.headers_mut().insert("content-type", "application/json".parse().unwrap());
-                    // Something the allowlist does NOT name. A proxy
-                    // that copies headers wholesale leaks it.
-                    res.headers_mut().insert("x-hub-internal", "leaked".parse().unwrap());
-                    res.headers_mut().insert("set-cookie", "hubsession=1".parse().unwrap());
-                    res
-                },
-            );
-        let (addr, srv) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
+            .map(move |m: warp::http::Method,
+                       p: warp::path::FullPath,
+                       q: String,
+                       h: HeaderMap,
+                       b: Bytes| {
+                if m == warp::http::Method::PUT && !h.contains_key("content-length") {
+                    let mut res = warp::reply::Response::new(
+                        "A content-length header is required".into(),
+                    );
+                    *res.status_mut() = StatusCode::LENGTH_REQUIRED;
+                    return res;
+                }
+                reply(m, p, q, h, b, log.clone())
+            });
+
+        let (addr, srv) = warp::serve(hub).bind_ephemeral(([127, 0, 0, 1], 0));
         tokio::spawn(srv);
         format!("http://{addr}")
     }
@@ -1199,6 +1568,43 @@ mod tests {
             .await;
         assert_eq!(res.status(), 200);
         assert_eq!(r.log.all()[1].range.as_deref(), Some("bytes=0-9"));
+    }
+
+    /// THE 411 THE KIND DRILL FOUND.
+    ///
+    /// The gateway streams an upload rather than buffering it, and a
+    /// streamed body has no known length — so hyper frames it
+    /// `Transfer-Encoding: chunked`. The hub's upload route guards
+    /// itself with `warp::body::content_length_limit`, which REFUSES a
+    /// request with no Content-Length: 411, before the handler runs.
+    /// Every upload in the fleet failed, and no test here saw it,
+    /// because this file's fake hub used a bare `bytes()` and was more
+    /// permissive than the product.
+    ///
+    /// Both halves are asserted: the length IS forwarded, and the
+    /// request is NOT also chunked. A body carrying both is malformed
+    /// and is treated as request smuggling by some servers.
+    #[tokio::test]
+    async fn an_upload_reaches_the_hub_with_a_content_length_and_not_chunked() {
+        let r = ready_rig().await;
+        let res = req()
+            .method("PUT")
+            .path("/v1/projects/proj-a/files/content?path=/a.txt")
+            .body("0123456789")
+            .reply(&routes(r.gw.clone()))
+            .await;
+        assert_eq!(res.status(), 200, "the hub refused the upload framing");
+        let seen = &r.log.all()[0];
+        assert_eq!(
+            seen.content_length.as_deref(),
+            Some("10"),
+            "the caller's Content-Length was not forwarded — the hub answers 411"
+        );
+        assert_eq!(
+            seen.transfer_encoding, None,
+            "the request carried BOTH a length and chunked framing"
+        );
+        assert_eq!(seen.body, b"0123456789", "and the bytes still arrived intact");
     }
 
     /// Response headers are an allowlist, not a copy-minus-hop-by-hop.
@@ -1848,5 +2254,317 @@ mod tests {
             assert_eq!(res.status(), 401, "{project}");
         }
         assert!(r.a.all().is_empty() && r.b.all().is_empty());
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // ONE PROJECT, SEVERAL HUBS
+    //
+    // Nothing in the operator forbids it. `conflict::overlaps` keys
+    // fleet uniqueness on (endpoint, bucket, prefix-subtree) and NOTHING
+    // reads `flint.io/project-id` at all — so N shares on N different
+    // prefixes, all labelled with one project id, is a legal and
+    // unremarkable configuration. (One HUB serving several volumes is a
+    // different thing and is not implemented; the model here is one
+    // volume, one hub, N of them per project.)
+    //
+    // The first cut of this gateway assumed project↔share was 1:1 and
+    // answered 409 for the whole shape. These tests exist so that
+    // assumption cannot come back.
+    // ───────────────────────────────────────────────────────────────
+
+    fn volume_share(
+        name: &str,
+        project: &str,
+        volume: &str,
+        endpoint: &str,
+    ) -> FlintShare {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "metadata": {
+                "name": name, "namespace": "workspaces",
+                "labels": {
+                    "flint.io/project-id": project,
+                    "flint.io/volume-id": volume,
+                },
+            },
+            "spec": {
+                "bucket": "tenant-bucket",
+                // DIFFERENT prefixes — which is exactly what makes two
+                // shares of one project legal to the arbiter.
+                "keyPrefix": format!("{project}/{volume}/"),
+                "persistence": {"size": "20Gi"}
+            },
+            "status": {
+                "phase": "Ready",
+                "apiEndpoint": endpoint,
+                "conditions": [{
+                    "type": "ApiEndpointPublished", "status": "True", "reason": "InCluster",
+                    "lastTransitionTime": "2026-08-21T00:00:00Z"
+                }]
+            }
+        }))
+        .expect("test share")
+    }
+
+    /// One project, two volumes, two hubs, on real ports.
+    async fn one_project_two_volumes() -> TwoHubs {
+        crate::install_crypto_provider();
+        let (la, lb) = (HubLog::default(), HubLog::default());
+        let (ha, hb) = (
+            fake_hub(la.clone(), "hub-a").await,
+            fake_hub(lb.clone(), "hub-b").await,
+        );
+        let shares = vec![
+            volume_share("fs-proj-a-data", "proj-a", "data", &ha),
+            volume_share("fs-proj-a-models", "proj-a", "models", &hb),
+        ];
+        let client = kube::Client::try_from(kube::Config::new(
+            "http://127.0.0.1:1".parse().expect("uri"),
+        ))
+        .expect("client");
+        let gw = Arc::new(Gateway {
+            client,
+            store: store_of(shares),
+            cfg: Config {
+                namespace: None,
+                share_name_prefix: "fs-".into(),
+                wake_wait: Duration::from_secs(0),
+                read_only: false,
+                max_upload_bytes: 1024 * 1024,
+                upstream_timeout: Duration::from_secs(5),
+            },
+            minter: Minter::Derived(ROOT_KEY.to_vec()),
+            inbound: TokenSource::fixed(INBOUND),
+            http: upstream_client(Duration::from_secs(2)).expect("http"),
+            ready: Arc::new(AtomicBool::new(true)),
+        });
+        let (addr, srv) = warp::serve(routes(gw)).bind_ephemeral(([127, 0, 0, 1], 0));
+        tokio::spawn(srv);
+        TwoHubs { base: format!("http://{addr}"), a: la, b: lb }
+    }
+
+    /// The headline for this shape: each volume of one project reaches
+    /// its own hub, addressed by volume id, over a real socket.
+    #[tokio::test]
+    async fn one_project_with_two_volumes_reaches_a_different_hub_for_each() {
+        let r = one_project_two_volumes().await;
+        let c = outside();
+        for (volume, want) in [("data", "hub-a"), ("models", "hub-b")] {
+            let res = c
+                .get(format!("{}/v1/projects/proj-a/volumes/{volume}/files?path=/", r.base))
+                .bearer_auth(INBOUND)
+                .send()
+                .await
+                .expect("the gateway must answer");
+            assert_eq!(res.status(), 200, "{volume}");
+            let body = res.text().await.unwrap();
+            assert!(
+                body.contains(&format!(r#""hub":"{want}""#)),
+                "volume {volume} was served by the wrong hub: {body}"
+            );
+        }
+        assert_eq!(r.a.paths(), vec!["/files"]);
+        assert_eq!(r.b.paths(), vec!["/files"]);
+    }
+
+    /// Each volume's hub gets a credential bound to ITS OWN prefix.
+    ///
+    /// Two volumes of one project are two independent subtrees with two
+    /// independent epochs; a shared credential would mean a compromise
+    /// of one volume's hub opened the other.
+    #[tokio::test]
+    async fn each_volume_of_one_project_has_its_own_credential() {
+        let r = one_project_two_volumes().await;
+        let c = outside();
+        for volume in ["data", "models"] {
+            c.get(format!("{}/v1/projects/proj-a/volumes/{volume}/files?path=/", r.base))
+                .bearer_auth(INBOUND)
+                .send()
+                .await
+                .unwrap();
+        }
+        let ta = r.a.all()[0].auth.clone().unwrap();
+        let tb = r.b.all()[0].auth.clone().unwrap();
+        assert_ne!(ta, tb, "two volumes of one project shared a credential");
+        // And each is the token for its own prefix, not merely different.
+        let want = |vol: &str| {
+            format!(
+                "Bearer {}",
+                super::super::derive::derive(
+                    ROOT_KEY,
+                    &super::super::derive::Binding {
+                        endpoint: "",
+                        bucket: "tenant-bucket",
+                        key_prefix: &format!("proj-a/{vol}/"),
+                        version: 1,
+                    },
+                )
+            )
+        };
+        assert_eq!(ta, want("data"));
+        assert_eq!(tb, want("models"));
+    }
+
+    /// The bare `/files` shape on a multi-volume project is
+    /// UNDER-SPECIFIED, not wrong — so it names the choice rather than
+    /// refusing opaquely, and it dials nothing while doing so.
+    ///
+    /// Picking one instead would serve `models/` to a caller that meant
+    /// `data/`, and the reflector's order is not stable across a watch
+    /// reconnect, so it would not even be consistently the same one.
+    #[tokio::test]
+    async fn a_multi_volume_project_names_the_choice_instead_of_guessing() {
+        let r = one_project_two_volumes().await;
+        let c = outside();
+        let res = c
+            .get(format!("{}/v1/projects/proj-a/files?path=/", r.base))
+            .bearer_auth(INBOUND)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 409);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["reason"], "MultipleVolumes");
+        let mut vols: Vec<String> = body["volumes"]
+            .as_array()
+            .expect("the caller needs the list to act on")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        vols.sort();
+        assert_eq!(vols, vec!["data", "models"]);
+        assert!(
+            r.a.all().is_empty() && r.b.all().is_empty(),
+            "it dialled a hub while deciding it could not choose"
+        );
+
+        // And the answer is ACTIONABLE: following it works.
+        let ok = c
+            .get(format!("{}/v1/projects/proj-a/volumes/data/files?path=/", r.base))
+            .bearer_auth(INBOUND)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200);
+        assert!(ok.text().await.unwrap().contains(r#""hub":"hub-a""#));
+    }
+
+    /// A single-volume project keeps working with no volume in the
+    /// path and no `flint.io/volume-id` label anywhere. This is the
+    /// shape every existing caller uses.
+    #[tokio::test]
+    async fn a_single_volume_project_still_serves_the_bare_path() {
+        let r = two_hub_rig(false).await;   // two PROJECTS, one volume each
+        let c = outside();
+        let res = c
+            .get(format!("{}/v1/projects/proj-a/files?path=/", r.base))
+            .bearer_auth(INBOUND)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(res.text().await.unwrap().contains(r#""hub":"hub-a""#));
+    }
+
+    /// Asking for a volume that does not exist must be a 404, never a
+    /// fallback onto whichever volume the project does have. A
+    /// fallback here is a caller reading the wrong subtree and being
+    /// told everything is fine.
+    #[tokio::test]
+    async fn an_unknown_volume_is_404_and_never_falls_back_to_another() {
+        let r = one_project_two_volumes().await;
+        let c = outside();
+        let res = c
+            .get(format!("{}/v1/projects/proj-a/volumes/nope/files?path=/", r.base))
+            .bearer_auth(INBOUND)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["reason"], "NoSuchVolume");
+        assert!(r.a.all().is_empty() && r.b.all().is_empty());
+    }
+
+    /// Listing a project's volumes must touch NO hub. "Which volumes
+    /// are there" is a question about the CR, and answering it by
+    /// dialling would wake parked volumes and count as activity against
+    /// the idle ladder for the live ones.
+    #[tokio::test]
+    async fn listing_a_projects_volumes_touches_no_hub() {
+        let r = one_project_two_volumes().await;
+        let c = outside();
+        let res = c
+            .get(format!("{}/v1/projects/proj-a/volumes", r.base))
+            .bearer_auth(INBOUND)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["project"], "proj-a");
+        let vols = body["volumes"].as_array().unwrap();
+        assert_eq!(vols.len(), 2);
+        // Sorted, so a UI does not re-render a shuffled list each poll.
+        assert_eq!(vols[0]["volume"], "data");
+        assert_eq!(vols[1]["volume"], "models");
+        assert_eq!(vols[0]["keyPrefix"], "proj-a/data/");
+        assert_eq!(vols[0]["serving"], true);
+        assert!(
+            r.a.all().is_empty() && r.b.all().is_empty(),
+            "listing volumes dialled a hub"
+        );
+
+        // Unauthenticated callers cannot enumerate a project's volumes.
+        let bare = c
+            .get(format!("{}/v1/projects/proj-a/volumes", r.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bare.status(), 401);
+    }
+
+    /// A project id that happens to be the literal `volumes` must still
+    /// route — the `/volumes/` branch is matched first, so this is the
+    /// case that would break if the branch ordering were reasoned about
+    /// carelessly.
+    #[tokio::test]
+    async fn a_project_named_volumes_is_not_swallowed_by_the_volume_route() {
+        crate::install_crypto_provider();
+        let log = HubLog::default();
+        let hub = fake_hub(log.clone(), "hub-v").await;
+        let share = volume_share("fs-volumes", "volumes", "only", &hub);
+        let client = kube::Client::try_from(kube::Config::new(
+            "http://127.0.0.1:1".parse().unwrap(),
+        ))
+        .unwrap();
+        let gw = Arc::new(Gateway {
+            client,
+            store: store_of(vec![share]),
+            cfg: Config {
+                namespace: None,
+                share_name_prefix: "fs-".into(),
+                wake_wait: Duration::from_secs(0),
+                read_only: false,
+                max_upload_bytes: 1024 * 1024,
+                upstream_timeout: Duration::from_secs(5),
+            },
+            minter: Minter::Shared("t".into()),
+            inbound: TokenSource::fixed(INBOUND),
+            http: upstream_client(Duration::from_secs(2)).unwrap(),
+            ready: Arc::new(AtomicBool::new(true)),
+        });
+        let (addr, srv) = warp::serve(routes(gw)).bind_ephemeral(([127, 0, 0, 1], 0));
+        tokio::spawn(srv);
+        let c = outside();
+        let res = c
+            .get(format!("http://{addr}/v1/projects/volumes/files?path=/"))
+            .bearer_auth(INBOUND)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(res.text().await.unwrap().contains(r#""hub":"hub-v""#));
+        assert_eq!(log.paths(), vec!["/files"]);
     }
 }

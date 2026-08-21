@@ -106,6 +106,16 @@ pub struct ShareView {
     /// The hub's own phase, when the operator observed one this pass.
     pub hub_phase: Option<String>,
     pub api_endpoint: Option<String>,
+    /// `status.address` — the NFS door, `host:2049`. Withdrawn by the
+    /// operator on `Failed` and `Terminating`, which is why it is read
+    /// rather than derived.
+    pub address: Option<String>,
+    /// The hub's persisted NFS server identity. **A change here means
+    /// every existing mount is stale**: it is stable across ordinary
+    /// restarts, but a hibernate deletes the PVC, so a woken share
+    /// comes back with a new one and the stateids clients still hold
+    /// refer to a server generation that no longer exists.
+    pub server_id: Option<String>,
     /// `ApiEndpointPublished`: (status, reason, message).
     pub api_condition: Option<(bool, String, String)>,
     /// Who won the bucket subtree, when this share lost it.
@@ -118,6 +128,15 @@ pub struct ShareView {
     pub bucket: Option<String>,
     pub key_prefix: Option<String>,
     pub token_version: u64,
+    /// `flint.io/volume-id`, when the share carries one.
+    pub volume_id: Option<String>,
+    /// `spec.idle.suspendAfterSecs`. `None` = the ladder is OFF for
+    /// this share and it will never be suspended for quiet.
+    pub suspend_after_secs: Option<u64>,
+    /// `spec.idle.suspendWithSessions`. **The protective value is
+    /// `Some(false)`**, and it is opt-in: absent and `Some(true)` both
+    /// mean the ladder suspends even while an NFS client holds a lease.
+    pub suspend_with_sessions: Option<bool>,
     /// `spec.monitoring.fileApi.hydrateWaitSecs`, when the share sets
     /// one. How long the HUB will hold a download open waiting for an
     /// evicted file to come back from S3 before answering 503.
@@ -153,6 +172,8 @@ impl ShareView {
             phase: st.and_then(|s| s.phase.clone()),
             hub_phase: st.and_then(|s| s.hub_phase.clone()),
             api_endpoint: st.and_then(|s| s.api_endpoint.clone()),
+            address: st.and_then(|s| s.address.clone()),
+            server_id: st.and_then(|s| s.server_id.clone()),
             api_condition,
             conflict_with: st
                 .and_then(|s| s.conflict_with.as_ref())
@@ -173,6 +194,23 @@ impl ShareView {
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .filter(|v| *v >= 1)
                 .unwrap_or(1),
+            volume_id: share
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(LABEL_VOLUME_ID))
+                .filter(|v| !v.is_empty())
+                .cloned(),
+            suspend_after_secs: share
+                .spec
+                .idle
+                .as_ref()
+                .and_then(|i| i.suspend_after_secs),
+            suspend_with_sessions: share
+                .spec
+                .idle
+                .as_ref()
+                .and_then(|i| i.suspend_with_sessions),
             hydrate_wait_secs: share
                 .spec
                 .monitoring
@@ -366,7 +404,7 @@ pub fn hub_phase_blocks(v: &ShareView) -> Option<Refusal> {
     })
 }
 
-/// The documented index from a project id to its share.
+/// The documented index from a project id to its share(s).
 ///
 /// `docs/flint-lite-operator.md` tells a front door to derive the name
 /// (`fs-<project-id>`) AND label it. Both are load-bearing and they fail
@@ -376,8 +414,37 @@ pub fn hub_phase_blocks(v: &ShareView) -> Option<Refusal> {
 /// side — it is already a printer column on the CRD.
 pub const LABEL_PROJECT_ID: &str = "flint.io/project-id";
 
+/// Which of a project's volumes a share is.
+///
+/// **A project may have several hubs, and the operator has no opinion
+/// about it.** `conflict::overlaps` keys fleet uniqueness on
+/// `(endpoint, bucket, prefix-subtree)` and nothing in the operator
+/// reads `flint.io/project-id` at all — so N shares on N different
+/// prefixes, all labelled with one project id, is a legal and
+/// unremarkable configuration. (One HUB serving several volumes is a
+/// different thing entirely and is not implemented; see
+/// `docs/plans/multi-volume-hub-design.md`. The model here is one
+/// volume, one hub, N of them per project.)
+///
+/// Absent, the CR's own name is the volume id. That keeps a
+/// single-volume project working with no labels at all, and gives a
+/// multi-volume one a usable identifier before anyone thinks to add
+/// this label.
+pub const LABEL_VOLUME_ID: &str = "flint.io/volume-id";
+
 pub fn project_id_of(share: &FlintShare) -> Option<String> {
     share.metadata.labels.as_ref()?.get(LABEL_PROJECT_ID).cloned()
+}
+
+pub fn volume_id_of(share: &FlintShare) -> String {
+    share
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(LABEL_VOLUME_ID))
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .unwrap_or_else(|| share.metadata.name.clone().unwrap_or_default())
 }
 
 /// The result of looking a project up in the fleet.
@@ -385,69 +452,207 @@ pub fn project_id_of(share: &FlintShare) -> Option<String> {
 pub enum Lookup<T> {
     Found(T),
     NotFound,
-    /// More than one share claims this project. Reported as `ns/name`
-    /// pairs and REFUSED — see [`find`].
+    /// The project has more than one volume and the request named
+    /// none. Carries the volume ids — the caller CAN act on this, by
+    /// asking again for one of them.
+    NeedsVolume(Vec<String>),
+    /// Two shares claim the same (project, volume). A misconfiguration
+    /// the caller cannot fix; the `ns/name` pairs are for the log.
     Ambiguous(Vec<String>),
 }
 
-/// Find the share for a project id, label first and derived name second.
+/// Every share belonging to a project, label first and derived name
+/// second.
 ///
-/// **Ambiguity is refused, never resolved.** Watching every namespace is
-/// the fleet posture, and two namespaces can hold a `fs-proj-a` each —
-/// one tenant's, one another's. Any tie-break (first in the store,
-/// lowest namespace, most recently created) is a rule that silently
-/// serves one tenant's files to a caller asking for the other's, and
-/// the store's iteration order is not even stable across relists. So
-/// this returns the candidates and the caller answers 409 naming them:
-/// wrong is worse than unavailable here, and an operator can fix a
-/// duplicate in a minute once they can see it.
-///
-/// The label wins over the name when BOTH match different shares,
-/// because the label is the deliberate statement and the name is a
-/// convention. A share matching by name is only consulted when no share
-/// carries the label — which is what lets an install that predates the
-/// labelling convention keep working.
-pub fn find<T: AsRef<FlintShare> + Clone>(
+/// The label wins over the name when both match, because the label is
+/// the deliberate statement and the name is a convention. A share
+/// matching by name is only consulted when NO share carries the label —
+/// which is what lets an install that predates the labelling convention
+/// keep working, while a project that has adopted labels is not
+/// polluted by whatever object happens to be called `fs-<id>`.
+pub fn shares_of<T: AsRef<FlintShare> + Clone>(
     shares: &[T],
     prefix: &str,
     project: &str,
     namespace: Option<&str>,
-) -> Lookup<T> {
+) -> Vec<T> {
     let in_scope = |s: &FlintShare| match namespace {
         Some(ns) => s.metadata.namespace.as_deref() == Some(ns),
         None => true,
     };
-    let name = share_name(prefix, project);
-
-    let by_label: Vec<&T> = shares
+    let by_label: Vec<T> = shares
         .iter()
         .filter(|s| in_scope(s.as_ref()) && project_id_of(s.as_ref()).as_deref() == Some(project))
+        .cloned()
         .collect();
-    let chosen = if by_label.is_empty() {
-        shares
-            .iter()
-            .filter(|s| in_scope(s.as_ref()) && s.as_ref().metadata.name.as_deref() == Some(&name))
-            .collect::<Vec<_>>()
-    } else {
-        by_label
+    if !by_label.is_empty() {
+        return by_label;
+    }
+    let name = share_name(prefix, project);
+    shares
+        .iter()
+        .filter(|s| in_scope(s.as_ref()) && s.as_ref().metadata.name.as_deref() == Some(&name))
+        .cloned()
+        .collect()
+}
+
+/// Narrow a project's shares to the one a request addressed.
+///
+/// `volume: None` is the single-volume shape — it serves when there is
+/// exactly one and asks for a volume when there are several, rather
+/// than picking. **Every tie-break is a rule that serves one volume's
+/// files to a caller asking for another**, and with two volumes of one
+/// project that is a caller reading `models/` when it asked for
+/// `data/`. The reflector's iteration order is not even stable across
+/// a watch reconnect, so a silent pick would not be consistently wrong
+/// — it would be intermittently wrong, which is worse.
+pub fn pick<T: AsRef<FlintShare> + Clone>(found: &[T], volume: Option<&str>) -> Lookup<T> {
+    let refs = |set: &[T]| -> Vec<String> {
+        set.iter()
+            .map(|s| {
+                let m = &s.as_ref().metadata;
+                format!(
+                    "{}/{}",
+                    m.namespace.as_deref().unwrap_or("?"),
+                    m.name.as_deref().unwrap_or("?")
+                )
+            })
+            .collect()
     };
 
-    match chosen.len() {
+    let Some(want) = volume else {
+        return match found.len() {
+            0 => Lookup::NotFound,
+            1 => Lookup::Found(found[0].clone()),
+            _ => {
+                let mut vols: Vec<String> =
+                    found.iter().map(|s| volume_id_of(s.as_ref())).collect();
+                vols.sort();
+                vols.dedup();
+                // Several shares that all resolve to ONE volume id is a
+                // duplicate, not a choice — naming it as a choice would
+                // send the caller round a loop that cannot terminate.
+                if vols.len() == 1 {
+                    return Lookup::Ambiguous(refs(found));
+                }
+                Lookup::NeedsVolume(vols)
+            }
+        };
+    };
+
+    let matched: Vec<T> = found
+        .iter()
+        .filter(|s| volume_id_of(s.as_ref()) == want)
+        .cloned()
+        .collect();
+    match matched.len() {
         0 => Lookup::NotFound,
-        1 => Lookup::Found(chosen[0].clone()),
-        _ => Lookup::Ambiguous(
-            chosen
-                .iter()
-                .map(|s| {
-                    let m = &s.as_ref().metadata;
-                    format!(
-                        "{}/{}",
-                        m.namespace.as_deref().unwrap_or("?"),
-                        m.name.as_deref().unwrap_or("?")
-                    )
-                })
-                .collect(),
-        ),
+        1 => Lookup::Found(matched[0].clone()),
+        _ => Lookup::Ambiguous(refs(&matched)),
+    }
+}
+
+/// Find one share: a project's shares, narrowed by volume.
+pub fn find<T: AsRef<FlintShare> + Clone>(
+    shares: &[T],
+    prefix: &str,
+    project: &str,
+    volume: Option<&str>,
+    namespace: Option<&str>,
+) -> Lookup<T> {
+    pick(&shares_of(shares, prefix, project, namespace), volume)
+}
+
+/// Whether a share can be scaled to zero out from under a live NFS
+/// mount, and what to do about it.
+///
+/// **This is the sharp edge for a consumer that mounts.** The ladder
+/// suspends when two signals agree: `flint.io/requested-at` is stale
+/// AND the hub's own activity clock is quiet. A consumer doing file
+/// I/O is held up by the second for free. A consumer that holds a
+/// mount and does no I/O — an agent computing in memory, which is the
+/// case `idle::decide` names explicitly — has only the first, and
+/// nothing in the system stamps it on the consumer's behalf.
+///
+/// What happens if it does suspend is a stall rather than data loss:
+/// with a `hard` mount, in-flight I/O blocks in uninterruptible sleep,
+/// and `state.db` on the PVC keeps `serverId` stable so clients
+/// reclaim. The problem is that **nothing wakes it** — wake is
+/// level-triggered on an annotation, and an NFS client cannot write a
+/// Kubernetes annotation. The mount hangs until something else asks.
+///
+/// So a caller that is about to mount gets told, rather than finding
+/// out at 3am.
+pub fn mount_hazard(v: &ShareView) -> Option<String> {
+    let after = v.suspend_after_secs?;
+    if v.suspend_with_sessions == Some(false) {
+        // Opted into the lease guard: the ladder will hold while any
+        // client holds a lease.
+        return None;
+    }
+    let every = (after / 2).max(1);
+    Some(format!(
+        "this share suspends after {after}s of quiet even while an NFS client holds a \
+lease (spec.idle.suspendWithSessions is not false). A mount held open without file \
+I/O will be scaled to zero underneath it, and nothing will wake it, because an NFS \
+client cannot write the wake annotation. Either set spec.idle.suspendWithSessions: \
+false, or POST this endpoint again every {every}s while the mount is held."
+    ))
+}
+
+/// How often a mounting consumer should call back to stay alive.
+///
+/// Half the suspend budget, so one missed call is survivable. `None`
+/// when the ladder is off for this share — there is nothing to keep
+/// alive against.
+pub fn keepalive_secs(v: &ShareView) -> Option<u64> {
+    v.suspend_after_secs.map(|a| (a / 2).max(1))
+}
+
+/// The volume id for an already-lifted view.
+///
+/// `ShareView` keeps the CR's own name, and the volume label falls back
+/// to exactly that — so this is the same answer [`volume_id_of`] gives,
+/// without carrying the whole object forward.
+pub fn volume_id_of_view(v: &ShareView) -> String {
+    v.volume_id.clone().unwrap_or_else(|| v.name.clone())
+}
+
+/// One row of `GET /v1/projects/{id}/shares`.
+///
+/// What a UI needs to render a project that has more than one volume,
+/// without holding a Kubernetes client: which volumes exist, whether
+/// each is servable right now, and what backs it.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeRow {
+    pub volume: String,
+    /// `Ready`, `IdleSuspended`, … — `null` when the operator has not
+    /// reported on this share yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// The hub's own phase, when observed this pass. Absent means NOT
+    /// OBSERVED, never "not serving".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_prefix: Option<String>,
+    /// True when a request for this volume would be proxied right now.
+    /// False is not an error — a parked volume wakes on first use.
+    pub serving: bool,
+}
+
+pub fn volume_row(share: &FlintShare) -> VolumeRow {
+    let v = ShareView::of(share);
+    VolumeRow {
+        volume: volume_id_of(share),
+        phase: v.phase.as_ref().map(|p| format!("{p:?}")),
+        hub_phase: v.hub_phase.clone(),
+        bucket: v.bucket.clone(),
+        key_prefix: v.key_prefix.clone(),
+        serving: matches!(decide(&v), Decision::Dial(_)) && hub_phase_blocks(&v).is_none(),
     }
 }
 
@@ -729,16 +934,16 @@ mod tests {
             share("workspaces", "fs-proj-b", None),
             share("other", "unrelated", Some("proj-z")),
         ];
-        match find(&fleet, "fs-", "proj-a", None) {
+        match find(&fleet, "fs-", "proj-a", None, None) {
             Lookup::Found(s) => assert_eq!(s.metadata.name.as_deref(), Some("fs-proj-a")),
             l => panic!("{l:?}"),
         }
         // No label anywhere for proj-b: the derived name carries it.
-        match find(&fleet, "fs-", "proj-b", None) {
+        match find(&fleet, "fs-", "proj-b", None, None) {
             Lookup::Found(s) => assert_eq!(s.metadata.name.as_deref(), Some("fs-proj-b")),
             l => panic!("{l:?}"),
         }
-        assert_eq!(find(&fleet, "fs-", "nope", None), Lookup::NotFound);
+        assert_eq!(find(&fleet, "fs-", "nope", None, None), Lookup::NotFound);
     }
 
     /// A deliberate label beats an accidental name match, so relabelling
@@ -750,7 +955,7 @@ mod tests {
             share("workspaces", "fs-proj-a", None),          // name match only
             share("workspaces", "renamed-later", Some("proj-a")), // the label
         ];
-        match find(&fleet, "fs-", "proj-a", None) {
+        match find(&fleet, "fs-", "proj-a", None, None) {
             Lookup::Found(s) => assert_eq!(s.metadata.name.as_deref(), Some("renamed-later")),
             l => panic!("{l:?}"),
         }
@@ -770,7 +975,7 @@ mod tests {
             share("tenant-a", "fs-proj-a", Some("proj-a")),
             share("tenant-b", "fs-proj-a", Some("proj-a")),
         ];
-        match find(&fleet, "fs-", "proj-a", None) {
+        match find(&fleet, "fs-", "proj-a", None, None) {
             Lookup::Ambiguous(mut who) => {
                 who.sort();
                 assert_eq!(who, vec!["tenant-a/fs-proj-a", "tenant-b/fs-proj-a"]);
@@ -779,19 +984,216 @@ mod tests {
         }
         // Reversing the store's order must not change the answer.
         let reversed: Vec<_> = fleet.iter().rev().cloned().collect();
-        assert!(matches!(find(&reversed, "fs-", "proj-a", None), Lookup::Ambiguous(_)));
+        assert!(matches!(find(&reversed, "fs-", "proj-a", None, None), Lookup::Ambiguous(_)));
 
         // Pinning the gateway to one namespace disambiguates it.
-        match find(&fleet, "fs-", "proj-a", Some("tenant-b")) {
+        match find(&fleet, "fs-", "proj-a", None, Some("tenant-b")) {
             Lookup::Found(s) => assert_eq!(s.metadata.namespace.as_deref(), Some("tenant-b")),
             l => panic!("{l:?}"),
         }
     }
 
+    fn vshare(ns: &str, name: &str, project: &str, volume: Option<&str>) -> std::sync::Arc<FlintShare> {
+        let mut labels = serde_json::Map::new();
+        labels.insert("flint.io/project-id".into(), serde_json::json!(project));
+        if let Some(v) = volume {
+            labels.insert("flint.io/volume-id".into(), serde_json::json!(v));
+        }
+        std::sync::Arc::new(
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+                "metadata": {"name": name, "namespace": ns, "labels": labels},
+                "spec": {"persistence": {"size": "1Gi"}}
+            }))
+            .unwrap(),
+        )
+    }
+
+    /// A project may legally have several hubs: the operator keys
+    /// uniqueness on the bucket prefix subtree and never reads
+    /// `flint.io/project-id`. So N shares on N prefixes with one project
+    /// label is ordinary, and the lookup has to address them.
+    #[test]
+    fn a_project_may_have_several_volumes_and_each_is_addressable() {
+        let fleet = vec![
+            vshare("workspaces", "fs-p-data", "p", Some("data")),
+            vshare("workspaces", "fs-p-models", "p", Some("models")),
+        ];
+        assert_eq!(shares_of(&fleet, "fs-", "p", None).len(), 2);
+        for want in ["data", "models"] {
+            match find(&fleet, "fs-", "p", Some(want), None) {
+                Lookup::Found(s) => assert_eq!(volume_id_of(&s), want),
+                l => panic!("{want}: {l:?}"),
+            }
+        }
+    }
+
+    /// Under-specified, not wrong: the caller gets the choice, sorted
+    /// and deduplicated, rather than a share picked for it.
+    #[test]
+    fn a_bare_lookup_on_a_multi_volume_project_asks_which_one() {
+        let fleet = vec![
+            vshare("workspaces", "fs-p-models", "p", Some("models")),
+            vshare("workspaces", "fs-p-data", "p", Some("data")),
+        ];
+        match find(&fleet, "fs-", "p", None, None) {
+            Lookup::NeedsVolume(mut v) => {
+                v.sort();
+                assert_eq!(v, vec!["data", "models"]);
+            }
+            l => panic!("picked one of two volumes: {l:?}"),
+        }
+        // And the order it was stored in must not change the answer.
+        let rev: Vec<_> = fleet.iter().rev().cloned().collect();
+        assert!(matches!(find(&rev, "fs-", "p", None, None), Lookup::NeedsVolume(_)));
+    }
+
+    /// The distinction that matters: "pick one of these" is actionable,
+    /// "two shares are the same volume" is a misconfiguration. Reporting
+    /// the second as the first would send a caller round a loop that
+    /// cannot terminate — it would ask for the volume it was offered and
+    /// be offered it again.
+    #[test]
+    fn a_duplicate_volume_is_ambiguous_rather_than_a_choice() {
+        let dup = vec![
+            vshare("tenant-a", "fs-p-data", "p", Some("data")),
+            vshare("tenant-b", "fs-p-data", "p", Some("data")),
+        ];
+        assert!(matches!(find(&dup, "fs-", "p", None, None), Lookup::Ambiguous(_)));
+        assert!(matches!(find(&dup, "fs-", "p", Some("data"), None), Lookup::Ambiguous(_)));
+    }
+
+    #[test]
+    fn an_unlabelled_share_uses_its_own_name_as_the_volume_id() {
+        // So a project that never adopted the volume label still has a
+        // usable identifier for every one of its shares.
+        let fleet = vec![
+            vshare("workspaces", "fs-p-data", "p", None),
+            vshare("workspaces", "fs-p-models", "p", None),
+        ];
+        match find(&fleet, "fs-", "p", None, None) {
+            Lookup::NeedsVolume(mut v) => {
+                v.sort();
+                assert_eq!(v, vec!["fs-p-data", "fs-p-models"]);
+            }
+            l => panic!("{l:?}"),
+        }
+        assert!(matches!(find(&fleet, "fs-", "p", Some("fs-p-data"), None), Lookup::Found(_)));
+    }
+
+    /// Never a fallback. Asking for a volume that does not exist must
+    /// not serve one that does.
+    #[test]
+    fn an_unknown_volume_never_falls_back_to_a_sibling() {
+        let fleet = vec![vshare("workspaces", "fs-p-data", "p", Some("data"))];
+        assert_eq!(find(&fleet, "fs-", "p", Some("nope"), None), Lookup::NotFound);
+        // The control: the sibling that DOES exist is still servable,
+        // so the NotFound above is the volume filter and not an empty
+        // fleet.
+        assert!(matches!(find(&fleet, "fs-", "p", Some("data"), None), Lookup::Found(_)));
+    }
+
+    fn with_idle(after: Option<u64>, with_sessions: Option<bool>) -> ShareView {
+        let mut idle = serde_json::Map::new();
+        if let Some(a) = after {
+            idle.insert("suspendAfterSecs".into(), serde_json::json!(a));
+        }
+        if let Some(w) = with_sessions {
+            idle.insert("suspendWithSessions".into(), serde_json::json!(w));
+        }
+        let mut spec = serde_json::json!({"persistence": {"size": "1Gi"}});
+        if !idle.is_empty() {
+            spec["idle"] = serde_json::Value::Object(idle);
+        }
+        let share: FlintShare = serde_json::from_value(serde_json::json!({
+            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "metadata": {"name": "fs-p", "namespace": "ws"},
+            "spec": spec
+        }))
+        .unwrap();
+        ShareView::of(&share)
+    }
+
+    /// THE ONE AN AGENT NEEDS.
+    ///
+    /// agent-mounts-NFS is the primary consumer shape, and the hazard
+    /// is specific: a mount held open with no file I/O is invisible to
+    /// the hub's activity clock, so only the wake annotation keeps it
+    /// alive — and an NFS client cannot write one. If it suspends, the
+    /// mount hangs with no path back.
+    ///
+    /// So the caller is TOLD, at the moment it asks for an address.
+    #[test]
+    fn a_share_that_can_be_suspended_under_a_mount_says_so() {
+        // The ladder is off: nothing to warn about.
+        assert_eq!(mount_hazard(&with_idle(None, None)), None);
+        assert_eq!(keepalive_secs(&with_idle(None, None)), None);
+        assert_eq!(mount_hazard(&with_idle(None, Some(true))), None,
+            "suspendWithSessions is meaningless while the ladder is off");
+
+        // The ladder is ON and the lease guard is NOT opted into —
+        // absent and `true` are the same answer, which is the part
+        // people get backwards.
+        for w in [None, Some(true)] {
+            let v = with_idle(Some(600), w);
+            let why = mount_hazard(&v)
+                .unwrap_or_else(|| panic!("suspendWithSessions={w:?} must warn"));
+            assert!(why.contains("600s"), "{why}");
+            assert!(why.contains("suspendWithSessions"), "{why}");
+            assert_eq!(keepalive_secs(&v), Some(300), "half the budget, so one miss survives");
+        }
+
+        // Opted in: the ladder holds while a lease is live.
+        assert_eq!(mount_hazard(&with_idle(Some(600), Some(false))), None);
+        // …but the keepalive interval is still reported, because the
+        // lease guard protects a MOUNT and not an agent that unmounted
+        // and still wants the share up.
+        assert_eq!(keepalive_secs(&with_idle(Some(600), Some(false))), Some(300));
+    }
+
+    #[test]
+    fn a_tiny_suspend_budget_never_yields_a_zero_second_keepalive() {
+        // A zero interval is a busy loop against the API server.
+        assert_eq!(keepalive_secs(&with_idle(Some(1), None)), Some(1));
+        assert_eq!(keepalive_secs(&with_idle(Some(0), None)), Some(1));
+        assert!(mount_hazard(&with_idle(Some(1), None)).unwrap().contains("every 1s"));
+    }
+
+    #[test]
+    fn a_volume_row_reports_serving_only_when_a_request_would_be_proxied() {
+        let ready: FlintShare = serde_json::from_value(serde_json::json!({
+            "apiVersion": "flint.io/v1alpha1", "kind": "FlintShare",
+            "metadata": {"name": "fs-p-data", "namespace": "ws",
+                         "labels": {"flint.io/project-id": "p", "flint.io/volume-id": "data"}},
+            "spec": {"bucket": "b", "keyPrefix": "p/data/", "persistence": {"size": "1Gi"}},
+            "status": {"phase": "Ready", "apiEndpoint": "http://x:8080",
+                       "conditions": [{"type": "ApiEndpointPublished", "status": "True",
+                                       "reason": "InCluster",
+                                       "lastTransitionTime": "2026-08-21T00:00:00Z"}]}
+        })).unwrap();
+        let row = volume_row(&ready);
+        assert_eq!(row.volume, "data");
+        assert_eq!(row.key_prefix.as_deref(), Some("p/data/"));
+        assert!(row.serving);
+
+        // Parked: legible, and honestly not serving. `serving: false` is
+        // not an error — it wakes on first use.
+        let mut parked = ready.clone();
+        parked.status.as_mut().unwrap().phase = Some(Phase::IdleSuspended);
+        let row = volume_row(&parked);
+        assert!(!row.serving);
+        assert_eq!(row.phase.as_deref(), Some("IdleSuspended"));
+
+        // Ready by the operator, but the hub said otherwise.
+        let mut importing = ready.clone();
+        importing.status.as_mut().unwrap().hub_phase = Some("Importing".into());
+        assert!(!volume_row(&importing).serving);
+    }
+
     #[test]
     fn a_namespace_pinned_gateway_cannot_see_out_of_its_namespace() {
         let fleet = vec![share("tenant-a", "fs-proj-a", Some("proj-a"))];
-        assert_eq!(find(&fleet, "fs-", "proj-a", Some("tenant-b")), Lookup::NotFound);
+        assert_eq!(find(&fleet, "fs-", "proj-a", None, Some("tenant-b")), Lookup::NotFound);
     }
 
     #[test]

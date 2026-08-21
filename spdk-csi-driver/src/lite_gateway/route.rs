@@ -109,7 +109,19 @@ impl Verb {
     pub fn request_headers(self) -> &'static [&'static str] {
         match self {
             Verb::Download => &["range", "if-none-match"],
-            Verb::Upload => &["if-match", "if-none-match", "content-type"],
+            // `content-length` is LOAD-BEARING, not decoration. The
+            // gateway streams the body upstream, and a streamed body
+            // has no known length, so hyper frames it
+            // `Transfer-Encoding: chunked` — which the hub's upload
+            // route REFUSES with 411, because it guards itself with
+            // `warp::body::content_length_limit`. Forwarding the
+            // caller's length is what makes the upstream request
+            // fixed-length instead.
+            //
+            // It is always present: the gateway's own upload route uses
+            // `content_length_limit` too, so a request with no
+            // Content-Length is refused here before any of this runs.
+            Verb::Upload => &["if-match", "if-none-match", "content-type", "content-length"],
             Verb::Delete | Verb::Move => &["if-match"],
             Verb::Folder => &["content-type"],
             Verb::List => &[],

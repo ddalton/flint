@@ -30,12 +30,15 @@ the fleet. That is the whole trade. See
 ## What it proxies
 
 ```
-GET    /v1/projects/{id}/files?path=&recursive=&cursor=&limit=
-GET    /v1/projects/{id}/files/content?path=          [Range, If-None-Match]
-PUT    /v1/projects/{id}/files/content?path=          [If-Match, If-None-Match]
-DELETE /v1/projects/{id}/files/content?path=          [If-Match]
-POST   /v1/projects/{id}/files/folder                 {"path": "..."}
-POST   /v1/projects/{id}/files/move                   [If-Match]
+GET    /v1/projects/{id}/volumes                      list a project's volumes
+POST   /v1/projects/{id}[/volumes/{vol}]/wake         bring it up, and keep it up
+
+GET    /v1/projects/{id}[/volumes/{vol}]/files?path=&recursive=&cursor=&limit=
+GET    /v1/projects/{id}[/volumes/{vol}]/files/content?path=   [Range, If-None-Match]
+PUT    /v1/projects/{id}[/volumes/{vol}]/files/content?path=   [If-Match, If-None-Match]
+DELETE /v1/projects/{id}[/volumes/{vol}]/files/content?path=   [If-Match]
+POST   /v1/projects/{id}[/volumes/{vol}]/files/folder          {"path": "..."}
+POST   /v1/projects/{id}[/volumes/{vol}]/files/move            [If-Match]
 
 GET    /healthz     unauthenticated, names no share
 GET    /readyz      unauthenticated, 503 until the share cache has listed
@@ -90,13 +93,38 @@ received it would be holding the key to every other project.
 Whoever creates a share writes its token Secret. That value must equal
 what the gateway computes, and two implementations of an HMAC that must
 agree byte-for-byte is a fleet-wide outage waiting for a typo. So use
-the binary as the oracle rather than reimplementing it:
+the binary as the oracle rather than reimplementing it.
+
+**For a share that already exists, use `--derive-for`** — it reads the
+FlintShare and derives from *its own* spec, so the binding cannot
+disagree with what the serving gateway computes:
+
+```bash
+flint-hub-gateway --root-key-file=/path/to/key --derive-for workspaces/fs-proj-a-data
+# binding: endpoint="http://minio.workspaces.svc:9000" bucket="tenant-bucket" …
+# -> a 43-character token; write it to that share's Secret under `token`
+```
+
+The hand-typed form exists for provisioning a share that does not exist
+yet:
 
 ```bash
 flint-hub-gateway --root-key-file=/path/to/key \
-  --derive-token ',my-bucket,proj-a/,1'
-# -> a 43-character token; write it to that share's Secret under `token`
+  --derive-token 'http://minio.workspaces.svc:9000,my-bucket,proj-a/data/,1'
 ```
+
+**Get one field wrong there and the token is perfectly well-formed,
+perfectly wrong, and rejected by every request.** This is not
+hypothetical: the kind drill's own provisioning omitted `spec.endpoint`
+on its first run — an empty endpoint is a legal value, so nothing
+complained — and the failure surfaced three legs later as a 502 on an
+upload. Cross-check with `--derive-for` once the share exists.
+
+⚠️ **`spec.endpoint` is part of the binding and is mutable.** The CRD
+lets an endpoint move (`spec.bucket` and `spec.keyPrefix` are
+CEL-immutable; the endpoint is not). Changing it invalidates every token
+derived before the change, and the share's file API is 401 until its
+Secret is rewritten. Nothing warns you.
 
 The fields are `<endpoint>,<bucket>,<keyPrefix>,<version>`; endpoint is
 empty for real S3. `version` comes from the share's
@@ -117,24 +145,87 @@ it does *not* give up: per-hub secrets protect a project from **other
 callers of the API**, and once the gateway is the only caller there are
 none — a compromise of the gateway opens every project in either mode.
 
-## How a project is found
+## A project may have several hubs
 
-1. `flint.io/project-id` label on a FlintShare — the documented index,
-   already a printer column on the CRD.
+**Nothing in the operator ties a project to one share.**
+`conflict::overlaps` keys fleet uniqueness on
+`(endpoint, bucket, prefix-subtree)`, and nothing in the operator reads
+`flint.io/project-id` at all. So a project with a `data/` prefix and a
+`models/` prefix is two FlintShares, two hubs, two independent epochs —
+a legal and unremarkable configuration.
+
+(One *hub* serving several volumes is a different thing entirely, and is
+**not implemented** — see `docs/plans/multi-volume-hub-design.md`. The
+model here is one volume, one hub, N of them per project.)
+
+Label each share with the volume it is:
+
+```yaml
+metadata:
+  labels:
+    flint.io/project-id: proj-a
+    flint.io/volume-id: data      # optional; defaults to the CR name
+```
+
+and address it as `/v1/projects/proj-a/volumes/data/files`.
+
+| the project has | `…/files` | `…/volumes/{v}/files` |
+|---|---|---|
+| no share | 404 `NoSuchProject` | 404 |
+| one volume | **served** | served if `{v}` matches, else 404 |
+| several volumes | **409 `MultipleVolumes`, listing them** | served |
+| two shares, same volume id | 409 `AmbiguousVolume` | 409 |
+
+The bare path on a multi-volume project is **under-specified, not
+wrong**, so the 409 carries the list:
+
+```json
+{"reason": "MultipleVolumes",
+ "error": "this project has 2 volumes; address one as …",
+ "volumes": ["data", "models"]}
+```
+
+Picking one instead would serve `models/` to a caller that meant
+`data/`, and the reflector's iteration order is not stable across a
+watch reconnect — so it would not even be *consistently* the wrong one.
+
+`GET /v1/projects/{id}/volumes` is the same information ahead of time,
+and it is what a UI wants to render a project. It is answered entirely
+from the cache: **it touches no hub**, so listing a project neither
+wakes a parked volume nor counts as activity against the idle ladder for
+a live one.
+
+```json
+{"project": "proj-a", "volumes": [
+  {"volume": "data",   "phase": "Ready", "hubPhase": "Serving",
+   "bucket": "tenant-bucket", "keyPrefix": "proj-a/data/", "serving": true},
+  {"volume": "models", "phase": "IdleSuspended",
+   "bucket": "tenant-bucket", "keyPrefix": "proj-a/models/", "serving": false}]}
+```
+
+`serving: false` is not an error — a parked volume wakes on first use.
+
+### How a project's shares are found
+
+1. `flint.io/project-id` label — the documented index, already a printer
+   column on the CRD.
 2. Failing that, the derived name `fs-<project-id>` (`sharePrefix`).
 
-The label wins when both match different shares, so relabelling actually
-moves a project rather than being shadowed by whatever object happens to
-be called `fs-<id>`.
+The label wins when both match, so relabelling actually moves a project
+rather than being shadowed by whatever object happens to be called
+`fs-<id>`. Within a project, the volume is the `flint.io/volume-id`
+label, or the CR's own name when it carries none — which keeps a project
+that never adopted the label addressable anyway.
 
-**Two shares claiming one project id is a 409, never a guess.** Watching
-every namespace is the fleet posture, so two tenants can each hold a
-`proj-a`. Every tie-break rule — first in the store, lowest namespace,
-newest — serves one tenant's files to someone asking for the other's,
-and the reflector's iteration order is not even stable across a watch
-reconnect, so the same request could resolve differently after a
-reconnect. The candidates go in the gateway's log; the caller gets a
-409 that names neither, because they cannot fix it.
+**Two shares claiming one project *and* volume is a 409, never a
+guess.** Watching every namespace is the fleet posture, so two tenants
+can each hold a `proj-a`. Every tie-break rule serves one tenant's files
+to someone asking for the other's. The candidates go in the gateway's
+log; the caller gets a 409 that names neither, because they cannot fix
+it. That is deliberately a *different* answer from `MultipleVolumes`:
+reporting a duplicate as a choice would send the caller round a loop
+that cannot terminate — it would ask for the volume it was offered and
+be offered it again.
 
 ## Whether before where
 
@@ -177,6 +268,118 @@ A file-API call *counts as activity* on a share — including a 304 — so a
 gateway that polled hubs to find out whether they were up would pin
 awake every share it ever touched and quietly disable the idle ladder
 the fleet's economics rest on.
+
+### `POST …/wake` — for consumers that mount, and for keeping them alive
+
+File requests wake a share on their own; this endpoint exists for the
+callers that are **not** making file requests.
+
+```json
+POST /v1/projects/proj-a/volumes/data/wake
+{"project":"proj-a","volume":"data","phase":"Ready",
+ "address":"10.96.1.7:2049","serverId":"…","apiEndpoint":"http://…",
+ "requested":true}
+```
+
+`address` is what a consumer mounts. So an agent that wants an NFS mount
+does not need a Kubernetes client, the `frontDoor` ClusterRole, or any
+knowledge of share names: one POST brings the hub up and returns the
+mount target.
+
+**It stamps on every call, including when the share is already Ready —
+and that is the point.** The idle ladder suspends only when *two*
+independent signals agree: `flint.io/requested-at` is stale **and** the
+hub's own activity clock says idle. A consumer doing file I/O is held up
+by the second signal for free. A consumer that holds a mount and does no
+I/O — an agent computing in memory for twenty minutes, which is exactly
+the case `idle::decide` calls out — has only the first, and **nothing
+else in the system will stamp it**. Call this on a timer well inside
+`suspendAfterSecs` and the share stays up.
+
+It never dials the hub: this is a control operation, and probing through
+`/files` to see whether the hub came up would itself count as activity.
+
+Two things to do with the answer:
+
+- **Compare `serverId` across wakes.** It is stable across an ordinary
+  restart, and **different** after a hibernate — which deletes the PVC,
+  so every stateid a client holds refers to a server generation that no
+  longer exists. A changed `serverId` means remount, not resume.
+- **Waking is not reachability.** `address` is `host:2049` from the
+  consumer Service. Whether the caller can reach that port is a separate
+  boundary — network topology plus `networkPolicy.nfsClientCIDRs`. Note
+  that kubelet-driven mounts arrive from the *node* IP, which a
+  podSelector cannot express. The gateway can tell you the hub is up; it
+  cannot make 2049 reachable.
+
+An admin `Suspended` is refused **before** anything is stamped — leaving
+a `requested-at` that means nothing would read like a pending wake to
+whoever looked next.
+
+## The agent recipe: mount NFS without a Kubernetes client
+
+This is the primary NFS consumer shape, and it has one sharp edge that
+is worth stating before the recipe.
+
+```
+POST /v1/projects/{id}/volumes/{v}/wake     ->  {address, serverId, keepaliveSecs, mountWarning?}
+mount -t nfs4 -o vers=4.2,nconnect=2,hard {address%:*}:/ /mnt/work
+... every keepaliveSecs, POST /wake again ...
+```
+
+Three fields in the answer, and each is load-bearing.
+
+**`address`** is what you mount. The agent needs no Kubernetes access,
+no `frontDoor` ClusterRole and no knowledge of share names — just the
+gateway's bearer token.
+
+**`serverId`** must be compared across wakes. It is stable across an
+ordinary hub restart, and **different** after a hibernate, because that
+deletes the PVC — every stateid the client holds then refers to a server
+generation that no longer exists. A changed `serverId` means *remount*,
+not resume.
+
+**`keepaliveSecs`**, and the `mountWarning` beside it, are the sharp
+edge. The idle ladder suspends when two signals agree: the wake
+annotation is stale **and** the hub's own activity clock is quiet. An
+agent doing file I/O is held up by the second for free. **An agent that
+holds a mount and computes in memory is not** — `idle::decide` names
+this case exactly — and if the share suspends, the mount does not fail
+cleanly. With a `hard` mount, I/O blocks in uninterruptible sleep; the
+data is safe (`state.db` keeps `serverId` stable, so clients reclaim)
+but **nothing wakes it**, because wake is level-triggered on an
+annotation and an NFS client cannot write one. The mount hangs until
+something else asks.
+
+Two defences, and for agents you want both:
+
+- **`spec.idle.suspendWithSessions: false`** on the share. Read the name
+  literally: the *protective* value is the falsy one, and it is
+  **opt-in**. Absent and `true` both mean "suspend even while a client
+  holds a lease". The default is that way for a real reason — an idle
+  NFSv4 mount renews its lease forever, so defaulting it on would pin
+  every mounted share awake permanently, which is the state the ladder
+  exists to end. Its cost: a client that vanished without unmounting
+  holds the share up for the lease window, and a *partitioned* one holds
+  it far longer.
+- **The keepalive.** POST `/wake` every `keepaliveSecs` (half the
+  suspend budget, so one missed call is survivable). This is driven by
+  the thing that actually knows whether work is happening, which the
+  lease guard is not.
+
+`mountWarning` is present exactly when the share can be suspended out
+from under a mount — i.e. the ladder is on and `suspendWithSessions` is
+not `false`. If you see it, do one of the two above.
+
+If `spec.idle` is absent entirely the ladder is off for that share,
+nothing suspends, and `keepaliveSecs` is absent too.
+
+**Waking is not reachability.** `address` is `host:2049` off the
+consumer Service. Whether the agent can reach that port is a separate
+boundary — network topology plus `networkPolicy.nfsClientCIDRs`. Note
+that kubelet-driven mounts arrive from the *node* IP, which a
+podSelector cannot express. The gateway can tell you the hub is up; it
+cannot make 2049 reachable.
 
 ## Install
 
@@ -259,13 +462,23 @@ mint and carries a fleet-wide blast radius of its own).
 
 ## Verification
 
-- `cargo test --lib lite_gateway` — 57 tests. The proxy ones stand up
+- `cargo test --lib lite_gateway` — 71 tests. The proxy ones stand up
   **two independent fake hubs on real ports**, bind the gateway on a
   third, and drive it with a real HTTP client; each hub names itself in
   every response, so a cross-routed request fails on the body the caller
   received. One test writes the request bytes to the socket by hand,
   because `reqwest` normalises `..` out of a path before sending and
-  would otherwise make the traversal tests unable to fail.
+  would otherwise make the traversal tests unable to fail. A second
+  two-hub rig models **one project with two volumes**, and checks that
+  each volume reaches its own hub with its own prefix-bound credential.
+  The fake hubs enforce `content_length_limit` on their upload route
+  exactly as the real one does — a stand-in that accepts what the
+  product refuses does not test the product, and that gap let a 411 on
+  every upload reach the drill.
+- `tests/regression/gateway-kind-e2e.sh` — the cluster drill: real
+  hubs, real S3 (in-cluster MinIO), one project with two volumes, and
+  the four things no local test can answer (the derived token against a
+  real hub, the headless endpoint resolving, the wake path, RBAC).
 - `tests/regression/chart-render-pass.sh` — the chart's three refusals,
   the RBAC (no Secrets, no create, no delete), the whole-directory token
   mount, the auto-admitted NetworkPolicy peer, and that

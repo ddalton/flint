@@ -113,8 +113,25 @@ struct Args {
     /// byte-for-byte is a fleet-wide outage waiting for a typo. Takes
     /// `<endpoint>,<bucket>,<keyPrefix>,<version>`; endpoint is empty
     /// for real S3.
+    ///
+    /// **Prefer `--derive-for` when the share already exists.** Typing
+    /// the binding by hand is the one step of this design with no
+    /// feedback: get a field wrong and the token is perfectly valid,
+    /// perfectly wrong, and rejected by every request. That is not
+    /// hypothetical — the kind drill's own provisioning omitted the
+    /// endpoint on its first run and produced exactly that.
     #[arg(long, value_name = "ENDPOINT,BUCKET,PREFIX,VERSION")]
     derive_token: Option<String>,
+
+    /// Print the token for an EXISTING share, read from the cluster.
+    ///
+    /// `<namespace>/<name>`. Reads the FlintShare and derives from its
+    /// own `spec.endpoint`, `spec.bucket`, `spec.keyPrefix` and
+    /// `flint.io/api-token-version`, so the binding cannot disagree
+    /// with what the serving gateway will compute — it is the same
+    /// code reading the same object.
+    #[arg(long, value_name = "NAMESPACE/NAME")]
+    derive_for: Option<String>,
 }
 
 #[tokio::main]
@@ -138,6 +155,11 @@ async fn main() -> anyhow::Result<()> {
     // the process default has to be chosen explicitly or the kube
     // client construction below panics outright.
     spdk_csi_driver::install_crypto_provider();
+
+    if let Some(r#ref) = args.derive_for.as_deref() {
+        println!("{}", derive_for(&minter, r#ref).await?);
+        return Ok(());
+    }
 
     let inbound = build_inbound(&args)?;
     reject_shared_credential(&inbound, &minter)?;
@@ -290,6 +312,44 @@ fn reject_shared_credential(inbound: &Arc<TokenSource>, minter: &Minter) -> anyh
         }
     }
     Ok(())
+}
+
+/// `--derive-for <namespace>/<name>` — the binding, read from the CR.
+///
+/// The whole point is that no field is typed by hand. `--derive-token`
+/// takes four fields in an order, and three of them are easy to get
+/// subtly wrong: an omitted `spec.endpoint` (empty is a legal value, so
+/// nothing complains), a `keyPrefix` missing its trailing slash, a
+/// version that defaulted to 1 on the CR but was typed as 2 here. Every
+/// one of those produces a well-formed token that no hub will ever
+/// accept.
+async fn derive_for(minter: &Minter, r#ref: &str) -> anyhow::Result<String> {
+    let (ns, name) = r#ref
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("--derive-for wants <namespace>/<name>, got {ref:?}", r#ref = r#ref))?;
+    let client = Client::try_default().await?;
+    let share = kube::Api::<FlintShare>::namespaced(client, ns)
+        .get(name)
+        .await
+        .map_err(|e| anyhow::anyhow!("reading FlintShare {ns}/{name}: {e}"))?;
+
+    let view = spdk_csi_driver::lite_gateway::resolve::ShareView::of(&share);
+    let binding = view
+        .binding()
+        .map_err(|_| anyhow::anyhow!(
+            "FlintShare {ns}/{name} has no spec.bucket, so there is no immutable identity to \
+             bind a token to. Use --hub-token for a fleet-wide credential instead."
+        ))?;
+    // Echoed so the caller can SEE the binding rather than trust it.
+    // None of it is secret; the token below is the only secret here.
+    eprintln!(
+        "binding: endpoint={:?} bucket={:?} keyPrefix={:?} version={}",
+        binding.endpoint, binding.bucket, binding.key_prefix, binding.version
+    );
+    match minter {
+        Minter::Derived(root) => Ok(derive::derive(root, &binding)),
+        Minter::Shared(t) => Ok(t.clone()),
+    }
 }
 
 /// `--derive-token <endpoint>,<bucket>,<prefix>,<version>`.
